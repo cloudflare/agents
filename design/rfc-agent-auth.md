@@ -95,12 +95,28 @@ manager matches the requirement to a grant owned by the current Agent.
 For remote MCP tools, the MCP server owns the tool definitions and OAuth discovery. The
 Agent developer does not redeclare them.
 
-### Every execution path submits the same authority operation
+### Capability source and model presentation are separate axes
 
-MCP, local AI SDK tools, codemode, and libraries such as Workspace must not implement
-separate permission systems. Before a consequential action crosses its last controllable
-boundary, each adapter constructs the same `AuthorityOperation` and asks
-`this.auth.authorize()` for a decision.
+MCP, local APIs, and libraries such as Workspace are capability sources: they define what
+an operation means. Direct AI SDK tools and codemode are model-facing presentations: they
+define how the model invokes that capability.
+
+```text
+MCP ─────────┬─ direct AI tool
+             └─ codemode method
+
+Workspace ───┬─ direct AI tool
+             └─ codemode method
+```
+
+Authorization follows the underlying capability, not its presentation. The capability
+adapter normalizes and authorizes the call once at its final effect boundary. Direct and
+codemode presentations invoke that same boundary; presenting an MCP tool through codemode
+must not add a second policy decision.
+
+The presentation supplies execution context and handles the result. A direct presentation
+surfaces a requestable denial to its caller. Codemode records the same denial as a durable
+pause and, on resume, invokes the capability boundary again for fresh evaluation.
 
 ```ts
 interface AuthorityOperation {
@@ -600,11 +616,27 @@ The unresolved follow-up is external Agent proof: workload identity, signed Agen
 assertions, sender-constrained tokens, and actor chains. Those mechanisms should build on
 this envelope without being required for local grant isolation and policy.
 
-## Integration adapters
+## Capability and presentation adapters
 
-The authorization kernel is independent of how an operation was discovered or executed.
-MCP, AI SDK, codemode, and domain libraries are adapters into the same
-`AuthorityOperation` and decision contract.
+The authorization kernel is independent of both capability source and presentation.
+Capability adapters own operation semantics; presentation adapters own model-facing
+execution and pause/resume behavior.
+
+### Capability adapter contract
+
+A capability source must produce one bound effect:
+
+```ts
+interface AuthorityEffect<T> {
+  operation: Omit<AuthorityOperation, "callId" | "principal" | "execution">;
+  execute(): Promise<T>;
+}
+```
+
+The effect closes over the exact validated parameters it will execute. The capability
+adapter passes it through `Agent.auth` exactly once. Presentations do not reconstruct,
+classify, or separately authorize it; they only invoke the adapter and handle an allowed,
+requestable-denied, or terminal-denied outcome.
 
 ### Domain library hook
 
@@ -649,13 +681,16 @@ exact parameters closed over by `effect`. Authorization and observability remain
 the gate may prevent or pause work; an observer records telemetry and must not alter
 execution.
 
-A library must mediate every public path capable of the claimed effect. An adapter on an
-AI tool wrapper is insufficient if callers can reach a raw filesystem, provider, RPC stub,
-or backend directly.
+A library must mediate every public path capable of the claimed effect if it claims
+non-bypassable enforcement. For the common Agent integration, a shared Workspace adapter
+can create identical `AuthorityEffect` values for direct and codemode tools without
+changing Workspace internals. An optional low-level Workspace gate is only needed when
+application/RPC callers outside those tool adapters must also be governed.
 
 ### Workspace mapping
 
-Workspace operations can normalize into the shared model without becoming tools:
+Workspace is a capability domain, not a third presentation. Its operations can be exposed
+to the model as direct AI tools, codemode methods, or both, while normalizing identically:
 
 ```ts
 { domain: "workspace", action: "fs.readFile",  resource: { type: "path", id: path } }
@@ -676,10 +711,11 @@ audit the resulting sync changes. Claims of path-level or egress enforcement req
 additional PEP in the backend/FUSE/egress layer; the host hook must not claim controls it
 cannot enforce.
 
-### Remote MCP tools
+### MCP capability source
 
-MCP is the simplest integration because the server already defines its tools and auth.
-The developer does not rewrite them:
+MCP is a capability source because the server defines tool identity, schemas,
+annotations, auth, and execution. The same discovered tool can be presented directly or
+through codemode. The developer does not rewrite it:
 
 ```ts
 await this.addMcpServer("cloudflare", "https://mcp.example.com/mcp");
@@ -687,15 +723,20 @@ await this.addMcpServer("cloudflare", "https://mcp.example.com/mcp");
 const tools = this.mcp.getAITools();
 ```
 
-The MCP adapter:
+The MCP capability adapter:
 
 1. Preserves standard MCP `ToolAnnotations`.
 2. Computes `definitionDigest` from server identity, tool name, schema, annotations, and
    available authorization metadata.
 3. Filters denied tools during listing.
-4. Constructs an `AuthorityOperation` after MCP arguments validate.
+4. Constructs one bound `AuthorityEffect` after MCP arguments validate.
 5. Dispatches only after `this.auth.authorize()` returns `allow`.
 6. Attaches the MCP credential after authorization, never before.
+
+`this.mcp.getAITools()` presents those effects as AI SDK tools. `McpConnector` presents the
+same MCP capabilities as codemode methods. Both route execution through the canonical,
+authority-aware `MCPClientManager.callTool()` boundary. The codemode connector must not
+call an ungated raw MCP client and must not run a second authorization decision.
 
 Standard OAuth discovery and grant provisioning remain MCP-native. The existing
 `DurableObjectOAuthClientProvider` is adapted behind `AgentAuthManager`, not replaced.
@@ -703,9 +744,9 @@ Standard OAuth discovery and grant provisioning remain MCP-native. The existing
 MCP server-side elicitation remains valid for decisions only the server can make. It does
 not replace the Agent's local policy check.
 
-### Local AI SDK tools
+### Local capability sources
 
-For a direct HTTP API, the developer supplies the tool and auth requirement.
+For a direct HTTP API, the developer supplies the capability and auth requirement.
 `authenticatedTool()` takes an AI SDK-shaped definition plus Agents metadata and returns a
 normal AI SDK tool. Its only extension to the first argument is `name`, because AI SDK
 normally takes the tool name from its containing object while durable policy needs a
@@ -743,9 +784,12 @@ It is used directly:
 streamText({ model, tools: { getForecast } });
 ```
 
-The wrapper validates input, constructs an `AuthorityOperation`, and calls the same
-authorization kernel. Only after `allow` does it resolve the grant and invoke the authored
-handler with:
+The wrapper validates input, constructs an `AuthorityEffect`, and runs it through the
+authorization kernel. The same authenticated tool can later be exposed through
+`ToolSetConnector`; calling its wrapped `execute` reaches the same authorization boundary.
+The connector handles a requestable denial as a codemode pause rather than layering a
+second approval. Only after `allow` does the wrapper resolve the grant and invoke the
+authored handler with:
 
 ```ts
 interface ToolAuth {
@@ -757,21 +801,25 @@ interface ToolAuth {
 origin, prevents overriding credential headers, propagates cancellation, and redacts
 secrets. The returned object satisfies AI SDK `Tool<Input, Output>`.
 
-### Codemode
+### Codemode presentation
 
-Codemode is an execution mode, not another policy system. Every connector method is
-normalized to the same MCP `ToolAnnotations`. Existing `requiresApproval` and AI SDK
-`needsApproval` remain compatibility inputs that produce `ask`; no new safeguard field is
-introduced.
+Codemode is a model-facing presentation and durable execution mode, not a capability
+source or another policy system. MCP, AI SDK ToolSets, OpenAPI, and Workspace can all
+appear as codemode connectors. Each connector must preserve the underlying capability's
+operation builder and annotations.
 
-Before a connector call, the host constructs an `AuthorityOperation` with the codemode
-`executionId` and sequence and calls `this.auth.authorize()`:
+Existing `requiresApproval` and AI SDK `needsApproval` remain compatibility inputs that
+produce `ask`; no new safeguard field is introduced.
 
-- `allow` lets the durable runtime mark the action executing and dispatch it.
-- A requestable denial stores the authorization request ID on the pending log entry and
+For a fresh connector call, codemode invokes the authority-aware capability adapter with
+its `executionId` and sequence:
+
+- `allow` executes the effect and records its result.
+- A requestable denial returns its request ID; codemode stores it on the log entry and
   pauses.
-- A terminal denial ends the call without dispatch.
-- Resume rechecks the latest policy and operation digest before dispatch.
+- A terminal denial ends the call without a side effect.
+- Resume invokes the capability adapter again, causing current policy and the operation
+  digest to be reevaluated before dispatch.
 
 Codemode retains responsibility for deterministic replay, result logging, and preventing
 further side effects after pause. The auth manager owns policy and approval state. This
@@ -954,11 +1002,12 @@ The migration moves shared authority concerns, not protocol implementations.
 | MCP transport, discovery, tool schemas, OAuth challenges, callback routing  | `MCPClientManager` and MCP SDK                              |
 | OAuth protocol mechanics and MCP `OAuthClientProvider` compatibility        | Existing MCP OAuth provider, backed by `Agent.auth` storage |
 | Agent-local grants, imported API keys, policy rules, authorization requests | `AgentAuthManager`                                          |
-| Tool listing and `tools/call` interception                                  | MCP adapter calling `Agent.auth`                            |
-| AI SDK local-tool wrapping                                                  | `authenticatedTool()` adapter                               |
-| Codemode replay, result log, pause/resume, rollback                         | `CodemodeRuntime`                                           |
+| MCP operation normalization and final `tools/call` boundary                 | Authority-aware `MCPClientManager.callTool()`               |
+| Local HTTP operation normalization and effect boundary                      | `authenticatedTool()`                                       |
+| Workspace operation vocabulary                                              | Shared Workspace capability adapter                         |
+| Direct model presentation                                                   | AI SDK tool wrappers                                        |
+| Code Mode model presentation, replay, pause/resume, rollback                | Codemode connectors and `CodemodeRuntime`                   |
 | Authorization decisions and approval request lifecycle                      | `AgentAuthManager`                                          |
-| Workspace operation vocabulary and final effect boundaries                  | Workspace hook/adapter                                      |
 | Authorization audit records                                                 | `AgentAuthManager` / configured audit sink                  |
 | Tracing and performance telemetry                                           | Existing observability systems                              |
 
@@ -1005,27 +1054,32 @@ Then add authorization at two existing seams:
 - `MCPClientManager.callTool()` constructs and authorizes the operation after argument
   validation and immediately before `client.callTool()`.
 
-Direct `callTool()` and AI SDK wrappers therefore cannot bypass policy. Server-originated
-MCP elicitation remains separate: it handles decisions the remote server owns, while
-Agent policy governs whether this Agent sends the call.
+Direct `callTool()` and AI SDK wrappers therefore cannot bypass policy. Add an
+`McpConnectionLike` adapter backed by `MCPClientManager.callTool()` so `McpConnector`
+reaches this same boundary when MCP is presented through codemode. It must not hold an
+ungated raw MCP SDK client.
+
+Server-originated MCP elicitation remains separate: it handles decisions the remote server
+owns, while Agent policy governs whether this Agent sends the call.
 
 ### Phase 4: Unify codemode authorization without moving replay
 
 Codemode keeps its durable execution tables and semantics. Its current `decide()` mixes
 replay lookup with a boolean approval decision, so migration is staged:
 
-1. Replace the single `decide()` step with a planning step that returns `replay`,
-   `already_authorized`, or `authorize_fresh` for the `(executionId, sequence)` entry.
-2. For `replay`, return the recorded result without consulting policy; no new effect will
-   occur.
-3. For `authorize_fresh`, the host builds the same `AuthorityOperation` used by direct
-   execution and calls `Agent.auth.authorize()`.
-4. Store `authorization_request_id`, `operation_digest`, and `policy_revision` on the
-   codemode log entry. Existing `requires_approval` remains temporarily for schema and API
-   compatibility.
+1. Replace the single `decide()` step with a planning step that returns `replay` or
+   `execute_fresh` for the `(executionId, sequence)` entry.
+2. For `replay`, return the recorded result without invoking the capability; no effect and
+   no authorization decision occur.
+3. For `execute_fresh`, invoke the authority-aware capability adapter (MCP, wrapped AI SDK
+   tool, OpenAPI, or Workspace) with codemode execution context. The capability adapter
+   constructs and authorizes the operation once at its effect boundary.
+4. Store any `authorization_request_id`, `operation_digest`, and `policy_revision` returned
+   by that boundary on the codemode log entry. Existing `requires_approval` remains
+   temporarily for schema and API compatibility.
 5. A requestable denial marks the execution paused. A terminal denial marks it rejected.
-6. On resume, reevaluate current policy and the operation digest before changing the log
-   entry from pending to executing.
+6. On resume, invoke the capability adapter again. It reevaluates current policy and the
+   operation digest before dispatch; codemode does not perform another policy check.
 
 There is no cross-facet atomic transaction. Recovery relies on idempotent request IDs and
 reconciliation: an approved request with a still-pending codemode row is safe to resume;
@@ -1049,23 +1103,28 @@ codemode policy.
 
 ### Phase 6: Add domain libraries, starting with Workspace
 
-Workspace adds a framework-neutral `OperationGate` option and a Workspace domain adapter.
-The migration must cover all public effect paths, not only future AI tools:
+First ship a shared Workspace capability adapter that owns normalization, summaries,
+path/remote selectors, and composite operation boundaries. The same adapter emits:
 
-- Wrap public `Workspace.fs`; do not return an ungated raw filesystem when a gate is set.
-- Wrap `workspace.git` at logical Git operations. Internal VFS calls run under that outer
-  operation rather than generating hundreds of independent prompts.
-- Gate `shell.exec`, `get`/`kill` where applicable, explicit `push`/`pull`, assets sharing,
-  artifacts mutations/token issuance, mount mutations, and RPC stubs.
-- Treat `provider()` as privileged internal capability or return a gated provider; an
-  ungated public provider would bypass the contract.
-- Audit shell commands as open-world operations and record post-exec sync changes. Do not
-  claim per-file or egress enforcement inside a running container without a backend/FUSE
-  or egress PEP.
+- ordinary AI SDK tools for direct presentation; and
+- codemode connector methods for Code Mode presentation.
 
-The Workspace package owns normalization, summaries, path/remote selectors, and composite
-operation boundaries. It depends only on the structural gate interface. An Agents adapter
-connects that hook to `Agent.auth`.
+Both presentations invoke the same Workspace effects and therefore produce one operation
+identity, one policy decision, and one audit shape.
+
+For applications that require non-bypassable control over Workspace calls made outside
+model tools, Workspace may additionally accept a framework-neutral `OperationGate`. That
+optional hardening must cover all claimed public effect paths:
+
+- public `Workspace.fs` and RPC stubs;
+- logical `workspace.git` operations rather than every internal VFS read/write;
+- `shell.exec`, `get`/`kill` where applicable, explicit `push`/`pull`, assets sharing,
+  artifacts mutations/token issuance, and mount mutations; and
+- `provider()`, which must be gated or treated as a privileged internal capability.
+
+Audit shell commands as open-world operations and record post-exec sync changes. Do not
+claim per-file or egress enforcement inside a running container without a backend/FUSE or
+egress PEP.
 
 ### Phase 7: Identity and centralized providers
 
@@ -1080,7 +1139,8 @@ connects that hook to `Agent.auth`.
 
 Legacy approval state can be removed only when:
 
-- direct, MCP, and codemode calls produce equivalent operation digests and decisions;
+- direct and codemode presentations of the same MCP, local, or Workspace capability reach
+  the same operation identity and single authorization boundary;
 - all approval UIs resolve `Agent.auth` requests;
 - replayed codemode calls never create new authorization requests;
 - policy changes made while paused are observed before dispatch;
@@ -1101,8 +1161,9 @@ normalizing to stable serializable IDs for storage and central control.
 
 ### Separate permission systems for MCP, AI SDK tools, and codemode
 
-Rejected. All operation adapters submit one `AuthorityOperation` to one durable
-authorization kernel. Codemode retains replay responsibility, not policy ownership.
+Rejected. Capability adapters submit one `AuthorityOperation` to one durable authorization
+kernel. Direct and codemode are presentations over those capabilities; codemode retains
+replay responsibility, not policy ownership.
 
 ### Mandatory centralized authority service
 
