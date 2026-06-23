@@ -490,6 +490,39 @@ describe("AgentClient", () => {
       await expect(inFlight).rejects.toThrow("Connection closed");
     });
 
+    it("stops reconnecting and reports connectionError on terminal close", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onConnectionError = vi.fn();
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `rpc-terminal-close-${Date.now()}`,
+        host,
+        protocol,
+        onConnectionError
+      });
+
+      await client.ready;
+
+      await expect(
+        client.call("closeConnectionsForTest", [1008, "policy"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(() => {
+        expect(onConnectionError).toHaveBeenCalledOnce();
+      });
+
+      expect(client.shouldReconnect).toBe(false);
+      expect(client.connectionError).toMatchObject({
+        name: "AgentConnectionError",
+        code: 1008,
+        reason: "policy"
+      });
+      await expect(client.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
+    });
+
     it("keeps buffered (untransmitted) calls pending across a transient disconnect and flushes them on reconnect", async () => {
       const { host, protocol } = getTestWorkerHost();
 

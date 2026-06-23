@@ -35,7 +35,7 @@
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.11",
     "partyserver": "^0.5.8",
-    "partysocket": "1.2.0",
+    "partysocket": "1.3.0",
     "yaml": "^2.9.0",
     "yargs": "^18.0.0"
   },

@@ -353,6 +353,16 @@ function actionErrorEnvelope(error: unknown): {
   };
 }
 
+function streamErrorToString(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 function actionAuthorizationErrorEnvelope(
   reason: string | undefined,
   permissions: string[]
@@ -1016,6 +1026,7 @@ export interface StreamCallback {
 export interface StreamableResult {
   toUIMessageStream(options?: {
     sendReasoning?: boolean;
+    onError?: (error: unknown) => string;
   }): AsyncIterable<unknown>;
   output?: PromiseLike<unknown>;
 }
@@ -5177,8 +5188,11 @@ export class Think<
     }
 
     const streamResult = {
-      toUIMessageStream: () =>
-        result.toUIMessageStream({ sendReasoning: finalSendReasoning }),
+      toUIMessageStream: (options) =>
+        result.toUIMessageStream({
+          sendReasoning: options?.sendReasoning ?? finalSendReasoning,
+          onError: options?.onError ?? streamErrorToString
+        }),
       output: outputPromise
     } satisfies StreamableResult;
 
@@ -10557,7 +10571,7 @@ export class Think<
       >();
       try {
         const guardedStream = iterateWithStallWatchdog(
-          result.toUIMessageStream(),
+          result.toUIMessageStream({ onError: streamErrorToString }),
           stallTimeoutMs,
           () => {
             this._emit("chat:stream:stalled", {
@@ -10993,7 +11007,7 @@ export class Think<
       this._insideInferenceLoop = true;
       try {
         const guardedStream = iterateWithStallWatchdog(
-          result.toUIMessageStream(),
+          result.toUIMessageStream({ onError: streamErrorToString }),
           stallTimeoutMs,
           () => {
             this._emit("chat:stream:stalled", {

@@ -84,3 +84,4 @@ minimumReleaseAgeExclude:
   - "@tanstack/ai-event-client@0.6.3"
   - "@tanstack/ai-react@0.15.9"
   - "@tanstack/ai@0.32.0"
+  - partysocket@1.3.0

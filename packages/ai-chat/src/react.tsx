@@ -28,6 +28,12 @@ function warnDeprecated(id: string, message: string) {
   }
 }
 
+type AgentConnectionErrorLike = Error & {
+  code: number;
+  reason: string;
+  wasClean: boolean;
+};
+
 // ── DEPRECATED TYPES AND FUNCTIONS ──────────────────────────────────
 // Everything in this section is deprecated and will be removed in the
 // next major version. Use server-side tools with tool() from "ai" and
@@ -373,6 +379,7 @@ type UseAgentChatOptions<
     agent: string;
     name: string;
     path?: ReadonlyArray<{ agent: string; name: string }>;
+    connectionError?: AgentConnectionErrorLike | null;
     getHttpUrl: () => string;
   };
   getInitialMessages?:
@@ -646,6 +653,7 @@ export function useAgentChat<
    * See issue #1365.
    */
   isToolContinuation: boolean;
+  connectionError: AgentConnectionErrorLike | null;
 } {
   const {
     agent,
@@ -2410,6 +2418,7 @@ export function useAgentChat<
      */
     isRecovering,
     isToolContinuation,
+    connectionError: agent.connectionError ?? null,
     sendMessage: sendMessageWithStreamingProtection,
     stop: stopWithToolContinuationAbort,
     /**

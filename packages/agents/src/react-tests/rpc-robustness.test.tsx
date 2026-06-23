@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render as _render, cleanup } from "vitest-browser-react";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useAgent, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
@@ -57,13 +57,17 @@ function ControlledAgentComponent({
   const agent = useAgent(options);
   useEffect(() => {
     onAgent(agent);
-  }, [agent, agent.identified, onAgent]);
+  }, [agent, agent.identified, agent.connectionError, onAgent]);
 
   return (
     <div data-testid="agent-status">
       {agent.identified ? "connected" : "connecting"}
     </div>
   );
+}
+
+function SuspenseWrapper({ children }: { children: React.ReactNode }) {
+  return <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>;
 }
 
 /**
@@ -282,6 +286,218 @@ describe("useAgent RPC robustness", () => {
       setOptions!({ ...baseOptions, query: { generation: "2" } });
 
       await expect(slowCall).rejects.toThrow("Connection closed");
+    });
+
+    it("surfaces terminal close as connectionError and stops reconnecting", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let latestAgent: TestAgent | null = null;
+      const onConnectionError = vi.fn();
+      const name = `terminal-close-${crypto.randomUUID()}`;
+
+      render(
+        <ControlledAgentComponent
+          initialOptions={{
+            agent: "TestCallableAgent",
+            name,
+            host,
+            protocol,
+            onConnectionError
+          }}
+          onAgent={(agent) => {
+            latestAgent = agent;
+          }}
+          exposeSetOptions={() => {}}
+        />
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(latestAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      await expect(
+        latestAgent!.call("closeConnectionsForTest", [1008, "policy"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(() => {
+        expect(onConnectionError).toHaveBeenCalledOnce();
+        expect(latestAgent?.connectionError).toMatchObject({
+          name: "AgentConnectionError",
+          code: 1008,
+          reason: "policy"
+        });
+      });
+
+      const terminalAgent = latestAgent as unknown as TestAgent;
+      expect(terminalAgent.shouldReconnect).toBe(false);
+      await expect(terminalAgent.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
+    });
+
+    it("does not refresh async query or reconnect after terminal close", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let latestAgent: TestAgent | null = null;
+      const queryFn = vi.fn(async () => ({ token: crypto.randomUUID() }));
+
+      await render(
+        <SuspenseWrapper>
+          <ControlledAgentComponent
+            initialOptions={{
+              agent: "TestCallableAgent",
+              name: `terminal-async-query-${crypto.randomUUID()}`,
+              host,
+              protocol,
+              query: queryFn
+            }}
+            onAgent={(agent) => {
+              latestAgent = agent;
+            }}
+            exposeSetOptions={() => {}}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(latestAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+      const queryCallsBeforeClose = queryFn.mock.calls.length;
+
+      await expect(
+        latestAgent!.call("closeConnectionsForTest", [1008, "policy"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(() => {
+        expect(latestAgent?.connectionError).toMatchObject({ code: 1008 });
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(queryFn).toHaveBeenCalledTimes(queryCallsBeforeClose);
+      const asyncQueryAgent = latestAgent as unknown as TestAgent;
+      expect(asyncQueryAgent.shouldReconnect).toBe(false);
+    });
+
+    it("clears terminal connectionError when the agent address changes", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let latestAgent: TestAgent | null = null;
+      let setOptions: ((options: UseAgentOptions<unknown>) => void) | null =
+        null;
+
+      const baseOptions: UseAgentOptions<unknown> = {
+        agent: "TestCallableAgent",
+        name: `terminal-address-a-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        defaultCallTimeout: 200
+      };
+
+      render(
+        <ControlledAgentComponent
+          initialOptions={baseOptions}
+          onAgent={(agent) => {
+            latestAgent = agent;
+          }}
+          exposeSetOptions={(fn) => {
+            setOptions = fn;
+          }}
+        />
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(latestAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      await expect(
+        latestAgent!.call("closeConnectionsForTest", [1008, "policy"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(() => {
+        expect(latestAgent?.connectionError).toMatchObject({ code: 1008 });
+      });
+
+      setOptions!({
+        ...baseOptions,
+        enabled: false,
+        name: `terminal-address-b-${crypto.randomUUID()}`
+      });
+
+      await vi.waitFor(() => {
+        expect(latestAgent?.connectionError).toBeNull();
+      });
+
+      await expect(latestAgent!.call("add", [1, 2])).rejects.toThrow(
+        /timed out after 200ms/
+      );
+    });
+
+    it("composes user shouldReconnectOnClose with terminal close policy", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let latestAgent: TestAgent | null = null;
+      const shouldReconnectOnClose = vi.fn((event: CloseEvent) => {
+        return event.code !== 4001;
+      });
+
+      render(
+        <ControlledAgentComponent
+          initialOptions={{
+            agent: "TestCallableAgent",
+            name: `terminal-predicate-${crypto.randomUUID()}`,
+            host,
+            protocol,
+            shouldReconnectOnClose
+          }}
+          onAgent={(agent) => {
+            latestAgent = agent;
+          }}
+          exposeSetOptions={() => {}}
+        />
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(latestAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      await expect(
+        latestAgent!.call("closeConnectionsForTest", [1011, "nonterminal"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(
+        () => {
+          expect(latestAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+      await vi.waitFor(() => {
+        expect(shouldReconnectOnClose).toHaveBeenCalledWith(
+          expect.objectContaining({ code: 1011, reason: "nonterminal" })
+        );
+      });
+      const reconnectedAgent = latestAgent as unknown as TestAgent;
+      expect(reconnectedAgent.connectionError).toBeNull();
+
+      await expect(
+        latestAgent!.call("closeConnectionsForTest", [4001, "user-stop"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(() => {
+        expect(latestAgent?.connectionError).toMatchObject({
+          code: 4001,
+          reason: "user-stop"
+        });
+      });
+      const terminalAgent = latestAgent as unknown as TestAgent;
+      expect(terminalAgent.shouldReconnect).toBe(false);
     });
 
     it("rejects queued calls when the agent address changes (destination guard)", async () => {

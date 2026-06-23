@@ -41,6 +41,17 @@ export class TestCallableAgent extends Agent<
     return "unreachable";
   }
 
+  @callable()
+  closeConnectionsForTest(code: number, reason: string): number {
+    const connections = Array.from(this.getConnections());
+    setTimeout(() => {
+      for (const connection of connections) {
+        connection.close(code, reason);
+      }
+    }, 0);
+    return connections.length;
+  }
+
   // Void return type
   @callable()
   voidMethod(): void {

@@ -3,6 +3,7 @@ import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef, use, useMemo, useState, useEffect } from "react";
 import type { MCPServersState, RPCRequest, RPCResponse } from "./";
 import type {
+  AgentConnectionError,
   AgentPromiseReturnType,
   AgentStub,
   CallOptions,
@@ -12,7 +13,12 @@ import type {
   UntypedAgentStub
 } from "./client";
 import type { ClientParameters } from "./serializable";
-import { createStubProxy, DEFAULT_CALL_TIMEOUT_MS } from "./client";
+import {
+  createStubProxy,
+  DEFAULT_CALL_TIMEOUT_MS,
+  AgentConnectionError as AgentConnectionErrorCtor,
+  isTerminalCloseEvent
+} from "./client";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
 import {
@@ -24,6 +30,9 @@ import {
 } from "./chat/agent-tools";
 
 type QueryObject = Record<string, string | null>;
+type TerminalReconnectOptions = {
+  shouldReconnectOnClose?: (event: CloseEvent) => boolean;
+};
 
 interface CacheEntry {
   promise: Promise<QueryObject>;
@@ -135,106 +144,109 @@ export const _testUtils = {
 export type UseAgentOptions<State = unknown> = Omit<
   Parameters<typeof usePartySocket>[0],
   "party" | "room" | "query"
-> & {
-  /** Name of the agent to connect to (ignored if basePath is set) */
-  agent: string;
-  /** Name of the specific Agent instance (ignored if basePath is set) */
-  name?: string;
-  /**
-   * Full URL path - bypasses agent/name URL construction.
-   * When set, the client connects to this path directly.
-   * Server must handle routing manually (e.g., with getAgentByName + fetch).
-   * @example
-   * // Client connects to /user, server routes based on session
-   * useAgent({ agent: "UserAgent", basePath: "user" })
-   */
-  basePath?: string;
-  /** Query parameters - can be static object or async function */
-  query?: QueryObject | (() => Promise<QueryObject>);
-  /** Dependencies for async query caching */
-  queryDeps?: unknown[];
-  /** Cache TTL in milliseconds for auth tokens/time-sensitive data */
-  cacheTtl?: number;
-  /** Called when the Agent's state is updated */
-  onStateUpdate?: (state: State, source: "server" | "client") => void;
-  /** Called when a state update fails (e.g., connection is readonly) */
-  onStateUpdateError?: (error: string) => void;
-  /** Called when MCP server state is updated */
-  onMcpUpdate?: (mcpServers: MCPServersState) => void;
-  /**
-   * Called when the server sends the agent's identity on connect.
-   * Useful when using basePath, as the actual instance name is determined server-side.
-   * @param name The actual agent instance name
-   * @param agent The agent class name (kebab-case)
-   */
-  onIdentity?: (name: string, agent: string) => void;
-  /**
-   * Called when identity changes on reconnect (different instance than before).
-   * If not provided and identity changes, a warning will be logged.
-   * @param oldName Previous instance name
-   * @param newName New instance name
-   * @param oldAgent Previous agent class name
-   * @param newAgent New agent class name
-   */
-  onIdentityChange?: (
-    oldName: string,
-    newName: string,
-    oldAgent: string,
-    newAgent: string
-  ) => void;
-  /**
-   * Additional path to append to the URL.
-   * Works with both standard routing and basePath.
-   * @example
-   * // With basePath: /user/settings
-   * { basePath: "user", path: "settings" }
-   * // Standard: /agents/my-agent/room/settings
-   * { agent: "MyAgent", name: "room", path: "settings" }
-   */
-  path?: string;
-  /**
-   * Connect to a sub-agent (facet) via its parent. Flat array,
-   * root-first. Each step addresses one parent↔child hop.
-   *
-   * The hook's returned `.agent` / `.name` report the **leaf**
-   * identity (the deepest entry in `sub`), so downstream hooks
-   * like `useAgentChat` see the child they actually talk to.
-   * `.path` exposes the full chain for observability, deep links,
-   * and reconnect keying.
-   *
-   * @example
-   * ```ts
-   * // Two-level nesting: Inbox (Alice) → Chat (abc)
-   * useAgent({
-   *   agent: "inbox", name: userId,
-   *   sub: [{ agent: "chat", name: chatId }]
-   * });
-   *
-   * // Three-level: tenant → inbox → chat
-   * useAgent({
-   *   agent: "tenant", name: tenantId,
-   *   sub: [
-   *     { agent: "inbox", name: userId },
-   *     { agent: "chat",  name: chatId }
-   *   ]
-   * });
-   * ```
-   *
-   * @experimental The API surface may change before stabilizing.
-   */
-  sub?: ReadonlyArray<{ agent: string; name: string }>;
-  /**
-   * Default timeout (in milliseconds) applied to non-streaming `call()`s
-   * that don't pass an explicit `timeout`. Acts as a backstop so calls
-   * whose response is lost (e.g. the connection is replaced mid-flight)
-   * reject instead of hanging forever.
-   *
-   * Defaults to 30 000 ms. Set to `0` to disable the default timeout.
-   * Streaming calls never get a default timeout (long-lived streams are
-   * legitimate); pass an explicit `timeout` to bound them.
-   */
-  defaultCallTimeout?: number;
-};
+> &
+  TerminalReconnectOptions & {
+    /** Name of the agent to connect to (ignored if basePath is set) */
+    agent: string;
+    /** Name of the specific Agent instance (ignored if basePath is set) */
+    name?: string;
+    /**
+     * Full URL path - bypasses agent/name URL construction.
+     * When set, the client connects to this path directly.
+     * Server must handle routing manually (e.g., with getAgentByName + fetch).
+     * @example
+     * // Client connects to /user, server routes based on session
+     * useAgent({ agent: "UserAgent", basePath: "user" })
+     */
+    basePath?: string;
+    /** Query parameters - can be static object or async function */
+    query?: QueryObject | (() => Promise<QueryObject>);
+    /** Dependencies for async query caching */
+    queryDeps?: unknown[];
+    /** Cache TTL in milliseconds for auth tokens/time-sensitive data */
+    cacheTtl?: number;
+    /** Called when the Agent's state is updated */
+    onStateUpdate?: (state: State, source: "server" | "client") => void;
+    /** Called when a state update fails (e.g., connection is readonly) */
+    onStateUpdateError?: (error: string) => void;
+    /** Called when MCP server state is updated */
+    onMcpUpdate?: (mcpServers: MCPServersState) => void;
+    /**
+     * Called when the server sends the agent's identity on connect.
+     * Useful when using basePath, as the actual instance name is determined server-side.
+     * @param name The actual agent instance name
+     * @param agent The agent class name (kebab-case)
+     */
+    onIdentity?: (name: string, agent: string) => void;
+    /**
+     * Called when identity changes on reconnect (different instance than before).
+     * If not provided and identity changes, a warning will be logged.
+     * @param oldName Previous instance name
+     * @param newName New instance name
+     * @param oldAgent Previous agent class name
+     * @param newAgent New agent class name
+     */
+    onIdentityChange?: (
+      oldName: string,
+      newName: string,
+      oldAgent: string,
+      newAgent: string
+    ) => void;
+    /**
+     * Additional path to append to the URL.
+     * Works with both standard routing and basePath.
+     * @example
+     * // With basePath: /user/settings
+     * { basePath: "user", path: "settings" }
+     * // Standard: /agents/my-agent/room/settings
+     * { agent: "MyAgent", name: "room", path: "settings" }
+     */
+    path?: string;
+    /**
+     * Connect to a sub-agent (facet) via its parent. Flat array,
+     * root-first. Each step addresses one parent↔child hop.
+     *
+     * The hook's returned `.agent` / `.name` report the **leaf**
+     * identity (the deepest entry in `sub`), so downstream hooks
+     * like `useAgentChat` see the child they actually talk to.
+     * `.path` exposes the full chain for observability, deep links,
+     * and reconnect keying.
+     *
+     * @example
+     * ```ts
+     * // Two-level nesting: Inbox (Alice) → Chat (abc)
+     * useAgent({
+     *   agent: "inbox", name: userId,
+     *   sub: [{ agent: "chat", name: chatId }]
+     * });
+     *
+     * // Three-level: tenant → inbox → chat
+     * useAgent({
+     *   agent: "tenant", name: tenantId,
+     *   sub: [
+     *     { agent: "inbox", name: userId },
+     *     { agent: "chat",  name: chatId }
+     *   ]
+     * });
+     * ```
+     *
+     * @experimental The API surface may change before stabilizing.
+     */
+    sub?: ReadonlyArray<{ agent: string; name: string }>;
+    /**
+     * Default timeout (in milliseconds) applied to non-streaming `call()`s
+     * that don't pass an explicit `timeout`. Acts as a backstop so calls
+     * whose response is lost (e.g. the connection is replaced mid-flight)
+     * reject instead of hanging forever.
+     *
+     * Defaults to 30 000 ms. Set to `0` to disable the default timeout.
+     * Streaming calls never get a default timeout (long-lived streams are
+     * legitimate); pass an explicit `timeout` to bound them.
+     */
+    defaultCallTimeout?: number;
+    /** Called when the connection closes with a terminal code and will not reconnect. */
+    onConnectionError?: (error: AgentConnectionError) => void;
+  };
 
 type OptionalArgsAgentMethodCall<AgentT> = <
   K extends keyof OptionalAgentMethods<AgentT>
@@ -274,6 +286,7 @@ export function useAgent<State = unknown>(
   identified: boolean;
   ready: Promise<void>;
   state: State | undefined;
+  connectionError: AgentConnectionError | null;
   setState: (state: State) => void;
   call: UntypedAgentMethodCall;
   stub: UntypedAgentStub;
@@ -293,6 +306,7 @@ export function useAgent<
   identified: boolean;
   ready: Promise<void>;
   state: State | undefined;
+  connectionError: AgentConnectionError | null;
   setState: (state: State) => void;
   call: AgentMethodCall<AgentT>;
   stub: AgentStub<AgentT>;
@@ -308,6 +322,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   identified: boolean;
   ready: Promise<void>;
   state: State | undefined;
+  connectionError: AgentConnectionError | null;
   setState: (state: State) => void;
   call: UntypedAgentMethodCall | AgentMethodCall<unknown>;
   stub: UntypedAgentStub;
@@ -326,6 +341,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     sub: subOption,
     path: userPath,
     defaultCallTimeout,
+    onConnectionError,
+    shouldReconnectOnClose,
     ...restOptions
   } = options;
 
@@ -553,6 +570,10 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
 
   // Track agent state for reactivity — updated on server broadcasts and client setState
   const [agentState, setAgentState] = useState<State | undefined>(undefined);
+  const [connectionError, setConnectionError] =
+    useState<AgentConnectionError | null>(null);
+  const connectionErrorRef = useRef<AgentConnectionError | null>(null);
+  const connectionErrorAddressKeyRef = useRef<string | null>(null);
 
   // Store identity in React state for reactivity. Seed with the
   // leaf's address — what the server will echo back in
@@ -606,7 +627,10 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         basePath: options.basePath,
         path: combinedPath || undefined,
         query: resolvedQuery,
-        ...restOptions
+        ...restOptions,
+        shouldReconnectOnClose: (event: CloseEvent) =>
+          (shouldReconnectOnClose?.(event) ?? true) &&
+          !isTerminalCloseEvent(event)
       }
     : {
         party: agentNamespace,
@@ -614,7 +638,10 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         room: options.name || "default",
         path: combinedPath || undefined,
         query: resolvedQuery,
-        ...restOptions
+        ...restOptions,
+        shouldReconnectOnClose: (event: CloseEvent) =>
+          (shouldReconnectOnClose?.(event) ?? true) &&
+          !isTerminalCloseEvent(event)
       };
 
   const socketEnabled = !awaitingQueryRefresh && (restOptions.enabled ?? true);
@@ -633,11 +660,18 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     options.name || "default",
     combinedPath || null
   ]);
+  const visibleConnectionError =
+    connectionErrorAddressKeyRef.current === addressKey
+      ? connectionError
+      : null;
+  connectionErrorRef.current = visibleConnectionError;
 
   const agent = usePartySocket({
     ...socketOptions,
     enabled: socketEnabled,
     onOpen: (event: Event) => {
+      connectionErrorAddressKeyRef.current = null;
+      setConnectionError(null);
       // The socket is open: transmit any RPC requests that were issued
       // while disconnected (or while a previous socket was being
       // replaced). They were never handed to a socket before, so this
@@ -773,6 +807,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       const closedSocket =
         (event.target as PartySocket | null) ?? socketRef.current;
       const isCurrentSocket = closedSocket === socketRef.current;
+      const terminalClose = isTerminalCloseEvent(event);
 
       // Calls transmitted on the closed socket can never receive their
       // response — reject them. Calls still queued (never transmitted)
@@ -780,6 +815,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       // in flight on a *different* (newer) socket are untouched.
       if (closedSocket) {
         rejectCallsSentOn(closedSocket, "Connection closed");
+        if (isCurrentSocket && !closedSocket.shouldReconnect) {
+          rejectQueuedCalls("Connection closed");
+        }
       }
 
       if (isCurrentSocket) {
@@ -790,14 +828,23 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         }
         setIdentity((prev) => ({ ...prev, identified: false }));
 
-        // Pause reconnection for async queries until fresh query params are ready
-        if (isAsyncQuery) {
-          setAwaitingQueryRefresh(true);
+        if (closedSocket?.shouldReconnect) {
+          // Pause reconnection for async queries until fresh query params are ready.
+          if (isAsyncQuery) {
+            setAwaitingQueryRefresh(true);
+          }
+
+          // Invalidate cache and trigger re-render to fetch fresh query params.
+          deleteCacheEntry(cacheKeyRef.current);
+          setCacheInvalidatedAt(Date.now());
         }
 
-        // Invalidate cache and trigger re-render to fetch fresh query params
-        deleteCacheEntry(cacheKeyRef.current);
-        setCacheInvalidatedAt(Date.now());
+        if (!closedSocket?.shouldReconnect && terminalClose) {
+          const error = new AgentConnectionErrorCtor(event);
+          connectionErrorAddressKeyRef.current = addressKey;
+          setConnectionError(error);
+          onConnectionError?.(error);
+        }
       }
 
       // Call user's onClose if provided
@@ -809,6 +856,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     identified: boolean;
     ready: Promise<void>;
     state: State | undefined;
+    connectionError: AgentConnectionError | null;
     setState: (state: State) => void;
     call: UntypedAgentMethodCall;
     stub: UntypedAgentStub;
@@ -838,6 +886,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     // still queued were composed for the *old* instance. Reject them
     // before anything can flush them onto the new instance.
     if (prevAddress !== addressKey) {
+      connectionErrorAddressKeyRef.current = null;
+      setConnectionError(null);
       rejectQueuedCalls(
         "Call discarded: the agent address changed before the request could be sent"
       );
@@ -867,6 +917,16 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       options?: CallOptions | StreamOptions
     ): Promise<T> => {
       return new Promise((resolve, reject) => {
+        const socket = socketRef.current;
+        if (
+          socket &&
+          connectionErrorRef.current &&
+          socket.readyState === socket.CLOSED
+        ) {
+          reject(new Error("Connection closed"));
+          return;
+        }
+
         const id = crypto.randomUUID();
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
@@ -922,7 +982,6 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         // request stays queued and is flushed on the next open event.
         // We never hand requests to a non-open socket: its internal
         // buffer is lost forever if the socket gets replaced.
-        const socket = socketRef.current;
         if (socket && socket.readyState === socket.OPEN) {
           socket.send(request);
           const pending = pendingCallsRef.current.get(id);
@@ -959,6 +1018,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   agent.identified = identity.identified;
   agent.ready = readyRef.current!.promise;
   agent.state = agentState;
+  agent.connectionError = visibleConnectionError;
   mutableAgentRef.current = agent;
   // Memoize stub so it's referentially stable across renders
   // (call is already stable via useCallback)
