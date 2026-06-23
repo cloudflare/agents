@@ -267,6 +267,20 @@ describe("toolApprovalUpdate", () => {
     expect(applied.state).toBe("output-denied");
     expect(applied.approval).toEqual({ id: "a1", approved: false });
   });
+
+  it("synthesizes an approval id when an older transcript is missing one", () => {
+    const update = toolApprovalUpdate("tc-missing-id", true);
+    const applied = update.apply({
+      toolCallId: "tc-missing-id",
+      state: "approval-requested"
+    });
+
+    expect(applied.state).toBe("approval-responded");
+    expect(applied.approval).toEqual({
+      id: "tc-missing-id",
+      approved: true
+    });
+  });
 });
 
 describe("applyToolUpdate", () => {

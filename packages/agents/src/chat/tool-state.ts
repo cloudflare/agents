@@ -199,14 +199,26 @@ export function toolApprovalUpdate(
   return {
     toolCallId,
     matchStates: ["input-available", "approval-requested"],
-    apply: (part) => ({
-      ...part,
-      state: approved ? "approval-responded" : "output-denied",
-      approval: {
-        ...(part.approval as Record<string, unknown> | undefined),
-        approved
-      }
-    })
+    apply: (part) => {
+      const approval =
+        typeof part.approval === "object" &&
+        part.approval !== null &&
+        !Array.isArray(part.approval)
+          ? (part.approval as Record<string, unknown>)
+          : undefined;
+      const approvalId =
+        typeof approval?.id === "string" ? approval.id : toolCallId;
+
+      return {
+        ...part,
+        state: approved ? "approval-responded" : "output-denied",
+        approval: {
+          ...approval,
+          id: approvalId,
+          approved
+        }
+      };
+    }
   };
 }
 
