@@ -4,11 +4,20 @@ Status: proposed
 
 ## Problem
 
-An Agent needs to answer three questions before it uses a tool:
+This RFC is not a taxonomy of every security control. It defines three responsibilities
+an Agent SDK needs at an execution boundary:
 
-1. **Credentials** — what secret or OAuth grant lets this Agent call the service?
-2. **Permissions** — should this Agent allow, ask, or deny this particular operation?
-3. **Identity** — which Agent is acting, and is it acting for an authenticated user?
+1. **Identity context** — which Agent is acting, and is it acting for an authenticated
+   user?
+2. **Credential lifecycle** — what secret or OAuth grant can this Agent present to the
+   service?
+3. **Runtime authorization** — may this concrete operation run under current policy and
+   execution context?
+
+Network reachability, egress control, sandbox containment, and downstream resource-server
+policy are separate enforcement domains. They may use the same operation contract, but a
+credential does not answer network reachability and an Agent-side permit does not replace
+a downstream authorization check.
 
 The Agents SDK already has useful pieces: each Agent is a Durable Object with isolated
 storage, MCP has a durable OAuth client provider, MCP tools expose risk annotations, and
@@ -34,6 +43,8 @@ automatically by MCP and by locally authored authenticated tools.
 - Make policy editable throughout the Agent's lifetime without repeating authentication.
 - Give every decision a stable Agent identity and, when available, a verified user
   identity.
+- Let policy consider prior operations and information labels accumulated by the current
+  execution or thread.
 - Preserve standard MCP and OAuth behavior.
 - Return ordinary AI SDK tools from the local-tool helper.
 - Minimize refresh races and make failure states testable.
@@ -58,6 +69,9 @@ automatically by MCP and by locally authored authenticated tools.
   required to solve Agent-local control and is outside the core design.
 - A complete externally verifiable Agent identity protocol. This RFC defines the local
   identity envelope and leaves external proof as a follow-up.
+- Complete data-loss prevention or field-level taint tracking through arbitrary LLM
+  reasoning, generated code, shells, or downstream services. This RFC defines a
+  conservative information-context input to policy, not a proof of non-exfiltration.
 
 ## Core model
 
@@ -142,7 +156,13 @@ interface AuthorityOperation {
     definitionDigest: string;
     annotations?: ToolAnnotations;
   };
-  context?: Record<string, unknown>;
+  context?: {
+    information?: {
+      labels: string[];
+      lineage: string[]; // prior authority-event IDs, not raw data
+    };
+    [key: string]: unknown;
+  };
   execution: {
     mode: "direct" | "codemode";
     executionId?: string;
@@ -462,8 +482,9 @@ interface AuthorizationRequest {
 ```
 
 The operation digest is SHA-256 over a canonical serialization of the normalized domain,
-action, resource, parameters, principal, and capability definition. Domain adapters must
-define normalization before hashing, including omitted defaults and set-like arrays.
+action, resource, parameters, principal, capability definition, and policy-relevant
+context. Domain adapters must define normalization before hashing, including omitted
+defaults and set-like arrays.
 
 Only bounded, redacted policy inputs and their digest are persisted. Credentials and
 OAuth codes are never part of an authorization request.
@@ -601,6 +622,28 @@ the lifetime of that Agent and is used to:
 This is a local platform identity. It is not, by itself, cryptographic proof to an
 external API that a particular Agent made a request.
 
+### Optional portable Agent proof (future)
+
+A future opt-in profile can give an Agent an asymmetric key pair, preferably Ed25519, and
+use HTTP Message Signatures (RFC 9421) when it calls HTTP or MCP resources. The private key
+stays in Agent-local secure storage; the public key is registered with, or resolved by, a
+party trusted to bind it to the Agent principal.
+
+RFC 9421 proves possession of the private key over the covered request components. It does
+not establish identity on its own. A complete profile still needs:
+
+- public-key registration or trusted resolution and a stable `keyid`;
+- binding between that key and the Agent principal;
+- covered components such as method, target URI, content digest, created time, and nonce;
+- replay protection, key rotation, and revocation; and
+- rules for combining Agent proof with delegated user identity.
+
+This could let a resource distinguish two Agent instances using the same OAuth client or
+source grant, and could sender-bind an Agent-specific provisioned grant. It is ordered
+after policy, credentials, information-flow controls, and audit because those provide
+useful local safety without requiring ecosystem adoption. Unsigned Agent IDs remain local
+attribution, not external proof.
+
 ### User identity
 
 A user identity must come from a verified application authentication path, never from
@@ -623,6 +666,141 @@ present, policy and grants operate for the Agent principal alone.
 The unresolved follow-up is external Agent proof: workload identity, signed Agent
 assertions, sender-constrained tokens, and actor chains. Those mechanisms should build on
 this envelope without being required for local grant isolation and policy.
+
+## Information context and history-aware policy
+
+Authorization normally evaluates the current operation. Agent harnesses can add another
+useful input: what the current execution has already observed and done.
+
+```text
+read private customer record
+        ↓ add label: customer-data
+thread / codemode execution now carries customer-data
+        ↓
+post to public webhook
+        ↓ policy denies or requests approval
+```
+
+This is conservative information-flow context, not precise language-model taint tracking.
+Once labeled data is returned to the model, the containing thread or codemode execution
+inherits the label. Labels are monotonic for that context unless a trusted declassifier,
+outside the model and explicitly recognized by policy, removes or replaces one.
+
+### Context ownership
+
+Each model-visible execution has durable context state:
+
+```ts
+interface AuthorityContextState {
+  id: string;
+  revision: number;
+  labels: string[];
+  lineage: string[];
+}
+```
+
+- Direct chat tools use the current Agent thread/conversation context.
+- Codemode uses its execution ID and persists labels alongside its replay state.
+- Background or workflow calls use an explicit execution context supplied by the caller.
+
+Agent-level grants remain separate. Reading private data in one conversation does not
+automatically taint unrelated conversations owned by the same Agent.
+
+A capability adapter may classify what a successful result reveals:
+
+```ts
+interface InformationUpdate {
+  labels: string[];
+  source: {
+    domain: string;
+    action: string;
+    resource?: { type: string; id: string };
+  };
+}
+```
+
+The update is persisted before the result enters model context or a codemode sandbox.
+Label union, lineage append, context revision increment, and audit append occur in one
+Agent-storage transaction. Policy receives only labels and lineage event IDs, not the
+sensitive result itself.
+
+A decision records the context revision it evaluated. Immediately before an effect, the
+PEP compares that revision with current state. If labels or lineage changed while the
+operation was waiting, it reevaluates. This prevents a sink approved under stale
+information context from racing a newly completed private read.
+
+Capability adapters declare trusted information behavior:
+
+```ts
+interface InformationSemantics<Result> {
+  source?: {
+    classify(result: Result): InformationUpdate | undefined;
+  };
+  sink?: {
+    trustZone(operation: AuthorityOperation): string;
+  };
+}
+```
+
+A static declaration is sufficient for many capabilities; a trusted classifier may derive
+labels from result metadata when needed. The model cannot add, remove, or downgrade these
+labels.
+
+Capabilities that can transmit or publish information identify their destination in the
+normalized operation. Policy can then express rules such as:
+
+```ts
+this.auth.policy.setApplicationPolicy(({ operation }) => {
+  const labels = operation.context?.information?.labels ?? [];
+  const trustZone = operation.context?.destinationTrustZone;
+
+  if (labels.includes("customer-data") && trustZone === "public") {
+    return "deny";
+  }
+});
+```
+
+A more specific rule may require approval when a sensitive read precedes a named sink:
+
+```text
+crm.readCustomer → label customer-data
+email.send(public recipient) + customer-data → ask or deny
+```
+
+Policy may also match lineage: for example, require approval for `email.send` after
+`crm.readCustomer`, or deny deployment after a secret-reading operation. This enables
+sequence-aware controls without treating a model-generated explanation as security input.
+
+History is causally ordered, not predictive. Parallel operations are safe only for what
+has completed or is ordered before the effect. A sink cannot use the result of a private
+read until that result resolves, and the label is committed before resolution. Codemode
+must preserve this ordering when it exposes connector results.
+
+A model-visible context is monotonic: once the model has seen `customer-data`, a later
+"redact" call cannot make it unseen. Trusted declassification must occur before sensitive
+content enters that context—for example, an isolated tool reads private data and returns
+only a verified aggregate. That new result can carry a lower label, but the raw-data
+context, if one existed, remains tainted.
+
+### Limits
+
+The harness can enforce only boundaries it controls:
+
+- It cannot infer every sensitive value from an unlabeled prompt or tool result.
+- It cannot track individual fields through arbitrary model reasoning or generated code;
+  it taints the containing execution conservatively.
+- A shell or unrestricted network path can bypass tool-level sink policy unless the
+  sandbox, filesystem, or egress proxy is also a PEP.
+- A compound tool that reads and exfiltrates internally exposes only one outer operation;
+  the tool/resource server must enforce its internal boundary.
+- Across an external MCP or API hop, there is no ubiquitous standard today for carrying
+  this complete execution context. Local policy can still block the outbound call. Signed
+  context propagation, transaction tokens, or future MCP metadata are follow-ups and must
+  not rely on client-asserted `_meta` as trusted evidence.
+
+Audit records capture label additions and lineage edges. They do not store raw private
+content. This gives developers useful containment and explainability while keeping the
+non-exfiltration claim honest.
 
 ## Capability and presentation adapters
 
@@ -877,6 +1055,11 @@ Create one `AuthorityOperation` fixture and run it through:
 All three must produce the same decision, request fingerprint, policy revision, and audit
 event. Additional required races:
 
+- A labeled result commits its information update before resolving to the model/sandbox.
+- A sink authorized against an old context revision reevaluates after a concurrent label
+  update.
+- Direct and codemode presentations of one capability add the same labels and lineage.
+- Replay returns recorded results without duplicating lineage or label updates.
 - Concurrent identical calls create one pending request.
 - Two clients resolving one request produce one state transition.
 - Policy changing while a call is pending is observed before dispatch.
@@ -897,6 +1080,11 @@ interface AuthorityEvent {
   operationDigest: string;
   decision: "allow" | "deny";
   policyRevision: number;
+  contextRevision?: number;
+  information?: {
+    labelsAdded?: string[];
+    lineage?: string[];
+  };
   ruleId?: string;
   requestId?: string;
   grantId?: string;
@@ -961,6 +1149,10 @@ They provide adaptation points without making unfinished profiles mandatory.
 - **RFC 8785 JSON Canonicalization Scheme** is a suitable basis for operation and
   capability digests once each domain has normalized defaults and set-like values.
   Canonical JSON cannot supply missing domain semantics by itself.
+- **RFC 9421 HTTP Message Signatures** can provide opt-in proof that the current HTTP
+  requester possesses an Agent key. A future profile must define key registration,
+  principal binding, covered components, replay protection, rotation, and revocation;
+  signatures alone are not identity.
 - **RFC 8693 token exchange, RAR (RFC 9396), DPoP, EMA/ID-JAG, actor profiles, and
   transaction tokens** may strengthen credential projection and cross-domain identity.
   They do not replace execution-time policy and are deferred from the minimal kernel.
@@ -1005,6 +1197,25 @@ a zero-dependency core package.
 
 The migration moves shared authority concerns, not protocol implementations.
 
+### Delivery priorities
+
+The intended product order is:
+
+1. **Permission checks.** One operation model, basic policy, MCP annotations, requestable
+   denial, and direct/Code Mode presentation adapters.
+2. **Credential management.** Agent-local grants, OAuth and API-key provisioning, refresh,
+   and constrained credential use inside capability adapters.
+3. **History-aware policy.** Information labels, prior-operation lineage, sink trust zones,
+   context revisions, and conservative exfiltration controls.
+4. **Audit hardening.** A minimal decision event exists from phase one for debugging;
+   durable query APIs, retention, integrity protection, and cross-system export arrive
+   after policy semantics stabilize.
+5. **Portable Agent identity.** Optional key-bound Agent proof, potentially Ed25519 with
+   RFC 9421 HTTP Message Signatures, followed later by workload and delegation profiles.
+
+This order separates what is immediately enforceable in the harness from mechanisms that
+need broader ecosystem support.
+
 | Concern                                                                     | Owner after migration                                       |
 | --------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | MCP transport, discovery, tool schemas, OAuth challenges, callback routing  | `MCPClientManager` and MCP SDK                              |
@@ -1030,7 +1241,7 @@ reconnection is required solely for this migration.
 ### Phase 1: Introduce the kernel without behavior changes
 
 - Add `Agent.auth`, the `AuthorityOperation` type, domain-adapter contracts, policy and
-  request tables, and the audit sink.
+  request tables, and a minimal redacted decision-event hook for debugging.
 - Add deterministic operation normalization/digests and pure policy tests.
 - Keep MCP OAuth, AI SDK approval, and codemode approval behavior unchanged.
 - Provide compatibility adapters for existing `needsApproval` and `requiresApproval`.
@@ -1134,10 +1345,36 @@ Audit shell commands as open-world operations and record post-exec sync changes.
 claim per-file or egress enforcement inside a running container without a backend/FUSE or
 egress PEP.
 
-### Phase 7: Identity and centralized providers
+### Phase 7: Add history-aware information context
+
+- Add durable context IDs, revisions, labels, and lineage for threads, codemode executions,
+  and explicit workflow contexts.
+- Let trusted capability adapters declare source labels and sink trust zones.
+- Commit source labels before returning results to the model or sandbox.
+- Bind decisions to context revision and reevaluate stale sink decisions before dispatch.
+- Pass only labels and event references to policy; keep raw content out of policy and audit
+  records.
+- Treat labels as monotonic once data enters a model-visible context. Support trusted
+  declassification only in isolated capabilities that never expose raw sensitive input to
+  that context.
+
+This phase provides conservative containment for known sources and sinks. It does not
+claim complete DLP or solve egress paths outside controlled capability boundaries.
+
+### Phase 8: Harden audit
+
+- Add durable audit query APIs, retention policy, export, and integrity protection after
+  operation and policy schemas stabilize.
+- Preserve operation/context revision, decision, rule/request IDs, label updates, lineage,
+  and outcome without raw sensitive content.
+- Keep observability spans separate from authorization evidence.
+
+### Phase 9: Identity and centralized providers
 
 - Add verified principal resolution and use it across every adapter.
 - Add optional mandatory-policy and central credential providers.
+- Add optional Agent key registration and RFC 9421 HTTP Message Signature support,
+  including replay defense, rotation, revocation, and delegation binding.
 - Keep the same normalized operation contract so moving policy to AuthZEN, Cedar, OPA, or
   another PDP does not change MCP, local tools, codemode, or Workspace.
 - Add richer workload identity or actor-chain support later without changing local Agent
@@ -1151,7 +1388,9 @@ Legacy approval state can be removed only when:
   the same operation identity and single authorization boundary;
 - all approval UIs resolve `Agent.auth` requests;
 - replayed codemode calls never create new authorization requests;
-- policy changes made while paused are observed before dispatch;
+- policy and information-context changes made while paused are observed before dispatch;
+- source labels are committed before results enter model-visible context;
+- replay does not duplicate label or lineage updates;
 - all claimed Workspace public effect paths are gated; and
 - audit records contain no credential material or raw sensitive payloads.
 
