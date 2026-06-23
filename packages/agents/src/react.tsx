@@ -574,6 +574,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     useState<AgentConnectionError | null>(null);
   const connectionErrorRef = useRef<AgentConnectionError | null>(null);
   const connectionErrorAddressKeyRef = useRef<string | null>(null);
+  const shouldReconnectOnCloseRef = useRef(shouldReconnectOnClose);
+  shouldReconnectOnCloseRef.current = shouldReconnectOnClose;
+  const classifyReconnect = useCallback(
+    (event: CloseEvent) =>
+      (shouldReconnectOnCloseRef.current?.(event) ?? true) &&
+      !isTerminalCloseEvent(event),
+    []
+  );
 
   // Store identity in React state for reactivity. Seed with the
   // leaf's address — what the server will echo back in
@@ -628,9 +636,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         path: combinedPath || undefined,
         query: resolvedQuery,
         ...restOptions,
-        shouldReconnectOnClose: (event: CloseEvent) =>
-          (shouldReconnectOnClose?.(event) ?? true) &&
-          !isTerminalCloseEvent(event)
+        shouldReconnectOnClose: classifyReconnect
       }
     : {
         party: agentNamespace,
@@ -639,9 +645,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         path: combinedPath || undefined,
         query: resolvedQuery,
         ...restOptions,
-        shouldReconnectOnClose: (event: CloseEvent) =>
-          (shouldReconnectOnClose?.(event) ?? true) &&
-          !isTerminalCloseEvent(event)
+        shouldReconnectOnClose: classifyReconnect
       };
 
   const socketEnabled = !awaitingQueryRefresh && (restOptions.enabled ?? true);

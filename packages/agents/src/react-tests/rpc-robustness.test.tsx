@@ -500,6 +500,67 @@ describe("useAgent RPC robustness", () => {
       expect(terminalAgent.shouldReconnect).toBe(false);
     });
 
+    it("uses the latest shouldReconnectOnClose without replacing the socket", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let latestAgent: TestAgent | null = null;
+      let setOptions: ((options: UseAgentOptions<unknown>) => void) | null =
+        null;
+      const initialPredicate = vi.fn(() => true);
+      const updatedPredicate = vi.fn((event: CloseEvent) => {
+        return event.code !== 1011;
+      });
+
+      const baseOptions: UseAgentOptions<unknown> = {
+        agent: "TestCallableAgent",
+        name: `latest-predicate-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        shouldReconnectOnClose: initialPredicate
+      };
+
+      render(
+        <ControlledAgentComponent
+          initialOptions={baseOptions}
+          onAgent={(agent) => {
+            latestAgent = agent;
+          }}
+          exposeSetOptions={(fn) => {
+            setOptions = fn;
+          }}
+        />
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(latestAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+      const connectedAgent = latestAgent;
+
+      setOptions!({
+        ...baseOptions,
+        shouldReconnectOnClose: updatedPredicate
+      });
+
+      await vi.waitFor(() => {
+        expect(latestAgent).toBe(connectedAgent);
+      });
+
+      await expect(
+        latestAgent!.call("closeConnectionsForTest", [1011, "user-stop"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(() => {
+        expect(updatedPredicate).toHaveBeenCalledWith(
+          expect.objectContaining({ code: 1011, reason: "user-stop" })
+        );
+      });
+      expect(initialPredicate).not.toHaveBeenCalled();
+      const terminalAgent = latestAgent as unknown as TestAgent;
+      expect(terminalAgent.shouldReconnect).toBe(false);
+    });
+
     it("rejects queued calls when the agent address changes (destination guard)", async () => {
       const { host, protocol } = getTestWorkerHost();
       let latestAgent: TestAgent | null = null;
