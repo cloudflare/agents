@@ -220,9 +220,6 @@ importers:
 
   examples/agent-skills:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -284,9 +281,6 @@ importers:
 
   examples/agents-as-tools:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -433,9 +427,6 @@ importers:
 
   examples/assistant:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/codemode':
         specifier: '*'
         version: link:../../packages/codemode
@@ -576,9 +567,6 @@ importers:
 
   examples/browser-live-view:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -707,9 +695,6 @@ importers:
       '@chat-adapter/telegram':
         specifier: ^4.30.0
         version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -1049,9 +1034,6 @@ importers:
 
   examples/context-overflow-recovery:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -1156,9 +1138,6 @@ importers:
       '@ai-sdk/anthropic':
         specifier: ^3.0.83
         version: 3.0.85(zod@4.4.3)
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -2302,9 +2281,6 @@ importers:
       '@chat-adapter/telegram':
         specifier: ^4.30.0
         version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -3520,9 +3496,6 @@ importers:
 
   experimental/session-skills:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: '*'
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4100,9 +4073,6 @@ importers:
 
   think-starters/basic:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: workspace:*
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4167,9 +4137,6 @@ importers:
 
   think-starters/business-workflow:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: workspace:*
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4237,9 +4204,6 @@ importers:
 
   think-starters/coding-agent:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: workspace:*
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4304,9 +4268,6 @@ importers:
 
   think-starters/customer-support:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: workspace:*
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4374,9 +4335,6 @@ importers:
 
   think-starters/personal-assistant:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: workspace:*
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4441,9 +4399,6 @@ importers:
 
   think-starters/webhook-agent:
     dependencies:
-      '@cloudflare/ai-chat':
-        specifier: workspace:*
-        version: link:../../packages/ai-chat
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)

@@ -209,7 +209,7 @@ Every example should include an info card at the top of the page explaining what
 
 ### Chat message rendering
 
-Any example with a chat UI (`useAgentChat` from `@cloudflare/ai-chat/react`, or `useChat`) must render the full shape of an assistant turn — not just text. Reference implementations: **`examples/ai-chat`** (streamdown + complete tool states) and **`examples/assistant`** (adds reasoning + approvals + branches).
+Any example with a chat UI (`useAgentChat` from `@cloudflare/ai-chat/react` or `@cloudflare/think/react`, or `useChat`) must render the full shape of an assistant turn — not just text. Reference implementations: **`examples/ai-chat`** (streamdown + complete tool states) and **`examples/assistant`** (adds reasoning + approvals + branches).
 
 Rules:
 

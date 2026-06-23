@@ -25,7 +25,7 @@ npm init -y
 Install dependencies:
 
 ```sh
-npm install @cloudflare/think @cloudflare/ai-chat agents ai @cloudflare/shell zod workers-ai-provider react react-dom
+npm install @cloudflare/think agents ai @cloudflare/shell zod workers-ai-provider react react-dom
 npm install -D wrangler @cloudflare/vite-plugin @cloudflare/workers-types @vitejs/plugin-react @tailwindcss/vite tailwindcss typescript vite
 ```
 
@@ -119,7 +119,7 @@ Create `src/client.tsx`:
 ```tsx
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 
 function Chat() {
   const agent = useAgent({ agent: "MyAgent" });
@@ -193,6 +193,8 @@ npx vite dev
 ```
 
 Open the browser and send a message. The agent responds with streaming text, and workspace file tools are available to the model automatically.
+
+> **`setMessages` is display-only on Think.** Think is server-authoritative — its transcript is a projection of the Session tree, not a flat array the client owns. `useAgentChat` from `@cloudflare/think/react` therefore keeps `setMessages` local to the React view: edits update what's on screen but are **not** persisted and won't survive a refresh or reconnect (the server re-projects the authoritative history). To persist a clear, call `clearHistory()`. If you push a full transcript to Think anyway (for example, by using `@cloudflare/ai-chat/react` against a Think server), the server ignores it and logs a one-time dev warning.
 
 ## 6. Add persistent memory
 

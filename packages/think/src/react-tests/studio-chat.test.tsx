@@ -8,7 +8,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import type { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -231,5 +231,59 @@ describe("Think Studio chat client path", () => {
     await waitFor(() => {
       expect(screen.getByTestId("status").textContent).toBe("ready");
     });
+  });
+
+  it("keeps setMessages local by default and still clears persisted history", async () => {
+    const { agent, sentMessages } = createFakeAgent({
+      name: "studio-local-set-messages",
+      url: "ws://localhost/agents/chat/studio-local-set-messages?_pk=abc"
+    });
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      chatInstance = chat;
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    render(
+      <StrictMode>
+        <Suspense fallback="Loading...">
+          <TestComponent />
+        </Suspense>
+      </StrictMode>
+    );
+
+    await act(async () => {
+      chatInstance!.setMessages([
+        {
+          id: "local-1",
+          role: "user",
+          parts: [{ type: "text", text: "Local only" }]
+        }
+      ]);
+      await sleep(10);
+    });
+
+    expect(screen.getByTestId("messages-count").textContent).toBe("1");
+
+    const messageSyncFrames = sentMessages
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .filter((message) => message.type === "cf_agent_chat_messages");
+    expect(messageSyncFrames).toHaveLength(0);
+
+    await act(async () => {
+      chatInstance!.clearHistory();
+      await sleep(10);
+    });
+
+    const clearFrames = sentMessages
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .filter((message) => message.type === "cf_agent_chat_clear");
+    expect(clearFrames).toHaveLength(1);
   });
 });

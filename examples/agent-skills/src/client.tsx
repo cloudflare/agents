@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 import { getToolName, isToolUIPart } from "ai";
 import {
   ChatCircleTextIcon,

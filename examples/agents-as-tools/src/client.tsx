@@ -34,7 +34,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgent, useAgentToolEvents } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { AgentToolRunState } from "agents/chat";
 import {

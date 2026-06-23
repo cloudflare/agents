@@ -3,7 +3,7 @@ import "./styles.css";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import { Streamdown } from "streamdown";

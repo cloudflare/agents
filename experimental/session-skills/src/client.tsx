@@ -7,7 +7,7 @@ import {
   Surface,
   Text
 } from "@cloudflare/kumo";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 import {
   BookOpenIcon,
   CaretRightIcon,

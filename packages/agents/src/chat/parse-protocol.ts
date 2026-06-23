@@ -119,7 +119,10 @@ export function parseProtocolMessage(raw: string): ChatProtocolEvent | null {
       return { type: "stream-resume-request" };
 
     case CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK:
-      return { type: "stream-resume-ack", id: data.id as string };
+      return {
+        type: "stream-resume-ack",
+        id: data.id as string
+      };
 
     case CHAT_MESSAGE_TYPES.CHAT_MESSAGES:
       return {

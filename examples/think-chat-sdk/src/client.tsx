@@ -1,7 +1,7 @@
 import "./styles.css";
 
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 import {
   ChatCircleTextIcon,
   InfoIcon,

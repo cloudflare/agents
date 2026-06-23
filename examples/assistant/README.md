@@ -49,7 +49,7 @@ the sub-agent routing primitive from `agents`.
 - **Regeneration with branch navigation** — v1/v2/v3 response versions via `getBranches`
 - **Streaming markdown rendering** — assistant replies render through [streamdown](https://streamdown.ai) with syntax-highlighted code blocks (`@streamdown/code`)
 - **Stream resumption** — page refresh replays the active stream (built into Think)
-- **useAgentChat** — Think speaks the same CF_AGENT protocol as AIChatAgent
+- **useAgentChat** — the Think React hook speaks the CF_AGENT chat protocol
 - **GitHub OAuth** — users sign in with GitHub; the Worker owns all DO naming, so each user gets their own directory + isolated chats
 
 ## How to run
@@ -391,7 +391,7 @@ export class MyAssistant extends Think<Env> {
 
 **Client** (`src/client.tsx`) — `useChats()` (a local prototype in
 `src/use-chats.ts`) drives the sidebar; each chat pane uses
-`useAgentChat` from `@cloudflare/ai-chat/react` over a sub-routed
+`useAgentChat` from `@cloudflare/think/react` over a sub-routed
 `useAgent` connection.
 
 ## Related

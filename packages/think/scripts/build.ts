@@ -19,6 +19,7 @@ async function main() {
       "src/workflows.ts",
       "src/extensions/index.ts",
       "src/framework/index.ts",
+      "src/react.tsx",
       "src/server-entry.ts",
       "src/messengers/index.ts",
       "src/messengers/telegram.ts",

@@ -2354,6 +2354,7 @@ export class Think<
 
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();
+  private _loggedProtocolWarnings = new Set<string>();
 
   /**
    * Controls how overlapping user submit requests behave while another
@@ -9875,6 +9876,15 @@ export class Think<
         break;
 
       case "messages":
+        if (!this._loggedProtocolWarnings.has("client-pushed-messages")) {
+          this._loggedProtocolWarnings.add("client-pushed-messages");
+          console.warn(
+            "[think] Ignoring client-pushed chat messages; Think is " +
+              "server-authoritative and does not persist flat transcript " +
+              "overwrites. Use @cloudflare/think/react so setMessages stays " +
+              "local-only, and use clearHistory() for persisted clears."
+          );
+        }
         break;
     }
   }

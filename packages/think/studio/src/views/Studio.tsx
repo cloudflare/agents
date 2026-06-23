@@ -7,7 +7,7 @@ import {
   type ReactNode
 } from "react";
 import { useAgent } from "agents/react";
-import { useAgentChat, getToolApproval } from "@cloudflare/ai-chat/react";
+import { useAgentChat, getToolApproval } from "@cloudflare/think/react";
 import { isToolUIPart, getToolName, type UIMessage } from "ai";
 import {
   Badge,

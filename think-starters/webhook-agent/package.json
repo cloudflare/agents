@@ -12,7 +12,6 @@
     "types": "think types --all"
   },
   "dependencies": {
-    "@cloudflare/ai-chat": "workspace:*",
     "@cloudflare/kumo": "^2.5.2",
     "@cloudflare/think": "workspace:*",
     "@phosphor-icons/react": "^2.1.10",

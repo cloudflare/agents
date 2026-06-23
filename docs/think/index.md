@@ -584,7 +584,7 @@ chats.
 
 ```tsx
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 
 function Chat() {
   const agent = useAgent({ agent: "MyAgent" });

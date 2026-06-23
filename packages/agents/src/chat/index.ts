@@ -54,6 +54,9 @@ export {
 
 export { CHAT_MESSAGE_TYPES } from "./protocol";
 
+export { MessageType } from "./wire-types";
+export type { OutgoingMessage, IncomingMessage } from "./wire-types";
+
 export {
   applyAgentToolEvent,
   createAgentToolEventState,

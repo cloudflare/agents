@@ -67,7 +67,7 @@ return agent.fetch(request);
 
 Think owns the Chat SDK runtime, webhook verification, per-thread sub-agent
 routing, streamed delivery, and recovery snapshots. The dashboard connects to the
-default root agent with `useAgent()` and `useAgentChat()`, so it hydrates from
+default root agent with `useAgent()` and `useAgentChat()` from `@cloudflare/think/react`, so it hydrates from
 Think's `/get-messages` endpoint and receives live message updates over the
 Agent websocket.
 

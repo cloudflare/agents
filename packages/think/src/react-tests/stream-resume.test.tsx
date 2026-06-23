@@ -24,7 +24,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import type { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));

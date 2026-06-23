@@ -2,8 +2,8 @@
  * Assistant — Client
  *
  * Chat UI for a Think agent showcasing all Project Think features.
- * Uses useAgentChat from @cloudflare/ai-chat which speaks the same
- * CF_AGENT protocol that Think implements.
+ * Uses useAgentChat from @cloudflare/think/react, the Think-tuned
+ * wrapper around the shared CF_AGENT chat protocol client.
  *
  * Features:
  *   - Chat with streaming responses
@@ -29,7 +29,7 @@ import {
   type ReactNode
 } from "react";
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { useAgentChat } from "@cloudflare/think/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
 import { Streamdown } from "streamdown";

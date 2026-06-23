@@ -25,7 +25,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/ai-chat`.
+That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/think/react`.
 
 ## Think framework
 
@@ -865,7 +865,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 
 ### Production features
 
-- **WebSocket protocol** — wire-compatible with `useAgentChat` from `@cloudflare/ai-chat`
+- **WebSocket protocol** — wire-compatible with `useAgentChat` from `@cloudflare/think/react`
 - **Built-in workspace** — every agent gets `this.workspace` with file tools auto-wired
 - **Lifecycle hooks** — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`

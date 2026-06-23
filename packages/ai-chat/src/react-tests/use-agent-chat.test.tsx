@@ -1451,6 +1451,61 @@ describe("useAgentChat setMessages", () => {
     expect(lastSent.messages.length).toBe(1);
     expect(lastSent.messages[0].id).toBe("arr-1");
   });
+
+  it("should keep setMessages local when server sync is disabled", async () => {
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name: "set-messages-local-test",
+      url: "ws://localhost:3000/agents/chat/set-messages-local-test?_pk=abc",
+      send: (data: string) => sentMessages.push(data)
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        syncMessagesToServer: false
+      });
+      chatInstance = chat;
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      chatInstance!.setMessages([
+        {
+          id: "local-1",
+          role: "user",
+          parts: [{ type: "text", text: "Local only" }]
+        }
+      ]);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("1");
+
+    const chatMessagesSent = sentMessages
+      .map((m) => JSON.parse(m))
+      .filter((m) => m.type === "cf_agent_chat_messages");
+
+    expect(chatMessagesSent).toHaveLength(0);
+  });
 });
 
 describe("useAgentChat clearHistory", () => {

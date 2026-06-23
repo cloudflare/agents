@@ -1,0 +1,2491 @@
+import { useChat, type UseChatOptions } from "@ai-sdk/react";
+import { getToolName, isToolUIPart } from "ai";
+import type {
+  ChatInit,
+  JSONSchema7,
+  Tool,
+  UIMessage as Message,
+  UIMessage
+} from "ai";
+import { nanoid } from "nanoid";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { OutgoingMessage } from "./wire-types";
+import { MessageType } from "./wire-types";
+import {
+  transition as broadcastTransition,
+  type BroadcastStreamState
+} from "./broadcast-state";
+import {
+  WebSocketChatTransport,
+  type AgentConnection
+} from "./ws-chat-transport";
+
+export { WebSocketChatTransport } from "./ws-chat-transport";
+export type {
+  AgentConnection,
+  WebSocketChatTransportOptions
+} from "./ws-chat-transport";
+
+/**
+ * One-shot deprecation warnings (warns once per key per session).
+ */
+const _deprecationWarnings = new Set<string>();
+function warnDeprecated(id: string, message: string) {
+  if (!_deprecationWarnings.has(id)) {
+    _deprecationWarnings.add(id);
+    console.warn(`[agents/chat] Deprecated: ${message}`);
+  }
+}
+
+type AgentConnectionErrorLike = Error & {
+  code: number;
+  reason: string;
+  wasClean: boolean;
+};
+
+// ── DEPRECATED TYPES AND FUNCTIONS ──────────────────────────────────
+// Everything in this section is deprecated and will be removed in the
+// next major version. Use server-side tools with tool() from "ai" and
+// the onToolCall callback in useAgentChat instead.
+
+/**
+ * JSON Schema type for tool parameters.
+ * Re-exported from the AI SDK for convenience.
+ * @deprecated Import JSONSchema7 directly from "ai" instead. Will be removed in the next major version.
+ */
+export type JSONSchemaType = JSONSchema7;
+
+/**
+ * Definition for a tool that can be executed on the client.
+ * Tools with an `execute` function are automatically registered with the server.
+ *
+ * **For most apps**, define tools on the server with `tool()` from `"ai"` —
+ * you get full Zod type safety and simpler code. Use `onToolCall` in
+ * `useAgentChat` for tools that need browser-side execution.
+ *
+ * **For SDKs and platforms** where the tool surface is determined dynamically
+ * by the embedding application at runtime, this type lets the client register
+ * tools the server does not know about at deploy time.
+ *
+ * Note: Uses `parameters` (JSONSchema7) because client tools must be
+ * serializable for the wire format. Zod schemas cannot be serialized.
+ */
+export type AITool<Input = unknown, Output = unknown> = {
+  /** Human-readable description of what the tool does */
+  description?: Tool["description"];
+  /** JSON Schema defining the tool's input parameters */
+  parameters?: JSONSchema7;
+  /**
+   * @deprecated Use `parameters` instead. Will be removed in a future version.
+   */
+  inputSchema?: JSONSchema7;
+  /**
+   * Function to execute the tool on the client.
+   * If provided, the tool schema is automatically sent to the server.
+   */
+  execute?: (input: Input) => Output | Promise<Output>;
+};
+
+import type { ClientToolSchema } from "./client-tools";
+export type { ClientToolSchema } from "./client-tools";
+
+/**
+ * Extracts tool schemas from tools that have client-side execute functions.
+ * These schemas are automatically sent to the server with each request.
+ *
+ * Called internally by `useAgentChat` when `tools` are provided.
+ * Most apps do not need to call this directly.
+ *
+ * @param tools - Record of tool name to tool definition
+ * @returns Array of tool schemas to send to server, or undefined if none
+ */
+export function extractClientToolSchemas(
+  tools?: Record<string, AITool<unknown, unknown>>
+): ClientToolSchema[] | undefined {
+  if (!tools) return undefined;
+
+  const schemas: ClientToolSchema[] = Object.entries(tools)
+    .filter(([_, tool]) => tool.execute) // Only tools with client-side execute
+    .map(([name, tool]) => {
+      if (tool.inputSchema && !tool.parameters) {
+        console.warn(
+          `[useAgentChat] Tool "${name}" uses deprecated 'inputSchema'. Please migrate to 'parameters'.`
+        );
+      }
+      return {
+        name,
+        description: tool.description,
+        parameters: tool.parameters ?? tool.inputSchema
+      };
+    });
+
+  return schemas.length > 0 ? schemas : undefined;
+}
+
+// ── END DEPRECATED TYPES AND FUNCTIONS ─────────────────────────────
+
+// ── Tool part helpers ──────────────────────────────────────────────
+//
+// `isToolUIPart` and `getToolName` are exported by the AI SDK:
+//   import { isToolUIPart, getToolName } from "ai";
+//
+// The helpers below provide additional typed accessors and a
+// simplified state mapping that the AI SDK doesn't offer.
+
+/**
+ * Map internal tool part states to simplified UI-relevant states.
+ *
+ * @example
+ * ```tsx
+ * import { isToolUIPart } from "ai";
+ * import { getToolPartState } from "@cloudflare/ai-chat/react";
+ *
+ * if (isToolUIPart(part)) {
+ *   const state = getToolPartState(part);
+ *   if (state === "complete") { ... }
+ *   if (state === "waiting-approval") { ... }
+ * }
+ * ```
+ */
+export function getToolPartState(
+  part: UIMessage["parts"][number]
+):
+  | "loading"
+  | "streaming"
+  | "waiting-approval"
+  | "approved"
+  | "complete"
+  | "error"
+  | "denied" {
+  const state = (part as { state?: string }).state;
+  switch (state) {
+    case "input-streaming":
+      return "streaming";
+    case "approval-requested":
+      return "waiting-approval";
+    case "approval-responded":
+      return "approved";
+    case "output-available":
+      return "complete";
+    case "output-error":
+      return "error";
+    case "output-denied":
+      return "denied";
+    default:
+      return "loading";
+  }
+}
+
+/** Get the tool call ID from a tool UI part. */
+export function getToolCallId(part: UIMessage["parts"][number]): string {
+  return (part as { toolCallId: string }).toolCallId;
+}
+
+/** Get the tool input from a tool UI part (if available). */
+export function getToolInput(
+  part: UIMessage["parts"][number]
+): unknown | undefined {
+  return (part as { input?: unknown }).input;
+}
+
+/** Get the tool output from a tool UI part (if available). */
+export function getToolOutput(
+  part: UIMessage["parts"][number]
+): unknown | undefined {
+  return (part as { output?: unknown }).output;
+}
+
+/** Get the approval info from a tool UI part (if in approval state). */
+export function getToolApproval(
+  part: UIMessage["parts"][number]
+): { id: string; approved?: boolean } | undefined {
+  return (part as { approval?: { id: string; approved?: boolean } }).approval;
+}
+
+// ── END Tool part helpers ──────────────────────────────────────────
+
+// ── Standalone fetch ───────────────────────────────────────────────
+
+function agentNameToKebab(name: string): string {
+  if (name === name.toUpperCase() && name !== name.toLowerCase()) {
+    return name.toLowerCase().replace(/_/g, "-");
+  }
+  let result = name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+  result = result.startsWith("-") ? result.slice(1) : result;
+  return result.replace(/_/g, "-").replace(/-$/, "");
+}
+
+/**
+ * Fetch messages from an agent's `/get-messages` HTTP endpoint.
+ *
+ * Use in framework route loaders to prefetch messages before the component
+ * tree mounts, or anywhere you need messages outside a React hook.
+ *
+ * @example Standard routing
+ * ```typescript
+ * import { getAgentMessages } from "@cloudflare/ai-chat/react";
+ *
+ * const messages = await getAgentMessages({
+ *   host: "https://my-app.workers.dev",
+ *   agent: "ChatAgent",
+ *   name: "session-123"
+ * });
+ * ```
+ *
+ * @example With basePath (custom URL)
+ * ```typescript
+ * const messages = await getAgentMessages({
+ *   url: "https://my-app.workers.dev/custom/path/get-messages"
+ * });
+ * ```
+ */
+export async function getAgentMessages<M extends UIMessage = UIMessage>(
+  options:
+    | {
+        host: string;
+        agent: string;
+        name: string;
+        credentials?: RequestCredentials;
+        headers?: HeadersInit;
+      }
+    | {
+        url: string;
+        credentials?: RequestCredentials;
+        headers?: HeadersInit;
+      }
+): Promise<M[]> {
+  let messagesUrl: string;
+
+  if ("url" in options) {
+    messagesUrl = options.url;
+  } else {
+    const agentSlug = agentNameToKebab(options.agent);
+    const base = options.host.endsWith("/")
+      ? options.host.slice(0, -1)
+      : options.host;
+    messagesUrl = `${base}/agents/${agentSlug}/${options.name}/get-messages`;
+  }
+
+  try {
+    const response = await fetch(messagesUrl, {
+      credentials: options.credentials,
+      headers: options.headers
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `[getAgentMessages] Failed to fetch: ${response.status} ${response.statusText}`
+      );
+      return [];
+    }
+
+    const text = await response.text();
+    if (!text.trim()) return [];
+
+    return JSON.parse(text) as M[];
+  } catch (error) {
+    console.warn("[getAgentMessages] Fetch error:", error);
+    return [];
+  }
+}
+
+// ── END Standalone fetch ───────────────────────────────────────────
+
+type GetInitialMessagesOptions = {
+  agent: string;
+  name: string;
+  url?: string;
+};
+
+// v5 useChat parameters
+type UseChatParams<M extends UIMessage = UIMessage> = ChatInit<M> &
+  UseChatOptions<M>;
+
+/**
+ * Options for preparing the send messages request.
+ * Used by prepareSendMessagesRequest callback.
+ */
+export type PrepareSendMessagesRequestOptions<
+  ChatMessage extends UIMessage = UIMessage
+> = {
+  /** The chat ID */
+  id: string;
+  /** Messages to send */
+  messages: ChatMessage[];
+  /** What triggered this request */
+  trigger: "submit-message" | "regenerate-message";
+  /** ID of the message being sent (if applicable) */
+  messageId?: string;
+  /** Request metadata */
+  requestMetadata?: unknown;
+  /** Current body (if any) */
+  body?: Record<string, unknown>;
+  /** Current credentials (if any) */
+  credentials?: RequestCredentials;
+  /** Current headers (if any) */
+  headers?: HeadersInit;
+  /** API endpoint */
+  api?: string;
+};
+
+/**
+ * Return type for prepareSendMessagesRequest callback.
+ * Allows customizing headers, body, and credentials for each request.
+ * All fields are optional; only specify what you need to customize.
+ */
+export type PrepareSendMessagesRequestResult = {
+  /** Custom headers to send with the request */
+  headers?: HeadersInit;
+  /** Custom body data to merge with the request */
+  body?: Record<string, unknown>;
+  /** Custom credentials option */
+  credentials?: RequestCredentials;
+  /** Custom API endpoint */
+  api?: string;
+};
+
+/**
+ * Options for addToolOutput function
+ */
+type AddToolOutputOptions = {
+  /** The ID of the tool call to provide output for */
+  toolCallId: string;
+  /** The name of the tool (optional, for type safety) */
+  toolName?: string;
+  /** The output to provide */
+  output?: unknown;
+  /** Override the tool part state (e.g. "output-error" for custom denial) */
+  state?: "output-available" | "output-error";
+  /** Error message when state is "output-error" */
+  errorText?: string;
+};
+
+/**
+ * Callback for handling client-side tool execution.
+ * Called when a tool without server-side execute is invoked.
+ */
+export type OnToolCallCallback = (options: {
+  /** The tool call that needs to be handled */
+  toolCall: {
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+  };
+  /** Function to provide the tool output (or signal an error/denial) */
+  addToolOutput: (options: Omit<AddToolOutputOptions, "toolName">) => void;
+}) => void | Promise<void>;
+
+/**
+ * Options for the useAgentChat hook
+ */
+export type UseAgentChatOptions<
+  // oxlint-disable-next-line no-unused-vars -- kept for backward compat
+  State = unknown,
+  ChatMessage extends UIMessage = UIMessage
+> = Omit<UseChatParams<ChatMessage>, "fetch" | "onToolCall"> & {
+  /** Agent connection from useAgent (accepts both typed and untyped agents) */
+  agent: AgentConnection & {
+    agent: string;
+    name: string;
+    path?: ReadonlyArray<{ agent: string; name: string }>;
+    connectionError?: AgentConnectionErrorLike | null;
+    getHttpUrl: () => string;
+  };
+  getInitialMessages?:
+    | undefined
+    | null
+    | ((options: GetInitialMessagesOptions) => Promise<ChatMessage[]>);
+  /** Request credentials */
+  credentials?: RequestCredentials;
+  /** Request headers */
+  headers?: HeadersInit;
+  /**
+   * Callback for handling client-side tool execution.
+   * Called when a tool without server-side `execute` is invoked by the LLM.
+   *
+   * Use this for:
+   * - Tools that need browser APIs (geolocation, camera, etc.)
+   * - Tools that need user interaction before providing a result
+   * - Tools requiring approval before execution
+   *
+   * @example
+   * ```typescript
+   * onToolCall: async ({ toolCall, addToolOutput }) => {
+   *   if (toolCall.toolName === 'getLocation') {
+   *     const position = await navigator.geolocation.getCurrentPosition();
+   *     addToolOutput({
+   *       toolCallId: toolCall.toolCallId,
+   *       output: { lat: position.coords.latitude, lng: position.coords.longitude }
+   *     });
+   *   }
+   * }
+   * ```
+   */
+  onToolCall?: OnToolCallCallback;
+  /**
+   * @deprecated Use `onToolCall` callback instead for automatic tool execution.
+   * @description Whether to automatically resolve tool calls that do not require human interaction.
+   * @experimental
+   */
+  experimental_automaticToolResolution?: boolean;
+  /**
+   * Tools that can be executed on the client. Tool schemas are automatically
+   * sent to the server and tool calls are routed back for client execution.
+   *
+   * **For most apps**, define tools on the server with `tool()` from `"ai"`
+   * and handle client-side execution via `onToolCall`. This gives you full
+   * Zod type safety and keeps tool definitions in one place.
+   *
+   * **For SDKs and platforms** where tools are defined dynamically by the
+   * embedding application at runtime, this option lets the client register
+   * tools the server does not know about at deploy time.
+   */
+  tools?: Record<string, AITool<unknown, unknown>>;
+  /**
+   * @deprecated Use `needsApproval` on server-side tools instead.
+   * @description Manual override for tools requiring confirmation.
+   * If not provided, will auto-detect from tools object (tools without execute require confirmation).
+   */
+  toolsRequiringConfirmation?: string[];
+  /**
+   * When true (default), the server automatically continues the conversation
+   * after receiving client-side tool results or approvals, similar to how
+   * server-executed tools work with maxSteps in streamText. The continuation
+   * is merged into the same assistant message.
+   *
+   * When false, the client must call sendMessage() after tool results
+   * to continue the conversation, which creates a new assistant message.
+   *
+   * @default true
+   */
+  autoContinueAfterToolResult?: boolean;
+  /**
+   * @deprecated Use `sendAutomaticallyWhen` from AI SDK instead.
+   *
+   * When true (default), automatically sends the next message only after
+   * all pending confirmation-required tool calls have been resolved.
+   * When false, sends immediately after each tool result.
+   *
+   * Only applies when `autoContinueAfterToolResult` is false.
+   *
+   * @default true
+   */
+  autoSendAfterAllConfirmationsResolved?: boolean;
+  /**
+   * Set to false to disable automatic stream resumption.
+   * @default true
+   */
+  resume?: boolean;
+  /**
+   * Whether generic client-side stream abort/cleanup should cancel the server
+   * turn. By default, client cleanup is local-only so the server turn can
+   * continue and be resumed on reconnect. Explicit stop() always cancels the
+   * server turn.
+   *
+   * @default false
+   */
+  cancelOnClientAbort?: boolean;
+  /**
+   * Whether `setMessages` should also send the full client transcript to the
+   * server as `CF_AGENT_CHAT_MESSAGES`. This is useful for flat transcript
+   * stores such as `AIChatAgent`, but should be disabled for server-authoritative
+   * hosts whose client messages are only a projection of richer storage.
+   *
+   * @default true
+   */
+  syncMessagesToServer?: boolean;
+  /**
+   * Custom data to include in every chat request body.
+   * Accepts a static object or a function that returns one (for dynamic values).
+   * These fields are available in `onChatMessage` via `options.body`.
+   *
+   * @example
+   * ```typescript
+   * // Static
+   * body: { timezone: "America/New_York", userId: "abc" }
+   *
+   * // Dynamic (called on each send)
+   * body: () => ({ token: getAuthToken(), timestamp: Date.now() })
+   * ```
+   */
+  body?:
+    | Record<string, unknown>
+    | (() => Record<string, unknown> | Promise<Record<string, unknown>>);
+  /**
+   * Callback to customize the request before sending messages.
+   * For most cases, use the `body` option instead.
+   * Use this for advanced scenarios that need access to the messages or trigger type.
+   *
+   * Note: Client tool schemas are automatically sent when tools have `execute` functions.
+   * This callback can add additional data alongside the auto-extracted schemas.
+   */
+  prepareSendMessagesRequest?: (
+    options: PrepareSendMessagesRequestOptions<ChatMessage>
+  ) =>
+    | PrepareSendMessagesRequestResult
+    | Promise<PrepareSendMessagesRequestResult>;
+};
+
+/**
+ * Module-level cache for initial message fetches. Intentionally shared across
+ * all useAgentChat instances to deduplicate requests during React Strict Mode
+ * double-renders and re-renders. Cache keys include the agent URL, agent type,
+ * and thread name to prevent cross-agent collisions.
+ */
+const requestCache = new Map<string, Promise<Message[]>>();
+
+function findLastAssistantMessage<ChatMessage extends UIMessage>(
+  messages: ChatMessage[]
+): { index: number; message: ChatMessage } | null {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === "assistant") {
+      return { index, message };
+    }
+  }
+
+  return null;
+}
+
+function moveMessageToEnd<ChatMessage extends UIMessage>(
+  messages: ChatMessage[],
+  messageId: string
+): ChatMessage[] {
+  const idx = messages.findIndex((m) => m.id === messageId);
+  if (idx < 0 || idx === messages.length - 1) return messages;
+
+  const result = [...messages];
+  const [msg] = result.splice(idx, 1);
+  if (!msg) return messages;
+
+  result.push(msg);
+  return result;
+}
+
+function prependMissingHydratedMessages<ChatMessage extends UIMessage>(
+  hydratedMessages: ChatMessage[],
+  currentMessages: ChatMessage[]
+): ChatMessage[] {
+  if (currentMessages.length === 0) {
+    return hydratedMessages;
+  }
+
+  const currentMessageIds = new Set(
+    currentMessages.map((message) => message.id)
+  );
+  const missingHydratedMessages = hydratedMessages.filter(
+    (message) => !currentMessageIds.has(message.id)
+  );
+
+  if (missingHydratedMessages.length === 0) {
+    return currentMessages;
+  }
+
+  // History fetched after mount predates messages already rendered locally
+  // (for example an optimistic immediate send). Keep current copies for
+  // matching IDs because they may include newer streamed/client state.
+  return [...missingHydratedMessages, ...currentMessages];
+}
+
+/**
+ * React hook for building AI chat interfaces using an Agent
+ * @param options Chat options including the agent connection
+ * @returns Chat interface controls and state with added clearHistory method
+ */
+/**
+ * Automatically detects which tools require confirmation based on their configuration.
+ * Tools require confirmation if they have no execute function AND are not server-executed.
+ * @param tools - Record of tool name to tool definition
+ * @returns Array of tool names that require confirmation
+ *
+ * @deprecated Use `needsApproval` on server-side tools instead.
+ */
+export function detectToolsRequiringConfirmation(
+  tools?: Record<string, AITool<unknown, unknown>>
+): string[] {
+  warnDeprecated(
+    "detectToolsRequiringConfirmation",
+    "detectToolsRequiringConfirmation() is deprecated. Use needsApproval on server-side tools instead. Will be removed in the next major version."
+  );
+  if (!tools) return [];
+
+  return Object.entries(tools)
+    .filter(([_name, tool]) => !tool.execute)
+    .map(([name]) => name);
+}
+
+export function useAgentChat<
+  // oxlint-disable-next-line no-unused-vars -- kept for backward compat
+  State = unknown,
+  ChatMessage extends UIMessage = UIMessage
+>(
+  options: UseAgentChatOptions<State, ChatMessage>
+): Omit<ReturnType<typeof useChat<ChatMessage>>, "addToolOutput"> & {
+  clearHistory: () => void;
+  /**
+   * Provide output for a tool call. Use this for tools that require user interaction
+   * or client-side execution.
+   */
+  addToolOutput: (opts: AddToolOutputOptions) => void;
+  /**
+   * Whether a server-initiated stream (e.g. from `saveMessages`,
+   * auto-continuation, or another tab) is currently active, OR a
+   * client-side tool call is awaiting resolution via `onToolCall`.
+   * Covers the full "turn-in-progress" window from the consumer's
+   * perspective, including the gap between the model emitting a
+   * client-tool call and the server pushing a continuation after
+   * `addToolOutput`. This is independent of the AI SDK's `status`
+   * which only tracks client-initiated request/response cycles.
+   */
+  isServerStreaming: boolean;
+  /**
+   * Convenience flag: `true` when either the client-initiated stream
+   * (`status === "streaming"`) or a server-initiated stream is active.
+   * Use this for showing a universal streaming indicator.
+   */
+  isStreaming: boolean;
+  /**
+   * `true` while a durable chat turn is being recovered (interrupted by a
+   * deploy/eviction or a stream-stall watchdog abort and now resuming, #1620).
+   * Distinct from `isStreaming` — a recovering turn isn't producing tokens yet,
+   * so a client can show a "recovering…" hint instead of looking frozen. Most
+   * UIs treat `isStreaming || isRecovering` as "busy". Driven by the server's
+   * `CF_AGENT_CHAT_RECOVERING` frames (also replayed on connect for
+   * `@cloudflare/think`); cleared automatically on the next stream or terminal.
+   */
+  isRecovering: boolean;
+  /**
+   * `true` when the current `status`/`isServerStreaming` activity is
+   * driven by a server-pushed tool continuation (i.e. the server is
+   * auto-continuing the conversation after `addToolOutput` or
+   * `addToolApprovalResponse`) rather than a fresh user submission.
+   *
+   * Use this to disambiguate "user just sent a new message, awaiting
+   * first token" from "mid-turn tool round-trip" — e.g. when you want
+   * a typing indicator only for the former:
+   *
+   * ```tsx
+   * const showTypingIndicator = status === "submitted" && !isToolContinuation;
+   * ```
+   *
+   * See issue #1365.
+   */
+  isToolContinuation: boolean;
+  connectionError: AgentConnectionErrorLike | null;
+} {
+  const {
+    agent,
+    getInitialMessages,
+    messages: optionsInitialMessages,
+    onToolCall,
+    onData,
+    experimental_automaticToolResolution,
+    tools,
+    toolsRequiringConfirmation: manualToolsRequiringConfirmation,
+    autoContinueAfterToolResult = true, // Server auto-continues after tool results/approvals
+    autoSendAfterAllConfirmationsResolved = true, // Legacy option for client-side batching
+    resume = true, // Enable stream resumption by default
+    cancelOnClientAbort = false,
+    syncMessagesToServer = true,
+    body: bodyOption,
+    prepareSendMessagesRequest,
+    ...rest
+  } = options;
+
+  // Emit deprecation warnings for deprecated options (once per session)
+  if (manualToolsRequiringConfirmation) {
+    warnDeprecated(
+      "useAgentChat.toolsRequiringConfirmation",
+      "The 'toolsRequiringConfirmation' option is deprecated. Use needsApproval on server-side tools instead. Will be removed in the next major version."
+    );
+  }
+  if (experimental_automaticToolResolution) {
+    warnDeprecated(
+      "useAgentChat.experimental_automaticToolResolution",
+      "The 'experimental_automaticToolResolution' option is deprecated. Use the onToolCall callback instead. Will be removed in the next major version."
+    );
+  }
+  if (options.autoSendAfterAllConfirmationsResolved !== undefined) {
+    warnDeprecated(
+      "useAgentChat.autoSendAfterAllConfirmationsResolved",
+      "The 'autoSendAfterAllConfirmationsResolved' option is deprecated. Use sendAutomaticallyWhen from AI SDK instead. Will be removed in the next major version."
+    );
+  }
+
+  // ── DEPRECATED: client-side tool confirmation ──────────────────────
+  // This block will be removed when toolsRequiringConfirmation is removed.
+  // Only call the deprecated function when deprecated options are actually used.
+  const toolsRequiringConfirmation = useMemo(() => {
+    if (manualToolsRequiringConfirmation) {
+      return manualToolsRequiringConfirmation;
+    }
+    // Inline the logic from detectToolsRequiringConfirmation to avoid
+    // emitting a deprecation warning when tools are provided via the
+    // non-deprecated `tools` option.
+    if (!tools) return [];
+    return Object.entries(tools)
+      .filter(([_name, tool]) => !tool.execute)
+      .map(([name]) => name);
+  }, [manualToolsRequiringConfirmation, tools]);
+
+  // Keep refs to always point to the latest callbacks
+  const onToolCallRef = useRef(onToolCall);
+  onToolCallRef.current = onToolCall;
+  const onDataRef = useRef(onData);
+  onDataRef.current = onData;
+
+  const rawHttpUrl = agent.getHttpUrl();
+  const agentUrl = rawHttpUrl ? new URL(rawHttpUrl) : null;
+
+  if (agentUrl) {
+    agentUrl.searchParams.delete("_pk");
+  }
+  const agentUrlString = agentUrl?.toString() ?? null;
+
+  const agentAddressKey = Array.isArray(agent.path)
+    ? JSON.stringify(agent.path.map((step) => [step.agent, step.name]))
+    : JSON.stringify([[agent.agent ?? "", agent.name ?? ""]]);
+
+  // Cache key for the request-dedup `requestCache` and the late-seed
+  // effect. It uses the full root-first agent address when `useAgent`
+  // provides one, so sub-agents with the same leaf class/name under
+  // different parents do not share hydrated messages.
+  //
+  //   - Query params like auth tokens change across page loads and
+  //     must not bust the cache, or Suspense re-triggers and breaks
+  //     stream resume (see issue #1223).
+  //   - The origin+pathname portion of the socket URL can legitimately
+  //     transition from empty → resolved on the second render when
+  //     `useAgent()` finishes its handshake. Including it here would
+  //     cause `doGetInitialMessages` to miss the cache after the URL
+  //     arrives, re-invoke the loader, and re-trigger Suspense — the
+  //     exact regression #1356 reports when a custom `getInitialMessages`
+  //     is provided.
+  //
+  // `resolvedInitialMessagesCacheKey` is still computed because the
+  // `stableChatIdRef` logic below uses it to detect the URL-arrival
+  // transition separately from identity changes.
+  const resolvedInitialMessagesCacheKey = agentUrl
+    ? `${agentUrl.origin}${agentUrl.pathname}|${agentAddressKey}`
+    : null;
+  const initialMessagesCacheKey = agentAddressKey;
+
+  // Stable chat ID for `useChat({ id })`.
+  //
+  // The AI SDK recreates the underlying Chat instance whenever its `id`
+  // changes, which aborts any in-flight `transport.reconnectToStream()`
+  // (the resume path) and leaves the recreated Chat without any resume
+  // having been fired on it — the AI SDK's `useEffect(() => {
+  // if (resume) chatRef.current.resumeStream() }, [resume, chatRef])`
+  // deps are object-stable, so the effect does not re-fire on recreation.
+  // See issue #1356.
+  //
+  // Two things can move across renders and must NOT cause an id flip:
+  //
+  //   1. The origin+pathname of the socket URL can transition from
+  //      `null` → resolved on the second render when `useAgent()`
+  //      finishes its handshake. The Chat id must stay on its
+  //      first-render fallback through that transition; upgrading to
+  //      the URL-resolved key would recreate Chat and drop optimistic
+  //      messages sent immediately after mount.
+  //
+  //   2. `agent.name` can transition from the client-side fallback
+  //      ("default") to a server-assigned value when
+  //      `static options = { sendIdentityOnConnect: true }` is set and
+  //      the consumer uses the `basePath` pattern (the server owns the
+  //      DO instance name, not the browser). `useAgent` mutates the
+  //      same agent object's `.name` in place here.
+  //
+  // What IS a genuine chat switch: the consumer passes a different
+  // `agent` object to `useAgentChat`. That's a new `useAgent({...})`
+  // return value, typically from swapping or remounting a parent. We
+  // detect this by reference equality — `useAgent`'s return is stable
+  // across renders for a given mount, so a reference change is the
+  // unambiguous "chat switch" signal.
+  const stableChatIdRef = useRef<string | null>(null);
+  const previousAgentRef = useRef<typeof agent | null>(null);
+  const previousAgentAddressKeyRef = useRef<string | null>(null);
+  const fallbackChatId = agentAddressKey;
+  const agentPathChanged =
+    Array.isArray(agent.path) &&
+    previousAgentAddressKeyRef.current !== null &&
+    previousAgentAddressKeyRef.current !== agentAddressKey;
+
+  if (stableChatIdRef.current === null) {
+    // First render: initialize.
+    stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
+  } else if (previousAgentRef.current !== agent || agentPathChanged) {
+    // Consumer swapped in a different agent object, or the full
+    // sub-agent address changed on a `useAgent` object — genuine chat switch.
+    // Recompute from current values.
+    stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
+  }
+
+  previousAgentRef.current = agent;
+  previousAgentAddressKeyRef.current = agentAddressKey;
+
+  // Keep a ref to always point to the latest agent instance.
+  // Updated synchronously during render (not in useEffect) so the
+  // transport's agent ref is always current.  The transport is a
+  // singleton whose .agent is reassigned every render — if we used
+  // useEffect the assignment would lag behind, causing the transport
+  // to send through a stale/closed socket (issue #929).
+  const agentRef = useRef(agent);
+  agentRef.current = agent;
+
+  async function defaultGetInitialMessagesFetch({
+    url
+  }: GetInitialMessagesOptions) {
+    if (!url) {
+      return [];
+    }
+    const getMessagesUrl = new URL(url);
+    getMessagesUrl.pathname += "/get-messages";
+    const response = await fetch(getMessagesUrl.toString(), {
+      credentials: options.credentials,
+      headers: options.headers
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `Failed to fetch initial messages: ${response.status} ${response.statusText}`
+      );
+      return [];
+    }
+
+    const text = await response.text();
+    if (!text.trim()) {
+      return [];
+    }
+
+    try {
+      return JSON.parse(text) as ChatMessage[];
+    } catch (error) {
+      console.warn("Failed to parse initial messages JSON:", error);
+      return [];
+    }
+  }
+
+  const getInitialMessagesFetch =
+    getInitialMessages || defaultGetInitialMessagesFetch;
+
+  function doGetInitialMessages(
+    getInitialMessagesOptions: GetInitialMessagesOptions,
+    cacheKey: string
+  ) {
+    if (requestCache.has(cacheKey)) {
+      return requestCache.get(cacheKey)! as Promise<ChatMessage[]>;
+    }
+    const promise = getInitialMessagesFetch(getInitialMessagesOptions);
+    requestCache.set(cacheKey, promise);
+    return promise;
+  }
+
+  const shouldFetchInitialMessages =
+    getInitialMessages === null
+      ? false
+      : getInitialMessages
+        ? true
+        : !!agentUrlString;
+  const initialMessagesPromise = !shouldFetchInitialMessages
+    ? null
+    : doGetInitialMessages(
+        {
+          agent: agent.agent,
+          name: agent.name,
+          url: agentUrlString ?? undefined
+        },
+        initialMessagesCacheKey
+      );
+  const initialMessages = initialMessagesPromise
+    ? use(initialMessagesPromise)
+    : (optionsInitialMessages ?? []);
+
+  useEffect(() => {
+    if (!initialMessagesPromise) {
+      return;
+    }
+    requestCache.set(initialMessagesCacheKey, initialMessagesPromise!);
+    return () => {
+      if (
+        requestCache.get(initialMessagesCacheKey) === initialMessagesPromise
+      ) {
+        requestCache.delete(initialMessagesCacheKey);
+      }
+    };
+  }, [initialMessagesCacheKey, initialMessagesPromise]);
+
+  // Use synchronous ref updates to avoid race conditions between effect runs.
+  // This ensures the ref always has the latest value before any effect reads it.
+  const toolsRef = useRef(tools);
+  toolsRef.current = tools;
+
+  const prepareSendMessagesRequestRef = useRef(prepareSendMessagesRequest);
+  prepareSendMessagesRequestRef.current = prepareSendMessagesRequest;
+
+  const bodyOptionRef = useRef(bodyOption);
+  bodyOptionRef.current = bodyOption;
+
+  /**
+   * Tracks request IDs initiated by this tab via the transport.
+   * Used by onAgentMessage to skip messages already handled by the transport.
+   */
+  const localRequestIdsRef = useRef<Set<string>>(new Set());
+  const pendingReplayResumeRequestIdsRef = useRef<Set<string>>(new Set());
+  const replayHydratedAssistantMessageIdsRef = useRef<Set<string>>(new Set());
+  /**
+   * Request ids this socket already ACKed via the fallback resume path.
+   * The server sends CF_AGENT_STREAM_RESUMING for the same request from
+   * both onConnect and its CF_AGENT_STREAM_RESUME_REQUEST handler (#1733).
+   * The transport-handled path dedupes the second notify via
+   * localRequestIdsRef, but the fallback path used to ACK both — triggering
+   * a second full-buffer replay that duplicated streamed parts. Entries are
+   * dropped when the turn completes; the whole set resets when the socket
+   * closes, since a new connection legitimately needs a fresh ACK+replay.
+   */
+  const fallbackAckedResumeRequestIdsRef = useRef<Set<string>>(new Set());
+
+  // WebSocket-based transport that speaks the CF_AGENT protocol natively.
+  // Replaces the old aiFetch + DefaultChatTransport indirection.
+  //
+  // The transport is a true singleton (created once, never recreated) so
+  // that the resolver set by reconnectToStream and the handleStreamResuming
+  // call from onAgentMessage always operate on the SAME instance — even
+  // when _pk changes (async queries, socket recreation) or React Strict
+  // Mode double-mounts.  The agent reference is updated every render so
+  // sends always go through the latest socket.
+  const customTransportRef = useRef<WebSocketChatTransport<ChatMessage> | null>(
+    null
+  );
+
+  if (customTransportRef.current === null) {
+    customTransportRef.current = new WebSocketChatTransport<ChatMessage>({
+      agent: agentRef.current,
+      activeRequestIds: localRequestIdsRef.current,
+      cancelOnClientAbort,
+      prepareBody: async ({ messages: msgs, trigger, messageId }) => {
+        // Start with the top-level body option (static or dynamic)
+        let extraBody: Record<string, unknown> = {};
+        const currentBody = bodyOptionRef.current;
+        if (currentBody) {
+          const resolved =
+            typeof currentBody === "function"
+              ? await currentBody()
+              : currentBody;
+          extraBody = { ...resolved };
+        }
+
+        // Extract schemas from deprecated client tools (if any)
+        // Only extract client tool schemas when deprecated tools option is used
+        if (toolsRef.current) {
+          const clientToolSchemas = extractClientToolSchemas(toolsRef.current);
+          if (clientToolSchemas) {
+            extraBody.clientTools = clientToolSchemas;
+          }
+        }
+
+        // Apply user's prepareSendMessagesRequest callback (overrides body option)
+        if (prepareSendMessagesRequestRef.current) {
+          const userResult = await prepareSendMessagesRequestRef.current({
+            id: (agentRef.current as unknown as { _pk: string })._pk,
+            messages: msgs,
+            trigger,
+            messageId
+          });
+          if (userResult.body) {
+            Object.assign(extraBody, userResult.body);
+          }
+        }
+
+        return extraBody;
+      }
+    });
+  }
+  // Always point the transport at the latest socket so sends/listeners
+  // go through the current connection after _pk changes.
+  customTransportRef.current.agent = agentRef.current;
+  customTransportRef.current.setCancelOnClientAbort(cancelOnClientAbort);
+  const customTransport = customTransportRef.current;
+
+  // Use a stable Chat ID that doesn't change when _pk changes.
+  // The AI SDK recreates the Chat when `id` changes, which would
+  // abandon any in-flight makeRequest (including resume) and the
+  // resume effect wouldn't re-fire (deps are [resume, chatRef]).
+  // Using the initial messages cache key (URL + agent + name) keeps
+  // the Chat stable across socket recreations.
+  const useChatHelpers = useChat<ChatMessage>({
+    ...rest,
+    onData,
+    messages: initialMessages,
+    transport: customTransport,
+    id: stableChatIdRef.current,
+    // Pass resume so useChat calls transport.reconnectToStream().
+    // This lets the AI SDK track status ("streaming") during resume.
+    resume
+  });
+
+  // Destructure stable method references from useChatHelpers.
+  // These are individually memoized by the AI SDK (via useCallback), so they're
+  // safe to use in dependency arrays without causing re-renders. Using them
+  // directly instead of `useChatHelpers.method` avoids the exhaustive-deps
+  // warning about the unstable `useChatHelpers` object.
+  const {
+    messages: chatMessages,
+    setMessages,
+    addToolResult,
+    addToolApprovalResponse,
+    sendMessage,
+    resumeStream,
+    status,
+    stop
+  } = useChatHelpers;
+
+  const statusRef = useRef(status);
+  statusRef.current = status;
+
+  const resumingToolContinuationRef = useRef(false);
+  const pendingToolContinuationRef = useRef(false);
+  const observedToolContinuationRequestIdRef = useRef<string | null>(null);
+  const continuationLaunchTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  // Generation counter for tool continuations. Bumped on every
+  // `startToolContinuation` entry and on any external reset path
+  // (e.g. `clearHistory`). The `.finally()` handler captures its
+  // generation at start time and only applies the cleanup if it still
+  // matches — otherwise the promise is settling after a reset or after
+  // a newer continuation has already taken over, and its reset would
+  // clobber current state.
+  const continuationGenerationRef = useRef(0);
+  // Mirrors `resumingToolContinuationRef` as React state so consumers can
+  // distinguish a user-initiated `status === "submitted"` from one driven
+  // by a server-pushed tool continuation. The ref is kept for its
+  // synchronous re-entry guard semantics; this state is purely for UI.
+  // See issue #1365.
+  const [isToolContinuation, setIsToolContinuation] = useState(false);
+
+  // Shared reset for every path that wipes chat history — the local
+  // `clearHistory()` call AND the server-pushed `CF_AGENT_CHAT_CLEAR`
+  // handler (another tab or the server itself cleared the chat).
+  // Without this, a tab with an in-flight tool continuation that
+  // receives a cross-tab clear would render `isToolContinuation === true`
+  // over an empty message list until the orphaned `resumeStream()`
+  // promise eventually settles. Keep ref/state/generation in lockstep;
+  // the generation bump ensures the pending `.finally()` is a no-op.
+  const resetToolContinuation = useCallback(() => {
+    continuationGenerationRef.current++;
+    pendingToolContinuationRef.current = false;
+    resumingToolContinuationRef.current = false;
+    observedToolContinuationRequestIdRef.current = null;
+    if (continuationLaunchTimerRef.current) {
+      clearTimeout(continuationLaunchTimerRef.current);
+      continuationLaunchTimerRef.current = null;
+    }
+    setIsToolContinuation(false);
+  }, []);
+
+  const scheduleToolContinuationLaunch = useCallback(() => {
+    if (
+      !pendingToolContinuationRef.current ||
+      statusRef.current !== "ready" ||
+      continuationLaunchTimerRef.current
+    ) {
+      return;
+    }
+
+    continuationLaunchTimerRef.current = setTimeout(() => {
+      continuationLaunchTimerRef.current = null;
+
+      if (
+        !pendingToolContinuationRef.current ||
+        statusRef.current !== "ready"
+      ) {
+        return;
+      }
+
+      pendingToolContinuationRef.current = false;
+      const myGeneration = continuationGenerationRef.current;
+      customTransport.expectToolContinuation();
+
+      void resumeStream()
+        .catch((error) => {
+          console.error(
+            "[useAgentChat] Tool continuation resume failed:",
+            error
+          );
+        })
+        .finally(() => {
+          // Bail if a reset (clearHistory / cross-tab clear) or a newer
+          // continuation has taken over since we started — otherwise this
+          // stale settlement would flip the flags off while a newer
+          // continuation is still in flight, and reopen the re-entry
+          // guard spuriously.
+          if (continuationGenerationRef.current !== myGeneration) return;
+          resumingToolContinuationRef.current = false;
+          setIsToolContinuation(false);
+        });
+    }, 0);
+  }, [customTransport, resumeStream]);
+
+  const startToolContinuation = useCallback(() => {
+    if (!autoContinueAfterToolResult || resumingToolContinuationRef.current) {
+      return;
+    }
+
+    ++continuationGenerationRef.current;
+    resumingToolContinuationRef.current = true;
+    pendingToolContinuationRef.current = true;
+    setIsToolContinuation(true);
+    scheduleToolContinuationLaunch();
+  }, [autoContinueAfterToolResult, scheduleToolContinuationLaunch]);
+
+  useEffect(() => {
+    if (status === "error" && pendingToolContinuationRef.current) {
+      resetToolContinuation();
+      return;
+    }
+
+    scheduleToolContinuationLaunch();
+  }, [resetToolContinuation, scheduleToolContinuationLaunch, status]);
+
+  const stopWithToolContinuationAbort: typeof stop = useCallback(async () => {
+    try {
+      customTransport.cancelActiveServerTurn();
+      await stop();
+    } finally {
+      customTransport.abortActiveToolContinuation();
+    }
+  }, [stop, customTransport]);
+
+  const processedToolCalls = useRef(new Set<string>());
+  const isResolvingToolsRef = useRef(false);
+  // Counter to force the tool resolution effect to re-run after completing
+  // a batch of tool calls. Without this, if new tool calls arrive while
+  // isResolvingToolsRef is true (e.g. server auto-continuation), the effect
+  // exits early and never retriggers because the ref reset doesn't cause
+  // a re-render.
+  const [toolResolutionTrigger, setToolResolutionTrigger] = useState(0);
+
+  // Fix for issue #728: Track client-side tool results in local state
+  // to ensure tool parts show output-available immediately after execution.
+  const [clientToolResults, setClientToolResults] = useState<
+    Map<string, unknown>
+  >(new Map());
+
+  // Ref to access current messages in callbacks without stale closures
+  const messagesRef = useRef(chatMessages);
+  messagesRef.current = chatMessages;
+  const initialMessagesRef = useRef(initialMessages);
+  initialMessagesRef.current = initialMessages;
+
+  // Tracks which `initialMessagesCacheKey` we've already applied to the
+  // underlying Chat. Used by the late-seed effect below, and flipped to
+  // the current key whenever the chat is intentionally emptied so we
+  // don't re-hydrate server history on top of a user-driven clear.
+  const seededInitialMessagesKeyRef = useRef<string | null>(null);
+  const markInitialMessagesSeeded = useCallback(() => {
+    seededInitialMessagesKeyRef.current = initialMessagesCacheKey;
+  }, [initialMessagesCacheKey]);
+
+  // Late-seed: when the initial-messages promise resolves AFTER the Chat
+  // was already mounted (the URL-not-ready-on-first-render case), the
+  // AI SDK's `useChat({ messages })` won't re-ingest the new value.
+  // This effect applies it once per cache key. If the user already sent
+  // an optimistic first message, prepend any missing hydrated history
+  // rather than overwriting or discarding either side. Existing in-memory
+  // message copies win by ID because they may include newer stream/client
+  // state than the fetch response.
+  //
+  // Crucially, we mark the key as handled on EVERY observation so that
+  // subsequent emptying events (a server broadcast of
+  // CF_AGENT_CHAT_MESSAGES with `[]`, a `setMessages([])` on this tab,
+  // or an explicit `clearHistory()`) don't resurrect stale initial
+  // messages on top of the clear.
+  useEffect(() => {
+    if (!initialMessagesPromise) {
+      return;
+    }
+    if (seededInitialMessagesKeyRef.current === initialMessagesCacheKey) {
+      return;
+    }
+
+    markInitialMessagesSeeded();
+    setMessages((prevMessages: ChatMessage[]) =>
+      prependMissingHydratedMessages(initialMessagesRef.current, prevMessages)
+    );
+  }, [
+    initialMessagesCacheKey,
+    initialMessagesPromise,
+    markInitialMessagesSeeded,
+    setMessages
+  ]);
+
+  const localResponseMessageIdsRef = useRef(new Map<string, string>());
+  const protectedStreamingAssistantRef = useRef<{
+    assistantId: string;
+    anchorMessageId: string | null;
+  } | null>(null);
+
+  const preserveProtectedStreamingAssistant = useCallback(
+    (messages: readonly ChatMessage[]): ChatMessage[] => {
+      const protection = protectedStreamingAssistantRef.current;
+      if (!protection) {
+        return [...messages];
+      }
+
+      const protectedAssistant =
+        messagesRef.current.find(
+          (message) => message.id === protection.assistantId
+        ) ?? messages.find((message) => message.id === protection.assistantId);
+      if (!protectedAssistant) {
+        return [...messages];
+      }
+
+      return [
+        ...messages.filter((message) => message.id !== protection.assistantId),
+        protectedAssistant
+      ];
+    },
+    []
+  );
+
+  const protectStreamingAssistantTail = useCallback(() => {
+    if (statusRef.current !== "streaming") {
+      return;
+    }
+
+    const assistantInfo = findLastAssistantMessage(messagesRef.current);
+    if (!assistantInfo) {
+      return;
+    }
+
+    if (
+      protectedStreamingAssistantRef.current?.assistantId !==
+      assistantInfo.message.id
+    ) {
+      protectedStreamingAssistantRef.current = {
+        assistantId: assistantInfo.message.id,
+        anchorMessageId:
+          messagesRef.current[assistantInfo.index - 1]?.id ?? null
+      };
+    }
+
+    setMessages((prevMessages: ChatMessage[]) => {
+      const protection = protectedStreamingAssistantRef.current;
+      if (!protection) {
+        return prevMessages;
+      }
+
+      return moveMessageToEnd(prevMessages, protection.assistantId);
+    });
+  }, [setMessages]);
+
+  const restoreProtectedStreamingAssistant = useCallback(
+    (assistantId?: string) => {
+      const protection = protectedStreamingAssistantRef.current;
+      if (
+        !protection ||
+        (assistantId !== undefined && protection.assistantId !== assistantId)
+      ) {
+        return;
+      }
+
+      protectedStreamingAssistantRef.current = null;
+      setMessages((prevMessages: ChatMessage[]) => {
+        const sourceIdx = prevMessages.findIndex(
+          (m) => m.id === protection.assistantId
+        );
+        if (sourceIdx < 0) return prevMessages;
+
+        const result = [...prevMessages];
+        const [msg] = result.splice(sourceIdx, 1);
+        if (!msg) return prevMessages;
+
+        if (protection.anchorMessageId === null) {
+          result.unshift(msg);
+        } else {
+          const anchorIdx = result.findIndex(
+            (m) => m.id === protection.anchorMessageId
+          );
+          result.splice(anchorIdx >= 0 ? anchorIdx + 1 : sourceIdx, 0, msg);
+        }
+
+        return result;
+      });
+    },
+    [setMessages]
+  );
+
+  const resetMatchingHydratedAssistantForReplay = useCallback(
+    (messageId: string) => {
+      setMessages((prevMessages: ChatMessage[]) => {
+        const lastMessage = prevMessages[prevMessages.length - 1];
+        if (
+          !lastMessage ||
+          lastMessage.role !== "assistant" ||
+          lastMessage.id !== messageId
+        ) {
+          return prevMessages;
+        }
+
+        // Initial message hydration can already contain the partially
+        // persisted assistant response. Clear that assistant only once
+        // replay proves it is rebuilding the same message; keeping the
+        // shell preserves layout while avoiding duplicate text parts.
+        replayHydratedAssistantMessageIdsRef.current.add(messageId);
+        const next = [...prevMessages];
+        next[next.length - 1] = { ...lastMessage, parts: [] };
+        return next;
+      });
+    },
+    [setMessages]
+  );
+
+  const collapseHydratedReplayTextParts = useCallback(
+    (message: ChatMessage): ChatMessage => {
+      const parts = message.parts;
+      const nextParts = parts.filter((part, index) => {
+        if (part.type !== "text" || !("text" in part) || !part.text) {
+          return true;
+        }
+
+        // Replayed streams rebuild from the first chunk. If the
+        // hydrated assistant already had the same prefix, replay can
+        // temporarily produce a second text part with the rebuilt text.
+        return !parts.some((candidate, candidateIndex) => {
+          if (candidateIndex <= index) return false;
+          if (
+            candidate.type !== "text" ||
+            !("text" in candidate) ||
+            !candidate.text
+          ) {
+            return false;
+          }
+          return candidate.text.startsWith(part.text);
+        });
+      });
+
+      return nextParts.length === parts.length
+        ? message
+        : { ...message, parts: nextParts };
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (replayHydratedAssistantMessageIdsRef.current.size === 0) return;
+
+    const idsToCollapse = new Set(
+      chatMessages
+        .filter(
+          (message) =>
+            replayHydratedAssistantMessageIdsRef.current.has(message.id) &&
+            message.role === "assistant" &&
+            collapseHydratedReplayTextParts(message) !== message
+        )
+        .map((message) => message.id)
+    );
+    if (idsToCollapse.size === 0) return;
+
+    setMessages((prevMessages: ChatMessage[]) => {
+      let changed = false;
+      const nextMessages = prevMessages.map((message) => {
+        if (!idsToCollapse.has(message.id)) {
+          return message;
+        }
+
+        const nextMessage = collapseHydratedReplayTextParts(message);
+        if (nextMessage !== message) {
+          changed = true;
+        }
+        return nextMessage;
+      });
+
+      return changed ? nextMessages : prevMessages;
+    });
+  }, [chatMessages, collapseHydratedReplayTextParts, setMessages]);
+
+  // Shared reset for every path that wipes chat history — keep this
+  // list in sync between `clearHistory()` (local user action) and the
+  // `CF_AGENT_CHAT_CLEAR` broadcast handler (server/other-tab action).
+  // Anything reset here must be safe to reset either way; broadcast-
+  // specific state (`streamStateRef`, `isServerStreaming`) stays in
+  // the broadcast handler because it describes cross-tab/server
+  // streams that a local `clearHistory()` can't meaningfully cancel.
+  const resetLocalChatState = useCallback(() => {
+    markInitialMessagesSeeded();
+    setMessages([]);
+    setClientToolResults(new Map());
+    setPendingOnToolCallIds(new Set());
+    resetToolContinuation();
+    processedToolCalls.current.clear();
+    localResponseMessageIdsRef.current.clear();
+    pendingReplayResumeRequestIdsRef.current.clear();
+    fallbackAckedResumeRequestIdsRef.current.clear();
+    replayHydratedAssistantMessageIdsRef.current.clear();
+    protectedStreamingAssistantRef.current = null;
+  }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
+
+  const sendMessageWithStreamingProtection: typeof sendMessage = useCallback(
+    async (message, options) => {
+      const request = sendMessage(message, options);
+
+      if (
+        message !== undefined &&
+        !(
+          typeof message === "object" &&
+          message !== null &&
+          "messageId" in message &&
+          message.messageId != null
+        )
+      ) {
+        protectStreamingAssistantTail();
+      }
+
+      return request;
+    },
+    [sendMessage, protectStreamingAssistantTail]
+  );
+
+  // Calculate pending confirmations for the latest assistant message
+  const lastMessage = chatMessages[chatMessages.length - 1];
+
+  const pendingConfirmations = (() => {
+    if (!lastMessage || lastMessage.role !== "assistant") {
+      return { messageId: undefined, toolCallIds: new Set<string>() };
+    }
+
+    const pendingIds = new Set<string>();
+    for (const part of lastMessage.parts ?? []) {
+      if (
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
+        toolsRequiringConfirmation.includes(getToolName(part))
+      ) {
+        pendingIds.add(part.toolCallId);
+      }
+    }
+    return { messageId: lastMessage.id, toolCallIds: pendingIds };
+  })();
+
+  const pendingConfirmationsRef = useRef(pendingConfirmations);
+  pendingConfirmationsRef.current = pendingConfirmations;
+  const [pendingOnToolCallIds, setPendingOnToolCallIds] = useState<Set<string>>(
+    () => new Set()
+  );
+
+  const finishOnToolCall = useCallback((toolCallId: string) => {
+    setPendingOnToolCallIds((prev) => {
+      if (!prev.has(toolCallId)) return prev;
+      const next = new Set(prev);
+      next.delete(toolCallId);
+      return next;
+    });
+  }, []);
+
+  // ── DEPRECATED: automatic tool resolution effect ────────────────────
+  // This entire useEffect is deprecated. Use onToolCall instead.
+  useEffect(() => {
+    if (!experimental_automaticToolResolution) {
+      return;
+    }
+
+    void toolResolutionTrigger;
+
+    // Prevent re-entry while async operations are in progress
+    if (isResolvingToolsRef.current) {
+      return;
+    }
+
+    const lastMsg = chatMessages[chatMessages.length - 1];
+    if (!lastMsg || lastMsg.role !== "assistant") {
+      return;
+    }
+
+    const toolCalls = lastMsg.parts.filter(
+      (part) =>
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
+        !processedToolCalls.current.has(part.toolCallId)
+    );
+
+    if (toolCalls.length > 0) {
+      // Capture tools synchronously before async work
+      const currentTools = toolsRef.current;
+      const toolCallsToResolve = toolCalls.filter(
+        (part) =>
+          isToolUIPart(part) &&
+          !toolsRequiringConfirmation.includes(getToolName(part)) &&
+          currentTools?.[getToolName(part)]?.execute
+      );
+
+      if (toolCallsToResolve.length > 0) {
+        isResolvingToolsRef.current = true;
+
+        (async () => {
+          try {
+            const toolResults: Array<{
+              toolCallId: string;
+              toolName: string;
+              output: unknown;
+            }> = [];
+
+            for (const part of toolCallsToResolve) {
+              if (isToolUIPart(part)) {
+                let toolOutput: unknown = null;
+                const toolName = getToolName(part);
+                const tool = currentTools?.[toolName];
+
+                if (tool?.execute && part.input !== undefined) {
+                  try {
+                    toolOutput = await tool.execute(part.input);
+                  } catch (error) {
+                    toolOutput = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+                  }
+                }
+
+                processedToolCalls.current.add(part.toolCallId);
+
+                toolResults.push({
+                  toolCallId: part.toolCallId,
+                  toolName,
+                  output: toolOutput
+                });
+              }
+            }
+
+            if (toolResults.length > 0) {
+              // Send tool results to server first (server is source of truth)
+              const clientToolSchemas = extractClientToolSchemas(currentTools);
+              for (const result of toolResults) {
+                agentRef.current.send(
+                  JSON.stringify({
+                    type: MessageType.CF_AGENT_TOOL_RESULT,
+                    toolCallId: result.toolCallId,
+                    toolName: result.toolName,
+                    output: result.output,
+                    autoContinue: autoContinueAfterToolResult,
+                    clientTools: clientToolSchemas
+                  })
+                );
+              }
+
+              // Also update local state via AI SDK for immediate UI feedback
+              await Promise.all(
+                toolResults.map((result) =>
+                  addToolResult({
+                    tool: result.toolName,
+                    toolCallId: result.toolCallId,
+                    output: result.output
+                  })
+                )
+              );
+
+              setClientToolResults((prev) => {
+                const newMap = new Map(prev);
+                for (const result of toolResults) {
+                  newMap.set(result.toolCallId, result.output);
+                }
+                return newMap;
+              });
+
+              startToolContinuation();
+            }
+
+            // Note: We don't call sendMessage() here anymore.
+            // The server will continue the conversation after applying tool results.
+          } finally {
+            isResolvingToolsRef.current = false;
+            // Trigger a re-run so any tool calls that arrived while we were
+            // busy (e.g. from server auto-continuation) get picked up.
+            setToolResolutionTrigger((c) => c + 1);
+          }
+        })();
+      }
+    }
+  }, [
+    chatMessages,
+    experimental_automaticToolResolution,
+    addToolResult,
+    toolsRequiringConfirmation,
+    autoContinueAfterToolResult,
+    startToolContinuation,
+    toolResolutionTrigger
+  ]);
+
+  // Helper function to send tool output to server
+  const sendToolOutputToServer = useCallback(
+    (
+      toolCallId: string,
+      toolName: string,
+      output: unknown,
+      state?: "output-available" | "output-error",
+      errorText?: string
+    ) => {
+      const shouldAutoContinue =
+        state === "output-error" ? false : autoContinueAfterToolResult;
+
+      agentRef.current.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId,
+          toolName,
+          output,
+          ...(state ? { state } : {}),
+          ...(errorText !== undefined ? { errorText } : {}),
+          // output-error is a deliberate client action — don't auto-continue.
+          // This differs from addToolApprovalResponse (which auto-continues for
+          // both approvals and rejections). To have the LLM respond to the error,
+          // call sendMessage() after addToolOutput.
+          autoContinue: shouldAutoContinue,
+          clientTools: toolsRef.current
+            ? extractClientToolSchemas(toolsRef.current)
+            : undefined
+        })
+      );
+
+      if (state !== "output-error") {
+        setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+      }
+
+      if (shouldAutoContinue) {
+        startToolContinuation();
+      }
+    },
+    [autoContinueAfterToolResult, startToolContinuation]
+  );
+
+  // Helper function to send tool approval to server
+  const sendToolApprovalToServer = useCallback(
+    (toolCallId: string, approved: boolean) => {
+      agentRef.current.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_APPROVAL,
+          toolCallId,
+          approved,
+          autoContinue: autoContinueAfterToolResult
+        })
+      );
+
+      if (autoContinueAfterToolResult) {
+        startToolContinuation();
+      }
+    },
+    [autoContinueAfterToolResult, startToolContinuation]
+  );
+
+  // Effect for new onToolCall callback pattern (v6 style)
+  // This fires when there are tool calls that need client-side handling
+  useEffect(() => {
+    const currentOnToolCall = onToolCallRef.current;
+    if (!currentOnToolCall) {
+      return;
+    }
+
+    const lastMsg = chatMessages[chatMessages.length - 1];
+    if (!lastMsg || lastMsg.role !== "assistant") {
+      return;
+    }
+
+    // Find tool calls in input-available state that haven't been processed
+    const pendingToolCalls = lastMsg.parts.filter(
+      (part) =>
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
+        !processedToolCalls.current.has(part.toolCallId)
+    );
+
+    for (const part of pendingToolCalls) {
+      if (isToolUIPart(part)) {
+        const toolCallId = part.toolCallId;
+        const toolName = getToolName(part);
+
+        // Mark as processed to prevent re-triggering
+        processedToolCalls.current.add(toolCallId);
+
+        // track pending `onToolCall` calls to derive streaming state
+        setPendingOnToolCallIds((prev) => {
+          if (prev.has(toolCallId)) return prev;
+          const next = new Set(prev);
+          next.add(toolCallId);
+          return next;
+        });
+
+        // Create addToolOutput function for this specific tool call
+        const addToolOutput = (opts: AddToolOutputOptions) => {
+          sendToolOutputToServer(
+            opts.toolCallId,
+            toolName,
+            opts.output,
+            opts.state,
+            opts.errorText
+          );
+
+          // Update local state via AI SDK
+          addToolResult({
+            tool: toolName,
+            toolCallId: opts.toolCallId,
+            output:
+              opts.state === "output-error"
+                ? (opts.errorText ?? "Tool execution denied by user")
+                : opts.output
+          });
+        };
+
+        // Call the onToolCall callback
+        // The callback is responsible for calling addToolOutput when ready
+        let result: ReturnType<OnToolCallCallback>;
+        try {
+          result = currentOnToolCall({
+            toolCall: { toolCallId, toolName, input: part.input },
+            addToolOutput
+          });
+        } catch (error) {
+          finishOnToolCall(toolCallId);
+          throw error;
+        }
+        void Promise.resolve(result).finally(() => {
+          finishOnToolCall(toolCallId);
+        });
+      }
+    }
+  }, [chatMessages, sendToolOutputToServer, addToolResult, finishOnToolCall]);
+
+  const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
+
+  const [isServerStreaming, setIsServerStreaming] = useState(false);
+  // #1620: a durable chat turn is being recovered (interrupted by a
+  // deploy/eviction or a stream-stall watchdog abort and now resuming). Driven
+  // by the server's `CF_AGENT_CHAT_RECOVERING` frames; surfaced as a "working,
+  // not frozen" hint distinct from active streaming.
+  const [isRecovering, setIsRecovering] = useState(false);
+
+  useEffect(() => {
+    const localResponseIds = localResponseMessageIdsRef.current;
+
+    /**
+     * Unified message handler that parses JSON once and dispatches based on type.
+     * Avoids duplicate parsing overhead from separate listeners.
+     */
+    function onAgentMessage(event: MessageEvent) {
+      if (typeof event.data !== "string") return;
+
+      let data: OutgoingMessage<ChatMessage>;
+      try {
+        data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
+      } catch (_error) {
+        return;
+      }
+
+      switch (data.type) {
+        case MessageType.CF_AGENT_CHAT_CLEAR:
+          // Broadcast-specific resets (cross-tab stream tracking).
+          streamStateRef.current = broadcastTransition(streamStateRef.current, {
+            type: "clear"
+          }).state;
+          setIsServerStreaming(false);
+          setIsRecovering(false);
+          // Shared local-state reset — see `resetLocalChatState`.
+          resetLocalChatState();
+          break;
+
+        case MessageType.CF_AGENT_CHAT_RECOVERING:
+          // Durable recovery progress hint (#1620): show "recovering…" while a
+          // turn is being resumed. Cleared by the server's `recovering: false`
+          // frame on any terminal outcome (and locally on stream-resume /
+          // terminal response / clear below, for a snappy handoff).
+          setIsRecovering(Boolean(data.recovering));
+          break;
+
+        case MessageType.CF_AGENT_CHAT_MESSAGES: {
+          let next = preserveProtectedStreamingAssistant(data.messages);
+          // A cross-tab observer builds the in-flight assistant via the
+          // broadcast accumulator, not the local transport — so
+          // `protectedStreamingAssistantRef` is never armed for it. Without
+          // this, a behind-the-stream snapshot would replace the observed
+          // assistant's streamed parts until the next chunk re-merges them
+          // (the same disappear/reappear the originating tab gets without the
+          // start-chunk re-arm above). Re-apply the accumulator — it adopted
+          // the server id from the `start` chunk, so `mergeInto` replaces the
+          // snapshot's copy in place (or appends a not-yet-persisted turn).
+          const observed = streamStateRef.current;
+          if (
+            observed.status === "observing" &&
+            observed.accumulator.parts.length > 0
+          ) {
+            // Only re-apply the live accumulator when it is at least as
+            // complete as the snapshot's copy of the same message. A fresh
+            // observer rebuilding its accumulator from a chunk-0 replay can
+            // briefly trail a fully-persisted snapshot; merging then would drop
+            // parts until replay catches up. In steady-state live observing the
+            // accumulator is always at or ahead of the snapshot, so this still
+            // fixes the disappear/reappear flicker.
+            const snapshotIdx = next.findIndex(
+              (m) => m.id === observed.accumulator.messageId
+            );
+            const snapshotParts =
+              snapshotIdx >= 0 ? next[snapshotIdx].parts.length : 0;
+            if (observed.accumulator.parts.length >= snapshotParts) {
+              next = observed.accumulator.mergeInto(next) as ChatMessage[];
+            }
+          }
+          setMessages(next);
+          break;
+        }
+
+        case MessageType.CF_AGENT_MESSAGE_UPDATED:
+          // Server updated a message (e.g., applied tool result)
+          // Update the specific message in local state
+          setMessages((prevMessages: ChatMessage[]) => {
+            const updatedMessage = data.message;
+
+            // First try to find by message ID
+            let idx = prevMessages.findIndex((m) => m.id === updatedMessage.id);
+
+            // If not found by ID, try to find by toolCallId
+            // This handles the case where client has AI SDK-generated IDs
+            // but server has server-generated IDs
+            if (idx < 0) {
+              const updatedToolCallIds = new Set(
+                updatedMessage.parts
+                  .filter(
+                    (p: ChatMessage["parts"][number]) =>
+                      "toolCallId" in p && p.toolCallId
+                  )
+                  .map(
+                    (p: ChatMessage["parts"][number]) =>
+                      (p as { toolCallId: string }).toolCallId
+                  )
+              );
+
+              if (updatedToolCallIds.size > 0) {
+                idx = prevMessages.findIndex((m) =>
+                  m.parts.some(
+                    (p) =>
+                      "toolCallId" in p &&
+                      updatedToolCallIds.has(
+                        (p as { toolCallId: string }).toolCallId
+                      )
+                  )
+                );
+              }
+            }
+
+            if (idx >= 0) {
+              const updated = [...prevMessages];
+              // Preserve the client's message ID but update the content
+              updated[idx] = {
+                ...updatedMessage,
+                id: prevMessages[idx].id
+              };
+              return updated;
+            }
+            // Message not found — don't append. CF_AGENT_MESSAGE_UPDATED is
+            // for updating existing messages (e.g. tool result/approval state
+            // changes), not for adding new ones. If the message isn't in
+            // client state yet, it will arrive via the transport stream
+            // (same tab) or CF_AGENT_CHAT_MESSAGES (cross-tab).
+            // Appending here causes temporary duplicates (#1094).
+            return prevMessages;
+          });
+          break;
+
+        case MessageType.CF_AGENT_STREAM_RESUME_NONE:
+          // Server confirmed no active stream — let the transport
+          // resolve reconnectToStream immediately with null.
+          customTransport.handleStreamResumeNone();
+          break;
+
+        case MessageType.CF_AGENT_STREAM_RESUMING: {
+          const isEarlyToolContinuation =
+            resumingToolContinuationRef.current &&
+            !customTransport.isAwaitingResume();
+          if (!resume && !customTransport.isAwaitingResume()) {
+            if (!isEarlyToolContinuation) return;
+          }
+          if (!resumingToolContinuationRef.current) {
+            pendingReplayResumeRequestIdsRef.current.add(data.id);
+          }
+          // Let the transport handle it if reconnectToStream is waiting.
+          // This is called synchronously — no addEventListener race.
+          // The transport sends ACK, adds to activeRequestIds, and
+          // creates the ReadableStream that feeds into useChat's pipeline
+          // (which correctly sets status to "streaming"). This runs BEFORE
+          // the fallback-ACK dedupe below so a fallback-observed stream can
+          // still become transport-owned via a later resumeStream() — the
+          // transport's replay is isolated from the broadcast accumulator
+          // by localRequestIdsRef, so it cannot duplicate parts.
+          if (customTransport.handleStreamResuming(data)) {
+            return;
+          }
+          // Skip if the transport already handled this stream's resume
+          // (server sends STREAM_RESUMING from both onConnect and the
+          // RESUME_REQUEST handler — the second one must not trigger
+          // a duplicate ACK / replay).
+          if (localRequestIdsRef.current.has(data.id)) return;
+          // Duplicate offer for a stream this socket already ACKed via the
+          // fallback path (#1733): the server notifies from both onConnect
+          // and the RESUME_REQUEST handler. With nobody waiting on the
+          // handshake, re-ACKing would only trigger a second full-buffer
+          // replay into the same accumulator; drop it.
+          if (fallbackAckedResumeRequestIdsRef.current.has(data.id)) return;
+          if (isEarlyToolContinuation) {
+            pendingToolContinuationRef.current = false;
+            observedToolContinuationRequestIdRef.current = data.id;
+            if (continuationLaunchTimerRef.current) {
+              clearTimeout(continuationLaunchTimerRef.current);
+              continuationLaunchTimerRef.current = null;
+            }
+          }
+          // Fallback for cross-tab broadcasts or cases where the
+          // transport isn't expecting a resume.
+          streamStateRef.current = broadcastTransition(streamStateRef.current, {
+            type: "resume-fallback",
+            streamId: data.id,
+            messageId: nanoid()
+          }).state;
+          customTransport.observeServerTurn(data.id);
+          setIsServerStreaming(true);
+          // The recovered turn is now streaming live to us — it's no longer
+          // "recovering", it's producing the answer (#1620).
+          setIsRecovering(false);
+          // Remember the ACK so a duplicate STREAM_RESUMING for the same
+          // request on this socket doesn't trigger a second replay (#1733).
+          fallbackAckedResumeRequestIdsRef.current.add(data.id);
+          agentRef.current.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+              id: data.id
+            })
+          );
+          break;
+        }
+
+        case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
+          if (localRequestIdsRef.current.has(data.id)) {
+            if (data.body?.trim()) {
+              try {
+                const chunkData = JSON.parse(data.body) as {
+                  messageId?: string;
+                  type?: string;
+                };
+                if (
+                  chunkData.type === "start" &&
+                  typeof chunkData.messageId === "string"
+                ) {
+                  localResponseIds.set(data.id, chunkData.messageId);
+                  // Re-arm streaming protection to the ACTUAL assistant id for
+                  // this turn. `protectStreamingAssistantTail` runs at send
+                  // time — before the assistant message is minted — so it can
+                  // only latch the PREVIOUS turn's id (or nothing on the first
+                  // turn). Without correcting it here, a mid-stream full-list
+                  // broadcast (`CF_AGENT_CHAT_MESSAGES`, which Think emits after
+                  // every tool result) replaces the live-streamed assistant
+                  // with a possibly-behind server snapshot, so its parts (e.g.
+                  // tool cards) briefly disappear and reappear. Continuations
+                  // are skipped: they extend the existing protected assistant.
+                  if (!data.continuation) {
+                    const protection = protectedStreamingAssistantRef.current;
+                    if (protection?.assistantId !== chunkData.messageId) {
+                      const msgs = messagesRef.current;
+                      const idx = msgs.findIndex(
+                        (m) => m.id === chunkData.messageId
+                      );
+                      const anchorMessageId =
+                        idx >= 0
+                          ? (msgs[idx - 1]?.id ?? null)
+                          : (msgs[msgs.length - 1]?.id ?? null);
+                      protectedStreamingAssistantRef.current = {
+                        assistantId: chunkData.messageId,
+                        anchorMessageId
+                      };
+                    }
+                  }
+                  // EVERY replayed `start` rebuilds the message from chunk 0,
+                  // so the matching trailing assistant must be reset each
+                  // time — not only while the resume request id is still
+                  // pending (#1733: a second replay otherwise stacks a
+                  // duplicate text part). Continuation replays are excluded:
+                  // they append to the existing assistant message, and
+                  // wiping it would drop the pre-continuation parts.
+                  if (
+                    data.replay &&
+                    !data.continuation &&
+                    !resumingToolContinuationRef.current &&
+                    observedToolContinuationRequestIdRef.current !== data.id
+                  ) {
+                    pendingReplayResumeRequestIdsRef.current.delete(data.id);
+                    resetMatchingHydratedAssistantForReplay(
+                      chunkData.messageId
+                    );
+                  }
+                }
+              } catch {
+                // Ignore malformed local stream chunks.
+              }
+            }
+
+            if (data.done || data.replayComplete) {
+              pendingReplayResumeRequestIdsRef.current.delete(data.id);
+            }
+            if (data.done) {
+              if (
+                streamStateRef.current.status === "observing" &&
+                streamStateRef.current.streamId === data.id
+              ) {
+                streamStateRef.current = { status: "idle" };
+                setIsServerStreaming(false);
+              }
+              customTransport.handleServerTurnCompleted(data.id);
+              restoreProtectedStreamingAssistant(localResponseIds.get(data.id));
+              localResponseIds.delete(data.id);
+              localRequestIdsRef.current.delete(data.id);
+              fallbackAckedResumeRequestIdsRef.current.delete(data.id);
+            }
+            return;
+          }
+
+          let chunkData: unknown;
+          if (
+            data.replay &&
+            streamStateRef.current.status !== "observing" &&
+            !pendingReplayResumeRequestIdsRef.current.has(data.id)
+          ) {
+            return;
+          }
+          if (data.body?.trim()) {
+            try {
+              chunkData = JSON.parse(data.body);
+              // Reset on EVERY replayed `start` (not only while the resume
+              // request id is pending): replay rebuilds from chunk 0, so a
+              // second replay whose `start` skipped the reset would stack a
+              // duplicate text part on the frozen first one (#1733).
+              // Continuation replays are excluded — they append to the
+              // existing assistant message, and wiping it would drop the
+              // pre-continuation parts.
+              if (
+                data.replay &&
+                !data.continuation &&
+                !resumingToolContinuationRef.current &&
+                observedToolContinuationRequestIdRef.current !== data.id &&
+                typeof (chunkData as Record<string, unknown>).messageId ===
+                  "string" &&
+                (chunkData as Record<string, unknown>).type === "start"
+              ) {
+                pendingReplayResumeRequestIdsRef.current.delete(data.id);
+                resetMatchingHydratedAssistantForReplay(
+                  (chunkData as { messageId: string }).messageId
+                );
+              }
+              if (
+                typeof (chunkData as Record<string, unknown>).type ===
+                  "string" &&
+                (
+                  (chunkData as Record<string, unknown>).type as string
+                ).startsWith("data-") &&
+                onDataRef.current
+              ) {
+                onDataRef.current(
+                  chunkData as Parameters<
+                    NonNullable<typeof onDataRef.current>
+                  >[0]
+                );
+              }
+            } catch (parseError) {
+              console.warn(
+                "[useAgentChat] Failed to parse stream chunk:",
+                parseError instanceof Error ? parseError.message : parseError,
+                "body:",
+                data.body?.slice(0, 100)
+              );
+            }
+          }
+          if (data.done || data.replayComplete) {
+            pendingReplayResumeRequestIdsRef.current.delete(data.id);
+          }
+          if (data.done) {
+            customTransport.handleServerTurnCompleted(data.id);
+            fallbackAckedResumeRequestIdsRef.current.delete(data.id);
+            // A terminal turn outcome resolves any in-progress recovery (#1620).
+            setIsRecovering(false);
+          }
+          const completedObservedToolContinuation =
+            data.done &&
+            observedToolContinuationRequestIdRef.current === data.id;
+
+          const result = broadcastTransition(streamStateRef.current, {
+            type: "response",
+            streamId: data.id,
+            messageId: nanoid(),
+            chunkData,
+            done: data.done,
+            error: data.error,
+            replay: data.replay,
+            replayComplete: data.replayComplete,
+            continuation: data.continuation,
+            currentMessages: data.continuation ? messagesRef.current : undefined
+          });
+
+          streamStateRef.current = result.state;
+          if (result.messagesUpdate) {
+            setMessages(
+              result.messagesUpdate as unknown as (
+                prev: ChatMessage[]
+              ) => ChatMessage[]
+            );
+          }
+          setIsServerStreaming(result.isStreaming);
+          if (completedObservedToolContinuation) {
+            resetToolContinuation();
+          }
+          break;
+        }
+      }
+    }
+
+    const fallbackAckedResumeRequestIds =
+      fallbackAckedResumeRequestIdsRef.current;
+
+    // A closed socket invalidates the per-socket resume-ACK dedupe: after a
+    // reconnect the server sees a brand-new connection and must be ACKed
+    // (and replay) again, so the previous entries must not suppress it.
+    function onAgentClose() {
+      fallbackAckedResumeRequestIds.clear();
+    }
+
+    agent.addEventListener("message", onAgentMessage);
+    agent.addEventListener("close", onAgentClose);
+
+    // Stream resume is now primarily handled by the transport's
+    // reconnectToStream (which sends CF_AGENT_STREAM_RESUME_REQUEST).
+    // The onAgentMessage handler above serves as fallback for cross-tab
+    // broadcasts and cases where the transport didn't handle the resume.
+
+    return () => {
+      agent.removeEventListener("message", onAgentMessage);
+      agent.removeEventListener("close", onAgentClose);
+      fallbackAckedResumeRequestIds.clear();
+      streamStateRef.current = { status: "idle" };
+      setIsServerStreaming(false);
+      setIsRecovering(false);
+      protectedStreamingAssistantRef.current = null;
+      localResponseIds.clear();
+    };
+  }, [
+    agent,
+    setMessages,
+    resume,
+    customTransport,
+    preserveProtectedStreamingAssistant,
+    resetToolContinuation,
+    resetMatchingHydratedAssistantForReplay,
+    restoreProtectedStreamingAssistant,
+    resetLocalChatState
+  ]);
+
+  // ── DEPRECATED: addToolResult wrapper with confirmation batching ────
+  // This wrapper is deprecated. Use addToolOutput or addToolApprovalResponse instead.
+  const addToolResultAndSendMessage: typeof addToolResult = async (args) => {
+    const { toolCallId } = args;
+    const toolName = "tool" in args ? args.tool : "";
+    const output = "output" in args ? args.output : undefined;
+
+    // Send tool result to server (server is source of truth)
+    // Include flag to tell server whether to auto-continue
+    agentRef.current.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId,
+        toolName,
+        output,
+        autoContinue: autoContinueAfterToolResult,
+        clientTools: toolsRef.current
+          ? extractClientToolSchemas(toolsRef.current)
+          : undefined
+      })
+    );
+
+    setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+
+    // Call AI SDK's addToolResult for local state update (non-blocking)
+    // We don't await this since clientToolResults provides immediate UI feedback
+    addToolResult(args);
+
+    if (autoContinueAfterToolResult) {
+      startToolContinuation();
+    }
+
+    // If server auto-continuation is disabled, client needs to trigger continuation
+    if (!autoContinueAfterToolResult) {
+      // Use legacy behavior: batch confirmations or send immediately
+      if (!autoSendAfterAllConfirmationsResolved) {
+        // Always send immediately
+        sendMessage();
+        return;
+      }
+
+      // Wait for all confirmations before sending
+      const pending = pendingConfirmationsRef.current?.toolCallIds;
+      if (!pending) {
+        sendMessage();
+        return;
+      }
+
+      const wasLast = pending.size === 1 && pending.has(toolCallId);
+      if (pending.has(toolCallId)) {
+        pending.delete(toolCallId);
+      }
+
+      if (wasLast || pending.size === 0) {
+        sendMessage();
+      }
+    }
+    // If autoContinueAfterToolResult is true, server handles continuation
+  };
+
+  // Wrapper that sends tool approval to server before updating local state.
+  // This prevents duplicate messages by ensuring server updates the message
+  // in place with the existing ID, rather than relying on ID resolution
+  // when sendMessage() is called later.
+  const addToolApprovalResponseAndNotifyServer: typeof addToolApprovalResponse =
+    (args) => {
+      const { id: approvalId, approved } = args;
+
+      // Find the toolCallId from the approval ID
+      // The approval ID is stored on the tool part's approval.id field
+      let toolCallId: string | undefined;
+      for (const msg of messagesRef.current) {
+        for (const part of msg.parts) {
+          if (
+            "toolCallId" in part &&
+            "approval" in part &&
+            (part.approval as { id?: string })?.id === approvalId
+          ) {
+            toolCallId = part.toolCallId as string;
+            break;
+          }
+        }
+        if (toolCallId) break;
+      }
+
+      if (toolCallId) {
+        // Send approval to server first (server updates message in place)
+        sendToolApprovalToServer(toolCallId, approved);
+      } else {
+        console.warn(
+          `[useAgentChat] addToolApprovalResponse: Could not find toolCallId for approval ID "${approvalId}". ` +
+            "Server will not be notified, which may cause duplicate messages."
+        );
+      }
+
+      // Call AI SDK's addToolApprovalResponse for local state update
+      addToolApprovalResponse(args);
+    };
+
+  // Fix for issue #728: Merge client-side tool results with messages
+  // so tool parts show output-available immediately after execution
+  const messagesWithToolResults = useMemo(() => {
+    if (clientToolResults.size === 0) {
+      return chatMessages;
+    }
+    return chatMessages.map((msg) => ({
+      ...msg,
+      parts: msg.parts.map((p) => {
+        if (
+          !("toolCallId" in p) ||
+          !("state" in p) ||
+          p.state !== "input-available" ||
+          !clientToolResults.has(p.toolCallId)
+        ) {
+          return p;
+        }
+        return {
+          ...p,
+          state: "output-available" as const,
+          output: clientToolResults.get(p.toolCallId)
+        };
+      })
+    })) as ChatMessage[];
+  }, [chatMessages, clientToolResults]);
+
+  // Cleanup stale entries from clientToolResults when messages change
+  // to prevent memory leak in long conversations.
+  // Note: We intentionally exclude clientToolResults from deps to avoid infinite loops.
+  // The functional update form gives us access to the previous state.
+  useEffect(() => {
+    // Collect all current toolCallIds from messages
+    const currentToolCallIds = new Set<string>();
+    for (const msg of chatMessages) {
+      for (const part of msg.parts) {
+        if ("toolCallId" in part && part.toolCallId) {
+          currentToolCallIds.add(part.toolCallId);
+        }
+      }
+    }
+
+    // Use functional update to check and clean stale entries atomically
+    setClientToolResults((prev) => {
+      if (prev.size === 0) return prev;
+
+      // Check if any entries are stale
+      let hasStaleEntries = false;
+      for (const toolCallId of prev.keys()) {
+        if (!currentToolCallIds.has(toolCallId)) {
+          hasStaleEntries = true;
+          break;
+        }
+      }
+
+      // Only create new Map if there are stale entries to remove
+      if (!hasStaleEntries) return prev;
+
+      const newMap = new Map<string, unknown>();
+      for (const [id, output] of prev) {
+        if (currentToolCallIds.has(id)) {
+          newMap.set(id, output);
+        }
+      }
+      return newMap;
+    });
+
+    // Also cleanup processedToolCalls to prevent issues in long conversations
+    for (const toolCallId of processedToolCalls.current) {
+      if (!currentToolCallIds.has(toolCallId)) {
+        processedToolCalls.current.delete(toolCallId);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatMessages]);
+
+  // Create addToolOutput function for external use
+  const addToolOutput = useCallback(
+    (opts: AddToolOutputOptions) => {
+      const toolName = opts.toolName ?? "";
+      sendToolOutputToServer(
+        opts.toolCallId,
+        toolName,
+        opts.output,
+        opts.state,
+        opts.errorText
+      );
+
+      // Update local state via AI SDK
+      addToolResult({
+        tool: toolName,
+        toolCallId: opts.toolCallId,
+        output:
+          opts.state === "output-error"
+            ? (opts.errorText ?? "Tool execution denied by user")
+            : opts.output
+      });
+    },
+    [sendToolOutputToServer, addToolResult]
+  );
+
+  // Derive whether there are unresolved client-side tool calls on the
+  // latest assistant message. The AI SDK's `streamText` on the server
+  // ends the stream as soon as it emits a tool-call the server can't
+  // execute, which drops `status` back to "ready" while the client's
+  // async `onToolCall` handler is still running. Without this signal,
+  // consumers see a blank "nothing happening" window for the full
+  // duration of the client-side work — often a `fetch` taking seconds.
+  //
+  // We scope this to tool calls that have actual client-side work in flight:
+  //   - an `onToolCall` callback promise is still pending, OR
+  //   - a matching entry in the deprecated `tools` option has `execute`.
+  // Tools waiting on explicit user confirmation are excluded — nothing
+  // is happening until the user acts, so the "busy" indicator would be
+  // misleading.
+  //
+  // Derivation (not a counter / not effect-tracked) so that the flag
+  // self-heals as soon as the tool part transitions to `output-available`
+  // via `addToolOutput` → `addToolResult`, or to any other terminal
+  // state via a server-pushed message update.
+  const lastAssistantMessage =
+    messagesWithToolResults[messagesWithToolResults.length - 1];
+  const hasPendingClientToolCalls = (() => {
+    if (pendingOnToolCallIds.size === 0 && !tools) return false;
+    if (!lastAssistantMessage || lastAssistantMessage.role !== "assistant") {
+      return false;
+    }
+    for (const part of lastAssistantMessage.parts) {
+      if (!isToolUIPart(part)) continue;
+      if (part.state !== "input-available") continue;
+      const toolName = getToolName(part);
+      if (toolsRequiringConfirmation.includes(toolName)) continue;
+      if (pendingOnToolCallIds.has(part.toolCallId)) return true;
+      if (tools?.[toolName]?.execute) return true;
+    }
+    return false;
+  })();
+
+  const effectiveIsServerStreaming =
+    isServerStreaming || hasPendingClientToolCalls;
+  const isStreaming = status === "streaming" || effectiveIsServerStreaming;
+
+  return {
+    ...useChatHelpers,
+    messages: messagesWithToolResults,
+    isServerStreaming: effectiveIsServerStreaming,
+    isStreaming,
+    /**
+     * True while a durable chat turn is being recovered (interrupted by a
+     * deploy/eviction or a stream-stall watchdog abort and now resuming, #1620).
+     * Distinct from `isStreaming` — a recovering turn isn't producing tokens
+     * yet. Render a "recovering…" hint; most UIs treat `isStreaming ||
+     * isRecovering` as "busy". Cleared automatically on the next stream/terminal.
+     */
+    isRecovering,
+    isToolContinuation,
+    connectionError: agent.connectionError ?? null,
+    sendMessage: sendMessageWithStreamingProtection,
+    stop: stopWithToolContinuationAbort,
+    /**
+     * Provide output for a tool call. Use this for tools that require user interaction
+     * or client-side execution.
+     */
+    addToolOutput,
+    /**
+     * @deprecated Use `addToolOutput` instead.
+     */
+    addToolResult: addToolResultAndSendMessage,
+    /**
+     * Respond to a tool approval request. Use this for tools with `needsApproval`.
+     * This wrapper notifies the server before updating local state, preventing
+     * duplicate messages when sendMessage() is called afterward.
+     */
+    addToolApprovalResponse: addToolApprovalResponseAndNotifyServer,
+    clearHistory: () => {
+      resetLocalChatState();
+      agent.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_CHAT_CLEAR
+        })
+      );
+    },
+    setMessages: (messagesOrUpdater: Parameters<typeof setMessages>[0]) => {
+      // Resolve functional updaters to get the actual messages array
+      // before syncing to server. Without this, updater functions would
+      // send an empty array and wipe server-side messages.
+      let resolvedMessages: ChatMessage[];
+      if (typeof messagesOrUpdater === "function") {
+        resolvedMessages = messagesOrUpdater(messagesRef.current);
+      } else {
+        resolvedMessages = messagesOrUpdater;
+      }
+
+      if (resolvedMessages.length === 0) {
+        markInitialMessagesSeeded();
+      }
+      setMessages(resolvedMessages);
+      if (syncMessagesToServer) {
+        agent.send(
+          JSON.stringify({
+            messages: resolvedMessages,
+            type: MessageType.CF_AGENT_CHAT_MESSAGES
+          })
+        );
+      }
+    }
+  };
+}

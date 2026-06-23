@@ -9,6 +9,7 @@ const entries = [
   "src/skills/index.ts",
   "src/skills/compile.ts",
   "src/chat/index.ts",
+  "src/chat/react.tsx",
   "src/chat-sdk/index.ts",
   "src/cli/index.ts",
   "src/mcp/index.ts",

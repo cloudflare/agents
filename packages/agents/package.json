@@ -56,6 +56,7 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
+    "@ai-sdk/react": "^3.0.204",
     "@cloudflare/ai-chat": ">=0.8.5 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
@@ -67,6 +68,9 @@
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/react": {
+      "optional": true
+    },
     "@cloudflare/ai-chat": {
       "optional": true
     },
@@ -172,6 +176,11 @@
       "types": "./dist/chat/index.d.ts",
       "import": "./dist/chat/index.js",
       "require": "./dist/chat/index.js"
+    },
+    "./chat/react": {
+      "types": "./dist/chat/react.d.ts",
+      "import": "./dist/chat/react.js",
+      "require": "./dist/chat/react.js"
     },
     "./chat-sdk": {
       "types": "./dist/chat-sdk/index.d.ts",
