@@ -7,7 +7,7 @@ import type {
   AgentToolStoredChunk
 } from "../agent-tool-types";
 
-function sortRuns<Part extends object>(
+function sortRuns<Part extends AgentToolRunPart>(
   runs: AgentToolRunState<Part>[]
 ): AgentToolRunState<Part>[] {
   return [...runs].sort((a, b) => {
@@ -16,7 +16,7 @@ function sortRuns<Part extends object>(
   });
 }
 
-function rebuildIndexes<Part extends object>(
+function rebuildIndexes<Part extends AgentToolRunPart>(
   runsById: Record<string, AgentToolRunState<Part>>
 ): Pick<AgentToolEventState<Part>, "runsByToolCallId" | "unboundRuns"> {
   const grouped: Record<string, AgentToolRunState<Part>[]> = {};
@@ -35,7 +35,7 @@ function rebuildIndexes<Part extends object>(
   return { runsByToolCallId: grouped, unboundRuns: sortRuns(unboundRuns) };
 }
 
-function emptyRun<Part extends object>(
+function emptyRun<Part extends AgentToolRunPart>(
   message: AgentToolEventMessage
 ): AgentToolRunState<Part> | undefined {
   const { event } = message;
@@ -55,7 +55,7 @@ function emptyRun<Part extends object>(
   return undefined;
 }
 
-function applyToRun<Part extends object>(
+function applyToRun<Part extends AgentToolRunPart>(
   prev: AgentToolRunState<Part> | undefined,
   message: AgentToolEventMessage
 ): AgentToolRunState<Part> | undefined {
@@ -121,7 +121,7 @@ function applyToRun<Part extends object>(
 }
 
 export function createAgentToolEventState<
-  Part extends object = AgentToolRunPart
+  Part extends AgentToolRunPart = AgentToolRunPart
 >(): AgentToolEventState<Part> {
   return {
     runsById: {},
@@ -130,7 +130,9 @@ export function createAgentToolEventState<
   };
 }
 
-export function applyAgentToolEvent<Part extends object = AgentToolRunPart>(
+export function applyAgentToolEvent<
+  Part extends AgentToolRunPart = AgentToolRunPart
+>(
   state: AgentToolEventState<Part>,
   message: AgentToolEventMessage
 ): AgentToolEventState<Part> {

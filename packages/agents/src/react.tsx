@@ -1004,7 +1004,7 @@ function agentToolDedupeKey(message: AgentToolEventMessage): string {
 }
 
 export function useAgentToolEvents<
-  Part extends object = AgentToolRunPart
+  Part extends AgentToolRunPart = AgentToolRunPart
 >(options: {
   agent: AgentToolEventAgent;
 }): {

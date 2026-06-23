@@ -218,9 +218,11 @@ export type AgentToolEventMessage = {
   event: AgentToolEvent;
 };
 
-export type AgentToolRunPart = object;
+export type AgentToolRunPart = { type: string };
 
-export type AgentToolRunState<Part extends object = AgentToolRunPart> = {
+export type AgentToolRunState<
+  Part extends AgentToolRunPart = AgentToolRunPart
+> = {
   runId: string;
   agentType: string;
   parentToolCallId?: string;
@@ -249,7 +251,9 @@ export type AgentToolRunState<Part extends object = AgentToolRunPart> = {
   subAgent: { agent: string; name: string };
 };
 
-export type AgentToolEventState<Part extends object = AgentToolRunPart> = {
+export type AgentToolEventState<
+  Part extends AgentToolRunPart = AgentToolRunPart
+> = {
   runsById: Record<string, AgentToolRunState<Part>>;
   runsByToolCallId: Record<string, AgentToolRunState<Part>[]>;
   unboundRuns: AgentToolRunState<Part>[];
