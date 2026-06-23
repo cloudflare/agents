@@ -6340,12 +6340,7 @@ export class Think<
           const resolved =
             typeof userMessage === "function"
               ? await userMessage(this.messages)
-              : this._normalizeRunTurnMessages(userMessage);
-
-          if (typeof userMessage !== "function" && resolved.length === 0) {
-            await callback.onDone();
-            return;
-          }
+              : this._normalizeChatMessages(userMessage);
 
           for (const msg of this._stampChannel(resolved, options?.channel)) {
             await this._appendMessageToHistory(msg);
@@ -6561,6 +6556,21 @@ export class Think<
     return [input];
   }
 
+  private _normalizeChatMessages(
+    input: Exclude<
+      TurnInputMessages,
+      (current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>
+    >
+  ): UIMessage[] {
+    if (typeof input === "string") {
+      return [this._userMessageFromText(input)];
+    }
+    if (Array.isArray(input)) {
+      return input;
+    }
+    return [input];
+  }
+
   private _assertRunTurnSubmitInput(
     input: TurnInputMessages
   ): asserts input is string | UIMessage | UIMessage[] {
@@ -6649,6 +6659,15 @@ export class Think<
     const input = options.input;
     if (input === undefined) {
       throw new TypeError('runTurn: mode "stream" requires input');
+    }
+
+    if (typeof input !== "function") {
+      const messages = this._normalizeRunTurnMessages(input);
+      if (messages.length === 0) {
+        await options.callback.onStart({ requestId: crypto.randomUUID() });
+        await options.callback.onDone();
+        return;
+      }
     }
 
     return this.chat(input, options.callback, {

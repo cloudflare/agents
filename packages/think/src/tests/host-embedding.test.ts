@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
   buildThinkAgentPath,
@@ -397,9 +398,5 @@ describe("Think host embedding helpers", () => {
 });
 
 function executionCtx(): ExecutionContext {
-  return {
-    waitUntil() {},
-    passThroughOnException() {},
-    props: {}
-  } as ExecutionContext;
+  return createExecutionContext();
 }

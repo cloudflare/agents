@@ -302,6 +302,30 @@ describe("Think — core", () => {
     expect(eventTypes).toContain("text-delta");
   });
 
+  it("should run inference for an empty string chat message", async () => {
+    const agent = await freshAgent(
+      `chat-empty-string-turn-${crypto.randomUUID()}`
+    );
+    await agent.setResponse("Greeting from empty input");
+
+    const result = await agent.testChat("");
+
+    expect(result.done).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.events.length).toBeGreaterThan(0);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: "user",
+      parts: [{ type: "text", text: "" }]
+    });
+    const assistantText = messages[1]?.parts.find(
+      (part): part is { type: "text"; text: string } => part.type === "text"
+    );
+    expect(assistantText?.text).toBe("Greeting from empty input");
+  });
+
   it("should return empty messages before first chat", async () => {
     const agent = await freshAgent("chat-empty");
 
