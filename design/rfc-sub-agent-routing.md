@@ -1,6 +1,7 @@
 # RFC: External addressability for sub-agents
 
-Status: proposed
+Status: accepted — shipped as an experimental routing primitive; D6 client retry
+hardening and the follow-up table remain open.
 
 > Current behavior note: this RFC records the original routing proposal. For
 > the current `parentAgent()` implementation, including facet-only direct

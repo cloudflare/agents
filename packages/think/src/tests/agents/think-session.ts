@@ -60,6 +60,7 @@ export type TestChatResult = {
   events: string[];
   done: boolean;
   error?: string;
+  requestId?: string;
   interruptedCalls: number;
 };
 
@@ -4846,6 +4847,59 @@ export class ThinkProgrammaticTestAgent extends Think {
       events: callback.events,
       done: callback.doneCalled,
       error: callback.errorMessage,
+      requestId: callback.requestId,
+      interruptedCalls: callback.interruptedCalls
+    };
+  }
+
+  async testRunTurnStreamArray(
+    messages: UIMessage[],
+    channel?: string
+  ): Promise<TestChatResult> {
+    const callback = new TestCollectingCallback();
+    await this.runTurn({ mode: "stream", input: messages, callback, channel });
+    return {
+      events: callback.events,
+      done: callback.doneCalled,
+      error: callback.errorMessage,
+      requestId: callback.requestId,
+      interruptedCalls: callback.interruptedCalls
+    };
+  }
+
+  async testRunTurnStreamWithFn(text: string): Promise<TestChatResult> {
+    const callback = new TestCollectingCallback();
+    await this.runTurn({
+      mode: "stream",
+      input: (current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ],
+      callback
+    });
+    return {
+      events: callback.events,
+      done: callback.doneCalled,
+      error: callback.errorMessage,
+      requestId: callback.requestId,
+      interruptedCalls: callback.interruptedCalls
+    };
+  }
+
+  async testRunTurnStreamEmpty(
+    input: "" | UIMessage[] | ((current: UIMessage[]) => UIMessage[])
+  ): Promise<TestChatResult> {
+    const callback = new TestCollectingCallback();
+    await this.runTurn({ mode: "stream", input, callback });
+    return {
+      events: callback.events,
+      done: callback.doneCalled,
+      error: callback.errorMessage,
+      requestId: callback.requestId,
       interruptedCalls: callback.interruptedCalls
     };
   }
@@ -4874,23 +4928,6 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.testRunTurnExpectError({
       mode: "submit",
       input: () => []
-    });
-  }
-
-  async testRunTurnStreamWithArray(): Promise<{
-    name: string;
-    message: string;
-  } | null> {
-    return this.testRunTurnExpectError({
-      mode: "stream",
-      input: [
-        {
-          id: crypto.randomUUID(),
-          role: "user",
-          parts: [{ type: "text", text: "hi" }]
-        }
-      ],
-      callback: new TestCollectingCallback()
     });
   }
 

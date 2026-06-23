@@ -70,6 +70,14 @@ Legend: ✅ covered · ⚠️ partial / indirect · — none · 🚫 gated (opt-
 | Codemode (dynamic worker exec)                                           |      ✅       |                                            ✅                                             |                                                       ✅                                                        |                                                                            ✅ `codemode/src/tests/` (browser)                                                                             |                                   —                                    |       ⚠️ `codemode/e2e/` (**not nightly**)       |            —             |
 | Shared-engine genericity (pi / tanstack adapters)                        |      ✅       |                                            ✅                                             |                                                       ✅                                                        |                                                                                             —                                                                                             | ✅ `experimental/pi-recovery`, `tanstack-recovery` (workers-ai leg 🚫) |                        —                         |     ✅ tanstack leg      |
 
+### Accepted coverage gaps
+
+- **Chat recovery orphan-persist (c) tool-approval dedup:** no real-SIGKILL L4
+  e2e by design. The behavior is covered at L1/2 and L3 via
+  `reconcileOrphanPartial` unit coverage and `durable-chat-recovery.test.ts`;
+  the RFC progress log records the L4 gap as accepted because marginal value is
+  low and harness cost is high.
+
 ## Skipped & quarantined test debt
 
 Tracked so it doesn't rot. **Group A** is intentional opt-in (live/billable deps);
@@ -157,3 +165,8 @@ sign-off; the non-workflow fix is already applied.
   transcript-delivery divergence (Think pushes; ai-chat owns via
   `getInitialMessages`) is recorded as a keep-divergent row in the chat-recovery
   RFC convergence matrix.
+- **Design-reconciliation follow-up:** corrected stale RFC status lines for
+  shipped Turns, sub-agent routing, and Channels work; kept the ai-chat
+  `agent-tool-recovery` L4 parity coverage in the feature matrix; and documented
+  the remaining accepted tool-approval-dedup SIGKILL gap separately from skipped
+  test debt.

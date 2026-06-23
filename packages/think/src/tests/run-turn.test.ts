@@ -29,6 +29,48 @@ async function waitFor(
   throw new Error("Timed out waiting for condition");
 }
 
+type TurnObservabilityEvent = {
+  type: string;
+  name?: string;
+  payload: {
+    requestId?: string;
+    trigger?: string;
+    admission?: string;
+    continuation?: boolean;
+    status?: string;
+    durationMs?: number;
+    error?: string;
+  };
+};
+
+function captureTurnEvents(name: string) {
+  const events: TurnObservabilityEvent[] = [];
+  const unsubscribe = subscribe("chat", (event) => {
+    if (
+      event.name?.startsWith(name) &&
+      (event.type === "chat:turn:start" || event.type === "chat:turn:finish")
+    ) {
+      events.push(event as TurnObservabilityEvent);
+    }
+  });
+  return { events, unsubscribe };
+}
+
+function expectTurnPair(
+  events: TurnObservabilityEvent[],
+  start: Record<string, unknown>,
+  finish: Record<string, unknown>
+) {
+  expect(events.map((event) => event.type)).toEqual([
+    "chat:turn:start",
+    "chat:turn:finish"
+  ]);
+  expect(events[0].payload).toMatchObject(start);
+  expect(events[1].payload).toMatchObject(finish);
+  expect(events[0].payload.requestId).toBe(events[1].payload.requestId);
+  expect(typeof events[1].payload.durationMs).toBe("number");
+}
+
 describe("Think — runTurn", () => {
   it("wait mode returns TurnResult equivalent to saveMessages", async () => {
     const agent = await freshProgrammaticAgent("runturn-wait-parity");
@@ -103,6 +145,140 @@ describe("Think — runTurn", () => {
       status: "completed"
     });
     expect(typeof events[1].payload.durationMs).toBe("number");
+  });
+
+  it("emits chat:turn metadata for continuation mode", async () => {
+    const name = `runturn-events-continuation-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    await agent.setProgrammaticResponseForTest("First answer");
+    await agent.testRunTurnWaitString("Start");
+    await agent.setProgrammaticResponseForTest("Continued answer");
+    const { events, unsubscribe } = captureTurnEvents(name);
+
+    let result: TurnResult;
+    try {
+      result = (await agent.testRunTurnContinuation()) as TurnResult;
+    } finally {
+      unsubscribe();
+    }
+
+    expectTurnPair(
+      events,
+      {
+        requestId: result.requestId,
+        trigger: "programmatic",
+        admission: "queue",
+        continuation: true
+      },
+      {
+        requestId: result.requestId,
+        trigger: "programmatic",
+        admission: "queue",
+        continuation: true,
+        status: "completed"
+      }
+    );
+  });
+
+  it("emits chat:turn metadata for RPC chat", async () => {
+    const name = `runturn-events-rpc-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    await agent.setProgrammaticResponseForTest("RPC reply");
+    const { events, unsubscribe } = captureTurnEvents(name);
+
+    try {
+      await agent.testChat("via rpc");
+    } finally {
+      unsubscribe();
+    }
+
+    expectTurnPair(
+      events,
+      {
+        trigger: "rpc",
+        admission: "queue",
+        continuation: false
+      },
+      {
+        trigger: "rpc",
+        admission: "queue",
+        continuation: false,
+        status: "completed"
+      }
+    );
+  });
+
+  it("emits no chat:turn metadata for skipped empty wait input", async () => {
+    const name = `runturn-events-empty-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    const { events, unsubscribe } = captureTurnEvents(name);
+
+    try {
+      await agent.testRunTurnWait({ mode: "wait", input: "" });
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("emits ordered chat:turn pairs for sequential turns", async () => {
+    const name = `runturn-events-sequential-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    await agent.setProgrammaticResponseForTest("First reply");
+    const { events, unsubscribe } = captureTurnEvents(name);
+
+    try {
+      await agent.testRunTurnWaitString("one");
+      await agent.setProgrammaticResponseForTest("Second reply");
+      await agent.testRunTurnWaitString("two");
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "chat:turn:start",
+      "chat:turn:finish",
+      "chat:turn:start",
+      "chat:turn:finish"
+    ]);
+    expect(events[0].payload.requestId).toBe(events[1].payload.requestId);
+    expect(events[2].payload.requestId).toBe(events[3].payload.requestId);
+    expect(events[0].payload.requestId).not.toBe(events[2].payload.requestId);
+  });
+
+  it("does not expose channel on chat:turn metadata", async () => {
+    const name = `runturn-events-channel-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    await agent.setProgrammaticResponseForTest("Channel reply");
+    const { events, unsubscribe } = captureTurnEvents(name);
+
+    try {
+      await agent.testRunTurnWait({
+        mode: "wait",
+        input: "via channel",
+        channel: "web"
+      });
+    } finally {
+      unsubscribe();
+    }
+
+    expectTurnPair(
+      events,
+      {
+        trigger: "programmatic",
+        admission: "queue",
+        continuation: false
+      },
+      {
+        trigger: "programmatic",
+        admission: "queue",
+        continuation: false,
+        status: "completed"
+      }
+    );
+    expect(Object.hasOwn(events[0].payload, "channel")).toBe(false);
+    expect(Object.hasOwn(events[1].payload, "channel")).toBe(false);
   });
 
   it("wait mode supports array input", async () => {
@@ -301,6 +477,122 @@ describe("Think — runTurn", () => {
     });
   });
 
+  it("stream mode supports array input", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stream-array");
+    await agent.setProgrammaticResponseForTest("Array streamed");
+
+    const result = await agent.testRunTurnStreamArray([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Array one" }]
+      },
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Array two" }]
+      }
+    ]);
+    expect(result.done).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.events.length).toBeGreaterThan(0);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(3);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "user",
+      "assistant"
+    ]);
+    expect(textPart(messages[2] ?? {})).toMatchObject({
+      type: "text",
+      text: "Array streamed"
+    });
+  });
+
+  it("stream mode supports function input evaluated inside the turn", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stream-fn");
+    await agent.testChat("Seed history");
+    await agent.setProgrammaticResponseForTest("Function streamed");
+
+    const result = await agent.testRunTurnStreamWithFn("Function stream input");
+    expect(result.done).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.events.length).toBeGreaterThan(0);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+    expect(textPart(messages[2] ?? {})).toMatchObject({
+      type: "text",
+      text: "Function stream input"
+    });
+    expect(textPart(messages[3] ?? {})).toMatchObject({
+      type: "text",
+      text: "Function streamed"
+    });
+  });
+
+  it("stream mode completes static empty input without running inference", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stream-empty-static");
+
+    const emptyString = await agent.testRunTurnStreamEmpty("");
+    expect(emptyString.requestId).toBeTruthy();
+    expect(emptyString.done).toBe(true);
+    expect(emptyString.error).toBeUndefined();
+    expect(emptyString.events).toHaveLength(0);
+
+    const emptyArray = await agent.testRunTurnStreamEmpty([]);
+    expect(emptyArray.requestId).toBeTruthy();
+    expect(emptyArray.done).toBe(true);
+    expect(emptyArray.error).toBeUndefined();
+    expect(emptyArray.events).toHaveLength(0);
+
+    expect(await agent.getStoredMessages()).toHaveLength(0);
+  });
+
+  it("stream mode preserves function-returning-empty behavior", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stream-empty-fn");
+    await agent.testChat("Seed history");
+    await agent.setProgrammaticResponseForTest("Empty function streamed");
+
+    const result = await agent.testRunTurnStreamEmpty(() => []);
+    expect(result.error).toBeUndefined();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(3);
+    expect(textPart(messages[2] ?? {})).toMatchObject({
+      type: "text",
+      text: "Empty function streamed"
+    });
+  });
+
+  it("stream mode stamps channel metadata on array input", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stream-array-channel");
+    await agent.setProgrammaticResponseForTest("Channel streamed");
+
+    await agent.testRunTurnStreamArray(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "Channel one" }]
+        },
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "Channel two" }]
+        }
+      ],
+      "web"
+    );
+
+    const messages = (await agent.getStoredMessages()) as Array<
+      UIMessage & { metadata?: { channel?: string } }
+    >;
+    expect(messages[0]?.metadata?.channel).toBe("web");
+    expect(messages[1]?.metadata?.channel).toBe("web");
+  });
+
   it("validates input vs continuation for wait mode", async () => {
     const agent = await freshProgrammaticAgent("runturn-validate-wait");
 
@@ -346,7 +638,7 @@ describe("Think — runTurn", () => {
     expect(streamMissing?.message).toContain('mode "stream" requires input');
   });
 
-  it("validates stream requires callback and rejects unsupported input shapes", async () => {
+  it("validates stream requires callback and disallows continuation", async () => {
     const agent = await freshProgrammaticAgent("runturn-validate-stream");
 
     const noCallback = await agent.testRunTurnExpectError({
@@ -369,9 +661,6 @@ describe("Think — runTurn", () => {
     });
     expect(continuationOnStream?.name).toBe("TypeError");
     expect(continuationOnStream?.message).toContain("continuation");
-
-    const arrayInput = await agent.testRunTurnStreamWithArray();
-    expect(arrayInput?.message).toContain("array input");
 
     const fnSubmit = await agent.testRunTurnSubmitWithFunction();
     expect(fnSubmit?.message).toContain("function input");

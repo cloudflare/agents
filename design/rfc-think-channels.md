@@ -1,4 +1,6 @@
-Status: in progress
+Status: v1 shipped; five tracked follow-ups remain (DeliveryKind on `post()`,
+sub-agent channels, attachment ordering, voice transport, and recovery
+convergence).
 
 # RFC: Think channels and notices
 

@@ -1,4 +1,5 @@
-Status: proposed
+Status: accepted — `runTurn`, `addMessages`, `TurnSpec`, and `_admitTurn`
+shipped; the remaining input-superset work is tracked as follow-up.
 
 # RFC: Think turns — `runTurn()`, `TurnSpec`, and `addMessages()`
 
@@ -147,11 +148,11 @@ turn.
 
 ## The proposal
 
-Three additions, in order of importance (#3 is already shipped — see Status):
+Three additions, in order of importance (all three have shipped — see Status):
 
-1. `runTurn(options)` — public unifying turn API. **(not built)**
+1. `runTurn(options)` — public unifying turn API. **(✅ shipped)**
 2. `TurnSpec` + an internal `_admitTurn(spec)` routine — the shared admission
-   path the existing methods delegate to. **(not built)**
+   path the existing methods delegate to. **(✅ shipped)**
 3. `addMessages(...)` — public no-turn transcript write. **(✅ shipped)**
 
 ### 1. `runTurn(options)`
@@ -798,7 +799,9 @@ must be preserved by the parity tests, not by this prose.
 
 ## The decision
 
-_Pending review._ Proposed direction: ship `runTurn` + `addMessages` as additive
-APIs, extract `_admitTurn`/`TurnSpec` as a behavior-preserving internal refactor
-sequenced after recovery RFC Phases 0–1 (ideally Phase 3), and lead the docs with
-`runTurn` while keeping the existing methods as shortcuts.
+Accepted and shipped. `runTurn` + `addMessages` landed as additive APIs,
+`_admitTurn`/`TurnSpec` landed as a behavior-preserving internal refactor after
+the recovery foundation, and docs can lead with `runTurn` while keeping existing
+methods as shortcuts. Remaining input-superset work is tracked separately:
+`stream` should accept array/function input, while `submit` + function input
+requires durable submission pipeline changes.
