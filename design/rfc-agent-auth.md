@@ -95,31 +95,30 @@ manager matches the requirement to a grant owned by the current Agent.
 For remote MCP tools, the MCP server owns the tool definitions and OAuth discovery. The
 Agent developer does not redeclare them.
 
-### Every execution path submits the same authorization request
+### Every execution path submits the same authority operation
 
-MCP, local AI SDK tools, and codemode must not implement separate permission systems.
-Before a side effect crosses its host boundary, each adapter constructs the same
-`ToolInvocation` and asks `this.auth.authorize()` for a decision.
+MCP, local AI SDK tools, codemode, and libraries such as Workspace must not implement
+separate permission systems. Before a consequential action crosses its last controllable
+boundary, each adapter constructs the same `AuthorityOperation` and asks
+`this.auth.authorize()` for a decision.
 
 ```ts
-interface ToolAnnotations {
-  title?: string;
-  readOnlyHint?: boolean;
-  destructiveHint?: boolean;
-  idempotentHint?: boolean;
-  openWorldHint?: boolean;
-}
-
-interface ToolInvocation {
+interface AuthorityOperation {
   callId: string;
   principal: AgentPrincipal;
-  source: { type: "mcp"; server: string } | { type: "local"; authId: string };
-  tool: {
-    name: string;
+  domain: string; // e.g. "tool", "workspace"
+  action: string; // e.g. "delete_worker", "fs.writeFile"
+  resource?: {
+    type: string; // e.g. "mcp_server", "path", "git_remote"
+    id: string;
+  };
+  parameters: unknown; // validated, normalized parameters
+  capability?: {
+    id: string;
     definitionDigest: string;
     annotations?: ToolAnnotations;
   };
-  input: unknown; // validated arguments
+  context?: Record<string, unknown>;
   execution: {
     mode: "direct" | "codemode";
     executionId?: string;
@@ -128,9 +127,10 @@ interface ToolInvocation {
 }
 ```
 
-`ToolAnnotations` uses MCP's standard annotation vocabulary (`readOnlyHint`,
-`destructiveHint`, `idempotentHint`, `openWorldHint`) for both MCP and local tools.
-Annotations are policy hints, not trusted proof of behavior.
+Tool adapters use MCP's standard annotation vocabulary (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`, `openWorldHint`). Other domains supply their own
+stable action, resource, and normalized parameter vocabulary. Domain metadata informs
+policy but is not trusted proof of behavior.
 
 ## Native Agent API
 
@@ -354,8 +354,9 @@ Policy is mutable Agent state and does not modify the upstream grant.
 
 ```ts
 await agent.auth.policy.deny({
-  source: { type: "mcp", server: "cloudflare" },
-  tools: ["delete_worker"]
+  domain: "tool",
+  actions: ["delete_worker"],
+  selector: { mcpServer: "cloudflare" }
 });
 ```
 
@@ -366,7 +367,7 @@ This takes effect on the next call while leaving the Cloudflare OAuth connection
 All execution paths call:
 
 ```ts
-this.auth.authorize(invocation);
+this.auth.authorize(operation);
 ```
 
 and receive:
@@ -379,59 +380,55 @@ type AuthorizationDecision =
       policyRevision: number;
       reason: string;
       ruleId?: string;
-    }
-  | {
-      decision: "ask";
-      policyRevision: number;
-      requestId: string;
-      summary: string;
+      request?: {
+        id: string;
+        summary: string;
+      };
     };
 ```
 
 - `allow` permits credential resolution and dispatch.
-- `ask` durably records one pending authorization request and pauses the host execution.
-- `deny` fails without resolving or using a credential.
+- A denial without `request` is terminal under current policy.
+- A denial with `request` is a requestable denial: execution remains blocked while a
+  governance workflow decides whether current policy should permit the operation.
 
-The policy engine does not execute tools and does not own codemode replay. It only
-produces and persists authorization decisions.
+Policy rules retain `ask` as an ergonomic authoring decision. At runtime, `ask` produces
+a denial with a durable request; it never permits execution by itself. The policy engine
+does not execute operations and does not own codemode replay.
 
 ### Rules
 
 ```ts
 interface PolicyRule {
   id: string;
-  source: { type: "mcp"; server: string } | { type: "local"; authId: string };
-  tools?: string[];
-  annotations?: {
-    readOnly?: boolean;
-    destructive?: boolean;
-    openWorld?: boolean;
-  };
-  constraints?: Record<string, unknown>;
+  domain: string;
+  actions?: string[];
+  resources?: Array<{ type?: string; id?: string }>;
+  selector?: unknown; // interpreted by the registered domain adapter
   decision: "allow" | "ask" | "deny";
-  definitionDigest?: string;
+  capabilityDigest?: string;
   expiresAt?: number;
 }
 ```
 
-Rules are stored in the Agent. They may target an exact tool, an MCP server or a local
-auth descriptor's derived ID, a risk annotation, or validated input constraints such as
-an account ID. Server-side developer APIs accept the descriptor and derive this ID; client
-APIs receive the opaque ID from tool/grant metadata rather than constructing it.
+Rules are stored in the Agent. Generic fields match domain, action, and exact resource.
+The optional selector lets a domain add typed constraints such as an MCP server, auth
+descriptor, workspace path prefix, backend, or Git remote without teaching the core
+policy engine every resource ontology.
 
-`definitionDigest` prevents a persisted approval from silently applying after a tool's
-schema, annotations, or auth requirement changes.
+`capabilityDigest` prevents a persisted approval from silently applying after a discovered
+tool or other capability definition changes.
 
 ### Durable authorization requests
 
-A request is idempotent by `callId` and invocation digest. Concurrent retries return the
+A request is idempotent by `callId` and operation digest. Concurrent retries return the
 same pending request instead of opening multiple approval prompts.
 
 ```ts
 interface AuthorizationRequest {
   id: string;
   callId: string;
-  invocationDigest: string;
+  operationDigest: string;
   policyRevision: number;
   status: "pending" | "approved" | "denied" | "expired";
   summary: string;
@@ -439,6 +436,10 @@ interface AuthorizationRequest {
   resolvedAt?: number;
 }
 ```
+
+The operation digest is SHA-256 over a canonical serialization of the normalized domain,
+action, resource, parameters, principal, and capability definition. Domain adapters must
+define normalization before hashing, including omitted defaults and set-like arrays.
 
 Only bounded, redacted policy inputs and their digest are persisted. Credentials and
 OAuth codes are never part of an authorization request.
@@ -453,7 +454,9 @@ agent.auth.requests.resolve(requestId, "deny");
 ```
 
 `always_allow` writes a policy rule and resolves the request in the same storage
-transaction. A duplicate or stale resolution is a no-op.
+transaction. A duplicate or stale resolution is a no-op. Approval is an input to a fresh
+policy evaluation, not a grant: the PEP recomputes the operation digest and calls
+`authorize()` again immediately before execution.
 
 ### Policy sources and precedence
 
@@ -473,7 +476,7 @@ An organization may additionally install a mandatory policy provider:
 
 ```ts
 interface MandatoryPolicyProvider {
-  evaluate(invocation: ToolInvocation): Promise<"allow" | "ask" | "deny">;
+  evaluate(operation: AuthorityOperation): Promise<"allow" | "ask" | "deny">;
 }
 ```
 
@@ -487,9 +490,9 @@ closed.
 For example, an application may opt into an annotation-based policy:
 
 ```ts
-this.auth.policy.setApplicationPolicy(({ tool }) => {
-  if (tool.annotations?.destructiveHint) return "ask";
-  if (tool.annotations?.readOnlyHint) return "allow";
+this.auth.policy.setApplicationPolicy(({ capability }) => {
+  if (capability?.annotations?.destructiveHint) return "ask";
+  if (capability?.annotations?.readOnlyHint) return "allow";
   return "ask";
 });
 ```
@@ -505,15 +508,18 @@ not client-side source-code heuristics.
 
 ### Enforcement
 
-Authorization is checked:
+Authorization is checked at the last controllable boundary before an operation. Tool
+adapters may also evaluate policy during listing to hide denied tools from model and
+codemode discovery, but filtering is exposure control rather than authorization.
 
-1. When tools are listed, to hide denied tools from model and codemode discovery.
-2. When validated input is available, before credential resolution.
-3. After approval, immediately before transport or `fetch` dispatch.
+For an operation that pauses, authorization is checked:
 
-The final check uses the latest policy revision and the same invocation digest. A stale
-approval cannot bypass a policy or tool-definition change made while the call was
-waiting.
+1. With validated, normalized parameters before credential resolution or dispatch.
+2. Again after approval, immediately before the effect.
+
+The final check uses the latest policy revision and the same operation digest. A stale
+approval cannot bypass a policy, parameter, principal, or capability-definition change
+made while the call was waiting.
 
 ### Policy API
 
@@ -523,7 +529,7 @@ agent.auth.policy.ask(selector);
 agent.auth.policy.deny(selector);
 agent.auth.policy.list();
 agent.auth.policy.remove(ruleId);
-agent.auth.policy.evaluate(invocation); // pure explanation; does not create a request
+agent.auth.policy.evaluate(operation); // pure explanation; does not create a request
 ```
 
 Policy and request administration are authenticated owner APIs. They are not model tools
@@ -596,8 +602,79 @@ this envelope without being required for local grant isolation and policy.
 
 ## Integration adapters
 
-The authorization kernel is independent of how a tool was discovered or executed. MCP,
-AI SDK, and codemode are adapters into the same `ToolInvocation` and decision contract.
+The authorization kernel is independent of how an operation was discovered or executed.
+MCP, AI SDK, codemode, and domain libraries are adapters into the same
+`AuthorityOperation` and decision contract.
+
+### Domain library hook
+
+A domain library owns the operation vocabulary because it knows where effects occur and
+which parameters matter. It exposes a small framework-neutral gate:
+
+```ts
+interface OperationGate<Operation> {
+  run<T>(operation: Operation, effect: () => Promise<T>): Promise<T>;
+}
+
+interface AuthorityDomainAdapter<Operation> {
+  domain: string;
+  normalize(
+    operation: Operation
+  ): Omit<AuthorityOperation, "callId" | "principal" | "execution">;
+  summarize(operation: Operation): string;
+  matches?(selector: unknown, operation: Operation): boolean;
+}
+```
+
+`AgentAuthManager.gate(adapter)` returns an `OperationGate` that the library accepts. The
+domain package depends only on the structural hook, not on Agents:
+
+```ts
+const workspace = new Workspace({
+  storage: this.ctx.storage,
+  gate: this.auth.gate(workspaceAuthority())
+});
+```
+
+The gate executes this sequence:
+
+1. Normalize the domain operation.
+2. Authorize it against current policy.
+3. On a requestable denial, persist/present the request and do not call `effect`.
+4. On allow, recompute the operation digest and invoke `effect` exactly once.
+5. Record the decision and outcome without secret or raw-content leakage.
+
+The callback shape keeps the check at the last controllable boundary and binds it to the
+exact parameters closed over by `effect`. Authorization and observability remain separate:
+the gate may prevent or pause work; an observer records telemetry and must not alter
+execution.
+
+A library must mediate every public path capable of the claimed effect. An adapter on an
+AI tool wrapper is insufficient if callers can reach a raw filesystem, provider, RPC stub,
+or backend directly.
+
+### Workspace mapping
+
+Workspace operations can normalize into the shared model without becoming tools:
+
+```ts
+{ domain: "workspace", action: "fs.readFile",  resource: { type: "path", id: path } }
+{ domain: "workspace", action: "fs.writeFile", resource: { type: "path", id: path } }
+{ domain: "workspace", action: "shell.exec",   resource: { type: "backend", id: backend } }
+{ domain: "workspace", action: "git.push",     resource: { type: "git_remote", id: remote } }
+```
+
+Workspace should gate logical public operations, not every internal filesystem call made
+by a composite operation. For example, `git.commit` is one operation even though it reads
+and writes many VFS paths. Internal raw facades use private capabilities; public `fs`,
+`git`, `shell`, RPC stubs, assets, artifacts, and sync entry points must all pass through
+the gate.
+
+`shell.exec` is open-world: once a process starts, the host cannot pre-authorize each file
+or network effect it produces. The host can authorize the command as one operation and
+audit the resulting sync changes. Claims of path-level or egress enforcement require an
+additional PEP in the backend/FUSE/egress layer; the host hook must not claim controls it
+cannot enforce.
 
 ### Remote MCP tools
 
@@ -616,7 +693,7 @@ The MCP adapter:
 2. Computes `definitionDigest` from server identity, tool name, schema, annotations, and
    available authorization metadata.
 3. Filters denied tools during listing.
-4. Constructs a `ToolInvocation` after MCP arguments validate.
+4. Constructs an `AuthorityOperation` after MCP arguments validate.
 5. Dispatches only after `this.auth.authorize()` returns `allow`.
 6. Attaches the MCP credential after authorization, never before.
 
@@ -666,8 +743,9 @@ It is used directly:
 streamText({ model, tools: { getForecast } });
 ```
 
-The wrapper validates input, constructs `ToolInvocation`, and calls the same authorization
-kernel. Only after `allow` does it resolve the grant and invoke the authored handler with:
+The wrapper validates input, constructs an `AuthorityOperation`, and calls the same
+authorization kernel. Only after `allow` does it resolve the grant and invoke the authored
+handler with:
 
 ```ts
 interface ToolAuth {
@@ -686,13 +764,14 @@ normalized to the same MCP `ToolAnnotations`. Existing `requiresApproval` and AI
 `needsApproval` remain compatibility inputs that produce `ask`; no new safeguard field is
 introduced.
 
-Before a connector call, the host constructs a `ToolInvocation` with the codemode
+Before a connector call, the host constructs an `AuthorityOperation` with the codemode
 `executionId` and sequence and calls `this.auth.authorize()`:
 
 - `allow` lets the durable runtime mark the action executing and dispatch it.
-- `ask` stores the authorization `requestId` on the pending log entry and pauses.
-- `deny` terminates the call without dispatch.
-- Resume rechecks the latest policy and invocation digest before dispatch.
+- A requestable denial stores the authorization request ID on the pending log entry and
+  pauses.
+- A terminal denial ends the call without dispatch.
+- Resume rechecks the latest policy and operation digest before dispatch.
 
 Codemode retains responsibility for deterministic replay, result logging, and preventing
 further side effects after pause. The auth manager owns policy and approval state. This
@@ -733,7 +812,7 @@ Providers run against a fake token endpoint and deterministic store. Required ca
 
 ### Integration tests
 
-Create one `ToolInvocation` fixture and run it through:
+Create one `AuthorityOperation` fixture and run it through:
 
 - A local `authenticatedTool()`.
 - An MCP tool returned by `getAITools()`.
@@ -756,11 +835,16 @@ The manager emits structured events without credential material:
 interface AuthorityEvent {
   agentId: string;
   user?: { issuer: string; subject: string };
-  source: { type: "mcp" | "local"; id: string };
-  tool: string;
-  decision: "allow" | "ask" | "deny";
+  domain: string;
+  action: string;
+  resource?: { type: string; id: string };
+  operationDigest: string;
+  decision: "allow" | "deny";
+  policyRevision: number;
   ruleId?: string;
+  requestId?: string;
   grantId?: string;
+  outcome?: "succeeded" | "failed";
   timestamp: number;
 }
 ```
@@ -801,6 +885,38 @@ must not make one Agent's grant discoverable by another.
 Central policy and credentials are independent. A broad grant may remain valid while a
 central or user policy immediately denies one operation.
 
+## Standards posture and deferred ideas
+
+The core SDK contracts are intentionally smaller than the surrounding standards work.
+They provide adaptation points without making unfinished profiles mandatory.
+
+- **AuthZEN Authorization API 1.0** is the natural wire adapter for a remote mandatory
+  policy provider. `AuthorityOperation` maps to subject, resource, action, and context.
+  The SDK does not expose AuthZEN JSON as its internal TypeScript API because local policy
+  should not require a network protocol.
+- **AuthZEN Access Request and Approval Profile** provides the right model for requestable
+  denials: denial binding, idempotent request creation, an opaque task handle, and fresh
+  reevaluation after governance completes. The Agent-local request store implements these
+  semantics; a central provider may expose the profile directly.
+- **MCP asynchronous approval for tool calls (SEP-2848)** is currently experimental. If it
+  lands, the MCP adapter can map a remote requestable denial to MCP Tasks. The local
+  authorization kernel must not depend on that SEP, and client policy remains a separate
+  gate from server-owned approval.
+- **RFC 8785 JSON Canonicalization Scheme** is a suitable basis for operation and
+  capability digests once each domain has normalized defaults and set-like values.
+  Canonical JSON cannot supply missing domain semantics by itself.
+- **RFC 8693 token exchange, RAR (RFC 9396), DPoP, EMA/ID-JAG, actor profiles, and
+  transaction tokens** may strengthen credential projection and cross-domain identity.
+  They do not replace execution-time policy and are deferred from the minimal kernel.
+- **Mission/task authority** may later supply a durable purpose and lifecycle reference in
+  `AuthorityOperation.context`. This RFC does not define Mission shaping, authority-set
+  compilation, expansion, or cross-domain propagation. Adding those concepts now would
+  overload a design whose immediate job is consistent local enforcement.
+
+The practical rule is: evaluate locally where domain meaning lives, carry authority only
+when it must travel, and keep approval as input to a fresh decision rather than turning it
+into ambient authority.
+
 ## Relationship to workers-oauth-provider
 
 The packages have separate responsibilities:
@@ -829,17 +945,151 @@ A separate package or service binding is not needed for the first implementation
 third-party provider ecosystem emerges, the small provider contracts can later move into
 a zero-dependency core package.
 
-## Implementation sequence
+## Ownership and migration plan
 
-1. Add `Agent.auth` with Agent-local grant, policy, and authorization-request tables.
-2. Implement the canonical `ToolInvocation` and durable `authorize()` contract.
-3. Adapt MCP OAuth storage and enforce authorization in MCP listing and dispatch.
-4. Route codemode decisions through `authorize()` while retaining its replay log.
-5. Add `authenticatedTool()` and API-key provisioning for local tools.
-6. Add principal resolution, policy management APIs, and structured audit events.
+The migration moves shared authority concerns, not protocol implementations.
 
-This sequence solves credential durability and MCP policy first, without requiring the
-unresolved external Agent identity design.
+| Concern                                                                     | Owner after migration                                       |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| MCP transport, discovery, tool schemas, OAuth challenges, callback routing  | `MCPClientManager` and MCP SDK                              |
+| OAuth protocol mechanics and MCP `OAuthClientProvider` compatibility        | Existing MCP OAuth provider, backed by `Agent.auth` storage |
+| Agent-local grants, imported API keys, policy rules, authorization requests | `AgentAuthManager`                                          |
+| Tool listing and `tools/call` interception                                  | MCP adapter calling `Agent.auth`                            |
+| AI SDK local-tool wrapping                                                  | `authenticatedTool()` adapter                               |
+| Codemode replay, result log, pause/resume, rollback                         | `CodemodeRuntime`                                           |
+| Authorization decisions and approval request lifecycle                      | `AgentAuthManager`                                          |
+| Workspace operation vocabulary and final effect boundaries                  | Workspace hook/adapter                                      |
+| Authorization audit records                                                 | `AgentAuthManager` / configured audit sink                  |
+| Tracing and performance telemetry                                           | Existing observability systems                              |
+
+MCP is not reimplemented inside `agents/auth`. The existing OAuth client provider remains
+the MCP SDK adapter, including state, PKCE, dynamic registration, token refresh,
+credential invalidation, authorization redirects, and callback behavior. Its durable
+storage methods delegate to `AgentAuthManager` so MCP OAuth grants use the same ownership,
+redaction, and revocation model as local credentials. Existing storage keys can be read
+through a compatibility adapter and migrated lazily after a successful read; no OAuth
+reconnection is required solely for this migration.
+
+### Phase 1: Introduce the kernel without behavior changes
+
+- Add `Agent.auth`, the `AuthorityOperation` type, domain-adapter contracts, policy and
+  request tables, and the audit sink.
+- Add deterministic operation normalization/digests and pure policy tests.
+- Keep MCP OAuth, AI SDK approval, and codemode approval behavior unchanged.
+- Provide compatibility adapters for existing `needsApproval` and `requiresApproval`.
+
+This phase creates no new prompts and moves no protocol state.
+
+### Phase 2: Unify local AI SDK tools
+
+- Ship `authenticatedTool()` and API-key/OAuth descriptors.
+- Wrap local execution at the final `execute` boundary.
+- Translate AI SDK `needsApproval` into application policy returning `ask`.
+- Store Agent-local credentials, policy, requests, and audit records in `Agent.auth`.
+
+Local tools become the first end-to-end user of the kernel without changing AI SDK's
+returned `Tool` shape.
+
+### Phase 3: Adapt MCP credentials, then MCP policy
+
+First adapt storage only:
+
+- Make `DurableObjectOAuthClientProvider.tokens()`, `saveTokens()`, and
+  `invalidateCredentials()` delegate to Agent-local grant storage.
+- Preserve MCP SDK interfaces, discovery, transports, redirects, callbacks, and errors.
+- Keep existing MCP server records and connection lifecycle in `MCPClientManager`.
+
+Then add authorization at two existing seams:
+
+- `getAITools()` / `listTools()` use policy only for exposure filtering.
+- `MCPClientManager.callTool()` constructs and authorizes the operation after argument
+  validation and immediately before `client.callTool()`.
+
+Direct `callTool()` and AI SDK wrappers therefore cannot bypass policy. Server-originated
+MCP elicitation remains separate: it handles decisions the remote server owns, while
+Agent policy governs whether this Agent sends the call.
+
+### Phase 4: Unify codemode authorization without moving replay
+
+Codemode keeps its durable execution tables and semantics. Its current `decide()` mixes
+replay lookup with a boolean approval decision, so migration is staged:
+
+1. Replace the single `decide()` step with a planning step that returns `replay`,
+   `already_authorized`, or `authorize_fresh` for the `(executionId, sequence)` entry.
+2. For `replay`, return the recorded result without consulting policy; no new effect will
+   occur.
+3. For `authorize_fresh`, the host builds the same `AuthorityOperation` used by direct
+   execution and calls `Agent.auth.authorize()`.
+4. Store `authorization_request_id`, `operation_digest`, and `policy_revision` on the
+   codemode log entry. Existing `requires_approval` remains temporarily for schema and API
+   compatibility.
+5. A requestable denial marks the execution paused. A terminal denial marks it rejected.
+6. On resume, reevaluate current policy and the operation digest before changing the log
+   entry from pending to executing.
+
+There is no cross-facet atomic transaction. Recovery relies on idempotent request IDs and
+reconciliation: an approved request with a still-pending codemode row is safe to resume;
+an executing row retains codemode's existing crash/re-execution semantics. The migration
+does not claim exactly-once effects.
+
+After callers migrate, `requiresApproval` remains an authoring compatibility field but no
+longer creates or owns approval state. Codemode pending-action APIs return the linked
+Agent-auth request, and approval UIs resolve that request rather than mutating a separate
+codemode policy.
+
+### Phase 5: Move approval presenters onto durable requests
+
+- Adapt chat approval, MCP-facing UI, workflow UI, and custom clients to present the same
+  `AuthorizationRequest`.
+- Remove in-memory/session approval caches and duplicate consent-policy stores once their
+  callers have migrated.
+- Preserve presentation-specific UX; only request identity, state, and resolution become
+  shared.
+- Always reevaluate after approval. Approval is not itself a grant or permit.
+
+### Phase 6: Add domain libraries, starting with Workspace
+
+Workspace adds a framework-neutral `OperationGate` option and a Workspace domain adapter.
+The migration must cover all public effect paths, not only future AI tools:
+
+- Wrap public `Workspace.fs`; do not return an ungated raw filesystem when a gate is set.
+- Wrap `workspace.git` at logical Git operations. Internal VFS calls run under that outer
+  operation rather than generating hundreds of independent prompts.
+- Gate `shell.exec`, `get`/`kill` where applicable, explicit `push`/`pull`, assets sharing,
+  artifacts mutations/token issuance, mount mutations, and RPC stubs.
+- Treat `provider()` as privileged internal capability or return a gated provider; an
+  ungated public provider would bypass the contract.
+- Audit shell commands as open-world operations and record post-exec sync changes. Do not
+  claim per-file or egress enforcement inside a running container without a backend/FUSE
+  or egress PEP.
+
+The Workspace package owns normalization, summaries, path/remote selectors, and composite
+operation boundaries. It depends only on the structural gate interface. An Agents adapter
+connects that hook to `Agent.auth`.
+
+### Phase 7: Identity and centralized providers
+
+- Add verified principal resolution and use it across every adapter.
+- Add optional mandatory-policy and central credential providers.
+- Keep the same normalized operation contract so moving policy to AuthZEN, Cedar, OPA, or
+  another PDP does not change MCP, local tools, codemode, or Workspace.
+- Add richer workload identity or actor-chain support later without changing local Agent
+  grant ownership.
+
+### Removal criteria
+
+Legacy approval state can be removed only when:
+
+- direct, MCP, and codemode calls produce equivalent operation digests and decisions;
+- all approval UIs resolve `Agent.auth` requests;
+- replayed codemode calls never create new authorization requests;
+- policy changes made while paused are observed before dispatch;
+- all claimed Workspace public effect paths are gated; and
+- audit records contain no credential material or raw sensitive payloads.
+
+This sequence solves credential durability and runtime policy first without moving MCP
+protocol ownership, weakening codemode replay, or requiring the unresolved external Agent
+identity and Mission designs.
 
 ## Alternatives considered
 
@@ -851,8 +1101,8 @@ normalizing to stable serializable IDs for storage and central control.
 
 ### Separate permission systems for MCP, AI SDK tools, and codemode
 
-Rejected. All three submit one `ToolInvocation` to one durable authorization kernel.
-Codemode retains replay responsibility, not policy ownership.
+Rejected. All operation adapters submit one `AuthorityOperation` to one durable
+authorization kernel. Codemode retains replay responsibility, not policy ownership.
 
 ### Mandatory centralized authority service
 
@@ -869,4 +1119,5 @@ and users decide their own policy; no read/write defaults are imposed by the SDK
 
 Pending discussion. This RFC proposes `Agent.auth`, Agent-local grants, durable mutable
 policy, a minimal principal envelope, typed auth descriptors for local tools, automatic
-MCP integration, and a single authorization contract shared with codemode.
+MCP integration, and a single operation-authorization contract shared with codemode and
+domain libraries.
