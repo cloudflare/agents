@@ -40,6 +40,14 @@ automatically by MCP and by locally authored authenticated tools.
 - Allow custom credential mechanisms, policy stores, and approval UIs through small
   interfaces.
 
+## Visual overview
+
+![Credentials, permissions, and identity form the Agent authority plane](./assets/agent-auth/authority-gap.png)
+
+![Direct tool calling and Code Mode share one authority operation](./assets/agent-auth/authority-kernel.png)
+
+![Capability sources, presentations, and the authority plane remain separate](./assets/agent-auth/authority-unification.png)
+
 ## Non-goals
 
 - A credential vault shared between Agents.
