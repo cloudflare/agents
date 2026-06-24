@@ -8,7 +8,19 @@ function createMockCtx(runtimeStub: unknown): DurableObjectState {
   return {
     facets: {
       get: vi.fn(() => runtimeStub)
+    },
+    exports: {
+      CodemodeRuntime: class MockCodemodeRuntime {}
     }
+  } as unknown as DurableObjectState;
+}
+
+function createMockCtxWithoutRuntimeExport(): DurableObjectState {
+  return {
+    facets: {
+      get: vi.fn()
+    },
+    exports: {}
   } as unknown as DurableObjectState;
 }
 
@@ -46,6 +58,18 @@ describe("createCodemodeRuntime", () => {
         connectors: [named("state"), named("cdp")]
       })
     ).not.toThrow();
+  });
+
+  it("throws a clear error when CodemodeRuntime is not exported", () => {
+    const runtime = createCodemodeRuntime({
+      ctx: createMockCtxWithoutRuntimeExport(),
+      executor: createMockExecutor(),
+      connectors: []
+    });
+
+    expect(() => runtime.tool()).toThrow(
+      "CodemodeRuntime is not exported from this Worker entry"
+    );
   });
 
   it("exposes the model-facing tool from the runtime handle", async () => {

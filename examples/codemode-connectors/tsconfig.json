@@ -1,6 +1,3 @@
 {
-  "extends": "agents/tsconfig",
-  "compilerOptions": {
-    "module": "esnext"
-  }
+  "extends": "agents/tsconfig"
 }

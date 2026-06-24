@@ -1,6 +1,6 @@
 # Connectors
 
-Connectors are class-based integrations that bridge external services into the codemode sandbox. Each connector extends `WorkerEntrypoint`, making it serializable, RPC-callable, and available as `ctx.exports.ConnectorName`.
+Connectors are class-based integrations that bridge external services into the codemode sandbox.
 
 **Why this exists:** there should be one way to add a capability. Whether the source is an MCP server, an OpenAPI spec, an AI SDK toolset, or your own service, the answer is the same — wrap it in a connector class, put it in a runtime, and the model sees it as a typed global (`github.list_pull_requests(...)`). The model-facing protocol never changes; only the class you subclass does.
 
@@ -304,24 +304,6 @@ const raw = await stripe.request({
   path: "/v1/charges",
   method: "GET"
 });
-```
-
-## File convention
-
-Connector files use the `*.codemode.ts` extension. The codemode [Vite plugin](./vite-plugin.md) discovers them and auto-exports the classes from the worker entry module.
-
-```
-src/
-  github.codemode.ts     → export class GithubConnector extends McpConnector
-  stripe.codemode.ts     → export class StripeConnector extends OpenApiConnector
-  linear.codemode.ts     → export class LinearConnector extends CodemodeConnector
-  server.ts              → import with { type: "connectors" }
-```
-
-Import with the `type: "connectors"` attribute:
-
-```ts
-import { GithubConnector } from "./github.codemode" with { type: "connectors" };
 ```
 
 ## Constructor convention

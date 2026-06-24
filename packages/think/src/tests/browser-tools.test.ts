@@ -3,10 +3,12 @@ import { createBrowserRuntime, createBrowserTools } from "../tools/browser";
 
 // Shape-only tests: nothing here executes against the facet, storage, or the
 // browser binding — those paths are exercised by the agents browser e2e
-// suite. The facet stub satisfies the runtime's eager `ctx.facets.get`.
+// suite. The facet stub satisfies the runtime's eager `ctx.facets.get`, and
+// the export mirrors a Worker entry that re-exports CodemodeRuntime.
 const fakeCtx = {
   storage: {},
-  facets: { get: () => ({}) }
+  facets: { get: () => ({}) },
+  exports: { CodemodeRuntime: class MockCodemodeRuntime {} }
 } as unknown as DurableObjectState;
 
 describe("createBrowserTools", () => {

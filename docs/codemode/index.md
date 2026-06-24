@@ -38,7 +38,7 @@ The sandbox has **no network access**. Model code cannot `fetch`; every effect g
 
 ## Configure it (developer)
 
-**1. Add the Vite plugin** — it discovers connector files and wires up the Worker exports the runtime needs:
+**1. Add the Vite plugin** — it exports the runtime facet class that `createCodemodeRuntime()` needs:
 
 ```ts
 // vite.config.ts
@@ -49,7 +49,7 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 export default { plugins: [agents(), codemode(), cloudflare()] };
 ```
 
-**2. Write a connector** — a class per service, in a `*.codemode.ts` file. Mark only the tools that need a human; everything else executes immediately:
+**2. Write a connector** — a class per service. Mark only the tools that need a human; everything else executes immediately:
 
 ```ts
 // github.codemode.ts
@@ -91,7 +91,7 @@ import {
   createCodemodeRuntime,
   DynamicWorkerExecutor
 } from "@cloudflare/codemode";
-import { GithubConnector } from "./github.codemode" with { type: "connectors" };
+import { GithubConnector } from "./github.codemode";
 
 export class Chat extends AIChatAgent<Env> {
   codemode() {
@@ -188,4 +188,4 @@ sandbox: github.create_issue(args)
 - [Runtime](./runtime.md) — both API surfaces (handle + sandbox SDK), the durable log, abort-and-replay
 - [Approvals](./approvals.md) — annotations, pause/resume flow, wiring an approval UI
 - [Snippets](./snippets.md) — scripts the model saves and reuses
-- [Vite Plugin](./vite-plugin.md) — `*.codemode.ts` discovery and Worker-entry exports
+- [Vite Plugin](./vite-plugin.md) — auto-export the `CodemodeRuntime` facet class

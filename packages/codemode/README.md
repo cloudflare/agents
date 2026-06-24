@@ -193,7 +193,7 @@ await executor.execute(code, [resolveProvider(dbProvider)]);
 
 ## Connectors
 
-Connectors are class-based integrations that bridge external services into the codemode sandbox. Each connector extends `WorkerEntrypoint`, making it serializable, RPC-callable, and available as `ctx.exports.ConnectorName`.
+Connectors are class-based integrations that bridge external services into the codemode sandbox.
 
 Create a runtime with an executor and connectors, then expose `runtime.tool()` to the model:
 
@@ -330,7 +330,7 @@ const raw = await stripe.request({ path: "/v1/charges", method: "GET" });
 
 ### `CodemodeConnector` (base class)
 
-All connectors extend `CodemodeConnector`, which extends `WorkerEntrypoint`. A connector is three things — `name()`, optional `instructions()`, and `tools()`. Each tool carries its own docs, schema, approval requirement, execution, and optional revert, so everything about a tool lives in one place:
+A connector is three things — `name()`, optional `instructions()`, and `tools()`. Each tool carries its own docs, schema, approval requirement, execution, and optional revert, so everything about a tool lives in one place:
 
 ```ts
 import { CodemodeConnector } from "@cloudflare/codemode";
@@ -400,7 +400,7 @@ Snippets appear in `codemode.search` results (with `kind: "snippet"`) and are do
 
 ### Vite plugin
 
-The `@cloudflare/codemode/vite` plugin discovers `*.codemode.ts` files and auto-exports connector classes from the worker entry module, making them available as `ctx.exports.ConnectorName`:
+The `@cloudflare/codemode/vite` plugin exports the `CodemodeRuntime` facet class from the Worker entry module, making it available as `ctx.exports.CodemodeRuntime` for facet spawning:
 
 ```ts
 // vite.config.ts
@@ -408,11 +408,11 @@ import codemode from "@cloudflare/codemode/vite";
 export default { plugins: [codemode()] };
 ```
 
-Import connectors with the `type: "connectors"` attribute:
+Connector classes are ordinary TypeScript imports:
 
 ```ts
-import { GithubConnector } from "./github.codemode" with { type: "connectors" };
-import { StripeConnector } from "./stripe.codemode" with { type: "connectors" };
+import { GithubConnector } from "./github.codemode";
+import { StripeConnector } from "./stripe.codemode";
 ```
 
 ### How connector calls work
@@ -422,9 +422,9 @@ import { StripeConnector } from "./stripe.codemode" with { type: "connectors" };
 │                     │        │  Dynamic Worker (isolated sandbox)           │
 │  Host Worker        │  RPC   │                                              │
 │                     │◄──────►│  github.list_pull_requests(args)             │
-│  Connectors are     │        │    → env.__connectors.github.callTool(...)   │
-│  env bindings       │        │    → Workers RPC                             │
-│  (WorkerEntrypoint) │        │                                              │
+│  Connectors are     │        │    → __connectors.github.callTool(...)       │
+│  host-side RPC      │        │    → Workers RPC                             │
+│  targets            │        │                                              │
 │                     │        │  codemode.search("query")                    │
 │  Platform SDK uses  │        │    → __dispatchers.codemode.call(...)        │
 │  ToolDispatcher     │        │    → host-side search                        │
@@ -432,7 +432,7 @@ import { StripeConnector } from "./stripe.codemode" with { type: "connectors" };
 └─────────────────────┘        └─────────────────────────────────────────────┘
 ```
 
-Connector calls go via **Workers RPC** directly to the connector's `callTool()` method — no JSON serialization through ToolDispatcher. The platform SDK (`codemode.search`, `codemode.describe`, etc.) uses the traditional ToolDispatcher path since it's host-created.
+Connector calls go via **Workers RPC** directly to the host-side connector binding — no JSON serialization through ToolDispatcher. The platform SDK (`codemode.search`, `codemode.describe`, etc.) uses the traditional ToolDispatcher path since it's host-created.
 
 ## Architecture
 

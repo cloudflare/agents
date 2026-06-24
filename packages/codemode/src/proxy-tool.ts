@@ -30,7 +30,6 @@ import type {
 } from "./connectors";
 import { searchConnectors, describeTarget } from "./connectors";
 import {
-  CodemodeRuntime,
   MAX_DURABLE_VALUE_BYTES,
   STEP_CONNECTOR,
   tooLargeMessage,
@@ -834,7 +833,15 @@ type FacetCapableCtx = DurableObjectState & {
 
 function getRuntime(ctx: DurableObjectState, name?: string): RuntimeStub {
   const facetCtx = ctx as unknown as FacetCapableCtx;
-  const runtimeClass = facetCtx.exports?.CodemodeRuntime ?? CodemodeRuntime;
+  const runtimeClass = facetCtx.exports?.CodemodeRuntime;
+  if (!runtimeClass) {
+    throw new Error(
+      "CodemodeRuntime is not exported from this Worker entry. Add the " +
+        "@cloudflare/codemode/vite plugin to your Vite config, or manually " +
+        'export { CodemodeRuntime } from "@cloudflare/codemode".'
+    );
+  }
+
   return facetCtx.facets.get<RuntimeStub>(runtimeFacetName(name), () => ({
     class: runtimeClass
   }));

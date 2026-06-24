@@ -14,8 +14,8 @@ import {
   type Snippet
 } from "@cloudflare/codemode";
 import { BrowserConnector, DurableBrowserSessionStore } from "agents/browser";
-import { GithubConnector } from "./github.codemode" with { type: "connectors" };
-import { RepoApiConnector } from "./repoapi.codemode" with { type: "connectors" };
+import { GithubConnector } from "./github.codemode";
+import { RepoApiConnector } from "./repoapi.codemode";
 
 // ---------------------------------------------------------------------------
 // Demo MCP server — a couple of reads and one approval-gated write.
