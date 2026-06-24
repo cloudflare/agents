@@ -44,6 +44,7 @@ import {
   hasIncompleteToolBatch,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
+  toolApprovalUpdate,
   type TurnResult,
   type MessagePart,
   type StreamChunkData,
@@ -5851,21 +5852,17 @@ export class AIChatAgent<
     toolCallId: string,
     approved: boolean
   ): Promise<boolean> {
+    // Use the shared `agents/chat` builder so the approval merge — including
+    // the fallback that synthesizes `approval.id` from `toolCallId` when an
+    // older / hand-seeded transcript lacks one — stays identical to Think.
+    // convertToModelMessages needs `approval.id` to produce a valid
+    // tool-approval-request content part with `approvalId`.
+    const update = toolApprovalUpdate(toolCallId, approved);
     return this._findAndUpdateToolPart(
       toolCallId,
       "_applyToolApproval",
-      ["input-available", "approval-requested"],
-      (part) => ({
-        ...part,
-        state: approved ? "approval-responded" : "output-denied",
-        // Merge with existing approval data to preserve the id field.
-        // convertToModelMessages needs approval.id to produce a valid
-        // tool-approval-request content part with approvalId.
-        approval: {
-          ...(part.approval as Record<string, unknown> | undefined),
-          approved
-        }
-      })
+      update.matchStates,
+      update.apply
     );
   }
 
