@@ -79,6 +79,28 @@ request: async (opts, context) => {
 
 The context stays in trusted host code and should only be used while the outer tool call is active. Existing callbacks that only accept `opts` continue to work.
 
+### Timeouts: keep the sandbox budget at or above the elicitation timeout
+
+The `request()` callback runs while the sandbox is still suspended on its
+`codemode.request()` call — that call is a blocking RPC round-trip, so the
+executor's timeout covers the whole wait, including the time a human spends
+answering the elicitation. The default `DynamicWorkerExecutor` timeout is
+**60s**, which matches the MCP elicitation timeout (both the SDK's
+`DEFAULT_REQUEST_TIMEOUT_MSEC` and `McpAgent.elicitInput` default to 60s), so
+the default config already lets an elicitation run to completion.
+
+If you lower the executor timeout, a tool that elicits user input (or samples,
+or lists roots) will abort with `Execution timed out` once the sandbox budget
+expires, before the user can respond. Keep the executor timeout at least as
+long as the elicitation timeout:
+
+```ts
+const executor = new DynamicWorkerExecutor({
+  loader: env.LOADER,
+  timeout: 60_000 // do not drop below the 60s elicitation timeout
+});
+```
+
 The LLM first searches the spec:
 
 ```js

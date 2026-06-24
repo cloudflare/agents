@@ -279,6 +279,13 @@ export interface OpenApiMcpServerOptions {
    * The context belongs to the outer MCP `execute` tool call. It can be used
    * to associate elicitation, sampling, roots, and notifications with that
    * call's response stream.
+   *
+   * This callback runs while the sandbox is still suspended on its
+   * `codemode.request()` call, so the executor timeout covers the whole wait.
+   * The default executor timeout (60s) matches the elicitation timeout, so the
+   * default config already lets an elicitation finish. If you lower the
+   * executor timeout below the elicitation timeout, the sandbox aborts the
+   * call before the user can respond.
    */
   request: (
     options: RequestOptions,
