@@ -1,6 +1,7 @@
 import type { CodeOutput } from "./shared";
 import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { normalizeCode } from "./normalize";
+import { CodemodeExecutionError } from "./retry";
 
 export async function runCode({
   code,
@@ -19,11 +20,12 @@ export async function runCode({
     connectors?.length ? { connectors } : undefined
   );
 
-  if (executeResult.error) {
-    const logCtx = executeResult.logs?.length
-      ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
-      : "";
-    throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
+  if (executeResult.error !== undefined) {
+    const failure = executeResult.failure ?? {
+      kind: "error" as const,
+      message: executeResult.error
+    };
+    throw new CodemodeExecutionError(failure, executeResult.logs);
   }
 
   return executeResult.logs?.length

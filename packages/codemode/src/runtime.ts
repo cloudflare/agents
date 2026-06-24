@@ -50,6 +50,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { stringifyForStorage, parseForStorage } from "./codec";
+import { ExecutionAttemptStore } from "./runtime-attempts";
 import type { Snippet, SaveSnippetOptions } from "./snippet";
 
 // ---------------------------------------------------------------------------
@@ -126,7 +127,7 @@ export type PendingAction = {
  */
 export type ToolDecision =
   | { kind: "replay"; result: unknown }
-  | { kind: "execute"; seq: number }
+  | { kind: "execute"; seq: number; attempt: number }
   // "pause" tells the host to abort the sandbox run. The reason lives on the
   // execution: status "paused" (awaiting approval) or "error" (replay
   // divergence). Routing divergence through the execution record rather than a
@@ -296,10 +297,9 @@ function toStored(what: string, value: unknown): string | null {
 // CodemodeRuntime facet
 // ---------------------------------------------------------------------------
 
-export class CodemodeRuntime extends DurableObject<unknown> {
-  constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env);
-    this.ctx.storage.sql.exec(`
+/** @internal Initialize the facet schema and backfill retry generations. */
+export function initializeRuntimeSchema(sql: SqlStorage): void {
+  sql.exec(`
       CREATE TABLE IF NOT EXISTS cm_executions (
         id TEXT PRIMARY KEY,
         code TEXT NOT NULL,
@@ -333,7 +333,16 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         input_schema TEXT,
         connectors TEXT
       );
-    `);
+  `);
+}
+
+export class CodemodeRuntime extends DurableObject<unknown> {
+  readonly #attempts: ExecutionAttemptStore;
+
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env);
+    initializeRuntimeSchema(this.ctx.storage.sql);
+    this.#attempts = new ExecutionAttemptStore(this.ctx.storage.sql);
   }
 
   // -----------------------------------------------------------------------
@@ -368,8 +377,27 @@ export class CodemodeRuntime extends DurableObject<unknown> {
       now,
       now
     );
+    this.#attempts.begin(id);
     this.#pruneTerminal(options?.maxExecutions ?? DEFAULT_MAX_EXECUTIONS, id);
     return id;
+  }
+
+  /** Current fenced pass number for an execution, starting at zero. */
+  async currentAttempt(id: string): Promise<number> {
+    return this.#attempts.current(id);
+  }
+
+  /**
+   * Fence a failed pass and begin its retry. Late calls/results carrying the
+   * old attempt number become inert before the retry delay begins.
+   */
+  async beginRetry(
+    id: string,
+    expectedAttempt: number
+  ): Promise<number | null> {
+    const next = this.#attempts.advance(id, expectedAttempt);
+    if (next !== null) this.#touch(id);
+    return next;
   }
 
   /**
@@ -415,9 +443,18 @@ export class CodemodeRuntime extends DurableObject<unknown> {
     method: string,
     args: unknown,
     requiresApproval: boolean,
-    ephemeral = false
+    ephemeral: boolean,
+    attempt: number
   ): Promise<ToolDecision> {
     const row = this.#requireRow(executionId);
+    const currentAttempt = await this.currentAttempt(executionId);
+
+    // A timed-out/retried pass may still have live RPC calls. Fence it before
+    // inspecting or mutating the log so it cannot apply work after a retry has
+    // begun.
+    if (attempt !== currentAttempt) {
+      return { kind: "pause", seq };
+    }
 
     // Once a run has paused (awaiting approval) or terminated (divergence,
     // rejection), refuse to make any further progress: every subsequent
@@ -459,7 +496,7 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         // connector/method/args only), but the value may legitimately have
         // changed underneath (e.g. a file edited between pause and resume).
         if (existing.ephemeral) {
-          return { kind: "execute", seq };
+          return { kind: "execute", seq, attempt: currentAttempt };
         }
         return { kind: "replay", result: existing.result };
       }
@@ -472,13 +509,13 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         // fresh-call path below.
         this.#setEntryState(executionId, seq, "executing");
         this.#touch(executionId);
-        return { kind: "execute", seq };
+        return { kind: "execute", seq, attempt: currentAttempt };
       }
       if (existing.state === "executing") {
         // Decided to run on a previous pass but crashed before recordResult
         // landed — re-execute. Do NOT re-pause even for an approval action: it
         // was already approved when it first reached "executing".
-        return { kind: "execute", seq };
+        return { kind: "execute", seq, attempt: currentAttempt };
       }
       // "reverted" — fall through and re-execute as a fresh call.
     }
@@ -524,7 +561,7 @@ export class CodemodeRuntime extends DurableObject<unknown> {
       return { kind: "pause", seq };
     }
     this.#touch(executionId);
-    return { kind: "execute", seq };
+    return { kind: "execute", seq, attempt: currentAttempt };
   }
 
   /**
@@ -543,8 +580,15 @@ export class CodemodeRuntime extends DurableObject<unknown> {
   async recordResult(
     executionId: string,
     seq: number,
-    result: unknown
-  ): Promise<void> {
+    result: unknown,
+    attempt: number
+  ): Promise<boolean> {
+    // A connector can finish after its pass timed out or after the execution
+    // reached a terminal state. Reject that result before serializing it, then
+    // repeat the same guard atomically on the UPDATE below to close the race
+    // between this check and persistence.
+    if (!this.#isCurrentRunning(executionId, attempt)) return false;
+
     const row = this.#logRow(executionId, seq);
     if (!row) throw new Error(`No log entry at step ${seq}`);
     let stored: string | null;
@@ -554,21 +598,24 @@ export class CodemodeRuntime extends DurableObject<unknown> {
           ? null
           : toStored(`The result of ${row.connector}.${row.method}`, result);
     } catch (err) {
-      this.#fail(
+      this.#failCurrent(
         executionId,
         seq,
-        err instanceof Error ? err.message : String(err)
+        err instanceof Error ? err.message : String(err),
+        attempt
       );
-      return;
+      return false;
     }
-    this.ctx.storage.sql.exec(
-      `UPDATE cm_log SET result = ?, state = 'applied'
-        WHERE execution_id = ? AND seq = ?`,
-      stored,
+
+    const updated = this.#updateResultIfCurrent(
       executionId,
-      seq
+      seq,
+      stored,
+      attempt
     );
+    if (!updated) return false;
     this.#touch(executionId);
+    return true;
   }
 
   /**
@@ -797,6 +844,7 @@ export class CodemodeRuntime extends DurableObject<unknown> {
   async deleteExecution(id: string): Promise<boolean> {
     const existed = this.#executionRow(id) !== null;
     this.ctx.storage.sql.exec(`DELETE FROM cm_log WHERE execution_id = ?`, id);
+    this.#attempts.delete(id);
     this.ctx.storage.sql.exec(`DELETE FROM cm_executions WHERE id = ?`, id);
     return existed;
   }
@@ -898,6 +946,17 @@ export class CodemodeRuntime extends DurableObject<unknown> {
     );
   }
 
+  #failCurrent(
+    executionId: string,
+    seq: number,
+    error: string,
+    attempt: number
+  ): boolean {
+    if (!this.#isCurrentRunning(executionId, attempt)) return false;
+    this.#fail(executionId, seq, error);
+    return true;
+  }
+
   #fail(executionId: string, seq: number, error: string): ToolDecision {
     // Mark the triggering log entry too (when one exists): an entry left
     // "executing"/"pending" under an errored execution misreads as a crash
@@ -936,6 +995,7 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         `DELETE FROM cm_log WHERE execution_id = ?`,
         id
       );
+      this.#attempts.delete(id);
       this.ctx.storage.sql.exec(`DELETE FROM cm_executions WHERE id = ?`, id);
     }
     return toDelete.length;
@@ -978,6 +1038,19 @@ export class CodemodeRuntime extends DurableObject<unknown> {
       )
       .toArray();
     return rows.length > 0 ? rows[0] : null;
+  }
+
+  #isCurrentRunning(executionId: string, attempt: number): boolean {
+    return this.#attempts.isCurrentRunning(executionId, attempt);
+  }
+
+  #updateResultIfCurrent(
+    executionId: string,
+    seq: number,
+    result: string | null,
+    attempt: number
+  ): boolean {
+    return this.#attempts.recordResult(executionId, seq, result, attempt);
   }
 
   #setEntryState(

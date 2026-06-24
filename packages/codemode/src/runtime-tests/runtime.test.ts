@@ -30,6 +30,39 @@ interface Host {
     code: string,
     options?: { maxExecutions?: number; name?: string }
   ): Promise<ProxyToolOutput>;
+  attemptStoreLifecycle(): Promise<{
+    initial: number;
+    advanced: number | null;
+    terminalAdvance: number | null;
+    missingThrows: boolean;
+  }>;
+  backfillReleasedExecutionAttempt(): Promise<{
+    initial?: number;
+    afterRepeat?: number;
+  }>;
+  runWithRetry(code: string): Promise<ProxyToolOutput>;
+  retryCounts(): Promise<{ checkpointReads: number; retryableCalls: number }>;
+  retryAlwaysCalls(): Promise<number>;
+  runWithoutRetries(code: string): Promise<ProxyToolOutput>;
+  runWithTimeoutRetry(code: string): Promise<ProxyToolOutput>;
+  runWithRetryScenario(
+    code: string,
+    scenario: "decline" | "throw-policy" | "throw-delay"
+  ): Promise<ProxyToolOutput>;
+  slowCalls(): Promise<number>;
+  abortCounts(): Promise<{
+    calls: number;
+    active: number;
+    passes: number;
+    reverts: number;
+  }>;
+  lateResultAfterTerminal(status: "completed" | "error"): Promise<{
+    recorded: boolean;
+    status?: string;
+    result?: unknown;
+    logState?: string;
+    logResult?: unknown;
+  }>;
   approve(executionId: string): Promise<ProxyToolOutput>;
   approveWithoutItems(executionId: string): Promise<ProxyToolOutput>;
   runSnippetWithoutItems(snippet: string): Promise<ProxyToolOutput>;
@@ -78,6 +111,24 @@ function host(): Host {
 }
 
 describe("codemode durable runtime (e2e)", () => {
+  it("owns the complete attempt lifecycle", async () => {
+    const h = host();
+    await expect(h.attemptStoreLifecycle()).resolves.toEqual({
+      initial: 0,
+      advanced: 1,
+      terminalAdvance: null,
+      missingThrows: true
+    });
+  });
+
+  it("backfills attempt zero for released executions exactly once", async () => {
+    const h = host();
+    await expect(h.backfillReleasedExecutionAttempt()).resolves.toEqual({
+      initial: 0,
+      afterRepeat: 2
+    });
+  });
+
   it("runs a read-only connector call to completion over real RPC", async () => {
     const h = host();
     const out = (await h.run(
@@ -87,6 +138,238 @@ describe("codemode durable runtime (e2e)", () => {
     expect(out.status).toBe("completed");
     if (out.status === "completed") expect(out.result).toEqual([]);
   });
+
+  it("retries RetryableError by default without configuration", async () => {
+    const h = host();
+    const out = await h.run(`async () => await items.retry_once()`);
+
+    expect(out.status).toBe("completed");
+    if (out.status === "completed") expect(out.result).toEqual({ calls: 2 });
+    expect((await h.retryCounts()).retryableCalls).toBe(2);
+  });
+
+  it("persists console logs when retry attempts are exhausted", async () => {
+    const h = host();
+    const out = await h.run(`async () => {
+      console.log("before exhausted retry");
+      return items.retry_always();
+    }`);
+
+    expect(out).toMatchObject({
+      status: "error",
+      logs: ["before exhausted retry"]
+    });
+    expect(await h.retryAlwaysCalls()).toBe(3);
+    expect((await h.executions())[0]).toMatchObject({
+      status: "error",
+      logs: ["before exhausted retry"]
+    });
+  });
+
+  it("ends without retry when a custom policy declines", async () => {
+    const h = host();
+    const out = await h.runWithRetryScenario(
+      `async () => items.retry_always()`,
+      "decline"
+    );
+
+    expect(out.status).toBe("error");
+    expect(await h.retryAlwaysCalls()).toBe(1);
+  });
+
+  it.each([
+    ["throw-policy", "retry policy crashed"],
+    ["throw-delay", "retry delay crashed"]
+  ] as const)(
+    "terminalizes and preserves logs when %s throws",
+    async (scenario, message) => {
+      const h = host();
+      const out = await h.runWithRetryScenario(
+        `async () => {
+          console.log("before callback failure");
+          return items.retry_always();
+        }`,
+        scenario
+      );
+
+      expect(out).toMatchObject({
+        status: "error",
+        error: `Code execution failed: ${message}\n\nConsole output:\nbefore callback failure`,
+        logs: ["before callback failure"]
+      });
+      expect((await h.executions())[0]).toMatchObject({
+        status: "error",
+        logs: ["before callback failure"]
+      });
+    }
+  );
+
+  it("allows default retries to be disabled", async () => {
+    const h = host();
+    const out = await h.runWithoutRetries(
+      `async () => await items.retry_once()`
+    );
+
+    expect(out.status).toBe("error");
+    expect((await h.retryCounts()).retryableCalls).toBe(1);
+  });
+
+  it("retries from the durable checkpoint through runtime.tool()", async () => {
+    const h = host();
+    const out = await h.runWithRetry(`async () => {
+      const before = await items.checkpoint_read();
+      const retried = await items.retry_once();
+      return { before, retried };
+    }`);
+
+    expect(out.status).toBe("completed");
+    if (out.status === "completed") {
+      expect(out.result).toEqual({
+        before: { reads: 1 },
+        retried: { calls: 2 }
+      });
+    }
+    expect(await h.retryCounts()).toEqual({
+      checkpointReads: 1,
+      retryableCalls: 2
+    });
+    expect((await h.executions())[0].log.map((entry) => entry.state)).toEqual([
+      "applied",
+      "applied"
+    ]);
+    expect(await h.passEnds()).toEqual([
+      { executionId: out.executionId, status: "retrying" },
+      { executionId: out.executionId, status: "completed" }
+    ]);
+  });
+
+  it("retries even when model code catches the connector error", async () => {
+    const h = host();
+    const out = await h.runWithRetry(`async () => {
+      try {
+        return await items.retry_once();
+      } catch {
+        return { caught: true };
+      }
+    }`);
+
+    expect(out.status).toBe("completed");
+    if (out.status === "completed") expect(out.result).toEqual({ calls: 2 });
+    expect((await h.retryCounts()).retryableCalls).toBe(2);
+  });
+
+  it("blocks codemode.step after a caught retry signal", async () => {
+    const h = host();
+    const out = await h.runWithRetry(`async () => {
+      try {
+        return await items.retry_once();
+      } catch {
+        await codemode.step("post-failure", () => "must not run");
+        return { continued: true };
+      }
+    }`);
+
+    expect(out.status).toBe("completed");
+    if (out.status === "completed") expect(out.result).toEqual({ calls: 2 });
+    const execution = (await h.executions())[0];
+    expect(execution.log).toHaveLength(1);
+    expect(execution.log[0]).toMatchObject({
+      connector: "items",
+      method: "retry_once",
+      state: "applied"
+    });
+  });
+
+  it("aborts the in-flight connector call before retrying a timed-out pass", async () => {
+    const h = host();
+    const out = await h.runWithTimeoutRetry(
+      `async () => await items.abortable_slow_once()`
+    );
+
+    expect(out.status).toBe("completed");
+    if (out.status === "completed") expect(out.result).toEqual({ call: 2 });
+    expect(await h.abortCounts()).toEqual({
+      calls: 2,
+      active: 1,
+      passes: 0,
+      reverts: 0
+    });
+  });
+
+  it.each([
+    [
+      "completed",
+      `async () => {
+        await items.observe_abort();
+        return "done";
+      }`
+    ],
+    [
+      "error",
+      `async () => {
+        await items.observe_abort();
+        throw new Error("done with error");
+      }`
+    ],
+    [
+      "paused",
+      `async () => {
+        await items.observe_abort();
+        return items.create_item({ title: "pause" });
+      }`
+    ]
+  ] as const)(
+    "aborts the pass signal when it ends %s",
+    async (status, code) => {
+      const h = host();
+      const out = await h.run(code);
+
+      expect(out.status).toBe(status);
+      expect(await h.abortCounts()).toEqual({
+        calls: 0,
+        active: 0,
+        passes: 1,
+        reverts: 0
+      });
+    }
+  );
+
+  it("fences a timed-out pass so its late result cannot overwrite the retry", async () => {
+    const h = host();
+    const out = await h.runWithTimeoutRetry(
+      `async () => await items.slow_once()`
+    );
+
+    expect(out.status).toBe("completed");
+    if (out.status === "completed") expect(out.result).toEqual({ call: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(await h.slowCalls()).toBe(2);
+    const execution = (await h.executions())[0];
+    expect(execution.result).toEqual({ call: 2 });
+    expect(execution.log[0]).toMatchObject({
+      state: "applied",
+      result: { call: 2 }
+    });
+  });
+
+  it.each([
+    ["completed", { winner: true }],
+    ["error", undefined]
+  ] as const)(
+    "rejects a late connector result after the execution is %s",
+    async (status, expectedResult) => {
+      const h = host();
+      const state = await h.lateResultAfterTerminal(status);
+
+      expect(state).toMatchObject({
+        recorded: false,
+        status,
+        result: expectedResult,
+        logState: "executing",
+        logResult: undefined
+      });
+    }
+  );
 
   it("names the connector globals (and renders hints) in the tool description", async () => {
     const h = host();
@@ -235,6 +518,7 @@ describe("codemode durable runtime (e2e)", () => {
     expect(execs.find((e) => e.id === first.executionId)?.status).toBe(
       "rolled_back"
     );
+    expect((await h.abortCounts()).reverts).toBe(1);
   });
 
   it("does not apply anything when model code swallows the pause", async () => {

@@ -22,14 +22,16 @@ export type ToolAnnotations = {
 // ---------------------------------------------------------------------------
 
 /**
- * Passed to a tool's `execute`/`revert` so a connector knows which codemode
- * execution the call belongs to. The id is stable across a run's pause/resume
- * passes, so it's the right key for a per-execution resource (e.g. a browser
- * session) that must survive a pause.
+ * Passed to a tool's `execute` so a connector knows which codemode execution
+ * and pass the call belongs to. The execution id is stable across pause/resume;
+ * the signal is scoped to one pass and aborts when that pass stops making
+ * progress (completion, pause, error, timeout, or retry).
  */
 export type ToolExecuteContext = {
   /** The codemode execution this call belongs to. Stable across pause/resume. */
   executionId: string;
+  /** Cooperative cancellation for work still running when this pass ends. */
+  signal?: AbortSignal;
 };
 
 /**
@@ -57,7 +59,7 @@ export type ExecutionEndStatus =
  * resources (an open socket, a lease) should be released even though
  * per-execution resources (a session) must survive.
  */
-export type PassEndStatus = ExecutionEndStatus | "paused";
+export type PassEndStatus = ExecutionEndStatus | "paused" | "retrying";
 
 // ---------------------------------------------------------------------------
 // Connector description — returned by describe() RPC.

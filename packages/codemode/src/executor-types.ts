@@ -3,11 +3,22 @@
  * code in a sandbox (DynamicWorkerExecutor, IframeSandboxExecutor, ...).
  */
 
-export interface ExecuteResult {
-  result: unknown;
-  error?: string;
-  logs?: string[];
-}
+import type { ExecuteFailure } from "./retry";
+
+export type ExecuteResult =
+  | {
+      result: unknown;
+      error?: never;
+      failure?: never;
+      logs?: string[];
+    }
+  | {
+      result?: undefined;
+      error: string;
+      /** Machine-readable failure metadata when the executor can classify it. */
+      failure?: ExecuteFailure;
+      logs?: string[];
+    };
 
 /**
  * Internal resolved form of a tool provider, ready for execution.

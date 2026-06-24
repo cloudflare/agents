@@ -380,6 +380,49 @@ The `tool(name, t)` decoration hook adjusts tools you didn't author inline (used
 
 The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve({ executionId })`, `runtime.reject({ seq, executionId })`, `runtime.rollback({ executionId })` (see [docs/codemode/approvals.md](../../docs/codemode/approvals.md)).
 
+### Durable retries
+
+A runtime automatically retries `RetryableError` under the same execution id, up to three total attempts. Applied connector calls replay from the durable log; the call at the failure boundary executes again. `retryAfterMs` is honored when present, otherwise retries use bounded exponential backoff (500ms, 1s, up to 10s).
+
+```ts
+import { RetryableError } from "@cloudflare/codemode";
+
+// Connector code can signal a transient, safe-to-repeat failure.
+throw new RetryableError("Rate limited", { retryAfterMs: 2_000 });
+
+const runtime = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors
+  // No retry configuration needed for RetryableError.
+});
+
+// Customize the policy when needed — for example, to opt safe reads into
+// timeout retries. Timeout retries are off by default because a timed-out
+// mutation may already have succeeded remotely.
+const customized = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors,
+  retry: {
+    maxAttempts: 4,
+    shouldRetry: ({ failure, execution }) =>
+      failure.kind === "retryable" ||
+      (failure.kind === "timeout" && timeoutIsSafe(execution))
+  }
+});
+
+// Or disable automatic retries entirely.
+const noRetries = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors,
+  retry: false
+});
+```
+
+Each pass has a durable attempt fence. If a timed-out old sandbox finishes after its retry started, its later calls and results are ignored rather than corrupting the replay log. Connector `execute` callbacks also receive a pass-scoped `AbortSignal` through their context; pass it to cancellable I/O so the old operation stops when the runtime moves on. Cancellation is cooperative and cannot roll back a remote write that already committed.
+
 ### Snippets
 
 Snippets are durable, addressable saved scripts. The model writes and runs scripts; the developer promotes the ones worth keeping (`runtime.saveSnippet`), and the model reuses them (`codemode.run`). No authoring step, no skill-source interface.

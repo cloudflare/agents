@@ -82,6 +82,7 @@ describe("createCodemodeRuntime", () => {
   it("executes as a plain tool through AI SDK streamText", async () => {
     const runtimeStub = {
       begin: vi.fn(async () => "exec_1"),
+      currentAttempt: vi.fn(async () => 0),
       getExecution: vi.fn(async () => null),
       complete: vi.fn(async () => undefined)
     };
@@ -158,6 +159,7 @@ describe("createCodemodeRuntime", () => {
     };
     const runtimeStub = {
       resume: vi.fn(async () => execution),
+      currentAttempt: vi.fn(async () => 0),
       getExecution: vi.fn(async () => execution),
       complete: vi.fn(async () => undefined)
     };

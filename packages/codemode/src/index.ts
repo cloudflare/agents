@@ -38,6 +38,13 @@ export {
 } from "./runtime";
 export { type Snippet, type SaveSnippetOptions } from "./snippet";
 export {
+  RetryableError,
+  type ExecuteFailure,
+  type CodemodeRetryContext,
+  type CodemodeRetryOptions,
+  type CodemodeRetryPolicy
+} from "./retry";
+export {
   createCodemodeRuntime,
   type CreateCodemodeRuntimeOptions,
   type CodemodeRuntimeHandle,

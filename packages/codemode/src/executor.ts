@@ -372,6 +372,11 @@ export class DynamicWorkerExecutor implements Executor {
         `          if (__r && typeof __r === "object") {\n` +
         `            if (__r.${CONNECTOR_CONTROL_KEY} === "pause") throw new Error("${PAUSE_SENTINEL_LITERAL}");\n` +
         `            if (__r.${CONNECTOR_CONTROL_KEY} === "error") throw new Error(String(__r.message));\n` +
+        `            if (__r.${CONNECTOR_CONTROL_KEY} === "retryable") {\n` +
+        `              const __e = new Error(String(__r.message));\n` +
+        `              __e.__codemode_failure__ = { kind: "retryable", message: String(__r.message), retryAfterMs: __r.retryAfterMs };\n` +
+        `              throw __e;\n` +
+        `            }\n` +
         `          }\n` +
         `          return __r;\n` +
         `        };\n` +
@@ -400,13 +405,13 @@ export class DynamicWorkerExecutor implements Executor {
       .concat([normalized])
       .concat([
         ")(),",
-        '        new Promise((_, reject) => setTimeout(() => reject(new Error("Execution timed out")), ' +
+        '        new Promise((_, reject) => setTimeout(() => { const e = new Error("Execution timed out"); e.__codemode_failure__ = { kind: "timeout", message: "Execution timed out" }; reject(e); }, ' +
           timeoutMs +
           "))",
         "      ]);",
         "      return { result, logs: __logs };",
         "    } catch (err) {",
-        "      return { result: undefined, error: err.message, logs: __logs };",
+        "      return { result: undefined, error: err.message, failure: err.__codemode_failure__, logs: __logs };",
         "    }",
         "  }",
         "}"
@@ -472,13 +477,20 @@ export class DynamicWorkerExecutor implements Executor {
       ): Promise<{
         result: unknown;
         error?: string;
+        failure?: import("./retry").ExecuteFailure;
         logs?: string[];
       }>;
     };
     const response = await entrypoint.evaluate(dispatchers, connectorBindings);
 
-    if (response.error) {
-      return { result: undefined, error: response.error, logs: response.logs };
+    if (response.error || response.failure) {
+      return {
+        result: undefined,
+        error:
+          response.error ?? response.failure?.message ?? "Execution failed",
+        failure: response.failure,
+        logs: response.logs
+      };
     }
 
     return { result: response.result, logs: response.logs };
