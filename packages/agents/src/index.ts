@@ -10864,10 +10864,14 @@ export class Agent<
     const payload = JSON.stringify(message);
     if (this._isFacet) {
       // The public `broadcast()` override is sync (`: void`) so on a facet it
-      // can only fire-and-forget the parent hop. That would let this RPC
-      // resolve before the message reaches the root-owned sockets, so a facet
-      // that hibernates right after the workflow RPC returns could silently
-      // drop the broadcast. Await the parent chain directly instead.
+      // necessarily fire-and-forgets the asynchronous parent hop. This RPC is
+      // promise-based, however: do not report completion to AgentWorkflow
+      // until the message has reached the root-owned sockets, and propagate
+      // any parent-hop failure to the workflow caller.
+      //
+      // workerd already tracks outbound actor RPC as pending I/O even when its
+      // JS promise is not awaited, so this is about completion, ordering, and
+      // error semantics — not keeping the facet alive for hibernation.
       await this._cf_broadcastToParentSubAgent(payload);
       return;
     }

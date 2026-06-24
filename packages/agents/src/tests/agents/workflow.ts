@@ -507,10 +507,11 @@ export class TestWorkflowAgent extends Agent {
   }
 
   // Abort a workflow sub-agent facet, dropping its in-memory state so a
-  // subsequent callback must route to a freshly re-initialized facet.
-  // Simulates hibernation/eviction mid-workflow.
+  // subsequent callback must route to a freshly re-initialized facet. This is
+  // a stronger restart test than ordinary hibernation: it explicitly tears
+  // down the facet isolate while preserving durable storage.
   abortWorkflowSubAgent(childName: string): void {
-    this.abortSubAgent(TestWorkflowSubAgent, childName, "test-eviction");
+    this.abortSubAgent(TestWorkflowSubAgent, childName, "test-restart");
   }
 
   // Permanently delete a workflow sub-agent facet, removing it from the

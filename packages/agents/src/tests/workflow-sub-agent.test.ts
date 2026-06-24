@@ -489,12 +489,12 @@ describe("sub-agent workflow origins", () => {
     expect(facetWorkflow?.status).toBe("complete");
   });
 
-  it("routes callbacks to a facet that was evicted mid-workflow", async () => {
+  it("routes callbacks to a facet that was restarted mid-workflow", async () => {
     const id = crypto.randomUUID();
-    const parentName = `facet-workflow-evict-parent-${id}`;
-    const childName = `facet-workflow-evict-child-${id}`;
-    const workflowId = `facet-evict-wf-${id}`;
-    const taskId = `facet-evict-task-${id}`;
+    const parentName = `facet-workflow-restart-parent-${id}`;
+    const childName = `facet-workflow-restart-child-${id}`;
+    const workflowId = `facet-restart-wf-${id}`;
+    const taskId = `facet-restart-task-${id}`;
     const agentStub = await getAgentByName(env.TestWorkflowAgent, parentName);
 
     await using instance = await introspectWorkflowInstance(
@@ -503,7 +503,7 @@ describe("sub-agent workflow origins", () => {
     );
 
     // Start an approval workflow that parks on waitForApproval, so the run
-    // spans an eviction window.
+    // spans an explicit facet restart.
     const startedWorkflowId = await agentStub.runSubAgentApprovalWorkflowTest(
       childName,
       workflowId,
@@ -522,8 +522,8 @@ describe("sub-agent workflow origins", () => {
     );
 
     // Forcibly abort the facet. This drops its in-memory state (including the
-    // in-memory callback log), mirroring hibernation/eviction. The durable
-    // workflow tracking row in the facet's own SQLite survives.
+    // in-memory callback log) and tears down the isolate. The durable workflow
+    // tracking row in the facet's own SQLite survives.
     await agentStub.abortWorkflowSubAgent(childName);
 
     // Approve from the parent. The workflow resumes and fires its completion
@@ -531,7 +531,7 @@ describe("sub-agent workflow origins", () => {
     await agentStub.approveSubAgentWorkflow(childName, workflowId);
     await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
 
-    // The completion callback landed on the restarted facet (the pre-eviction
+    // The completion callback landed on the restarted facet (the pre-restart
     // "progress" entry is gone because in-memory state was dropped).
     const callbacks = await waitForCallback(
       async () =>
@@ -547,7 +547,7 @@ describe("sub-agent workflow origins", () => {
     ).toBe(false);
 
     // The durable tracking row, read back through the registry, reflects the
-    // callback that routed to the post-eviction facet.
+    // callback that routed to the post-restart facet.
     const facetWorkflow = (await agentStub.getSubAgentWorkflowById(
       childName,
       workflowId
