@@ -1156,6 +1156,14 @@ They provide adaptation points without making unfinished profiles mandatory.
 - **RFC 8693 token exchange, RAR (RFC 9396), DPoP, EMA/ID-JAG, actor profiles, and
   transaction tokens** may strengthen credential projection and cross-domain identity.
   They do not replace execution-time policy and are deferred from the minimal kernel.
+- **Execution retry and cancellation annotations** should become part of normalized
+  capability metadata shared by direct tools and codemode. MCP's existing
+  `idempotentHint` / `readOnlyHint` are useful policy inputs but remain untrusted hints;
+  the cross-domain vocabulary should eventually state whether replay after an ambiguous
+  timeout is safe and whether an operation supports cooperative cancellation. Runtimes
+  must not infer those semantics from tool names or HTTP methods, and absent metadata
+  should remain conservative. This RFC carries the annotation envelope on
+  `AuthorityOperation.capability`; defining and enforcing the new hints is deferred.
 - **Mission/task authority** may later supply a durable purpose and lifecycle reference in
   `AuthorityOperation.context`. This RFC does not define Mission shaping, authority-set
   compilation, expansion, or cross-domain propagation. Adding those concepts now would
