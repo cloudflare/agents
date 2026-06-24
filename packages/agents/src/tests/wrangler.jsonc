@@ -17,6 +17,10 @@
         "name": "MCP_OBJECT"
       },
       {
+        "class_name": "TestCodemodeMcpAgent",
+        "name": "TestCodemodeMcpAgent"
+      },
+      {
         "class_name": "TestEmailAgent",
         "name": "EmailAgent"
       },
@@ -317,6 +321,7 @@
     {
       "new_sqlite_classes": [
         "TestMcpAgent",
+        "TestCodemodeMcpAgent",
         "TestEmailAgent",
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",

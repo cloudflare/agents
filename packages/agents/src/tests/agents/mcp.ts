@@ -6,6 +6,8 @@ import type {
   ServerNotification,
   ServerRequest
 } from "@modelcontextprotocol/sdk/types.js";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { openApiMcpServer } from "@cloudflare/codemode/mcp";
 import { z } from "zod";
 import { McpAgent } from "../../mcp/index.ts";
 import {
@@ -36,6 +38,36 @@ type EchoResponseData = {
 type Props = {
   testValue: string;
 };
+
+export class TestCodemodeMcpAgent extends McpAgent<
+  Cloudflare.Env & { LOADER: WorkerLoader }
+> {
+  server!: McpServer;
+
+  async init() {
+    this.server = openApiMcpServer({
+      spec: {
+        openapi: "3.1.0",
+        info: { title: "Codemode MCP test", version: "1.0.0" },
+        paths: { "/protected": { delete: { summary: "Protected action" } } }
+      },
+      executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
+      request: async (options, context) => {
+        return this.elicitInput(
+          {
+            message: `Allow ${options.method} ${options.path}?`,
+            requestedSchema: {
+              type: "object",
+              properties: { approved: { type: "boolean" } },
+              required: ["approved"]
+            }
+          },
+          { relatedRequestId: context.requestId }
+        );
+      }
+    });
+  }
+}
 
 export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
   private tempToolHandle?: { remove: () => void };

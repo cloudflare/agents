@@ -8,6 +8,7 @@ import {
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
 export {
+  TestCodemodeMcpAgent,
   TestMcpAgent,
   TestMcpJurisdiction,
   TestAddMcpServerAgent,
@@ -95,6 +96,7 @@ export {
 // circular dependencies.
 
 import type {
+  TestCodemodeMcpAgent,
   TestRpcMcpClientAgent,
   TestEmailAgent,
   TestCaseSensitiveAgent,
@@ -146,6 +148,7 @@ import type {
 export type Env = {
   LOADER: WorkerLoader;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
+  TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
   CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
@@ -209,7 +212,10 @@ export type Env = {
 
 // ── Fetch handler ────────────────────────────────────────────────────
 
-import { TestMcpAgent as McpAgentImpl } from "./agents";
+import {
+  TestCodemodeMcpAgent as CodemodeMcpAgentImpl,
+  TestMcpAgent as McpAgentImpl
+} from "./agents";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
@@ -227,6 +233,12 @@ export default {
 
     if (url.pathname === "/mcp") {
       return McpAgentImpl.serve("/mcp").fetch(request, env, ctx);
+    }
+
+    if (url.pathname === "/codemode-mcp") {
+      return CodemodeMcpAgentImpl.serve("/codemode-mcp", {
+        binding: "TestCodemodeMcpAgent"
+      }).fetch(request, env, ctx);
     }
 
     if (url.pathname === "/auto" || url.pathname === "/auto/message") {

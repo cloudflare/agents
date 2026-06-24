@@ -1,4 +1,5 @@
 export {
+  TestCodemodeMcpAgent,
   TestMcpAgent,
   TestMcpJurisdiction,
   TestAddMcpServerAgent,
