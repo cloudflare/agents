@@ -297,6 +297,14 @@ export class ChildAgent extends Agent {
 
 For sub-agent origins, `AgentWorkflow.agent` is an RPC-only stub. Use it to call Agent methods, but use `routeSubAgentRequest()` or the `/agents/{parent}/{name}/sub/{child}/{name}` URL shape for external HTTP or WebSocket routing instead of `this.agent.fetch()`.
 
+##### Routing constraints
+
+Because the originating identity is persisted durably in the workflow params and replayed on every callback, a few constraints apply to all workflows (sub-agent and top-level alike):
+
+- **Callbacks resolve the Agent by name.** The runtime re-resolves the originating Agent with `getAgentByName(...)`. If you addressed the Agent by a raw Durable Object id (`idFromString` / `get(id)`) instead of by name, callbacks land on a different instance. Start workflows from name-addressed Agents.
+- **Class names must survive bundling.** The originating path is keyed by `constructor.name`. Configure your bundler to preserve class names (esbuild `keepNames: true`) so progress, completion, and `this.agent` RPC can be routed back to the right facet.
+- **`agentBinding` is the root binding.** When you pass `options.agentBinding` from a sub-agent, use the **root** Agent's Durable Object binding name, not a child binding.
+
 #### `sendWorkflowEvent(workflowName, instanceId, event)`
 
 Send an event to a running workflow.
@@ -329,6 +337,8 @@ const workflow = this.getWorkflow(instanceId);
 #### `getWorkflows(criteria?)`
 
 Query tracked workflows with cursor-based pagination. Returns a `WorkflowPage` with workflows, total count, and cursor for the next page.
+
+> **Scoping:** `getWorkflows()` and `getWorkflowById()` only see workflows tracked in **this** Agent's storage. Workflows started by a sub-agent are tracked in that sub-agent's own facet storage, so a parent will not see child-started runs. To build a combined view, expose a wrapper method on each child (e.g. `listMyWorkflows()`) and aggregate the results across your sub-agents yourself.
 
 ```typescript
 // Get running workflows (default limit is 50, max is 100)

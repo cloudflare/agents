@@ -256,6 +256,17 @@ export default {
       return routeSubAgentRequest(request, parent, { fromPath: rest });
     }
 
+    // Workflow facet routing exercising `routeSubAgentRequest` directly.
+    // URL shape: /wf-sub/{parent}/sub/{child-class-kebab}/{child-name}[/...]
+    // Proves the documented HTTP escape hatch reaches a workflow facet.
+    if (url.pathname.startsWith("/wf-sub/")) {
+      const match = url.pathname.match(/^\/wf-sub\/([^/]+)(\/.*)$/);
+      if (!match) return new Response("Bad wf-sub path", { status: 400 });
+      const [, parentName, rest] = match;
+      const parent = await getAgentByName(env.TestWorkflowAgent, parentName);
+      return routeSubAgentRequest(request, parent, { fromPath: rest });
+    }
+
     // Spike: sub-agent routing through parent DO.
     // URL shape: /spike-sub/{parent}/sub/{child-class}/{child-name}[/...]
     // Forwards the request to the parent DO, which in turn forwards

@@ -212,6 +212,18 @@ export class AgentWorkflow<
     this._workflowName = workflowName;
     this._errorReported = false;
 
+    // The origin payload is durably persisted in workflow params, so a workflow
+    // started by an older SDK can resume against newer code (and vice versa).
+    // Reject origin versions this build does not understand rather than
+    // silently misreading a future shape.
+    if (agentOrigin && agentOrigin.version !== 1) {
+      throw new Error(
+        `AgentWorkflow received an unsupported origin version (${
+          (agentOrigin as { version?: unknown }).version
+        }). Upgrade the "agents" package running this Workflow to match the Agent that started it.`
+      );
+    }
+
     if (agentOrigin?.kind === "facet") {
       this._agent = await this._initFacetAgent(agentOrigin);
       return;

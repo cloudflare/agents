@@ -150,6 +150,23 @@ export class TestWorkflowSubAgent extends Agent<
     return this.state;
   }
 
+  // HTTP entrypoint for the facet. Used to prove the documented escape hatch
+  // (`routeSubAgentRequest()` / nested `/sub/...` URLs) reaches the facet for
+  // external HTTP/WebSocket traffic even while a facet-origin workflow runs —
+  // unlike `AgentWorkflow.agent.fetch()`, which is intentionally unsupported.
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const workflowId = url.searchParams.get("workflowId");
+    const status = workflowId
+      ? (this.getWorkflow(workflowId)?.status ?? null)
+      : null;
+    return Response.json({
+      facet: this.name,
+      isFacet: true,
+      workflowStatus: status
+    });
+  }
+
   getCallbacksReceived(): Array<{
     type: string;
     workflowName: string;
@@ -487,6 +504,42 @@ export class TestWorkflowAgent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(TestWorkflowSubAgent, childName);
     await child.approveWorkflowFromFacet(workflowId);
+  }
+
+  // Abort a workflow sub-agent facet, dropping its in-memory state so a
+  // subsequent callback must route to a freshly re-initialized facet.
+  // Simulates hibernation/eviction mid-workflow.
+  abortWorkflowSubAgent(childName: string): void {
+    this.abortSubAgent(TestWorkflowSubAgent, childName, "test-eviction");
+  }
+
+  // Permanently delete a workflow sub-agent facet, removing it from the
+  // registry so a later callback hits the "no longer exists" guard.
+  async deleteWorkflowSubAgent(childName: string): Promise<void> {
+    await this.deleteSubAgent(TestWorkflowSubAgent, childName);
+  }
+
+  // Directly exercise the path-based workflow RPC dispatch guard so error
+  // paths (built-in/internal method, missing sub-agent, non-descendant path)
+  // can be asserted deterministically.
+  async invokeAgentPathTest(
+    path: Array<{ className: string; name: string }>,
+    method: string,
+    args: unknown[]
+  ): Promise<{ ok: boolean; message: string }> {
+    try {
+      const self = this as unknown as {
+        _cf_invokeAgentPath(
+          p: Array<{ className: string; name: string }>,
+          m: string,
+          a: unknown[]
+        ): Promise<unknown>;
+      };
+      await self._cf_invokeAgentPath(path, method, args);
+      return { ok: true, message: "" };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   async rejectSubAgentWorkflow(

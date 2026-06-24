@@ -5793,11 +5793,22 @@ export class Agent<
     }
 
     if (selfPath.length === targetPath.length) {
+      // Match real DO-stub RPC semantics: refuse JS-internal probes
+      // (`constructor`, `toString`, symbol keys, thenable checks, …) and
+      // anything inherited from `Object.prototype` so a facet-origin workflow
+      // cannot reach a method surface a top-level workflow's stub would deny.
+      // The framework's own `_workflow_*` / `_cf_*` RPC methods and any
+      // user-defined Agent methods live on the subclass prototype, not
+      // `Object.prototype`, so they remain callable.
       const target = this as unknown as Record<string, unknown>;
       const fn = target[method];
-      if (typeof fn !== "function") {
+      if (
+        isInternalJsStubProp(method) ||
+        method in Object.prototype ||
+        typeof fn !== "function"
+      ) {
         throw new Error(
-          `Method ${method} not found on ${this.constructor.name}`
+          `Workflow origin method "${method}" is not callable on ${this.constructor.name}.`
         );
       }
       return await (fn as (...methodArgs: unknown[]) => unknown).apply(
@@ -9720,10 +9731,29 @@ export class Agent<
    * Start a workflow and track it in this Agent's database.
    * Automatically injects agent identity into the workflow params.
    *
+   * The originating Agent identity is persisted in the workflow params so
+   * callbacks (`this.agent` RPC, progress/completion/error, state updates)
+   * route back to the exact Agent or sub-agent facet that started the run.
+   * Note the following constraints:
+   *
+   * - **Resolution is by name.** Callbacks re-resolve the originating Agent via
+   *   `getAgentByName(...)`. Agents addressed by a raw Durable Object id
+   *   (`idFromString`/`get(id)`) rather than by name will not receive
+   *   callbacks on the same instance.
+   * - **Sub-agent runs are facet-local.** A workflow started from a sub-agent
+   *   is tracked in that facet's own storage; the parent's `getWorkflows()` /
+   *   `getWorkflowById()` do not see it. Aggregate across facets yourself if
+   *   you need a combined view.
+   * - **Class names must survive bundling.** The originating path is keyed by
+   *   `constructor.name`. Ensure your bundler preserves class names
+   *   (e.g. esbuild `keepNames: true`) so callbacks can be routed.
+   *
    * @template P - Type of params to pass to the workflow
    * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
    * @param params - Params to pass to the workflow
-   * @param options - Optional workflow options
+   * @param options - Optional workflow options. For sub-agents, pass
+   *   `agentBinding` as the **root** Agent's Durable Object binding name, not a
+   *   child binding.
    * @returns The workflow instance ID
    *
    * @example
@@ -10668,7 +10698,9 @@ export class Agent<
 
   /**
    * Handle a callback from a workflow.
-   * Called when the Agent receives a callback at /_workflow/callback.
+   * Invoked via the internal `_workflow_handleCallback` RPC whenever an
+   * {@link AgentWorkflow} reports progress, completion, an error, or a custom
+   * event back to its originating Agent (or sub-agent facet).
    * Override this to handle all callback types in one place.
    *
    * @param callback - The callback payload
@@ -10829,7 +10861,17 @@ export class Agent<
    */
   async _workflow_broadcast(message: unknown): Promise<void> {
     await this.__unsafe_ensureInitialized();
-    this.broadcast(JSON.stringify(message));
+    const payload = JSON.stringify(message);
+    if (this._isFacet) {
+      // The public `broadcast()` override is sync (`: void`) so on a facet it
+      // can only fire-and-forget the parent hop. That would let this RPC
+      // resolve before the message reaches the root-owned sockets, so a facet
+      // that hibernates right after the workflow RPC returns could silently
+      // drop the broadcast. Await the parent chain directly instead.
+      await this._cf_broadcastToParentSubAgent(payload);
+      return;
+    }
+    this.broadcast(payload);
   }
 
   /**

@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { introspectWorkflowInstance } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
@@ -487,5 +487,170 @@ describe("sub-agent workflow origins", () => {
       workflowId
     )) as WorkflowInfo | null;
     expect(facetWorkflow?.status).toBe("complete");
+  });
+
+  it("routes callbacks to a facet that was evicted mid-workflow", async () => {
+    const id = crypto.randomUUID();
+    const parentName = `facet-workflow-evict-parent-${id}`;
+    const childName = `facet-workflow-evict-child-${id}`;
+    const workflowId = `facet-evict-wf-${id}`;
+    const taskId = `facet-evict-task-${id}`;
+    const agentStub = await getAgentByName(env.TestWorkflowAgent, parentName);
+
+    await using instance = await introspectWorkflowInstance(
+      env.FACET_APPROVAL_WORKFLOW,
+      workflowId
+    );
+
+    // Start an approval workflow that parks on waitForApproval, so the run
+    // spans an eviction window.
+    const startedWorkflowId = await agentStub.runSubAgentApprovalWorkflowTest(
+      childName,
+      workflowId,
+      { taskId }
+    );
+    expect(startedWorkflowId).toBe(workflowId);
+
+    // Wait until the in-flight "progress" callback has landed on the facet.
+    await waitForCallback(
+      async () =>
+        (await agentStub.getSubAgentCallbacks(childName)) as CallbackRecord[],
+      (callback) =>
+        callback.type === "progress" &&
+        callback.workflowName === "FACET_APPROVAL_WORKFLOW" &&
+        callback.workflowId === workflowId
+    );
+
+    // Forcibly abort the facet. This drops its in-memory state (including the
+    // in-memory callback log), mirroring hibernation/eviction. The durable
+    // workflow tracking row in the facet's own SQLite survives.
+    await agentStub.abortWorkflowSubAgent(childName);
+
+    // Approve from the parent. The workflow resumes and fires its completion
+    // callbacks, which must route to a freshly re-initialized facet.
+    await agentStub.approveSubAgentWorkflow(childName, workflowId);
+    await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+
+    // The completion callback landed on the restarted facet (the pre-eviction
+    // "progress" entry is gone because in-memory state was dropped).
+    const callbacks = await waitForCallback(
+      async () =>
+        (await agentStub.getSubAgentCallbacks(childName)) as CallbackRecord[],
+      (callback) =>
+        callback.type === "complete" && callback.workflowId === workflowId
+    );
+    expect(
+      callbacks.some(
+        (callback) =>
+          callback.type === "progress" && callback.workflowId === workflowId
+      )
+    ).toBe(false);
+
+    // The durable tracking row, read back through the registry, reflects the
+    // callback that routed to the post-eviction facet.
+    const facetWorkflow = (await agentStub.getSubAgentWorkflowById(
+      childName,
+      workflowId
+    )) as WorkflowInfo | null;
+    expect(facetWorkflow?.status).toBe("complete");
+  });
+
+  it("rejects callbacks for a sub-agent deleted mid-flight and refuses unsafe methods", async () => {
+    const id = crypto.randomUUID();
+    const parentName = `facet-workflow-guard-parent-${id}`;
+    const childName = `facet-workflow-guard-child-${id}`;
+    const agentStub = await getAgentByName(env.TestWorkflowAgent, parentName);
+
+    // Materialize the child facet, then delete it so the registry no longer
+    // knows about it — the state a long-running workflow would hit if its
+    // origin facet was deleted while the run was parked.
+    await agentStub.runSubAgentWorkflowTest(childName, `seed-wf-${id}`, {
+      taskId: `seed-${id}`
+    });
+    await agentStub.deleteWorkflowSubAgent(childName);
+
+    // A callback targeting the deleted child surfaces a clear error rather
+    // than silently succeeding or hanging.
+    const deleted = await agentStub.invokeAgentPathTest(
+      [
+        { className: "TestWorkflowAgent", name: parentName },
+        { className: "TestWorkflowSubAgent", name: childName }
+      ],
+      "recordWorkflowResult",
+      ["x", { y: 1 }]
+    );
+    expect(deleted.ok).toBe(false);
+    expect(deleted.message).toContain("no longer exists");
+
+    // A path that does not descend from this agent is rejected.
+    const notDescend = await agentStub.invokeAgentPathTest(
+      [{ className: "SomeOtherAgent", name: "nope" }],
+      "getCallbacksReceived",
+      []
+    );
+    expect(notDescend.ok).toBe(false);
+    expect(notDescend.message).toContain("does not descend");
+
+    // Built-in / prototype methods are refused, matching real DO-stub RPC.
+    const builtin = await agentStub.invokeAgentPathTest(
+      [{ className: "TestWorkflowAgent", name: parentName }],
+      "constructor",
+      []
+    );
+    expect(builtin.ok).toBe(false);
+    expect(builtin.message).toContain("not callable");
+
+    const hasOwn = await agentStub.invokeAgentPathTest(
+      [{ className: "TestWorkflowAgent", name: parentName }],
+      "hasOwnProperty",
+      ["name"]
+    );
+    expect(hasOwn.ok).toBe(false);
+    expect(hasOwn.message).toContain("not callable");
+  });
+
+  it("reaches a workflow facet over HTTP via routeSubAgentRequest while a workflow runs", async () => {
+    const id = crypto.randomUUID();
+    const parentName = `facet-workflow-http-parent-${id}`;
+    const childName = `facet-workflow-http-child-${id}`;
+    const workflowId = `facet-http-wf-${id}`;
+    const taskId = `facet-http-task-${id}`;
+    const agentStub = await getAgentByName(env.TestWorkflowAgent, parentName);
+
+    await using instance = await introspectWorkflowInstance(
+      env.FACET_APPROVAL_WORKFLOW,
+      workflowId
+    );
+
+    // Park a workflow on the facet so it is live during the HTTP request.
+    await agentStub.runSubAgentApprovalWorkflowTest(childName, workflowId, {
+      taskId
+    });
+    await waitForCallback(
+      async () =>
+        (await agentStub.getSubAgentCallbacks(childName)) as CallbackRecord[],
+      (callback) =>
+        callback.type === "progress" && callback.workflowId === workflowId
+    );
+
+    // `AgentWorkflow.agent.fetch()` is intentionally unsupported; the
+    // documented escape hatch is `routeSubAgentRequest()` / the nested
+    // `/sub/...` URL. Confirm that reaches the running facet.
+    const res = await exports.default.fetch(
+      `http://example.com/wf-sub/${parentName}/sub/test-workflow-sub-agent/${childName}?workflowId=${workflowId}`
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      facet: string;
+      isFacet: boolean;
+      workflowStatus: string | null;
+    };
+    expect(body.facet).toBe(childName);
+    expect(body.isFacet).toBe(true);
+    expect(body.workflowStatus).not.toBeNull();
+
+    // Clean up the parked workflow.
+    await agentStub.approveSubAgentWorkflow(childName, workflowId);
+    await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
   });
 });
