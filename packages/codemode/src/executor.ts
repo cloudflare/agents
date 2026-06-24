@@ -159,10 +159,12 @@ export class ToolDispatcher extends RpcTarget {
 
 // ── DynamicWorkerExecutor ─────────────────────────────────────────────
 
+const DEFAULT_DYNAMIC_WORKER_EXECUTION_TIMEOUT_MS = 60_000;
+
 export interface DynamicWorkerExecutorOptions {
   loader: WorkerLoader;
   /**
-   * Timeout in milliseconds for code execution. Defaults to 30000 (30s).
+   * Timeout in milliseconds for code execution. Defaults to 60000 (60s).
    */
   timeout?: number;
   /**
@@ -216,7 +218,8 @@ export class DynamicWorkerExecutor implements Executor {
 
   constructor(options: DynamicWorkerExecutorOptions) {
     this.#loader = options.loader;
-    this.#timeout = options.timeout ?? 30000;
+    this.#timeout =
+      options.timeout ?? DEFAULT_DYNAMIC_WORKER_EXECUTION_TIMEOUT_MS;
     this.#globalOutbound = options.globalOutbound ?? null;
     const { "executor.js": _, ...safeModules } = options.modules ?? {};
     this.#modules = safeModules;
