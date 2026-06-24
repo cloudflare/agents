@@ -533,7 +533,7 @@ class NodeVMExecutor implements Executor {
 | Option           | Type                     | Default  | Description                                                  |
 | ---------------- | ------------------------ | -------- | ------------------------------------------------------------ |
 | `loader`         | `WorkerLoader`           | required | Worker Loader binding from `env.LOADER`                      |
-| `timeout`        | `number`                 | `30000`  | Execution timeout in ms                                      |
+| `timeout`        | `number`                 | `60000`  | Execution timeout in ms                                      |
 | `globalOutbound` | `Fetcher \| null`        | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
 | `modules`        | `Record<string, string>` | `{}`     | Extra modules importable in the sandbox                      |
 

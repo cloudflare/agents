@@ -370,7 +370,7 @@ Executes code in an isolated Cloudflare Worker via `WorkerLoader`.
 | Option           | Type              | Default  | Description                                                  |
 | ---------------- | ----------------- | -------- | ------------------------------------------------------------ |
 | `loader`         | `WorkerLoader`    | required | Worker Loader binding from `env.LOADER`                      |
-| `timeout`        | `number`          | `30000`  | Execution timeout in ms                                      |
+| `timeout`        | `number`          | `60000`  | Execution timeout in ms                                      |
 | `globalOutbound` | `Fetcher \| null` | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
 
 ### `IframeSandboxExecutor`
@@ -413,7 +413,7 @@ sanitizeToolName("delete"); // "delete_"
 - Code runs in **isolated Worker sandboxes** — each execution gets its own Worker instance
 - External network access (`fetch`, `connect`) is **blocked by default** at the runtime level
 - Tool calls are dispatched via Workers RPC, not network requests
-- Execution has a configurable **timeout** (default 30 seconds)
+- Execution has a configurable **timeout** (default 60 seconds)
 - Console output is captured separately and does not leak to the host
 - Browser iframe execution runs in a sandboxed iframe with a restrictive CSP by
   default. It uses nonce-scoped internal messages, but its timeout cannot preempt
