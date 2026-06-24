@@ -1005,3 +1005,114 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(activeRequestIds.has("req-full")).toBe(false);
   });
 });
+
+describe("WebSocketChatTransport STREAM_PENDING keep-waiting (#1784)", () => {
+  let agent: ReturnType<typeof createMockAgent>;
+  let activeRequestIds: Set<string>;
+  let transport: WebSocketChatTransport<ChatMessage>;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+    activeRequestIds = new Set();
+    transport = new WebSocketChatTransport<ChatMessage>({
+      agent,
+      activeRequestIds
+    });
+  });
+
+  it("handleStreamPending returns false when no resume is pending", () => {
+    expect(transport.handleStreamPending()).toBe(false);
+  });
+
+  it("extends the short probe timeout: a pending turn does not resolve null at 5s", async () => {
+    vi.useFakeTimers();
+    try {
+      const promise = transport.reconnectToStream({ chatId: "chat-1" });
+
+      // Server says "accepted, not streaming yet".
+      expect(transport.handleStreamPending()).toBe(true);
+
+      // The original 5s probe window passes — must NOT resolve yet.
+      vi.advanceTimersByTime(5001);
+      let settled = false;
+      void promise.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      // A later STREAM_RESUMING still resolves with a live stream.
+      transport.handleStreamResuming({ id: "req-pending" });
+      const stream = await promise;
+      expect(stream).toBeInstanceOf(ReadableStream);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still resolves null at the extended backstop if the server never follows up", async () => {
+    vi.useFakeTimers();
+    try {
+      const promise = transport.reconnectToStream({ chatId: "chat-1" });
+      expect(transport.handleStreamPending()).toBe(true);
+
+      // Past the short window but before the backstop: still waiting.
+      vi.advanceTimersByTime(5001);
+      // Past the 60s backstop: degrade to null rather than hang forever.
+      vi.advanceTimersByTime(60000);
+
+      const result = await promise;
+      expect(result).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a STREAM_RESUME_NONE after a pending frame still resolves null immediately", async () => {
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+    expect(transport.handleStreamPending()).toBe(true);
+    expect(transport.handleStreamResumeNone()).toBe(true);
+
+    const result = await promise;
+    expect(result).toBeNull();
+  });
+
+  it("clears the keep-waiting hook once resolved", async () => {
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+    transport.handleStreamResuming({ id: "req-x" });
+    await promise;
+
+    expect(transport.handleStreamPending()).toBe(false);
+  });
+
+  it("extends the tool-continuation probe window too", async () => {
+    vi.useFakeTimers();
+    try {
+      transport.expectToolContinuation();
+      const stream = (await transport.reconnectToStream({
+        chatId: "chat-1"
+      })) as ReadableStream<UIMessageChunk>;
+      const reader = stream.getReader();
+
+      expect(transport.handleStreamPending()).toBe(true);
+
+      // The 5s window passes without closing the (deferred) stream.
+      vi.advanceTimersByTime(5001);
+
+      // STREAM_RESUMING then completes the handshake and the stream flows.
+      expect(transport.handleStreamResuming({ id: "req-cont" })).toBe(true);
+      agent.dispatch({
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        id: "req-cont",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await expect(reader.read()).resolves.toEqual({
+        done: false,
+        value: { type: "text-start", id: "t1" }
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

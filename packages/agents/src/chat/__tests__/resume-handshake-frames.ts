@@ -55,6 +55,20 @@ export function streamResumeNoneFrame() {
 }
 
 /**
+ * Server -> client `STREAM_PENDING` keep-waiting frame (#1784): a turn is
+ * accepted but its resumable stream has not started yet. Carries `id` only when
+ * the accepted request id is known. The client cancels its short resume probe
+ * timeout and waits for a later `STREAM_RESUMING` or `STREAM_RESUME_NONE`.
+ * Emitted by `PreStreamTurns.park`.
+ */
+export function streamPendingFrame(requestId?: string) {
+  return {
+    type: CHAT_MESSAGE_TYPES.STREAM_PENDING,
+    ...(requestId ? { id: requestId } : {})
+  };
+}
+
+/**
  * Server -> client terminal replay-done frame: the ACK fallback when no live or
  * completed chunks remain to replay, closing the resumed stream cleanly.
  * `replay: true`, never `error`. `responseType` is the host's use-chat-response

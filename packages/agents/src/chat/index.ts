@@ -76,6 +76,15 @@ export {
 } from "./continuation-state";
 
 /**
+ * @internal Shared pre-stream-turn tracker (#1784) — represents the window
+ * between a turn being accepted and its resumable stream starting so a
+ * reconnecting client keeps waiting instead of giving up. Sibling-package
+ * support for `@cloudflare/ai-chat` and `@cloudflare/think`, not a public API.
+ * See `pre-stream-turns.ts`.
+ */
+export { PreStreamTurns } from "./pre-stream-turns";
+
+/**
  * @internal Shared auto-continuation barrier (the tool-result → auto-continue
  * flow, #1649 / #1650) — sibling-package support for `@cloudflare/ai-chat` and
  * `@cloudflare/think`, not a public API. See `auto-continuation-controller.ts`.

@@ -6542,3 +6542,169 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       .toHaveTextContent("user,user");
   });
 });
+
+describe("useAgentChat transparent reconnect re-probe (#1784)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url,
+      send: (data: string) => sentMessages.push(data)
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    return { agent, target, sentMessages };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  const RESUME_REQUEST = "cf_agent_stream_resume_request";
+
+  it("re-probes the stream on a SUBSEQUENT socket open, but not the first", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "reconnect-reprobe",
+      url: "ws://localhost:3000/agents/chat/reconnect-reprobe?_pk=abc"
+    });
+
+    const resumeRequests = () =>
+      sentMessages.filter(
+        (m) => (JSON.parse(m) as { type?: string }).type === RESUME_REQUEST
+      ).length;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: true
+      });
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(20);
+    });
+
+    // Settle any mount-time resume probe so the transport is no longer awaiting.
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(20);
+    });
+
+    const baseline = resumeRequests();
+
+    // First "open" is treated as the initial connect — no re-probe.
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    expect(resumeRequests()).toBe(baseline);
+
+    // A SUBSEQUENT open is a transparent reconnect (e.g. 1006) that does NOT
+    // remount the component → the hook must re-probe so AI SDK status recovers.
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    expect(resumeRequests()).toBe(baseline + 1);
+  });
+
+  it("keeps the resume probe alive on STREAM_PENDING and still resolves a later STREAM_RESUMING", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "stream-pending-keepalive",
+      url: "ws://localhost:3000/agents/chat/stream-pending-keepalive?_pk=abc"
+    });
+
+    const sentTypes = () =>
+      sentMessages.map((m) => (JSON.parse(m) as { type?: string }).type);
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: true
+      });
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(20);
+      return screen;
+    });
+
+    // Server says "accepted, not streaming yet" — the probe must NOT resolve to
+    // "no stream" and must keep waiting.
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_pending", id: "pending-1" });
+      await sleep(20);
+    });
+    // A pending frame must not produce an ACK or a RESUME_NONE-driven teardown.
+    expect(sentTypes()).not.toContain("cf_agent_stream_resume_ack");
+
+    // The stream finally starts; the still-open probe resolves into the normal
+    // resume handshake (ACK + replay).
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resuming", id: "pending-1" });
+      await sleep(10);
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "pending-1",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "pending-1",
+        body: '{"type":"text-delta","id":"t1","delta":"Hello"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("streaming");
+    expect(sentTypes()).toContain("cf_agent_stream_resume_ack");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "pending-1",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+    expect(sawActiveResponseError(consoleErrorSpy)).toBe(false);
+    consoleErrorSpy.mockRestore();
+  });
+});

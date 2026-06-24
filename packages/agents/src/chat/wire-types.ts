@@ -18,6 +18,14 @@ export enum MessageType {
   CF_AGENT_STREAM_RESUME_REQUEST = "cf_agent_stream_resume_request",
   /** Sent by server when client requests resume but no active stream exists */
   CF_AGENT_STREAM_RESUME_NONE = "cf_agent_stream_resume_none",
+  /**
+   * Sent by server when a turn is accepted but its resumable stream has not
+   * started yet (queued / debouncing / waiting on MCP / async setup). Tells a
+   * reconnecting client to keep waiting rather than resolve its resume probe to
+   * "no stream". Resolved by a later `CF_AGENT_STREAM_RESUMING` (stream started)
+   * or `CF_AGENT_STREAM_RESUME_NONE` (settled without streaming). See #1784.
+   */
+  CF_AGENT_STREAM_PENDING = "cf_agent_stream_pending",
 
   /** Client sends tool result to server (for client-side tools) */
   CF_AGENT_TOOL_RESULT = "cf_agent_tool_result",
@@ -84,6 +92,16 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
   | {
       /** Server responds to resume request when no active stream exists */
       type: MessageType.CF_AGENT_STREAM_RESUME_NONE;
+    }
+  | {
+      /**
+       * Server signals an accepted turn whose resumable stream has not started
+       * yet — the client should keep waiting for `STREAM_RESUMING` (or a later
+       * `STREAM_RESUME_NONE`) rather than give up. See #1784.
+       */
+      type: MessageType.CF_AGENT_STREAM_PENDING;
+      /** The accepted request id, when known. */
+      id?: string;
     }
   | {
       /**

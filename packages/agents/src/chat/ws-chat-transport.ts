@@ -13,6 +13,23 @@ import { nanoid } from "nanoid";
 import { MessageType, type OutgoingMessage } from "./wire-types";
 
 /**
+ * Short safety-net timeout for a resume probe when the server has said nothing.
+ * Under normal operation the server answers a `STREAM_RESUME_REQUEST` with
+ * `STREAM_RESUMING`, `STREAM_RESUME_NONE`, or `STREAM_PENDING` well before this.
+ */
+const RESUME_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * Extended backstop applied once the server says a turn is pending
+ * (`STREAM_PENDING`, #1784). The pre-stream window (queueing, MCP setup,
+ * debounce, model latency) can exceed the short probe timeout, and the server
+ * guarantees a follow-up `STREAM_RESUMING` or `STREAM_RESUME_NONE` — so we wait
+ * much longer (refreshed on every keep-waiting frame) but still cap it so a
+ * dropped follow-up degrades to a null resolve instead of hanging forever.
+ */
+const RESUME_PENDING_TIMEOUT_MS = 60000;
+
+/**
  * Agent-like interface for sending/receiving WebSocket messages.
  * Matches the shape returned by useAgent from agents/react.
  */
@@ -77,6 +94,11 @@ export class WebSocketChatTransport<
   // Pending "no stream" resolver — called by handleStreamResumeNone
   // when onAgentMessage sees CF_AGENT_STREAM_RESUME_NONE.
   private _resumeNoneResolver: (() => void) | null = null;
+  // Keep-waiting hook (#1784) — set by whichever resume path is currently
+  // awaiting, called by handleStreamPending when onAgentMessage sees
+  // CF_AGENT_STREAM_PENDING. Extends the path's probe timeout so a slow
+  // pre-stream window (queue / MCP / model latency) does not resolve early.
+  private _onStreamPending: (() => void) | null = null;
   // Set when a client-side tool result/approval is expected to trigger
   // a new continuation stream. In this mode reconnectToStream() returns
   // a deferred ReadableStream immediately so AI SDK status can transition
@@ -188,6 +210,19 @@ export class WebSocketChatTransport<
   handleStreamResumeNone(): boolean {
     if (!this._resumeNoneResolver) return false;
     this._resumeNoneResolver();
+    return true;
+  }
+
+  /**
+   * Called by onAgentMessage when it receives CF_AGENT_STREAM_PENDING (#1784):
+   * the server accepted a turn but its stream has not started yet. If a resume
+   * path is awaiting, extend its probe timeout (so it keeps waiting for the
+   * eventual STREAM_RESUMING / STREAM_RESUME_NONE instead of resolving null
+   * after the short window). Returns true if a waiting path consumed it.
+   */
+  handleStreamPending(): boolean {
+    if (!this._onStreamPending) return false;
+    this._onStreamPending();
     return true;
   }
 
@@ -413,8 +448,19 @@ export class WebSocketChatTransport<
         resolved = true;
         this._resumeResolver = null;
         this._resumeNoneResolver = null;
+        this._onStreamPending = null;
         if (timeout) clearTimeout(timeout);
         resolve(value);
+      };
+
+      // Keep-waiting (#1784): the server says a turn is accepted but its stream
+      // hasn't started. Extend the short probe timeout to the longer backstop so
+      // we wait for the eventual STREAM_RESUMING (or STREAM_RESUME_NONE) instead
+      // of resolving null mid pre-stream window. Refreshed on every frame.
+      this._onStreamPending = () => {
+        if (resolved) return;
+        if (timeout) clearTimeout(timeout);
+        timeout = setTimeout(() => done(null), RESUME_PENDING_TIMEOUT_MS);
       };
 
       // Set the "no stream" resolver that handleStreamResumeNone() will call.
@@ -461,9 +507,9 @@ export class WebSocketChatTransport<
 
       // Safety-net timeout: if the WebSocket never connects or the
       // server is unreachable, resolve null. Under normal operation
-      // the server responds with STREAM_RESUMING or STREAM_RESUME_NONE
-      // well before this fires.
-      timeout = setTimeout(() => done(null), 5000);
+      // the server responds with STREAM_RESUMING, STREAM_RESUME_NONE, or
+      // STREAM_PENDING (which extends this) well before this fires.
+      timeout = setTimeout(() => done(null), RESUME_PROBE_TIMEOUT_MS);
     });
   }
 
@@ -515,6 +561,7 @@ export class WebSocketChatTransport<
       if (completed) return;
       completed = true;
       this._abortToolContinuation = null;
+      this._onStreamPending = null;
       clearHandshakeResolvers(resumeResolver, resumeNoneResolver);
       try {
         action();
@@ -585,6 +632,7 @@ export class WebSocketChatTransport<
           requestId = data.id;
           activeIds?.add(requestId);
           clearHandshakeResolvers(onResume, onResumeNone);
+          transport._onStreamPending = null;
           if (timeout) clearTimeout(timeout);
 
           agent.send(
@@ -600,8 +648,19 @@ export class WebSocketChatTransport<
 
         timeout = setTimeout(
           () => finish(() => controller.close(), onResume, onResumeNone),
-          5000
+          RESUME_PROBE_TIMEOUT_MS
         );
+
+        // Keep-waiting (#1784): extend the probe window when the server reports
+        // the continuation turn is accepted but its stream hasn't started.
+        transport._onStreamPending = () => {
+          if (completed) return;
+          if (timeout) clearTimeout(timeout);
+          timeout = setTimeout(
+            () => finish(() => controller.close(), onResume, onResumeNone),
+            RESUME_PENDING_TIMEOUT_MS
+          );
+        };
 
         transport._resumeResolver = onResume;
         transport._resumeNoneResolver = onResumeNone;

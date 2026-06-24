@@ -1043,6 +1043,17 @@ export function useAgentChat<
   const statusRef = useRef(status);
   statusRef.current = status;
 
+  // Latest resumeStream, read by the reconnect re-probe effect without making
+  // it a dependency (it would re-register the socket listeners on every render).
+  const resumeStreamRef = useRef(resumeStream);
+  resumeStreamRef.current = resumeStream;
+
+  // Whether the socket has opened at least once. The AI SDK fires its own
+  // resume on mount, so we only re-probe on SUBSEQUENT opens (transparent 1006
+  // reconnects that don't remount the component) — see the reconnect re-probe
+  // in the socket effect below (#1784).
+  const hasConnectedOnceRef = useRef(false);
+
   const resumingToolContinuationRef = useRef(false);
   const pendingToolContinuationRef = useRef(false);
   const observedToolContinuationRequestIdRef = useRef<string | null>(null);
@@ -1896,6 +1907,15 @@ export function useAgentChat<
           customTransport.handleStreamResumeNone();
           break;
 
+        case MessageType.CF_AGENT_STREAM_PENDING:
+          // Server accepted a turn but its stream hasn't started yet (#1784):
+          // tell the transport to keep waiting so its resume probe doesn't
+          // resolve "no stream" mid pre-stream window. A later STREAM_RESUMING
+          // (stream started) or STREAM_RESUME_NONE (settled without streaming)
+          // resolves it. Advisory for clients not awaiting a resume.
+          customTransport.handleStreamPending();
+          break;
+
         case MessageType.CF_AGENT_STREAM_RESUMING: {
           const isEarlyToolContinuation =
             resumingToolContinuationRef.current &&
@@ -2153,8 +2173,33 @@ export function useAgentChat<
       fallbackAckedResumeRequestIds.clear();
     }
 
+    // Reconnect re-probe (#1784): a transparent socket reconnect (e.g. a 1006
+    // drop) does NOT remount the component, so the AI SDK's mount-time resume
+    // never re-fires and a turn that was still pre-stream when the socket
+    // dropped would leave AI SDK `status` stuck at "ready" even after the
+    // server starts streaming. On every reconnect (not the first open) re-probe
+    // through the transport so `status` recovers, mirroring a fresh mount. The
+    // proactive STREAM_RESUMING the server also sends on connect is reconciled
+    // with this probe by the existing #1733 dual-notify dedupe.
+    function onAgentOpen() {
+      if (!hasConnectedOnceRef.current) {
+        hasConnectedOnceRef.current = true;
+        return;
+      }
+      if (
+        !resume ||
+        statusRef.current !== "ready" ||
+        resumingToolContinuationRef.current ||
+        customTransport.isAwaitingResume()
+      ) {
+        return;
+      }
+      void Promise.resolve(resumeStreamRef.current?.()).catch(() => {});
+    }
+
     agent.addEventListener("message", onAgentMessage);
     agent.addEventListener("close", onAgentClose);
+    agent.addEventListener("open", onAgentOpen);
 
     // Stream resume is now primarily handled by the transport's
     // reconnectToStream (which sends CF_AGENT_STREAM_RESUME_REQUEST).
@@ -2164,6 +2209,7 @@ export function useAgentChat<
     return () => {
       agent.removeEventListener("message", onAgentMessage);
       agent.removeEventListener("close", onAgentClose);
+      agent.removeEventListener("open", onAgentOpen);
       fallbackAckedResumeRequestIds.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);

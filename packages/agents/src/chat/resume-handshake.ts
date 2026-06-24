@@ -22,6 +22,7 @@ import type { Connection } from "agents";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import type { ContinuationState } from "./continuation-state";
+import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ResumableStream } from "./resumable-stream";
 
 /** A pending terminal outcome captured before connect (#1645). */
@@ -42,6 +43,14 @@ export interface ResumeHandshakeHost {
   readonly resumableStream: ResumableStream;
   readonly continuation: ContinuationState<Connection>;
   /**
+   * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
+   * recovery adapters that don't track a pre-stream window omit it and keep the
+   * legacy `resume_none` behavior. When present, the handshake parks a
+   * reconnecting client here (sending a keep-waiting `STREAM_PENDING`) instead
+   * of telling it there is nothing to resume.
+   */
+  readonly preStream?: PreStreamTurns<Connection>;
+  /**
    * Connections notified of a resumable stream, excluded from live broadcast
    * until they ACK. Host-owned (shared with the streaming loop).
    */
@@ -50,6 +59,14 @@ export interface ResumeHandshakeHost {
   pendingChatTerminal(): Promise<PendingChatTerminal | null>;
   /** Materialize an orphaned stream's partial into a persisted assistant message. */
   persistOrphanedStream(streamId: string): Promise<void>;
+  /**
+   * Whether the connection that owns the active continuation stream is still
+   * connected. Optional: when omitted the handshake assumes it is (legacy
+   * behavior). Hosts wire their live connection registry so a continuation
+   * stream whose owner vanished on an abrupt (1006) reconnect can still be
+   * resumed by the replacement connection (#1784).
+   */
+  isConnectionPresent?(connectionId: string): boolean;
 }
 
 /**
@@ -97,12 +114,13 @@ export class ResumeHandshake {
    * `STREAM_RESUMING` from onConnect arrives before the handler is ready.
    */
   async handleResumeRequest(connection: Connection): Promise<void> {
-    const { resumableStream, continuation } = this.host;
+    const { resumableStream, continuation, preStream } = this.host;
     if (resumableStream.hasActiveStream()) {
       if (
         continuation.activeRequestId === resumableStream.activeRequestId &&
         continuation.activeConnectionId !== null &&
-        continuation.activeConnectionId !== connection.id
+        continuation.activeConnectionId !== connection.id &&
+        this._ownerStillPresent(continuation.activeConnectionId)
       ) {
         sendIfOpen(
           connection,
@@ -116,18 +134,46 @@ export class ResumeHandshake {
       (continuation.pending.connectionId === null ||
         continuation.pending.connectionId === connection.id)
     ) {
+      // A continuation turn is accepted but its stream has not started yet.
+      // Park the connection AND tell it to keep waiting (#1784) so its resume
+      // probe does not time out before the continuation stream begins; the host
+      // flushes `awaitingConnections` into `STREAM_RESUMING` on stream start.
       continuation.awaitingConnections.set(connection.id, connection);
+      this._sendStreamPending(connection, continuation.pending.requestId);
     } else if (await this._replayTerminalOnResume(connection)) {
       // A turn terminalized while no client was connected (#1645): drive the
       // resume handshake so the terminal error frame can be delivered on the
       // resumed stream (the only path that surfaces as an error on the client)
       // once this connection ACKs — see `_replayTerminalOnAck`.
+    } else if (preStream?.park(connection)) {
+      // A normal turn is accepted but its resumable stream has not started yet
+      // (#1784). `park` enrolled the connection and sent `STREAM_PENDING`; the
+      // host flushes it into `STREAM_RESUMING` on stream start, or releases it
+      // with `STREAM_RESUME_NONE` if the turn settles without streaming.
     } else {
       sendIfOpen(
         connection,
         JSON.stringify({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE })
       );
     }
+  }
+
+  /** Send a keep-waiting `STREAM_PENDING` frame (#1784). */
+  private _sendStreamPending(connection: Connection, requestId?: string): void {
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_PENDING,
+        ...(requestId ? { id: requestId } : {})
+      })
+    );
+  }
+
+  /** Whether the active continuation's owner connection is still present. */
+  private _ownerStillPresent(connectionId: string): boolean {
+    return this.host.isConnectionPresent
+      ? this.host.isConnectionPresent(connectionId)
+      : true;
   }
 
   /** Handle a client `STREAM_RESUME_ACK` for `requestId`. */

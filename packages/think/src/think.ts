@@ -146,6 +146,7 @@ import {
   cleanupStreamBuffers,
   STREAM_CLEANUP_DELAY_SECONDS,
   ContinuationState,
+  PreStreamTurns,
   AutoContinuationController,
   TIMED_OUT,
   awaitWithDeadline,
@@ -3237,6 +3238,18 @@ export class Think<
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
   private _continuation = new ContinuationState<Connection>();
+  /**
+   * Accepted-but-not-yet-streamed turns and the connections parked waiting for
+   * one (#1784). See {@link ResumeHandshake} `preStream`.
+   *
+   * HIBERNATION INVARIANT: in-memory only, NOT persisted. Safe because the
+   * pre-stream window cannot overlap hibernation — a turn between `begin()` and
+   * stream start is an unresolved `onMessage` handler promise that pins the DO,
+   * so eviction only happens once a durable stream exists (resumed via
+   * `ResumableStream`) or the turn finished. Breaks if a pre-stream wait is ever
+   * moved onto a durable alarm that releases the DO; if so, persist this state.
+   */
+  private _preStream = new PreStreamTurns<Connection>();
   // Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
   // and the double-fire guard. Parameterized by this agent's stream-active
   // signal, apply-drain, and continuation-turn pipeline (`_fireAutoContinuation`).
@@ -9756,6 +9769,12 @@ export class Think<
         // until the stream finishes.
         this._notifyStreamResuming(connection);
       } else {
+        // No active stream. If a turn is accepted but its stream hasn't started
+        // yet (#1784), park this connection and tell it to keep waiting (`park`
+        // sends the keep-waiting frame; no-op otherwise). Either way send the
+        // idle-connect transcript so the client renders the user message it
+        // just submitted while it waits for the stream to begin.
+        this._preStream.park(connection);
         for (const message of await this._buildIdleConnectMessages()) {
           connection.send(JSON.stringify(message));
         }
@@ -9772,6 +9791,7 @@ export class Think<
     ) => {
       this._pendingResumeConnections.delete(connection.id);
       this._continuation.releaseConnection(connection.id);
+      this._preStream.release(connection.id);
       return _onClose(connection, code, reason, wasClean);
     };
 
@@ -9966,6 +9986,12 @@ export class Think<
     // has already moved on. Completion clears it too, but only once the turn
     // resolves — which leaves the gap open.
     await this._clearChatTerminal();
+
+    // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client that
+    // reconnects/re-mounts before the stream starts is parked and told to keep
+    // waiting (see _resumeHandshake / onConnect), then flushed into
+    // STREAM_RESUMING on _startResumableStream or released on settle.
+    this._preStream.begin(requestId);
 
     const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
     let pendingEnqueue = true;
@@ -10219,6 +10245,10 @@ export class Think<
     } finally {
       releaseIfPending();
       this._aborts.remove(requestId);
+      // Release any pre-stream parked connections (#1784). No-op when the turn
+      // streamed (flushed on _startResumableStream); covers the no-response /
+      // pre-stream-failure paths.
+      this._settlePreStreamTurn(requestId);
     }
   }
 
@@ -10257,6 +10287,8 @@ export class Think<
     this._streamingAssistant = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
+    this._preStream.releaseAwaiting();
+    this._preStream.reset();
   }
 
   /**
@@ -13579,6 +13611,35 @@ export class Think<
         done: true
       })
     );
+    // A skipped turn settles out of the pre-stream set, but must NOT release
+    // parked connections (#1784): a skip happens because a NEWER turn was
+    // admitted (latest/merge supersede) or the queue generation advanced. The
+    // earliest "successor exists" signal (`SubmitConcurrencyController.decide`)
+    // fires before the successor's `_preStream.begin()`, so releasing here would
+    // race a `begin()` that hasn't run yet and cut a parked client loose right
+    // before the successor streams. Leave it parked: the successor flushes it on
+    // stream start, or the final surviving turn's settle releases it. (Chat
+    // clear releases parked connections explicitly via `resetTurnState`.)
+    this._settlePreStreamTurn(requestId, { releaseParked: false });
+  }
+
+  /**
+   * Mark an accepted turn (#1784) as settled. When `releaseParked` (the default)
+   * and no accepted turn remains in flight and no stream is active, release every
+   * connection parked on the pre-stream window with STREAM_RESUME_NONE. No-op once
+   * they were flushed into STREAM_RESUMING on stream start. Skip paths pass
+   * `releaseParked: false` so a parked client survives onto the successor turn
+   * (see `_completeSkippedRequest`).
+   */
+  private _settlePreStreamTurn(
+    requestId: string,
+    options: { releaseParked?: boolean } = {}
+  ): void {
+    const idle = this._preStream.settle(requestId);
+    const releaseParked = options.releaseParked ?? true;
+    if (releaseParked && idle && !this._resumableStream.hasActiveStream()) {
+      this._preStream.releaseAwaiting();
+    }
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
@@ -14023,9 +14084,13 @@ export class Think<
       responseMessageType: MSG_CHAT_RESPONSE,
       resumableStream: this._resumableStream,
       continuation: this._continuation,
+      preStream: this._preStream,
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => this._pendingChatTerminal(),
-      persistOrphanedStream: (streamId) => this._persistOrphanedStream(streamId)
+      persistOrphanedStream: (streamId) =>
+        this._persistOrphanedStream(streamId),
+      isConnectionPresent: (connectionId) =>
+        this.getConnection(connectionId) !== undefined
     }));
   }
 
@@ -14058,6 +14123,11 @@ export class Think<
     options?: { messageId?: string }
   ): string {
     const streamId = this._resumableStream.start(requestId, options);
+    // Flush connections parked during this turn's pre-stream window (#1784)
+    // into STREAM_RESUMING now that a stream exists. No-op unless a client
+    // reconnected before the first chunk. (Continuation-turn parks live in
+    // `_continuation` and are flushed by the caller.)
+    this._preStream.flushOnStreamStart((c) => this._notifyStreamResuming(c));
     void this._ensureStreamCleanupScheduled();
     return streamId;
   }

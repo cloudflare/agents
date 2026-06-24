@@ -7,8 +7,10 @@ import {
 } from "../resume-handshake";
 import { ContinuationState } from "../continuation-state";
 import type { ResumableStream } from "../resumable-stream";
+import { PreStreamTurns } from "../pre-stream-turns";
 import {
   replayDoneFrame,
+  streamPendingFrame,
   streamResumeNoneFrame,
   streamResumingFrame,
   terminalErrorFrame
@@ -91,20 +93,26 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
 function makeHost(opts: {
   resumableStream: ResumableStream;
   continuation?: ContinuationState<Connection>;
+  preStream?: PreStreamTurns<Connection>;
   pendingTerminal?: PendingChatTerminal | null;
   pendingResumeConnections?: Set<string>;
   persistCalls?: string[];
+  presentConnectionIds?: Set<string>;
 }): ResumeHandshakeHost {
   return {
     responseMessageType: RESPONSE_TYPE,
     resumableStream: opts.resumableStream,
     continuation: opts.continuation ?? new ContinuationState<Connection>(),
+    preStream: opts.preStream,
     pendingResumeConnections:
       opts.pendingResumeConnections ?? new Set<string>(),
     pendingChatTerminal: async () => opts.pendingTerminal ?? null,
     persistOrphanedStream: async (id: string) => {
       opts.persistCalls?.push(id);
-    }
+    },
+    isConnectionPresent: opts.presentConnectionIds
+      ? (id: string) => opts.presentConnectionIds!.has(id)
+      : undefined
   };
 }
 
@@ -182,13 +190,15 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     expect(frames).toEqual([streamResumeNoneFrame()]);
   });
 
-  it("REQUEST with no active stream but a matching pending continuation parks (no frame)", async () => {
+  it("REQUEST with no active stream but a matching pending continuation parks + keeps waiting (#1784)", async () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({ active: false });
     const continuation = new ContinuationState<Connection>();
-    // Only `connectionId` is read by the driver's pending check.
+    // `connectionId` is read by the driver's pending check; `requestId` is
+    // echoed into the keep-waiting frame.
     continuation.pending = {
-      connectionId: null
+      connectionId: null,
+      requestId: "cont-1"
     } as ContinuationState<Connection>["pending"];
     const handshake = new ResumeHandshake(
       makeHost({ resumableStream, continuation })
@@ -197,7 +207,9 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
     await handshake.handleResumeRequest(conn);
 
-    expect(frames).toEqual([]);
+    // Now parks AND tells the client to keep waiting so its short resume probe
+    // doesn't resolve "no stream" before the continuation stream starts.
+    expect(frames).toEqual([streamPendingFrame("cont-1")]);
     expect(continuation.awaitingConnections.get("c1")).toBe(conn);
   });
 
@@ -220,6 +232,81 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({ active: false });
     const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+
+    await handshake.handleResumeRequest(makeConnection("c1", frames));
+
+    expect(frames).toEqual([streamResumeNoneFrame()]);
+  });
+
+  it("REQUEST with no active stream but a pre-stream turn in flight parks + keeps waiting (#1784)", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({ active: false });
+    const preStream = new PreStreamTurns<Connection>();
+    preStream.begin("req-pre");
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, preStream })
+    );
+    const conn = makeConnection("c1", frames);
+
+    await handshake.handleResumeRequest(conn);
+
+    expect(frames).toEqual([streamPendingFrame("req-pre")]);
+    expect(preStream.awaitingConnections.get("c1")).toBe(conn);
+  });
+
+  it("REQUEST with an idle pre-stream tracker → RESUME_NONE (nothing in flight)", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({ active: false });
+    const preStream = new PreStreamTurns<Connection>();
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, preStream })
+    );
+
+    await handshake.handleResumeRequest(makeConnection("c1", frames));
+
+    expect(frames).toEqual([streamResumeNoneFrame()]);
+    expect(preStream.awaitingConnections.size).toBe(0);
+  });
+
+  it("active continuation owned by an ABSENT connection can be resumed by a new one (#1784)", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: true,
+      activeRequestId: "req-1"
+    });
+    const continuation = new ContinuationState<Connection>();
+    continuation.activeRequestId = "req-1";
+    continuation.activeConnectionId = "old-owner";
+    const handshake = new ResumeHandshake(
+      makeHost({
+        resumableStream,
+        continuation,
+        // "old-owner" is NOT present → the new connection may take over.
+        presentConnectionIds: new Set<string>(["c1"])
+      })
+    );
+
+    await handshake.handleResumeRequest(makeConnection("c1", frames));
+
+    expect(frames).toEqual([streamResumingFrame("req-1")]);
+  });
+
+  it("active continuation owned by a PRESENT connection is NOT hijacked → RESUME_NONE", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: true,
+      activeRequestId: "req-1"
+    });
+    const continuation = new ContinuationState<Connection>();
+    continuation.activeRequestId = "req-1";
+    continuation.activeConnectionId = "old-owner";
+    const handshake = new ResumeHandshake(
+      makeHost({
+        resumableStream,
+        continuation,
+        presentConnectionIds: new Set<string>(["old-owner", "c1"])
+      })
+    );
 
     await handshake.handleResumeRequest(makeConnection("c1", frames));
 

@@ -4,6 +4,7 @@ import {
   HANDSHAKE_INVARIANTS,
   recoveringFrame,
   replayDoneFrame,
+  streamPendingFrame,
   streamResumeNoneFrame,
   streamResumingFrame,
   terminalErrorFrame
@@ -54,6 +55,16 @@ describe("resume-handshake golden frames", () => {
     expect("replay" in frame).toBe(false);
   });
 
+  it("STREAM_PENDING includes the id only when present (#1784)", () => {
+    expect(streamPendingFrame("req-1")).toEqual({
+      type: "cf_agent_stream_pending",
+      id: "req-1"
+    });
+    const noId = streamPendingFrame();
+    expect(noId).toEqual({ type: "cf_agent_stream_pending" });
+    expect("id" in noId).toBe(false);
+  });
+
   it("recovering frame includes the id only when present", () => {
     expect(recoveringFrame("req-1")).toEqual({
       type: "cf_agent_chat_recovering",
@@ -82,6 +93,9 @@ describe("resume-handshake golden frames", () => {
       CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE
     );
     expect(recoveringFrame("x").type).toBe(CHAT_MESSAGE_TYPES.CHAT_RECOVERING);
+    expect(streamPendingFrame("x").type).toBe(
+      CHAT_MESSAGE_TYPES.STREAM_PENDING
+    );
   });
 
   it("a host with a distinct use-chat-response constant is honored", () => {
