@@ -1,8 +1,8 @@
-# getCurrentAgent()
+# `getCurrentAgent()`
 
-## Automatic Context for Custom Methods
+## Automatic context for custom methods
 
-**All custom methods automatically have full agent context!** The framework automatically detects and wraps your custom methods during initialization, ensuring `getCurrentAgent()` works seamlessly everywhere.
+The framework detects and wraps custom Agent methods during initialization so `getCurrentAgent()` can resolve the active agent inside them and the functions they call.
 
 ## How It Works
 
@@ -124,7 +124,53 @@ export class MyAgent extends AIChatAgent {
 }
 ```
 
-## API Reference
+## When context is lost
+
+The agent context only propagates along the call tree of the original
+invocation. Code reached outside that call tree starts with an empty context,
+so `getCurrentAgent()` returns an object whose fields are `undefined`. Common
+cases include:
+
+- a host callback invoked through RPC from a Worker Loader child isolate, such
+  as sandboxed Codemode execution;
+- a service binding or Durable Object RPC entrypoint;
+- a queue consumer or another entrypoint that retains an agent reference.
+
+Route the callback through a public method on the agent. Custom methods are
+wrapped automatically, so calling `agent.someMethod()` re-enters that agent's
+context:
+
+```typescript
+import { RpcTarget } from "cloudflare:workers";
+
+class HostCallbackBridge extends RpcTarget {
+  constructor(private agent: MyMcpAgent) {
+    super();
+  }
+
+  // Invoked through RPC from a Worker Loader child isolate. There is no context
+  // ancestry. Calling a public agent method restores it automatically.
+  async invoke() {
+    return this.agent.handleSandboxCallback();
+  }
+}
+
+export class MyMcpAgent extends McpAgent {
+  async handleSandboxCallback() {
+    const { agent } = getCurrentAgent<MyMcpAgent>();
+    // `agent` is available again.
+  }
+}
+```
+
+Context restored this way has `connection`, `request`, and `email` unset. It
+is not tied to live client I/O.
+
+Server-initiated MCP requests (`elicitInput`, `createMessage`, and `listRoots`)
+on `McpAgent` do not require this indirection because the MCP transport retains
+its owning agent.
+
+## API reference
 
 The agents package exports one main function for context management:
 

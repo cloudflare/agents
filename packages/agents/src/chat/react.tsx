@@ -1244,6 +1244,28 @@ export function useAgentChat<
         return [...messages];
       }
 
+      // If the incoming snapshot already contains the protected assistant AND a
+      // later assistant message, the server transcript has advanced past the
+      // message we were protecting — the snapshot is terminal/authoritative
+      // (e.g. a Think HITL denial persisted the denied tool message, then
+      // appended a follow-up assistant response explaining the denial).
+      // Appending our protected copy to the tail would reorder the transcript
+      // (#1778). Clear protection and trust the snapshot as-is; if a stream is
+      // still active for the newer assistant it re-arms protection via its own
+      // `start` chunk.
+      const protectedIndex = messages.findIndex(
+        (message) => message.id === protection.assistantId
+      );
+      if (
+        protectedIndex >= 0 &&
+        messages
+          .slice(protectedIndex + 1)
+          .some((message) => message.role === "assistant")
+      ) {
+        protectedStreamingAssistantRef.current = null;
+        return [...messages];
+      }
+
       const protectedAssistant =
         messagesRef.current.find(
           (message) => message.id === protection.assistantId

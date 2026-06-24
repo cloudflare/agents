@@ -6541,6 +6541,134 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       .element(screen.getByTestId("role-order"))
       .toHaveTextContent("user,user");
   });
+
+  it("does not reorder a terminal snapshot that already has a later assistant (#1778)", async () => {
+    // Think HITL denial flow: the streaming assistant emits a tool that needs
+    // approval, so the turn pauses WITHOUT a `done` chunk and protection stays
+    // armed to that assistant. The user denies, and the server persists the
+    // denied tool message then appends a follow-up assistant response. Think
+    // broadcasts the full authoritative `cf_agent_chat_messages` snapshot
+    // (user, assistant-with-denied-tool, assistant-terminal-response). The
+    // protected-tail merge must NOT move the denied assistant to the end.
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "terminal-snapshot-order",
+      url: "ws://localhost:3000/agents/chat/terminal-snapshot-order?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      return (
+        <div>
+          <div data-testid="role-order">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+          <div data-testid="ids">
+            {chat.messages.map((m) => m.id).join(",")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "delete everything" });
+      await sleep(10);
+    });
+
+    const reqId = sentMessages
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .find((m) => m.type === "cf_agent_use_chat_request")?.id;
+
+    // Stream the assistant that carries the tool requiring approval. The turn
+    // pauses for the approval, so there is intentionally NO `done` chunk here —
+    // protection remains armed to `assistant-denied`.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"start","messageId":"assistant-denied"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-delta","id":"t1","delta":"About to run a dangerous tool"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant");
+
+    const user1 = chatInstance!.messages.find((m) => m.role === "user")!;
+
+    // Authoritative snapshot after the user denies: the denied assistant is
+    // followed by a NEW terminal assistant explaining the denial.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [
+          user1,
+          {
+            id: "assistant-denied",
+            role: "assistant",
+            parts: [
+              {
+                type: "tool-runDangerousThing",
+                toolCallId: "tc-1",
+                state: "output-error",
+                input: { command: "rm -rf /" },
+                errorText: "Denied by user"
+              }
+            ]
+          },
+          {
+            id: "assistant-terminal",
+            role: "assistant",
+            parts: [{ type: "text", text: "I won't run that — it was denied." }]
+          }
+        ]
+      });
+      await sleep(10);
+    });
+
+    // The transcript order must match the authoritative snapshot exactly, NOT
+    // move the protected (denied) assistant to the tail.
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant,assistant");
+    await expect
+      .element(screen.getByTestId("ids"))
+      .toHaveTextContent(`${user1.id},assistant-denied,assistant-terminal`);
+  });
 });
 
 describe("useAgentChat transparent reconnect re-probe (#1784)", () => {
