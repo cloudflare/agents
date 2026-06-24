@@ -74,6 +74,8 @@ export {
 export { ChatSdkStateAgent } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
+export { TestOnErrorAgent } from "./agents/on-error.ts";
+import type { TestOnErrorAgent } from "./agents/on-error.ts";
 
 export type { TestState } from "./agents";
 
@@ -166,6 +168,7 @@ export type Env = {
   TestRpcMcpClientAgent: DurableObjectNamespace<TestRpcMcpClientAgent>;
   TestHttpMcpDedupAgent: DurableObjectNamespace<TestHttpMcpDedupAgent>;
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+  TestOnErrorAgent: DurableObjectNamespace<TestOnErrorAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
   TestPersistedStateAgent: DurableObjectNamespace<TestPersistedStateAgent>;

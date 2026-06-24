@@ -411,21 +411,24 @@ function someUtilityFunction() {
 
 ### `this.onError`
 
-`Agent` extends `Server`'s `onError` so it can be used to handle errors that are not necessarily WebSocket errors. It is called with a `Connection` or `unknown` error.
+`Agent` extends `Server`'s `onError` so it can be used to handle errors that are not necessarily WebSocket errors. It is called in one of two shapes: `onError(connection, error)` when the error is associated with a connection (for example, an error thrown while handling a WebSocket message), or `onError(error)` for server errors (alarms, schedules, and other background work). The overloads exist only at the type level — at runtime there is a single method, so an override must handle both shapes:
 
 ```ts
 class MyAgent extends Agent {
   onError(connectionOrError: Connection | unknown, error?: unknown) {
-    if (error) {
-      // WebSocket connection error
-      console.error("Connection error:", error);
+    if (error !== undefined) {
+      // Error associated with a websocket connection.
+      // `error` is the actual thrown error (e.g. a SqlError).
+      const connection = connectionOrError as Connection;
+      console.error(`Error on connection ${connection.id}:`, error);
+
+      // Optionally rethrow to propagate the error
+      throw error;
     } else {
       // Server error
       console.error("Server error:", connectionOrError);
+      throw connectionOrError;
     }
-
-    // Optionally throw to propagate the error
-    throw connectionOrError;
   }
 }
 ```

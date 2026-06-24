@@ -104,6 +104,10 @@
         "name": "TestStateAgent"
       },
       {
+        "class_name": "TestOnErrorAgent",
+        "name": "TestOnErrorAgent"
+      },
+      {
         "class_name": "TestStateAgentNoInitial",
         "name": "TestStateAgentNoInitial"
       },
@@ -338,6 +342,7 @@
         "TestRpcMcpClientAgent",
         "TestHttpMcpDedupAgent",
         "TestStateAgent",
+        "TestOnErrorAgent",
         "TestStateAgentNoInitial",
         "TestThrowingStateAgent",
         "TestPersistedStateAgent",
