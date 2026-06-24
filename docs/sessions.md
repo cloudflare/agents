@@ -373,8 +373,7 @@ const session = Session.create(this)
         generateText({ model: myModel, prompt }).then((r) => r.text),
       protectHead: 3, // Keep first 3 messages (default: 3)
       tailTokenBudget: 20000, // Protect ~20K tokens at the tail (default: 20000)
-      minTailMessages: 2, // Always keep at least 2 tail messages (default: 2)
-      tokenCounter: async (messages) => estimateWithYourTokenizer({ messages })
+      minTailMessages: 2 // Always keep at least 2 tail messages (default: 2)
     })
   )
   .compactAfter(100_000); // Auto-compact at 100K estimated tokens
@@ -408,18 +407,27 @@ When `.compactAfter(threshold)` is set, `appendMessage()` checks the estimated t
 
 > Auto-compaction is checked **between turns** (on each `appendMessage()`), not within a turn. A single long, tool-heavy turn can grow past the model's context window mid-flight, before the next check. `@cloudflare/think` adds opt-in mid-turn recovery on top of this — see [Context-window overflow recovery](./think/index.md#context-window-overflow-recovery).
 
-By default, the estimate includes stored message parts plus the Session-managed frozen system prompt. That means context blocks and cached prompts managed by `Session` contribute to the threshold. The estimate does not include framework-specific prompt additions or tool schema serialization that happen outside `Session`, such as Think's final capability prompt and tool catalog.
+### Token counting
 
-There are two token-counting decisions:
+The Session resolves one authoritative context size, in priority order:
 
-- `.compactAfter(threshold, { tokenCounter })` controls when automatic compaction is triggered after writes. It can include the frozen system prompt and context blocks.
-- `createCompactFunction({ tokenCounter })` controls which tail messages are protected from summarization. Use this when tool-heavy histories are much larger than the Workers-safe heuristic can estimate.
+1. **`.compactAfter(threshold, { tokenCounter })`** — a whole-prompt counter. It receives the messages, the frozen system prompt, and context blocks; returning model-reported usage that ignores the input (e.g. `() => lastUsage.inputTokens`) is fine.
+2. **Usage metadata on assistant messages** — when a message carries model-reported usage in `metadata.usage` or `metadata.totalUsage` (e.g. attached via the AI SDK's `messageMetadata`), the Session reads it automatically. The estimate is the last reported usage plus a heuristic for any newer messages. No configuration needed:
 
-You usually only need to configure one counter. The `.compactAfter()` counter now also flows into `createCompactFunction`'s boundary walk (via `CompactContext`) when no explicit `createCompactFunction({ tokenCounter })` is given, so a single counter drives both "should we compact?" and "what should we compact?". Without this, a fire-only counter plus the under-counting heuristic could make compaction trigger every turn but silently no-op on tool-heavy histories (fixed in [#1593](https://github.com/cloudflare/agents/issues/1593)).
+   ```typescript
+   await session.appendMessage({
+     id: `assistant-${crypto.randomUUID()}`,
+     role: "assistant",
+     parts,
+     metadata: { usage: { totalTokens: 84_213 } } // model-reported
+   });
+   ```
 
-Caveat: the flowed counter is invoked **per message** during the boundary walk. A tokenizer-style counter budgets accurately; a usage-only counter that returns a fixed whole-prompt total (e.g. `usage.inputTokens` regardless of which messages are passed) degrades the tail budget to `minTailMessages` — compaction still runs and context stays bounded, but the byte budget is effectively ignored. Pass an explicit per-message `createCompactFunction({ tokenCounter })` for precise tail budgeting.
+3. **The Workers-safe heuristic**, otherwise: stored message parts plus the Session-managed frozen system prompt. The heuristic does not include framework-specific prompt additions or tool schema serialization that happen outside `Session`, such as Think's final capability prompt and tool catalog.
 
-Use a custom counter when you have model-reported usage or your own tokenizer:
+That single number decides when compaction fires, and it is also passed to the compaction function as `CompactContext.contextTokens`, where `createCompactFunction` uses it to express `tailTokenBudget` at the model's token scale. Tool-heavy histories that the heuristic under-counts therefore still honor the tail budget instead of silently no-opping (fixed in [#1593](https://github.com/cloudflare/agents/issues/1593)). The boundary walk never invokes a user counter per message.
+
+Configure a `.compactAfter()` counter when you have model-reported usage or your own tokenizer and your messages do not carry usage metadata:
 
 ```typescript
 const session = Session.create(this)
@@ -438,7 +446,7 @@ const session = Session.create(this)
   });
 ```
 
-> **Note:** The default token estimation is heuristic (not tiktoken). It uses `max(chars/4, words*1.3)` with 4 tokens per-message overhead, and also applies the string heuristic to the Session-managed system prompt. This is intentional — tiktoken would add 80-120MB heap overhead, which exceeds Cloudflare Workers' 128MB limit.
+> **Note:** The fallback token estimation is heuristic (not tiktoken). It uses `max(chars/4, words*1.3)` with 4 tokens per-message overhead, and also applies the string heuristic to the Session-managed system prompt. This is intentional — tiktoken would add 80-120MB heap overhead, which exceeds Cloudflare Workers' 128MB limit. Attach usage metadata to assistant messages to get exact, model-reported accounting instead.
 
 > **Gotcha:** Compaction is iterative but single-overlay. Each new compaction extends from the earliest existing compaction's `fromMessageId` to the new end. So you always have at most one active compaction overlay per session, and it keeps growing. The previous compaction rows remain in the database but are superseded by the latest one (which covers a wider range). `getCompactions()` returns all of them, but `getHistory()` applies the latest one.
 
@@ -891,11 +899,17 @@ Exported from `agents/experimental/memory/utils`:
 ```typescript
 import {
   estimateStringTokens,
-  estimateMessageTokens
+  estimateMessageTokens,
+  calculateContextTokens,
+  getAssistantUsage,
+  estimateContextTokensFromUsage
 } from "agents/experimental/memory/utils/tokens";
 
 estimateStringTokens("Hello world"); // heuristic: max(chars/4, words*1.3)
 estimateMessageTokens(messages); // sum with 4 tokens per-message overhead
+calculateContextTokens(usage); // totalTokens, or the sum of its components
+getAssistantUsage(message); // usage from assistant message metadata, if any
+estimateContextTokensFromUsage(messages); // last usage + heuristic for newer messages
 ```
 
 ### Compaction Helpers

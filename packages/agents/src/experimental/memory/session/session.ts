@@ -26,7 +26,11 @@ import {
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
 import type { CompactResult } from "../utils/compaction-helpers";
-import { estimateMessageTokens, estimateStringTokens } from "../utils/tokens";
+import {
+  estimateContextTokensFromUsage,
+  estimateMessageTokens,
+  estimateStringTokens
+} from "../utils/tokens";
 import { MessageType } from "../../../types";
 
 export type SessionContextOptions = Omit<ContextConfig, "label">;
@@ -535,14 +539,23 @@ export class Session {
     );
   }
 
-  private async _estimateTokenCount(): Promise<number> {
+  /**
+   * Authoritative whole-prompt size in model tokens, when one is available:
+   * the configured `compactAfter()` counter, otherwise model-reported usage
+   * from assistant message metadata (which already covers the system prompt;
+   * only newer messages need the heuristic). Undefined when only the
+   * heuristic is left. This single number drives both the fire decision and
+   * the boundary calibration (`CompactContext.contextTokens`), so the two
+   * decisions can never disagree.
+   */
+  private async _knownContextTokens(): Promise<number | undefined> {
     const messages = await this.getHistory();
-    const systemPrompt = await this.context.getSystemPromptForEstimate();
 
     if (this._tokenCounter) {
       if (!this.context.isLoaded()) {
         await this.context.load();
       }
+      const systemPrompt = await this.context.getSystemPromptForEstimate();
       const contextBlocks = this.context.getBlocks();
       const estimate = await this._tokenCounter({
         messages,
@@ -552,6 +565,15 @@ export class Session {
       return Number.isFinite(estimate) ? Math.max(0, Math.ceil(estimate)) : 0;
     }
 
+    return estimateContextTokensFromUsage(messages)?.tokens;
+  }
+
+  private async _estimateTokenCount(): Promise<number> {
+    const known = await this._knownContextTokens();
+    if (known !== undefined) return known;
+
+    const messages = await this.getHistory();
+    const systemPrompt = await this.context.getSystemPromptForEstimate();
     return estimateMessageTokens(messages) + estimateStringTokens(systemPrompt);
   }
 
@@ -651,8 +673,8 @@ export class Session {
           console.warn(
             `[Session] Auto-compaction fired (~${tokenEstimate} tokens > ${this._tokenThreshold}) but the compaction function returned null, so history was not shortened. ` +
               (this._tokenCounter
-                ? `A tokenCounter is configured and now flows to the boundary logic, but it is invoked per-message there — a whole-prompt/usage counter (e.g. returning a fixed usage.inputTokens regardless of which messages are passed) degrades the tail budget to minTailMessages and can still no-op. Pass a per-message CompactOptions.tokenCounter for precise tail budgeting.`
-                : `If your history is tool-heavy, configure a tokenCounter on compactAfter() — it flows to createCompactFunction's boundary logic automatically.`)
+                ? `The tokenCounter's total calibrates the boundary heuristic automatically, so a null result usually means the protected head/tail already cover the whole history — check protectHead, minTailMessages and tailTokenBudget against your history length, or that summarize() returned a non-empty string.`
+                : `If your history is tool-heavy, attach model-reported usage to assistant message metadata (metadata.usage / metadata.totalUsage, e.g. via the AI SDK's messageMetadata) or configure a tokenCounter on compactAfter() — both calibrate createCompactFunction's boundary logic automatically.`)
           );
         } else if (compacted) {
           // Re-arm the one-time warning so a later regression is surfaced again.
@@ -746,12 +768,10 @@ export class Session {
 
     let result: CompactResult | null;
     try {
-      // Pass the Session's authoritative token counter so the compaction
-      // function's boundary logic can use the same accounting as the
-      // fire/no-fire decision (see CompactContext). The function still wins if
-      // it was given its own explicit counter.
+      // Hand the boundary logic the same authoritative total the fire
+      // decision used (see CompactContext), so the two can never disagree.
       result = await this._compactionFn(await this.getHistory(), {
-        tokenCounter: this._tokenCounter
+        contextTokens: await this._knownContextTokens()
       });
     } catch (err) {
       this._emitError(err instanceof Error ? err.message : String(err));

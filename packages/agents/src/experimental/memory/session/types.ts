@@ -43,9 +43,15 @@ export interface CompactAfterOptions {
   /**
    * Override the token estimate used by auto-compaction and status broadcasts.
    *
-   * The default is a Workers-safe heuristic over message parts plus the
-   * Session-managed frozen system prompt. Callers that have model-reported
-   * usage or a tokenizer can provide a more precise counter here.
+   * Usually unnecessary: when assistant messages carry model-reported usage
+   * in their metadata (`metadata.usage` / `metadata.totalUsage`), the Session
+   * uses it automatically — last reported usage plus a heuristic for newer
+   * messages. Without usage metadata the default is a Workers-safe heuristic
+   * over message parts plus the Session-managed frozen system prompt.
+   *
+   * The counter is whole-prompt scoped by signature; ignoring the input and
+   * returning a model-reported total (e.g. `() => lastUsage.inputTokens`) is
+   * legal — the boundary logic auto-calibrates around it.
    */
   tokenCounter?: SessionTokenCounter;
 }
@@ -53,14 +59,19 @@ export interface CompactAfterOptions {
 /**
  * Context the Session passes to the registered compaction function. Lets the
  * same authoritative token accounting drive BOTH the "should we compact?"
- * (`compactAfter`) and "what should we compact?" (boundary) decisions, so a
- * consumer that wires a `tokenCounter` once doesn't hit the failure mode where
- * compaction fires every turn but silently no-ops because the boundary logic
- * used a different (under-counting) estimate.
+ * (`compactAfter`) and "what should we compact?" (boundary) decisions, so the
+ * two never disagree — compaction can't fire every turn yet silently no-op
+ * because the boundary logic used a different (under-counting) estimate.
  */
 export interface CompactContext {
-  /** The Session's token counter (from `compactAfter`/options), if configured. */
-  tokenCounter?: SessionTokenCounter;
+  /**
+   * Best-known size of the current context in model tokens — from the
+   * `compactAfter()` counter if configured, otherwise from usage metadata on
+   * assistant messages (last reported usage plus the heuristic for newer
+   * messages). Undefined when only the heuristic is available. The boundary
+   * walk uses it to calibrate the built-in heuristic to the model's scale.
+   */
+  contextTokens?: number;
 }
 
 export type CompactionErrorHandler = (error: unknown) => void | Promise<void>;
@@ -75,6 +86,14 @@ export interface SessionMessage {
   role: string;
   parts: SessionMessagePart[];
   createdAt?: Date;
+  /**
+   * Arbitrary message metadata (AI SDK `UIMessage.metadata` is structurally
+   * compatible). When an assistant message carries model-reported usage here
+   * (`metadata.usage` or `metadata.totalUsage`, e.g. from the AI SDK's
+   * `messageMetadata` callback), the Session uses it for token accounting —
+   * no `tokenCounter` configuration needed.
+   */
+  metadata?: unknown;
 }
 
 /**

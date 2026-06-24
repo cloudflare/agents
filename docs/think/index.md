@@ -981,7 +981,7 @@ export class MyAgent extends Think<Env> {
 
 Use either layer alone, or both together: the proactive guard avoids most overflows, and the reactive backstop catches any that still slip through (for example, a turn that starts already over budget, or a single tool result so large that compaction cannot help — in which case it terminalizes cleanly). Both apply to every turn entry path (WebSocket, sub-agent `chat()`, and programmatic `saveMessages()` / `submitMessages()`), and both emit a `chat:context:compacted` [observability event](../observability.md#chat-context-events).
 
-> A no-op compaction cannot rescue an over-budget turn, so recovery is only as effective as your compaction configuration. For tool-heavy histories, configure a `tokenCounter` on `compactAfter()` (see [Sessions](../sessions.md#auto-compaction)).
+> A no-op compaction cannot rescue an over-budget turn, so recovery is only as effective as your compaction configuration. For tool-heavy histories, attach model-reported usage to assistant message metadata or configure a `tokenCounter` on `compactAfter()` (see [Sessions](../sessions.md#token-counting)).
 
 For a runnable demo against a real Workers AI model, see [`examples/context-overflow-recovery`](../../examples/context-overflow-recovery).
 

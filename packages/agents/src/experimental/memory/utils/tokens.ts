@@ -90,3 +90,108 @@ export function estimateMessageTokens(messages: SessionMessage[]): number {
   }
   return tokens;
 }
+
+// ── Model-Reported Usage ─────────────────────────────────────────────
+//
+// Mirrors pi's (earendil-works/pi) context accounting: usage comes from
+// assistant message metadata, never a user callback; the heuristic above
+// only covers messages newer than the last reported usage.
+
+/**
+ * Usage shape read from assistant message metadata. Structurally compatible
+ * with the AI SDK's `LanguageModelUsage` and OpenAI-style usage objects.
+ */
+export interface MessageUsage {
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedInputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
+function asTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : 0;
+}
+
+/**
+ * Calculate total context tokens from a usage object.
+ * Uses the native `totalTokens` field when available, falls back to summing
+ * the components.
+ */
+export function calculateContextTokens(usage: MessageUsage): number {
+  return (
+    asTokenCount(usage.totalTokens) ||
+    asTokenCount(usage.inputTokens ?? usage.promptTokens) +
+      asTokenCount(usage.outputTokens ?? usage.completionTokens) +
+      asTokenCount(usage.cachedInputTokens ?? usage.cacheReadTokens) +
+      asTokenCount(usage.cacheWriteTokens)
+  );
+}
+
+/**
+ * Get usage from an assistant message's metadata if available.
+ * Recognizes `metadata.totalUsage` and `metadata.usage` (the AI SDK
+ * `messageMetadata` conventions) as well as a usage-shaped `metadata` itself.
+ */
+export function getAssistantUsage(
+  message: SessionMessage
+): MessageUsage | undefined {
+  if (message.role !== "assistant") return undefined;
+  const metadata = message.metadata;
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const m = metadata as { usage?: unknown; totalUsage?: unknown };
+  for (const candidate of [m.totalUsage, m.usage, metadata]) {
+    if (
+      candidate &&
+      typeof candidate === "object" &&
+      calculateContextTokens(candidate as MessageUsage) > 0
+    ) {
+      return candidate as MessageUsage;
+    }
+  }
+  return undefined;
+}
+
+export interface ContextUsageEstimate {
+  /** Total estimated context tokens (model-reported + trailing heuristic). */
+  tokens: number;
+  /** Model-reported tokens from the last assistant message carrying usage. */
+  usageTokens: number;
+  /** Heuristic estimate for messages newer than the last reported usage. */
+  trailingTokens: number;
+  /** Index of the assistant message the usage came from. */
+  lastUsageIndex: number;
+}
+
+/**
+ * Estimate context tokens using the last assistant usage when available.
+ * Messages after the last usage are estimated with the heuristic; the
+ * model-reported total already covers everything before it (including the
+ * system prompt). Returns null when no message carries usage — callers fall
+ * back to the pure heuristic.
+ */
+export function estimateContextTokensFromUsage(
+  messages: SessionMessage[]
+): ContextUsageEstimate | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const usage = getAssistantUsage(messages[i]);
+    if (!usage) continue;
+    const usageTokens = calculateContextTokens(usage);
+    let trailingTokens = 0;
+    for (let j = i + 1; j < messages.length; j++) {
+      trailingTokens += estimateMessageTokens([messages[j]]);
+    }
+    return {
+      tokens: usageTokens + trailingTokens,
+      usageTokens,
+      trailingTokens,
+      lastUsageIndex: i
+    };
+  }
+  return null;
+}

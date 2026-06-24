@@ -9,10 +9,6 @@
 import type { CompactContext, SessionMessage } from "../session/types";
 import { estimateMessageTokens } from "./tokens";
 
-export type CompactTokenCounter = (
-  messages: SessionMessage[]
-) => number | Promise<number>;
-
 // ── Compaction ID constants ─────────────────────────────────────────
 
 /** Prefix for all compaction messages (overlays and summaries) */
@@ -157,32 +153,6 @@ export function findTailCutByTokens(
   const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
 
   // Align to avoid splitting tool groups
-  return alignBoundaryBackward(messages, cutIdx);
-}
-
-async function findTailCutByTokensWithCounter(
-  messages: SessionMessage[],
-  headEnd: number,
-  tokenCounter: CompactTokenCounter,
-  tailTokenBudget = 20000,
-  minTailMessages = 2
-): Promise<number> {
-  const n = messages.length;
-  let accumulated = 0;
-  let tokenCut = n;
-
-  for (let i = n - 1; i >= headEnd; i--) {
-    const msgTokens = await tokenCounter([messages[i]]);
-
-    if (accumulated + msgTokens > tailTokenBudget && tokenCut < n) {
-      break;
-    }
-    accumulated += msgTokens;
-    tokenCut = i;
-  }
-
-  const minCut = n - minTailMessages;
-  const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
   return alignBoundaryBackward(messages, cutIdx);
 }
 
@@ -439,13 +409,36 @@ export interface CompactOptions {
 
   /** Minimum tail messages to protect (default: 2) */
   minTailMessages?: number;
+}
 
-  /**
-   * Optional counter for tail-budget decisions. Use this when a tokenizer or
-   * model-reported accounting is available; otherwise the Workers-safe
-   * heuristic is used.
-   */
-  tokenCounter?: CompactTokenCounter;
+/**
+ * Express `tailTokenBudget` (model tokens) in the heuristic's units (#1593).
+ *
+ * `contextTokens` is the Session's authoritative whole-prompt size — from a
+ * `compactAfter()` counter or usage metadata on assistant messages. The
+ * heuristic under-counts tool-heavy histories, so a budget expressed in model
+ * tokens would otherwise protect far too much tail (often everything, making
+ * compaction a silent no-op). Dividing the budget by
+ * `contextTokens / heuristic(history)` is equivalent to scaling every
+ * per-message estimate up to the model's scale: the walk's distribution is
+ * unchanged and the budget keeps meaning "model tokens". Without an
+ * authoritative total the budget is used as-is.
+ */
+function tailBudgetInHeuristicUnits(
+  tailTokenBudget: number,
+  contextTokens: number | undefined,
+  messages: SessionMessage[]
+): number {
+  if (
+    typeof contextTokens !== "number" ||
+    !Number.isFinite(contextTokens) ||
+    contextTokens <= 0
+  ) {
+    return tailTokenBudget;
+  }
+  const heuristicTotal = estimateMessageTokens(messages);
+  if (heuristicTotal <= 0) return tailTokenBudget;
+  return (tailTokenBudget * heuristicTotal) / contextTokens;
 }
 
 /**
@@ -486,52 +479,20 @@ export function createCompactFunction(opts: CompactOptions) {
       return null;
     }
 
-    // Prefer an explicit counter; otherwise adapt the Session's counter (flowed
-    // via CompactContext) so a single `tokenCounter` on `compactAfter` drives
-    // the boundary cut too — without it, a fire counter + the default heuristic
-    // under-counting a tool-heavy history makes compaction fire every turn but
-    // never shorten anything. The session counter is whole-prompt shaped; for
-    // the tail walk we feed it individual messages with empty system/context.
-    //
-    // Caveat: this counter is invoked once PER MESSAGE. A tokenizer-style
-    // counter yields accurate per-message tokens; a counter that returns a
-    // fixed whole-prompt total (e.g. `usage.inputTokens`) returns the same
-    // value for every message, which degrades `tailTokenBudget` to
-    // `minTailMessages` — compaction still runs and context stays bounded, but
-    // the byte budget is effectively ignored. It is also called O(n) times per
-    // compaction, so an async/remote counter (e.g. a `count_tokens` API) will
-    // be slow. For precise tail budgeting with such counters, pass an explicit
-    // per-message `CompactOptions.tokenCounter` instead.
-    const sessionCounter = context?.tokenCounter;
-    const tailCounter: CompactTokenCounter | undefined =
-      opts.tokenCounter ??
-      (sessionCounter
-        ? (msgs) =>
-            sessionCounter({
-              messages: msgs,
-              systemPrompt: "",
-              contextBlocks: []
-            })
-        : undefined);
-
     // 1. Find compression boundaries
     let compressStart = protectHead;
     compressStart = alignBoundaryForward(messages, compressStart);
 
-    let compressEnd = tailCounter
-      ? await findTailCutByTokensWithCounter(
-          messages,
-          compressStart,
-          tailCounter,
-          tailTokenBudget,
-          minTailMessages
-        )
-      : findTailCutByTokens(
-          messages,
-          compressStart,
-          tailTokenBudget,
-          minTailMessages
-        );
+    const compressEnd = findTailCutByTokens(
+      messages,
+      compressStart,
+      tailBudgetInHeuristicUnits(
+        tailTokenBudget,
+        context?.contextTokens,
+        messages
+      ),
+      minTailMessages
+    );
 
     if (compressEnd <= compressStart) {
       return null;
