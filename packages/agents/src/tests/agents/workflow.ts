@@ -595,6 +595,43 @@ export class TestWorkflowAgent extends Agent {
     return child.getWorkflowById(workflowId);
   }
 
+  // Start a workflow using the *legacy* param shape that predates this
+  // change: only `__agentName` / `__agentBinding` / `__workflowName`, with
+  // no `__agentOrigin`. Simulates a workflow that was already in flight when
+  // an older `agents` build was upgraded, exercising the backward-compat
+  // fallback in AgentWorkflow._initAgent(). Bypasses runWorkflow() because
+  // runWorkflow() always injects the new `__agentOrigin` field.
+  async runLegacyTopLevelWorkflowTest(
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    const env = this.env as unknown as {
+      TEST_WORKFLOW: {
+        create(opts: {
+          id: string;
+          params: Record<string, unknown>;
+        }): Promise<{ id: string }>;
+      };
+    };
+    const instance = await env.TEST_WORKFLOW.create({
+      id: workflowId,
+      params: {
+        ...params,
+        __agentName: this.name,
+        __agentBinding: "TestWorkflowAgent",
+        __workflowName: "TEST_WORKFLOW"
+        // Intentionally NO __agentOrigin.
+      }
+    });
+    // Mirror runWorkflow()'s own tracking insert so getWorkflow() works.
+    const id = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status)
+      VALUES (${id}, ${instance.id}, ${"TEST_WORKFLOW"}, 'queued')
+    `;
+    return instance.id;
+  }
+
   // Test helper to update workflow status directly
   async updateWorkflowStatus(
     workflowId: string,

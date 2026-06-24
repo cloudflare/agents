@@ -653,4 +653,43 @@ describe("sub-agent workflow origins", () => {
     await agentStub.approveSubAgentWorkflow(childName, workflowId);
     await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
   });
+
+  it("resumes a legacy workflow started without an origin payload", async () => {
+    // A workflow that was already in flight when an older `agents` build was
+    // upgraded carries only `__agentName` / `__agentBinding` / `__workflowName`
+    // in its params and no `__agentOrigin`. AgentWorkflow._initAgent() must
+    // fall back to the legacy name+binding path so its callbacks and
+    // `this.agent` RPC still reach the originating top-level Agent.
+    const id = crypto.randomUUID();
+    const agentName = `legacy-origin-agent-${id}`;
+    const workflowId = `legacy-origin-wf-${id}`;
+    const taskId = `legacy-origin-task-${id}`;
+    const agentStub = await getAgentByName(env.TestWorkflowAgent, agentName);
+
+    await using instance = await introspectWorkflowInstance(
+      env.TEST_WORKFLOW,
+      workflowId
+    );
+
+    const startedWorkflowId = await agentStub.runLegacyTopLevelWorkflowTest(
+      workflowId,
+      { taskId }
+    );
+    expect(startedWorkflowId).toBe(workflowId);
+    await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+
+    // `this.agent.recordWorkflowResult(...)` RPC resolved against the legacy
+    // name+binding origin and landed on the originating Agent.
+    const results = (await agentStub.getWorkflowResults()) as Array<{
+      taskId: string;
+      result: unknown;
+    }>;
+    expect(results.some((entry) => entry.taskId === taskId)).toBe(true);
+
+    // The durable completion callback routed back and updated tracking.
+    const tracked = (await agentStub.getWorkflowById(
+      workflowId
+    )) as WorkflowInfo | null;
+    expect(tracked?.status).toBe("complete");
+  });
 });
