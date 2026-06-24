@@ -3441,6 +3441,129 @@ describe("Think — onChatRecovery", () => {
     );
   });
 
+  // Reproduction for #1781: a turn interrupted mid-tool-input (the trailing
+  // persisted assistant part is a tool call still in `input-streaming` — input
+  // never finalized, tool never dispatched). The "continue" strategy has no
+  // resumption point for a non-finalized tool call; recovery must instead repair
+  // the dead orphan and regenerate, rather than spinning to a stable-timeout.
+  it("repairs an input-streaming orphan on recovery and regenerates (#1781)", async () => {
+    const agent = await freshRecoveryAgent(
+      `mid-tool-input-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-mid",
+      role: "user",
+      parts: [{ type: "text", text: "Write that file" }]
+    });
+    // The durable state at interruption: the assistant message ends ON a tool
+    // call still in `input-streaming` — the model began emitting a tool-use
+    // block but never finished streaming its input (no `tool-input-available`),
+    // so the call was never finalized or executed.
+    await agent.persistTestMessage({
+      id: "a-mid",
+      role: "assistant",
+      parts: [
+        { type: "text", text: "Let me write that file" },
+        {
+          type: "tool-writeFile",
+          toolCallId: "tc-mid",
+          state: "input-streaming",
+          input: undefined
+        } as unknown as UIMessage["parts"][number]
+      ]
+    });
+
+    await agent.insertInterruptedStream("stream-mid", "req-mid", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-mid" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({
+          type: "text-delta",
+          delta: "Let me write that file"
+        }),
+        index: 2
+      },
+      {
+        body: JSON.stringify({
+          type: "tool-input-start",
+          toolCallId: "tc-mid",
+          toolName: "writeFile"
+        }),
+        index: 3
+      },
+      {
+        body: JSON.stringify({
+          type: "tool-input-delta",
+          toolCallId: "tc-mid",
+          inputTextDelta: '{"path":"ou'
+        }),
+        index: 4
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-mid", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-mid",
+        continuation: false,
+        latestMessageId: "a-mid",
+        latestMessageRole: "assistant",
+        latestUserMessageId: "u-mid",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(1);
+    await agent.runScheduledRecoveryContinueForTest();
+
+    // Progress was made: the continuation re-ran inference and produced new
+    // tokens (NOT zero-progress → stable-timeout, the #1781 symptom).
+    expect(await agent.getTurnCallCount()).toBe(1);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    // The regenerated step produced new tokens (Think appends a fresh assistant
+    // message for the new step rather than merging, but either way the turn
+    // advanced — not the #1781 zero-progress stall).
+    const allAssistantText = messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => m.parts)
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    expect(allAssistantText).toContain("Continued response.");
+
+    // The non-finalized tool call is no longer dangling in `input-streaming`:
+    // it has a settled (errored) result so the next provider call cannot 400.
+    const toolPart = messages
+      .flatMap((m) => m.parts)
+      .find((p) => {
+        const part = p as { type?: unknown; toolCallId?: unknown };
+        return (
+          typeof part.type === "string" &&
+          part.type.startsWith("tool-") &&
+          part.toolCallId === "tc-mid"
+        );
+      }) as { state?: string } | undefined;
+    expect(toolPart).toBeDefined();
+    expect(toolPart?.state).not.toBe("input-streaming");
+
+    // The turn settled — the incident did not dead-end on a stable-timeout.
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+    }>;
+    expect(incidents.every((i) => i.status !== "exhausted")).toBe(true);
+
+    expect(await agent.getActiveFibers()).toHaveLength(0);
+  });
+
   it("{ continue: false } persists but does not schedule continuation", async () => {
     const agent = await freshRecoveryAgent("no-continue");
 

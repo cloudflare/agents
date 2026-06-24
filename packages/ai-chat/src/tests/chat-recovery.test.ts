@@ -949,4 +949,88 @@ describe("chatRecovery", () => {
       ws.close(1000);
     });
   });
+
+  // Reproduction for #1781: a turn interrupted mid-tool-input (the trailing
+  // persisted assistant part is a tool call still in `input-streaming` — input
+  // never finalized, tool never dispatched). The "continue" strategy has no
+  // resumption point for a non-finalized tool call; recovery must instead repair
+  // the dead orphan and regenerate, rather than spinning to a stable-timeout.
+  describe("recovery from a mid-tool-input interruption (#1781)", () => {
+    it("repairs the input-streaming orphan and regenerates instead of exhausting", async () => {
+      const room = crypto.randomUUID();
+      const stub = (await getAgentByName(
+        env.ChatRecoveryTestAgent,
+        room
+      )) as unknown as ChatTestStub;
+
+      // The interrupted stream ends ON a tool call still in `input-streaming`:
+      // `tool-input-start` (+ a partial `tool-input-delta`) with NO
+      // `tool-input-available` — the model began emitting a tool-use block but
+      // never finished streaming its input, so the call was never finalized or
+      // executed.
+      await stub.insertInterruptedStream("stream-mid", "req-mid", [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-mid" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "Let me write that file"
+          }),
+          index: 2
+        },
+        {
+          body: JSON.stringify({
+            type: "tool-input-start",
+            toolCallId: "tc-mid",
+            toolName: "writeFile"
+          }),
+          index: 3
+        },
+        {
+          body: JSON.stringify({
+            type: "tool-input-delta",
+            toolCallId: "tc-mid",
+            inputTextDelta: '{"path":"ou'
+          }),
+          index: 4
+        }
+      ]);
+      await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-mid");
+
+      await stub.triggerFiberRecovery();
+      await stub.waitForIdleForTest();
+
+      // Progress was made: the continuation re-ran inference and produced new
+      // tokens (NOT zero-progress → stable-timeout, the #1781 symptom).
+      expect(await stub.getOnChatMessageCallCount()).toBe(1);
+
+      const messages = await stub.getPersistedMessages();
+      const assistantMsgs = messages.filter((m) => m.role === "assistant");
+      expect(assistantMsgs).toHaveLength(1);
+      expect(extractAssistantText(messages)).toContain("Continued response.");
+
+      // The non-finalized tool call is no longer dangling in `input-streaming`:
+      // it has a settled (errored) result so the next provider call cannot 400.
+      const toolPart = assistantMsgs[0]?.parts?.find((p) => {
+        const part = p as { type?: unknown; toolCallId?: unknown };
+        return (
+          typeof part.type === "string" &&
+          part.type.startsWith("tool-") &&
+          part.toolCallId === "tc-mid"
+        );
+      }) as { state?: string } | undefined;
+      expect(toolPart).toBeDefined();
+      expect(toolPart?.state).not.toBe("input-streaming");
+
+      // The turn settled — the incident did not dead-end on a stable-timeout.
+      const incidents = await stub.getChatRecoveryIncidentsForTest();
+      expect(incidents.every((i) => i.status !== "exhausted")).toBe(true);
+
+      const fibers = await stub.getActiveFibers();
+      expect(fibers).toHaveLength(0);
+    });
+  });
 });
