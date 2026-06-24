@@ -53,7 +53,7 @@ automatically by MCP and by locally authored authenticated tools.
 
 ## Visual overview
 
-![Credentials, permissions, and identity form the Agent authority plane](./assets/agent-auth/authority-gap.png)
+![Credential lifecycle, runtime authorization, and identity context form the Agent authority plane](./assets/agent-auth/authority-gap.png)
 
 ![Direct tool calling and Code Mode share one authority operation](./assets/agent-auth/authority-kernel.png)
 
@@ -599,8 +599,8 @@ identity but does not currently have one universal source of authenticated user 
 ```ts
 interface AgentPrincipal {
   agent: {
-    id: string; // stable Durable Object identity
-    class: string;
+    id: string; // stable Agent instance / Durable Object identity
+    class: string; // logical Agent software class
   };
   user?: {
     issuer: string;
@@ -621,6 +621,12 @@ the lifetime of that Agent and is used to:
 
 This is a local platform identity. It is not, by itself, cryptographic proof to an
 external API that a particular Agent made a request.
+
+The split between `agent.class` and `agent.id` is intentional. OAuth and MCP usually
+register a logical client or application. Agent platforms run many concrete instances of
+that software. `agent.class` names the logical software; `agent.id` names the runtime actor
+whose grants, policy, approvals, and audit records are isolated. The SDK should not solve
+instance attribution by registering every Agent instance as a new OAuth client.
 
 ### Optional portable Agent proof (future)
 
@@ -662,6 +668,12 @@ interface PrincipalResolver {
 Applications can adapt Access JWT validation, their session system, or another IdP. MCP
 server auth context can supply a verified subject for inbound MCP calls. If no user is
 present, policy and grants operate for the Agent principal alone.
+
+The Agent principal and user principal stay distinct. A workload or Agent identity must
+not erase the delegated user, and a user identity must not erase the Agent actor. When a
+call crosses into a domain that names the user differently, `agents/auth` should not invent
+a new subject mapping locally. A trusted issuer for that downstream domain must mint or
+resolve the target-local subject evidence.
 
 The unresolved follow-up is external Agent proof: workload identity, signed Agent
 assertions, sender-constrained tokens, and actor chains. Those mechanisms should build on
@@ -1153,9 +1165,14 @@ They provide adaptation points without making unfinished profiles mandatory.
   requester possesses an Agent key. A future profile must define key registration,
   principal binding, covered components, replay protection, rotation, and revocation;
   signatures alone are not identity.
+- **RFC 9728 Protected Resource Metadata and related open-world OAuth work** improve
+  runtime discovery of authorization servers, resource identifiers, and token audiences.
+  MCP and credential providers should use those standards where available; `agents/auth`
+  should not invent first-contact trust or resource-binding rules in this RFC.
 - **RFC 8693 token exchange, RAR (RFC 9396), DPoP, EMA/ID-JAG, actor profiles, and
-  transaction tokens** may strengthen credential projection and cross-domain identity.
-  They do not replace execution-time policy and are deferred from the minimal kernel.
+  transaction tokens** may strengthen credential projection, delegated-user visibility,
+  and cross-domain identity. They do not replace execution-time policy and are deferred
+  from the minimal kernel.
 - **Execution retry and cancellation annotations** should become part of normalized
   capability metadata shared by direct tools and codemode. MCP's existing
   `idempotentHint` / `readOnlyHint` are useful policy inputs but remain untrusted hints;
@@ -1165,9 +1182,13 @@ They provide adaptation points without making unfinished profiles mandatory.
   should remain conservative. This RFC carries the annotation envelope on
   `AuthorityOperation.capability`; defining and enforcing the new hints is deferred.
 - **Mission/task authority** may later supply a durable purpose and lifecycle reference in
-  `AuthorityOperation.context`. This RFC does not define Mission shaping, authority-set
-  compilation, expansion, or cross-domain propagation. Adding those concepts now would
-  overload a design whose immediate job is consistent local enforcement.
+  `AuthorityOperation.context`. A session, Code Mode replay log, or OAuth refresh token is
+  not a mission; it proves execution can continue, not that authority should continue.
+  This RFC does not define Mission shaping, authority-set compilation, expansion, or
+  cross-domain propagation. If that layer appears, it should be a separate authority
+  object/service that the local kernel evaluates, not MCP protocol state, an OAuth-only
+  token trick, or an SDK-invented universal policy language. Adding those concepts now
+  would overload a design whose immediate job is consistent local enforcement.
 
 The practical rule is: evaluate locally where domain meaning lives, carry authority only
 when it must travel, and keep approval as input to a fresh decision rather than turning it
