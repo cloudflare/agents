@@ -86,7 +86,7 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
     });
 
     // Broadcast to connected clients (non-durable)
-    await this.broadcastToClients({
+    this.broadcastToClients({
       type: "task-complete",
       taskId: params.taskId
     });
@@ -794,7 +794,7 @@ await this.reportProgress({
   percent: 0.5,
   message: "Halfway done"
 });
-await this.broadcastToClients({ type: "update", data });
+this.broadcastToClients({ type: "update", data });
 
 // Durable callbacks via step (idempotent, won't repeat on retry)
 await step.reportComplete(result);

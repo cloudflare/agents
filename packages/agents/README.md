@@ -232,15 +232,6 @@ when a connection is resumed from hibernation.
 Nested sub-agent URLs are supported using repeated `/sub/{agent}/{name}`
 segments, subject to the platform's current facet nesting limits.
 
-Sub-agents can start workflows with `this.runWorkflow()` just like top-level
-agents. The workflow row is tracked in the originating facet's SQLite database,
-so parent `getWorkflow()` / `getWorkflows()` calls do not see child-started
-runs unless you aggregate them yourself. Inside `AgentWorkflow`, `this.agent`
-routes RPC back to the originating facet; it is RPC-only for facet origins, so
-use normal sub-agent HTTP/WebSocket routing instead of `.fetch()`. If you pass
-`runWorkflow(..., { agentBinding })` from a facet, use the root Durable Object
-binding name, not a child binding.
-
 ### Agent Tools
 
 Run chat-capable sub-agents as tools from a parent chat agent. Think agents and
@@ -390,8 +381,6 @@ Workflows provide:
 - **Human-in-the-loop** — pause for approval with `waitForApproval()`
 - **Long-running tasks** — run for days or weeks
 - **Progress tracking** — report status back to the agent
-- **Facet origins** — sub-agents can start workflows; callbacks and `this.agent`
-  target the originating facet, and tracking is facet-local
 
 See [Workflows](../../docs/workflows.md) and [Human in the Loop](../../docs/human-in-the-loop.md).
 

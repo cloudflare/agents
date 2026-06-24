@@ -94,7 +94,7 @@ export class TestProcessingWorkflow extends AgentWorkflow<
     });
 
     // Step 5: Broadcast to clients (non-durable)
-    await this.broadcastToClients({
+    this.broadcastToClients({
       type: "workflow-progress",
       taskId: params.taskId,
       status: "completing"

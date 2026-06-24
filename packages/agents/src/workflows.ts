@@ -520,8 +520,8 @@ export class AgentWorkflow<
    *
    * @param message - Message to broadcast (will be JSON-stringified)
    */
-  protected async broadcastToClients(message: unknown): Promise<void> {
-    await this.agent._workflow_broadcast(message);
+  protected broadcastToClients(message: unknown): void {
+    this.agent._workflow_broadcast(message);
   }
 
   /**
