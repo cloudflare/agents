@@ -954,7 +954,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       approval?: { approved: boolean };
     };
     expect(toolPart.state).toBe("approval-responded");
-    expect(toolPart.approval).toEqual({ approved: true });
+    expect(toolPart.approval).toEqual({ id: toolCallId, approved: true });
 
     ws.close(1000);
   });
@@ -1015,7 +1015,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       approval?: { approved: boolean };
     };
     expect(toolPart.state).toBe("output-denied");
-    expect(toolPart.approval).toEqual({ approved: false });
+    expect(toolPart.approval).toEqual({ id: toolCallId, approved: false });
 
     ws.close(1000);
   });
@@ -1316,7 +1316,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       approval?: { approved: boolean };
     };
     expect(toolPart.state).toBe("approval-responded");
-    expect(toolPart.approval).toEqual({ approved: true });
+    expect(toolPart.approval).toEqual({ id: toolCallId, approved: true });
     expect(assistantMsg.parts.length).toBe(1);
 
     ws.close(1000);
@@ -1384,7 +1384,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       approval?: { approved: boolean };
     };
     expect(toolPart.state).toBe("approval-responded");
-    expect(toolPart.approval).toEqual({ approved: true });
+    expect(toolPart.approval).toEqual({ id: toolCallId, approved: true });
 
     // Continuation parts should be appended (TestChatAgent returns text response)
     expect(assistantMsg.parts.length).toBeGreaterThan(1);
@@ -1447,7 +1447,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       approval?: { approved: boolean };
     };
     expect(toolPart.state).toBe("output-denied");
-    expect(toolPart.approval).toEqual({ approved: false });
+    expect(toolPart.approval).toEqual({ id: toolCallId, approved: false });
 
     // Continuation parts should be appended (LLM sees denial and responds)
     expect(assistantMsg.parts.length).toBeGreaterThan(1);

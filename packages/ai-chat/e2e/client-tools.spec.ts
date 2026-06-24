@@ -520,6 +520,9 @@ test.describe("Tool approval auto-continuation e2e", () => {
     );
     expect(toolPart).toBeTruthy();
     expect(toolPart.state).toBe("approval-responded");
-    expect(toolPart.approval).toEqual({ approved: true });
+    expect(toolPart.approval).toEqual({
+      id: result.toolCallId,
+      approved: true
+    });
   });
 });
