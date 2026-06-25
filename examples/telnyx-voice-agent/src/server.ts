@@ -40,7 +40,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       ]
     });
 
-    return result.fullStream;
+    return result.fullStream as AsyncIterable<unknown>;
   }
 }
 
