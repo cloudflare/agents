@@ -520,6 +520,93 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return rawMessages;
   }
 
+  getMessagesForTest(): ChatMessage[] {
+    return this.messages as ChatMessage[];
+  }
+
+  /**
+   * Drive the `detached: { notify }` completion hook directly (the warm-path /
+   * backbone delivery is exercised elsewhere). Called `times` times to prove the
+   * deterministic message id collapses re-delivery to a single injected turn.
+   */
+  async notifyDetachedFinishForTest(options?: {
+    runId?: string;
+    notifySource?: string;
+    status?: AgentToolLifecycleResult["status"];
+    times?: number;
+  }): Promise<void> {
+    const runId = options?.runId ?? "detached-notify-run";
+    const status = options?.status ?? "completed";
+    const internals = this as unknown as {
+      _cfDetachedNotifyFinish(
+        run: AgentToolRunInfo,
+        result: AgentToolLifecycleResult
+      ): Promise<void>;
+    };
+    for (let i = 0; i < (options?.times ?? 1); i++) {
+      await internals._cfDetachedNotifyFinish(
+        {
+          runId,
+          agentType: "Researcher",
+          status,
+          inputPreview: "detached topic",
+          displayOrder: 0,
+          startedAt: Date.now(),
+          ...(options?.notifySource !== undefined && {
+            notifySource: options.notifySource
+          })
+        },
+        { status, summary: "detached summary" }
+      );
+    }
+  }
+
+  /**
+   * Drive the `detached: { onMilestones }` hook directly. Called `times` times to
+   * prove the deterministic message id collapses warm-path + reconcile delivery
+   * to a single injected message.
+   */
+  async notifyDetachedMilestoneForTest(options?: {
+    runId?: string;
+    name?: string;
+    notifySource?: string;
+    times?: number;
+    mode?: "react" | "narrate";
+  }): Promise<void> {
+    const runId = options?.runId ?? "detached-milestone-run";
+    const name = options?.name ?? "sources-gathered";
+    const mode = options?.mode ?? "narrate";
+    const internals = this as unknown as {
+      _deliverDetachedMilestone(
+        run: AgentToolRunInfo,
+        milestone: {
+          name: string;
+          sequence: number;
+          at: number;
+          data?: unknown;
+        },
+        mode: "react" | "narrate"
+      ): Promise<void>;
+    };
+    for (let i = 0; i < (options?.times ?? 2); i++) {
+      await internals._deliverDetachedMilestone(
+        {
+          runId,
+          agentType: "Researcher",
+          status: "running",
+          inputPreview: "detached topic",
+          displayOrder: 0,
+          startedAt: Date.now(),
+          ...(options?.notifySource !== undefined && {
+            notifySource: options.notifySource
+          })
+        },
+        { name, sequence: 0, at: Date.now(), data: { sources: 2 } },
+        mode
+      );
+    }
+  }
+
   async testPersistToolCall(messageId: string, toolName: string) {
     const toolCallPart: TestToolCallPart = {
       type: `tool-${toolName}`,

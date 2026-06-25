@@ -8,9 +8,11 @@ import type {
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentToolLifecycleResult,
   type AgentToolMilestone,
   type AgentToolProgress,
   type AgentToolProgressSnapshot,
+  type AgentToolRunInfo,
   type AgentToolRunInspection,
   type AgentToolStoredChunk,
   type AgentContext,
@@ -2977,6 +2979,17 @@ export class AIChatAgent<
     }
   }
 
+  /** True while running inside this agent's own serialized detached-delivery
+   * turn slot (set by {@link _runDetachedDelivery}); lets a `react` notify run
+   * its reply inline rather than enqueuing (which would deadlock) or interleaving
+   * with a foreign turn. */
+  private _inSerializedDetachedDeliverySlot = false;
+
+  /** Notification ids (`detached-finish:*` / `detached-ms:*`) currently being
+   * injected, to dedupe a concurrent warm-tail + backbone delivery of the same
+   * milestone within one isolate before the persisted message exists. */
+  private _inFlightDetachedNotifications = new Set<string>();
+
   /**
    * Serialize detached terminal delivery against the chat turn queue. A
    * fast-path push or backbone tick can land mid-turn, and an `onFinish` that
@@ -3015,8 +3028,195 @@ export class AIChatAgent<
     await this.keepAliveWhile(() =>
       this._turnQueue.enqueue(
         `detached-delivery:${crypto.randomUUID()}`,
-        inContext
+        // Mark the slot so `_injectDetachedNotification` knows it owns the active
+        // turn and can run a `react` reply INLINE (vs a foreign active turn,
+        // where inline would interleave and enqueue-await would deadlock).
+        async () => {
+          this._inSerializedDetachedDeliverySlot = true;
+          try {
+            await inContext();
+          } finally {
+            this._inSerializedDetachedDeliverySlot = false;
+          }
+        }
       )
+    );
+  }
+
+  /**
+   * Inject a synthetic chat message for a detached-run notification, idempotent
+   * on its deterministic `id` (a re-delivery from the warm tail + cold backbone
+   * collapses to one — `persistMessages` is skipped when the id already exists).
+   * When `react` is set the model then takes a turn over the new message.
+   *
+   * `@cloudflare/ai-chat` has no durable-submission layer (unlike Think's
+   * `submitMessages`), so the turn cannot be enqueued-and-awaited from inside the
+   * serialized delivery slot — `TurnQueue` has no re-entrancy bypass, so that
+   * would self-deadlock. Instead: when we are already inside a turn slot (the
+   * `serialize: true` finish delivery runs as its own enqueued turn) we run the
+   * programmatic turn INLINE, reusing that slot — so the whole notify completes
+   * before the ledger marks the slot delivered (eviction-safe). When we are not
+   * inside a slot (a milestone fired from the `waitUntil` fast path or the
+   * reconcile alarm) we enqueue a fresh turn normally.
+   */
+  private async _injectDetachedNotification(
+    id: string,
+    role: "user" | "assistant",
+    text: string,
+    metadata: Record<string, unknown>,
+    options: { react: boolean }
+  ): Promise<void> {
+    // `messages.some` covers re-delivery against persisted history (survives
+    // eviction); the in-flight set closes the check-then-persist race when the
+    // warm tail and cold backbone deliver the SAME milestone concurrently in one
+    // isolate (milestones have no ledger claim, unlike finish).
+    if (
+      this._inFlightDetachedNotifications.has(id) ||
+      this.messages.some((message) => message.id === id)
+    ) {
+      return;
+    }
+    this._inFlightDetachedNotifications.add(id);
+    try {
+      await this.persistMessages([
+        ...this.messages,
+        { id, role, parts: [{ type: "text", text }], metadata } as UIMessage
+      ]);
+      if (!options.react) return;
+      const runReply = (requestId: string) =>
+        this._runProgrammaticChatTurn(
+          requestId,
+          this._lastClientTools,
+          this._lastBody,
+          undefined
+        );
+      if (this._inSerializedDetachedDeliverySlot) {
+        // We own the active turn slot (a `serialize: true` finish delivery), so
+        // run inline + awaited, reusing the slot's request id (keeps the
+        // `activeRequestId === turn requestId` invariant `saveMessages` relies
+        // on). The ledger marks the slot delivered only after the reaction
+        // completes, making the react turn eviction-safe too.
+        await runReply(this._turnQueue.activeRequestId ?? nanoid());
+      } else if (this._turnQueue.isActive) {
+        // Inside a FOREIGN turn (e.g. `cancelAgentTool` called mid-turn).
+        // Enqueue-and-await would deadlock; inline would interleave with that
+        // turn. Fire-and-forget a turn that runs once the slot frees — the
+        // message is already persisted, so the reaction is best-effort.
+        const requestId = nanoid();
+        void this.keepAliveWhile(() =>
+          this._runExclusiveChatTurn(requestId, () => runReply(requestId))
+        );
+      } else {
+        const requestId = nanoid();
+        await this._runExclusiveChatTurn(requestId, () => runReply(requestId));
+      }
+    } finally {
+      this._inFlightDetachedNotifications.delete(id);
+    }
+  }
+
+  /**
+   * Format the message injected by `detached: { notify }` when a background run
+   * finishes. Override to customize the prose, or return an empty string to
+   * suppress the notification for a given outcome.
+   */
+  protected formatDetachedCompletion(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    switch (result.status) {
+      case "completed":
+        return result.summary
+          ? `${label} finished:\n\n${result.summary}`
+          : `${label} finished successfully.`;
+      case "error":
+        return `${label} failed${result.error ? `: ${result.error}` : "."}`;
+      case "aborted":
+        return `${label} was cancelled.`;
+      case "interrupted":
+        return result.reason === "budget-exceeded"
+          ? `${label} ran out of time before completing and was stopped.`
+          : `${label} was interrupted before completing${result.error ? `: ${result.error}` : "."}`;
+      default:
+        return `${label} ended (${result.status}).`;
+    }
+  }
+
+  /**
+   * Targeted completion hook for `detached: { notify }`. Auto-wired by
+   * `runAgentTool` (resolved by name so the base `Agent` stays decoupled from the
+   * chat layer). Injects the formatted completion as a user turn so the model
+   * reacts to the background result. Idempotent per run + status (deterministic
+   * message id), so an exactly-once finish — or a soft give-up followed by a real
+   * completion — never injects a duplicate, while a give-up and a later real
+   * completion surface as two distinct messages.
+   */
+  async _cfDetachedNotifyFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    const text = this.formatDetachedCompletion(run, result);
+    if (!text) return;
+    await this._injectDetachedNotification(
+      `detached-finish:${run.runId}:${result.status}`,
+      "user",
+      text,
+      {
+        source: run.notifySource ?? "detached-agent-tool",
+        runId: run.runId,
+        agentType: run.agentType,
+        status: result.status
+      },
+      { react: true }
+    );
+  }
+
+  /**
+   * Format the message injected when a `detached: { onMilestones }` milestone is
+   * reached. Override to customize the prose (or return an empty string to
+   * suppress a given milestone).
+   */
+  protected formatDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    const detail =
+      milestone.data !== undefined
+        ? `\n\n${JSON.stringify(milestone.data, null, 2)}`
+        : "";
+    return `${label} reached milestone "${milestone.name}".${detail}`;
+  }
+
+  /**
+   * Targeted milestone hook for `detached: { onMilestones }`. Idempotent per run
+   * + milestone NAME (deterministic message id), so the warm tail and the cold
+   * backbone reconcile converge to at most one message.
+   *
+   * - `"narrate"` (default): a synthetic **assistant** message injected directly
+   *   — no model turn.
+   * - `"react"`: a **user** message followed by a model turn so the agent
+   *   responds to the milestone.
+   */
+  protected override async _deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone,
+    mode: "react" | "narrate"
+  ): Promise<void> {
+    const text = this.formatDetachedMilestone(run, milestone);
+    if (!text) return;
+    await this._injectDetachedNotification(
+      `detached-ms:${run.runId}:${milestone.name}`,
+      mode === "narrate" ? "assistant" : "user",
+      text,
+      {
+        source: run.notifySource ?? "detached-agent-tool",
+        runId: run.runId,
+        agentType: run.agentType,
+        milestone: milestone.name
+      },
+      { react: mode === "react" }
     );
   }
 

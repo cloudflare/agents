@@ -925,8 +925,13 @@ Suggested phasing:
    child→parent fast-path push; the finite absolute `maxBudgetMs` ceiling;
    `cancelAgentTool(runId)`; signal-isolation. Make `onAgentToolFinish`
    exactly-once internally as part of this (changeset note).
-3. **Think convenience:** `detached: { notify }`, `submitMessages`-based
-   idempotent fold-in, `formatDetachedCompletion` override, transcript filter.
+3. **Chat-agent convenience:** `detached: { notify }`, idempotent fold-in,
+   `formatDetachedCompletion` override, transcript filter. Shipped on **both**
+   `@cloudflare/think` and `AIChatAgent`. Think dedupes via a `submitMessages`
+   idempotency key; `AIChatAgent` (no durable-submission layer) persists under a
+   deterministic message id and runs the follow-up turn inline within the
+   already-serialized delivery slot (`TurnQueue` has no re-entrancy bypass, so an
+   enqueued-and-awaited turn there would self-deadlock).
 4. **Progress & milestones.** Split, because the dashboard-builds-a-website
    customer needs live progress + milestone _narration_ (react-don't-block), not
    the blocking join point — and the join point is the riskiest piece against
@@ -947,9 +952,10 @@ message, phase, data? })` emit API, the transient `data-agent-progress`
      `data-agent-milestone` part vs. the transient progress part. Surfaced as
      `milestones` on `AgentToolRunState` and `inspectAgentToolRun()` (deduped by
      `sequence`); `onProgress` also fires for milestones (`progress.milestone`
-     set). `detached: { onMilestones }` is the Think convenience: an idempotent
-     synthetic chat message (per `(runId, name)`) injected from both the warm
-     tail and the cold backbone reconcile, at-most-once, before the run finishes.
+     set). `detached: { onMilestones }` is the chat-agent convenience (Think and
+     AIChatAgent): an idempotent synthetic chat message (per `(runId, name)`)
+     injected from both the warm tail and the cold backbone reconcile,
+     at-most-once, before the run finishes.
      Two modes (the `string[]` shorthand defaults to `"narrate"`):
      **`"narrate"`** (default) injects a synthetic assistant message directly (no
      inference) — a cheap status line for milestones the agent needn't act on;

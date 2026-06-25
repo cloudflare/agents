@@ -65,12 +65,12 @@ await this.reportProgress({
   and `AgentToolRunState.milestones` (deduped by `sequence`).
 - **`onProgress` fires for milestones too** — the snapshot carries
   `progress.milestone`, so a consumer can branch on milestone vs. ephemeral.
-- **Think `detached: { onMilestones }` convenience.** When a configured
-  milestone lands, Think surfaces an idempotent synthetic chat message
-  (keyed/idempotent per `(runId, name)`) _before_ the run finishes. Delivered
-  from both the warm tail and the cold backbone reconcile; the idempotency key
-  collapses them to at-most-once. Two modes (the `string[]` shorthand defaults to
-  `"narrate"`):
+- **`detached: { onMilestones }` chat convenience** (`@cloudflare/think` and
+  `AIChatAgent`). When a configured milestone lands, the chat agent surfaces an
+  idempotent synthetic chat message (keyed/idempotent per `(runId, name)`)
+  _before_ the run finishes. Delivered from both the warm tail and the cold
+  backbone reconcile; the deterministic id collapses them to at-most-once. Two
+  modes (the `string[]` shorthand defaults to `"narrate"`):
   - `"narrate"` (default) — a synthetic **assistant** message injected directly
     (no inference): a cheap, honest status line that does not trigger a turn.
   - `"react"` — a **user-role** turn so the model responds to the milestone
