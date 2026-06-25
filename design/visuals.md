@@ -10,11 +10,12 @@ The playground (and eventually all examples) uses [Kumo](https://kumo-ui.com/), 
 - **Icons**: `@phosphor-icons/react` v2 (Kumo's peer icon library, also at root). Always use the `*Icon` suffixed exports (e.g. `TrashIcon`, `ShieldIcon`) — the bare names (`Trash`, `Shield`) are deprecated.
 - **Tailwind v4**: Requires `@tailwindcss/vite` in `vite.config.ts` (alongside `@vitejs/plugin-react` and `@cloudflare/vite-plugin`). Kumo ships its own Tailwind plugin; imported in `styles.css`:
   ```css
-  @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
   @import "tailwindcss";
   @import "@cloudflare/kumo/styles/tailwind";
+  /* Tailwind ignores node_modules by default, so we source Kumo for class extraction. */
+  @source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
   ```
-  Note: the `@source` path must point to the hoisted Kumo package at the monorepo root (`../../../node_modules`), not a local `node_modules`.
+  Note: the `@source` path is relative to `src/styles.css` and points at the example's own `node_modules` (`../node_modules`). It resolves both in the pnpm workspace (each package gets its own `node_modules` with symlinks) and when the example is copied out and installed standalone — don't use a monorepo-root-relative path like `../../../node_modules`.
 
 ### Dark mode
 

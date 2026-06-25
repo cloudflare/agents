@@ -75,7 +75,7 @@ Server-only examples can use Wrangler directly:
 ### wrangler.jsonc
 
 - Use `wrangler.jsonc` (not `.toml`)
-- Include `"$schema": "../../node_modules/wrangler/config-schema.json"`
+- Include `"$schema": "./node_modules/wrangler/config-schema.json"` — relative to the example root so it resolves both in the workspace and when the example is copied out and installed standalone
 - `compatibility_date: "2026-06-11"`, `compatibility_flags: ["nodejs_compat"]`
 - Full-stack apps with client routing: add `"assets": { "not_found_handling": "single-page-application" }`
 - Use `"run_worker_first"` to route API/agent paths to the Worker
@@ -168,8 +168,11 @@ Full-stack examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for co
 ```css
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
-@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+/* Tailwind ignores node_modules by default, so we source Kumo for class extraction. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 ```
+
+The `@source` path is relative to `src/styles.css`, so it points at the example's own `node_modules` (`../node_modules`). That resolves both in the pnpm workspace (each package gets its own `node_modules` with symlinks) and when the example is copied out and installed standalone — don't use a monorepo-root-relative path like `../../../node_modules`.
 
 #### Required UI patterns
 
