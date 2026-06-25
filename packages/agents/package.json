@@ -31,7 +31,6 @@
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
-    "just-bash": "^3.0.2",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.16",
     "partyserver": "^0.5.8",
@@ -51,6 +50,7 @@
     "ai": "^6.0.202",
     "chat": "^4.31.0",
     "glob": "^13.0.6",
+    "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.3"
@@ -63,6 +63,7 @@
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",
     "chat": "^4.29.0",
+    "just-bash": "^3.0.0",
     "react": "^19.0.0",
     "vite": ">=6.0.0 <9.0.0",
     "zod": "^4.0.0"
@@ -87,6 +88,9 @@
       "optional": true
     },
     "chat": {
+      "optional": true
+    },
+    "just-bash": {
       "optional": true
     },
     "vite": {

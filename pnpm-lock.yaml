@@ -3681,9 +3681,6 @@ importers:
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
-      just-bash:
-        specifier: ^3.0.2
-        version: 3.0.2
       mimetext:
         specifier: ^3.0.28
         version: 3.0.28
@@ -3739,6 +3736,9 @@ importers:
       glob:
         specifier: ^13.0.6
         version: 13.0.6
+      just-bash:
+        specifier: ^3.0.2
+        version: 3.0.2
       react:
         specifier: ^19.2.7
         version: 19.2.7
