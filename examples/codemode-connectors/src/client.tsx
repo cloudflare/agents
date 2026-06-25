@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Surface, Text, PoweredByCloudflare } from "@cloudflare/kumo";
