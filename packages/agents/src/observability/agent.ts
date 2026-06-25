@@ -388,6 +388,28 @@ export type AgentObservabilityEvent =
       { runCount: number; elapsedMs?: number }
     >
   | BaseEvent<"agent_tool:recovery:failed", { error: string }>
+  | BaseEvent<
+      "agent_tool:detached:delivery_failed",
+      {
+        runId: string;
+        /** Which ledger slot was being delivered. */
+        kind: "finish" | "give_up";
+        /** Terminal status that was being delivered. */
+        status: string;
+        /** The per-run `onFinish` callback name, if one was wired. */
+        callback?: string;
+        error: string;
+      }
+    >
+  | BaseEvent<
+      "agent_tool:detached:live_count_warning",
+      {
+        /** Detached runs currently holding a concurrency slot (non-terminal). */
+        liveCount: number;
+        /** The threshold that was crossed. */
+        threshold: number;
+      }
+    >
   | BaseEvent<"destroy">
   | BaseEvent<"connect", { connectionId: string }>
   | BaseEvent<

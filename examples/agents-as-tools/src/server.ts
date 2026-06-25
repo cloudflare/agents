@@ -68,25 +68,59 @@ export class Researcher extends DemoToolAgent {
         inputSchema: z.object({
           query: z.string().min(2)
         }),
-        execute: async ({ query }) => ({
-          query,
-          results: [
-            {
-              title: `Background on "${query}"`,
-              snippet:
-                `Comprehensive overview of ${query}. Recent analysis shows ` +
-                "several trade-offs that depend on workload and deployment shape.",
-              url: `https://example.com/search?q=${encodeURIComponent(query)}`
-            },
-            {
-              title: `Recent changes related to "${query}"`,
-              snippet:
-                `Latest updates around ${query}, including production lessons ` +
-                "from large open-source and infrastructure deployments.",
-              url: `https://example.com/research?topic=${encodeURIComponent(query)}`
-            }
-          ]
-        })
+        execute: async ({ query }) => {
+          // Ephemeral progress (rfc-detached-agent-tools §progress). When this
+          // Researcher runs as an agent tool (inline or detached/background),
+          // these signals ride the child stream as transient
+          // `data-agent-progress` parts and surface on the parent's
+          // `AgentToolRunState.progress` — the background-runs tray renders a
+          // live bar without anyone drilling in. A no-op when run standalone.
+          await this.reportProgress({
+            phase: "searching",
+            fraction: 0.2,
+            message: `Searching for "${query}"…`
+          });
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await this.reportProgress({
+            phase: "reading",
+            fraction: 0.6,
+            message: "Reading 2 sources…"
+          });
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await this.reportProgress({
+            phase: "synthesizing",
+            fraction: 0.9,
+            message: "Synthesizing findings…"
+          });
+          // Durable milestone (rfc-detached-agent-tools §progress, 4b). Unlike
+          // the ephemeral signals above, a named milestone persists, replays on
+          // drill-in, and — for a detached run dispatched with
+          // `detached: { onMilestones: ["sources-gathered"] }` — injects a chat
+          // notification so the parent model can react before the run finishes.
+          await this.reportProgress({
+            milestone: "sources-gathered",
+            data: { query, sources: 2 }
+          });
+          return {
+            query,
+            results: [
+              {
+                title: `Background on "${query}"`,
+                snippet:
+                  `Comprehensive overview of ${query}. Recent analysis shows ` +
+                  "several trade-offs that depend on workload and deployment shape.",
+                url: `https://example.com/search?q=${encodeURIComponent(query)}`
+              },
+              {
+                title: `Recent changes related to "${query}"`,
+                snippet:
+                  `Latest updates around ${query}, including production lessons ` +
+                  "from large open-source and infrastructure deployments.",
+                url: `https://example.com/research?topic=${encodeURIComponent(query)}`
+              }
+            ]
+          };
+        }
       })
     };
   }
@@ -193,14 +227,25 @@ export class Assistant extends Think<Env> {
         }),
         execute: async ({ query }) => {
           // Detached: does not block this turn, survives parent eviction, and
-          // `notify: true` posts the completion back into the chat so the model
-          // reacts to it later. `cancelBackground(runId)` can stop it early.
+          // `notify` posts the completion back into the chat so the model reacts
+          // to it later. `cancelBackground(runId)` can stop it early.
           const dispatched = await this.runAgentTool<ResearchInput>(
             Researcher,
             {
               input: { query },
               display: { name: "Researcher" },
-              detached: { notify: true, maxBudgetMs: 5 * 60 * 1000 }
+              detached: {
+                notify: { source: "agents-as-tools-background" },
+                maxBudgetMs: 5 * 60 * 1000,
+                // Durable milestone narration (4b): when the Researcher reaches
+                // "sources-gathered", surface a status line mid-run. The
+                // shorthand defaults to "narrate" — a synthetic assistant
+                // message injected directly (no model turn), the right fit for a
+                // progress update the agent needn't act on. Use
+                // `{ names: [...], mode: "react" }` instead when the model should
+                // respond to the milestone (e.g. start dependent work).
+                onMilestones: ["sources-gathered"]
+              }
             }
           );
           return {

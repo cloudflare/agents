@@ -238,9 +238,11 @@ The fast path is best-effort. The guarantee comes from a self-scheduling
 reconcile the parent owns whenever any detached run is outstanding:
 
 - On the first detached dispatch, the parent arms a recurring schedule
-  (`this.schedule`, exponential-ish cadence, e.g. 5s → 30s → 2m, capped) keyed to
-  a single "detached reconcile" callback. Sub-agent scheduling already routes
-  facet alarms through the root, so this works for nested parents too.
+  (`this.schedule`, cadence 5s → 15s → 30s → 2m, capped) keyed to a single
+  "detached reconcile" callback. A new detached dispatch resets the pending
+  schedule to the fast end (5s), so fresh work is noticed promptly while long
+  background work backs off. Sub-agent scheduling already routes facet alarms
+  through the root, so this works for nested parents too.
 - On parent `onStart`, the backbone is **re-armed** if any detached run is still
   non-terminal — the schedule row survives in SQLite, but recovery verifies it
   exists and recreates it if a dispatching turn crashed after inserting the run
@@ -602,12 +604,13 @@ for short waits (seconds) — see "Edge cases & resolved decisions".
 
 Just as `detached: { notify: true }` folds the _result_ into chat, Think can fold
 _milestones_ in when they should surface to the user/model — e.g.
-`detached: { notify: { onMilestones: ["schema-ready"] } }` submits an idempotent
-synthetic message (keyed `detached-ms:${sessionId}:${runId}:${name}`) when a
-named milestone lands, so the agent can react in-conversation ("Schema's ready —
-sketching the dashboard now") before the full import finishes. Ephemeral progress
-is **not** folded into chat by default (too noisy for the model); it stays on the
-`agent-tool-event` stream for UI.
+`detached: { notify: true, onMilestones: ["schema-ready"] }` could submit an
+idempotent synthetic message (keyed
+`detached-ms:${sessionId}:${runId}:${name}`) when a named milestone lands, so the
+agent can react in-conversation ("Schema's ready — sketching the dashboard now")
+before the full import finishes. Ephemeral progress is **not** folded into chat
+by default (too noisy for the model); it stays on the `agent-tool-event` stream
+for UI.
 
 ### Think convenience: fold the result into the chat
 
@@ -622,15 +625,24 @@ this.runAgentTool(ImportAgent, {
 });
 ```
 
+Apps that classify synthetic messages by source can supply their own taxonomy:
+
+```ts
+this.runAgentTool(ImportAgent, {
+  input,
+  detached: { notify: { source: "imports-background" } }
+});
+```
+
 On completion Think calls `submitMessages([...], { idempotencyKey: \`detached:${sessionId}:${runId}\` })`,
 injecting a synthetic user-role message that summarises the result as the
 parent's next-turn input (FIFO behind any running turn). The message carries
-`metadata.source = "agent-tool"`so the rendered transcript can filter it out
-while the model still sees it. The idempotency key is derived from`runId`, so
+`metadata.source = "detached-agent-tool"`by default, or the caller-provided`notify.source`, so the rendered transcript can filter it out while the model
+still sees it. The idempotency key is derived from `runId`, so
 the durable backbone and fast path cannot double-submit — reusing the exact
 primitive (`submitMessages`+`UNIQUE(idempotency_key)`) the reporter already
 validated, but framework-owned. Apps override the wording via
-`formatDetachedCompletion(run, result): UIMessage`.
+`formatDetachedCompletion(run, result)`.
 
 This keeps the core generic (any `Agent` gets named callbacks) while giving Think
 users the one-liner that matches the motivating workload.
@@ -915,13 +927,44 @@ Suggested phasing:
    exactly-once internally as part of this (changeset note).
 3. **Think convenience:** `detached: { notify }`, `submitMessages`-based
    idempotent fold-in, `formatDetachedCompletion` override, transcript filter.
-4. **Progress & milestones:** the single `reportProgress` emit API (a `milestone`
-   name promotes to durable), `data-agent-progress`/`data-agent-milestone`
-   transport, `progress`/`milestone` event projections, the `onProgress` hook and
-   `awaitAgentToolMilestone`, the resetting `noProgressBudgetMs` window (resets the
-   no-progress timer), the `progress_json` snapshot + milestone rows in recovery
-   inspect, and the `AgentToolRunState` client fields. The emit API works for
-   awaited runs too. `notify: { onMilestones }` Think convenience layers on top.
+4. **Progress & milestones.** Split, because the dashboard-builds-a-website
+   customer needs live progress + milestone _narration_ (react-don't-block), not
+   the blocking join point — and the join point is the riskiest piece against
+   chat-recovery:
+   - **4a — ephemeral progress (SHIPPED):** the `reportProgress({ fraction,
+message, phase, data? })` emit API, the transient `data-agent-progress`
+     transport, the `progress` projection on `AgentToolRunState`, the public
+     `onProgress(run, progress)` parent hook, the `progress_json` + `last_signal_at`
+     snapshot on the child run row surfaced through `inspectAgentToolRun().progress`,
+     and the resetting `noProgressBudgetMs` window (default 1h; per-run override
+     via `detached: { noProgressBudgetMs }`) enforced by the backbone off the
+     child's authoritative snapshot. Works for awaited runs too. Coalesced
+     (latest-wins; a `fraction >= 1` "done" frame always flushes). `data` is
+     live-only unless `{ persist: true }`.
+   - **4b — durable milestones (SHIPPED):** `reportProgress({ milestone, data })`
+     promotes a signal to a persisted, replayable row (one per milestone, with a
+     monotonic per-run `sequence`), carried as the **persisted**
+     `data-agent-milestone` part vs. the transient progress part. Surfaced as
+     `milestones` on `AgentToolRunState` and `inspectAgentToolRun()` (deduped by
+     `sequence`); `onProgress` also fires for milestones (`progress.milestone`
+     set). `detached: { onMilestones }` is the Think convenience: an idempotent
+     synthetic chat message (per `(runId, name)`) injected from both the warm
+     tail and the cold backbone reconcile, at-most-once, before the run finishes.
+     Two modes (the `string[]` shorthand defaults to `"narrate"`):
+     **`"narrate"`** (default) injects a synthetic assistant message directly (no
+     inference) — a cheap status line for milestones the agent needn't act on;
+     **`"react"`** injects a user-role turn so the model responds (steer / start
+     dependent work, costs a turn). Override prose via
+     `formatDetachedMilestone()`. Because the
+     two modes land as different chat roles, clients render these by
+     `metadata.source` as an agent **event**, not by raw role (a `narrate`
+     milestone is an `assistant` message; a `react`/finish notify is a `user`
+     message — neither should read as "the human typed this").
+   - **4c — awaitable join point (gated):** `awaitAgentToolMilestone`. Deferred
+     behind a short design addendum + a genuine same-turn, short-wait consumer —
+     it re-blocks the parent turn and interacts with chat-recovery / no-progress
+     budgets in ways that warrant isolated design. The website-build customer is
+     served by 4b's react-don't-block model, not this.
 5. **Example + docs:** extend `examples/agents-as-tools` (or a new
    `examples/background-tasks`) with the import-overlap pattern, milestone
    unblocking, and the background-tasks tray UI with live progress bars; distil
@@ -932,6 +975,9 @@ exactly-once delivery would make the floating-promise footgun a blessed,
 advertised API. The flag and the guarantee land together or not at all.
 
 Phase 4 (progress) is independently shippable and valuable on its own — awaited
-runs benefit too — so it need not block on Phase 2/3. The milestone tier is the
-higher-value half; ephemeral progress can follow if the milestone work lands
-first.
+runs benefit too — so it need not block on Phase 2/3. With a concrete customer
+(a Cloudflare dashboard agent that builds websites inside a sub-agent), the
+ordering is **4a → 4b**, with **4c gated**: a minutes-long build wants a live
+bar (4a) + milestone narration (4b, react-don't-block), and explicitly does
+_not_ want to block the parent turn awaiting a milestone (4c). 4a and 4b are
+shipped (see the phasing above); 4c stays gated behind a design addendum.

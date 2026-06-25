@@ -132,6 +132,9 @@ import {
 const agentToolChunkEncoder = new TextEncoder();
 import type {
   AgentToolLifecycleResult,
+  AgentToolMilestone,
+  AgentToolProgress,
+  AgentToolProgressSnapshot,
   AgentToolRunInfo,
   Connection,
   FiberRecoveryContext,
@@ -154,6 +157,7 @@ import {
   awaitWithDeadline,
   drainInteractionApplies,
   interceptAgentToolBroadcast,
+  AgentToolProgressEmitter,
   SubmitConcurrencyController,
   createToolsFromClientSchemas,
   AbortRegistry,
@@ -1415,6 +1419,8 @@ type AgentToolChildRunRow = {
   error_message: string | null;
   started_at: number;
   completed_at: number | null;
+  progress_json?: string | null;
+  last_signal_at?: number | null;
 };
 
 type AgentToolRunInspection<Output = unknown> = {
@@ -1427,6 +1433,7 @@ type AgentToolRunInspection<Output = unknown> = {
   error?: string;
   startedAt: number;
   completedAt?: number;
+  progress?: AgentToolProgressSnapshot;
 };
 
 type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
@@ -6726,6 +6733,75 @@ export class Think<
     this._addAgentToolChildRunColumnIfMissing(
       "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN output_json TEXT"
     );
+    // Latest progress snapshot (rfc-detached-agent-tools §progress). Only the
+    // most recent `reportProgress` is retained; `last_signal_at` drives the
+    // parent's resetting no-progress budget across eviction.
+    this._addAgentToolChildRunColumnIfMissing(
+      "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN progress_json TEXT"
+    );
+    this._addAgentToolChildRunColumnIfMissing(
+      "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN last_signal_at INTEGER"
+    );
+    // Durable milestones (rfc-detached-agent-tools §progress, 4b). One row per
+    // milestone; `sequence` is monotonic per run so replay/live races dedupe.
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_tool_milestones (
+        run_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        data_json TEXT,
+        at INTEGER NOT NULL,
+        PRIMARY KEY (run_id, sequence)
+      )
+    `;
+  }
+
+  private _persistAgentToolMilestone(
+    runId: string,
+    name: string,
+    data: unknown,
+    at: number
+  ): number {
+    this._ensureAgentToolChildRunTable();
+    const rows = this.sql<{ next: number }>`
+      SELECT COALESCE(MAX(sequence), -1) + 1 AS next
+      FROM cf_agent_tool_milestones WHERE run_id = ${runId}
+    `;
+    const sequence = rows[0]?.next ?? 0;
+    this.sql`
+      INSERT OR IGNORE INTO cf_agent_tool_milestones
+        (run_id, sequence, name, data_json, at)
+      VALUES (
+        ${runId}, ${sequence}, ${name},
+        ${data !== undefined ? JSON.stringify(data) : null}, ${at}
+      )
+    `;
+    // A milestone is a progress signal too: advance the no-progress clock.
+    this.sql`
+      UPDATE cf_agent_tool_child_runs SET last_signal_at = ${at}
+      WHERE run_id = ${runId}
+    `;
+    return sequence;
+  }
+
+  private _readAgentToolMilestones(runId: string): AgentToolMilestone[] {
+    this._ensureAgentToolChildRunTable();
+    return this.sql<{
+      sequence: number;
+      name: string;
+      data_json: string | null;
+      at: number;
+    }>`
+      SELECT sequence, name, data_json, at FROM cf_agent_tool_milestones
+      WHERE run_id = ${runId} ORDER BY sequence ASC
+    `.map((row) => ({
+      name: row.name,
+      sequence: row.sequence,
+      at: row.at,
+      ...(row.data_json != null
+        ? { data: Think._parseAgentToolOutput(row.data_json) }
+        : {})
+    }));
   }
 
   private _addAgentToolChildRunColumnIfMissing(sql: string): void {
@@ -6743,7 +6819,8 @@ export class Think<
     this._ensureAgentToolChildRunTable();
     const rows = this.sql<AgentToolChildRunRow>`
       SELECT run_id, request_id, stream_id, status, summary, output_json,
-             error_message, started_at, completed_at
+             error_message, started_at, completed_at, progress_json,
+             last_signal_at
       FROM cf_agent_tool_child_runs
       WHERE run_id = ${runId}
       LIMIT 1
@@ -6769,8 +6846,35 @@ export class Think<
       summary: row.summary ?? undefined,
       error: row.error_message ?? undefined,
       startedAt: row.started_at,
-      completedAt: row.completed_at ?? undefined
+      completedAt: row.completed_at ?? undefined,
+      ...(() => {
+        const progress = Think._progressSnapshotFromRow(row);
+        return progress ? { progress } : {};
+      })(),
+      ...(() => {
+        const milestones = this._readAgentToolMilestones(row.run_id);
+        return milestones.length > 0 ? { milestones } : {};
+      })()
     };
+  }
+
+  /**
+   * Rebuild the latest progress snapshot persisted by `reportProgress` from a
+   * child run row, or `undefined` if the child never reported progress.
+   */
+  private static _progressSnapshotFromRow(
+    row: AgentToolChildRunRow
+  ): AgentToolProgressSnapshot | undefined {
+    if (row.progress_json == null || row.last_signal_at == null)
+      return undefined;
+    try {
+      const parsed = JSON.parse(row.progress_json) as Partial<
+        Omit<AgentToolProgressSnapshot, "at">
+      >;
+      return { ...parsed, at: row.last_signal_at };
+    } catch {
+      return { at: row.last_signal_at };
+    }
   }
 
   protected formatAgentToolInput(input: unknown): UIMessage {
@@ -6781,6 +6885,54 @@ export class Think<
       role: "user",
       parts: [{ type: "text", text }]
     };
+  }
+
+  private _agentToolProgressEmitterInstance: AgentToolProgressEmitter | null =
+    null;
+
+  private get _agentToolProgressEmitter(): AgentToolProgressEmitter {
+    if (!this._agentToolProgressEmitterInstance) {
+      this._agentToolProgressEmitterInstance = new AgentToolProgressEmitter({
+        resolveActiveRun: () => {
+          const requestId = admittedTurnContext.getStore()?.requestId;
+          if (!requestId) return null;
+          const runId = this._agentToolRunsByRequestId.get(requestId);
+          return runId ? { runId, requestId } : null;
+        },
+        broadcast: (requestId, chunkBody) => {
+          this._broadcastChat({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: chunkBody,
+            done: false
+          });
+        },
+        persistSnapshot: (runId, snapshot, at) => {
+          this._ensureAgentToolChildRunTable();
+          this.sql`
+            UPDATE cf_agent_tool_child_runs
+            SET progress_json = ${JSON.stringify(snapshot)},
+                last_signal_at = ${at}
+            WHERE run_id = ${runId}
+          `;
+        },
+        persistMilestone: (runId, name, data, at) =>
+          this._persistAgentToolMilestone(runId, name, data, at)
+      });
+    }
+    return this._agentToolProgressEmitterInstance;
+  }
+
+  override async reportProgress<T = unknown>(
+    progress: AgentToolProgress<T>,
+    options?: { persist?: boolean }
+  ): Promise<void> {
+    const result = this._agentToolProgressEmitter.report(progress, options);
+    if (result === "inactive") {
+      console.warn(
+        "[think] reportProgress() was called outside of an active agent-tool run; ignoring. Call it from within a turn that is running as a sub-agent."
+      );
+    }
   }
 
   protected getAgentToolOutput(_runId: string): unknown {
@@ -6832,6 +6984,51 @@ export class Think<
   }
 
   /**
+   * Serialize detached terminal delivery against the chat turn queue. A
+   * fast-path push or backbone tick can land mid-turn, and an `onFinish` that
+   * mutates state (`setState`, `submitMessages`, a follow-up `runAgentTool`)
+   * running concurrently with an active LLM turn is a data race. Those paths
+   * never run synchronously inside a turn body (they fire from `waitUntil` / a
+   * scheduled alarm), so enqueuing on the turn queue runs the delivery strictly
+   * between turns without risk of self-deadlock.
+   *
+   * An explicit `cancelAgentTool` (`serialize` unset) may be invoked from inside
+   * the very turn that triggers it, where enqueuing WOULD self-deadlock, so it
+   * runs inline in the caller's (or a fresh) `agentContext` instead. The Think
+   * `notify` convenience is unaffected either way: it delivers via
+   * `submitMessages`, which already serializes FIFO behind any active turn.
+   */
+  protected override async _runDetachedDelivery(
+    invoke: () => Promise<void>,
+    options?: { serialize?: boolean }
+  ): Promise<void> {
+    const inContext = () =>
+      agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        invoke
+      );
+    if (!options?.serialize) {
+      if (agentContext.getStore()?.agent === this) {
+        await invoke();
+        return;
+      }
+      await inContext();
+      return;
+    }
+    await this.keepAliveWhile(() =>
+      this._turnQueue.enqueue(
+        `detached-delivery:${crypto.randomUUID()}`,
+        inContext
+      )
+    );
+  }
+
+  /**
    * Targeted completion hook for `detached: { notify: true }`. Auto-wired by
    * `runAgentTool` (resolved by name so the base Agent stays decoupled from the
    * chat layer). Injects the formatted completion as a programmatic turn so the
@@ -6857,12 +7054,79 @@ export class Think<
       {
         idempotencyKey: `detached-finish:${run.runId}:${result.status}`,
         metadata: {
-          source: "detached-agent-tool",
+          source: run.notifySource ?? "detached-agent-tool",
           runId: run.runId,
           agentType: run.agentType,
           status: result.status
         }
       }
+    );
+  }
+
+  /**
+   * Format the synthetic message injected when a `detached: { onMilestones }`
+   * milestone is reached. Override to customize the prose (or return an empty
+   * string to suppress a given milestone). The default announces the milestone
+   * name and any structured data so the model can react in-conversation before
+   * the run finishes.
+   */
+  protected formatDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    const detail =
+      milestone.data !== undefined
+        ? `\n\n${JSON.stringify(milestone.data, null, 2)}`
+        : "";
+    return `${label} reached milestone "${milestone.name}".${detail}`;
+  }
+
+  /**
+   * Targeted milestone hook for `detached: { onMilestones }`. Idempotent per run
+   * + milestone NAME (not sequence — a name surfaces at most once even if
+   * re-emitted), so the warm tail and the backbone reconcile converge. Fired
+   * from both paths.
+   *
+   * - `"narrate"` (default): a synthetic **assistant** message injected directly
+   *   — no model turn — using a deterministic message id for idempotency
+   *   (`addMessages` is a no-op for an id already in history).
+   * - `"react"`: a **user-role** turn so the model responds to the milestone
+   *   (idempotency via `submitMessages` + UNIQUE idempotency key).
+   */
+  protected override async _deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone,
+    mode: "react" | "narrate"
+  ): Promise<void> {
+    const text = this.formatDetachedMilestone(run, milestone);
+    if (!text) return;
+    const metadata = {
+      source: run.notifySource ?? "detached-agent-tool",
+      runId: run.runId,
+      agentType: run.agentType,
+      milestone: milestone.name
+    };
+    if (mode === "narrate") {
+      await this.addMessages([
+        {
+          id: `detached-ms:${run.runId}:${milestone.name}`,
+          role: "assistant",
+          parts: [{ type: "text", text }],
+          metadata
+        }
+      ]);
+      return;
+    }
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { idempotencyKey: `detached-ms:${run.runId}:${milestone.name}`, metadata }
     );
   }
 
@@ -6964,6 +7228,8 @@ export class Think<
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolForwarders.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        // Drop the progress emitter's per-run coalescing state.
+        this._agentToolProgressEmitterInstance?.forget(options.runId);
         // Drop this run's request-id mappings. When no runs remain in flight
         // clear the whole map, so negatively-cached (null) entries for
         // unrelated turns can't accumulate for the DO's lifetime — the map is
@@ -8445,6 +8711,13 @@ export class Think<
         requestId: inspection.requestId,
         error: inspection.error
       });
+      console.error("[Think] Submission failed", {
+        submissionId: inspection.submissionId,
+        requestId: inspection.requestId,
+        idempotencyKey: inspection.idempotencyKey,
+        metadata: inspection.metadata,
+        error: inspection.error
+      });
     }
     if (this._isTerminalSubmissionStatus(inspection.status)) {
       await this._enqueueWorkflowNotification(inspection, output);
@@ -8978,6 +9251,7 @@ export class Think<
           trigger: "submission",
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
+          allowNested: true,
           workflowPrompt: workflowPrompt ?? undefined,
           shouldApplyMessages: () =>
             this._readSubmission(row.submission_id)?.status === "running",
@@ -9400,6 +9674,7 @@ export class Think<
       body?: Record<string, unknown>;
       workflowPrompt?: ThinkWorkflowPromptContext;
       shouldApplyMessages?: () => boolean | Promise<boolean>;
+      allowNested?: boolean;
       trigger?: TurnTrigger;
       channel?: string;
     }
@@ -9424,6 +9699,7 @@ export class Think<
       trigger: options?.trigger ?? "programmatic",
       requestId,
       continuation: false,
+      allowNested: options?.allowNested,
       channel,
       getStatus: () => status,
       execute: async () => {

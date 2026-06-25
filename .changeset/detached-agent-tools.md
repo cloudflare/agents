@@ -45,7 +45,18 @@ Highlights:
   abandoned run cannot hold a concurrency slot forever.
 - **`cancelAgentTool(runId)`** cancels a detached (or awaited) run by id through
   the same guarded path, so a wired `onFinish` still fires once with
-  `status: "aborted"`.
+  `status: "aborted"`, and the terminal `agent-tool-event` is always broadcast
+  to connected clients (a cancelled run's UI settles immediately).
+- **Recovery-safe delivery.** A chat host (`@cloudflare/think` / `AIChatAgent`)
+  runs the completion callback serialized on its turn queue, so an `onFinish`
+  that mutates chat state can never interleave with a live LLM turn. Concurrent
+  detached dispatches in one turn no longer race to arm multiple reconcile
+  backbones (arming is serialized).
+- **Observability.** New events `agent_tool:detached:delivery_failed` (a wired
+  callback threw; the slot stays open for retry) and
+  `agent_tool:detached:live_count_warning` (edge-triggered when live detached
+  runs cross a threshold — a leak smoke alarm, since detached runs hold a
+  concurrency slot for their whole life).
 
 A detached run deliberately does NOT inherit `options.signal` (it must outlive
 the spawning turn); cancel it explicitly with `cancelAgentTool`.

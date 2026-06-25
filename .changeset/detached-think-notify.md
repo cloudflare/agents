@@ -11,12 +11,14 @@ chat so the model reacts to the result — without you wiring `onFinish` by hand
 ```ts
 await this.runAgentTool(ResearchAgent, {
   input,
-  detached: { notify: true }
+  detached: { notify: { source: "research-background" } }
 });
 ```
 
 The injected turn is idempotent per run + terminal status (built on
 `submitMessages`), so an exactly-once finish never duplicates, while a soft
 give-up followed by a real late completion surfaces as two distinct turns.
-Override `formatDetachedCompletion(run, result)` to customize (or suppress) the
-injected text.
+Use `notify: true` for the default `metadata.source`, pass `notify: { source }`
+to match your app's message taxonomy, and override
+`formatDetachedCompletion(run, result)` to customize (or suppress) the injected
+text.

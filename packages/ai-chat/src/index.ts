@@ -8,6 +8,9 @@ import type {
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentToolMilestone,
+  type AgentToolProgress,
+  type AgentToolProgressSnapshot,
   type AgentToolRunInspection,
   type AgentToolStoredChunk,
   type AgentContext,
@@ -32,6 +35,7 @@ import {
 } from "agents/chat";
 import {
   applyChunkToParts,
+  AgentToolProgressEmitter,
   aiSdkRecoveryCodec,
   ResumeHandshake,
   isReplayChunk,
@@ -260,6 +264,8 @@ type AIChatAgentToolRunRow = {
   error_message: string | null;
   started_at: number;
   completed_at: number | null;
+  progress_json?: string | null;
+  last_signal_at?: number | null;
 };
 type AIChatStreamMetadataRow = {
   id: string;
@@ -1283,8 +1289,74 @@ export class AIChatAgent<
     addColumnIfNotExists(
       "alter table cf_ai_chat_agent_tool_runs add column summary text"
     );
+    // Latest progress snapshot (rfc-detached-agent-tools §progress); only the
+    // most recent `reportProgress` is retained. `last_signal_at` drives the
+    // parent's resetting no-progress budget across eviction.
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column progress_json text"
+    );
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column last_signal_at integer"
+    );
     this.sql`create index if not exists idx_ai_chat_agent_tool_request_id
       on cf_ai_chat_agent_tool_runs(request_id)`;
+    // Durable milestones (rfc-detached-agent-tools §progress, 4b). One row per
+    // milestone; `sequence` is monotonic per run so replay/live races dedupe.
+    this.sql`create table if not exists cf_ai_chat_agent_tool_milestones (
+      run_id text not null,
+      sequence integer not null,
+      name text not null,
+      data_json text,
+      at integer not null,
+      primary key (run_id, sequence)
+    )`;
+  }
+
+  private _persistAgentToolMilestone(
+    runId: string,
+    name: string,
+    data: unknown,
+    at: number
+  ): number {
+    this._ensureAgentToolTables();
+    const rows = this.sql<{ next: number }>`
+      select coalesce(max(sequence), -1) + 1 as next
+      from cf_ai_chat_agent_tool_milestones where run_id = ${runId}
+    `;
+    const sequence = rows[0]?.next ?? 0;
+    this.sql`
+      insert or ignore into cf_ai_chat_agent_tool_milestones
+        (run_id, sequence, name, data_json, at)
+      values (
+        ${runId}, ${sequence}, ${name},
+        ${data !== undefined ? JSON.stringify(data) : null}, ${at}
+      )
+    `;
+    // A milestone is a progress signal too: advance the no-progress clock.
+    this.sql`update cf_ai_chat_agent_tool_runs set last_signal_at = ${at}
+      where run_id = ${runId}`;
+    return sequence;
+  }
+
+  private _readAgentToolMilestones(runId: string): AgentToolMilestone[] {
+    this._ensureAgentToolTables();
+    return this.sql<{
+      sequence: number;
+      name: string;
+      data_json: string | null;
+      at: number;
+    }>`
+      select sequence, name, data_json, at
+      from cf_ai_chat_agent_tool_milestones
+      where run_id = ${runId} order by sequence asc
+    `.map((row) => ({
+      name: row.name,
+      sequence: row.sequence,
+      at: row.at,
+      ...(row.data_json != null
+        ? { data: JSON.parse(row.data_json) as unknown }
+        : {})
+    }));
   }
 
   private _flushAwaitingStreamStartConnections() {
@@ -2827,6 +2899,54 @@ export class AIChatAgent<
     };
   }
 
+  private _agentToolProgressEmitterInstance: AgentToolProgressEmitter | null =
+    null;
+
+  private get _agentToolProgressEmitter(): AgentToolProgressEmitter {
+    if (!this._agentToolProgressEmitterInstance) {
+      this._agentToolProgressEmitterInstance = new AgentToolProgressEmitter({
+        resolveActiveRun: () => {
+          const requestId = this._activeRequestId;
+          if (!requestId) return null;
+          const runId = this._agentToolRunsByRequestId.get(requestId);
+          return runId ? { runId, requestId } : null;
+        },
+        broadcast: (requestId, chunkBody) => {
+          this._broadcastChatMessage({
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            id: requestId,
+            body: chunkBody,
+            done: false
+          });
+        },
+        persistSnapshot: (runId, snapshot, at) => {
+          this._ensureAgentToolTables();
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set progress_json = ${JSON.stringify(snapshot)},
+                last_signal_at = ${at}
+            where run_id = ${runId}
+          `;
+        },
+        persistMilestone: (runId, name, data, at) =>
+          this._persistAgentToolMilestone(runId, name, data, at)
+      });
+    }
+    return this._agentToolProgressEmitterInstance;
+  }
+
+  override async reportProgress<T = unknown>(
+    progress: AgentToolProgress<T>,
+    options?: { persist?: boolean }
+  ): Promise<void> {
+    const result = this._agentToolProgressEmitter.report(progress, options);
+    if (result === "inactive") {
+      console.warn(
+        "[ai-chat] reportProgress() was called outside of an active agent-tool run; ignoring. Call it from within an onChatMessage turn that is running as a sub-agent."
+      );
+    }
+  }
+
   /**
    * Override to return structured agent-tool output instead of the default
    * final assistant text.
@@ -2855,6 +2975,49 @@ export class AIChatAgent<
     } catch {
       return String(output);
     }
+  }
+
+  /**
+   * Serialize detached terminal delivery against the chat turn queue. A
+   * fast-path push or backbone tick can land mid-turn, and an `onFinish` that
+   * mutates chat state (`saveMessages`, `setState`, a follow-up
+   * `runAgentTool`) running concurrently with an active LLM turn is a data
+   * race. Those paths never run synchronously inside a turn body (they fire
+   * from `waitUntil` / a scheduled alarm), so enqueuing on the turn queue runs
+   * the delivery strictly between turns without risk of self-deadlock.
+   *
+   * An explicit `cancelAgentTool` (`serialize` unset) may be invoked from
+   * inside the very turn that triggers it, where enqueuing WOULD self-deadlock,
+   * so it runs inline in the caller's (or a fresh) `agentContext`.
+   */
+  protected override async _runDetachedDelivery(
+    invoke: () => Promise<void>,
+    options?: { serialize?: boolean }
+  ): Promise<void> {
+    const inContext = () =>
+      agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        invoke
+      );
+    if (!options?.serialize) {
+      if (agentContext.getStore()?.agent === this) {
+        await invoke();
+        return;
+      }
+      await inContext();
+      return;
+    }
+    await this.keepAliveWhile(() =>
+      this._turnQueue.enqueue(
+        `detached-delivery:${crypto.randomUUID()}`,
+        inContext
+      )
+    );
   }
 
   /**
@@ -3019,6 +3182,8 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        // Drop the progress emitter's per-run coalescing state.
+        this._agentToolProgressEmitterInstance?.forget(options.runId);
         // Drop this run's request-id mappings. When no runs remain in flight
         // clear the whole map, so negatively-cached (null) entries for
         // unrelated turns can't accumulate for the DO's lifetime — the map is
@@ -3216,6 +3381,8 @@ export class AIChatAgent<
           this.getAgentToolOutput({ runId, input }, messagesAfterStart))
         : undefined;
 
+    const progress = AIChatAgent._progressSnapshotFromRow(row);
+    const milestones = this._readAgentToolMilestones(runId);
     return {
       runId,
       status: row.status,
@@ -3226,8 +3393,26 @@ export class AIChatAgent<
       error:
         row.status === "error" ? (row.error_message ?? undefined) : undefined,
       startedAt: row.started_at,
-      completedAt: row.completed_at ?? undefined
+      completedAt: row.completed_at ?? undefined,
+      ...(progress ? { progress } : {}),
+      ...(milestones.length > 0 ? { milestones } : {})
     };
+  }
+
+  private static _progressSnapshotFromRow(
+    row: AIChatAgentToolRunRow
+  ): AgentToolProgressSnapshot | undefined {
+    if (row.progress_json == null || row.last_signal_at == null) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(row.progress_json) as Partial<
+        Omit<AgentToolProgressSnapshot, "at">
+      >;
+      return { ...parsed, at: row.last_signal_at };
+    } catch {
+      return { at: row.last_signal_at };
+    }
   }
 
   async getAgentToolChunks(
@@ -3314,7 +3499,8 @@ export class AIChatAgent<
   private _getAgentToolRunRow(runId: string): AIChatAgentToolRunRow | null {
     const rows = this.sql<AIChatAgentToolRunRow>`
       select run_id, request_id, status, input_json, output_json, summary,
-             error_message, started_at, completed_at
+             error_message, started_at, completed_at, progress_json,
+             last_signal_at
       from cf_ai_chat_agent_tool_runs
       where run_id = ${runId}
     `;

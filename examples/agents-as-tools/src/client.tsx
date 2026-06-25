@@ -89,6 +89,7 @@ function resolveUser(): string {
 }
 
 const USER = resolveUser();
+const BACKGROUND_NOTIFY_SOURCE = "agents-as-tools-background";
 
 /**
  * Helper class names that drill-in knows how to route to. Mirrors
@@ -132,20 +133,20 @@ type HelperState = {
   error?: string;
 };
 
+function previewText(inputPreview: unknown): string {
+  if (typeof inputPreview === "string") return inputPreview;
+  if (inputPreview === undefined) return "";
+  return JSON.stringify(inputPreview);
+}
+
 function toHelperState(
   run: AgentToolRunState<UIMessage["parts"][number]>
 ): HelperState {
   const label = run.display?.name ?? run.agentType;
-  const preview =
-    typeof run.inputPreview === "string"
-      ? run.inputPreview
-      : run.inputPreview === undefined
-        ? ""
-        : JSON.stringify(run.inputPreview);
   return {
     helperId: run.runId,
     helperType: label,
-    query: preview,
+    query: previewText(run.inputPreview),
     order: run.order,
     status:
       run.status === "completed"
@@ -157,6 +158,55 @@ function toHelperState(
     summary: run.summary,
     error: run.error
   };
+}
+
+function isTerminalAgentToolStatus(
+  status: AgentToolRunState["status"]
+): boolean {
+  return (
+    status === "completed" ||
+    status === "error" ||
+    status === "aborted" ||
+    status === "interrupted"
+  );
+}
+
+function agentToolStatusLabel(status: AgentToolRunState["status"]): string {
+  switch (status) {
+    case "completed":
+      return "Done";
+    case "aborted":
+      return "Cancelled";
+    case "interrupted":
+      return "Interrupted";
+    case "error":
+      return "Error";
+    case "running":
+      return "Running";
+  }
+}
+
+function messageMetadata(message: UIMessage): Record<string, unknown> {
+  const metadata = (message as { metadata?: unknown }).metadata;
+  return metadata && typeof metadata === "object"
+    ? (metadata as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * Classify a synthetic background-event message (a detached completion or a
+ * milestone notification). These are framework-injected — a milestone in
+ * `narrate` mode arrives as an `assistant` message, a completion / `react`
+ * milestone as a `user` message — so we render them by their `metadata.source`
+ * as an "Agent event", NOT by their raw chat role (showing "user" would imply
+ * the human typed it).
+ */
+function backgroundEventKind(
+  message: UIMessage
+): "milestone" | "completion" | null {
+  const metadata = messageMetadata(message);
+  if (metadata.source !== BACKGROUND_NOTIFY_SOURCE) return null;
+  return typeof metadata.milestone === "string" ? "milestone" : "completion";
 }
 
 // ── Small UI helpers ───────────────────────────────────────────────
@@ -370,6 +420,191 @@ function HelperPanel({
         </div>
       )}
     </Surface>
+  );
+}
+
+/**
+ * Live progress bar for a running agent-tool run. Driven by the ephemeral
+ * `data-agent-progress` signals the child emits via `reportProgress`, projected
+ * onto `AgentToolRunState.progress` by the framework reducer (latest-wins).
+ */
+function AgentToolProgressBar({
+  progress
+}: {
+  progress: NonNullable<AgentToolRunState["progress"]>;
+}) {
+  const pct =
+    typeof progress.fraction === "number"
+      ? Math.max(0, Math.min(1, progress.fraction)) * 100
+      : undefined;
+  return (
+    <div className="mt-2" data-testid="agent-tool-progress">
+      <div className="flex items-center gap-2">
+        {progress.phase && (
+          <Badge variant="secondary" data-testid="agent-tool-progress-phase">
+            {progress.phase}
+          </Badge>
+        )}
+        {progress.message && (
+          <span className="truncate min-w-0">
+            <Text size="xs" variant="secondary">
+              {progress.message}
+            </Text>
+          </span>
+        )}
+      </div>
+      <div className="mt-1 h-1.5 w-full rounded-full bg-kumo-line overflow-hidden">
+        <div
+          className={`h-full bg-kumo-accent transition-all ${
+            pct === undefined ? "animate-pulse w-1/3" : ""
+          }`}
+          style={pct === undefined ? undefined : { width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function BackgroundRunsPanel({
+  runs,
+  cancelling,
+  onCancel,
+  onDrillIn
+}: {
+  runs: AgentToolRunState[];
+  cancelling: ReadonlySet<string>;
+  onCancel: (runId: string) => void;
+  onDrillIn: (helperId: string) => void;
+}) {
+  if (runs.length === 0) return null;
+
+  return (
+    <div className="px-3 pb-3 shrink-0">
+      <Surface
+        className="p-3 rounded-xl ring ring-kumo-line"
+        data-testid="background-runs-panel"
+      >
+        <div className="flex items-start gap-3">
+          <RobotIcon
+            size={18}
+            weight="bold"
+            className="text-kumo-accent shrink-0 mt-0.5"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <Text size="sm" bold>
+                Background runs
+              </Text>
+              <Badge variant="secondary">{runs.length}</Badge>
+            </div>
+            <span className="block mt-1">
+              <Text size="xs" variant="secondary">
+                Detached helpers return immediately, keep running after the
+                assistant turn, and post a follow-up chat message when they
+                finish.
+              </Text>
+            </span>
+
+            <div className="mt-3 flex flex-col gap-2">
+              {runs.map((run) => {
+                const label = run.display?.name ?? run.agentType;
+                const terminal = isTerminalAgentToolStatus(run.status);
+                const isCancelling = cancelling.has(run.runId);
+                const statusLabel = isCancelling
+                  ? "Cancelling"
+                  : agentToolStatusLabel(run.status);
+                const hasError =
+                  run.status === "error" ||
+                  run.status === "aborted" ||
+                  run.status === "interrupted";
+
+                return (
+                  <Surface
+                    key={run.runId}
+                    className="p-2 rounded-lg ring ring-kumo-line bg-kumo-base"
+                    data-testid="background-run"
+                    data-background-run-id={run.runId}
+                    data-background-run-status={run.status}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <Text size="xs" bold>
+                            {label}
+                          </Text>
+                          <Badge
+                            variant={hasError ? "destructive" : "secondary"}
+                          >
+                            {statusLabel}
+                          </Badge>
+                        </div>
+                        <span className="block truncate">
+                          <Text size="xs" variant="secondary">
+                            {previewText(run.inputPreview) || "Background task"}{" "}
+                            · run {run.runId}
+                          </Text>
+                        </span>
+                      </div>
+
+                      <Button
+                        variant="ghost"
+                        shape="square"
+                        size="sm"
+                        aria-label={`Drill in to ${label}`}
+                        onClick={() => onDrillIn(run.runId)}
+                        icon={<ArrowSquareOutIcon size={14} />}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={terminal || isCancelling}
+                        onClick={() => onCancel(run.runId)}
+                        icon={<XCircleIcon size={14} />}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                    {!terminal && run.progress && (
+                      <AgentToolProgressBar progress={run.progress} />
+                    )}
+                    {run.milestones && run.milestones.length > 0 && (
+                      <div
+                        className="mt-2 flex flex-wrap gap-1"
+                        data-testid="agent-tool-milestones"
+                      >
+                        {run.milestones.map((milestone) => (
+                          <Badge
+                            key={milestone.sequence}
+                            variant="secondary"
+                            data-testid="agent-tool-milestone"
+                          >
+                            {milestone.name}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                    {run.summary && (
+                      <span className="mt-1 block">
+                        <Text size="xs" variant="secondary">
+                          {run.summary}
+                        </Text>
+                      </span>
+                    )}
+                    {run.error && (
+                      <span className="mt-1 block text-red-500">
+                        <Text size="xs" variant="secondary">
+                          {run.error}
+                        </Text>
+                      </span>
+                    )}
+                  </Surface>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </Surface>
+    </div>
   );
 }
 
@@ -798,7 +1033,7 @@ export default function App() {
     experimental_throttle: 100
   });
   const agentTools = useAgentToolEvents<UIMessage["parts"][number]>({ agent });
-  const { runsByToolCallId, resetLocalState } = agentTools;
+  const { runsByToolCallId, unboundRuns, resetLocalState } = agentTools;
   const helperStateByToolCall = useMemo<Record<string, HelperBucket>>(() => {
     return Object.fromEntries(
       Object.entries(runsByToolCallId).map(([toolCallId, runs]) => [
@@ -807,6 +1042,39 @@ export default function App() {
       ])
     );
   }, [runsByToolCallId]);
+  const backgroundRuns = useMemo(
+    () => unboundRuns.filter((run) => KNOWN_HELPER_TYPES.has(run.agentType)),
+    [unboundRuns]
+  );
+  const backgroundHelperStates = useMemo(
+    () => backgroundRuns.map(toHelperState),
+    [backgroundRuns]
+  );
+  const [cancellingBackgroundRuns, setCancellingBackgroundRuns] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const cancelBackground = useCallback(
+    (runId: string) => {
+      setCancellingBackgroundRuns((current) => new Set(current).add(runId));
+      void (async () => {
+        try {
+          await agent.call("cancelBackground", [runId]);
+        } catch (err) {
+          console.warn(
+            "[agents-as-tools] Failed to cancel background run:",
+            err
+          );
+        } finally {
+          setCancellingBackgroundRuns((current) => {
+            const next = new Set(current);
+            next.delete(runId);
+            return next;
+          });
+        }
+      })();
+    },
+    [agent]
+  );
 
   // Drill-in side panel target. We store just the helper id; the
   // panel's metadata (helperType, query) is looked up from the
@@ -857,6 +1125,7 @@ export default function App() {
       clearHistory();
       resetLocalState();
       setDrillInHelperId(null);
+      setCancellingBackgroundRuns(new Set());
     })();
   }, [agent, clearHistory, resetLocalState]);
 
@@ -913,18 +1182,24 @@ export default function App() {
               </Text>
               <span className="block mt-1">
                 <Text size="xs" variant="secondary">
-                  Ask for research on a topic. The assistant calls the{" "}
-                  <code>research</code> tool, which spawns a{" "}
-                  <code>Researcher</code> sub-agent. The helper is itself a
-                  Think instance running its own inference loop; its chat stream
-                  is forwarded onto this WebSocket and rendered inline under the
-                  tool call as it runs.
+                  Ask for research on a topic. The assistant can spawn a{" "}
+                  <code>Researcher</code> sub-agent inline, or dispatch it in
+                  the background with <code>research_background</code>.
+                  Background runs appear in their own panel, can be cancelled,
+                  and post a follow-up chat message when they finish.
                 </Text>
               </span>
             </div>
           </div>
         </Surface>
       </div>
+
+      <BackgroundRunsPanel
+        runs={backgroundRuns}
+        cancelling={cancellingBackgroundRuns}
+        onCancel={cancelBackground}
+        onDrillIn={openDrillIn}
+      />
 
       {/* ── Message stream ──────────────────────────────────────── */}
       <div
@@ -934,18 +1209,59 @@ export default function App() {
         {messages.length === 0 ? (
           <EmptyHints />
         ) : (
-          messages.map((m) => (
-            <div key={m.id} className="flex flex-col gap-1">
-              <Text size="xs" variant="secondary">
-                {m.role}
-              </Text>
-              <MessageParts
-                message={m}
-                helperStateByToolCall={helperStateByToolCall}
-                onDrillIn={openDrillIn}
-              />
-            </div>
-          ))
+          messages.map((m) => {
+            const eventKind = backgroundEventKind(m);
+            const isEvent = eventKind !== null;
+            const metadata = messageMetadata(m);
+            return (
+              <div
+                key={m.id}
+                className={`flex flex-col gap-1 ${
+                  isEvent
+                    ? "rounded-xl ring ring-kumo-line bg-kumo-base p-3"
+                    : ""
+                }`}
+                data-testid={
+                  isEvent ? `background-${eventKind}-message` : undefined
+                }
+              >
+                <div className="flex items-center gap-2">
+                  <Text size="xs" variant="secondary">
+                    {isEvent ? "Agent event" : m.role}
+                  </Text>
+                  {eventKind === "milestone" && (
+                    <Badge variant="secondary">
+                      Milestone
+                      {typeof metadata.milestone === "string"
+                        ? `: ${metadata.milestone}`
+                        : ""}
+                    </Badge>
+                  )}
+                  {eventKind === "completion" && (
+                    <>
+                      <Badge variant="secondary">Background result</Badge>
+                      {typeof metadata.status === "string" && (
+                        <Badge
+                          variant={
+                            metadata.status === "completed"
+                              ? "secondary"
+                              : "destructive"
+                          }
+                        >
+                          {metadata.status}
+                        </Badge>
+                      )}
+                    </>
+                  )}
+                </div>
+                <MessageParts
+                  message={m}
+                  helperStateByToolCall={helperStateByToolCall}
+                  onDrillIn={openDrillIn}
+                />
+              </div>
+            );
+          })
         )}
       </div>
 
@@ -965,6 +1281,9 @@ export default function App() {
               break;
             }
           }
+          helperState ??= backgroundHelperStates.find(
+            (run) => run.helperId === drillInHelperId
+          );
           if (!helperState) {
             // Helper id refers to a state that's been cleared or
             // never tracked — close cleanly. Shouldn't happen in
@@ -1041,14 +1360,20 @@ function EmptyHints() {
           </li>
           <li>
             <Text size="xs" variant="secondary">
+              Research the history of TLS in the background — do not make me
+              wait.
+            </Text>
+          </li>
+          <li>
+            <Text size="xs" variant="secondary">
               What are the key differences between OAuth 2.0 and OIDC?
             </Text>
           </li>
         </ul>
         <span className="block mt-3">
           <Text size="xs" variant="secondary">
-            Plain chat works too — the helper only spawns when the model decides
-            to call the <code>research</code> tool.
+            Plain chat works too. Background prompts show the detached run panel
+            and a cancel button while the helper keeps working.
           </Text>
         </span>
       </Surface>

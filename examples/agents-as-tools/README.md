@@ -9,7 +9,7 @@ This example now uses the shipped primitives:
 - `agentTool(Researcher, ...)` for ordinary LLM-selected helper calls.
 - `this.runAgentTool(Researcher, ...)` for explicit fan-out from the `compare`
   tool.
-- `this.runAgentTool(Researcher, { detached: { notify: true } })` for a
+- `this.runAgentTool(Researcher, { detached: { notify: { source } } })` for a
   **background (detached)** run that returns immediately and posts its result
   back into the chat when it finishes (see `research_background`).
 - `this.cancelAgentTool(runId)` to stop a background run early.
@@ -34,6 +34,11 @@ Open the dev URL and ask for research or planning:
 - _Plan how I should add rate limiting to a Worker._
 - _Research the history of TLS in the background — don't make me wait._
   (dispatches a detached run; the result arrives as a follow-up message)
+
+For the detached flow, watch the **Background runs** panel appear with the run
+id. You can open the helper with the drill-in button, cancel it before it
+finishes, or wait for the framework-injected follow-up message tagged as a
+background result.
 
 The assistant can call `research`, `plan`, or `compare`. Each call starts a real
 Think sub-agent (`Researcher` or `Planner`) with its own model, tools, messages,
@@ -63,10 +68,12 @@ The important pieces are:
   parent tool call id and different display order values, so both panels render
   under one tool part.
 - **Background (detached) runs.** `research_background` calls `runAgentTool`
-  with `detached: { notify: true }`. The turn returns immediately with a run id
-  while the Researcher keeps working; when it finishes the framework injects the
-  result back into the chat (durably, even across parent eviction or reconnect)
-  so the model reacts to it. `cancelBackground(runId)` stops it early.
+  with `detached: { notify: { source } }`. The turn returns immediately with a
+  run id while the Researcher keeps working. The UI lists that unbound run in a
+  Background runs panel with drill-in and cancel controls; when it finishes the
+  framework injects the result back into the chat (durably, even across parent
+  eviction or reconnect) so the model reacts to it. `cancelBackground(runId)`
+  stops it early.
 - **Drill-in.** Each panel has an open button that connects directly to
   `/sub/{agent}/{runId}` with `useAgentChat`; it is the child agent's real chat,
   not a synthetic event viewer.
@@ -113,7 +120,8 @@ const agentTools = useAgentToolEvents({ agent });
 
 `agentTools.runsByToolCallId` is passed into the message renderer. When a tool
 part appears, the renderer looks up child runs with the same `toolCallId` and
-renders a panel for each run.
+renders a panel for each run. `agentTools.unboundRuns` powers the Background
+runs panel for detached helpers that are not attached to a parent tool call.
 
 For drill-in, the panel opens a direct sub-agent connection:
 

@@ -266,6 +266,16 @@ result in context:
 await this.runAgentTool(ResearchAgent, { input, detached: { notify: true } });
 ```
 
+If your app routes or hides synthetic messages by `metadata.source`, pass your
+own source:
+
+```ts
+await this.runAgentTool(ResearchAgent, {
+  input,
+  detached: { notify: { source: "research-background" } }
+});
+```
+
 Override `formatDetachedCompletion(run, result)` to customize the injected text,
 or return an empty string to suppress the notification for a given outcome. An
 explicit `onFinish` takes precedence over `notify`.
