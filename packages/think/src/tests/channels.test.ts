@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defineChannels, messengerChannel, resolveChannels } from "../channels";
+import { messengerChannel, resolveChannels } from "../channels";
 import { telegramMessenger } from "../messengers/telegram";
 
 function telegram() {
@@ -29,31 +29,31 @@ describe("resolveChannels", () => {
   });
 
   it("registers configureChannels web/voice entries without feeding the runtime", () => {
-    const configured = defineChannels({
+    const configured = {
       voice: { kind: "voice", ingress: { transport: "voice" } }
-    });
+    } as const;
     const { channels, messengers } = resolveChannels(configured, {});
     expect(channels.get("voice")?.kind).toBe("voice");
     expect(Object.keys(messengers)).toEqual([]);
   });
 
   it("feeds messenger-kind configureChannels entries into the runtime", () => {
-    const configured = defineChannels({
+    const configured = {
       tg: messengerChannel(telegram())
-    });
+    };
     const { channels, messengers } = resolveChannels(configured, {});
     expect(channels.get("tg")?.kind).toBe("messenger");
     expect(Object.keys(messengers)).toEqual(["tg"]);
   });
 
   it("allows overriding the web channel's policy with a kind: web entry", () => {
-    const configured = defineChannels({
+    const configured = {
       web: {
         kind: "web",
         ingress: { transport: "websocket" },
         instructions: "be concise"
       }
-    });
+    } as const;
     const { channels } = resolveChannels(configured, {});
     const web = channels.get("web");
     expect(web?.kind).toBe("web");
@@ -66,9 +66,9 @@ describe("resolveChannels", () => {
   });
 
   it("throws when configureChannels() replaces web with a non-web kind", () => {
-    const configured = defineChannels({
+    const configured = {
       web: { kind: "voice", ingress: { transport: "voice" } }
-    });
+    } as const;
     expect(() => resolveChannels(configured, {})).toThrow(
       /reserved for the built-in WebSocket chat surface/
     );
@@ -81,9 +81,9 @@ describe("resolveChannels", () => {
   });
 
   it("throws on a duplicate id across configureChannels() and getMessengers()", () => {
-    const configured = defineChannels({
+    const configured = {
       telegram: { kind: "voice", ingress: { transport: "voice" } }
-    });
+    } as const;
     expect(() => resolveChannels(configured, { telegram: telegram() })).toThrow(
       /channel ids must be unique/
     );

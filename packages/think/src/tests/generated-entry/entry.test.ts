@@ -60,7 +60,7 @@ describe("generated virtual Think entry", () => {
     sales.webSocket?.close();
   });
 
-  it("drills into a declarative agent() sub-agent via the generated facet class", async () => {
+  it("drills into a class-based sub-agent via the generated facet class", async () => {
     const response = await exports.default.fetch(
       "https://example.com/api/agents/sales/parent/sub/analyst/child",
       { headers: { Upgrade: "websocket" } }

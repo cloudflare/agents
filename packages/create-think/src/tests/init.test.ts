@@ -43,7 +43,10 @@ async function baseOptions(root: string): Promise<InitCommandOptions> {
     root,
     install: false,
     templatesDir,
-    fetchTemplate: writeFakeTemplate
+    fetchTemplate: writeFakeTemplate,
+    promptTemplate: async () => "basic",
+    gitRunner: async () => {},
+    isInsideGitRepo: async () => false
   };
 }
 
@@ -79,6 +82,119 @@ describe("create-think initCommand", () => {
     expect(
       await readFile(path.join(root, "app/wrangler.jsonc"), "utf8")
     ).toContain('"name": "app"');
+  });
+
+  it("prompts for a template when none is provided", async () => {
+    const root = await makeRoot();
+    const selectedDefaults: string[] = [];
+    const calls: Array<{ template: string; ref: string }> = [];
+
+    await initCommand({
+      ...(await baseOptions(root)),
+      directory: "app",
+      promptTemplate: async (defaultTemplate) => {
+        selectedDefaults.push(defaultTemplate);
+        return "coding-agent";
+      },
+      fetchTemplate: async ({ template, ref, dest }) => {
+        calls.push({ template, ref });
+        await writeFakeTemplate({ template, ref, dest });
+      }
+    });
+
+    expect(selectedDefaults).toEqual(["basic"]);
+    expect(calls).toEqual([{ template: "coding-agent", ref: "main" }]);
+  });
+
+  it("keeps the default template in --yes mode without prompting", async () => {
+    const root = await makeRoot();
+    const calls: Array<{ template: string; ref: string }> = [];
+
+    await initCommand({
+      ...(await baseOptions(root)),
+      directory: "app",
+      yes: true,
+      promptTemplate: async () => {
+        throw new Error("should not prompt");
+      },
+      fetchTemplate: async ({ template, ref, dest }) => {
+        calls.push({ template, ref });
+        await writeFakeTemplate({ template, ref, dest });
+      }
+    });
+
+    expect(calls).toEqual([{ template: "basic", ref: "main" }]);
+  });
+
+  it("initializes git after scaffolding", async () => {
+    const root = await makeRoot();
+    const gitRoots: string[] = [];
+
+    await initCommand({
+      ...(await baseOptions(root)),
+      directory: "app",
+      gitRunner: async (gitRoot) => {
+        gitRoots.push(gitRoot);
+      }
+    });
+
+    expect(gitRoots).toEqual([path.join(root, "app")]);
+  });
+
+  it("skips git init when scaffolding inside an existing repository", async () => {
+    const root = await makeRoot();
+    let gitInitCalled = false;
+
+    await initCommand({
+      ...(await baseOptions(root)),
+      directory: "app",
+      isInsideGitRepo: async () => true,
+      gitRunner: async () => {
+        gitInitCalled = true;
+      }
+    });
+
+    expect(gitInitCalled).toBe(false);
+  });
+
+  it("falls back to the default template when stdin is non-interactive", async () => {
+    const root = await makeRoot();
+    const calls: Array<{ template: string }> = [];
+    const options = await baseOptions(root);
+    // No promptTemplate and a non-TTY stdin (vitest): selection must not block.
+    delete options.promptTemplate;
+
+    await initCommand({
+      ...options,
+      directory: "app",
+      fetchTemplate: async ({ template, ref, dest }) => {
+        calls.push({ template });
+        await writeFakeTemplate({ template, ref, dest });
+      }
+    });
+
+    expect(calls).toEqual([{ template: "basic" }]);
+  });
+
+  it("continues when git init fails", async () => {
+    const root = await makeRoot();
+    const warnings: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    });
+
+    await initCommand({
+      ...(await baseOptions(root)),
+      directory: "app",
+      gitRunner: async () => {
+        throw new Error("git missing");
+      }
+    });
+
+    expect(
+      await readFile(path.join(root, "app/package.json"), "utf8")
+    ).toContain('"name": "app"');
+    expect(warnings.join("\n")).toContain("git missing");
   });
 
   it("defaults the interactive prompt to '.' in an empty folder", async () => {

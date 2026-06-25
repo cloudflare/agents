@@ -23,25 +23,33 @@ import { readWranglerConfig } from "../framework/project";
 describe("think CLI", () => {
   let originalConsoleLog: typeof console.log;
   let originalConsoleError: typeof console.error;
+  let originalConsoleWarn: typeof console.warn;
   let consoleOutput: string[] = [];
   let consoleError: string[] = [];
+  let consoleWarn: string[] = [];
 
   beforeEach(() => {
     consoleOutput = [];
     consoleError = [];
+    consoleWarn = [];
     originalConsoleLog = console.log;
     originalConsoleError = console.error;
+    originalConsoleWarn = console.warn;
     console.log = vi.fn((...args) => {
       consoleOutput.push(args.map(String).join(" "));
     });
     console.error = vi.fn((...args) => {
       consoleError.push(args.map(String).join(" "));
     });
+    console.warn = vi.fn((...args) => {
+      consoleWarn.push(args.map(String).join(" "));
+    });
   });
 
   afterEach(() => {
     console.log = originalConsoleLog;
     console.error = originalConsoleError;
+    console.warn = originalConsoleWarn;
   });
 
   it("prints inspect output for a Think project", async () => {
@@ -321,6 +329,7 @@ describe("think CLI", () => {
       root,
       directory: "remote-app",
       install: false,
+      promptTemplate: async () => "basic",
       templatesDir: emptyTemplates,
       fetchTemplate: async ({ template, ref, dest }) => {
         calls.push({ template, ref });
@@ -350,6 +359,7 @@ describe("think CLI", () => {
     await initCommand({
       root,
       install: false,
+      promptTemplate: async () => "basic",
       promptTargetDirectory: async () => "."
     });
 
@@ -370,6 +380,8 @@ describe("think CLI", () => {
       "my-app",
       "--root",
       root,
+      "--template",
+      "basic",
       "--no-install"
     ]);
 
@@ -394,6 +406,7 @@ describe("think CLI", () => {
       initCommand({
         root,
         directory: "app",
+        template: "basic",
         install: false
       })
     ).rejects.toThrow("not empty");
@@ -406,6 +419,7 @@ describe("think CLI", () => {
       initCommand({
         root,
         directory: "../outside",
+        template: "basic",
         install: false
       })
     ).rejects.toThrow("inside the project root");
@@ -426,6 +440,7 @@ describe("think CLI", () => {
     await initCommand({
       root,
       directory: "app",
+      template: "basic",
       install: false
     });
 
@@ -440,6 +455,7 @@ describe("think CLI", () => {
     await initCommand({
       root,
       directory: "dry-app",
+      promptTemplate: async () => "basic",
       dryRun: true
     });
 
@@ -456,6 +472,7 @@ describe("think CLI", () => {
     await initCommand({
       root,
       directory: "ready-app",
+      promptTemplate: async () => "basic",
       install: false
     });
 
@@ -492,6 +509,7 @@ describe("think CLI", () => {
     await initCommand({
       root,
       directory: "install-app",
+      promptTemplate: async () => "basic",
       installRunner: async (installRoot) => {
         installedRoots.push(installRoot);
       }
@@ -534,6 +552,76 @@ describe("think CLI", () => {
     expect(pkg.dependencies["some-dep"]).toBe("^1.0.0");
     expect(pkg.dependencies["@cloudflare/think"]).toBe("latest");
     expect(consoleOutput.join("\n")).toContain("Added Think to");
+  });
+
+  it("initializes git when augmenting an existing project", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "existing-app" }),
+      "utf8"
+    );
+    const gitRoots: string[] = [];
+
+    await initCommand({
+      root,
+      install: false,
+      isInsideGitRepo: async () => false,
+      gitRunner: async (gitRoot) => {
+        gitRoots.push(gitRoot);
+      }
+    });
+
+    expect(gitRoots).toEqual([root]);
+    expect(consoleOutput.join("\n")).toContain("Initialized a git repository.");
+  });
+
+  it("skips git init when already inside a git repository", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "existing-app" }),
+      "utf8"
+    );
+    let gitInitCalled = false;
+
+    await initCommand({
+      root,
+      install: false,
+      isInsideGitRepo: async () => true,
+      gitRunner: async () => {
+        gitInitCalled = true;
+      }
+    });
+
+    expect(gitInitCalled).toBe(false);
+    expect(consoleOutput.join("\n")).toContain(
+      "Already inside a git repository"
+    );
+  });
+
+  it("continues augmenting when git init fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "existing-app" }),
+      "utf8"
+    );
+
+    await initCommand({
+      root,
+      install: false,
+      isInsideGitRepo: async () => false,
+      gitRunner: async () => {
+        throw new Error("git missing");
+      }
+    });
+
+    expect(await readFile(path.join(root, "vite.config.ts"), "utf8")).toContain(
+      "think()"
+    );
+    expect(consoleOutput.join("\n")).toContain("Skipped git init.");
+    expect(consoleWarn.join("\n")).toContain("git missing");
   });
 
   it("fetches a template even inside an existing project when --template is set", async () => {
@@ -592,6 +680,9 @@ describe("think CLI", () => {
 
     expect(consoleOutput.join("\n")).toContain(
       "Think init would add to the current project:"
+    );
+    expect(consoleOutput.join("\n")).toContain(
+      "Would initialize a git repository"
     );
     await expect(
       readFile(path.join(root, "vite.config.ts"), "utf8")

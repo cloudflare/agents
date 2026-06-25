@@ -1,9 +1,7 @@
+/* Tailwind ignores node_modules by default, so we source Kumo and Streamdown for class extraction. */
 @source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
-@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @source "../node_modules/streamdown/dist/*.js";
-@source "../../../node_modules/streamdown/dist/*.js";
 @source "../node_modules/@streamdown/code/dist/*.js";
-@source "../../../node_modules/@streamdown/code/dist/*.js";
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
 

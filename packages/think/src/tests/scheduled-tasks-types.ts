@@ -1,6 +1,6 @@
-import { defineScheduledTasks } from "../think";
+import type { ThinkScheduledTasks } from "../think";
 
-const validScheduledTasks = defineScheduledTasks({
+const validScheduledTasks = {
   interval: {
     schedule: "every 5 minutes",
     prompt: "Run interval task"
@@ -31,33 +31,33 @@ const validScheduledTasks = defineScheduledTasks({
       void timezone;
     }
   }
-});
+} satisfies ThinkScheduledTasks;
 
 void validScheduledTasks;
 
-defineScheduledTasks({
+({
   invalidTime: {
     // @ts-expect-error obvious invalid literal times are rejected
     schedule: "every day at 25:00",
     timezone: "UTC",
     prompt: "Invalid time"
   }
-});
+}) satisfies ThinkScheduledTasks;
 
-defineScheduledTasks({
+({
   // @ts-expect-error intervals do not accept timezone
   intervalWithTimezone: {
     schedule: "every 5 minutes",
     timezone: "UTC",
     prompt: "Interval with timezone"
   }
-});
+}) satisfies ThinkScheduledTasks;
 
-defineScheduledTasks({
+({
   // @ts-expect-error scheduled tasks must define prompt or handler, not both
   promptAndHandler: {
     schedule: "every 5 minutes",
     prompt: "Run prompt",
     handler: () => {}
   }
-});
+}) satisfies ThinkScheduledTasks;

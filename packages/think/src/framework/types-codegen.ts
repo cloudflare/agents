@@ -95,11 +95,8 @@ function agentConstructorType(
   files: Record<string, string> | undefined
 ): string {
   const exportInfo = inferAgentExport(agent, files);
-  if (exportInfo.kind === "class") {
-    const specifier = relativeModuleSpecifier(fromFile, agent.sourcePath);
-    return `(typeof import(${JSON.stringify(specifier)}))${exportAccessor(exportInfo.exportName)}`;
-  }
-  return `typeof import("@cloudflare/think").Think<Cloudflare.Env>`;
+  const specifier = relativeModuleSpecifier(fromFile, agent.sourcePath);
+  return `(typeof import(${JSON.stringify(specifier)}))${exportAccessor(exportInfo.exportName)}`;
 }
 
 function agentInstanceType(
@@ -108,52 +105,29 @@ function agentInstanceType(
   files: Record<string, string> | undefined
 ): string {
   const exportInfo = inferAgentExport(agent, files);
-  if (exportInfo.kind === "class") {
-    const specifier = relativeModuleSpecifier(fromFile, agent.sourcePath);
-    return `InstanceType<(typeof import(${JSON.stringify(specifier)}))${exportAccessor(exportInfo.exportName)}>`;
-  }
-  return `import("@cloudflare/think").Think<Cloudflare.Env>`;
+  const specifier = relativeModuleSpecifier(fromFile, agent.sourcePath);
+  return `InstanceType<(typeof import(${JSON.stringify(specifier)}))${exportAccessor(exportInfo.exportName)}>`;
 }
 
 function inferAgentExport(
   agent: ThinkFrameworkAgent,
   files: Record<string, string> | undefined
-): { kind: "class"; exportName: string } | { kind: "declarative" } {
+): { exportName: string } {
   const source = files?.[agent.sourcePath];
   if (!source) {
-    return agent.exportName
-      ? { kind: "class", exportName: agent.exportName }
-      : { kind: "declarative" };
-  }
-
-  if (/export\s+default\s+agent\s*\(/.test(source)) {
-    return { kind: "declarative" };
+    return { exportName: agent.exportName ?? "default" };
   }
   if (/export\s+default\s+class\b/.test(source)) {
-    return { kind: "class", exportName: "default" };
+    return { exportName: "default" };
   }
   const namedClass = source.match(
     /export\s+(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/
   );
   if (namedClass?.[1]) {
-    return { kind: "class", exportName: namedClass[1] };
-  }
-  const namedDeclarative = source.match(
-    /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*agent\s*\(/
-  );
-  if (namedDeclarative) {
-    return { kind: "declarative" };
-  }
-  const reexportDefault = source.match(
-    /export\s*\{\s*([A-Za-z_$][\w$]*)\s+as\s+default\s*\}/
-  );
-  if (reexportDefault?.[1]) {
-    return { kind: "class", exportName: "default" };
+    return { exportName: namedClass[1] };
   }
 
-  return agent.exportName
-    ? { kind: "class", exportName: agent.exportName }
-    : { kind: "declarative" };
+  return { exportName: agent.exportName ?? "default" };
 }
 
 function exportAccessor(exportName: string): string {

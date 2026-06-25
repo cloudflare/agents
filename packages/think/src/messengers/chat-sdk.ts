@@ -153,10 +153,6 @@ export interface MessengerFiberStartResult {
   status: string;
 }
 
-export function defineMessengers<T extends ThinkMessengers>(messengers: T): T {
-  return messengers;
-}
-
 export function chatSdkMessenger(
   options: ChatSdkMessengerOptions
 ): MessengerDefinition {

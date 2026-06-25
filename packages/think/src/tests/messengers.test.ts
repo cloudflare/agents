@@ -12,7 +12,6 @@ import {
   defaultChatSdkEvent,
   defaultConversationName,
   deliverMessengerReply,
-  defineMessengers,
   EMPTY_MESSENGER_RESPONSE,
   ERROR_MESSENGER_RESPONSE,
   INTERRUPTED_MESSENGER_RESPONSE,
@@ -74,16 +73,14 @@ const baseEvent: MessengerEvent = {
 describe("think messengers core", () => {
   it("normalizes inferred defaults", () => {
     const adapter = {} as never;
-    const [definition] = normalizeMessengers(
-      defineMessengers({
-        fake: chatSdkMessenger({
-          adapter,
-          provider: "fake",
-          userName: "fake_bot",
-          verifyWebhook: false
-        })
+    const [definition] = normalizeMessengers({
+      fake: chatSdkMessenger({
+        adapter,
+        provider: "fake",
+        userName: "fake_bot",
+        verifyWebhook: false
       })
-    );
+    });
 
     expect(definition?.path).toBe("/messengers/fake/webhook");
     expect(definition?.respondTo).toEqual(["direct-message", "mention"]);
@@ -163,7 +160,7 @@ describe("think messengers core", () => {
 
   it("honors custom webhook verifier responses before Chat SDK handling", async () => {
     const runtime = new ThinkMessengerRuntime(
-      defineMessengers({
+      {
         fake: chatSdkMessenger({
           adapter: fakeAdapter(),
           provider: "fake",
@@ -172,7 +169,7 @@ describe("think messengers core", () => {
             return new Response("blocked", { status: 403 });
           }
         })
-      }),
+      },
       fakeHost([])
     );
     runtime.initialize();
@@ -189,7 +186,7 @@ describe("think messengers core", () => {
 
   it("rejects webhook requests when custom verification returns false", async () => {
     const runtime = new ThinkMessengerRuntime(
-      defineMessengers({
+      {
         fake: chatSdkMessenger({
           adapter: fakeAdapter(),
           provider: "fake",
@@ -198,7 +195,7 @@ describe("think messengers core", () => {
             return false;
           }
         })
-      }),
+      },
       fakeHost([])
     );
     runtime.initialize();
@@ -214,7 +211,7 @@ describe("think messengers core", () => {
 
   it("lets custom webhook verification read the body without consuming adapter input", async () => {
     const runtime = new ThinkMessengerRuntime(
-      defineMessengers({
+      {
         fake: chatSdkMessenger({
           adapter: fakeAdapter({
             async handleWebhook(request?: Request) {
@@ -227,7 +224,7 @@ describe("think messengers core", () => {
             return (await request.text()) === "payload";
           }
         })
-      }),
+      },
       fakeHost([])
     );
     runtime.initialize();
@@ -433,7 +430,7 @@ describe("think messengers core", () => {
     const posted: string[] = [];
     const resolved: FiberRecoveryResult[] = [];
     const runtime = new ThinkMessengerRuntime(
-      defineMessengers({
+      {
         fake: chatSdkMessenger({
           adapter: fakeAdapter({
             postMessage(_threadId, message) {
@@ -450,7 +447,7 @@ describe("think messengers core", () => {
           userName: "fake_bot",
           verifyWebhook: false
         })
-      }),
+      },
       fakeHost(resolved)
     );
     runtime.initialize();

@@ -2,7 +2,6 @@ export {
   chatSdkMessenger,
   defaultChatSdkEvent,
   defaultConversationName,
-  defineMessengers,
   idempotencyKeyForEvent,
   normalizeMessengers,
   ThinkMessengerRuntime,

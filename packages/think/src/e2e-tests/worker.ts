@@ -12,7 +12,6 @@ import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
   chatSdkMessenger,
-  defineMessengers,
   messengerReplySnapshot,
   MESSENGER_REPLY_FIBER_NAME,
   type MessengerEvent,
@@ -1856,7 +1855,7 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
   }
 
   override getMessengers(): ThinkMessengers {
-    return defineMessengers({
+    return {
       fake: chatSdkMessenger({
         adapter: this._recordingAdapter(),
         conversation: "self",
@@ -1865,7 +1864,7 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
         userName: "fake_bot",
         verifyWebhook: false
       })
-    });
+    };
   }
 
   private _ensurePostsTable(): void {

@@ -1,6 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, defineScheduledTasks, Think } from "../../think";
+import { action, Think } from "../../think";
 import { Agent } from "agents";
 import type {
   AgentToolEventMessage,
@@ -5762,7 +5762,7 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
         prompt
       } as ThinkScheduledTask;
     }
-    return defineScheduledTasks(tasks);
+    return tasks;
   }
 
   async setScheduledTasksForTest(

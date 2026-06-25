@@ -1,7 +1,8 @@
 import { callable } from "agents";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createWorkersAI } from "workers-ai-provider";
-import { defineScheduledTasks, Think, Workspace } from "@cloudflare/think";
+import { Think, Workspace } from "@cloudflare/think";
+import type { ThinkScheduledTasks } from "@cloudflare/think";
 import type { LanguageModel } from "ai";
 import type { FileInfo, WorkspaceChangeEvent } from "@cloudflare/shell";
 import { nanoid } from "nanoid";
@@ -270,8 +271,8 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
    * notification attached to the conversation they last used. A real app
    * might fan out to every chat, or skip chats idle beyond a threshold.
    */
-  override getScheduledTasks() {
-    return defineScheduledTasks({
+  override getScheduledTasks(): ThinkScheduledTasks {
+    return {
       dailySummary: {
         schedule: "every day at 09:00",
         handler: async () => {
@@ -283,7 +284,7 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
           await target.postDailySummaryPrompt();
         }
       }
-    });
+    };
   }
 
   // ── Shared workspace RPC surface (called by SharedWorkspace) ─────

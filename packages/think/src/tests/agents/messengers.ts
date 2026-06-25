@@ -1,10 +1,6 @@
 import type { Adapter } from "chat";
 import { Think } from "../../think";
-import {
-  chatSdkMessenger,
-  defineMessengers,
-  type ThinkMessengers
-} from "../../messengers";
+import { chatSdkMessenger, type ThinkMessengers } from "../../messengers";
 
 const fakeAdapter = {
   channelIdFromThreadId(threadId: string) {
@@ -53,14 +49,14 @@ const fakeAdapter = {
 
 export class ThinkMessengerRouteTestAgent extends Think {
   override getMessengers(): ThinkMessengers {
-    return defineMessengers({
+    return {
       fake: chatSdkMessenger({
         adapter: fakeAdapter,
         provider: "fake",
         userName: "fake_bot",
         verifyWebhook: false
       })
-    });
+    };
   }
 
   override onRequest(_request: Request): Response | Promise<Response> {

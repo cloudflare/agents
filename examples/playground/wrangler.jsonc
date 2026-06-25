@@ -1,5 +1,5 @@
 {
-  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "agents-playground",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],

@@ -64,23 +64,20 @@ Chat SDK adapters are not bundled.
 
 ```ts
 import { Think } from "@cloudflare/think";
-import {
-  defineMessengers,
-  ThinkMessengerStateAgent
-} from "@cloudflare/think/messengers";
+import { ThinkMessengerStateAgent } from "@cloudflare/think/messengers";
 import telegramMessenger from "@cloudflare/think/messengers/telegram";
 
 export { ThinkMessengerStateAgent };
 
 export class SupportAgent extends Think<Env> {
   getMessengers() {
-    return defineMessengers({
+    return {
       telegram: telegramMessenger({
         token: this.env.TELEGRAM_BOT_TOKEN,
         userName: "support_bot",
         secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN
       })
-    });
+    };
   }
 }
 ```
@@ -325,7 +322,7 @@ Script execution requires a Worker Loader binding:
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/framework`           | Framework manifest discovery and declarative `agent()` helper |
+| `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
 | `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
@@ -510,11 +507,7 @@ an inline timezone, a task `timezone`, or `getDefaultTimezone()`. If an alarm is
 late, Think runs the intended occurrence once and schedules the next future
 occurrence; it does not backfill missed runs.
 
-The return type annotation gives TypeScript literal checks for schedule strings.
-If you prefer not to annotate the method, wrap the object with
-`defineScheduledTasks(...)` to keep the same checks. Think also validates
-scheduled tasks at runtime during startup reconciliation, so dynamically built
-objects still fail before schedules are persisted.
+The return type annotation gives TypeScript literal checks for schedule strings. Think also validates scheduled tasks at runtime during startup reconciliation, so dynamically built objects still fail before schedules are persisted.
 
 Each task must define exactly one of `prompt` or `handler`. Prompt tasks create a
 durable submission with `submitMessages()`. Handler tasks receive

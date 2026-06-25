@@ -271,7 +271,7 @@ import type {
   ThinkChannels
 } from "./channels";
 
-export { defineChannels, messengerChannel } from "./channels";
+export { messengerChannel } from "./channels";
 export type {
   ChannelCapabilities,
   ChannelContext,
@@ -1497,12 +1497,6 @@ export type ThinkScheduledTask =
     });
 
 export type ThinkScheduledTasks = Record<string, ThinkScheduledTask>;
-
-export function defineScheduledTasks<const T extends ThinkScheduledTasks>(
-  tasks: T
-): T {
-  return tasks;
-}
 
 type ParsedDeclaredSchedule =
   | {

@@ -1,5 +1,5 @@
-import { defineScheduledTasks, Think } from "@cloudflare/think";
-import type { Session } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
+import type { Session, ThinkScheduledTasks } from "@cloudflare/think";
 import { createWorkersAI } from "workers-ai-provider";
 
 type Env = Cloudflare.Env & {
@@ -44,13 +44,13 @@ export class Assistant extends Think<Env> {
     return "UTC";
   }
 
-  override getScheduledTasks() {
-    return defineScheduledTasks({
+  override getScheduledTasks(): ThinkScheduledTasks {
+    return {
       dailyBriefing: {
         schedule: "every weekday at 09:00",
         prompt:
           "Give the user a short morning briefing based on what you remember: outstanding commitments and anything they asked to be reminded about."
       }
-    });
+    };
   }
 }

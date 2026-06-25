@@ -65,8 +65,7 @@ A `ChannelDefinition` has these fields:
 | `conversation` | messenger conversation mode or resolver                             | Messenger thread routing (see [Messengers](./messengers.md)).                       |
 | `delivery`     | channel delivery policy                                             | Messenger delivery policy.                                                          |
 
-Use the `defineChannels()` helper for type inference, and `messengerChannel()` to
-wrap a Chat SDK adapter definition as a `kind: "messenger"` channel.
+Use `messengerChannel()` to wrap a Chat SDK adapter definition as a `kind: "messenger"` channel. Add a `ThinkChannels` return type or `satisfies ThinkChannels` when you want compile-time checks for inline channel maps.
 
 ### Channel kinds
 
@@ -177,7 +176,6 @@ const unsubscribe = subscribe("channel", (event) => {
 | `deliverNotice(text, options?)` | Send an out-of-band message to a channel with no model turn.                |
 | `activeChannel`                 | The `ChannelContext` for the in-flight turn, or `undefined`.                |
 | `renderAttachment(attachment)`  | Map a reply attachment to channel notice text (or `undefined` to skip).     |
-| `defineChannels(channels)`      | Identity helper for channel-map type inference.                             |
 | `messengerChannel(definition)`  | Wrap a Chat SDK adapter as a `kind: "messenger"` channel.                   |
 
 ## Related

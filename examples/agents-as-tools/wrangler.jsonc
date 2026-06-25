@@ -1,5 +1,5 @@
 {
-  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "ai": { "binding": "AI", "remote": true },
   // Date is after the 2026-03-15 Cloudflare runtime change that
   // populates `ctx.id.name` inside alarm handlers. Pre-this date,

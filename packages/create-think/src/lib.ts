@@ -12,6 +12,15 @@ export {
   type InitCommandOptions
 } from "./init";
 export {
+  fileExists,
+  gitOutcomeMessage,
+  initializeGit,
+  packageName,
+  readTextIfExists,
+  runNpmInstall,
+  type GitInitOutcome
+} from "./cli-utils";
+export {
   DEFAULT_TEMPLATE,
   DEFAULT_TEMPLATE_REF,
   formatTemplateList,

@@ -14,10 +14,6 @@ export default defineConfig({
       "@cloudflare/think/server-entry": path.join(
         testsDir,
         "../../server-entry.ts"
-      ),
-      "@cloudflare/think/framework": path.join(
-        testsDir,
-        "../../framework/index.ts"
       )
     }
   },

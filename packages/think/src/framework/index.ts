@@ -1,8 +1,3 @@
-export { THINK_AGENT_DEFINITION, agent } from "./agent";
-export type {
-  DeclarativeThinkAgentDefinition,
-  DeclarativeThinkAgentOptions
-} from "./agent";
 export { discoverThinkApp } from "./discovery";
 export type { DiscoverThinkAppOptions } from "./discovery";
 export {
@@ -45,7 +40,6 @@ export type {
   ThinkTypesCodegenOptions
 } from "./types-codegen";
 export type {
-  ThinkAgentDeclarationKind,
   ThinkFrameworkAgent,
   ThinkFrameworkBinding,
   ThinkFrameworkFeature,

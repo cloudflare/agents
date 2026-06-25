@@ -47,7 +47,7 @@ Open the printed URL. Deploy with `npm run deploy`.
 - **Give it memory:** override `configureSession()` and add a `withContext(...)`
   block the model can read and update across turns.
 - **Run it proactively:** override `getScheduledTasks()` with
-  `defineScheduledTasks({ ... })` for recurring, prompt-driven turns.
+  `getScheduledTasks()` with a `ThinkScheduledTasks` return type for recurring, prompt-driven turns.
 - **Accept webhooks / custom routes:** add a `src/server.ts` with a default
   export `{ fetch(request, env, ctx, { router }) }`; return a `Response` to
   handle, or `undefined` to fall through to Think.

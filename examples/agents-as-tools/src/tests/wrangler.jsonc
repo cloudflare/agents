@@ -1,5 +1,5 @@
 {
-  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
   // Same compat date as the production example so partyserver 0.5.x
   // can rely on `ctx.id.name` inside alarm handlers.
   "compatibility_date": "2026-06-11",

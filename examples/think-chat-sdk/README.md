@@ -45,7 +45,7 @@ export { ThinkMessengerStateAgent };
 
 export class SupportAgent extends Think<Env> {
   getMessengers() {
-    return defineMessengers({
+    return {
       telegram: telegramMessenger({
         token: this.env.TELEGRAM_BOT_TOKEN,
         userName: this.env.TELEGRAM_BOT_USERNAME ?? "think_chat_sdk_bot",
@@ -53,7 +53,7 @@ export class SupportAgent extends Think<Env> {
         conversation: "self",
         respondTo: ["direct-message", "mention"]
       })
-    });
+    };
   }
 }
 ```

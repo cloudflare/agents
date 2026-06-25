@@ -1,5 +1,5 @@
 {
-  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "ai": { "binding": "AI", "remote": true },
   "browser": { "binding": "BROWSER" },
   "worker_loaders": [{ "binding": "LOADER" }],

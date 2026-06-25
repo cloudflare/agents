@@ -1,5 +1,5 @@
 {
-  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "browser-quick-actions",
   "main": "src/server.ts",
   // Quick Actions (`env.BROWSER.quickAction`) require compatibility_date

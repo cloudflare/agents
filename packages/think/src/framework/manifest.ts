@@ -4,8 +4,6 @@ export type ThinkFrameworkFeature =
   | "messengers"
   | "tools";
 
-export type ThinkAgentDeclarationKind = "class" | "declarative";
-
 export type ThinkFrameworkRouteSurfaceKind =
   | "agent"
   | "subagent"

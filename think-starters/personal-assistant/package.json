@@ -9,7 +9,12 @@
     "dev": "vite dev",
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
-    "types": "think types --all"
+    "types": "think types --all",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run format:check && npm run lint && npm run typecheck"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
@@ -30,6 +35,8 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "oxfmt": "^0.56.0",
+    "oxlint": "^1.71.0",
     "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",

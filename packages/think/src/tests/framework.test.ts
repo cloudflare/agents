@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  THINK_AGENT_DEFINITION,
-  agent,
   createThinkWorkerConfig,
   createThinkWorkerDefaults,
   diagnoseThinkManifest,
@@ -49,12 +47,11 @@ describe("Think framework discovery", () => {
     expect(manifest.routePrefix).toBe("/agents");
   });
 
-  it("generates Think type declarations for class and declarative agents", () => {
+  it("generates Think type declarations for class agents", () => {
     const files = {
       "agents/host/agent.ts": "export class HostAgent {}",
       "agents/researcher/agent.ts": `
-        import { agent } from "@cloudflare/think/framework";
-        export default agent({ model });
+        export default class ResearcherAgent {}
       `,
       "agents/host/skills/review/SKILL.md": "# Review"
     };
@@ -72,7 +69,7 @@ describe("Think framework discovery", () => {
     expect(
       generated.find((file) => file.path === "think.d.ts")?.content
     ).toContain(
-      `export const ThinkAgent_Researcher: typeof import("@cloudflare/think").Think<Cloudflare.Env>;`
+      `export const ThinkAgent_Researcher: (typeof import("./agents/researcher/agent")).default;`
     );
     expect(
       generated.find((file) => file.path === "think.d.ts")?.content
@@ -94,7 +91,7 @@ describe("Think framework discovery", () => {
         "agents/assistant/agents/my-assistant.ts":
           "export class MyAssistant {}",
         "agents/assistant/agents/researcher/agent.ts":
-          "export default agent({ model })"
+          "export default class ResearcherAgent {}"
       }
     });
 
@@ -139,13 +136,12 @@ describe("Think framework discovery", () => {
     ]);
   });
 
-  it("discovers declarative agents and colocated skills by convention", () => {
+  it("discovers class agents and colocated skills by convention", () => {
     const manifest = discoverThinkApp({
       root: "/app",
       files: {
         "./agents/researcher/agent.ts": `
-          import { agent } from "@cloudflare/think/framework";
-          export default agent({ model: (env) => env.AI("@cf/model") });
+          export default class ResearcherAgent {}
         `,
         "agents/researcher/skills/summarize/SKILL.md": "# Summarize"
       }
@@ -254,11 +250,11 @@ describe("Think framework discovery", () => {
     const manifest = discoverThinkApp({
       files: {
         "agents/support/agent.ts": `
-          export default agent({
-            schedules: [],
-            tools: [createExecuteTool()],
-            model: () => this.env.AI
-          });
+          export default class SupportAgent {
+            schedules = [];
+            tools = [createExecuteTool()];
+            model = () => this.env.AI;
+          }
         `,
         "agents/support/skills/review/SKILL.md": "# Review"
       }
@@ -286,7 +282,7 @@ describe("Think framework discovery", () => {
       files: {
         "agents/support/agent.ts": `
           import "./tools";
-          export default agent({});
+          export default class SupportAgent {}
         `,
         "agents/support/tools.ts": "export const tools = [createExecuteTool()]"
       }
@@ -302,7 +298,7 @@ describe("Think framework discovery", () => {
     const manifest = discoverThinkApp({
       files: {
         "agents/support.ts": "export class SupportAgent {}",
-        "agents/researcher/agent.ts": "export default agent({ model })",
+        "agents/researcher/agent.ts": "export default class ResearcherAgent {}",
         "src/server.ts": "export default { fetch() {} }"
       }
     });
@@ -647,19 +643,5 @@ describe("Think framework discovery", () => {
       "- support | class ThinkAgent_Support | /api/agents/support",
       "- support/researcher | class ThinkSubAgent_Support_Researcher | parent support"
     ]);
-  });
-});
-
-describe("declarative Think agent helper", () => {
-  it("brands declarative agent definitions for framework codegen", () => {
-    const definition = agent({
-      model: { id: "test-model" } as never,
-      prompt: "Hello"
-    });
-
-    expect(definition.kind).toBe("think-agent-definition");
-    expect(definition[THINK_AGENT_DEFINITION]).toBe(true);
-    expect(definition.options.prompt).toBe("Hello");
-    expect(typeof definition.__toThinkClass).toBe("function");
   });
 });

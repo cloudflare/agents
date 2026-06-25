@@ -12,7 +12,7 @@ async function main(): Promise<void> {
     .option("template", {
       alias: "t",
       type: "string",
-      describe: `Starter template (${templateList})`
+      describe: `Starter template (${templateList}); omit to choose`
     })
     .option("name", {
       type: "string",

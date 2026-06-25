@@ -77,7 +77,7 @@ export function createCli(argv = process.argv) {
           })
           .option("template", {
             type: "string",
-            describe: "Starter template to scaffold (default: basic)"
+            describe: "Starter template to scaffold (omit to choose)"
           })
           .option("ref", {
             type: "string",

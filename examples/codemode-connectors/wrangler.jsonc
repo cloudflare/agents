@@ -1,5 +1,5 @@
 {
-  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "codemode-connectors-demo",
   "main": "src/server.ts",
   "ai": { "binding": "AI", "remote": true },

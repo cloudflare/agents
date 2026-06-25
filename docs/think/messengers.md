@@ -19,23 +19,20 @@ adapters are not bundled into your Worker.
 
 ```typescript
 import { Think } from "@cloudflare/think";
-import {
-  defineMessengers,
-  ThinkMessengerStateAgent
-} from "@cloudflare/think/messengers";
+import { ThinkMessengerStateAgent } from "@cloudflare/think/messengers";
 import telegramMessenger from "@cloudflare/think/messengers/telegram";
 
 export { ThinkMessengerStateAgent };
 
 export class SupportAgent extends Think<Env> {
   getMessengers() {
-    return defineMessengers({
+    return {
       telegram: telegramMessenger({
         token: this.env.TELEGRAM_BOT_TOKEN,
         userName: "support_bot",
         secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN
       })
-    });
+    };
   }
 }
 ```
@@ -54,7 +51,7 @@ If one Think agent owns multiple Telegram bots, give each provider a distinct
 Chat SDK adapter name:
 
 ```typescript
-defineMessengers({
+{
   support: telegramMessenger({
     adapterName: "support-telegram",
     token: this.env.SUPPORT_TELEGRAM_BOT_TOKEN,
@@ -67,7 +64,7 @@ defineMessengers({
     userName: "sales_bot",
     secretToken: this.env.SALES_TELEGRAM_WEBHOOK_SECRET_TOKEN
   })
-});
+};
 ```
 
 Duplicate adapter names fail during startup so providers cannot overwrite each

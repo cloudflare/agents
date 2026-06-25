@@ -17,14 +17,14 @@ bun create think
 npm create think@latest [directory] -- [options]
 ```
 
-| Option           | Description                                       |
-| ---------------- | ------------------------------------------------- |
-| `--template, -t` | Starter template (see below). Defaults to `basic` |
-| `--name`         | Package and Worker name                           |
-| `--ref`          | Git ref to fetch templates from                   |
-| `--yes, -y`      | Skip prompts and use defaults                     |
-| `--no-install`   | Skip `npm install`                                |
-| `--dry-run`      | Print what would be created without writing       |
+| Option           | Description                                           |
+| ---------------- | ----------------------------------------------------- |
+| `--template, -t` | Starter template (omit to choose interactively)       |
+| `--name`         | Package and Worker name                               |
+| `--ref`          | Git ref to fetch templates from                       |
+| `--yes, -y`      | Skip prompts and use defaults (`basic`, fresh folder) |
+| `--no-install`   | Skip `npm install`                                    |
+| `--dry-run`      | Print what would be created without writing           |
 
 ## Templates
 
@@ -45,10 +45,13 @@ npm create think@latest my-agent -- --template coding-agent
 
 Each starter is a complete, deployable Cloudflare Workers app using the Think
 framework: a streaming chat agent, persistent history, resumable streams, and
-built-in workspace file tools, wired up with Vite and Wrangler.
+built-in workspace file tools, wired up with Vite and Wrangler. The project is
+initialized as a git repository (skipped if you scaffold inside an existing one)
+and ships with Oxlint + Oxfmt configured behind a `check` script.
 
 ```sh
 cd my-agent
 npm run dev      # local dev
+npm run check    # format check + lint + typecheck
 npm run deploy   # deploy to Cloudflare
 ```

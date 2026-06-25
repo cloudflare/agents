@@ -1,4 +1,5 @@
-import { defineScheduledTasks, Think } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
+import type { ThinkScheduledTasks } from "@cloudflare/think";
 import { createWorkersAI } from "workers-ai-provider";
 import { tool } from "ai";
 import { z } from "zod";
@@ -102,13 +103,13 @@ export class Operations extends Think<Env> {
     return "UTC";
   }
 
-  override getScheduledTasks() {
-    return defineScheduledTasks({
+  override getScheduledTasks(): ThinkScheduledTasks {
+    return {
       dailyDigest: {
         schedule: "every weekday at 17:00",
         prompt:
           "Summarize the operations handled today: refunds issued, accounts closed, and anything still waiting on approval."
       }
-    });
+    };
   }
 }

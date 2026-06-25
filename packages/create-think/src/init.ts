@@ -1,25 +1,35 @@
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { access, mkdir, readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import tiged from "tiged";
 import {
   copyLocalTemplate,
+  DEFAULT_TEMPLATE,
   DEFAULT_TEMPLATE_REF,
   finalizeTemplate,
   findLocalTemplatesRoot,
   localTemplateExists,
   resolveTemplateName,
+  THINK_TEMPLATES,
   THINK_TEMPLATES_REPO,
   type TemplateFetcher
 } from "./templates";
+import {
+  fileExists,
+  gitOutcomeMessage,
+  initializeGit,
+  packageName,
+  readTextIfExists,
+  runNpmInstall,
+  type GitInitOutcome
+} from "./cli-utils";
 
 export interface InitCommandOptions {
   root?: string;
   directory?: string;
   name?: string;
-  /** Starter template to scaffold. Defaults to `basic`. */
+  /** Starter template to scaffold. Prompts interactively when omitted. */
   template?: string;
   /** Git ref passed to the remote template fetcher. Defaults to `main`. */
   ref?: string;
@@ -33,8 +43,12 @@ export interface InitCommandOptions {
    * from the agents repo; injectable for tests.
    */
   fetchTemplate?: TemplateFetcher;
+  promptTemplate?: (defaultTemplate: string) => Promise<string>;
   promptTargetDirectory?: (defaultDirectory: string) => Promise<string>;
   installRunner?: (root: string) => Promise<void>;
+  gitRunner?: (root: string) => Promise<void>;
+  /** Injectable git work-tree check (used in tests). */
+  isInsideGitRepo?: (root: string) => Promise<boolean>;
 }
 
 const SAFE_EMPTY_DIRECTORY_ENTRIES = new Set([".git", ".DS_Store"]);
@@ -79,7 +93,7 @@ const tigedFetchTemplate: TemplateFetcher = async ({ template, ref, dest }) => {
 
 export async function initCommand(options: InitCommandOptions): Promise<void> {
   const baseRoot = path.resolve(options.root ?? process.cwd());
-  const template = resolveTemplateName(options.template);
+  const template = await selectTemplate(options);
   const selectedDirectory = await selectTargetDirectory(options, baseRoot);
   const targetRoot = resolveTargetRoot(baseRoot, selectedDirectory);
   const projectName = packageName(options.name ?? path.basename(targetRoot));
@@ -101,6 +115,7 @@ export async function initCommand(options: InitCommandOptions): Promise<void> {
     console.log(
       [
         `Think init would create a "${template}" app in ${targetRoot}.`,
+        "Would initialize a git repository (skipped if already inside one).",
         (options.install ?? true)
           ? "Would run: npm install"
           : "Would skip dependency install."
@@ -112,6 +127,10 @@ export async function initCommand(options: InitCommandOptions): Promise<void> {
   await mkdir(targetRoot, { recursive: true });
   await fetchTemplate(template, targetRoot, options);
   await finalizeTemplate(targetRoot, projectName);
+  const gitOutcome = await initializeGit(targetRoot, {
+    gitRunner: options.gitRunner,
+    isInsideGitRepo: options.isInsideGitRepo
+  });
 
   if (options.install ?? true) {
     await (options.installRunner ?? runNpmInstall)(targetRoot);
@@ -121,7 +140,8 @@ export async function initCommand(options: InitCommandOptions): Promise<void> {
     targetRoot,
     selectedDirectory,
     template,
-    options.install ?? true
+    options.install ?? true,
+    gitOutcome
   );
 }
 
@@ -144,6 +164,51 @@ async function fetchTemplate(
   });
 }
 
+async function selectTemplate(options: InitCommandOptions): Promise<string> {
+  if (options.template) return resolveTemplateName(options.template);
+  if (options.yes) return DEFAULT_TEMPLATE;
+  // A non-interactive stdin (CI, piped input) can never answer the prompt, so
+  // fall back to the default instead of blocking forever on `readline`.
+  if (!options.promptTemplate && !input.isTTY) return DEFAULT_TEMPLATE;
+  const selected = await (options.promptTemplate ?? promptTemplate)(
+    DEFAULT_TEMPLATE
+  );
+  return resolveTemplateName(selected);
+}
+
+async function promptTemplate(defaultTemplate: string): Promise<string> {
+  const defaultIndex =
+    THINK_TEMPLATES.findIndex((template) => template.name === defaultTemplate) +
+    1;
+  const lines = [
+    "Which starter template would you like?",
+    ...THINK_TEMPLATES.map(
+      (template, index) =>
+        `  ${index + 1}. ${template.name} - ${template.description}`
+    ),
+    `Choose a template (${defaultIndex}) `
+  ];
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await rl.question(lines.join("\n"));
+    return templateChoice(answer, defaultTemplate);
+  } finally {
+    rl.close();
+  }
+}
+
+function templateChoice(answer: string, defaultTemplate: string): string {
+  const trimmed = answer.trim();
+  if (!trimmed) return defaultTemplate;
+  // A bare number is a menu index; an out-of-range index falls back to the
+  // default rather than being mistaken for a (nonexistent) template name.
+  if (/^\d+$/.test(trimmed)) {
+    return THINK_TEMPLATES[Number(trimmed) - 1]?.name ?? defaultTemplate;
+  }
+  // Otherwise treat it as a template name and let resolveTemplateName validate.
+  return trimmed;
+}
+
 async function selectTargetDirectory(
   options: InitCommandOptions,
   root: string
@@ -158,6 +223,10 @@ async function selectTargetDirectory(
   const defaultDirectory = (await isSafeEmptyDirectory(root))
     ? "."
     : randomDirectory;
+  // A non-interactive stdin can never answer the prompt; use the default.
+  if (!options.promptTargetDirectory && !input.isTTY) {
+    return normalizeTargetDirectory(defaultDirectory);
+  }
   const target = await (options.promptTargetDirectory ?? promptTargetDirectory)(
     defaultDirectory
   );
@@ -265,10 +334,12 @@ function printSuccess(
   root: string,
   selectedDirectory: string,
   template: string,
-  install: boolean
+  install: boolean,
+  gitOutcome: GitInitOutcome
 ): void {
   const lines = [
     `Created a "${template}" Think app in ${root}.`,
+    gitOutcomeMessage(gitOutcome),
     install ? "Installed npm dependencies." : "Skipped npm install.",
     "",
     "Next steps:"
@@ -285,53 +356,11 @@ function printSuccess(
   console.log(lines.join("\n"));
 }
 
-async function runNpmInstall(root: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("npm", ["install"], {
-      cwd: root,
-      stdio: "inherit",
-      // On Windows `npm` resolves to `npm.cmd`, which Node's spawn won't find
-      // without a shell.
-      shell: process.platform === "win32"
-    });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(
-        new Error(`npm install failed with exit code ${code ?? "unknown"}.`)
-      );
-    });
-  });
-}
-
-function packageName(name: string): string {
-  return (
-    name
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .replace(/^[._]+/, "") || "think-agent"
-  );
-}
-
 async function readDirectoryEntries(root: string): Promise<string[]> {
   try {
     return await readdir(root);
   } catch (error) {
-    if (isMissingFileError(error)) return [];
-    throw error;
-  }
-}
-
-async function readTextIfExists(file: string): Promise<string | null> {
-  try {
-    return await readFile(file, "utf8");
-  } catch (error) {
-    if (isMissingFileError(error)) return null;
+    if ((error as { code?: unknown } | null)?.code === "ENOENT") return [];
     throw error;
   }
 }
@@ -342,25 +371,6 @@ async function readFirstExistingText(files: string[]): Promise<string | null> {
     if (source !== null) return source;
   }
   return null;
-}
-
-async function fileExists(file: string): Promise<boolean> {
-  try {
-    await access(file);
-    return true;
-  } catch (error) {
-    if (isMissingFileError(error)) return false;
-    throw error;
-  }
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT"
-  );
 }
 
 interface PackageJson {

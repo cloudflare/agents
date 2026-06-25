@@ -1,3 +1,4 @@
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
-@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+/* Tailwind ignores node_modules by default, so we source Kumo for class extraction. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";

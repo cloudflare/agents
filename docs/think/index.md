@@ -96,10 +96,9 @@ agents/assistant/agents/researcher.ts
 agents/assistant/agents/code-reviewer/agent.ts
 ```
 
-Each convention file should export one Agent-compatible class, or a default
-declarative `agent({...})` definition. If a module exports multiple
-Agent-compatible classes, Think fails with a focused diagnostic so the generated
-Durable Object export stays unambiguous.
+Each convention file should export one Agent-compatible class. If a module
+exports multiple Agent-compatible classes, Think fails with a focused diagnostic
+so the generated Durable Object export stays unambiguous.
 
 The framework derives stable generated class names from this topology:
 
@@ -523,23 +522,20 @@ npm install @chat-adapter/telegram
 
 ```typescript
 import { Think } from "@cloudflare/think";
-import {
-  defineMessengers,
-  ThinkMessengerStateAgent
-} from "@cloudflare/think/messengers";
+import { ThinkMessengerStateAgent } from "@cloudflare/think/messengers";
 import telegramMessenger from "@cloudflare/think/messengers/telegram";
 
 export { ThinkMessengerStateAgent };
 
 export class SupportAgent extends Think<Env> {
   getMessengers() {
-    return defineMessengers({
+    return {
       telegram: telegramMessenger({
         token: this.env.TELEGRAM_BOT_TOKEN,
         userName: "support_bot",
         secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN
       })
-    });
+    };
   }
 }
 ```
@@ -1127,15 +1123,16 @@ stores a durable one-shot schedule for the next occurrence, and re-arms the next
 occurrence after each run.
 
 ```typescript
-import { Think, defineScheduledTasks } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
+import type { ThinkScheduledTasks } from "@cloudflare/think";
 
 export class DigestAgent extends Think<Env> {
   getDefaultTimezone() {
     return "Europe/London";
   }
 
-  getScheduledTasks() {
-    return defineScheduledTasks({
+  getScheduledTasks(): ThinkScheduledTasks {
+    return {
       weeklyCommitReport: {
         schedule: "every week on monday at 09:00",
         prompt:
@@ -1162,7 +1159,7 @@ export class DigestAgent extends Think<Env> {
           });
         }
       }
-    });
+    };
   }
 }
 ```
@@ -1225,7 +1222,7 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session`, `Workspace`, `skills` namespace           |
-| `@cloudflare/think/framework`           | Framework manifest discovery and declarative `agent()` helper |
+| `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
 | `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |

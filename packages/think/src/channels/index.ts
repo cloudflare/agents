@@ -67,11 +67,6 @@ export type ThinkChannels = Record<string, ChannelDefinition>;
 
 export type NormalizedChannelDefinition = ChannelDefinition & { id: string };
 
-/** Identity helper for declaring a channel map with inference, like `defineMessengers`. */
-export function defineChannels<T extends ThinkChannels>(channels: T): T {
-  return channels;
-}
-
 /** Wrap a {@link MessengerDefinition} as a `kind: "messenger"` channel. */
 export function messengerChannel(
   definition: MessengerDefinition

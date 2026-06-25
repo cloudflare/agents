@@ -2,7 +2,6 @@ import { getAgentByName, routeAgentRequest } from "agents";
 import { createWorkersAI } from "workers-ai-provider";
 import { Think } from "@cloudflare/think";
 import {
-  defineMessengers,
   ThinkMessengerStateAgent,
   type ThinkMessengers
 } from "@cloudflare/think/messengers";
@@ -47,7 +46,7 @@ export class SupportAgent extends Think<Env> {
   }
 
   override getMessengers(): ThinkMessengers {
-    return defineMessengers({
+    return {
       telegram: telegramMessenger({
         token: this.env.TELEGRAM_BOT_TOKEN,
         userName: this.env.TELEGRAM_BOT_USERNAME ?? "think_chat_sdk_bot",
@@ -55,7 +54,7 @@ export class SupportAgent extends Think<Env> {
         conversation: "self",
         respondTo: ["direct-message", "mention"]
       })
-    });
+    };
   }
 }
 
