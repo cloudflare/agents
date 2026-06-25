@@ -35,6 +35,35 @@ import { stringifyForCodemode, parseForCodemode } from "./codec";
 const CONNECTOR_CONTROL_KEY = "__codemode_control__";
 const PAUSE_SENTINEL_LITERAL = "__CODEMODE_PAUSE__";
 
+/**
+ * Best-effort synchronous disposal of a disposable resource.
+ *
+ * Dynamically-loaded Workers and the RPC `Fetcher` stubs returned by
+ * `getEntrypoint()` own native handles. Left to GC, they can be finalized
+ * after the isolate's destruction queue has closed — under the
+ * `@cloudflare/vitest-pool-workers` teardown matrix this trips a fatal
+ * workerd assertion ("tried to defer destruction during isolate shutdown")
+ * that kills the worker. Disposing them eagerly releases the handle while the
+ * isolate is still alive. Disposal must never mask the execution result, so
+ * failures are swallowed.
+ */
+function disposeQuietly(resource: unknown): void {
+  if (
+    typeof resource !== "object" ||
+    resource === null ||
+    !(Symbol.dispose in resource)
+  ) {
+    return;
+  }
+  const dispose = (resource as { [Symbol.dispose]?: unknown })[Symbol.dispose];
+  if (typeof dispose !== "function") return;
+  try {
+    (dispose as () => void).call(resource);
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
 const SANDBOX_CODEC = String.raw`
     const __CODEMODE_BINARY_TAG = "__codemode_binary_v1__";
     function __bytesToBase64(bytes) {
@@ -468,22 +497,41 @@ export class DynamicWorkerExecutor implements Executor {
       env: hasEnv ? env : undefined
     });
 
-    const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(
-        dispatchers: Record<string, ToolDispatcher>,
-        connectors: Record<string, unknown>
-      ): Promise<{
-        result: unknown;
-        error?: string;
-        logs?: string[];
-      }>;
-    };
-    const response = await entrypoint.evaluate(dispatchers, connectorBindings);
+    // `worker` (the loaded child Worker) and `entrypoint` (its RPC stub) own
+    // native handles. Dispose both once `evaluate` settles so they are not left
+    // for GC — a finalize during isolate shutdown trips a fatal workerd
+    // assertion under vitest-pool-workers (see `disposeQuietly`).
+    try {
+      const entrypoint = worker.getEntrypoint() as unknown as {
+        evaluate(
+          dispatchers: Record<string, ToolDispatcher>,
+          connectors: Record<string, unknown>
+        ): Promise<{
+          result: unknown;
+          error?: string;
+          logs?: string[];
+        }>;
+      };
+      try {
+        const response = await entrypoint.evaluate(
+          dispatchers,
+          connectorBindings
+        );
 
-    if (response.error) {
-      return { result: undefined, error: response.error, logs: response.logs };
+        if (response.error) {
+          return {
+            result: undefined,
+            error: response.error,
+            logs: response.logs
+          };
+        }
+
+        return { result: response.result, logs: response.logs };
+      } finally {
+        disposeQuietly(entrypoint);
+      }
+    } finally {
+      disposeQuietly(worker);
     }
-
-    return { result: response.result, logs: response.logs };
   }
 }
