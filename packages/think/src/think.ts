@@ -9251,6 +9251,14 @@ export class Think<
           trigger: "submission",
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
+          // The drain runs fire-and-forget (`_startSubmissionDrain` /
+          // `_drainThinkSubmissions` alarm), so it can inherit the ALS of a turn
+          // that called `submitMessages` mid-turn (e.g. a detached-finish notify
+          // from a `beforeTurn` hook). `allowNested` skips the
+          // not-inside-active-turn guard for that case. Safe on every submission
+          // path: nothing holding the turn queue ever awaits this turn, so the
+          // queued submission simply runs once the parent turn frees the slot —
+          // no deadlock, no need to scope this to detached notify.
           allowNested: true,
           workflowPrompt: workflowPrompt ?? undefined,
           shouldApplyMessages: () =>
