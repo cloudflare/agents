@@ -33,7 +33,7 @@ export class PlaygroundVoiceAgent extends VoiceAgent<Env> {
       abortSignal: context.signal
     });
 
-    return result.fullStream as AsyncIterable<unknown>;
+    return result.fullStream;
   }
 
   async onCallStart(connection: Connection) {
