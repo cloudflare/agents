@@ -95,6 +95,7 @@ const v3Usage = (inputTokens: number, outputTokens: number) => ({
 
 type MockTextStreamPart =
   | { type: "text"; text: string }
+  | { type: "error"; message: string }
   | {
       type: "tool-call";
       toolName: string;
@@ -152,6 +153,11 @@ function createToolCallingTextStreamModel(
                 delta: part.text
               });
               controller.enqueue({ type: "text-end", id });
+            } else if (part.type === "error") {
+              controller.enqueue({
+                type: "error",
+                error: new Error(part.message)
+              });
             } else {
               const id = part.toolCallId ?? `tc-${callCount}-${i}`;
               controller.enqueue({
@@ -245,6 +251,7 @@ function isMockTextStreamResponse(
         step.every((part) => {
           if (!isRecord(part)) return false;
           if (part.type === "text") return typeof part.text === "string";
+          if (part.type === "error") return typeof part.message === "string";
           return (
             part.type === "tool-call" &&
             typeof part.toolName === "string" &&

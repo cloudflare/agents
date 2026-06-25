@@ -7,7 +7,7 @@
  */
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "./worker";
 
 // --- Helpers ---
@@ -87,19 +87,48 @@ function waitForType(ws: WebSocket, type: string) {
 
 function waitForBinary(ws: WebSocket, timeout = 5000): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("Timeout waiting for binary message")),
-      timeout
-    );
+    let settled = false;
+
+    const cleanup = () => {
+      settled = true;
+      clearTimeout(timer);
+      ws.removeEventListener("message", handler);
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timeout waiting for binary message"));
+    }, timeout);
     const handler = (e: MessageEvent) => {
-      if (e.data instanceof ArrayBuffer) {
-        clearTimeout(timer);
-        ws.removeEventListener("message", handler);
-        resolve(e.data);
-      }
+      void toArrayBuffer(e.data).then(
+        (buffer) => {
+          if (settled || !buffer) return;
+          cleanup();
+          resolve(buffer);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          cleanup();
+          reject(error);
+        }
+      );
     };
     ws.addEventListener("message", handler);
   });
+}
+
+async function toArrayBuffer(data: unknown): Promise<ArrayBuffer | null> {
+  if (data instanceof ArrayBuffer) return data;
+
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView;
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice()
+      .buffer as ArrayBuffer;
+  }
+
+  if (data instanceof Blob) return data.arrayBuffer();
+
+  return null;
 }
 
 function decodeAudio(buffer: ArrayBuffer): string {
@@ -361,7 +390,7 @@ describe("VoiceAgent — continuous STT pipeline", () => {
           toolName: "getWeather",
           input: { location: "San Francisco" },
           output: "warm",
-          outputDelayMs: 1000
+          outputDelayMs: 3000
         }
       ],
       [{ type: "text", text: "The weather is warm" }]
@@ -379,11 +408,12 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    const audioPromise = waitForBinary(ws, 1000);
     for (let i = 0; i < 4; i++) {
       ws.send(new ArrayBuffer(5000));
     }
 
-    const audio = await waitForBinary(ws, 500);
+    const audio = await audioPromise;
     expect(decodeAudio(audio)).toBe("I can get the weather for you.");
 
     const transcriptEnd = (await waitForType(ws, "transcript_end")) as Record<
@@ -396,6 +426,55 @@ describe("VoiceAgent — continuous STT pipeline", () => {
 
     await waitForStatus(ws, "listening");
     ws.close();
+  });
+
+  it("flushes partial fullStream speech before reporting stream errors", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniqueAISDKFullStreamPath());
+    try {
+      await waitForStatus(ws, "idle");
+
+      const mockResponse = [
+        [
+          { type: "text", text: "Partial response." },
+          { type: "error", message: "provider failed" }
+        ]
+      ];
+      sendJSON(ws, { type: "_set_mock_response", response: mockResponse });
+      await waitForMessageMatching(
+        ws,
+        (m) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).type === "_ack" &&
+          (m as Record<string, unknown>).command === "_set_mock_response"
+      );
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      const audioPromise = waitForBinary(ws, 1000);
+      for (let i = 0; i < 4; i++) {
+        ws.send(new ArrayBuffer(5000));
+      }
+
+      const audio = await audioPromise;
+      expect(decodeAudio(audio)).toBe("Partial response.");
+
+      const transcriptEnd = (await waitForType(ws, "transcript_end")) as Record<
+        string,
+        unknown
+      >;
+      expect(transcriptEnd.text).toBe("Partial response.");
+
+      const error = (await waitForType(ws, "error")) as Record<string, unknown>;
+      expect(error.message).toBe("provider failed");
+
+      await waitForStatus(ws, "listening");
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
   });
 
   it("keeps deprecated AI SDK textStream support for tool-call streams", async () => {

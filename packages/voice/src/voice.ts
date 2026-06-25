@@ -868,6 +868,8 @@ export function withVoice<TBase extends AgentLike>(
       let streamComplete = false;
       let drainNotify: (() => void) | null = null;
       let drainPending = false;
+      let drainedCount = 0;
+      const drainWaiters = new Map<number, (() => void)[]>();
 
       const notifyDrain = () => {
         if (drainNotify) {
@@ -877,6 +879,24 @@ export function withVoice<TBase extends AgentLike>(
         } else {
           drainPending = true;
         }
+      };
+
+      const notifyDrained = () => {
+        for (const [target, waiters] of drainWaiters) {
+          if (drainedCount < target) continue;
+          drainWaiters.delete(target);
+          for (const resolve of waiters) resolve();
+        }
+      };
+
+      const waitForDrained = (target: number): Promise<void> => {
+        if (drainedCount >= target) return Promise.resolve();
+
+        return new Promise<void>((resolve) => {
+          const waiters = drainWaiters.get(target) ?? [];
+          waiters.push(resolve);
+          drainWaiters.set(target, waiters);
+        });
       };
 
       const tts = this.#requireTTS();
@@ -917,6 +937,8 @@ export function withVoice<TBase extends AgentLike>(
             });
           }
           i++;
+          drainedCount = i;
+          notifyDrained();
         }
       })();
 
@@ -982,7 +1004,25 @@ export function withVoice<TBase extends AgentLike>(
           for (const sentence of chunker.flush()) {
             enqueueSentence(sentence);
           }
+          await waitForDrained(ttsQueue.length);
           continue;
+        }
+
+        if (event.type === "error") {
+          for (const sentence of chunker.flush()) {
+            enqueueSentence(sentence);
+          }
+          await waitForDrained(ttsQueue.length);
+          if (transcriptStarted) {
+            this.#sendJSON(connection, {
+              type: "transcript_end",
+              text: fullText
+            });
+          }
+          streamComplete = true;
+          notifyDrain();
+          await drainPromise;
+          throw event.error;
         }
 
         const token = event.text;

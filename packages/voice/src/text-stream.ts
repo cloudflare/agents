@@ -17,7 +17,8 @@ export type TextSource = string | TextReadableStream | AsyncIterable<unknown>;
 
 export type TextStreamEvent =
   | { type: "text"; text: string }
-  | { type: "boundary" };
+  | { type: "boundary" }
+  | { type: "error"; error: Error };
 
 type TextReadableStreamReader = {
   read(): Promise<ReadableStreamReadResult<unknown>>;
@@ -49,7 +50,11 @@ const warnedTextStreamSources = new WeakSet<object>();
  */
 export async function* iterateText(source: TextSource): AsyncGenerator<string> {
   for await (const event of iterateTextEvents(source)) {
-    if (event.type === "text") yield event.text;
+    if (event.type === "text") {
+      yield event.text;
+    } else if (event.type === "error") {
+      throw toError(event.error);
+    }
   }
 }
 
@@ -195,6 +200,14 @@ async function* iterateAsyncTextEvents(
       continue;
     }
 
+    if (chunk.type === "error") {
+      if (hasYieldedText) {
+        yield { type: "boundary" };
+      }
+      yield { type: "error", error: toError(chunk.error) };
+      return;
+    }
+
     if (hasYieldedText && isTextBoundary(chunk.type)) {
       if (!needsBoundarySpace) yield { type: "boundary" };
       needsBoundarySpace = true;
@@ -240,6 +253,12 @@ function startsWithWhitespace(text: string): boolean {
 
 function endsWithWhitespace(text: string): boolean {
   return /\s$/.test(text);
+}
+
+function toError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  if (typeof error === "string") return new Error(error);
+  return new Error("AI SDK stream error");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -88,9 +88,9 @@ class MyAgent extends VoiceAgent<Env> {
 
 Class field initializers run after `super()`, so `this.env` is available. Override `createTranscriber(connection)` for runtime model switching. Workers AI convenience classes accept a loose `AiLike` interface. Any object satisfying the `Transcriber` interface works.
 
-### `onTurn` return type: `string | AsyncIterable<string> | ReadableStream`
+### `onTurn` return type: `string | AI SDK fullStream | AsyncIterable<string> | ReadableStream`
 
-Simple responses return a string (one TTS call). Streaming responses return an `AsyncIterable` or `ReadableStream` (sentence-chunked TTS). `iterateText()` normalizes all three into `AsyncIterable<string>`.
+Simple responses return a string (one TTS call). Streaming responses return AI SDK `fullStream`, an `AsyncIterable<string>`, or a `ReadableStream` (sentence-chunked TTS). AI SDK `textStream` still works but is deprecated for voice because it omits non-text events that mark speech boundaries. `iterateText()` normalizes supported sources into `AsyncIterable<string>`.
 
 ### Eager async iterables
 
