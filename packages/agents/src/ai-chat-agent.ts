@@ -1,5 +1,3 @@
-export * from "@cloudflare/ai-chat";
-
-console.log(
-  "All the AI Chat related modules are now in @cloudflare/ai-chat. This module is deprecated and will be removed in the next major version."
+throw new Error(
+  "All the AI Chat related modules are now in @cloudflare/ai-chat. This module is deprecated and will be removed in the next major version. Please use @cloudflare/ai-chat instead."
 );
