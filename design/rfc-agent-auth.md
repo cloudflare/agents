@@ -551,6 +551,57 @@ A broad code-execution tool cannot be safely classified by HTTP-method regexes o
 client. Finer policy requires the server or connector to expose a structured operation,
 not client-side source-code heuristics.
 
+### Intent-derived policy
+
+Applications may add an intent-shaping step before an Agent starts work. This is not part
+of the minimal kernel, but it fits naturally as another policy input:
+
+```text
+user request
+  → trusted intent parser / planner
+  → reviewable capability set
+  → transient policy constraints
+  → ordinary AuthorityOperation checks at every effect
+```
+
+For example, "email Bob the report" may compile to temporary constraints that permit:
+
+```text
+file.read /docs/report.pdf
+email.send recipient=bob@example.com
+```
+
+and deny or request escalation for:
+
+```text
+file.read /docs/payroll.csv
+email.send recipient=public-webhook.example
+```
+
+The important property is that the LLM executing the task cannot expand this authority by
+reasoning about untrusted content. Expansion is a requestable denial: name the new action,
+resource, and reason; ask the user or governance system; then reevaluate current policy.
+
+```ts
+interface IntentAuthority {
+  id: string;
+  sourcePromptDigest: string;
+  constraints: PolicyRule[];
+  expiresAt?: number;
+}
+```
+
+Intent-derived constraints are additive limits, not grants. They can make policy stricter
+or satisfy an application rule that requires the current operation to be within the
+approved task intent, but they cannot override user or mandatory deny rules and they do
+not provision credentials. An implementation may store them in Agent state, an FGA system,
+Cedar/Verified Permissions, or another PDP; the SDK contract remains the same
+`AuthorityOperation` decision boundary.
+
+This gives the RFC a place for intent-based authorization without relying on natural
+language at dispatch time. The parser may use an LLM, but the runtime check consumes only
+structured constraints and stable operation fields.
+
 ### Enforcement
 
 Authorization is checked at the last controllable boundary before an operation. Tool
@@ -1146,6 +1197,11 @@ central or user policy immediately denies one operation.
 The core SDK contracts are intentionally smaller than the surrounding standards work.
 They provide adaptation points without making unfinished profiles mandatory.
 
+- **Cedar / Amazon Verified Permissions** is a strong candidate for application or
+  mandatory policy backends because its principal/action/resource/context model, typing,
+  and automated-reasoning posture match `AuthorityOperation`. The SDK should not depend on
+  Cedar, but the operation shape should remain easy to translate to Cedar entities,
+  actions, resources, and context.
 - **AuthZEN Authorization API 1.0** is the natural wire adapter for a remote mandatory
   policy provider. `AuthorityOperation` maps to subject, resource, action, and context.
   The SDK does not expose AuthZEN JSON as its internal TypeScript API because local policy
@@ -1181,6 +1237,11 @@ They provide adaptation points without making unfinished profiles mandatory.
   must not infer those semantics from tool names or HTTP methods, and absent metadata
   should remain conservative. This RFC carries the annotation envelope on
   `AuthorityOperation.capability`; defining and enforcing the new hints is deferred.
+- **Intent-based authorization** can supply transient, structured capability constraints
+  compiled from the user's task. This is useful as policy input and for prompt-injection
+  containment, but natural language intent is not evaluated at dispatch time; the runtime
+  check uses the normalized operation and structured constraints. User and mandatory deny
+  rules still win.
 - **Mission/task authority** may later supply a durable purpose and lifecycle reference in
   `AuthorityOperation.context`. A session, Code Mode replay log, or OAuth refresh token is
   not a mission; it proves execution can continue, not that authority should continue.
