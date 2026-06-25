@@ -12,10 +12,12 @@
  */
 
 import {
+  createModels,
   fauxAssistantMessage,
-  registerFauxProvider,
+  fauxProvider,
   type Model
 } from "@earendil-works/pi-ai";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 
 const FAUX_API = "faux";
 const FAUX_PROVIDER = "faux";
@@ -24,6 +26,7 @@ const FAUX_MODEL_ID = "faux-recovery";
 /** A registered faux pi model plus controls for scripting turns. */
 export interface FauxPiModel {
   model: Model<string>;
+  streamFn: StreamFn;
   /** Script the assistant text the NEXT turn streams. */
   setNextTurnText(text: string): void;
 }
@@ -37,17 +40,20 @@ export interface FauxPiModel {
 export function createFauxPiModel(options: {
   tokensPerSecond: number;
 }): FauxPiModel {
-  const registration = registerFauxProvider({
+  const faux = fauxProvider({
     api: FAUX_API,
     provider: FAUX_PROVIDER,
     tokensPerSecond: options.tokensPerSecond,
     models: [{ id: FAUX_MODEL_ID, name: "Faux Recovery Model" }]
   });
+  const models = createModels();
+  models.setProvider(faux.provider);
 
   return {
-    model: registration.getModel(),
+    model: faux.getModel(),
+    streamFn: models.streamSimple.bind(models),
     setNextTurnText(text: string): void {
-      registration.setResponses([fauxAssistantMessage(text)]);
+      faux.setResponses([fauxAssistantMessage(text)]);
     }
   };
 }

@@ -1,5 +1,6 @@
 {
   "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "parallel": 1,
   "tui": { "enabled": false },
   "namedInputs": {
     "default": ["{projectRoot}/**/*", "sharedGlobals"],

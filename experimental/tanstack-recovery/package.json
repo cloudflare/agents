@@ -14,23 +14,23 @@
   },
   "dependencies": {
     "@cloudflare/tanstack-ai": "^0.1.10",
-    "@tanstack/ai": "^0.32.0",
-    "@tanstack/ai-client": "^0.18.0",
-    "@tanstack/ai-react": "^0.15.9",
+    "@tanstack/ai": "0.32.0",
+    "@tanstack/ai-client": "0.18.0",
+    "@tanstack/ai-react": "0.15.9",
     "agents": "*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.40.2",
-    "@cloudflare/workers-types": "^4.20260612.1",
-    "@types/node": "^25.9.3",
+    "@cloudflare/vite-plugin": "^1.42.3",
+    "@cloudflare/workers-types": "^4.20260625.1",
+    "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@vitejs/plugin-react": "^6.0.3",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
-    "vitest": "4.1.8",
-    "wrangler": "^4.100.0"
+    "vite": "^8.1.0",
+    "vitest": "4.1.9",
+    "wrangler": "^4.105.0"
   }
 }

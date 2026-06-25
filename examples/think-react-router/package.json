@@ -16,18 +16,18 @@
     "agents": "*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "react-router": "^7.17.0"
+    "react-router": "^8.0.1"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.40.2",
-    "@cloudflare/workers-types": "^4.20260612.1",
-    "@react-router/dev": "^7.17.0",
-    "@types/node": "^25.9.3",
+    "@cloudflare/vite-plugin": "^1.42.3",
+    "@cloudflare/workers-types": "^4.20260625.1",
+    "@react-router/dev": "^8.0.1",
+    "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
-    "vitest": "4.1.8",
-    "wrangler": "^4.100.0"
+    "vite": "^8.1.0",
+    "vitest": "4.1.9",
+    "wrangler": "^4.105.0"
   }
 }

@@ -180,6 +180,7 @@ export class PiAgent extends Agent<Env> {
     this._transcript = this._loadTranscript();
 
     this._pi = new PiCore({
+      streamFn: this._faux.streamFn,
       initialState: {
         model: this._faux.model,
         systemPrompt: "You are a deterministic pi recovery harness.",

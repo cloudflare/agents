@@ -386,7 +386,6 @@ export const NOT_IN_WORKERS_ERROR =
 let pendingWasmImport: Promise<{ default: WebAssembly.Module }> | null = null;
 
 if (isCloudflareWorkersRuntime()) {
-  // @ts-expect-error - WASM module import resolved by the Workers loader.
   pendingWasmImport = import("./esbuild.wasm");
   // Suppress unhandled-rejection if `initializeEsbuild()` is never called.
   // Errors are still surfaced when the promise is awaited there.

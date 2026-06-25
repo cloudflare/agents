@@ -9,13 +9,13 @@
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.40.2",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@cloudflare/vite-plugin": "^1.42.3",
+    "@vitejs/plugin-react": "^6.0.3",
     "chess.js": "^1.4.0",
     "react": "^19.2.7",
     "react-chessboard": "^5.10.0",
     "react-dom": "^19.2.7",
-    "vite": "^8.0.16",
+    "vite": "^8.1.0",
     "vite-plugin-singlefile": "^2.3.3"
   },
   "devDependencies": {

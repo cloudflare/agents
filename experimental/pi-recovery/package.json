@@ -12,14 +12,14 @@
     "test:e2e": "vitest run --config e2e/vitest.config.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.79.6",
-    "@earendil-works/pi-ai": "^0.79.6",
+    "@earendil-works/pi-agent-core": "^0.80.2",
+    "@earendil-works/pi-ai": "^0.80.2",
     "agents": "*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260612.1",
+    "@cloudflare/workers-types": "^4.20260625.1",
     "typescript": "^6.0.3",
-    "vitest": "4.1.8",
-    "wrangler": "^4.100.0"
+    "vitest": "4.1.9",
+    "wrangler": "^4.105.0"
   }
 }

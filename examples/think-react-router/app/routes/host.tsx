@@ -1,10 +1,12 @@
-import { data, useLoaderData } from "react-router";
-import type { AppLoadContext } from "react-router";
+import { data, useLoaderData, type RouterContextProvider } from "react-router";
+import { cloudflareContext } from "../context";
 
-export async function loader({ context }: { context: AppLoadContext }) {
+export async function loader({ context }: { context: RouterContextProvider }) {
+  const cloudflare = context.get(cloudflareContext);
+
   return data({
-    hasEnv: Boolean(context.cloudflare.env),
-    hasCtx: Boolean(context.cloudflare.ctx)
+    hasEnv: Boolean(cloudflare.env),
+    hasCtx: Boolean(cloudflare.ctx)
   });
 }
 

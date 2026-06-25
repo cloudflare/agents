@@ -16,10 +16,10 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@playwright/test": "^1.60.0",
-    "@tanstack/ai": "^0.32.0",
+    "@playwright/test": "^1.61.1",
+    "@tanstack/ai": "0.32.0",
     "ai": "^6.0.202",
-    "vitest": "4.1.8",
+    "vitest": "4.1.9",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

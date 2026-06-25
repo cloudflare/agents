@@ -1,6 +1,7 @@
-import { createRequestHandler } from "react-router";
+import { createRequestHandler, RouterContextProvider } from "react-router";
 import type { ThinkAppContext } from "@cloudflare/think/server-entry";
 import type { ServerBuild } from "react-router";
+import { cloudflareContext } from "../app/context";
 
 const reactRouterHandler = createRequestHandler(
   () =>
@@ -22,11 +23,9 @@ export default {
       return null;
     }
 
-    return reactRouterHandler(request, {
-      cloudflare: {
-        env,
-        ctx
-      }
-    });
+    const routerContext = new RouterContextProvider();
+    routerContext.set(cloudflareContext, { env, ctx });
+
+    return reactRouterHandler(request, routerContext);
   }
 };

@@ -19,10 +19,10 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "nanoid": "^5.1.11"
+    "nanoid": "^5.1.16"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
+    "@playwright/test": "^1.61.1",
     "@types/react": "^19.2.17",
     "ai": "^6.0.202",
     "react": "^19.2.7",

@@ -4,12 +4,14 @@ import type { Context, Env } from "hono";
 import { env } from "hono/adapter";
 import { createMiddleware } from "hono/factory";
 
+type AgentEnv<E extends Env> = NonNullable<E["Bindings"]>;
+
 /**
  * Configuration options for the Cloudflare Agents middleware
  */
 type AgentMiddlewareContext<E extends Env> = {
   /** Cloudflare Agents-specific configuration options */
-  options?: AgentOptions<E>;
+  options?: AgentOptions<AgentEnv<E>>;
   /** Optional error handler for caught errors */
   onError?: (error: Error) => void;
 };
@@ -54,11 +56,11 @@ function isWebSocketUpgrade(c: Context): boolean {
  */
 async function handleWebSocketUpgrade<E extends Env>(
   c: Context<E>,
-  options?: AgentOptions<E>
+  options?: AgentOptions<AgentEnv<E>>
 ) {
   const response = await routeAgentRequest(
     c.req.raw,
-    env(c) satisfies Env,
+    env(c) as AgentEnv<E>,
     options
   );
 
@@ -78,7 +80,7 @@ async function handleWebSocketUpgrade<E extends Env>(
  */
 async function handleHttpRequest<E extends Env>(
   c: Context<E>,
-  options?: AgentOptions<E>
+  options?: AgentOptions<AgentEnv<E>>
 ) {
-  return routeAgentRequest(c.req.raw, env(c) satisfies Env, options);
+  return routeAgentRequest(c.req.raw, env(c) as AgentEnv<E>, options);
 }

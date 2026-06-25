@@ -9,28 +9,28 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^2.5.2",
+    "@cloudflare/kumo": "^2.6.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@x402/evm": "^2.14.0",
+    "@x402/evm": "^2.16.0",
     "agents": "*",
-    "nanoid": "^5.1.11",
+    "nanoid": "^5.1.16",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "viem": "^2.52.2",
+    "viem": "^2.53.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.40.2",
-    "@cloudflare/workers-types": "^4.20260612.1",
+    "@cloudflare/vite-plugin": "^1.42.3",
+    "@cloudflare/workers-types": "^4.20260625.1",
     "@tailwindcss/vite": "^4",
-    "@types/node": "^25.9.3",
+    "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.2",
-    "tailwindcss": "^4.3.0",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
-    "wrangler": "^4.100.0"
+    "vite": "^8.1.0",
+    "wrangler": "^4.105.0"
   }
 }
