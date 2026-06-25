@@ -790,6 +790,27 @@ describe("VoiceClient playback bridge reuse", () => {
     expect(audioElement.playCount).toBe(2);
   });
 
+  it("rebuilds the playback bridge for a new turn after an interrupt and idle gap", async () => {
+    const { transport } = startPcm16Call();
+
+    // Turn 1 starts playing, then is interrupted mid-playback (abrupt stop,
+    // not a natural drain).
+    audioContext.currentTime = 5;
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(1);
+    expect(audioContext.mediaStreamDestinationCount).toBe(1);
+    transport.receive(JSON.stringify({ type: "playback_interrupt" }));
+
+    // A gap longer than the idle threshold passes before the next turn.
+    audioContext.currentTime = 6; // 1s after the interrupt
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(2);
+
+    // The bridge went idle at the interrupt, so the next turn must rebuild it.
+    expect(audioContext.mediaStreamDestinationCount).toBe(2);
+    expect(audioElement.playCount).toBe(2);
+  });
+
   it("reuses the playback bridge when the next turn follows within the idle threshold", async () => {
     const { transport } = startPcm16Call();
 

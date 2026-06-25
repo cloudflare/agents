@@ -1000,7 +1000,15 @@ export class VoiceClient {
     this.#isPlaying = false;
     this.#isScheduling = false;
     this.#playbackCursor = 0;
-    this.#lastPlaybackEnd = null;
+    // An interrupt (barge-in or a user transcript) stops playback abruptly, so
+    // the bridge goes idle from now, not from the cut chunk's scheduled end.
+    // Record the current audio-clock time as the idle start so the next turn's
+    // rebuild check in #playAudio still fires after interrupt -> long pause ->
+    // new turn. Nulling this here would disable that check and let the slow-
+    // playback symptom reappear on the post-interrupt turn.
+    this.#lastPlaybackEnd = this.#audioContext
+      ? this.#audioContext.currentTime
+      : null;
   }
 
   // --- Mic capture ---
