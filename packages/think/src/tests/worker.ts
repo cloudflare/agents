@@ -1,4 +1,6 @@
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
+import { createBrowserRuntime, createBrowserTools } from "../tools/browser";
 
 export { HostBridgeLoopback } from "../extensions";
 
@@ -75,6 +77,110 @@ import type {
   ThinkMediaEvictionAutoAgent
 } from "./agents";
 
+type BrowserRunTestBinding = Fetcher & {
+  quickAction(action: string, options: unknown): Promise<Response>;
+};
+
+export class TestBrowserRunBinding extends WorkerEntrypoint<Env> {
+  fetch(): Response {
+    return Response.json({ ok: true });
+  }
+
+  quickAction(action: string): Response {
+    const result =
+      action === "links" || action === "scrape" || action === "json" ? [] : "";
+    return Response.json({ success: true, result });
+  }
+}
+
+function browserToolSummary(tools: Record<string, unknown>) {
+  const execute = tools.browser_execute as
+    | { execute?: unknown; description?: string }
+    | undefined;
+  return {
+    keys: Object.keys(tools).sort(),
+    hasExecute: typeof execute?.execute === "function",
+    description: execute?.description ?? ""
+  };
+}
+
+export class BrowserToolsHost extends DurableObject<Env> {
+  #browser(): BrowserRunTestBinding {
+    return this.ctx.exports.TestBrowserRunBinding as BrowserRunTestBinding;
+  }
+
+  toolsWithBinding() {
+    return browserToolSummary(
+      createBrowserTools({
+        ctx: this.ctx,
+        browser: this.#browser(),
+        loader: this.env.LOADER
+      })
+    );
+  }
+
+  toolsWithoutQuickActions() {
+    return browserToolSummary(
+      createBrowserTools({
+        ctx: this.ctx,
+        browser: this.#browser(),
+        loader: this.env.LOADER,
+        quickActions: false
+      })
+    );
+  }
+
+  toolsWithCdpUrl() {
+    return browserToolSummary(
+      createBrowserTools({
+        ctx: this.ctx,
+        cdpUrl: "http://localhost:9222",
+        loader: this.env.LOADER
+      })
+    );
+  }
+
+  toolsWithOptions() {
+    return browserToolSummary(
+      createBrowserTools({
+        ctx: this.ctx,
+        browser: this.#browser(),
+        loader: this.env.LOADER,
+        timeout: 60_000,
+        session: { mode: "dynamic" }
+      })
+    );
+  }
+
+  missingBrowserOrCdpUrlError() {
+    try {
+      createBrowserTools({
+        ctx: this.ctx,
+        loader: this.env.LOADER
+      });
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  runtimeShape() {
+    const { runtime, connector, tools } = createBrowserRuntime({
+      ctx: this.ctx,
+      browser: this.#browser(),
+      loader: this.env.LOADER
+    });
+
+    return {
+      connectorName: connector.name(),
+      runtimeApprove: typeof runtime.approve,
+      runtimeExpirePaused: typeof runtime.expirePaused,
+      connectorSweep: typeof connector.sweep,
+      hasExecute: "browser_execute" in tools
+    };
+  }
+}
+
 export type Env = {
   TestAssistantToolsAgent: DurableObjectNamespace<TestAssistantToolsAgent>;
   TestAssistantAgentAgent: DurableObjectNamespace<TestAssistantAgentAgent>;
@@ -108,6 +214,7 @@ export type Env = {
   ThinkWindowedHydrationAgent: DurableObjectNamespace<ThinkWindowedHydrationAgent>;
   ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
+  BrowserToolsHost: DurableObjectNamespace<BrowserToolsHost>;
   LOADER: WorkerLoader;
 };
 

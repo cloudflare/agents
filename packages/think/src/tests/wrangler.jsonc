@@ -139,6 +139,10 @@
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
       },
+      {
+        "class_name": "BrowserToolsHost",
+        "name": "BrowserToolsHost"
+      },
       // Facet-only class. vitest-pool-workers needs it listed as a binding so
       // a facet-compatible class value resolves; it stays out of
       // new_sqlite_classes below (the host agent owns the SQLite store).
@@ -184,7 +188,8 @@
         "ThinkOnStartHydrationFailureAgent",
         "ThinkWindowedHydrationAgent",
         "ThinkMediaEvictionAgent",
-        "ThinkMediaEvictionAutoAgent"
+        "ThinkMediaEvictionAutoAgent",
+        "BrowserToolsHost"
       ],
       "tag": "v1"
     }

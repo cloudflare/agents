@@ -2,7 +2,7 @@
   "extends": "agents/tsconfig",
   "compilerOptions": {
     "types": [
-      "@cloudflare/workers-types",
+      "@cloudflare/workers-types/latest",
       "@cloudflare/vitest-pool-workers/types"
     ]
   },
