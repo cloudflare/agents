@@ -112,7 +112,7 @@ An important note is that `Server` **does NOT persist to the DO storage** so you
 
 `partyserver` exposes helper to address your DOs instead of manually through your bindings. This allows `partyserver` to implement several improvements, including a unique URL routing scheme for your DOs (e.g. `<your-worker>/servers/:durableClass/:durableName`).
 
-Compare this to the DO addressing [example above](#RPC).
+Compare this to the DO addressing [example above](#rpc).
 
 ```ts
 // Note the await here!

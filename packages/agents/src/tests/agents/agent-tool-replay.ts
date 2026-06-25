@@ -3,8 +3,11 @@ import type {
   AgentToolEvent,
   AgentToolEventMessage,
   AgentToolInterruptedReason,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
   AgentToolRunInspection,
   AgentToolStoredChunk,
+  AgentToolTerminalStatus,
   RunAgentToolResult
 } from "../../agent-tool-types.ts";
 
@@ -22,6 +25,7 @@ type StubRunInput = {
  * Private framework internals this fixture drives directly to reproduce the
  * #1630 follow-up bug: the typed interrupted cause (`reason` /
  * `childStillRunning`) must survive a reconnect replay, not just live events.
+ * Also used to exercise the detached-run delivery ledger (#1752) directly.
  */
 type AgentToolInternals = {
   _updateAgentToolTerminal(
@@ -32,6 +36,26 @@ type AgentToolInternals = {
   _readAgentToolRun(runId: string): unknown;
   _resultFromAgentToolRow(row: unknown): RunAgentToolResult;
   _replayAgentToolRuns(connection: Connection): Promise<void>;
+  _deliverDetachedTerminal(
+    runId: string,
+    kind: "finish" | "give_up",
+    result: RunAgentToolResult,
+    options?: { sequence?: number; serialize?: boolean },
+    completedAt?: number
+  ): Promise<void>;
+  _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
+};
+
+type DetachedDeliveryLogEntry = {
+  hook: "onAgentToolFinish" | "onDetachedDone";
+  runId: string;
+  status: AgentToolTerminalStatus;
+  reason?: AgentToolInterruptedReason;
+};
+
+type DetachedBackboneSchedule = {
+  delayInSeconds?: number;
+  payload: unknown;
 };
 
 export class TestAgentToolReplayAgent extends Agent {
@@ -118,6 +142,249 @@ export class TestAgentToolReplayAgent extends Agent {
       "interrupted"
     ]);
     return captured.filter((event) => terminalKinds.has(event.kind));
+  }
+
+  // ── Detached-run delivery ledger (#1752) ──────────────────────────────
+
+  /** Records every delivery so a test can assert exactly-once / two-slot. */
+  detachedDeliveryLog: DetachedDeliveryLogEntry[] = [];
+  private detachedFailOnceRuns = new Set<string>();
+
+  /** The global metering hook still fires for detached runs. */
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    this.detachedDeliveryLog.push({
+      hook: "onAgentToolFinish",
+      runId: run.runId,
+      status: result.status,
+      ...(result.reason !== undefined ? { reason: result.reason } : {})
+    });
+  }
+
+  /** The targeted, durable per-run callback wired via `detached.onFinish`. */
+  async onDetachedDone(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    this.detachedDeliveryLog.push({
+      hook: "onDetachedDone",
+      runId: run.runId,
+      status: result.status,
+      ...(result.reason !== undefined ? { reason: result.reason } : {})
+    });
+  }
+
+  async onDetachedFailsOnce(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    if (!this.detachedFailOnceRuns.has(run.runId)) {
+      this.detachedFailOnceRuns.add(run.runId);
+      throw new Error("detached callback failed once");
+    }
+    await this.onDetachedDone(run, result);
+  }
+
+  getDetachedDeliveryLog(): DetachedDeliveryLogEntry[] {
+    return this.detachedDeliveryLog;
+  }
+
+  /** Seed a `running` detached run row with the `onDetachedDone` hook wired. */
+  seedDetachedRunForTest(
+    runId: string,
+    maxBudgetAt?: number,
+    notifySource?: string,
+    onFinishName = "onDetachedDone"
+  ): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish, detached_notify_source,
+        detached_max_budget_at
+      ) VALUES (
+        ${runId}, ${null}, 'Child', 'running', 0, ${Date.now()}, 1,
+        ${onFinishName}, ${notifySource ?? null}, ${maxBudgetAt ?? null}
+      )
+    `;
+  }
+
+  /**
+   * Seed a `running` detached run that has reported progress (`lastProgressAt`)
+   * and then gone silent, with a resetting no-progress budget but NO absolute
+   * ceiling — so the backbone reconcile gives up ONLY on the no-progress window.
+   */
+  seedDetachedRunWithStaleProgressForTest(
+    runId: string,
+    noProgressBudgetMs: number,
+    lastProgressAt: number
+  ): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish, detached_max_budget_at,
+        detached_no_progress_budget_ms, last_progress_at
+      ) VALUES (
+        ${runId}, ${null}, 'Child', 'running', 0, ${Date.now()}, 1,
+        'onDetachedDone', ${null}, ${noProgressBudgetMs}, ${lastProgressAt}
+      )
+    `;
+  }
+
+  /** Seed a non-detached `running` row to prove cancel ownership stays awaited. */
+  seedAwaitedRunForTest(runId: string): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached
+      ) VALUES (
+        ${runId}, ${null}, 'TestAgentToolStubChild', 'running', 0,
+        ${Date.now()}, 0
+      )
+    `;
+  }
+
+  readRunNotifySourceForTest(runId: string): string | null {
+    const row = this._agentTool._readAgentToolRun(runId) as {
+      detached_notify_source?: string | null;
+    } | null;
+    return row?.detached_notify_source ?? null;
+  }
+
+  expireDetachedFinishClaimForTest(runId: string): void {
+    this.sql`
+      UPDATE cf_agent_tool_runs
+      SET finish_claimed_at = 0
+      WHERE run_id = ${runId}
+    `;
+  }
+
+  async cancelRunForTest(runId: string): Promise<void> {
+    await this.cancelAgentTool(runId);
+  }
+
+  /**
+   * Capture the TERMINAL `agent-tool-event` frames a detached delivery
+   * broadcasts to connected clients. Proves that paths without a tail sequence
+   * (explicit cancel, budget give-up) still flip the background-runs tray to
+   * its final state live (#1752 fix #1), not just the warm fast path.
+   */
+  async captureDeliveryTerminalBroadcastsForTest(
+    action: "cancel" | "giveUp",
+    runId: string
+  ): Promise<AgentToolEvent[]> {
+    const captured: AgentToolEvent[] = [];
+    const self = this as unknown as {
+      broadcast: (
+        body: string | ArrayBuffer | ArrayBufferView,
+        without?: string[]
+      ) => void;
+    };
+    const original = self.broadcast.bind(this);
+    self.broadcast = (body, without) => {
+      if (typeof body === "string") {
+        try {
+          const message = JSON.parse(body) as AgentToolEventMessage;
+          if (message.type === "agent-tool-event") captured.push(message.event);
+        } catch {
+          // Ignore non-JSON frames.
+        }
+      }
+      return original(body, without);
+    };
+    try {
+      if (action === "cancel") await this.cancelAgentTool(runId);
+      else await this.deliverGiveUpForTest(runId);
+    } finally {
+      self.broadcast = original;
+    }
+    const terminalKinds = new Set([
+      "finished",
+      "error",
+      "aborted",
+      "interrupted"
+    ]);
+    return captured.filter((event) => terminalKinds.has(event.kind));
+  }
+
+  /**
+   * Arm the detached backbone `count` times concurrently (the fan-out a turn
+   * dispatching several detached runs at once produces) and return the live
+   * backbone schedules. The mutex must collapse them to exactly one.
+   */
+  async armDetachedBackboneConcurrentlyForTest(
+    count: number
+  ): Promise<DetachedBackboneSchedule[]> {
+    await Promise.all(
+      Array.from({ length: count }, () =>
+        this._agentTool._armDetachedBackbone({ resetCadence: true })
+      )
+    );
+    return this.detachedBackboneSchedulesForTest();
+  }
+
+  async detachedReconcileTickForTest(cadenceIndex?: number): Promise<void> {
+    await this._cfDetachedReconcileTick(
+      cadenceIndex !== undefined ? { cadenceIndex } : undefined
+    );
+  }
+
+  async detachedBackboneSchedulesForTest(): Promise<
+    DetachedBackboneSchedule[]
+  > {
+    const schedules = await this.listSchedules();
+    return schedules
+      .filter((schedule) => schedule.callback === "_cfDetachedReconcileTick")
+      .map((schedule) => ({
+        delayInSeconds:
+          "delayInSeconds" in schedule ? schedule.delayInSeconds : undefined,
+        payload: schedule.payload
+      }));
+  }
+
+  async deliverFinishForTest(
+    runId: string,
+    status: AgentToolTerminalStatus,
+    text: string
+  ): Promise<void> {
+    await this._agentTool._deliverDetachedTerminal(runId, "finish", {
+      runId,
+      agentType: "Child",
+      status,
+      ...(status === "completed" ? { summary: text } : { error: text })
+    });
+  }
+
+  async deliverFinishCatchingForTest(
+    runId: string,
+    status: AgentToolTerminalStatus,
+    text: string
+  ): Promise<string | null> {
+    try {
+      await this.deliverFinishForTest(runId, status, text);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async deliverGiveUpForTest(runId: string): Promise<void> {
+    await this._agentTool._deliverDetachedTerminal(runId, "give_up", {
+      runId,
+      agentType: "Child",
+      status: "interrupted",
+      error: "detached run exceeded its budget before completing",
+      reason: "budget-exceeded",
+      childStillRunning: true
+    });
+  }
+
+  readRunStatusForTest(runId: string): string | null {
+    const row = this._agentTool._readAgentToolRun(runId) as {
+      status: string;
+    } | null;
+    return row ? row.status : null;
   }
 
   /**

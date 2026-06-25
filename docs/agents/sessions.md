@@ -406,7 +406,7 @@ const overlays = await session.getCompactions();
 
 When `.compactAfter(threshold)` is set, `appendMessage()` checks the estimated token count after each write. If it exceeds the threshold, `compact()` is called automatically. Auto-compaction failure is non-fatal — the message is already saved.
 
-> Auto-compaction is checked **between turns** (on each `appendMessage()`), not within a turn. A single long, tool-heavy turn can grow past the model's context window mid-flight, before the next check. `@cloudflare/think` adds opt-in mid-turn recovery on top of this — see [Context-window overflow recovery](./think/index.md#context-window-overflow-recovery).
+> Auto-compaction is checked **between turns** (on each `appendMessage()`), not within a turn. A single long, tool-heavy turn can grow past the model's context window mid-flight, before the next check. `@cloudflare/think` adds opt-in mid-turn recovery on top of this — see [Context-window overflow recovery](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#context-window-overflow-recovery).
 
 By default, the estimate includes stored message parts plus the Session-managed frozen system prompt. That means context blocks and cached prompts managed by `Session` contribute to the threshold. The estimate does not include framework-specific prompt additions or tool schema serialization that happen outside `Session`, such as Think's final capability prompt and tool catalog.
 

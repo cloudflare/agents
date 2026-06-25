@@ -10,8 +10,8 @@ Related:
 - [think.md](./think.md) — overall Think architecture
 - [think-sessions.md](./think-sessions.md) — Session-backed message storage
 - [docs/think/programmatic-submissions.md](../docs/think/programmatic-submissions.md) — user-facing API guide
-- [server-driven-messages.md](../docs/server-driven-messages.md) — lighter-weight server message patterns
-- [workflows.md](../docs/workflows.md) — durable multi-step orchestration
+- [server-driven-messages.md](../docs/agents/server-driven-messages.md) — lighter-weight server message patterns
+- [workflows.md](../docs/agents/workflows.md) — durable multi-step orchestration
 
 ## Problem
 

@@ -4520,6 +4520,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     | "stream"
     | "submit"
     | "addMessages"
+    | "detachedNotify"
     | null = null;
   private _nestedAdmissionAttempted = false;
   private _nestedAdmissionSucceeded = false;
@@ -4649,6 +4650,12 @@ export class ThinkProgrammaticTestAgent extends Think {
       case "addMessages":
         await this.addMessages([msg]);
         return;
+      case "detachedNotify":
+        await this.notifyDetachedFinishForTest({
+          runId: "nested-detached-notify",
+          notifySource: "nested-detached-source"
+        });
+        return;
     }
   }
 
@@ -4672,6 +4679,125 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async clearInBandStreamErrorResponse(): Promise<void> {
     this._inBandErrorResponse = null;
+  }
+
+  async notifyDetachedFinishForTest(options?: {
+    runId?: string;
+    notifySource?: string;
+  }): Promise<void> {
+    const runId = options?.runId ?? "detached-notify-run";
+    await this._cfDetachedNotifyFinish(
+      {
+        runId,
+        agentType: "Researcher",
+        status: "completed",
+        inputPreview: "detached topic",
+        displayOrder: 0,
+        startedAt: Date.now(),
+        ...(options?.notifySource !== undefined && {
+          notifySource: options.notifySource
+        })
+      },
+      {
+        status: "completed",
+        summary: "detached summary"
+      }
+    );
+  }
+
+  /**
+   * Drive `_deliverDetachedMilestone` (the `detached: { onMilestones }`
+   * convenience) directly. Called twice with the same milestone to prove the
+   * idempotency key collapses warm-path + reconcile delivery to a single
+   * synthetic turn (rfc-detached-agent-tools §progress, 4b).
+   */
+  async notifyDetachedMilestoneForTest(options?: {
+    runId?: string;
+    name?: string;
+    notifySource?: string;
+    times?: number;
+    mode?: "react" | "narrate";
+  }): Promise<void> {
+    const runId = options?.runId ?? "detached-milestone-run";
+    const name = options?.name ?? "sources-gathered";
+    const mode = options?.mode ?? "react";
+    const internals = this as unknown as {
+      _deliverDetachedMilestone: (
+        run: AgentToolRunInfo,
+        milestone: {
+          name: string;
+          sequence: number;
+          at: number;
+          data?: unknown;
+        },
+        mode: "react" | "narrate"
+      ) => Promise<void>;
+    };
+    for (let i = 0; i < (options?.times ?? 2); i++) {
+      await internals._deliverDetachedMilestone(
+        {
+          runId,
+          agentType: "Researcher",
+          status: "running",
+          inputPreview: "detached topic",
+          displayOrder: 0,
+          startedAt: Date.now(),
+          ...(options?.notifySource !== undefined && {
+            notifySource: options.notifySource
+          })
+        },
+        { name, sequence: 0, at: Date.now(), data: { sources: 2 } },
+        mode
+      );
+    }
+  }
+
+  /**
+   * Prove that a serialized detached delivery (the fast-path / backbone case)
+   * runs strictly BETWEEN turns: while a turn is occupying the queue, a
+   * `_runDetachedDelivery(_, { serialize: true })` must wait for it rather than
+   * interleave its state-mutating callback with the active turn (#1752 fix #2).
+   */
+  async serializedDetachedDeliveryOrderingForTest(): Promise<string[]> {
+    const order: string[] = [];
+    const internals = this as unknown as {
+      _turnQueue: {
+        enqueue: (id: string, fn: () => Promise<void>) => Promise<void>;
+      };
+      _runDetachedDelivery: (
+        invoke: () => Promise<void>,
+        options?: { serialize?: boolean }
+      ) => Promise<void>;
+    };
+
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+
+    // Occupy the turn queue with a still-running "turn".
+    const turnPromise = internals._turnQueue.enqueue(
+      "test-active-turn",
+      async () => {
+        await turnGate;
+        order.push("turn");
+      }
+    );
+
+    // A serialized delivery dispatched while the turn is active must queue
+    // behind it, not run concurrently.
+    const deliveryPromise = internals._runDetachedDelivery(
+      async () => {
+        order.push("delivery");
+      },
+      { serialize: true }
+    );
+
+    // Let the delivery (incorrectly) run first if it were NOT serialized.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    releaseTurn();
+    await Promise.all([turnPromise, deliveryPromise]);
+    return order;
   }
 
   async setThrowingStreamError(message: string | null): Promise<void> {

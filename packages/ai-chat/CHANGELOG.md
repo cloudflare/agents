@@ -595,7 +595,7 @@
   }
   ```
 
-  No behavior change for existing callers. See `docs/chat-agents.md` (new "Guarding against stale recoveries" section) for the full recipe, including a loop-protection pattern using `onChatResponse`.
+  No behavior change for existing callers. See `docs/agents/chat-agents.md` (new "Guarding against stale recoveries" section) for the full recipe, including a loop-protection pattern using `onChatResponse`.
 
 ## 0.4.4
 
@@ -1066,7 +1066,7 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
   - Full tool streaming lifecycle in message-builder (tool-input-start/delta/error, tool-output-error)
 
   **Docs:**
-  - New `docs/chat-agents.md` — comprehensive AIChatAgent and useAgentChat reference
+  - New `docs/agents/chat-agents.md` — comprehensive AIChatAgent and useAgentChat reference
   - Rewritten README, migration guides, human-in-the-loop, resumable streaming, client tools docs
   - New `examples/ai-chat/` example with modern patterns and Workers AI
 

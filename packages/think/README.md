@@ -53,8 +53,8 @@ add `src/server.ts`; the generated entry still wraps it and injects
 The framework supports one sub-agent layer today. If you need nested sub-agents,
 please reach out with your use case so we can design that model deliberately.
 
-See the full Think framework docs in `docs/think/index.md` for conventions,
-custom server handlers, diagnostics, and route-prefix configuration.
+The published package includes the full Think documentation at
+`docs/index.md`.
 
 ## Messengers
 
@@ -173,7 +173,7 @@ export class Assistant extends Think<Env> {
 The parent broadcasts `agent-tool-event` frames for live UI rendering and keeps
 the child facet until `clearAgentToolRuns()` deletes retained runs.
 
-See the full [Agent Tools guide](../../docs/agent-tools.md) for rendering,
+See the full [Agent Tools guide](../../docs/agents/agent-tools.md) for rendering,
 drill-in, and cleanup patterns.
 
 ## Built-in workspace

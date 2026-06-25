@@ -125,5 +125,5 @@ That request creates a mock `ForwardableEmailMessage` and runs it through the sa
 
 ## Related docs
 
-- [`../../docs/email.md`](../../docs/email.md) — Email Service with agents
+- [`../../docs/agents/email.md`](../../docs/agents/email.md) — Email Service with agents
 - [`../playground`](../playground) — larger email routing demos inside the playground

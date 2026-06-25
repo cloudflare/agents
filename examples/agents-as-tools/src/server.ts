@@ -68,25 +68,59 @@ export class Researcher extends DemoToolAgent {
         inputSchema: z.object({
           query: z.string().min(2)
         }),
-        execute: async ({ query }) => ({
-          query,
-          results: [
-            {
-              title: `Background on "${query}"`,
-              snippet:
-                `Comprehensive overview of ${query}. Recent analysis shows ` +
-                "several trade-offs that depend on workload and deployment shape.",
-              url: `https://example.com/search?q=${encodeURIComponent(query)}`
-            },
-            {
-              title: `Recent changes related to "${query}"`,
-              snippet:
-                `Latest updates around ${query}, including production lessons ` +
-                "from large open-source and infrastructure deployments.",
-              url: `https://example.com/research?topic=${encodeURIComponent(query)}`
-            }
-          ]
-        })
+        execute: async ({ query }) => {
+          // Ephemeral progress (rfc-detached-agent-tools §progress). When this
+          // Researcher runs as an agent tool (inline or detached/background),
+          // these signals ride the child stream as transient
+          // `data-agent-progress` parts and surface on the parent's
+          // `AgentToolRunState.progress` — the background-runs tray renders a
+          // live bar without anyone drilling in. A no-op when run standalone.
+          await this.reportProgress({
+            phase: "searching",
+            fraction: 0.2,
+            message: `Searching for "${query}"…`
+          });
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await this.reportProgress({
+            phase: "reading",
+            fraction: 0.6,
+            message: "Reading 2 sources…"
+          });
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await this.reportProgress({
+            phase: "synthesizing",
+            fraction: 0.9,
+            message: "Synthesizing findings…"
+          });
+          // Durable milestone (rfc-detached-agent-tools §progress, 4b). Unlike
+          // the ephemeral signals above, a named milestone persists, replays on
+          // drill-in, and — for a detached run dispatched with
+          // `detached: { onMilestones: ["sources-gathered"] }` — injects a chat
+          // notification so the parent model can react before the run finishes.
+          await this.reportProgress({
+            milestone: "sources-gathered",
+            data: { query, sources: 2 }
+          });
+          return {
+            query,
+            results: [
+              {
+                title: `Background on "${query}"`,
+                snippet:
+                  `Comprehensive overview of ${query}. Recent analysis shows ` +
+                  "several trade-offs that depend on workload and deployment shape.",
+                url: `https://example.com/search?q=${encodeURIComponent(query)}`
+              },
+              {
+                title: `Recent changes related to "${query}"`,
+                snippet:
+                  `Latest updates around ${query}, including production lessons ` +
+                  "from large open-source and infrastructure deployments.",
+                url: `https://example.com/research?topic=${encodeURIComponent(query)}`
+              }
+            ]
+          };
+        }
       })
     };
   }
@@ -154,6 +188,11 @@ export class Assistant extends Think<Env> {
       "You are a friendly, concise assistant.",
       "Use `research` for deep background, `compare` for two-topic comparisons,",
       "and `plan` for implementation/refactor planning.",
+      "When the user wants something investigated 'in the background' or asks you",
+      "not to wait, use `research_background`: it returns immediately with a run",
+      "id while the Researcher keeps working. Tell the user it is running and",
+      "that you will report back when it finishes — a follow-up message will",
+      "arrive automatically with the result, and you should react to it then.",
       "After tools return, give the user a brief response grounded in the",
       "agent tools' findings. If a branch reports an error, acknowledge it",
       "instead of pretending it succeeded."
@@ -177,6 +216,44 @@ export class Assistant extends Think<Env> {
         inputSchema: z.object({
           description: z.string().min(5)
         })
+      }),
+      research_background: tool({
+        description:
+          "Dispatch a Researcher agent in the BACKGROUND (detached). Returns " +
+          "immediately with a run id; the result is injected back into the " +
+          "chat automatically when it finishes, even across reconnects.",
+        inputSchema: z.object({
+          query: z.string().min(3)
+        }),
+        execute: async ({ query }) => {
+          // Detached: does not block this turn, survives parent eviction, and
+          // `notify` posts the completion back into the chat so the model reacts
+          // to it later. `cancelBackground(runId)` can stop it early.
+          const dispatched = await this.runAgentTool<ResearchInput>(
+            Researcher,
+            {
+              input: { query },
+              display: { name: "Researcher" },
+              detached: {
+                notify: { source: "agents-as-tools-background" },
+                maxBudgetMs: 5 * 60 * 1000,
+                // Durable milestone narration (4b): when the Researcher reaches
+                // "sources-gathered", surface a status line mid-run. The
+                // shorthand defaults to "narrate" — a synthetic assistant
+                // message injected directly (no model turn), the right fit for a
+                // progress update the agent needn't act on. Use
+                // `{ names: [...], mode: "react" }` instead when the model should
+                // respond to the milestone (e.g. start dependent work).
+                onMilestones: ["sources-gathered"]
+              }
+            }
+          );
+          return {
+            status: "dispatched",
+            runId: dispatched.runId,
+            note: "Running in the background; I'll report back when it's done."
+          };
+        }
       }),
       compare: tool({
         description:
@@ -246,6 +323,16 @@ export class Assistant extends Think<Env> {
   @callable()
   async clearHelperRuns(): Promise<void> {
     await this.clearAgentToolRuns();
+  }
+
+  /**
+   * Cancel a background (detached) run early. Idempotent: a no-op if the run
+   * already finished. Delivers the `notify` completion with an "aborted" status
+   * so the chat still reflects the outcome.
+   */
+  @callable()
+  async cancelBackground(runId: string): Promise<void> {
+    await this.cancelAgentTool(runId);
   }
 }
 

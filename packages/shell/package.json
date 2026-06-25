@@ -54,6 +54,23 @@
   "type": "module",
   "files": [
     "dist",
+    "docs",
     "README.md"
-  ]
+  ],
+  "nx": {
+    "targets": {
+      "build": {
+        "inputs": [
+          "production",
+          "^production",
+          "{workspaceRoot}/docs/shell/**/*",
+          "{workspaceRoot}/scripts/copy-package-docs.ts"
+        ],
+        "outputs": [
+          "{projectRoot}/dist",
+          "{projectRoot}/docs"
+        ]
+      }
+    }
+  }
 }

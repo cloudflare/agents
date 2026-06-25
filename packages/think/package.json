@@ -141,6 +141,7 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md"
   ],
   "scripts": {
@@ -152,5 +153,21 @@
     "test:generated-entry": "vitest --run -c src/tests/generated-entry/vitest.config.ts",
     "test:vite": "vitest --run src/vite-tests",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
+  },
+  "nx": {
+    "targets": {
+      "build": {
+        "inputs": [
+          "production",
+          "^production",
+          "{workspaceRoot}/docs/think/**/*",
+          "{workspaceRoot}/scripts/copy-package-docs.ts"
+        ],
+        "outputs": [
+          "{projectRoot}/dist",
+          "{projectRoot}/docs"
+        ]
+      }
+    }
   }
 }

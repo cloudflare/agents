@@ -555,7 +555,7 @@ const secret = this.env.GITHUB_WEBHOOK_SECRET;
 
 ## Complete Example
 
-See the [GitHub Webhook Dashboard](../examples/github-webhook) for a full implementation featuring:
+See the [GitHub Webhook Dashboard](https://github.com/cloudflare/agents/tree/main/examples/github-webhook) for a full implementation featuring:
 
 - HMAC-SHA256 signature verification
 - Agent-per-repository routing

@@ -4,6 +4,11 @@ Workspace provides a durable virtual filesystem backed by SQLite and optional R2
 
 > **Experimental** — this feature may have breaking changes in future releases.
 
+## Related package documentation
+
+- `@cloudflare/codemode/docs/index.md` documents the sandbox runtime used to expose Workspace as `state.*` tools.
+- `agents/docs/index.md` documents Durable Object agents when Workspace is used as agent state.
+
 ## Installation
 
 ```sh
@@ -292,7 +297,7 @@ class MyAgent extends Agent<Env> {
 }
 ```
 
-Inside the sandbox, the `state` object exposes file operations, search/replace, JSON helpers, archive tools, and more. See [Codemode](./codemode.md) for details.
+Inside the sandbox, the `state` object exposes file operations, search/replace, JSON helpers, archive tools, and more. See `@cloudflare/codemode/docs/index.md` for the full Codemode documentation.
 
 ## Types
 

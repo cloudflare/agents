@@ -140,7 +140,7 @@ const { messages, sendMessage, addToolResult } = useAgentChat({
 });
 ```
 
-See [Client Tools Continuation](../client-tools-continuation.md) for the full protocol reference.
+See [Client Tools Continuation](https://github.com/cloudflare/agents/blob/main/docs/agents/client-tools-continuation.md) for the full protocol reference.
 
 ## Auto-Continuation
 

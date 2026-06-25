@@ -268,7 +268,7 @@ unrecoverable runs `interrupted` instead of hanging. In React, use
 `useAgentToolEvents({ agent })` to render retained and replayed child timelines.
 AIChatAgent children run headlessly, so browser client tools require a separate
 bridge; server-side tools work normally. See the full
-[Agent Tools guide](../../docs/agent-tools.md).
+[Agent Tools guide](../../docs/agents/agent-tools.md).
 
 ### WebSocket Connections
 
@@ -382,7 +382,7 @@ Workflows provide:
 - **Long-running tasks** — run for days or weeks
 - **Progress tracking** — report status back to the agent
 
-See [Workflows](../../docs/workflows.md) and [Human in the Loop](../../docs/human-in-the-loop.md).
+See [Workflows](../../docs/agents/workflows.md) and [Human in the Loop](../../docs/agents/human-in-the-loop.md).
 
 ---
 
@@ -513,12 +513,15 @@ export default {
 
 ## Learn More
 
-[Getting Started](../../docs/getting-started.md) ·
-[State Management](../../docs/state.md) ·
-[Scheduling](../../docs/scheduling.md) ·
-[Callable Methods](../../docs/callable-methods.md) ·
-[MCP Integration](../../docs/mcp-client.md) ·
-[Full Documentation](../../docs/index.md)
+The published package includes the complete documentation tree at
+`docs/index.md`.
+
+[Getting Started](../../docs/agents/getting-started.md) ·
+[State Management](../../docs/agents/state.md) ·
+[Scheduling](../../docs/agents/scheduling.md) ·
+[Callable Methods](../../docs/agents/callable-methods.md) ·
+[MCP Integration](../../docs/agents/mcp-client.md) ·
+[Full Documentation](../../docs/agents/index.md)
 
 ---
 

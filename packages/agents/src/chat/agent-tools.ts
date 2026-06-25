@@ -1,11 +1,231 @@
 import { applyChunkToParts, type MessagePart } from "./message-builder";
+import {
+  AGENT_TOOL_MILESTONE_PART,
+  AGENT_TOOL_PROGRESS_PART
+} from "../agent-tool-types";
 import type {
   AgentToolEventMessage,
   AgentToolEventState,
+  AgentToolMilestone,
+  AgentToolProgress,
+  AgentToolProgressSnapshot,
   AgentToolRunPart,
   AgentToolRunState,
   AgentToolStoredChunk
 } from "../agent-tool-types";
+
+/**
+ * Pull a reserved `data-agent-progress` chunk (emitted by a running sub-agent's
+ * `reportProgress`) into a latest-wins snapshot. Returns `undefined` for any
+ * other chunk so the caller keeps the prior snapshot.
+ */
+function readAgentToolProgressChunk(
+  chunk: unknown
+): AgentToolProgressSnapshot | undefined {
+  if (
+    typeof chunk !== "object" ||
+    chunk === null ||
+    (chunk as { type?: unknown }).type !== AGENT_TOOL_PROGRESS_PART
+  ) {
+    return undefined;
+  }
+  const data = (chunk as { data?: AgentToolProgress }).data ?? {};
+  return {
+    ...(typeof data.fraction === "number" ? { fraction: data.fraction } : {}),
+    ...(typeof data.message === "string" ? { message: data.message } : {}),
+    ...(typeof data.phase === "string" ? { phase: data.phase } : {}),
+    ...(data.data !== undefined ? { data: data.data } : {}),
+    at: Date.now()
+  };
+}
+
+/**
+ * Pull a reserved `data-agent-milestone` chunk into a durable milestone record,
+ * or `undefined` for any other chunk. Milestones carry their own monotonic
+ * `sequence` so the caller can dedupe replay-vs-live races.
+ */
+function readAgentToolMilestoneChunk(
+  chunk: unknown
+): AgentToolMilestone | undefined {
+  if (
+    typeof chunk !== "object" ||
+    chunk === null ||
+    (chunk as { type?: unknown }).type !== AGENT_TOOL_MILESTONE_PART
+  ) {
+    return undefined;
+  }
+  const data = (chunk as { data?: Partial<AgentToolMilestone> }).data ?? {};
+  if (typeof data.name !== "string") return undefined;
+  return {
+    name: data.name,
+    sequence: typeof data.sequence === "number" ? data.sequence : 0,
+    at: typeof data.at === "number" ? data.at : Date.now(),
+    ...(data.data !== undefined ? { data: data.data } : {})
+  };
+}
+
+/**
+ * Merge a milestone into a run's ordered milestone list, deduping on `sequence`
+ * (idempotent across replay + live races) and keeping the list sorted.
+ */
+function mergeMilestone(
+  existing: AgentToolMilestone[] | undefined,
+  milestone: AgentToolMilestone
+): AgentToolMilestone[] {
+  // Returns `existing` unchanged (same reference) when the milestone is a dup,
+  // so callers can identity-compare to detect a genuinely new milestone.
+  if (existing?.some((m) => m.sequence === milestone.sequence)) return existing;
+  const list = existing ? [...existing, milestone] : [milestone];
+  list.sort((a, b) => a.sequence - b.sequence);
+  return list;
+}
+
+/** Latest-wins coalescing window for `reportProgress` emits (per run). */
+const AGENT_TOOL_PROGRESS_COALESCE_MS = 200;
+
+export type AgentToolProgressEmitResult = "emitted" | "coalesced" | "inactive";
+
+/**
+ * Host-injected seams the shared progress emitter needs. Keeps the per-host
+ * `reportProgress` thin: Think / AIChatAgent supply how to resolve the active
+ * agent-tool run, how to broadcast a chat-response frame, and how to persist the
+ * latest snapshot on their own child-run table.
+ */
+export type AgentToolProgressEmitHooks = {
+  /** The agent-tool run currently executing in this turn, or null. */
+  resolveActiveRun: () => { runId: string; requestId: string } | null;
+  /** Broadcast a chat-response frame (id = requestId) to clients/tailers. */
+  broadcast: (requestId: string, chunkBody: string) => void;
+  /** Persist the latest snapshot + signal timestamp on the child run row. */
+  persistSnapshot: (
+    runId: string,
+    snapshot: {
+      fraction?: number;
+      message?: string;
+      phase?: string;
+      data?: unknown;
+    },
+    at: number
+  ) => void;
+  /**
+   * Persist a durable milestone row, bump the run's signal timestamp, and return
+   * the assigned monotonic per-run `sequence` (used to dedupe replay/live races).
+   */
+  persistMilestone: (
+    runId: string,
+    name: string,
+    data: unknown,
+    at: number
+  ) => number;
+};
+
+/**
+ * Shared implementation of `reportProgress` for chat hosts. Builds the reserved
+ * transient `data-agent-progress` wire frame, coalesces bursts to a bounded
+ * cadence (latest-wins; a `fraction >= 1` "done" frame always flushes), and
+ * persists a latest snapshot. `data` rides the live frame but is only persisted
+ * when the caller opts in via `{ persist: true }`.
+ */
+export class AgentToolProgressEmitter {
+  private readonly _lastEmitAt = new Map<string, number>();
+
+  constructor(private readonly hooks: AgentToolProgressEmitHooks) {}
+
+  report(
+    progress: AgentToolProgress,
+    options?: { persist?: boolean }
+  ): AgentToolProgressEmitResult {
+    const active = this.hooks.resolveActiveRun();
+    if (!active) return "inactive";
+    const { runId, requestId } = active;
+    const now = Date.now();
+
+    // Durable milestone: never coalesced (each named boundary must land,
+    // persist, and replay). Rides the stream as a PERSISTED data part.
+    if (typeof progress.milestone === "string" && progress.milestone) {
+      this._lastEmitAt.set(runId, now);
+      const sequence = this.hooks.persistMilestone(
+        runId,
+        progress.milestone,
+        progress.data,
+        now
+      );
+      this.hooks.broadcast(
+        requestId,
+        JSON.stringify({
+          type: AGENT_TOOL_MILESTONE_PART,
+          data: {
+            name: progress.milestone,
+            sequence,
+            at: now,
+            ...(typeof progress.fraction === "number"
+              ? { fraction: progress.fraction }
+              : {}),
+            ...(typeof progress.message === "string"
+              ? { message: progress.message }
+              : {}),
+            ...(typeof progress.phase === "string"
+              ? { phase: progress.phase }
+              : {}),
+            ...(progress.data !== undefined ? { data: progress.data } : {})
+          }
+        })
+      );
+      return "emitted";
+    }
+
+    const last = this._lastEmitAt.get(runId) ?? 0;
+    const isDone =
+      typeof progress.fraction === "number" && progress.fraction >= 1;
+    if (now - last < AGENT_TOOL_PROGRESS_COALESCE_MS && !isDone) {
+      return "coalesced";
+    }
+    this._lastEmitAt.set(runId, now);
+
+    const wire: AgentToolProgress = {
+      ...(typeof progress.fraction === "number"
+        ? { fraction: progress.fraction }
+        : {}),
+      ...(typeof progress.message === "string"
+        ? { message: progress.message }
+        : {}),
+      ...(typeof progress.phase === "string" ? { phase: progress.phase } : {}),
+      ...(progress.data !== undefined ? { data: progress.data } : {})
+    };
+    this.hooks.broadcast(
+      requestId,
+      JSON.stringify({
+        type: AGENT_TOOL_PROGRESS_PART,
+        transient: true,
+        data: wire
+      })
+    );
+    this.hooks.persistSnapshot(
+      runId,
+      {
+        ...(typeof progress.fraction === "number"
+          ? { fraction: progress.fraction }
+          : {}),
+        ...(typeof progress.message === "string"
+          ? { message: progress.message }
+          : {}),
+        ...(typeof progress.phase === "string"
+          ? { phase: progress.phase }
+          : {}),
+        ...(options?.persist && progress.data !== undefined
+          ? { data: progress.data }
+          : {})
+      },
+      now
+    );
+    return "emitted";
+  }
+
+  /** Drop coalescing state for a settled run (called on terminal). */
+  forget(runId: string): void {
+    this._lastEmitAt.delete(runId);
+  }
+}
 
 function sortRuns<Part extends AgentToolRunPart>(
   runs: AgentToolRunState<Part>[]
@@ -87,10 +307,51 @@ function applyToRun<Part extends AgentToolRunPart>(
     case "chunk": {
       if (!seeded) return undefined;
       const parts = [...seeded.parts];
+      let parsed: unknown;
       try {
-        applyChunkToParts(parts as MessagePart[], JSON.parse(event.body));
+        parsed = JSON.parse(event.body);
+        applyChunkToParts(
+          parts as MessagePart[],
+          parsed as Parameters<typeof applyChunkToParts>[1]
+        );
       } catch {
         return seeded;
+      }
+      // Project a reserved `data-agent-progress` part onto the run's latest
+      // progress snapshot so a tray can render a bar/phase without drilling in.
+      // The part is transient (not persisted into `parts`), so it is read here
+      // off the raw chunk rather than from the reduced parts array.
+      const progress = readAgentToolProgressChunk(parsed);
+      if (progress) {
+        return { ...seeded, parts, progress };
+      }
+      // Durable milestones land as a persisted `data-agent-milestone` part:
+      // append (deduped by sequence) to the run's milestone list, and reflect
+      // any progress fields the milestone carried onto the latest snapshot.
+      const milestone = readAgentToolMilestoneChunk(parsed);
+      if (milestone) {
+        const milestones = mergeMilestone(seeded.milestones, milestone);
+        // Only advance the snapshot for a genuinely new, not-older milestone, so
+        // a late replay of an earlier milestone never rolls `progress` backward.
+        const isNew = milestones !== seeded.milestones;
+        const notOlder =
+          seeded.progress === undefined || milestone.at >= seeded.progress.at;
+        if (!isNew || !notOlder) {
+          return { ...seeded, parts, milestones };
+        }
+        const data = (parsed as { data?: AgentToolProgress }).data ?? {};
+        const snapshot: AgentToolProgressSnapshot = {
+          ...(typeof data.fraction === "number"
+            ? { fraction: data.fraction }
+            : {}),
+          ...(typeof data.message === "string"
+            ? { message: data.message }
+            : {}),
+          ...(typeof data.phase === "string" ? { phase: data.phase } : {}),
+          milestone: milestone.name,
+          at: milestone.at
+        };
+        return { ...seeded, parts, progress: snapshot, milestones };
       }
       return { ...seeded, parts };
     }

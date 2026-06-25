@@ -119,7 +119,7 @@ const { messages } = useAgentChat({
 
 ## Try It
 
-See [examples/resumable-stream-chat](../examples/resumable-stream-chat) for a complete working example. Start a long response, refresh the page mid-stream, and watch it resume automatically.
+See [examples/resumable-stream-chat](https://github.com/cloudflare/agents/tree/main/examples/resumable-stream-chat) for a complete working example. Start a long response, refresh the page mid-stream, and watch it resume automatically.
 
 ## Related Docs
 

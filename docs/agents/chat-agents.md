@@ -845,7 +845,7 @@ The right strategy depends on whether the provider supports assistant prefill an
 | OpenAI (Responses API) | Retrieve completed response by ID — zero wasted tokens       | Zero       |
 | Anthropic              | Persist partial, send a synthetic user message to continue   | Medium     |
 
-For a complete multi-provider implementation, see the [`forever-chat` example](../experimental/forever-chat/) and the [`forever.md` design doc](../experimental/forever.md). For how chat recovery fits into the broader long-running agents story, see [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams).
+For a complete multi-provider implementation, see the [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) and the [`forever.md` design doc](https://github.com/cloudflare/agents/tree/main/experimental/forever.md). For how chat recovery fits into the broader long-running agents story, see [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams).
 
 ## Client API
 
@@ -878,17 +878,18 @@ function Chat() {
 
 ### Options
 
-| Option                        | Type                                            | Default  | Description                                                                                                              |
-| ----------------------------- | ----------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                         |
-| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                        |
-| `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                       |
-| `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                          |
-| `cancelOnClientAbort`         | `boolean`                                       | `false`  | Cancel the server turn when generic client stream abort/cleanup occurs. Explicit `stop()` always cancels the server turn |
-| `body`                        | `object \| () => object`                        | —        | Custom data sent with every request                                                                                      |
-| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`              | —        | Advanced per-request customization                                                                                       |
-| `tools`                       | `Record<string, AITool>`                        | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                    |
-| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly) |
+| Option                        | Type                                            | Default  | Description                                                                                                                                                                        |
+| ----------------------------- | ----------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                                                                                   |
+| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                                                                                  |
+| `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                                                                                 |
+| `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                                                                                    |
+| `cancelOnClientAbort`         | `boolean`                                       | `false`  | Cancel the server turn when generic client stream abort/cleanup occurs. Explicit `stop()` always cancels the server turn                                                           |
+| `body`                        | `object \| () => object`                        | —        | Custom data sent with every request                                                                                                                                                |
+| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`              | —        | Advanced per-request customization                                                                                                                                                 |
+| `tools`                       | `Record<string, AITool>`                        | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                                                                              |
+| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly)                                                           |
+| `syncMessagesToServer`        | `boolean`                                       | `true`   | When `true`, `setMessages` pushes the transcript to the server. Set to `false` for hosts with server-authoritative transcript storage so `setMessages` updates the local view only |
 
 ### Return Values
 
@@ -1669,11 +1670,11 @@ The chat protocol uses typed JSON messages over WebSocket:
 
 ## Examples
 
-- [AI Chat Example](../examples/ai-chat/) — Modern example with server tools, client tools, and approval
-- [Dynamic Tools](../examples/dynamic-tools/) — SDK/platform pattern with dynamic client-defined tools
-- [Resumable Stream Chat](../examples/resumable-stream-chat/) — Automatic stream resumption demo
-- [Human in the Loop Guide](../guides/human-in-the-loop/) — Tool approval with `needsApproval` and `onToolCall`
-- [Playground](../examples/playground/) — Kitchen-sink demo of all SDK features
+- [AI Chat Example](https://github.com/cloudflare/agents/tree/main/examples/ai-chat) — Modern example with server tools, client tools, and approval
+- [Dynamic Tools](https://github.com/cloudflare/agents/tree/main/examples/dynamic-tools) — SDK/platform pattern with dynamic client-defined tools
+- [Resumable Stream Chat](https://github.com/cloudflare/agents/tree/main/examples/resumable-stream-chat) — Automatic stream resumption demo
+- [Human in the Loop Guide](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop) — Tool approval with `needsApproval` and `onToolCall`
+- [Playground](https://github.com/cloudflare/agents/tree/main/examples/playground) — Kitchen-sink demo of all SDK features
 
 ## Related Docs
 

@@ -275,7 +275,7 @@ export class ChatAgent extends AIChatAgent<Env> {
 }
 ```
 
-See [`docs/chat-agents.md`](../../docs/chat-agents.md#stream-recovery) for provider-specific recovery strategies and observability events.
+See [`docs/agents/chat-agents.md`](../../docs/agents/chat-agents.md#stream-recovery) for provider-specific recovery strategies and observability events.
 
 Generic client stream abort/cleanup is local-only by default: the server turn continues and can be resumed later. An explicit `stop()` still cancels the server turn:
 
@@ -374,7 +374,7 @@ This is the same shape `Think.saveMessages` uses — see
 [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
 for the agent-tool orchestration pattern that motivated the API. The shipped
 agent-tool API is documented in
-[`docs/agent-tools.md`](../../docs/agent-tools.md).
+[`docs/agents/agent-tools.md`](../../docs/agents/agent-tools.md).
 
 ## Storage Management
 

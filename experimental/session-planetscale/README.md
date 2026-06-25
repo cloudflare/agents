@@ -28,7 +28,7 @@ Update `wrangler.jsonc` with the returned Hyperdrive ID. The checked-in config i
 
 ### 3. Create the tables
 
-Run the migration SQL from [docs/sessions.md](../../docs/sessions.md#3-create-the-tables) in your database console. The providers do not auto-create tables — migrations are managed by you.
+Run the migration SQL from [docs/agents/sessions.md](../../docs/agents/sessions.md#3-create-the-tables) in your database console. The providers do not auto-create tables — migrations are managed by you.
 
 ### 4. Deploy
 

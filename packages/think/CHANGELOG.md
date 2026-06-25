@@ -1025,7 +1025,7 @@
   }
   ```
 
-  No behavior change for existing callers. See `docs/chat-agents.md` (new "Guarding against stale recoveries" section) for the full recipe, including a loop-protection pattern using `onChatResponse`.
+  No behavior change for existing callers. See `docs/agents/chat-agents.md` (new "Guarding against stale recoveries" section) for the full recipe, including a loop-protection pattern using `onChatResponse`.
 
 ## 0.2.4
 

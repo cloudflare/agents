@@ -2,7 +2,7 @@
 
 The implementation plan for `@cloudflare/think` — an opinionated chat agent base class built on Session for conversation storage and the Agents SDK for execution.
 
-> This roadmap is retained as a historical implementation record. All phases are complete, and current recovery behavior is documented in [`docs/think/index.md`](../docs/think/index.md) and [`docs/chat-agents.md#stream-recovery`](../docs/chat-agents.md#stream-recovery).
+> This roadmap is retained as a historical implementation record. All phases are complete, and current recovery behavior is documented in [`docs/think/index.md`](../docs/think/index.md) and [`docs/agents/chat-agents.md#stream-recovery`](../docs/agents/chat-agents.md#stream-recovery).
 
 This document synthesizes four prior analyses:
 

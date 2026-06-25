@@ -2,7 +2,7 @@
 
 Think works as both a top-level agent (WebSocket to browser) and a sub-agent (RPC from a parent agent). It also supports programmatic turns — injecting messages and triggering model turns without a WebSocket connection.
 
-This page focuses on Think's `chat()` RPC surface and programmatic turns. For the generic framework primitives underneath (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`, routing shape), see [Sub-agents](../sub-agents.md).
+This page focuses on Think's `chat()` RPC surface and programmatic turns. For the generic framework primitives underneath (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`, routing shape), see [Sub-agents](https://github.com/cloudflare/agents/blob/main/docs/agents/sub-agents.md).
 
 For a quick comparison of `chat()`, `saveMessages()`, `submitMessages()`, and
 agent tools, see [Choosing a turn API](./index.md#choosing-a-turn-api).
@@ -286,7 +286,7 @@ class MyAgent extends Think<Env> {
 
 `AbortSignal` cannot be passed as an RPC argument across Durable Object boundaries — workerd's JSRPC layer rejects it at serialization time. Construct the controller **inside** the DO that calls `saveMessages` and bridge the parent's intent through a serializable mechanism.
 
-For agent orchestration, prefer [Agent Tools](../agent-tools.md). `runAgentTool()`
+For agent orchestration, prefer [Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md). `runAgentTool()`
 and `agentTool()` handle the parent abort signal, child-local `saveMessages({
 signal })`, event forwarding, replay, and cleanup for Think and `AIChatAgent`
 child agents.
@@ -309,7 +309,7 @@ In practice this means:
 - Recovery is best for long-lived chat sub-agents that have their own client reconnect path. Agent tools define a parent-side replay and terminal-state policy for cases where the original parent forwarding loop is gone.
 - If the parent restarts mid-agent-tool run, stored child chunks can replay, but the parent marks the run `interrupted` unless a future live-tail policy reattaches to recovered work.
 
-See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original motivation, and [Agent Tools](../agent-tools.md) for the shipped orchestration API.
+See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original motivation, and [Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md) for the shipped orchestration API.
 
 ---
 
@@ -482,7 +482,7 @@ export class MyAgent extends Think<Env> {
 | `terminalMessage`      | generic message   | Message shown to the user when recovery is given up on.                                                                                                                             |
 | `onExhausted`          | —                 | Called once when recovery is given up on. Inspect `ctx.reason`.                                                                                                                     |
 
-`ctx.reason` on the exhausted hook is one of: `no_progress_timeout` (stuck), `max_attempts_exceeded` (no-progress alarm loop), `work_budget_exceeded` (runaway), `recovery_aborted` (your `shouldKeepRecovering` returned `false`), or `stable_timeout` (extreme churn). See [`chat-agents.md`](../chat-agents.md#stream-recovery) for the full shared reference — Think and `@cloudflare/ai-chat` use the same recovery configuration.
+`ctx.reason` on the exhausted hook is one of: `no_progress_timeout` (stuck), `max_attempts_exceeded` (no-progress alarm loop), `work_budget_exceeded` (runaway), `recovery_aborted` (your `shouldKeepRecovering` returned `false`), or `stable_timeout` (extreme churn). See [`chat-agents.md`](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#stream-recovery) for the full shared reference — Think and `@cloudflare/ai-chat` use the same recovery configuration.
 
 ---
 

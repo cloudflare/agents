@@ -25,13 +25,13 @@ Human-in-the-loop (HITL) patterns allow agents to pause execution and wait for h
 
 Agents SDK supports multiple human-in-the-loop patterns. Choose based on your use case:
 
-| Use Case               | Pattern           | Best For                                           | Example                                                           |
-| ---------------------- | ----------------- | -------------------------------------------------- | ----------------------------------------------------------------- |
-| Long-running workflows | Workflow Approval | Multi-step processes, durable approval gates       | [examples/workflows/](../examples/workflows/)                     |
-| AIChatAgent tools      | `needsApproval`   | Chat-based tool calls with `@cloudflare/ai-chat`   | [guides/human-in-the-loop/](../guides/human-in-the-loop/)         |
-| OpenAI Agents SDK      | `needsApproval`   | Using OpenAI's agent SDK with conditional approval | [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/) |
-| Client-side tools      | `onToolCall`      | Tools that need browser APIs or user interaction   | Pattern below                                                     |
-| MCP Servers            | Elicitation       | MCP tools requesting structured user input         | [examples/mcp-elicitation/](../examples/mcp-elicitation/)         |
+| Use Case               | Pattern           | Best For                                           | Example                                                                                                      |
+| ---------------------- | ----------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Long-running workflows | Workflow Approval | Multi-step processes, durable approval gates       | [examples/workflows/](https://github.com/cloudflare/agents/tree/main/examples/workflows)                     |
+| AIChatAgent tools      | `needsApproval`   | Chat-based tool calls with `@cloudflare/ai-chat`   | [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)         |
+| OpenAI Agents SDK      | `needsApproval`   | Using OpenAI's agent SDK with conditional approval | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop) |
+| Client-side tools      | `onToolCall`      | Tools that need browser APIs or user interaction   | Pattern below                                                                                                |
+| MCP Servers            | Elicitation       | MCP tools requesting structured user input         | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)         |
 
 ### Decision Guide
 
@@ -350,7 +350,7 @@ This sends a `tool_result` to the LLM with your custom error text, so it can res
 
 `addToolOutput` with `state: "output-error"` does **not** auto-continue — it gives you full control over what happens next. If you want the LLM to respond to the error, call `sendMessage()` afterward.
 
-See the complete example: [guides/human-in-the-loop/](../guides/human-in-the-loop/)
+See the complete example: [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)
 
 ### Surviving restarts while waiting for a human
 
@@ -448,7 +448,7 @@ export class WeatherAgent extends Agent<Env, AgentState> {
 }
 ```
 
-See the complete example: [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/)
+See the complete example: [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop)
 
 ### MCP Elicitation
 
@@ -530,7 +530,7 @@ export class MyMcpAgent extends Agent<Env, State> {
 - The **MCP client** (Claude Desktop, etc.) handles UI rendering
 - Returns `{ action: "accept" | "decline", content: {...} }`
 
-See the complete example: [examples/mcp-elicitation/](../examples/mcp-elicitation/)
+See the complete example: [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)
 
 ## State Patterns for Approvals
 
@@ -647,12 +647,12 @@ async submitForApproval(request: ApprovalRequest): Promise<string> {
 
 ## Complete Examples
 
-| Pattern           | Location                                                          | Description                                        |
-| ----------------- | ----------------------------------------------------------------- | -------------------------------------------------- |
-| Workflow approval | [examples/workflows/](../examples/workflows/)                     | Multi-step task processing with approval gate      |
-| AIChatAgent tools | [guides/human-in-the-loop/](../guides/human-in-the-loop/)         | Chat tool approval with needsApproval + onToolCall |
-| OpenAI Agents SDK | [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/) | Conditional tool approval with modal               |
-| MCP Elicitation   | [examples/mcp-elicitation/](../examples/mcp-elicitation/)         | MCP server requesting structured user input        |
+| Pattern           | Location                                                                                                     | Description                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| Workflow approval | [examples/workflows/](https://github.com/cloudflare/agents/tree/main/examples/workflows)                     | Multi-step task processing with approval gate      |
+| AIChatAgent tools | [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)         | Chat tool approval with needsApproval + onToolCall |
+| OpenAI Agents SDK | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop) | Conditional tool approval with modal               |
+| MCP Elicitation   | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)         | MCP server requesting structured user input        |
 
 For detailed API documentation, see:
 

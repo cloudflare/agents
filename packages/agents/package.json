@@ -252,6 +252,7 @@
   },
   "files": [
     "dist",
+    "docs",
     "agents.tsconfig.json",
     "skills-module.d.ts",
     "README.md"
@@ -259,7 +260,21 @@
   "nx": {
     "implicitDependencies": [
       "!@cloudflare/ai-chat"
-    ]
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "production",
+          "^production",
+          "{workspaceRoot}/docs/agents/**/*",
+          "{workspaceRoot}/scripts/copy-package-docs.ts"
+        ],
+        "outputs": [
+          "{projectRoot}/dist",
+          "{projectRoot}/docs"
+        ]
+      }
+    }
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",

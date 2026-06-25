@@ -323,7 +323,7 @@ chat-shared-layer extraction PR 3 was set up to advance:
   on a facet now resolves the same way as on a top-level DO, including
   after hibernation, with no storage round-trip on cold wake. Also
   surfaces clear errors when the parent class isn't bound as a DO
-  namespace or when a bundler minifies its name. `docs/sub-agents.md`
+  namespace or when a bundler minifies its name. `docs/agents/sub-agents.md`
   gained the parent-class requirements section.
 - **#1394 — Think `beforeStep` hook + `TurnConfig.output` passthrough.**
   Adjacent rather than multi-session. `MyAssistant` can now make

@@ -201,6 +201,6 @@ const submission = await this.agent.submitMessages(messages, {
 
 ## Example
 
-See [Think Durable Submissions](../../examples/think-submissions/README.md) for
+See [Think Durable Submissions](https://github.com/cloudflare/agents/tree/main/examples/think-submissions/README.md) for
 a full dashboard that shows immediate ACKs, idempotent retry, queue status, and
 cancellation.

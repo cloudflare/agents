@@ -2,6 +2,8 @@
 
 Voice pipeline for [Cloudflare Agents](https://github.com/cloudflare/agents) -- continuous STT, TTS, streaming, and real-time audio over WebSocket.
 
+The published package includes the complete Voice guide at `docs/index.md`.
+
 > **Experimental.** This API is under active development and will break between releases. Pin your version and expect to rewrite when upgrading.
 
 ## Install

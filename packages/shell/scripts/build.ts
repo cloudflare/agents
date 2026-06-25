@@ -1,4 +1,5 @@
 import { build } from "tsdown";
+import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 async function main() {
@@ -16,6 +17,8 @@ async function main() {
   });
 
   formatDeclarationFiles();
+
+  copyPackageDocs(import.meta.url, "shell");
 
   process.exit(0);
 }

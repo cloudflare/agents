@@ -25,6 +25,9 @@ Built on Cloudflare Durable Objects, you get:
 
 > **Experimental.** This API is under active development and will break between releases. Pin your version.
 
+The Voice mixins extend the Agents SDK. Its documentation is available at
+`agents/docs/index.md`.
+
 ## Quick Start
 
 ### Install
@@ -683,6 +686,6 @@ History survives Durable Object restarts and client reconnections. Voice agents 
 
 ## Related
 
-- [Agent Class](./agent-class.md) — understanding the base Agent class
-- [Chat Agents](./chat-agents.md) — text-based AI chat agents
-- [State Management](./state.md) — managing agent state
+- [Agent Class](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-class.md) — understanding the base Agent class
+- [Chat Agents](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md) — text-based AI chat agents
+- [State Management](https://github.com/cloudflare/agents/blob/main/docs/agents/state.md) — managing agent state

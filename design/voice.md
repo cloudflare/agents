@@ -1,6 +1,6 @@
 # Voice Pipeline — Design (Experimental)
 
-> **Status: experimental.** The voice API is in `@cloudflare/voice` and will break between releases. See `docs/voice.md` for user-facing docs.
+> **Status: experimental.** The voice API is in `@cloudflare/voice` and will break between releases. See `docs/voice/index.md` for user-facing docs.
 
 How the voice pipeline works and why it is built this way.
 
@@ -35,7 +35,7 @@ What you give up:
 - WebRTC-grade network resilience (TCP head-of-line blocking on bad networks)
 - Tightly coupled echo cancellation (browser AEC via `getUserMedia` constraints still works)
 
-SFU integration is documented as an advanced option in `docs/voice.md`.
+SFU integration is documented as an advanced option in `docs/voice/index.md`.
 
 ## Two mixins
 

@@ -1,6 +1,6 @@
 # AGENTS.md — docs/
 
-User-facing documentation for the Agents SDK. These markdown files are manually synced to [developers.cloudflare.com/agents/](https://developers.cloudflare.com/agents/).
+User-facing documentation for the Agents SDK monorepo. Each package owns the directory under `docs/` matching its unscoped package name. These markdown files are manually synced to [developers.cloudflare.com/agents/](https://developers.cloudflare.com/agents/) where applicable.
 
 ## Diátaxis framework
 
@@ -31,14 +31,15 @@ There is no automated sync workflow. Changes here must be manually ported to `cl
 - Be concrete: code snippets over prose, real examples over abstract descriptions
 - No contractions (Cloudflare style guide requirement — "do not" not "don't")
 - Use TypeScript for all code examples
-- Link to related docs within this folder using relative paths (`./state.md`)
+- Link within a package directory using relative paths (`./state.md`)
+- Link across package directories with an absolute repository URL, and name the installed package path in prose when relevant
 
 ## Adding a new doc
 
-1. Write the markdown file in this folder
-2. Add it to `index.md` in the appropriate section
+1. Write the markdown file in the directory owned by its package
+2. Add it to that package's `index.md`
 3. If it documents a design decision, consider whether a companion entry in `/design` is warranted
 
 ## TODO backlog
 
-`index.md` has ~15 entries marked `TODO` — these are known gaps. When filling one, remove the TODO marker and follow the steps above.
+`agents/index.md` has entries marked `TODO` — these are known gaps. When filling one, remove the TODO marker and follow the steps above.

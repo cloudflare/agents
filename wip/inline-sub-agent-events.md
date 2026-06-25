@@ -96,7 +96,7 @@ below.
 This WIP note has mostly served its purpose. The pattern explored here
 graduated into the accepted RFC
 `design/rfc-helper-sub-agent-orchestration.md`, the stable design record
-`design/agent-tools.md`, user docs in `docs/agent-tools.md`, and a
+`design/agent-tools.md`, user docs in `docs/agents/agent-tools.md`, and a
 framework implementation under the public **agent tools** name.
 
 **What is done:**
@@ -120,7 +120,7 @@ framework implementation under the public **agent tools** name.
   `agentTool(Cls, options)`, the `agent-tool-event` protocol,
   parent-side `cf_agent_tool_runs`, Think and AIChatAgent child adapter
   methods, and the React `useAgentToolEvents` hook.
-- Docs / release notes: **done.** See `docs/agent-tools.md`,
+- Docs / release notes: **done.** See `docs/agents/agent-tools.md`,
   `design/agent-tools.md`, `packages/think/README.md`,
   `packages/ai-chat/README.md`, and the changeset.
 
@@ -145,7 +145,7 @@ The same word means two different things in this repo and being
 sloppy about it has been a source of confusion:
 
 1. **Sub-agent as nested addressable Durable Object** (what we ship).
-   Documented in `docs/sub-agents.md`:
+   Documented in `docs/agents/sub-agents.md`:
 
    > Sub-agents are child Durable Objects colocated under a parent
    > agent. Each sub-agent has its own isolated SQLite storage and its
@@ -341,7 +341,7 @@ covered by agent tools.
 
 - Routing primitive: `subAgent(Cls, name)`, `parentAgent(Cls)`,
   `onBeforeSubAgent`, `hasSubAgent`, `listSubAgents`,
-  `useAgent({ sub: [...] })`. Documented in `docs/sub-agents.md`.
+  `useAgent({ sub: [...] })`. Documented in `docs/agents/sub-agents.md`.
 - Resumable streaming for the parent's _own_ chat reply, durable
   across reconnect / hibernation. One `ResumableStream` per Think
   / AIChatAgent DO.
@@ -1079,7 +1079,7 @@ channel:
    re-establish a forwarding loop after its own crash (separate
    from per-turn helpers, where the run is allowed to be
    interrupted).
-8. Documentation in `docs/`. Decide whether `docs/sub-agents.md`
+8. Documentation in `docs/`. Decide whether `docs/agents/sub-agents.md`
    gains a "helpers" section or whether they get their own doc.
 
 Each PR is independently shippable. Each PR adds a concrete
@@ -1128,7 +1128,7 @@ shape is locked.
 
 - Issue: [`cloudflare/agents#1377`](https://github.com/cloudflare/agents/issues/1377)
 - Existing module: `packages/agents/src/chat/resumable-stream.ts`
-- Routing primitive doc: `docs/sub-agents.md`
+- Routing primitive doc: `docs/agents/sub-agents.md`
 - Shipped multi-session plan: `wip/think-multi-session-assistant-plan.md`
 - Chat-shared-layer extraction: `design/chat-shared-layer.md`
 - Think roadmap (where helper support could land): `design/think-roadmap.md`

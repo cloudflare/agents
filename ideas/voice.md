@@ -384,7 +384,7 @@ async speakReminder(payload: { message: string }) {
 **What has been built:**
 
 - `@cloudflare/agents-voice-twilio` — Twilio Media Streams adapter. Bridges Twilio's bidirectional WebSocket protocol (mulaw 8kHz, base64 JSON) to VoiceAgent's binary PCM protocol (16kHz, 16-bit LE). Handles mulaw decode/encode and sample rate conversion. Phone calls are routed to the same VoiceAgent Durable Object that handles web voice and text chat.
-- Agent handoff documentation — two patterns (client-side reconnect, server-side context transfer) documented in `docs/voice.md`.
+- Agent handoff documentation — two patterns (client-side reconnect, server-side context transfer) documented in `docs/voice/index.md`.
 - SFU WebSocket adapter guide — documented how to bridge Cloudflare Realtime SFU WebRTC audio to VoiceAgent for use cases that need WebRTC-grade quality.
 
 **Decisions on what is IN scope:**

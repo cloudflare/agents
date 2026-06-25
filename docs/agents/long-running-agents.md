@@ -44,7 +44,7 @@ State persists in SQLite. Agent restarts on next event.
 - **Connection state** — `connection.setState()` data for each WebSocket client
 - **Fiber checkpoints** — `stash()` data from `runFiber()`
 
-Higher-level abstractions built on SQLite — such as [Workspace](./workspace.md) files, [Session](./sessions.md) messages, and MCP connection state — also survive, since they are backed by the same SQLite storage.
+Higher-level abstractions built on SQLite — such as [Workspace](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) files, [Session](./sessions.md) messages, and MCP connection state — also survive, since they are backed by the same SQLite storage.
 
 ### What does not survive
 
@@ -531,7 +531,7 @@ Sub-agents still do not have independent physical alarm slots. The root parent k
 
 For a full user-facing guide to the routing primitive (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`), see [Sub-agents](./sub-agents.md).
 
-For chat-oriented sub-agents, [Think](./think/index.md) provides `chat()` for RPC streaming between parent and child agents. See [Sub-agents and Programmatic Turns](./think/sub-agents.md).
+For chat-oriented sub-agents, [Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) provides `chat()` for RPC streaming between parent and child agents. See [Sub-agents and Programmatic Turns](https://github.com/cloudflare/agents/blob/main/docs/think/sub-agents.md).
 
 ## Recovering interrupted LLM streams
 
@@ -571,9 +571,9 @@ The right recovery strategy depends on the LLM provider:
 | Anthropic              | Synthetic continuation              | Persist partial, send a synthetic user message asking the model to continue   | Medium     |
 | Other                  | Try prefill, fall back to synthetic | `continueLastTurn()` if the provider supports it, synthetic message otherwise | Varies     |
 
-For a complete multi-provider implementation with full code for each strategy, see the [`forever-chat` example](../experimental/forever-chat/) and the [`forever.md` design doc](../experimental/forever.md).
+For a complete multi-provider implementation with full code for each strategy, see the [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) and the [`forever.md` design doc](https://github.com/cloudflare/agents/tree/main/experimental/forever.md).
 
-[Think](./think/index.md) enables `chatRecovery` by default. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
+[Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) enables `chatRecovery` by default. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
 
 If the agent is interrupted before any assistant stream chunks are written, there is no partial assistant message to continue. When the latest persisted message is still the unanswered user message from that turn, chat recovery retries the turn automatically unless `onChatRecovery` returns `{ continue: false }`.
 
@@ -673,7 +673,7 @@ The project manager agent uses both: schedules for its own rhythms (daily standu
 
 ## Think: batteries included
 
-If you are building a chat-oriented long-running agent and want these patterns built in rather than assembling them yourself, [`Think`](./think/index.md) provides them out of the box:
+If you are building a chat-oriented long-running agent and want these patterns built in rather than assembling them yourself, [`Think`](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) provides them out of the box:
 
 - **Sessions with compaction** — non-destructive conversation summarization, context blocks, cross-session search
 - **Fiber-based recovery** — `chatRecovery` as a configuration toggle
@@ -720,11 +720,11 @@ The agent does not need to run continuously to do any of this. It just needs to 
 - [Workflows](./workflows.md) — durable multi-step processing
 - [State Management](./state.md) — `setState()` and persistence
 - [Sessions](./sessions.md) — persistent conversation storage, compaction, and context blocks
-- [Think](./think/index.md) — opinionated chat agent with built-in durability
+- [Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) — opinionated chat agent with built-in durability
 - [HTTP & WebSockets](./http-websockets.md) — lifecycle hooks and hibernation
 - [Callable Methods](./callable-methods.md) — RPC via `@callable` and service bindings
 - [Email Routing](./email.md) — receiving inbound email
 - [Webhooks](./webhooks.md) — receiving external events
 - [Human in the Loop](./human-in-the-loop.md) — approval flows
 - [Resumable Streaming](./resumable-streaming.md) — client-side stream resumption on disconnect
-- [`forever-chat` example](../experimental/forever-chat/) — multi-provider LLM recovery demo
+- [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) — multi-provider LLM recovery demo

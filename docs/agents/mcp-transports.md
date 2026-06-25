@@ -2,7 +2,7 @@
 
 This guide explains the different transport options for connecting to MCP servers with the Agents SDK.
 
-For a primer on MCP Servers and how they are implemented in the Agents SDK with `McpAgent`[here](docs/mcp-servers.md)
+For a primer on MCP servers and how they are implemented in the Agents SDK with `McpAgent`, see [Creating MCP Servers](./mcp-servers.md).
 
 ## Streamable HTTP Transport (Recommended)
 
@@ -303,6 +303,6 @@ export class MyMCP extends McpAgent<Env, State> {
 
 ## Examples
 
-- **Streamable HTTP**: See [`examples/mcp`](../examples/mcp)
-- **RPC Transport**: See [`examples/mcp-rpc-transport`](../examples/mcp-rpc-transport)
-- **MCP Client**: See [`examples/mcp-client`](../examples/mcp-client)
+- **Streamable HTTP**: See [`examples/mcp`](https://github.com/cloudflare/agents/tree/main/examples/mcp)
+- **RPC Transport**: See [`examples/mcp-rpc-transport`](https://github.com/cloudflare/agents/tree/main/examples/mcp-rpc-transport)
+- **MCP Client**: See [`examples/mcp-client`](https://github.com/cloudflare/agents/tree/main/examples/mcp-client)

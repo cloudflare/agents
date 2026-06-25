@@ -19,6 +19,23 @@ type ThinkSubmissionTestStub = {
   clearInBandStreamErrorResponse(): Promise<void>;
   setThrowingStreamError(message: string | null): Promise<void>;
   getProgrammaticStreamErrorCountForTest(): Promise<number>;
+  notifyDetachedFinishForTest(options?: {
+    runId?: string;
+    notifySource?: string;
+  }): Promise<void>;
+  notifyDetachedMilestoneForTest(options?: {
+    runId?: string;
+    name?: string;
+    notifySource?: string;
+    times?: number;
+    mode?: "react" | "narrate";
+  }): Promise<void>;
+  serializedDetachedDeliveryOrderingForTest(): Promise<string[]>;
+  runNestedAdmissionScenario(mode: "detachedNotify"): Promise<{
+    attempted: boolean;
+    succeeded: boolean;
+    error: string | null;
+  }>;
   getSubmissionFinalStatusForTest(
     resultStatus: "completed" | "error" | "skipped" | "aborted",
     streamError?: string
@@ -181,6 +198,27 @@ async function waitForSubmission(
   return submission;
 }
 
+async function waitForSubmissionByKey(
+  agent: ThinkSubmissionTestStub,
+  idempotencyKey: string,
+  predicate: (submission: ThinkSubmissionInspection) => boolean
+): Promise<ThinkSubmissionInspection> {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const submission = (await agent.listSubmissionsForTest({ limit: 20 })).find(
+      (item) => item.idempotencyKey === idempotencyKey
+    );
+    if (submission && predicate(submission)) return submission;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const submission = (await agent.listSubmissionsForTest({ limit: 20 })).find(
+    (item) => item.idempotencyKey === idempotencyKey
+  );
+  if (!submission) {
+    throw new Error(`Submission with key ${idempotencyKey} was not found`);
+  }
+  return submission;
+}
+
 async function waitForWorkflowEvent(
   agent: ThinkSubmissionTestStub,
   predicate: (
@@ -262,6 +300,150 @@ describe("Think durable submissions", () => {
     expect(lifecycle).toContain("pending");
     expect(lifecycle).toContain("running");
     expect(lifecycle).toContain("completed");
+  });
+
+  it("detached notify submits a follow-up turn that drains to a model response", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest("Background follow-up");
+
+    await agent.notifyDetachedFinishForTest({
+      runId: "notify-run",
+      notifySource: "agents-as-tools-background"
+    });
+
+    const completed = await waitForSubmissionByKey(
+      agent,
+      "detached-finish:notify-run:completed",
+      (submission) => submission.status === "completed"
+    );
+
+    expect(completed).toMatchObject({
+      idempotencyKey: "detached-finish:notify-run:completed",
+      metadata: {
+        source: "agents-as-tools-background",
+        runId: "notify-run",
+        agentType: "Researcher",
+        status: "completed"
+      }
+    });
+    expect(textParts(await agent.getStoredMessages())).toEqual([
+      'Background task "Researcher" (run notify-run) finished:\n\n' +
+        "detached summary",
+      "Background follow-up"
+    ]);
+  });
+
+  it("detached milestone notify submits once and is idempotent across re-delivery", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest("Reacting to the milestone");
+
+    // Called twice (warm tail + backbone reconcile re-delivery); the
+    // idempotency key must collapse them to a single synthetic turn.
+    await agent.notifyDetachedMilestoneForTest({
+      runId: "ms-run",
+      name: "sources-gathered",
+      notifySource: "agents-as-tools-background",
+      times: 2
+    });
+
+    const completed = await waitForSubmissionByKey(
+      agent,
+      "detached-ms:ms-run:sources-gathered",
+      (submission) => submission.status === "completed"
+    );
+
+    expect(completed).toMatchObject({
+      idempotencyKey: "detached-ms:ms-run:sources-gathered",
+      metadata: {
+        source: "agents-as-tools-background",
+        runId: "ms-run",
+        milestone: "sources-gathered"
+      }
+    });
+
+    // Exactly one milestone message injected despite two delivery attempts.
+    const milestoneMessages = textParts(await agent.getStoredMessages()).filter(
+      (text) => text.includes('reached milestone "sources-gathered"')
+    );
+    expect(milestoneMessages).toHaveLength(1);
+  });
+
+  it("detached milestone narrate injects a synthetic assistant line with no model turn", async () => {
+    const agent = await freshAgent();
+    // If narrate were to trigger inference, this would surface as a second
+    // assistant message — it must NOT.
+    await agent.setProgrammaticResponseForTest("SHOULD NOT APPEAR");
+
+    await agent.notifyDetachedMilestoneForTest({
+      runId: "ms-narrate",
+      name: "sources-gathered",
+      notifySource: "agents-as-tools-background",
+      mode: "narrate",
+      times: 2
+    });
+
+    const stored = await agent.getStoredMessages();
+    const texts = textParts(stored);
+    const milestoneLines = texts.filter((text) =>
+      text.includes('reached milestone "sources-gathered"')
+    );
+    // Idempotent (deterministic id) → exactly one line despite two deliveries.
+    expect(milestoneLines).toHaveLength(1);
+    // No inference ran, so the programmatic model response never appears.
+    expect(texts).not.toContain("SHOULD NOT APPEAR");
+    // It is the assistant speaking, not a synthetic "user" turn.
+    const milestoneMessage = stored.find((message) =>
+      (message.parts ?? []).some(
+        (part) =>
+          (part as { type?: string }).type === "text" &&
+          ((part as { text?: string }).text ?? "").includes(
+            'reached milestone "sources-gathered"'
+          )
+      )
+    );
+    expect(milestoneMessage?.role).toBe("assistant");
+  });
+
+  it("detached notify created during an active turn drains after that turn", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest("Model response");
+
+    await expect(
+      agent.runNestedAdmissionScenario("detachedNotify")
+    ).resolves.toEqual({
+      attempted: true,
+      succeeded: true,
+      error: null
+    });
+
+    const completed = await waitForSubmissionByKey(
+      agent,
+      "detached-finish:nested-detached-notify:completed",
+      (submission) => submission.status === "completed"
+    );
+
+    expect(completed.error).toBeUndefined();
+    expect(completed.metadata).toMatchObject({
+      source: "nested-detached-source",
+      runId: "nested-detached-notify",
+      agentType: "Researcher",
+      status: "completed"
+    });
+    expect(textParts(await agent.getStoredMessages())).toContain(
+      'Background task "Researcher" (run nested-detached-notify) finished:\n\n' +
+        "detached summary"
+    );
+  });
+
+  it("serializes a fast-path/backbone detached delivery behind an active turn", async () => {
+    const agent = await freshAgent();
+
+    // A serialized delivery dispatched while a turn occupies the queue must run
+    // strictly after that turn, never interleaved with it (#1752 fix #2).
+    expect(await agent.serializedDetachedDeliveryOrderingForTest()).toEqual([
+      "turn",
+      "delivery"
+    ]);
   });
 
   it("deduplicates retries by idempotency key without appending duplicate messages", async () => {

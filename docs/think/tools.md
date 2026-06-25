@@ -15,7 +15,7 @@ On every turn, Think merges tools from multiple sources. Later sources override 
 7. **Client tools** — from the browser (see [Client Tools](./client-tools.md))
 
 Tools belong to the agent running the turn. For parent-child orchestration,
-use [Agent Tools](../agent-tools.md) instead of passing one-off tools through
+use [Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md) instead of passing one-off tools through
 `chat()`.
 
 ## Built-in Workspace Tools
@@ -219,7 +219,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-See [Connecting to MCP Servers](../mcp-client.md) for full MCP client documentation.
+See [Connecting to MCP Servers](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md) for full MCP client documentation.
 
 ## Code Execution Tool
 
@@ -357,7 +357,7 @@ Add the Browser Rendering and Worker Loader bindings in `wrangler.jsonc`:
 }
 ```
 
-This adds the durable CDP tool plus — whenever a `browser` binding is present — the stateless [Quick Action](../browse-the-web.md#quick-actions-stateless-browsing) tools by default:
+This adds the durable CDP tool plus — whenever a `browser` binding is present — the stateless [Quick Action](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#quick-actions-stateless-browsing) tools by default:
 
 | Tool               | Description                                                                               |
 | ------------------ | ----------------------------------------------------------------------------------------- |
@@ -415,7 +415,7 @@ createBrowserTools({
 });
 ```
 
-See [Browse the Web](../browse-the-web.md) for the full CDP helper API reference, security model, and limitations.
+See [Browse the Web](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md) for the full CDP helper API reference, security model, and limitations.
 
 ## Extensions
 

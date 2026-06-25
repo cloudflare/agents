@@ -5,9 +5,9 @@ Integrate [Cloudflare Workflows](https://developers.cloudflare.com/workflows/) w
 ## Quick Links
 
 - [Start a workflow](#2-start-workflow-from-agent)
-- [Human approval](#human-in-the-loop-approvals)
-- [Pagination](#pagination)
-- [Workflow controls](#workflow-control-methods)
+- [Human approval](#human-in-the-loop-approval)
+- [Pagination](#getworkflowscriteria)
+- [Workflow controls](#agent-workflow-methods)
 
 ## Introduction
 

@@ -8,6 +8,11 @@ import type {
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentToolLifecycleResult,
+  type AgentToolMilestone,
+  type AgentToolProgress,
+  type AgentToolProgressSnapshot,
+  type AgentToolRunInfo,
   type AgentToolRunInspection,
   type AgentToolStoredChunk,
   type AgentContext,
@@ -32,6 +37,7 @@ import {
 } from "agents/chat";
 import {
   applyChunkToParts,
+  AgentToolProgressEmitter,
   aiSdkRecoveryCodec,
   ResumeHandshake,
   isReplayChunk,
@@ -260,6 +266,8 @@ type AIChatAgentToolRunRow = {
   error_message: string | null;
   started_at: number;
   completed_at: number | null;
+  progress_json?: string | null;
+  last_signal_at?: number | null;
 };
 type AIChatStreamMetadataRow = {
   id: string;
@@ -1283,8 +1291,74 @@ export class AIChatAgent<
     addColumnIfNotExists(
       "alter table cf_ai_chat_agent_tool_runs add column summary text"
     );
+    // Latest progress snapshot (rfc-detached-agent-tools §progress); only the
+    // most recent `reportProgress` is retained. `last_signal_at` drives the
+    // parent's resetting no-progress budget across eviction.
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column progress_json text"
+    );
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column last_signal_at integer"
+    );
     this.sql`create index if not exists idx_ai_chat_agent_tool_request_id
       on cf_ai_chat_agent_tool_runs(request_id)`;
+    // Durable milestones (rfc-detached-agent-tools §progress, 4b). One row per
+    // milestone; `sequence` is monotonic per run so replay/live races dedupe.
+    this.sql`create table if not exists cf_ai_chat_agent_tool_milestones (
+      run_id text not null,
+      sequence integer not null,
+      name text not null,
+      data_json text,
+      at integer not null,
+      primary key (run_id, sequence)
+    )`;
+  }
+
+  private _persistAgentToolMilestone(
+    runId: string,
+    name: string,
+    data: unknown,
+    at: number
+  ): number {
+    this._ensureAgentToolTables();
+    const rows = this.sql<{ next: number }>`
+      select coalesce(max(sequence), -1) + 1 as next
+      from cf_ai_chat_agent_tool_milestones where run_id = ${runId}
+    `;
+    const sequence = rows[0]?.next ?? 0;
+    this.sql`
+      insert or ignore into cf_ai_chat_agent_tool_milestones
+        (run_id, sequence, name, data_json, at)
+      values (
+        ${runId}, ${sequence}, ${name},
+        ${data !== undefined ? JSON.stringify(data) : null}, ${at}
+      )
+    `;
+    // A milestone is a progress signal too: advance the no-progress clock.
+    this.sql`update cf_ai_chat_agent_tool_runs set last_signal_at = ${at}
+      where run_id = ${runId}`;
+    return sequence;
+  }
+
+  private _readAgentToolMilestones(runId: string): AgentToolMilestone[] {
+    this._ensureAgentToolTables();
+    return this.sql<{
+      sequence: number;
+      name: string;
+      data_json: string | null;
+      at: number;
+    }>`
+      select sequence, name, data_json, at
+      from cf_ai_chat_agent_tool_milestones
+      where run_id = ${runId} order by sequence asc
+    `.map((row) => ({
+      name: row.name,
+      sequence: row.sequence,
+      at: row.at,
+      ...(row.data_json != null
+        ? { data: JSON.parse(row.data_json) as unknown }
+        : {})
+    }));
   }
 
   private _flushAwaitingStreamStartConnections() {
@@ -2827,6 +2901,54 @@ export class AIChatAgent<
     };
   }
 
+  private _agentToolProgressEmitterInstance: AgentToolProgressEmitter | null =
+    null;
+
+  private get _agentToolProgressEmitter(): AgentToolProgressEmitter {
+    if (!this._agentToolProgressEmitterInstance) {
+      this._agentToolProgressEmitterInstance = new AgentToolProgressEmitter({
+        resolveActiveRun: () => {
+          const requestId = this._activeRequestId;
+          if (!requestId) return null;
+          const runId = this._agentToolRunsByRequestId.get(requestId);
+          return runId ? { runId, requestId } : null;
+        },
+        broadcast: (requestId, chunkBody) => {
+          this._broadcastChatMessage({
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            id: requestId,
+            body: chunkBody,
+            done: false
+          });
+        },
+        persistSnapshot: (runId, snapshot, at) => {
+          this._ensureAgentToolTables();
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set progress_json = ${JSON.stringify(snapshot)},
+                last_signal_at = ${at}
+            where run_id = ${runId}
+          `;
+        },
+        persistMilestone: (runId, name, data, at) =>
+          this._persistAgentToolMilestone(runId, name, data, at)
+      });
+    }
+    return this._agentToolProgressEmitterInstance;
+  }
+
+  override async reportProgress<T = unknown>(
+    progress: AgentToolProgress<T>,
+    options?: { persist?: boolean }
+  ): Promise<void> {
+    const result = this._agentToolProgressEmitter.report(progress, options);
+    if (result === "inactive") {
+      console.warn(
+        "[ai-chat] reportProgress() was called outside of an active agent-tool run; ignoring. Call it from within an onChatMessage turn that is running as a sub-agent."
+      );
+    }
+  }
+
   /**
    * Override to return structured agent-tool output instead of the default
    * final assistant text.
@@ -2855,6 +2977,247 @@ export class AIChatAgent<
     } catch {
       return String(output);
     }
+  }
+
+  /** True while running inside this agent's own serialized detached-delivery
+   * turn slot (set by {@link _runDetachedDelivery}); lets a `react` notify run
+   * its reply inline rather than enqueuing (which would deadlock) or interleaving
+   * with a foreign turn. */
+  private _inSerializedDetachedDeliverySlot = false;
+
+  /** Notification ids (`detached-finish:*` / `detached-ms:*`) currently being
+   * injected, to dedupe a concurrent warm-tail + backbone delivery of the same
+   * milestone within one isolate before the persisted message exists. */
+  private _inFlightDetachedNotifications = new Set<string>();
+
+  /**
+   * Serialize detached terminal delivery against the chat turn queue. A
+   * fast-path push or backbone tick can land mid-turn, and an `onFinish` that
+   * mutates chat state (`saveMessages`, `setState`, a follow-up
+   * `runAgentTool`) running concurrently with an active LLM turn is a data
+   * race. Those paths never run synchronously inside a turn body (they fire
+   * from `waitUntil` / a scheduled alarm), so enqueuing on the turn queue runs
+   * the delivery strictly between turns without risk of self-deadlock.
+   *
+   * An explicit `cancelAgentTool` (`serialize` unset) may be invoked from
+   * inside the very turn that triggers it, where enqueuing WOULD self-deadlock,
+   * so it runs inline in the caller's (or a fresh) `agentContext`.
+   */
+  protected override async _runDetachedDelivery(
+    invoke: () => Promise<void>,
+    options?: { serialize?: boolean }
+  ): Promise<void> {
+    const inContext = () =>
+      agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        invoke
+      );
+    if (!options?.serialize) {
+      if (agentContext.getStore()?.agent === this) {
+        await invoke();
+        return;
+      }
+      await inContext();
+      return;
+    }
+    await this.keepAliveWhile(() =>
+      this._turnQueue.enqueue(
+        `detached-delivery:${crypto.randomUUID()}`,
+        // Mark the slot so `_injectDetachedNotification` knows it owns the active
+        // turn and can run a `react` reply INLINE (vs a foreign active turn,
+        // where inline would interleave and enqueue-await would deadlock).
+        async () => {
+          this._inSerializedDetachedDeliverySlot = true;
+          try {
+            await inContext();
+          } finally {
+            this._inSerializedDetachedDeliverySlot = false;
+          }
+        }
+      )
+    );
+  }
+
+  /**
+   * Inject a synthetic chat message for a detached-run notification, idempotent
+   * on its deterministic `id` (a re-delivery from the warm tail + cold backbone
+   * collapses to one — `persistMessages` is skipped when the id already exists).
+   * When `react` is set the model then takes a turn over the new message.
+   *
+   * `@cloudflare/ai-chat` has no durable-submission layer (unlike Think's
+   * `submitMessages`), so the turn cannot be enqueued-and-awaited from inside the
+   * serialized delivery slot — `TurnQueue` has no re-entrancy bypass, so that
+   * would self-deadlock. Instead: when we are already inside a turn slot (the
+   * `serialize: true` finish delivery runs as its own enqueued turn) we run the
+   * programmatic turn INLINE, reusing that slot — so the whole notify completes
+   * before the ledger marks the slot delivered (eviction-safe). When we are not
+   * inside a slot (a milestone fired from the `waitUntil` fast path or the
+   * reconcile alarm) we enqueue a fresh turn normally.
+   */
+  private async _injectDetachedNotification(
+    id: string,
+    role: "user" | "assistant",
+    text: string,
+    metadata: Record<string, unknown>,
+    options: { react: boolean }
+  ): Promise<void> {
+    // `messages.some` covers re-delivery against persisted history (survives
+    // eviction); the in-flight set closes the check-then-persist race when the
+    // warm tail and cold backbone deliver the SAME milestone concurrently in one
+    // isolate (milestones have no ledger claim, unlike finish).
+    if (
+      this._inFlightDetachedNotifications.has(id) ||
+      this.messages.some((message) => message.id === id)
+    ) {
+      return;
+    }
+    this._inFlightDetachedNotifications.add(id);
+    try {
+      await this.persistMessages([
+        ...this.messages,
+        { id, role, parts: [{ type: "text", text }], metadata } as UIMessage
+      ]);
+      if (!options.react) return;
+      const runReply = (requestId: string) =>
+        this._runProgrammaticChatTurn(
+          requestId,
+          this._lastClientTools,
+          this._lastBody,
+          undefined
+        );
+      if (this._inSerializedDetachedDeliverySlot) {
+        // We own the active turn slot (a `serialize: true` finish delivery), so
+        // run inline + awaited, reusing the slot's request id (keeps the
+        // `activeRequestId === turn requestId` invariant `saveMessages` relies
+        // on). The ledger marks the slot delivered only after the reaction
+        // completes, making the react turn eviction-safe too.
+        await runReply(this._turnQueue.activeRequestId ?? nanoid());
+      } else if (this._turnQueue.isActive) {
+        // Inside a FOREIGN turn (e.g. `cancelAgentTool` called mid-turn).
+        // Enqueue-and-await would deadlock; inline would interleave with that
+        // turn. Fire-and-forget a turn that runs once the slot frees — the
+        // message is already persisted, so the reaction is best-effort.
+        const requestId = nanoid();
+        void this.keepAliveWhile(() =>
+          this._runExclusiveChatTurn(requestId, () => runReply(requestId))
+        );
+      } else {
+        const requestId = nanoid();
+        await this._runExclusiveChatTurn(requestId, () => runReply(requestId));
+      }
+    } finally {
+      this._inFlightDetachedNotifications.delete(id);
+    }
+  }
+
+  /**
+   * Format the message injected by `detached: { notify }` when a background run
+   * finishes. Override to customize the prose, or return an empty string to
+   * suppress the notification for a given outcome.
+   */
+  protected formatDetachedCompletion(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    switch (result.status) {
+      case "completed":
+        return result.summary
+          ? `${label} finished:\n\n${result.summary}`
+          : `${label} finished successfully.`;
+      case "error":
+        return `${label} failed${result.error ? `: ${result.error}` : "."}`;
+      case "aborted":
+        return `${label} was cancelled.`;
+      case "interrupted":
+        return result.reason === "budget-exceeded"
+          ? `${label} ran out of time before completing and was stopped.`
+          : `${label} was interrupted before completing${result.error ? `: ${result.error}` : "."}`;
+      default:
+        return `${label} ended (${result.status}).`;
+    }
+  }
+
+  /**
+   * Targeted completion hook for `detached: { notify }`. Auto-wired by
+   * `runAgentTool` (resolved by name so the base `Agent` stays decoupled from the
+   * chat layer). Injects the formatted completion as a user turn so the model
+   * reacts to the background result. Idempotent per run + status (deterministic
+   * message id), so an exactly-once finish — or a soft give-up followed by a real
+   * completion — never injects a duplicate, while a give-up and a later real
+   * completion surface as two distinct messages.
+   */
+  async _cfDetachedNotifyFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    const text = this.formatDetachedCompletion(run, result);
+    if (!text) return;
+    await this._injectDetachedNotification(
+      `detached-finish:${run.runId}:${result.status}`,
+      "user",
+      text,
+      {
+        source: run.notifySource ?? "detached-agent-tool",
+        runId: run.runId,
+        agentType: run.agentType,
+        status: result.status
+      },
+      { react: true }
+    );
+  }
+
+  /**
+   * Format the message injected when a `detached: { onMilestones }` milestone is
+   * reached. Override to customize the prose (or return an empty string to
+   * suppress a given milestone).
+   */
+  protected formatDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    const detail =
+      milestone.data !== undefined
+        ? `\n\n${JSON.stringify(milestone.data, null, 2)}`
+        : "";
+    return `${label} reached milestone "${milestone.name}".${detail}`;
+  }
+
+  /**
+   * Targeted milestone hook for `detached: { onMilestones }`. Idempotent per run
+   * + milestone NAME (deterministic message id), so the warm tail and the cold
+   * backbone reconcile converge to at most one message.
+   *
+   * - `"narrate"` (default): a synthetic **assistant** message injected directly
+   *   — no model turn.
+   * - `"react"`: a **user** message followed by a model turn so the agent
+   *   responds to the milestone.
+   */
+  protected override async _deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone,
+    mode: "react" | "narrate"
+  ): Promise<void> {
+    const text = this.formatDetachedMilestone(run, milestone);
+    if (!text) return;
+    await this._injectDetachedNotification(
+      `detached-ms:${run.runId}:${milestone.name}`,
+      mode === "narrate" ? "assistant" : "user",
+      text,
+      {
+        source: run.notifySource ?? "detached-agent-tool",
+        runId: run.runId,
+        agentType: run.agentType,
+        milestone: milestone.name
+      },
+      { react: mode === "react" }
+    );
   }
 
   /**
@@ -3019,6 +3382,8 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        // Drop the progress emitter's per-run coalescing state.
+        this._agentToolProgressEmitterInstance?.forget(options.runId);
         // Drop this run's request-id mappings. When no runs remain in flight
         // clear the whole map, so negatively-cached (null) entries for
         // unrelated turns can't accumulate for the DO's lifetime — the map is
@@ -3216,6 +3581,8 @@ export class AIChatAgent<
           this.getAgentToolOutput({ runId, input }, messagesAfterStart))
         : undefined;
 
+    const progress = AIChatAgent._progressSnapshotFromRow(row);
+    const milestones = this._readAgentToolMilestones(runId);
     return {
       runId,
       status: row.status,
@@ -3226,8 +3593,26 @@ export class AIChatAgent<
       error:
         row.status === "error" ? (row.error_message ?? undefined) : undefined,
       startedAt: row.started_at,
-      completedAt: row.completed_at ?? undefined
+      completedAt: row.completed_at ?? undefined,
+      ...(progress ? { progress } : {}),
+      ...(milestones.length > 0 ? { milestones } : {})
     };
+  }
+
+  private static _progressSnapshotFromRow(
+    row: AIChatAgentToolRunRow
+  ): AgentToolProgressSnapshot | undefined {
+    if (row.progress_json == null || row.last_signal_at == null) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(row.progress_json) as Partial<
+        Omit<AgentToolProgressSnapshot, "at">
+      >;
+      return { ...parsed, at: row.last_signal_at };
+    } catch {
+      return { at: row.last_signal_at };
+    }
   }
 
   async getAgentToolChunks(
@@ -3314,7 +3699,8 @@ export class AIChatAgent<
   private _getAgentToolRunRow(runId: string): AIChatAgentToolRunRow | null {
     const rows = this.sql<AIChatAgentToolRunRow>`
       select run_id, request_id, status, input_json, output_json, summary,
-             error_message, started_at, completed_at
+             error_message, started_at, completed_at, progress_json,
+             last_signal_at
       from cf_ai_chat_agent_tool_runs
       where run_id = ${runId}
     `;

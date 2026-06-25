@@ -140,7 +140,7 @@ export class MyAgent extends Agent<Env> {
 }
 ```
 
-> Using `@cloudflare/think`? The unified execute tool (`createExecuteTool(this)`) already includes `cdp.*` alongside `state.*` and `tools.*` when `env.BROWSER` is bound. See the [Think tools documentation](./think/tools.md).
+> Using `@cloudflare/think`? The unified execute tool (`createExecuteTool(this)`) already includes `cdp.*` alongside `state.*` and `tools.*` when `env.BROWSER` is bound. See the [Think tools documentation](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md).
 
 ## TanStack AI
 
@@ -427,4 +427,4 @@ Use `cdpUrl` only when you intentionally want to connect to some other CDP-compa
 
 ## Example
 
-See [`examples/ai-chat/`](../examples/ai-chat/) for a working example that combines browser tools with other AI SDK tools, MCP servers, and tool approval, and [`examples/codemode-connectors/`](../examples/codemode-connectors/) for the connector playground (including in-sandbox approvals).
+See [`examples/ai-chat/`](https://github.com/cloudflare/agents/tree/main/examples/ai-chat) for a working example that combines browser tools with other AI SDK tools, MCP servers, and tool approval, and [`examples/codemode-connectors/`](https://github.com/cloudflare/agents/tree/main/examples/codemode-connectors) for the connector playground (including in-sandbox approvals).

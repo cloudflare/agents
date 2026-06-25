@@ -6,6 +6,15 @@ Think works as both a **top-level agent** (WebSocket chat to browser clients via
 
 > **Experimental.** The API surface is stable but may evolve before graduating out of experimental.
 
+## Related package documentation
+
+Think builds on packages that are installed alongside it:
+
+- `agents/docs/index.md` — Durable Objects, state, routing, sessions, scheduling, MCP, and shared agent primitives
+- `@cloudflare/codemode/docs/index.md` — sandboxed execution, tool providers, connectors, approvals, and snippets
+- `@cloudflare/shell/docs/index.md` — Workspace, filesystem operations, and the `state.*` and `git.*` providers used by Think's tools
+- `create-think/README.md` — CLI commands, templates, and generated project structure
+
 ## Why Think
 
 Think is for agents whose work must outlive the request. The opinionated pieces are the ones that are tedious and dangerous to get right by hand:
@@ -14,9 +23,9 @@ Think is for agents whose work must outlive the request. The opinionated pieces 
 - **Recovery-aware delivery** — replies are snapshotted as `accepted`, `streaming`, or `completed`, so a restart replays a not-yet-streamed answer but posts a safe interruption notice instead of a duplicate partial. See [Delivery and Recovery](./messengers.md#delivery-and-recovery).
 - **Durable submissions** — webhooks and RPC callers submit a turn with an idempotency key and check status later. See [Programmatic Submissions](./programmatic-submissions.md).
 - **Sessions, not just a message list** — tree-structured history with branching, compaction, and full-text search.
-- **Human-in-the-loop and client tools** — a turn can pause for approval or a browser-side tool and resume later, without holding a request open. See [Human in the Loop](../human-in-the-loop.md) and [Client Tools](./client-tools.md).
+- **Human-in-the-loop and client tools** — a turn can pause for approval or a browser-side tool and resume later, without holding a request open. See [Human in the Loop](https://github.com/cloudflare/agents/blob/main/docs/agents/human-in-the-loop.md) and [Client Tools](./client-tools.md).
 
-If you only need a chat-protocol adapter where you own the loop and the `Response`, use [`AIChatAgent`](../chat-agents.md) instead. See [Choose your path](../index.md#choose-your-path) for the full comparison.
+If you only need a chat-protocol adapter where you own the loop and the `Response`, use [`AIChatAgent`](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md) instead. See [Choose your path](https://github.com/cloudflare/agents/blob/main/docs/agents/index.md#choose-your-path) for the full comparison.
 
 ## Quick Start
 
@@ -641,7 +650,7 @@ in the framework section above.
 
 ## Think vs AIChatAgent
 
-Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the same `cf_agent_chat_*` WebSocket protocol. They serve different goals.
+Both Think and [`AIChatAgent`](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md) extend `Agent` and speak the same `cf_agent_chat_*` WebSocket protocol. They serve different goals.
 
 **AIChatAgent** is a protocol adapter. You override `onChatMessage` and are responsible for calling `streamText`, wiring tools, converting messages, and returning a `Response`. AIChatAgent handles the plumbing — message persistence, streaming, abort, resume — but the LLM call is entirely your concern.
 
@@ -677,8 +686,88 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 
 ## Choosing a Turn API
 
-Think has several ways to start or continue a turn. Choose based on who is
-driving the work and what the caller needs back.
+Think has several ways to start or continue a turn. They all funnel through one
+public entry point — `runTurn(options)` — and the older methods remain as
+convenience shortcuts.
+
+### `runTurn()`
+
+> **Experimental.** Stable in shape, but may evolve before Think graduates.
+
+`runTurn()` is the unified turn-admission API. One method, three modes, selected
+by `options.mode`:
+
+| Mode               | Use when                                                     | Returns                         | Shortcut for       |
+| ------------------ | ------------------------------------------------------------ | ------------------------------- | ------------------ |
+| `"wait"` (default) | The caller can block until the model response is finished    | `Promise<TurnResult>`           | `saveMessages()`   |
+| `"submit"`         | The caller needs fast, durable acceptance and a later status | `Promise<SubmitMessagesResult>` | `submitMessages()` |
+| `"stream"`         | The caller wants the response streamed to a callback (RPC)   | `Promise<void>`                 | `chat()`           |
+
+The `input` accepts a string, a `UIMessage`, an array of messages, or — in
+`wait` and `stream` modes — a function `(current) => UIMessage[]` evaluated at
+admission. (`submit` does not accept function input.)
+
+```typescript
+// wait — block for the result
+const result = await this.runTurn({ input: "Summarize the latest thread" });
+if (result.status === "completed") {
+  // result.message is the assistant SessionMessage; result.continuation is false
+}
+
+// submit — durable acceptance, check status later
+const submission = await this.runTurn({
+  mode: "submit",
+  input: "Process this webhook",
+  idempotencyKey: inboundEventId // dedupe; safe to retry
+});
+// submission.accepted is true on first accept; submission.status is "pending"
+
+// stream — drive a callback (the same surface as chat())
+await this.runTurn({
+  mode: "stream",
+  input: "Stream me",
+  callback: {
+    onStart({ requestId }) {},
+    onEvent(json) {}, // UIMessageChunk JSON
+    onDone() {},
+    onError(error) {}
+  }
+});
+```
+
+Continue the last assistant turn (instead of sending new input) by passing
+`continuation: true` in `wait` mode — pass exactly one of `input` or
+`continuation`:
+
+```typescript
+await this.runTurn({ continuation: true });
+```
+
+Key behaviors:
+
+- **Blocking modes cannot nest.** Calling `wait`/`stream`/`continuation` (or the
+  equivalent shortcut) from _inside_ an active turn — for example, from a tool's
+  `execute` — throws, because it would deadlock the turn queue. From inside a
+  turn, use `runTurn({ mode: "submit" })` (durable, runs after the current turn
+  frees the queue) or [`addMessages()`](#adding-messages-without-a-turn)
+  (transcript only, no inference).
+- **`submit` is idempotent.** Pass `submissionId` and/or `idempotencyKey`;
+  re-submitting a known key returns the existing record with `accepted: false`
+  instead of starting a second turn. See [Programmatic
+  Submissions](./programmatic-submissions.md).
+- **Recovery-safe.** When `chatRecovery` is enabled, the `wait`, `stream`, and
+  drained `submit` paths all run inference inside a recovery fiber, so an
+  interrupted turn resumes after eviction.
+
+`runTurn` is exported alongside its option and result types: `RunTurnOptions`,
+`RunTurnWait`, `RunTurnSubmit`, `RunTurnStream`, `TurnInputMessages`, and
+`TurnResult`.
+
+### Picking a shortcut
+
+The table below maps each scenario to the most direct call. Each shortcut has an
+unchanged signature; reach for them when you want the narrower surface, or use
+`runTurn()` when you want one mental model.
 
 | Use case                                                       | API                                             |
 | -------------------------------------------------------------- | ----------------------------------------------- |
@@ -700,11 +789,11 @@ make retries unsafe.
 
 Use [`chat()`](./sub-agents.md#sub-agent-via-chat) for low-level parent-to-child
 streaming when your code owns forwarding, cancellation, and replay policy. Use
-[Agent Tools](../agent-tools.md) when a parent model or workflow delegates to a
+[Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md) when a parent model or workflow delegates to a
 child agent and you want retained child runs, event replay, abort bridging, and
 UI drill-in.
 
-Use [`startFiber()`](../durable-execution.md#startfiber) outside Think when the
+Use [`startFiber()`](https://github.com/cloudflare/agents/blob/main/docs/agents/durable-execution.md#startfiber) outside Think when the
 durable unit is an application job around a turn: accepting a webhook once,
 restoring a serialized channel/thread target, posting a visible reply, or
 recording app-level recovery policy. Think submissions own conversation
@@ -713,7 +802,7 @@ idempotent side effects, and application recovery. Think and AIChat internals
 continue to use raw `runFiber()` for stream recovery because those fibers are
 internal recovery records, not externally inspectable application jobs.
 
-Use [Workflows](../workflows.md) when the durable unit is a multi-step process
+Use [Workflows](https://github.com/cloudflare/agents/blob/main/docs/agents/workflows.md) when the durable unit is a multi-step process
 with retries per step, long waits, external events, or approvals.
 
 ### Adding messages without a turn
@@ -759,9 +848,11 @@ path.
 | `getScheduledTasks()`      | `{}`                             | Code-declared recurring prompts or handlers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `getDefaultTimezone()`     | `undefined`                      | Default timezone for wall-clock scheduled tasks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `getMessengers()`          | `{}`                             | Messenger ingress and delivery declarations — see [Messengers](./messengers.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `getActions()`             | `{}`                             | Server actions (idempotency, approvals, authorization) compiled into tools — see [Actions](./actions.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `configureChannels()`      | `{}`                             | Per-channel policy and surfaces beyond the implicit `web` channel — see [Channels](./channels.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `maxSteps`                 | `10`                             | Max tool-call rounds per turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `sendReasoning`            | `true`                           | Send reasoning chunks to chat clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `configureSession()`       | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `configureSession()`       | identity                         | Add context blocks, compaction, search, skills — see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md)                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `workspaceBash`            | `true`                           | Include or configure the default workspace `bash` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -945,7 +1036,7 @@ This runs during transcript repair — before the repaired transcript is persist
 
 ### Context-window overflow recovery
 
-[Compaction](../sessions.md#compaction) is checked **between turns** — `compactAfter()` runs after each `appendMessage()`. But a single long, tool-heavy turn grows the prompt step by step inside one `streamText` loop and can exceed the model's context window **mid-turn**, before the next pre-turn check. The provider then rejects the request (`"prompt is too long"`, `context_length_exceeded`), and the turn would otherwise die terminally.
+[Compaction](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md#compaction) is checked **between turns** — `compactAfter()` runs after each `appendMessage()`. But a single long, tool-heavy turn grows the prompt step by step inside one `streamText` loop and can exceed the model's context window **mid-turn**, before the next pre-turn check. The provider then rejects the request (`"prompt is too long"`, `context_length_exceeded`), and the turn would otherwise die terminally.
 
 Think recovers from this with two opt-in, provider-agnostic layers, both configured through the `contextOverflow` property. Both are off by default, so existing behavior is unchanged. Both reuse your session's compaction function, so they require a `configureSession()` with `onCompaction()` configured. Both require [`classifyChatError`](./lifecycle-hooks.md#classifychaterror) to tell Think which errors are overflows — Think ships no provider-specific matching in core.
 
@@ -979,11 +1070,11 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Use either layer alone, or both together: the proactive guard avoids most overflows, and the reactive backstop catches any that still slip through (for example, a turn that starts already over budget, or a single tool result so large that compaction cannot help — in which case it terminalizes cleanly). Both apply to every turn entry path (WebSocket, sub-agent `chat()`, and programmatic `saveMessages()` / `submitMessages()`), and both emit a `chat:context:compacted` [observability event](../observability.md#chat-context-events).
+Use either layer alone, or both together: the proactive guard avoids most overflows, and the reactive backstop catches any that still slip through (for example, a turn that starts already over budget, or a single tool result so large that compaction cannot help — in which case it terminalizes cleanly). Both apply to every turn entry path (WebSocket, sub-agent `chat()`, and programmatic `saveMessages()` / `submitMessages()`), and both emit a `chat:context:compacted` [observability event](https://github.com/cloudflare/agents/blob/main/docs/agents/observability.md#chat-context-events).
 
-> A no-op compaction cannot rescue an over-budget turn, so recovery is only as effective as your compaction configuration. For tool-heavy histories, configure a `tokenCounter` on `compactAfter()` (see [Sessions](../sessions.md#auto-compaction)).
+> A no-op compaction cannot rescue an over-budget turn, so recovery is only as effective as your compaction configuration. For tool-heavy histories, configure a `tokenCounter` on `compactAfter()` (see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md#auto-compaction)).
 
-For a runnable demo against a real Workers AI model, see [`examples/context-overflow-recovery`](../../examples/context-overflow-recovery).
+For a runnable demo against a real Workers AI model, see [`examples/context-overflow-recovery`](https://github.com/cloudflare/agents/tree/main/examples/context-overflow-recovery).
 
 ## Dynamic Configuration
 
@@ -1103,7 +1194,7 @@ occurrences do not block future runs.
 
 ## Session Integration
 
-Think uses [Session](../sessions.md) for conversation storage. Override `configureSession` to add persistent memory, compaction, search, and skills:
+Think uses [Session](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for conversation storage. Override `configureSession` to add persistent memory, compaction, search, and skills:
 
 ```typescript
 import { Think, Session } from "@cloudflare/think";
@@ -1127,7 +1218,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Think's `this.messages` getter reads directly from Session's tree-structured storage. Context blocks, compaction overlays, and search are all handled by Session. See the [Sessions documentation](../sessions.md) for the full API.
+Think's `this.messages` getter reads directly from Session's tree-structured storage. Context blocks, compaction overlays, and search are all handled by Session. See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for the full API.
 
 ## Package Exports
 
@@ -1167,7 +1258,7 @@ Bundled with `@cloudflare/think`:
 | `aywson`               | Wrangler JSON/JSONC parsing for the framework plugin  |
 
 The Agent Skills engine and its script runner live in
-[`agents/skills`](../../packages/agents/AGENTS.md) (so skill scripts pull
+[`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so skill scripts pull
 `@cloudflare/worker-bundler` and `just-bash` through `agents`, not Think).
 
 ## Docs
@@ -1175,6 +1266,8 @@ The Agent Skills engine and its script runner live in
 - [Getting Started](./getting-started.md) — Build a Think agent step by step
 - [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./tools.md) — Workspace tools, code execution, extensions
+- [Actions](./actions.md) — Server actions with idempotency, approvals, authorization, and reply attachments
+- [Channels](./channels.md) — Per-channel policy, channel selection, and out-of-band notices
 - [Messengers](./messengers.md) — Chat SDK messenger ingress and delivery
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery
