@@ -732,3 +732,78 @@ describe("VoiceClient gapless playback", () => {
     expect(sources[1].startedAt).toBe(2);
   });
 });
+
+describe("VoiceClient playback bridge reuse", () => {
+  // The audible symptom (a new turn plays back slow, then re-converges) lives
+  // inside the HTMLAudioElement's playout and is not observable from JS, so we
+  // cannot assert playback speed. Instead we lock in the mechanism the fix
+  // relies on: a bridge that has gone idle between turns is rebuilt, not reused,
+  // and is never rebuilt mid-turn.
+  function pcm16Chunk(): ArrayBuffer {
+    // 1600 samples of 16-bit PCM = 0.1s at 16kHz
+    return new ArrayBuffer(1600 * 2);
+  }
+
+  function startPcm16Call(): { transport: MockTransport; client: VoiceClient } {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "audio_config", format: "pcm16" })
+    );
+    return { transport, client };
+  }
+
+  it("reuses the playback bridge for consecutive chunks within a turn", async () => {
+    const { transport } = startPcm16Call();
+    audioContext.currentTime = 5;
+
+    transport.receive(pcm16Chunk());
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(2);
+
+    // Chunks within a turn stay scheduled ahead on the cursor, so the bridge
+    // must not be torn down between them.
+    expect(audioContext.mediaStreamDestinationCount).toBe(1);
+    expect(audioElement.playCount).toBe(1);
+  });
+
+  it("rebuilds the playback bridge for a new turn after it has gone idle", async () => {
+    const { transport } = startPcm16Call();
+
+    // Turn 1: one chunk ending at t=5.1.
+    audioContext.currentTime = 5;
+    transport.receive(pcm16Chunk());
+    const [first] = await waitForSourceCount(1);
+    expect(audioContext.mediaStreamDestinationCount).toBe(1);
+
+    // Turn 1 finishes playing and the bridge drains.
+    first.stop();
+
+    // A gap longer than the idle threshold passes before the next turn.
+    audioContext.currentTime = 5.5; // 0.4s past the last chunk's end (5.1)
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(2);
+
+    // The idle bridge is torn down and a fresh one is built for turn 2.
+    expect(audioContext.mediaStreamDestinationCount).toBe(2);
+    expect(audioElement.playCount).toBe(2);
+  });
+
+  it("reuses the playback bridge when the next turn follows within the idle threshold", async () => {
+    const { transport } = startPcm16Call();
+
+    audioContext.currentTime = 5;
+    transport.receive(pcm16Chunk());
+    const [first] = await waitForSourceCount(1);
+    first.stop();
+
+    // Next chunk arrives only 0.1s after the previous chunk's end (< 0.3s).
+    audioContext.currentTime = 5.2;
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(2);
+
+    expect(audioContext.mediaStreamDestinationCount).toBe(1);
+    expect(audioElement.playCount).toBe(1);
+  });
+});

@@ -296,6 +296,10 @@ export class VoiceClient {
   #isScheduling = false;
   #scheduledSources = new Set<AudioBufferSourceNode>();
   #playbackCursor = 0;
+  // End time (on the AudioContext clock) of the most recently scheduled chunk.
+  // Used to detect when the playback bridge has been idle across the gap
+  // between turns so it can be rebuilt (see #playAudio).
+  #lastPlaybackEnd: number | null = null;
   #playbackElement: HTMLAudioElement | null = null;
   #playbackDestination: MediaStreamAudioDestinationNode | null = null;
   #playbackDestinationPromise: Promise<AudioNode> | null = null;
@@ -905,6 +909,28 @@ export class VoiceClient {
       }
       if (generation !== this.#playbackGeneration) return;
 
+      // Assistant playback is routed through a MediaStreamAudioDestinationNode
+      // -> HTMLAudioElement bridge (so a selected output device can be honored
+      // via HTMLMediaElement.setSinkId). That bridge is a live playout path:
+      // when it is reused for a new turn after sitting idle through the gap
+      // between turns, the element resumes the fresh burst at the wrong rate and
+      // the new turn plays back noticeably slow (it then re-converges to normal
+      // over the turn). A freshly created element does not show this, so once
+      // the bridge has fully drained and been idle past a short threshold, tear
+      // it down; #getPlaybackDestination rebuilds a fresh element for this turn.
+      // The scheduledSources.size === 0 guard means this never fires mid-turn:
+      // chunks within a turn are scheduled ahead on the cursor, keeping at least
+      // one source live until the turn finishes.
+      const BRIDGE_IDLE_REBUILD_SECONDS = 0.3;
+      if (
+        this.#playbackElement &&
+        this.#scheduledSources.size === 0 &&
+        this.#lastPlaybackEnd !== null &&
+        ctx.currentTime - this.#lastPlaybackEnd > BRIDGE_IDLE_REBUILD_SECONDS
+      ) {
+        this.#closePlaybackOutput();
+      }
+
       const destination = await this.#getPlaybackDestination(ctx);
       if (generation !== this.#playbackGeneration) return;
 
@@ -930,6 +956,7 @@ export class VoiceClient {
       // a periodic click during agent speech.
       const startAt = Math.max(ctx.currentTime, this.#playbackCursor);
       this.#playbackCursor = startAt + audioBuffer.duration;
+      this.#lastPlaybackEnd = this.#playbackCursor;
       source.start(startAt);
     } catch (err) {
       console.error("[VoiceClient] Audio playback error:", err);
@@ -973,6 +1000,7 @@ export class VoiceClient {
     this.#isPlaying = false;
     this.#isScheduling = false;
     this.#playbackCursor = 0;
+    this.#lastPlaybackEnd = null;
   }
 
   // --- Mic capture ---
