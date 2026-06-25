@@ -292,11 +292,151 @@ watching within budget", never as a terminal failure. Only a non-`null`
 inspection with a terminal `status` (`completed` / `error` / `aborted`)
 finalizes a run.
 
+## Report progress and milestones
+
+A sub-agent running as an agent tool — awaited or detached — can report mid-run
+progress so a parent can render a live status line, meter the run server-side, or
+react to a named checkpoint before the run finishes. Call `reportProgress()` from
+inside the child (for example, from a tool's `execute`):
+
+```ts
+export class ImportAgent extends Think<Env> {
+  getTools() {
+    return {
+      ingest: tool({
+        inputSchema: z.object({ url: z.string() }),
+        execute: async ({ url }) => {
+          // Ephemeral progress: drives a generic bar / phase / status line.
+          await this.reportProgress({
+            fraction: 0.6,
+            phase: "ingesting",
+            message: "Ingested 40k/80k rows"
+          });
+          // ...
+        }
+      })
+    };
+  }
+}
+```
+
+`reportProgress()` is available on chat agents (`@cloudflare/think` and
+`AIChatAgent`). It is a no-op with a development warning on the base `Agent`
+class and when called outside an active agent-tool run, so the same child code is
+safe to run standalone. The framework resolves the active run from the current
+turn — you never thread a run id.
+
+```ts
+reportProgress<T>(
+  progress: {
+    fraction?: number; // 0..1 — drives a progress bar
+    message?: string; // human-readable status line
+    phase?: string; // coarse phase label, e.g. "ingesting"
+    milestone?: string; // present ⇒ a durable milestone (see below)
+    data?: T; // app-specific payload; live-only unless persisted
+  },
+  options?: { persist?: boolean }
+): Promise<void>;
+```
+
+Ephemeral signals ride the child's own turn stream as a transient
+`data-agent-progress` part, so they re-broadcast to the parent's connected
+clients and surface on `AgentToolRunState.progress` through `useAgentToolEvents()`
+— a background-runs tray can render a live bar, phase, and status line without
+drilling in. Bursts are coalesced (latest-wins; a `fraction >= 1` frame always
+flushes). The `data` field is live-only unless you pass `{ persist: true }`.
+
+### Observe progress on the parent
+
+Override `onProgress()` to meter, steer, or surface progress server-side. It
+fires best-effort whenever a child progress signal is forwarded through the
+parent, for both awaited and detached runs:
+
+```ts
+export class Assistant extends Think<Env> {
+  override async onProgress(
+    run: AgentToolRunInfo,
+    progress: AgentToolProgressSnapshot
+  ) {
+    if (progress.milestone) {
+      // A durable milestone landed — branch on it.
+    }
+    console.log(run.runId, progress.phase, progress.fraction);
+  }
+}
+```
+
+`onProgress()` is not durable: after eviction a detached run's latest snapshot is
+reconstructed from `inspectAgentToolRun().progress` on reconcile rather than
+re-firing the hook. The latest snapshot is also persisted on the child run row,
+so a rehydrated parent can answer "where is this run" without having tailed the
+live stream.
+
+### Durable milestones
+
+Naming a `milestone` promotes a signal from the ephemeral tier to a **durable**
+one — there is still only one emit method:
+
+```ts
+await this.reportProgress({
+  milestone: "sources-gathered",
+  data: { sources: 2 }
+});
+```
+
+A milestone is persisted as one row on the child with a monotonic per-run
+`sequence`, and rides the stream as a **persisted** `data-agent-milestone` part
+(unlike transient progress). It therefore survives eviction, replays on drill-in,
+and is surfaced — deduped by `sequence` — on `AgentToolRunState.milestones` and
+`inspectAgentToolRun().milestones`. `onProgress()` fires for milestones too, with
+`progress.milestone` set, so a consumer can branch on milestone versus ephemeral
+progress.
+
+### Notify the chat on a milestone (Think / AIChatAgent)
+
+For a detached run on a chat agent, `detached: { onMilestones }` surfaces a chat
+message when a configured milestone lands, _before_ the run finishes. Each
+`(runId, name)` fires at most once — whether observed live or reconciled after
+eviction — so the deterministic id collapses warm and cold delivery to
+at-most-once:
+
+```ts
+// "narrate" (default): inject a synthetic assistant status line — no model turn.
+await this.runAgentTool(Researcher, {
+  input,
+  detached: { onMilestones: ["sources-gathered"] }
+});
+
+// "react": post a user-role turn so the model responds (steer, start dependent
+// work). Costs a model turn.
+await this.runAgentTool(Researcher, {
+  input,
+  detached: { onMilestones: { names: ["needs-approval"], mode: "react" } }
+});
+```
+
+Override `formatDetachedMilestone(run, milestone)` to customize the wording, or
+return an empty string to suppress a given milestone. Synthetic narrate messages
+carry `metadata.source`, so clients can render them as an agent event rather than
+a human turn.
+
+### Resetting no-progress budget for detached runs
+
+Once a detached child has reported at least one signal, the reconcile backbone
+gives up if the run then goes silent for `detachedNoProgressBudgetMs` (default 1
+hour; per-run override via `detached: { noProgressBudgetMs }`). This surfaces as
+`status: "interrupted"`, `reason: "no-progress"`. A child that never reports is
+bounded only by the absolute `detachedMaxBudgetMs` ceiling — a run is never
+given up on merely for being slow. Set `noProgressBudgetMs` to `0` or `Infinity`
+to disable the resetting window for a run.
+
 ## Render child timelines in React
 
 `useAgentToolEvents()` is a headless hook. It subscribes to the existing parent
 connection, deduplicates replay/live races, applies child `UIMessageChunk`
-bodies to message parts, and groups sibling runs by parent tool call id.
+bodies to message parts, and groups sibling runs by parent tool call id. Each
+run state carries `progress` and `milestones`, so a background-runs tray can
+render a live bar, phase, and milestone chips without drilling in.
 
 ```tsx
 import { useAgent, useAgentToolEvents } from "agents/react";

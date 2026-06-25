@@ -878,17 +878,18 @@ function Chat() {
 
 ### Options
 
-| Option                        | Type                                            | Default  | Description                                                                                                              |
-| ----------------------------- | ----------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                         |
-| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                        |
-| `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                       |
-| `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                          |
-| `cancelOnClientAbort`         | `boolean`                                       | `false`  | Cancel the server turn when generic client stream abort/cleanup occurs. Explicit `stop()` always cancels the server turn |
-| `body`                        | `object \| () => object`                        | —        | Custom data sent with every request                                                                                      |
-| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`              | —        | Advanced per-request customization                                                                                       |
-| `tools`                       | `Record<string, AITool>`                        | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                    |
-| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly) |
+| Option                        | Type                                            | Default  | Description                                                                                                                                                                        |
+| ----------------------------- | ----------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                                                                                   |
+| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                                                                                  |
+| `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                                                                                 |
+| `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                                                                                    |
+| `cancelOnClientAbort`         | `boolean`                                       | `false`  | Cancel the server turn when generic client stream abort/cleanup occurs. Explicit `stop()` always cancels the server turn                                                           |
+| `body`                        | `object \| () => object`                        | —        | Custom data sent with every request                                                                                                                                                |
+| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`              | —        | Advanced per-request customization                                                                                                                                                 |
+| `tools`                       | `Record<string, AITool>`                        | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                                                                              |
+| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly)                                                           |
+| `syncMessagesToServer`        | `boolean`                                       | `true`   | When `true`, `setMessages` pushes the transcript to the server. Set to `false` for hosts with server-authoritative transcript storage so `setMessages` updates the local view only |
 
 ### Return Values
 

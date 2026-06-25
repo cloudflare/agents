@@ -677,8 +677,88 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 
 ## Choosing a Turn API
 
-Think has several ways to start or continue a turn. Choose based on who is
-driving the work and what the caller needs back.
+Think has several ways to start or continue a turn. They all funnel through one
+public entry point — `runTurn(options)` — and the older methods remain as
+convenience shortcuts.
+
+### `runTurn()`
+
+> **Experimental.** Stable in shape, but may evolve before Think graduates.
+
+`runTurn()` is the unified turn-admission API. One method, three modes, selected
+by `options.mode`:
+
+| Mode               | Use when                                                     | Returns                         | Shortcut for       |
+| ------------------ | ------------------------------------------------------------ | ------------------------------- | ------------------ |
+| `"wait"` (default) | The caller can block until the model response is finished    | `Promise<TurnResult>`           | `saveMessages()`   |
+| `"submit"`         | The caller needs fast, durable acceptance and a later status | `Promise<SubmitMessagesResult>` | `submitMessages()` |
+| `"stream"`         | The caller wants the response streamed to a callback (RPC)   | `Promise<void>`                 | `chat()`           |
+
+The `input` accepts a string, a `UIMessage`, an array of messages, or — in
+`wait` and `stream` modes — a function `(current) => UIMessage[]` evaluated at
+admission. (`submit` does not accept function input.)
+
+```typescript
+// wait — block for the result
+const result = await this.runTurn({ input: "Summarize the latest thread" });
+if (result.status === "completed") {
+  // result.message is the assistant SessionMessage; result.continuation is false
+}
+
+// submit — durable acceptance, check status later
+const submission = await this.runTurn({
+  mode: "submit",
+  input: "Process this webhook",
+  idempotencyKey: inboundEventId // dedupe; safe to retry
+});
+// submission.accepted is true on first accept; submission.status is "pending"
+
+// stream — drive a callback (the same surface as chat())
+await this.runTurn({
+  mode: "stream",
+  input: "Stream me",
+  callback: {
+    onStart({ requestId }) {},
+    onEvent(json) {}, // UIMessageChunk JSON
+    onDone() {},
+    onError(error) {}
+  }
+});
+```
+
+Continue the last assistant turn (instead of sending new input) by passing
+`continuation: true` in `wait` mode — pass exactly one of `input` or
+`continuation`:
+
+```typescript
+await this.runTurn({ continuation: true });
+```
+
+Key behaviors:
+
+- **Blocking modes cannot nest.** Calling `wait`/`stream`/`continuation` (or the
+  equivalent shortcut) from _inside_ an active turn — for example, from a tool's
+  `execute` — throws, because it would deadlock the turn queue. From inside a
+  turn, use `runTurn({ mode: "submit" })` (durable, runs after the current turn
+  frees the queue) or [`addMessages()`](#adding-messages-without-a-turn)
+  (transcript only, no inference).
+- **`submit` is idempotent.** Pass `submissionId` and/or `idempotencyKey`;
+  re-submitting a known key returns the existing record with `accepted: false`
+  instead of starting a second turn. See [Programmatic
+  Submissions](./programmatic-submissions.md).
+- **Recovery-safe.** When `chatRecovery` is enabled, the `wait`, `stream`, and
+  drained `submit` paths all run inference inside a recovery fiber, so an
+  interrupted turn resumes after eviction.
+
+`runTurn` is exported alongside its option and result types: `RunTurnOptions`,
+`RunTurnWait`, `RunTurnSubmit`, `RunTurnStream`, `TurnInputMessages`, and
+`TurnResult`.
+
+### Picking a shortcut
+
+The table below maps each scenario to the most direct call. Each shortcut has an
+unchanged signature; reach for them when you want the narrower surface, or use
+`runTurn()` when you want one mental model.
 
 | Use case                                                       | API                                             |
 | -------------------------------------------------------------- | ----------------------------------------------- |
@@ -759,6 +839,8 @@ path.
 | `getScheduledTasks()`      | `{}`                             | Code-declared recurring prompts or handlers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `getDefaultTimezone()`     | `undefined`                      | Default timezone for wall-clock scheduled tasks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `getMessengers()`          | `{}`                             | Messenger ingress and delivery declarations — see [Messengers](./messengers.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `getActions()`             | `{}`                             | Server actions (idempotency, approvals, authorization) compiled into tools — see [Actions](./actions.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `configureChannels()`      | `{}`                             | Per-channel policy and surfaces beyond the implicit `web` channel — see [Channels](./channels.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `maxSteps`                 | `10`                             | Max tool-call rounds per turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `sendReasoning`            | `true`                           | Send reasoning chunks to chat clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `configureSession()`       | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -1175,6 +1257,8 @@ The Agent Skills engine and its script runner live in
 - [Getting Started](./getting-started.md) — Build a Think agent step by step
 - [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./tools.md) — Workspace tools, code execution, extensions
+- [Actions](./actions.md) — Server actions with idempotency, approvals, authorization, and reply attachments
+- [Channels](./channels.md) — Per-channel policy, channel selection, and out-of-band notices
 - [Messengers](./messengers.md) — Chat SDK messenger ingress and delivery
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery

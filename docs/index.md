@@ -87,6 +87,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Getting Started](./think/getting-started.md) - Build your first Think agent step by step
 - [Lifecycle Hooks](./think/lifecycle-hooks.md) - `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./think/tools.md) - Workspace tools, code execution, extensions
+- [Actions](./think/actions.md) - Server actions with idempotency, approvals, authorization, and reply attachments
+- [Channels](./think/channels.md) - Per-channel policy, channel selection, and out-of-band notices
 - [Messengers](./think/messengers.md) - Receive and reply to Chat SDK messenger webhooks from Think
 - [Client Tools](./think/client-tools.md) - Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./think/sub-agents.md) - RPC streaming, `saveMessages`, recovery
