@@ -23,7 +23,10 @@ AI SDK v6's in-place `updateToolPart` would regress the rendered tool part back
 to `output-denied` (and replay it on reconnect). Filtering it at the broadcast
 boundary keeps the client UI consistent with the persisted state.
 
-`tool-approval-request` gains a matching first-write-wins guard: a continuation
-that replays a prior tool round-trip can re-emit the approval request, which
-previously regressed an already-`approval-responded` (or settled) part back to
-`approval-requested`, discarding the user's decision.
+`tool-approval-request` gains the same treatment on both paths: a
+first-write-wins guard in `applyChunkToParts` (so a replayed approval request
+can't regress an already-`approval-responded` or settled part back to
+`approval-requested`, discarding the user's decision) and a matching
+`isReplayChunk` branch (so the replayed request isn't stored or broadcast,
+which would otherwise revert an approved tool to re-showing Approve/Reject on
+the client and on reconnect).

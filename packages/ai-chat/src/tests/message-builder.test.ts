@@ -1562,6 +1562,85 @@ describe("applyChunkToParts", () => {
         })
       ).toBe(false);
     });
+
+    it("returns true for tool-approval-request on an approval-responded part", () => {
+      // A continuation replaying a prior tool round-trip can re-emit the
+      // approval request. The chunk must not reach the client, where the
+      // in-place updateToolPart would revert an approved tool back to
+      // approval-requested (re-showing Approve/Reject).
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      applyChunkToParts(parts, {
+        type: "tool-approval-request",
+        toolCallId: "call_1",
+        approvalId: "appr-1"
+      });
+      (parts[0] as Record<string, unknown>).state = "approval-responded";
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-approval-request",
+          toolCallId: "call_1",
+          approvalId: "appr-1"
+        })
+      ).toBe(true);
+    });
+
+    it("returns true for tool-approval-request on a terminal part", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: "Sunny"
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-approval-request",
+          toolCallId: "call_1",
+          approvalId: "appr-late"
+        })
+      ).toBe(true);
+    });
+
+    it("returns false for a genuine first tool-approval-request (input-available)", () => {
+      // The first approval request of a still-pending tool must pass through so
+      // the client renders the Approve/Reject decision.
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-approval-request",
+          toolCallId: "call_1",
+          approvalId: "appr-1"
+        })
+      ).toBe(false);
+    });
+
+    it("returns false for tool-approval-request when no existing part matches", () => {
+      const parts = makeParts();
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-approval-request",
+          toolCallId: "call_unknown",
+          approvalId: "appr-1"
+        })
+      ).toBe(false);
+    });
   });
 });
 

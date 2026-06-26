@@ -510,12 +510,21 @@ export function applyChunkToParts(
  *   it reaching the client (where the in-place `updateToolPart` would flip the
  *   part to `output-denied`) and the replay buffer. Mirrors the
  *   first-write-wins guard in `applyChunkToParts`.
+ * - `tool-approval-request` for a `toolCallId` whose existing part is already
+ *   `approval-responded` or settled. A continuation replaying a prior tool
+ *   round-trip can re-emit the approval request; left unfiltered it would
+ *   revert an already-approved tool back to `approval-requested` on the client
+ *   (re-showing Approve/Reject) and replay that regression on reconnect. Same
+ *   pattern and rationale as `tool-output-denied`.
  */
 export function isReplayChunk(
   parts: MessagePart[],
   chunk: StreamChunkData
 ): boolean {
-  if (chunk.type === "tool-output-denied") {
+  if (
+    chunk.type === "tool-output-denied" ||
+    chunk.type === "tool-approval-request"
+  ) {
     if (!chunk.toolCallId) return false;
     const existing = findToolPartByCallId(parts, chunk.toolCallId);
     if (!existing) return false;
