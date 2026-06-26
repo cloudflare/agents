@@ -11,6 +11,10 @@
       { "class_name": "ChatAgent", "name": "ChatAgent" },
       { "class_name": "LlmChatAgent", "name": "LlmChatAgent" },
       { "class_name": "ClientToolAgent", "name": "ClientToolAgent" },
+      {
+        "class_name": "ClientToolApprovalAgent",
+        "name": "ClientToolApprovalAgent"
+      },
       { "class_name": "SlowAgent", "name": "SlowAgent" },
       { "class_name": "BadKeyAgent", "name": "BadKeyAgent" },
       { "class_name": "SanitizeAgent", "name": "SanitizeAgent" },
@@ -39,6 +43,7 @@
     {
       "new_sqlite_classes": ["ResponseLlmAgent", "ResponseChainAgent"],
       "tag": "v5"
-    }
+    },
+    { "new_sqlite_classes": ["ClientToolApprovalAgent"], "tag": "v6" }
   ]
 }

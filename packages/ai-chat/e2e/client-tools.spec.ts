@@ -352,7 +352,10 @@ test.describe("Tool approval auto-continuation e2e", () => {
     baseURL
   }) => {
     const room = crypto.randomUUID();
-    const wsUrl = agentPath(baseURL!, room);
+    // Use the approval-required agent so the LLM emits a real tool-approval
+    // request (the tool declares needsApproval) — approving it keeps the part
+    // in approval-responded instead of the SDK re-validating it as unneeded.
+    const wsUrl = `${baseURL!.replace("http", "ws")}/agents/client-tool-approval-agent/${room}`;
 
     // This test:
     // 1. Sends a message that triggers the LLM to call getUserLocation
@@ -365,11 +368,13 @@ test.describe("Tool approval auto-continuation e2e", () => {
           allMessages: WSMessage[];
           continuationStreamId: string | null;
           toolCallId: string | null;
+          approvalId: string | null;
           approvalSent: boolean;
         }>((resolve) => {
           const ws = new WebSocket(url);
           const allMessages: WSMessage[] = [];
           let toolCallId: string | null = null;
+          let approvalId: string | null = null;
           let sentApproval = false;
           let doneCount = 0;
           let continuationStreamId: string | null = null;
@@ -391,6 +396,27 @@ test.describe("Tool approval auto-continuation e2e", () => {
               }
 
               if (data.type === MT.CF_AGENT_USE_CHAT_RESPONSE) {
+                // Capture the SDK-issued approvalId from the approval-request
+                // chunk (the tool declares needsApproval, so the part's
+                // approval.id is this id, distinct from the toolCallId).
+                if (
+                  !approvalId &&
+                  typeof data.body === "string" &&
+                  data.body.includes("tool-approval-request")
+                ) {
+                  try {
+                    const chunk = JSON.parse(data.body as string);
+                    if (
+                      chunk.type === "tool-approval-request" &&
+                      chunk.approvalId
+                    ) {
+                      approvalId = chunk.approvalId;
+                    }
+                  } catch {
+                    // not JSON
+                  }
+                }
+
                 // Look for tool-input-available
                 if (
                   !sentApproval &&
@@ -433,6 +459,7 @@ test.describe("Tool approval auto-continuation e2e", () => {
                         allMessages,
                         continuationStreamId,
                         toolCallId,
+                        approvalId,
                         approvalSent: sentApproval
                       });
                     }, 500);
@@ -476,6 +503,7 @@ test.describe("Tool approval auto-continuation e2e", () => {
               allMessages,
               continuationStreamId,
               toolCallId,
+              approvalId,
               approvalSent: sentApproval
             });
           }, 25000);
@@ -504,7 +532,7 @@ test.describe("Tool approval auto-continuation e2e", () => {
 
     // Verify persistence
     const res = await page.request.get(
-      `${baseURL}/agents/client-tool-agent/${room}/get-messages`
+      `${baseURL}/agents/client-tool-approval-agent/${room}/get-messages`
     );
     expect(res.ok()).toBe(true);
     const persisted = await res.json();
@@ -520,8 +548,12 @@ test.describe("Tool approval auto-continuation e2e", () => {
     );
     expect(toolPart).toBeTruthy();
     expect(toolPart.state).toBe("approval-responded");
+    // The tool declares needsApproval, so the SDK issues a distinct approvalId
+    // (carried on the approval-request chunk) rather than reusing the
+    // toolCallId. The persisted approval preserves that id plus approved: true.
+    expect(result.approvalId).toBeTruthy();
     expect(toolPart.approval).toEqual({
-      id: result.toolCallId,
+      id: result.approvalId,
       approved: true
     });
   });

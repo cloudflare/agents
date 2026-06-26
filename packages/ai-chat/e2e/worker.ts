@@ -15,6 +15,7 @@ export type Env = {
   ChatAgent: DurableObjectNamespace<ChatAgent>;
   LlmChatAgent: DurableObjectNamespace<LlmChatAgent>;
   ClientToolAgent: DurableObjectNamespace<ClientToolAgent>;
+  ClientToolApprovalAgent: DurableObjectNamespace<ClientToolApprovalAgent>;
   SlowAgent: DurableObjectNamespace<SlowAgent>;
   BadKeyAgent: DurableObjectNamespace<BadKeyAgent>;
   SanitizeAgent: DurableObjectNamespace<SanitizeAgent>;
@@ -108,6 +109,42 @@ export class ClientToolAgent extends AIChatAgent<Env> {
           description: "Get the user's current location from the browser",
           inputSchema: z.object({})
           // No execute — client must handle via CF_AGENT_TOOL_RESULT
+        })
+      },
+      stopWhen: stepCountIs(3)
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+
+/**
+ * Agent with a client-side tool that REQUIRES approval (no execute function).
+ * The LLM calls the tool, the stream pauses at approval-requested, and the
+ * test sends CF_AGENT_TOOL_APPROVAL. Kept separate from `ClientToolAgent` so
+ * the approval flow doesn't perturb the tool-result/continuation tests that
+ * agent's plain (no-approval) tool drives.
+ */
+export class ClientToolApprovalAgent extends AIChatAgent<Env> {
+  async onChatMessage() {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+        sessionAffinity: this.sessionAffinity
+      }),
+      system:
+        "You are a test assistant. Always use the getUserLocation tool when asked about location.",
+      messages: await convertToModelMessages(this.messages),
+      tools: {
+        getUserLocation: tool({
+          description: "Get the user's current location from the browser",
+          inputSchema: z.object({}),
+          // Requires approval: an approved continuation keeps the part in
+          // `approval-responded` (awaiting the client result) rather than the
+          // SDK re-validating it as an unneeded approval and denying it.
+          needsApproval: true
+          // No execute — client resolves via CF_AGENT_TOOL_RESULT after approval
         })
       },
       stopWhen: stepCountIs(3)

@@ -1589,6 +1589,55 @@ describe("applyChunkToParts: tool-output-denied", () => {
     expect(part.input).toEqual({ a: 5000, b: 3, operator: "*" });
     expect(part.approval).toEqual({ id: "approval-xyz" });
   });
+
+  it("does not regress an approval-responded (approved) part to output-denied", () => {
+    // A continuation that re-validates the transcript can emit
+    // tool-output-denied for an approval the SDK deems unneeded. A granted
+    // approval (approval-responded) must not be silently flipped to a denial.
+    const parts: MessageParts = [
+      {
+        type: "tool-calculate",
+        toolCallId: "call_789",
+        toolName: "calculate",
+        state: "approval-responded",
+        input: { a: 5000, b: 3, operator: "*" },
+        approval: { id: "approval-xyz", approved: true }
+      } as MessageParts[number]
+    ];
+
+    const handled = applyChunkToParts(parts, {
+      type: "tool-output-denied",
+      toolCallId: "call_789"
+    } as StreamChunkData);
+
+    expect(handled).toBe(true);
+    const part = parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("approval-responded");
+    expect(part.approval).toEqual({ id: "approval-xyz", approved: true });
+  });
+
+  it("does not regress a terminal output-available part to output-denied", () => {
+    const parts: MessageParts = [
+      {
+        type: "tool-calculate",
+        toolCallId: "call_terminal",
+        toolName: "calculate",
+        state: "output-available",
+        input: { a: 2, b: 2, operator: "+" },
+        output: { result: 4 }
+      } as MessageParts[number]
+    ];
+
+    const handled = applyChunkToParts(parts, {
+      type: "tool-output-denied",
+      toolCallId: "call_terminal"
+    } as StreamChunkData);
+
+    expect(handled).toBe(true);
+    const part = parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("output-available");
+    expect(part.output).toEqual({ result: 4 });
+  });
 });
 
 describe("Tool approval persistence across reconnect", () => {

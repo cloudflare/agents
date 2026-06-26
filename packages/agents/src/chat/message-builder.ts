@@ -376,6 +376,21 @@ export function applyChunkToParts(
       const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
       if (toolPart) {
         const p = toolPart as Record<string, unknown>;
+        // First-write-wins: a tool that's already terminal must not be
+        // regressed by a later/replayed chunk. Also preserve an
+        // `approval-responded` (user-approved) part — a continuation that
+        // re-validates the transcript can emit `tool-output-denied` for an
+        // approval the SDK deems unneeded (e.g. a tool without
+        // `needsApproval`); that must not silently flip a granted approval
+        // into a denial.
+        if (
+          p.state === "output-available" ||
+          p.state === "output-error" ||
+          p.state === "output-denied" ||
+          p.state === "approval-responded"
+        ) {
+          return true;
+        }
         p.state = "output-denied";
       }
       return true;
