@@ -1,5 +1,11 @@
 # create-think
 
+## 0.1.1
+
+### Patch Changes
+
+- [#1817](https://github.com/cloudflare/agents/pull/1817) [`7f367d8`](https://github.com/cloudflare/agents/commit/7f367d88eb988d5f0285d4922d1091c7f69361a3) Thanks [@threepointone](https://github.com/threepointone)! - `create-think` now prompts for a starter template when `--template` is omitted (and falls back to `basic` when stdin is non-interactive). `npm create think` and `think init` initialize a git repository — skipping cleanly when the target is already inside one — and scaffold projects with Oxlint/Oxfmt config plus a `check` script. Removes the unused declarative `agent()` framework helper and the identity helpers (`defineMessengers`, `defineScheduledTasks`, `defineChannels`) in favor of class-based agents and typed object returns.
+
 ## 0.1.0
 
 ### Minor Changes

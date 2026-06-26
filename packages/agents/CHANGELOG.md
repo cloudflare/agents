@@ -1,5 +1,383 @@
 # @cloudflare/agents
 
+## 0.17.0
+
+### Minor Changes
+
+- [#1758](https://github.com/cloudflare/agents/pull/1758) [`6b46b04`](https://github.com/cloudflare/agents/commit/6b46b044c03e9fda280c9916fef6ec8b6baa7d73) Thanks [@threepointone](https://github.com/threepointone)! - Add progress signalling and durable milestones for agent-tool sub-agents
+  (cloudflare/agents#1758, rfc-detached-agent-tools §progress, phases 4a + 4b).
+
+  A sub-agent running as an agent tool (awaited or detached/background) can now
+  report mid-run progress:
+
+  ```ts
+  // Inside the child sub-agent (e.g. from a tool's execute):
+  await this.reportProgress({
+    fraction: 0.6,
+    phase: "deploying",
+    message: "Generating menu page…",
+  });
+  ```
+
+  These signals ride the child's own turn stream as a transient
+  `data-agent-progress` part, so they re-broadcast to the parent's connected
+  clients and surface on `AgentToolRunState.progress` via `useAgentToolEvents` — a
+  background-runs tray can render a live bar / phase / status line without drilling
+  in. Highlights:
+
+  - **`reportProgress({ fraction?, message?, phase?, data? }, { persist? })`** on
+    chat agents (`@cloudflare/think`, `AIChatAgent`); a no-op with a dev warning on
+    the base `Agent` and when called outside an active agent-tool run. The framework
+    resolves the run id from the active turn — no threading required. Bursts are
+    coalesced (latest-wins; a `fraction >= 1` "done" frame always flushes). `data`
+    is live-only unless `{ persist: true }`.
+  - **`onProgress(run, progress)`** parent hook, fired best-effort from the tail
+    for both awaited and detached runs.
+  - **Latest-snapshot persistence + recovery inspect.** The child stores a
+    `progress_json` + `last_signal_at` on its run row and surfaces it through
+    `inspectAgentToolRun().progress`, so a rehydrated parent reconstructs progress
+    after eviction.
+  - **Resetting no-progress budget for detached runs.** Once a detached child has
+    reported at least one signal, the backbone gives up if it then goes silent for
+    `detachedNoProgressBudgetMs` (default 1h; per-run override via
+    `detached: { noProgressBudgetMs }`), surfaced as `interrupted` with the
+    `no-progress` reason. A child that never reports is bounded only by the absolute
+    `detachedMaxBudgetMs` ceiling — we never give up on a run merely for being slow.
+
+  ## Durable milestones (phase 4b)
+
+  Naming a `milestone` promotes a signal from the ephemeral tier to a **durable**
+  one — there is still only one emit method:
+
+  ```ts
+  // Inside the child sub-agent:
+  await this.reportProgress({
+    milestone: "sources-gathered",
+    data: { sources: 2 },
+  });
+  ```
+
+  - **Persisted + replayable.** Each milestone is one row on the child
+    (`cf_agent_tool_milestones` / `cf_ai_chat_agent_tool_milestones`) with a
+    monotonic per-run `sequence`. It rides the stream as a **persisted**
+    `data-agent-milestone` part (vs. transient progress), so drill-in replay and a
+    rehydrated parent both see it. Surfaced via `inspectAgentToolRun().milestones`
+    and `AgentToolRunState.milestones` (deduped by `sequence`).
+  - **`onProgress` fires for milestones too** — the snapshot carries
+    `progress.milestone`, so a consumer can branch on milestone vs. ephemeral.
+  - **`detached: { onMilestones }` chat convenience** (`@cloudflare/think` and
+    `AIChatAgent`). When a configured milestone lands, the chat agent surfaces an
+    idempotent synthetic chat message (keyed/idempotent per `(runId, name)`)
+    _before_ the run finishes. Delivered from both the warm tail and the cold
+    backbone reconcile; the deterministic id collapses them to at-most-once. Two
+    modes (the `string[]` shorthand defaults to `"narrate"`):
+    - `"narrate"` (default) — a synthetic **assistant** message injected directly
+      (no inference): a cheap, honest status line that does not trigger a turn.
+    - `"react"` — a **user-role** turn so the model responds to the milestone
+      (steer, start dependent work). Costs a model turn.
+
+    ```ts
+    detached: { onMilestones: ["preview-ready"] } // narrate (default)
+    detached: { onMilestones: { names: ["needs-approval"], mode: "react" } }
+    ```
+
+    Override the wording via `formatDetachedMilestone(run, milestone)`. These
+    synthetic messages carry `metadata.source` so clients can render them as an
+    agent **event** rather than a human turn (the example does this).
+
+  The awaitable join point (`awaitAgentToolMilestone`, phase 4c) is intentionally
+  not included here — it is gated behind a design addendum.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Add typed action ledger observability events to the diagnostics channel event union.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Add typed `action:pause:*` (created/approved/rejected/swept) observability events to the diagnostics channel event union for durable-pause action approvals.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Add the `ReplyAttachment` type and an optional `attachments` field on `ChatResponseResult`, plus an `action:reply-attached` diagnostics event, to support the Think actions reply-attachment side-channel.
+
+- [#1799](https://github.com/cloudflare/agents/pull/1799) [`3c2afc9`](https://github.com/cloudflare/agents/commit/3c2afc9379f34fe51e401999ec03e9efc0fe93f2) Thanks [@threepointone](https://github.com/threepointone)! - Stop reconnecting on terminal WebSocket close events and expose terminal connection failures via `connectionError` / `onConnectionError` on `AgentClient`, `useAgent`, and `useAgentChat`.
+
+- [#1758](https://github.com/cloudflare/agents/pull/1758) [`6b46b04`](https://github.com/cloudflare/agents/commit/6b46b044c03e9fda280c9916fef6ec8b6baa7d73) Thanks [@threepointone](https://github.com/threepointone)! - Add first-class detached ("background") agent-tool runs with a durable
+  completion hook (cloudflare/agents#1752).
+
+  `runAgentTool(cls, { detached })` now dispatches a sub-agent **without blocking
+  the calling turn**, returning a `{ runId, agentType, status: "running" }` handle
+  immediately:
+
+  ```ts
+  // Fire-and-forget — observe via agent-tool-event frames + onAgentToolFinish.
+  const { runId } = await this.runAgentTool(ImportAgent, {
+    input,
+    detached: true
+  });
+
+  // Or wire a durable, eviction-surviving completion callback (by METHOD NAME,
+  // like schedule()):
+  await this.runAgentTool(ImportAgent, {
+    input,
+    detached: { onFinish: "onImportDone", maxBudgetMs: 60 * 60 * 1000 }
+  });
+
+  async onImportDone(run: AgentToolRunInfo, result: AgentToolLifecycleResult) {
+    // Branch on result.status: "completed" | "error" | "aborted" | "interrupted".
+    // A budget give-up arrives as interrupted / reason "budget-exceeded".
+  }
+  ```
+
+  Highlights:
+
+  - **Durable, exactly-once-on-the-happy-path completion.** A warm fast path
+    (low-latency while the isolate is alive) plus a self-scheduling reconcile
+    backbone (survives eviction / deploys) route through one guarded delivery
+    funnel. Two independent ledger slots (finish / give-up) with a claim+lease
+    mean a premature give-up can never dedupe a child's real late completion away.
+  - **No silent abandonment.** Detached runs are never sealed `interrupted` just
+    because their dispatching turn ended (the normal state for a background run);
+    the backbone owns them and re-arms on restart.
+  - **Bounded.** An absolute `maxBudgetMs` ceiling (default 24h, configurable via
+    the `detachedMaxBudgetMs` static option) gives up — surfaced as `interrupted`
+    with the new `budget-exceeded` reason — and tears the child down so an
+    abandoned run cannot hold a concurrency slot forever.
+  - **`cancelAgentTool(runId)`** cancels a detached (or awaited) run by id through
+    the same guarded path, so a wired `onFinish` still fires once with
+    `status: "aborted"`, and the terminal `agent-tool-event` is always broadcast
+    to connected clients (a cancelled run's UI settles immediately).
+  - **Recovery-safe delivery.** A chat host (`@cloudflare/think` / `AIChatAgent`)
+    runs the completion callback serialized on its turn queue, so an `onFinish`
+    that mutates chat state can never interleave with a live LLM turn. Concurrent
+    detached dispatches in one turn no longer race to arm multiple reconcile
+    backbones (arming is serialized).
+  - **Observability.** New events `agent_tool:detached:delivery_failed` (a wired
+    callback threw; the slot stays open for retry) and
+    `agent_tool:detached:live_count_warning` (edge-triggered when live detached
+    runs cross a threshold — a leak smoke alarm, since detached runs hold a
+    concurrency slot for their whole life).
+
+  A detached run deliberately does NOT inherit `options.signal` (it must outlive
+  the spawning turn); cancel it explicitly with `cancelAgentTool`.
+
+- [#1801](https://github.com/cloudflare/agents/pull/1801) [`c58b401`](https://github.com/cloudflare/agents/commit/c58b4015b7616581b3d7fca86a5fde6e49bd9cd3) Thanks [@threepointone](https://github.com/threepointone)! - Add the shared `agents/chat/react` entry with `useAgentChat`, chat transport helpers, and shared chat wire types. The hook also adds `syncMessagesToServer` so hosts with server-authoritative transcript storage can keep `setMessages` local-only.
+
+### Patch Changes
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - De-duplicate three adapter-spine helpers shared by `@cloudflare/ai-chat` and
+  `@cloudflare/think` into `agents/chat`.
+
+  Three fragments that were duplicated byte-for-byte across both hosts now live
+  once as shared, `@internal` primitives:
+
+  - `async-helpers.ts` — the `TIMED_OUT` sentinel, `awaitWithDeadline` (a
+    deadline-bounded promise race that always clears its timer), and
+    `drainInteractionApplies` (the substrate-free interaction-apply completeness
+    drain, parameterized by `hasPending` / `getTail`).
+  - `classifyAgentToolChildRecovery(storage)` (in `recovery-incident.ts`) — the
+    parent's agent-tool reattach incident scan, with `in-progress > failed > none`
+    precedence so a parent never gives up on a still-recovering child.
+  - `interceptAgentToolBroadcast(msg, hooks)` (in `agent-tools.ts`) — the [#1575](https://github.com/cloudflare/agents/issues/1575)
+    outgoing-frame snoop that forwards an agent-tool child's streamed progress to
+    its live tailers (or captures its error), parameterized by an
+    `AgentToolBroadcastHooks` substrate (the per-run forwarder / live-sequence /
+    last-error maps, the host's response-frame type, and the host run-lookup).
+
+  Both hosts delegate through their existing private method names and
+  `broadcast()` overrides (which still call `super.broadcast`), so every call site
+  is untouched. This is a pure internal de-duplication with no observable behavior
+  or API change: the new symbols are `@internal` sibling-package support, not
+  public API, and both hosts' existing test suites pass unchanged.
+  `@cloudflare/ai-chat` and `@cloudflare/think` need no changeset for this
+  extraction.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Add the `action:ledger:reclaimed` diagnostics event to `AgentObservabilityEvent`, emitted when a stale `pending` action ledger row is reclaimed and re-run under the Think pending-retry lease.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Add `channel:resolved`, `channel:delivered`, `notice:delivered`, and `notice:failed` observability events to `AgentObservabilityEvent` for the Think channels surface. These route to a dedicated `agents:channel` diagnostics channel and are reachable via the typed `subscribe("channel", cb)` API (new `ChannelEventMap` bucket) rather than falling through to the catch-all `lifecycle` channel.
+
+- [#1796](https://github.com/cloudflare/agents/pull/1796) [`058a781`](https://github.com/cloudflare/agents/commit/058a781dae3e28a52fbd81a8b4b1bbd9d07c19c0) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Make the `ai` peer optional again. The root `agents` runtime and declaration graph no longer reference AI SDK types; AI-specific entry points still require the peer when imported.
+
+- [#1802](https://github.com/cloudflare/agents/pull/1802) [`391b034`](https://github.com/cloudflare/agents/commit/391b0340299fa2079c8665ee5343c4667ed3ddcf) Thanks [@threepointone](https://github.com/threepointone)! - Ensure tool approval updates always retain a provider-facing approval id.
+
+  Older or hand-seeded transcripts can contain an `approval-requested` tool part
+  without an `approval.id`. When that part is approved and auto-continuation
+  re-enters inference, the AI SDK requires a matching approval id in the converted
+  model messages. Approval updates now synthesize a stable id from the
+  `toolCallId` when the transcript is missing one, preventing invalid prompt
+  errors while preserving existing approval metadata. `@cloudflare/ai-chat` now
+  routes its approval merge through the shared `toolApprovalUpdate` builder so it
+  benefits from the same fallback instead of its own divergent copy.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Extract the shared auto-continuation barrier into an `AutoContinuationController`
+  primitive in `agents/chat`.
+
+  The event-driven auto-continuation barrier (the tool-result → auto-continue flow,
+  [#1649](https://github.com/cloudflare/agents/issues/1649) / [#1650](https://github.com/cloudflare/agents/issues/1650)) was duplicated, line-for-line, across `@cloudflare/ai-chat`
+  (`AIChatAgent`) and `@cloudflare/think` (`Think`) — the coalesce timer, the
+  double-fire guard, the create/update/defer scheduling branch, and the
+  completeness-gated drain orchestration. It now lives once as
+  `AutoContinuationController`, parameterized over a small `AutoContinuationHost`
+  interface (the stream-active signal, the incomplete-batch / pending-interaction
+  predicates, the apply-drain primitive, and each host's continuation-turn
+  pipeline). Both hosts delegate to it through thin wrappers, so every call site is
+  untouched.
+
+  This is a pure internal de-duplication with no observable behavior or API change:
+  the new symbols are `@internal` sibling-package support, not public API, and both
+  hosts' existing test suites pass unchanged. `@cloudflare/ai-chat` and
+  `@cloudflare/think` need no changeset for this extraction.
+
+- [#1805](https://github.com/cloudflare/agents/pull/1805) [`60e53e0`](https://github.com/cloudflare/agents/commit/60e53e01a46d212a525d19aaac8835afb7ae27e2) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgentChat` reordering a terminal/authoritative `CF_AGENT_CHAT_MESSAGES` snapshot when a protected streaming assistant is followed by a later assistant message ([#1778](https://github.com/cloudflare/agents/issues/1778)). The protected-tail merge is still applied for stale mid-stream snapshots, but when the incoming snapshot already contains the protected assistant followed by a newer assistant (e.g. a Think HITL denial that persists the denied tool message and then appends a follow-up assistant response), protection is cleared and the snapshot is rendered in its authoritative order instead of moving the protected assistant to the end.
+
+- [#1788](https://github.com/cloudflare/agents/pull/1788) [`3b2af54`](https://github.com/cloudflare/agents/commit/3b2af5444af5002cd54fd493452e03c721d31999) Thanks [@threepointone](https://github.com/threepointone)! - Converge recovery forward-progress crediting between `AIChatAgent` and `Think`.
+
+  Both hosts now credit the recovery no-progress counter through one shared, host-agnostic rule (`shouldCreditStreamProgress`): a progress milestone (a started text/reasoning segment or a settled tool input/output) credits unconditionally, and mid-segment streaming deltas (`text-delta`/`reasoning-delta`/`tool-input-delta`) credit at most once per throttle window via a per-isolate `StreamProgressCreditThrottle`. Previously `AIChatAgent` credited only on chunk-type milestones while `Think` credited on its flush cadence, so a long single content segment spanning repeated crashes could read as "no progress" under `AIChatAgent` and false-fire its `no_progress_timeout`. The new rule is never coarser than either host's prior cadence, so it can only delay or avoid a false no-progress timeout, never hasten give-up.
+
+- [#1430](https://github.com/cloudflare/agents/pull/1430) [`d1c4342`](https://github.com/cloudflare/agents/commit/d1c4342b03adac6d5962318e63c682009614a406) Thanks [@threepointone](https://github.com/threepointone)! - Support starting Agent workflows from sub-agent facets by preserving the originating facet path for callbacks and workflow Agent RPC.
+
+  - Route workflow callbacks, `this.agent` RPC, progress/completion/error, durable events, and state updates back to the exact originating facet via path-based dispatch.
+  - Match real Durable Object stub RPC semantics in path dispatch: reject built-in/prototype and JS-internal method names.
+  - Validate the workflow origin payload version so a mismatched SDK fails with a clear error instead of misreading the shape.
+  - Document the callback routing constraints (name-based resolution, sub-agent workflow tracking is facet-local, class names must survive bundling).
+
+- [#1818](https://github.com/cloudflare/agents/pull/1818) [`fa7bfec`](https://github.com/cloudflare/agents/commit/fa7bfec9e7a3524bfadf589b582aee1e960f4615) Thanks [@threepointone](https://github.com/threepointone)! - Stop a `tool-output-denied` chunk from clobbering a settled or user-approved
+  tool part in `agents/chat`.
+
+  `applyChunkToParts` now treats `tool-output-denied` as first-write-wins: it
+  leaves a part already in `output-available` / `output-error` / `output-denied`
+  untouched, and — importantly — no longer flips an `approval-responded`
+  (user-approved) part to `output-denied`. An auto-continuation that re-validates
+  the transcript can legitimately emit `tool-output-denied` for an approval the
+  AI SDK deems unneeded (e.g. a tool without `needsApproval`); previously that
+  silently turned a granted approval into a denial in the persisted message. This
+  matches the first-write-wins guards already on the `tool-input-*` handlers and
+  benefits both `@cloudflare/ai-chat` and `@cloudflare/think`.
+
+  `isReplayChunk` now recognizes the same replayed `tool-output-denied` (for a
+  part already settled or in `approval-responded`). The server-side guard only
+  protects the persisted message; without this, the stale denial chunk was still
+  stored in the resumable-stream buffer and broadcast to connected clients, where
+  AI SDK v6's in-place `updateToolPart` would regress the rendered tool part back
+  to `output-denied` (and replay it on reconnect). Filtering it at the broadcast
+  boundary keeps the client UI consistent with the persisted state.
+
+  `tool-approval-request` gains the same treatment on both paths: a
+  first-write-wins guard in `applyChunkToParts` (so a replayed approval request
+  can't regress an already-`approval-responded` or settled part back to
+  `approval-requested`, discarding the user's decision) and a matching
+  `isReplayChunk` branch (so the replayed request isn't stored or broadcast,
+  which would otherwise revert an approved tool to re-showing Approve/Reject on
+  the client and on reconnect).
+
+- [#1734](https://github.com/cloudflare/agents/pull/1734) [`cd2c430`](https://github.com/cloudflare/agents/commit/cd2c43075738a52093f8fb1b8261ce3871de2526) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Allow `McpAgent` server-to-client requests to send from callbacks that do not inherit the agent's async context, including callbacks reached through Worker Loader RPC.
+
+- [#1794](https://github.com/cloudflare/agents/pull/1794) [`b6ad4d5`](https://github.com/cloudflare/agents/commit/b6ad4d5bc078ede978b9b68fd7beb6ed3194f848) Thanks [@threepointone](https://github.com/threepointone)! - De-duplicate the orphan-persist core shared by `@cloudflare/ai-chat` and
+  `@cloudflare/think` into `agents/chat`.
+
+  The genuinely-common skeleton of both hosts' `_persistOrphanedStream` — the
+  accumulate loop plus the `getMessage → updateMessage(merge) XOR appendMessage`
+  upsert — now lives once as the `@internal` `persistReconstructedOrphan` helper.
+  The deliberately host-specific bits stay in the callers: the buffer flush, the
+  fallback id, the `prepare` hook (Think strips internal parts and may skip;
+  ai-chat resolves the persist-target id), the `merge` hook (Think replaces;
+  ai-chat reconciles partials), and broadcast (Think after; ai-chat inside its
+  store's `persistMessages`).
+
+  Pure internal de-duplication with no observable behavior or API change: the new
+  symbol is `@internal` sibling-package support, not public API, and both hosts'
+  recovery suites pass unchanged. `@cloudflare/ai-chat` and `@cloudflare/think`
+  need no changeset for this extraction.
+
+- [#1788](https://github.com/cloudflare/agents/pull/1788) [`3b2af54`](https://github.com/cloudflare/agents/commit/3b2af5444af5002cd54fd493452e03c721d31999) Thanks [@threepointone](https://github.com/threepointone)! - Export `reconcileOrphanPartial` from `agents/chat`.
+
+  This is the shared primitive that merges a freshly-reconstructed orphaned stream
+  partial onto an assistant message that already owns its target id (an early
+  persist at tool-approval time, or a continuation resuming the prior assistant
+  message). It keeps all existing parts, appends only reconstructed parts whose
+  `toolCallId` is not already present (so a recovery replay never duplicates a
+  tool call), and overlays incoming metadata onto existing — preserving an
+  in-place tool result that lives only in storage rather than letting a replayed
+  chunk re-advance it. `@cloudflare/ai-chat`'s orphan-persist path now uses it;
+  hosts whose orphan persist only runs at stream finalize don't need it (the
+  shared reconstruction is already idempotent by `toolCallId`).
+
+  Additive export only — no behavior change to existing APIs.
+
+- [#1788](https://github.com/cloudflare/agents/pull/1788) [`3b2af54`](https://github.com/cloudflare/agents/commit/3b2af5444af5002cd54fd493452e03c721d31999) Thanks [@threepointone](https://github.com/threepointone)! - Export the `OrphanPersistStore<M = UIMessage>` type from `agents/chat`.
+
+  This is the minimal message store the chat-recovery orphan-persist write goes
+  through — the write subset of `SessionProvider` (the `getMessage`,
+  `appendMessage`, and `updateMessage` methods). It is parameterized over the
+  host's message type so the seam itself is not AI-SDK-specific: the AI-SDK chat
+  hosts (`@cloudflare/ai-chat`, `@cloudflare/think`) instantiate it at the
+  `UIMessage` default, while `SessionProvider` satisfies it at its own
+  `SessionMessage`. Both hosts now route their orphan-persist write through a host
+  adapter typed against this interface, turning the previous by-convention
+  alignment into a type-enforced contract.
+
+  Additive export only — no behavior change to existing APIs.
+
+- [#1803](https://github.com/cloudflare/agents/pull/1803) [`c476265`](https://github.com/cloudflare/agents/commit/c476265c9f18a2a6eb5f01137515a8776ca8b63c) Thanks [@threepointone](https://github.com/threepointone)! - Fix AI SDK `status` getting stuck after a reconnect that races a turn's
+  pre-stream window ([#1784](https://github.com/cloudflare/agents/issues/1784)).
+
+  A turn is "accepted but pre-stream" while it is queued, debouncing, or awaiting
+  async setup before its resumable stream starts. A client that connected or sent
+  a `STREAM_RESUME_REQUEST` in that window was answered with `STREAM_RESUME_NONE`
+  ("nothing to resume"), so its short resume probe resolved `null` and AI SDK
+  `status` settled on `ready` even though the server went on to stream — leaving
+  the UI unable to render the in-flight turn until a full remount.
+
+  This adds a shared `PreStreamTurns` tracker (`agents/chat`) and a new
+  server→client `cf_agent_stream_pending` frame:
+
+  - The resume handshake now parks resume requests that arrive during the
+    pre-stream window and emits `STREAM_PENDING` ("keep waiting") instead of
+    `STREAM_RESUME_NONE`, then flushes parked connections into the normal
+    `STREAM_RESUMING` handshake once the stream actually starts (and releases them
+    with `STREAM_RESUME_NONE` if the turn is superseded/cleared before streaming).
+  - On `STREAM_PENDING` the client transport extends its resume probe from the
+    5s fast-path to a 60s backstop so the probe stays open across the gap.
+  - `useAgentChat` re-probes the stream on a transparent socket reopen (e.g. a
+    1006 reconnect that does not remount the component) so `status` recovers.
+  - Continuation affinity is relaxed via an optional `isConnectionPresent` host
+    hook so a transparent reconnect (whose connection id changed) can resume a
+    continuation whose original owner connection is gone.
+
+  Wired into both `AIChatAgent` and `@cloudflare/think`.
+
+  The pre-stream tracker is in-memory only; it is hibernation-safe because a turn
+  in its pre-stream window is an unresolved message-handler promise that pins the
+  Durable Object in memory, so eviction only happens once a stream is durably
+  recorded (and resumes via `ResumableStream`) or the turn has finished. Skipped
+  turns (supersede/generation change) settle without releasing parked
+  connections, so a client parked during the window survives onto the successor
+  turn instead of being cut loose by a premature `STREAM_RESUME_NONE`.
+
+- [#1794](https://github.com/cloudflare/agents/pull/1794) [`b6ad4d5`](https://github.com/cloudflare/agents/commit/b6ad4d5bc078ede978b9b68fd7beb6ed3194f848) Thanks [@threepointone](https://github.com/threepointone)! - Extract transcript repair into a shared `agents/chat` primitive.
+
+  `@cloudflare/think`'s `_repairToolTranscriptParts` — which flips an interrupted
+  tool call (a `tool-*` / `dynamic-tool` part with no settled result, left behind
+  when a stream was cut off mid-flight) into an errored tool-result so the next
+  provider call doesn't 400 with `AI_MissingToolResultsError`, and normalizes
+  malformed tool `input` — now lives once as the shared, `@internal`
+  `repairInterruptedToolParts` primitive (plus the `toolPartHasSettledResult`
+  terminal-state check) in `agents/chat`.
+
+  The primitive is pure (returns a new messages array plus repair stats; never
+  touches storage, broadcast, or events) and is parameterized by an overridable
+  `repairPart` hook plus an optional `shouldRepair(part)` skip predicate (defaults
+  to repairing every interrupted part), so both AI-SDK chat hosts can run repair
+  logic before re-entering inference on a recovered turn — a host whose default
+  errors the part (ai-chat) uses `shouldRepair` to leave a part still awaiting a
+  client interaction verbatim. `@cloudflare/think` delegates through its existing
+  `repairInterruptedToolPart` hook with no `shouldRepair` (repairs everything) — a
+  pure internal refactor with no observable behavior or API change; its suites pass
+  unchanged.
+
+- [#1772](https://github.com/cloudflare/agents/pull/1772) [`d4f27fe`](https://github.com/cloudflare/agents/commit/d4f27fededefebc17cf455218e952ff76ade847b) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Include each package's documentation in its published package.
+
+- [#1815](https://github.com/cloudflare/agents/pull/1815) [`b20d6f6`](https://github.com/cloudflare/agents/commit/b20d6f649c79f472e11b02bd6e065e1b645286f2) Thanks [@threepointone](https://github.com/threepointone)! - Move `just-bash` from a runtime dependency to an optional peer dependency so apps only install it when they use the skills bash runner.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Add stable approval descriptors for Think actions and preserve approval descriptor metadata on chat tool parts.
+
+- [#1790](https://github.com/cloudflare/agents/pull/1790) [`190ea81`](https://github.com/cloudflare/agents/commit/190ea814c4ea61c216509a431baa8be06d917256) Thanks [@threepointone](https://github.com/threepointone)! - Add `chat:turn:start` and `chat:turn:finish` observability events for Think
+  turn execution.
+
 ## 0.16.2
 
 ### Patch Changes

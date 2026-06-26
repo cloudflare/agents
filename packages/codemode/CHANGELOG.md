@@ -1,5 +1,35 @@
 # @cloudflare/codemode
 
+## 0.4.2
+
+### Patch Changes
+
+- [#1807](https://github.com/cloudflare/agents/pull/1807) [`7eea2fb`](https://github.com/cloudflare/agents/commit/7eea2fb9e0f278b227b5f419b847e6882d3ef9b1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Cleanup connector imports so connector modules are imported normally and the Vite plugin only auto-exports the CodemodeRuntime facet class. Codemode now fails loudly when the runtime facet class is not exported from the Worker entry.
+
+- [#1814](https://github.com/cloudflare/agents/pull/1814) [`a79144d`](https://github.com/cloudflare/agents/commit/a79144d7b47efc85afa3665dc68f4b5ab8a9aad4) Thanks [@threepointone](https://github.com/threepointone)! - Dispose the dynamically-loaded Worker and its RPC entrypoint stub after each
+  `DynamicWorkerExecutor.execute()` run.
+
+  Each execution spins up a child Worker via `loader.load()` and obtains an RPC
+  `Fetcher` stub via `getEntrypoint()`. These own native handles, and the code
+  previously left them for the garbage collector. When such a handle is finalized
+  late — for example during isolate shutdown under
+  `@cloudflare/vitest-pool-workers` — workerd raises a fatal assertion ("tried to
+  defer destruction during isolate shutdown") that kills the worker, surfacing as
+  a flaky "Worker exited unexpectedly" with no failing assertion. The milder
+  manifestation is workerd's "An RPC result was not disposed properly" warning.
+
+  The executor now disposes the entrypoint stub and the loaded worker in `finally`
+  blocks (best-effort, via `Symbol.dispose`), releasing the handles while the
+  isolate is still alive. No behavior or API change for callers.
+
+- [#1793](https://github.com/cloudflare/agents/pull/1793) [`247ebeb`](https://github.com/cloudflare/agents/commit/247ebeb1fe34bd3b07a03530485e4597592e5ecc) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Pass the outer MCP tool-call context to `openApiMcpServer` request callbacks so server-to-client requests and notifications can be associated with the originating response stream.
+
+- [#1791](https://github.com/cloudflare/agents/pull/1791) [`9c85369`](https://github.com/cloudflare/agents/commit/9c85369a3f8bcfc0a2c4c3a559623cb5943c5fdd) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove the root entry's runtime dependency on the optional `ai` and `zod` peers. Executor and runtime imports now bundle without either framework package installed.
+
+- [#1772](https://github.com/cloudflare/agents/pull/1772) [`d4f27fe`](https://github.com/cloudflare/agents/commit/d4f27fededefebc17cf455218e952ff76ade847b) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Include each package's documentation in its published package.
+
+- [#1806](https://github.com/cloudflare/agents/pull/1806) [`43f663d`](https://github.com/cloudflare/agents/commit/43f663d2245fc5c74d0c41d0ada0d7b7da700c12) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Increase the default DynamicWorkerExecutor timeout from 30 seconds to 60 seconds to better support longer-running codemode executions.
+
 ## 0.4.1
 
 ### Patch Changes

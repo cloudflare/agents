@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.4.1
+
+### Patch Changes
+
+- [#1772](https://github.com/cloudflare/agents/pull/1772) [`d4f27fe`](https://github.com/cloudflare/agents/commit/d4f27fededefebc17cf455218e952ff76ade847b) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Include each package's documentation in its published package.
+
 ## 0.4.0
 
 ### Minor Changes

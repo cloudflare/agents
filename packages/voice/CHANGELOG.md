@@ -1,5 +1,15 @@
 # @cloudflare/voice
 
+## 0.3.3
+
+### Patch Changes
+
+- [#1605](https://github.com/cloudflare/agents/pull/1605) [`8bfebf0`](https://github.com/cloudflare/agents/commit/8bfebf00220879bf7c2c3904542df0fcb15fa0b6) Thanks [@cjol](https://github.com/cjol)! - Support AI SDK fullStream responses in voice turns and warn when textStream is used.
+
+- [#1772](https://github.com/cloudflare/agents/pull/1772) [`d4f27fe`](https://github.com/cloudflare/agents/commit/d4f27fededefebc17cf455218e952ff76ade847b) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Include each package's documentation in its published package.
+
+- [#1816](https://github.com/cloudflare/agents/pull/1816) [`f18ff01`](https://github.com/cloudflare/agents/commit/f18ff0123439e30411f92dbb1d1565682eadf428) Thanks [@cjol](https://github.com/cjol)! - Fix assistant speech playing back slow on a new turn after an idle gap. `VoiceClient` routes playback through a `MediaStreamAudioDestinationNode` -> `HTMLAudioElement` bridge, and reusing that element for a fresh burst after it had been idle between turns made the new turn resume at the wrong rate (audible as slow-motion that re-converges to normal over the turn). The bridge is now torn down and rebuilt once it has fully drained and been idle past a short threshold, so each turn plays through a freshly created element. Rebuilds never happen mid-turn, since chunks within a turn keep at least one source scheduled on the playback cursor.
+
 ## 0.3.2
 
 ### Patch Changes
