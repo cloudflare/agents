@@ -241,7 +241,15 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Pin an exact pre-bug Node patch. Wrangler's local Browser Rendering
+      # simulator downloads its own Chrome via @puppeteer/browsers, whose
+      # extract-zip dep silently aborts mid-extraction on Node 24.16+
+      # (puppeteer/puppeteer#14957). That leaves a partial Chrome cache, which
+      # Wrangler then "clears and retries" on every test — a re-corrupting loop
+      # that, with retry:3 + a 120s test timeout, ran this job to the 30m cancel.
       - uses: ./.github/actions/install
+        with:
+          node-version: 24.15.0
 
       - run: pnpm run build
 
@@ -259,11 +267,26 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
 
+      # Persist Wrangler's auto-downloaded Chrome (separate from the Playwright
+      # cache above) so it's fetched once and reused, keeping the one-time
+      # ~hundreds-of-MB download out of the timed test window. Keyed on the
+      # lockfile so a Wrangler bump (which can change the pinned Chrome build)
+      # busts it.
+      - name: Cache Wrangler Chrome
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/.wrangler/chrome
+          key: ${{ runner.os }}-wrangler-chrome-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # Wall-clock guard (20m, below the 30m job cap) mirroring the Playwright
+      # suites' globalTimeout: a future environmental stall fails WITH logs
+      # instead of being silently cancelled at the cap. The suite's own bail:1
+      # already turns a real failure into a fast, reported one.
       - name: Run agents browser-connector e2e tests
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:browser
+        run: timeout --kill-after=30s 20m pnpm run test:browser
         working-directory: packages/agents
 
   # ── DEPLOYED (Layer-5) recovery suites ──────────────────────────────────────

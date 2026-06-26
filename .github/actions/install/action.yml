@@ -6,6 +6,14 @@ inputs:
     description: Registry URL for setup-node (set this when publishing).
     required: false
     default: ""
+  node-version:
+    description: >-
+      Node version for setup-node. Defaults to the latest 24.x. Pin an exact
+      patch (e.g. 24.15.0) for jobs that download a browser via
+      @puppeteer/browsers, whose extract-zip dependency silently corrupts the
+      extraction on Node 24.16+ (see puppeteer/puppeteer#14957).
+    required: false
+    default: "24"
 
 runs:
   using: composite
@@ -16,7 +24,7 @@ runs:
 
     - uses: actions/setup-node@v6
       with:
-        node-version: 24
+        node-version: ${{ inputs.node-version }}
         registry-url: ${{ inputs.registry-url }}
         cache: pnpm
 
