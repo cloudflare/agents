@@ -1,7 +1,7 @@
 /**
  * @cloudflare/voice-assemblyai — AssemblyAI streaming STT provider for the
- * Cloudflare Agents voice pipeline. Defaults to Universal-3 Pro Streaming
- * (`u3-rt-pro`); see README.md for options and model selection.
+ * Cloudflare Agents voice pipeline. Uses AssemblyAI Universal-3.5 Pro Streaming
+ * (`universal-3-5-pro`); see README.md for options.
  */
 
 import type {
@@ -11,34 +11,70 @@ import type {
 } from "@cloudflare/voice";
 
 /**
- * AssemblyAI Streaming v3 speech models. `u3-rt-pro` (the default) is the
- * Universal-3 Pro Streaming voice-agent model — punctuation-based turn
- * detection, barge-in `SpeechStarted` events, and promptable transcription.
- * The `universal-streaming-*` models use confidence-based turn detection
- * (tuned via `min`/`maxTurnSilence`) and do **not** emit `SpeechStarted`.
- * The `string & {}` arm keeps autocomplete while allowing forward-compat values.
+ * Latency/accuracy preset → `mode`. `balanced` (the server default) is best for
+ * voice agents; `min_latency` minimizes time-to-text; `max_accuracy` is for
+ * scribes / post-call. The mode sets the per-mode defaults for turn-silence,
+ * partials, VAD, and interruption timing — only override those when you have a
+ * specific reason to.
  */
-export type AssemblyAISpeechModel =
-  | "u3-rt-pro"
-  | "universal-streaming-english"
-  | "universal-streaming-multilingual"
+export type AssemblyAIMode = "min_latency" | "balanced" | "max_accuracy";
+
+/**
+ * Voice Focus noise-suppression variant → `voice_focus`. `near-field` for
+ * headsets/handsets/close-talking mics, `far-field` for conference rooms,
+ * laptop mics, and other distant capture.
+ */
+export type AssemblyAIVoiceFocus = "near-field" | "far-field";
+
+/**
+ * Languages biased by `language_code` on `universal-3-5-pro`. Set when the
+ * session is known to be monolingual for better accuracy; omit to keep default
+ * multilingual code-switching. The `string & {}` arm keeps autocomplete while
+ * allowing forward-compat values.
+ */
+export type AssemblyAILanguageCode =
+  | "en"
+  | "es"
+  | "de"
+  | "fr"
+  | "it"
+  | "pt"
+  | "tr"
+  | "nl"
+  | "sv"
+  | "no"
+  | "da"
+  | "fi"
+  | "hi"
+  | "vi"
+  | "ar"
+  | "he"
+  | "ja"
+  | "ur"
+  | "zh"
   | (string & {});
 
-/** The only model that supports `prompt`/`continuousPartials`/`interruptionDelay`. */
-const DEFAULT_SPEECH_MODEL = "u3-rt-pro";
+/**
+ * The single streaming model this provider targets: AssemblyAI Universal-3.5
+ * Pro Streaming. It supports `mode`, `prompt`, `agent_context`,
+ * `previous_context_n_turns`, `voice_focus`, and language detection.
+ */
+const SPEECH_MODEL = "universal-3-5-pro";
+
+const DEFAULT_BASE_URL = "wss://streaming.assemblyai.com/v3/ws";
+
+/** Server-side cap on `prompt` and `agent_context` (characters). */
+const MAX_PROMPT_CHARS = 1500;
 
 export interface AssemblyAISTTOptions {
   /** AssemblyAI API key. Sent as the `Authorization` header (raw key, no prefix). */
   apiKey: string;
   /**
-   * Streaming model → `speech_model`. **Defaults to `"u3-rt-pro"`** (Universal-3
-   * Pro Streaming). `prompt`, `continuousPartials`, and `interruptionDelay` are
-   * `u3-rt-pro`-only and throw at construction if set with another model. The
-   * `universal-streaming-*` models tune turn detection via `min`/`maxTurnSilence`,
-   * and barge-in (`onSpeechStart`) only fires on `u3-rt-pro`.
-   * @default "u3-rt-pro"
+   * Latency/accuracy preset → `mode`. Omit to use AssemblyAI's `balanced`
+   * default (recommended for voice agents). The mode owns the per-mode tuning
+   * for turn silence, partials, VAD, and interruption timing.
    */
-  speechModel?: AssemblyAISpeechModel;
+  mode?: AssemblyAIMode;
   /**
    * Domain specialization → `domain=<value>`. `"medical-v1"` enables Medical
    * Mode (en/es/de/fr); the union keeps autocomplete for the known value while
@@ -48,36 +84,59 @@ export interface AssemblyAISTTOptions {
   /** Domain vocabulary to bias recognition → `keyterms_prompt` (JSON-encoded). */
   keyterms?: string[];
   /**
-   * Custom transcription prompt → `prompt`, set at connection time. **Omit to
-   * use AssemblyAI's optimized default prompt (recommended — 88% turn-detection
-   * accuracy).** If set, build off the default; prompts that reduce punctuation
-   * degrade the punctuation-based turn detection.
+   * Natural-language context about the audio (domain, topic, scenario) →
+   * `prompt`. **Not** behavioral/formatting instructions — the transcription
+   * behavior is managed by AssemblyAI. Omit to use the optimized default.
+   * Max 1500 characters. Mutually exclusive with `keyterms` server-side.
    */
   prompt?: string;
   /**
-   * Min silence (ms) before EOT check → `min_turn_silence`.
-   * @default 400 (AssemblyAI server default is 100)
+   * Seed the agent's most recent spoken reply (TTS text) at connection time →
+   * `agent_context`. Use it to prime context for the user's first answer (e.g.
+   * an opening greeting). Update it as the conversation progresses via the
+   * session's `updateAgentContext()`. Max 1500 characters.
    */
-  minTurnSilence?: number;
+  agentContext?: string;
   /**
-   * Max silence (ms) before forced EOT → `max_turn_silence`.
-   * @default 1280 (AssemblyAI server default is 1000)
+   * Max prior conversation entries (finalized user transcripts plus any
+   * `agent_context` values) carried forward as context → `previous_context_n_turns`.
+   * Range 0–100; `0` disables automatic context carryover. Omit to use the
+   * server default (~3).
    */
+  previousContextNTurns?: number;
+  /**
+   * Bias the model toward a single language → `language_code`. Set when the
+   * session is monolingual; omit to keep default multilingual code-switching.
+   */
+  languageCode?: AssemblyAILanguageCode;
+  /**
+   * Voice Focus noise suppression → `voice_focus`. Isolates the primary voice
+   * and suppresses background noise before audio reaches the model. Omit to
+   * disable.
+   */
+  voiceFocus?: AssemblyAIVoiceFocus;
+  /**
+   * How aggressively Voice Focus suppresses background audio → `voice_focus_threshold`
+   * (0–1, higher = more aggressive). Requires `voiceFocus` to be set.
+   */
+  voiceFocusThreshold?: number;
+  /** Min silence (ms) before EOT check → `min_turn_silence`. Omit to use the `mode` default. */
+  minTurnSilence?: number;
+  /** Max silence (ms) before forced EOT → `max_turn_silence`. Omit to use the `mode` default. */
   maxTurnSilence?: number;
-  /** First-partial timing 0–1000 ms → `interruption_delay`. Server default 500. */
+  /** First-partial / barge-in timing 0–1000 ms → `interruption_delay`. Omit to use the `mode` default. */
   interruptionDelay?: number;
   /** VAD silence-confidence threshold 0–1 → `vad_threshold`. Raise in noisy environments. */
   vadThreshold?: number;
   /**
    * Steady ~3 s partials during long uninterrupted turns → `continuous_partials`.
-   * **Defaults to `true` on `u3-rt-pro`** (off otherwise) so the live transcript
-   * keeps updating mid-turn instead of only at pauses. Set `false` to opt out.
+   * Omit to use the `mode` default; set explicitly to override.
    */
   continuousPartials?: boolean;
   /**
    * Return detected-language metadata on Turn events → `language_detection`.
-   * A `universal-streaming-multilingual` feature (`u3-rt-pro` detects language
-   * automatically via code-switching). Surface it via `onLanguageDetected`.
+   * `universal-3-5-pro` code-switches natively; enable this only when you need
+   * the per-turn language reported. Surface it via `onLanguageDetected`.
    */
   languageDetection?: boolean;
   /**
@@ -97,55 +156,53 @@ export interface AssemblyAISTTOptions {
   baseUrl?: string;
 }
 
-const DEFAULT_BASE_URL = "wss://streaming.assemblyai.com/v3/ws";
-
-// Turn-detection silence windows. The plugin defaults these above AssemblyAI's
-// server defaults (100/1000 ms): a slightly longer min and max give speakers
-// more room to pause mid-thought before an end-of-turn fires, which in practice
-// cuts off fewer turns. Callers can still override via `min`/`maxTurnSilence`.
-const DEFAULT_MIN_TURN_SILENCE = 400;
-const DEFAULT_MAX_TURN_SILENCE = 1280;
-
 /**
  * Build the AssemblyAI Streaming v3 WebSocket URL from provider options.
  * Underscore-prefixed: internal helper, exported only for unit tests.
  */
 export function _buildConnectionUrl(opts: AssemblyAISTTOptions): string {
   const base = opts.baseUrl ?? DEFAULT_BASE_URL;
-  const model = opts.speechModel ?? DEFAULT_SPEECH_MODEL;
   const params = new URLSearchParams({
-    speech_model: model,
+    speech_model: SPEECH_MODEL,
     sample_rate: "16000",
     encoding: "pcm_s16le"
   });
 
+  if (opts.mode !== undefined) params.set("mode", opts.mode);
   if (opts.domain !== undefined) params.set("domain", opts.domain);
   if (opts.keyterms !== undefined) {
     params.set("keyterms_prompt", JSON.stringify(opts.keyterms));
   }
   if (opts.prompt !== undefined) params.set("prompt", opts.prompt);
-  params.set(
-    "min_turn_silence",
-    String(opts.minTurnSilence ?? DEFAULT_MIN_TURN_SILENCE)
-  );
-  params.set(
-    "max_turn_silence",
-    String(opts.maxTurnSilence ?? DEFAULT_MAX_TURN_SILENCE)
-  );
+  if (opts.agentContext !== undefined) {
+    params.set("agent_context", opts.agentContext);
+  }
+  if (opts.previousContextNTurns !== undefined) {
+    params.set("previous_context_n_turns", String(opts.previousContextNTurns));
+  }
+  if (opts.languageCode !== undefined) {
+    params.set("language_code", opts.languageCode);
+  }
+  if (opts.voiceFocus !== undefined) {
+    params.set("voice_focus", opts.voiceFocus);
+  }
+  if (opts.voiceFocusThreshold !== undefined) {
+    params.set("voice_focus_threshold", String(opts.voiceFocusThreshold));
+  }
+  if (opts.minTurnSilence !== undefined) {
+    params.set("min_turn_silence", String(opts.minTurnSilence));
+  }
+  if (opts.maxTurnSilence !== undefined) {
+    params.set("max_turn_silence", String(opts.maxTurnSilence));
+  }
   if (opts.interruptionDelay !== undefined) {
     params.set("interruption_delay", String(opts.interruptionDelay));
   }
   if (opts.vadThreshold !== undefined) {
     params.set("vad_threshold", String(opts.vadThreshold));
   }
-  // Default continuous_partials on for u3-rt-pro: a steady ~3s stream of mid-turn
-  // partials (vs. silence-only partials) gives a live transcript during long
-  // uninterrupted speech. u3-rt-pro-only, so don't default it for other models.
-  const continuousPartials =
-    opts.continuousPartials ??
-    (model === DEFAULT_SPEECH_MODEL ? true : undefined);
-  if (continuousPartials !== undefined) {
-    params.set("continuous_partials", String(continuousPartials));
+  if (opts.continuousPartials !== undefined) {
+    params.set("continuous_partials", String(opts.continuousPartials));
   }
   if (opts.languageDetection !== undefined) {
     params.set("language_detection", String(opts.languageDetection));
@@ -155,31 +212,49 @@ export function _buildConnectionUrl(opts: AssemblyAISTTOptions): string {
 }
 
 /**
- * Throw if options combine a non-`u3-rt-pro` model with a `u3-rt-pro`-only
- * parameter. Fails fast at construction (like the LiveKit plugin) so a typo
- * surfaces as a clear config error rather than a silently-ignored param or a
- * server-side rejection mid-call.
+ * Validate option combinations at construction. Fails fast (like the LiveKit
+ * plugin) so a typo or out-of-range value surfaces as a clear config error
+ * rather than a server-side rejection mid-call.
  */
-function assertModelCompatibleOptions(opts: AssemblyAISTTOptions): void {
-  const model = opts.speechModel ?? DEFAULT_SPEECH_MODEL;
-  if (model === DEFAULT_SPEECH_MODEL) return;
-
-  const u3Only: Array<keyof AssemblyAISTTOptions> = [
-    "prompt",
-    "continuousPartials",
-    "interruptionDelay"
-  ];
-  for (const opt of u3Only) {
-    if (opts[opt] !== undefined) {
-      throw new Error(
-        `AssemblyAISTT: '${opt}' is only supported with the 'u3-rt-pro' speech model (got '${model}').`
-      );
-    }
+function assertValidOptions(opts: AssemblyAISTTOptions): void {
+  if (opts.voiceFocusThreshold !== undefined && opts.voiceFocus === undefined) {
+    throw new Error(
+      "AssemblyAISTT: 'voiceFocusThreshold' requires 'voiceFocus' to be set."
+    );
+  }
+  if (opts.prompt !== undefined && opts.prompt.length > MAX_PROMPT_CHARS) {
+    throw new Error(
+      `AssemblyAISTT: 'prompt' exceeds the maximum of ${MAX_PROMPT_CHARS} characters (got ${opts.prompt.length}).`
+    );
+  }
+  if (
+    opts.agentContext !== undefined &&
+    opts.agentContext.length > MAX_PROMPT_CHARS
+  ) {
+    throw new Error(
+      `AssemblyAISTT: 'agentContext' exceeds the maximum of ${MAX_PROMPT_CHARS} characters (got ${opts.agentContext.length}).`
+    );
+  }
+  if (
+    opts.interruptionDelay !== undefined &&
+    (opts.interruptionDelay < 0 || opts.interruptionDelay > 1000)
+  ) {
+    throw new Error(
+      `AssemblyAISTT: 'interruptionDelay' must be between 0 and 1000 ms (got ${opts.interruptionDelay}).`
+    );
+  }
+  if (
+    opts.previousContextNTurns !== undefined &&
+    (opts.previousContextNTurns < 0 || opts.previousContextNTurns > 100)
+  ) {
+    throw new Error(
+      `AssemblyAISTT: 'previousContextNTurns' must be between 0 and 100 (got ${opts.previousContextNTurns}).`
+    );
   }
 }
 
 /**
- * AssemblyAI Universal-3 Pro Streaming STT provider for the Cloudflare Agents
+ * AssemblyAI Universal-3.5 Pro Streaming STT provider for the Cloudflare Agents
  * voice pipeline. Connects via WebSocket per call; the model handles turn
  * detection via punctuation (no client-side speech-boundary signalling needed).
  *
@@ -201,15 +276,14 @@ export class AssemblyAISTT implements Transcriber {
   #options: AssemblyAISTTOptions;
 
   constructor(options: AssemblyAISTTOptions) {
-    assertModelCompatibleOptions(options);
+    assertValidOptions(options);
     this.#options = options;
   }
 
   createSession(options?: TranscriberSessionOptions): TranscriberSession {
-    // `options.language` is intentionally ignored: no current AssemblyAI
-    // streaming model takes a `language` param (deprecated on Universal
-    // Streaming, absent on u3-rt-pro, which code-switches natively). Guide
-    // language via `prompt` on u3-rt-pro instead.
+    // `options.language` is intentionally ignored: steer language via the
+    // `languageCode` provider option (`language_code`) instead, which
+    // universal-3-5-pro biases toward when the session is monolingual.
     return new AssemblyAISession(this.#options, options);
   }
 }
@@ -226,6 +300,9 @@ class AssemblyAISession implements TranscriberSession {
   #connected = false;
   #closed = false;
   #pendingChunks: ArrayBuffer[] = [];
+  // Latest agent_context queued before the socket was ready. Only the most
+  // recent value matters — older ones are stale once the agent speaks again.
+  #pendingAgentContext: string | null = null;
 
   constructor(
     providerOpts: AssemblyAISTTOptions,
@@ -292,7 +369,12 @@ class AssemblyAISession implements TranscriberSession {
         this.#connected = false;
       });
 
-      // Flush any audio fed before the socket was ready.
+      // Apply any agent_context queued before the socket was ready, then flush
+      // buffered audio.
+      if (this.#pendingAgentContext !== null) {
+        this.#sendAgentContext(this.#pendingAgentContext);
+        this.#pendingAgentContext = null;
+      }
       for (const chunk of this.#pendingChunks) ws.send(chunk);
       this.#pendingChunks = [];
     } catch (err) {
@@ -309,10 +391,45 @@ class AssemblyAISession implements TranscriberSession {
     }
   }
 
+  /**
+   * Update the conversational `agent_context` mid-session with the agent's most
+   * recent spoken reply (TTS text). Sent as an `UpdateConfiguration` message so
+   * the model knows the question the user is answering — especially valuable for
+   * short replies ("yes", "7pm", a name) and spelled-out entities. Capped to the
+   * last {@link MAX_PROMPT_CHARS} characters; empty/whitespace text is a no-op.
+   */
+  updateAgentContext(text: string): void {
+    if (this.#closed) return;
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    const capped =
+      trimmed.length > MAX_PROMPT_CHARS
+        ? trimmed.slice(-MAX_PROMPT_CHARS)
+        : trimmed;
+
+    if (this.#connected && this.#ws) {
+      this.#sendAgentContext(capped);
+    } else {
+      // Keep only the latest — older agent replies are stale by connect time.
+      this.#pendingAgentContext = capped;
+    }
+  }
+
+  #sendAgentContext(agentContext: string): void {
+    if (!this.#ws) return;
+    this.#ws.send(
+      JSON.stringify({
+        type: "UpdateConfiguration",
+        agent_context: agentContext
+      })
+    );
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#pendingChunks = [];
+    this.#pendingAgentContext = null;
 
     if (this.#ws && this.#connected) {
       try {

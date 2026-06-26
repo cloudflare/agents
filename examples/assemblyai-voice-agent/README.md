@@ -1,8 +1,8 @@
 # AssemblyAI Voice Agent
 
-A real-time voice agent running entirely inside a Durable Object, using [AssemblyAI Universal-3 Pro Streaming](https://www.assemblyai.com/docs/streaming/universal-3-pro) for speech-to-text. Talk to an AI assistant that can answer questions, set spoken reminders, and check the weather — with streaming responses, interruption (barge-in) support, and conversation memory across sessions.
+A real-time voice agent running entirely inside a Durable Object, using [AssemblyAI Universal-3.5 Pro Streaming](https://www.assemblyai.com/docs/speech-to-text/streaming) for speech-to-text. Talk to an AI assistant that can answer questions, set spoken reminders, and check the weather — with streaming responses, interruption (barge-in) support, and conversation memory across sessions.
 
-- **STT**: AssemblyAI `u3-rt-pro` via [`@cloudflare/voice-assemblyai`](../../voice-providers/assemblyai) — punctuation-based turn detection + barge-in, server-side
+- **STT**: AssemblyAI `universal-3-5-pro` via [`@cloudflare/voice-assemblyai`](../../voice-providers/assemblyai) — turn detection + barge-in server-side, with `agent_context` carryover fed from the agent's spoken replies
 - **TTS**: Workers AI (MeloTTS, `@cf/myshell-ai/melotts`) — runs on the AI binding, no extra API key
 - **LLM**: Workers AI (`@cf/zai-org/glm-4.7-flash`), with `get_current_time` / `set_reminder` / `get_weather` tools
 - **Transport**: plain WebSocket (browser mic → 16 kHz PCM frames) via the `useVoiceAgent` React hook — no SFU/WebRTC credentials needed
@@ -29,7 +29,7 @@ Browser                          Durable Object (AssemblyAIVoiceAgent)
 ┌──────────┐   binary WS frames   ┌──────────────────────────┐
 │ Mic PCM  │ ────────────────────► │ Audio Buffer             │
 │ (16kHz)  │                       │   ↓                      │
-│          │                       │ AssemblyAI STT (u3-rt-pro)│
+│          │                       │ AssemblyAI STT (u3.5-pro) │
 │          │   JSON: transcript    │   ↓                      │
 │          │ ◄──────────────────── │ LLM (Workers AI, tools)  │
 │          │   binary: audio       │   ↓ (sentence chunking)  │
@@ -43,9 +43,11 @@ Browser                          Durable Object (AssemblyAIVoiceAgent)
 3. AssemblyAI detects speech start (`SpeechStarted` → barge-in) and turn completion (`Turn` with `end_of_turn`) server-side.
 4. On each completed turn the agent runs the voice pipeline: STT → LLM (with tools) → TTS.
 5. TTS audio comes back sentence-by-sentence while the LLM is still generating; the browser plays it and you can interrupt at any time.
+6. After the agent speaks, `withVoice` feeds the spoken reply back to AssemblyAI as `agent_context`, so short or contextual next answers (e.g. "yes", "7pm", an email) are transcribed more accurately.
 
 ## Notes
 
-- **Barge-in** relies on AssemblyAI's `SpeechStarted` event, which only the default `u3-rt-pro` model emits. To try another streaming model, set `speechModel` on the `AssemblyAISTT` constructor in `src/server.ts` (e.g. `"universal-streaming-english"`) — but note `onSpeechStart`-driven barge-in goes quiet on the `universal-streaming-*` models.
+- **Tuning** — pass `mode` (`"min_latency"` / `"balanced"` / `"max_accuracy"`), `voiceFocus` noise suppression, or a `prompt` to the `AssemblyAISTT` constructor in `src/server.ts`. See the [provider options](../../voice-providers/assemblyai#options) for the full list.
+- **Agent context** — fed automatically by the pipeline (step 6). It's a `universal-3-5-pro` feature; no configuration needed.
 - **Conversation persistence** — messages are stored in SQLite and survive restarts; the agent remembers previous conversations per instance.
 - **`useVoiceAgent` hook** — the client uses the React hook from `@cloudflare/voice/react`, which encapsulates mic capture, playback, and the voice protocol.

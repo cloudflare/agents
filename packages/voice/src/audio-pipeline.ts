@@ -161,6 +161,16 @@ export class AudioConnectionManager {
     return true;
   }
 
+  /**
+   * Forward the agent's most recent spoken reply to the active transcriber
+   * session for conversational context carryover. No-op when there is no
+   * session or the provider does not implement `updateAgentContext`.
+   */
+  updateAgentContext(connectionId: string, text: string): void {
+    const session = this.#transcriberSessions.get(connectionId);
+    session?.updateAgentContext?.(text);
+  }
+
   // --- Pipeline abort ---
 
   /**

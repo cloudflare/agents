@@ -194,7 +194,7 @@ All default providers use Workers AI bindings -- no API keys required:
 
 | Package                        | What it provides                                      |
 | ------------------------------ | ----------------------------------------------------- |
-| `@cloudflare/voice-assemblyai` | Continuous STT (AssemblyAI Universal-3 Pro Streaming) |
+| `@cloudflare/voice-assemblyai` | Continuous STT (AssemblyAI Universal-3.5 Pro Streaming) |
 | `@cloudflare/voice-deepgram`   | Continuous STT (Deepgram Nova)                        |
 | `@cloudflare/voice-elevenlabs` | TTS (ElevenLabs)                                      |
 | `@cloudflare/voice-twilio`     | Telephony adapter (Twilio Media Streams)              |

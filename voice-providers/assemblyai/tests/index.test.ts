@@ -63,9 +63,9 @@ describe("_buildConnectionUrl — always-present params", () => {
     expect(url.pathname).toBe("/v3/ws");
   });
 
-  it("hardcodes speech_model, sample_rate, encoding", () => {
+  it("hardcodes speech_model to universal-3-5-pro plus sample_rate, encoding", () => {
     const p = parse(_buildConnectionUrl({ apiKey: "k" }));
-    expect(p.get("speech_model")).toBe("u3-rt-pro");
+    expect(p.get("speech_model")).toBe("universal-3-5-pro");
     expect(p.get("sample_rate")).toBe("16000");
     expect(p.get("encoding")).toBe("pcm_s16le");
   });
@@ -86,18 +86,21 @@ describe("_buildConnectionUrl — conditional params (only when set)", () => {
       "domain",
       "keyterms_prompt",
       "prompt",
+      "min_turn_silence",
+      "max_turn_silence",
       "interruption_delay",
       "vad_threshold",
-      "language_detection"
+      "continuous_partials",
+      "language_detection",
+      "mode",
+      "agent_context",
+      "previous_context_n_turns",
+      "language_code",
+      "voice_focus",
+      "voice_focus_threshold"
     ]) {
       expect(p.has(k)).toBe(false);
     }
-  });
-
-  it("defaults turn-silence windows above the server defaults", () => {
-    const p = parse(_buildConnectionUrl({ apiKey: "k" }));
-    expect(p.get("min_turn_silence")).toBe("400");
-    expect(p.get("max_turn_silence")).toBe("1280");
   });
 
   it("forwards domain", () => {
@@ -119,13 +122,13 @@ describe("_buildConnectionUrl — conditional params (only when set)", () => {
     const p = parse(
       _buildConnectionUrl({
         apiKey: "k",
-        prompt: "Transcribe Spanish."
+        prompt: "The caller is discussing a billing issue."
       })
     );
-    expect(p.get("prompt")).toBe("Transcribe Spanish.");
+    expect(p.get("prompt")).toBe("The caller is discussing a billing issue.");
   });
 
-  it("forwards turn-detection and barge-in knobs", () => {
+  it("forwards turn-detection and barge-in knobs only when set", () => {
     const p = parse(
       _buildConnectionUrl({
         apiKey: "k",
@@ -152,151 +155,124 @@ describe("_buildConnectionUrl — conditional params (only when set)", () => {
     expect(p.get("continuous_partials")).toBe("true");
     expect(p.get("language_detection")).toBe("true");
   });
-});
 
-describe("_buildConnectionUrl — continuous_partials default", () => {
-  it("defaults continuous_partials to true on u3-rt-pro", () => {
-    const p = parse(_buildConnectionUrl({ apiKey: "k" }));
-    expect(p.get("continuous_partials")).toBe("true");
-  });
-
-  it("respects an explicit continuousPartials: false on u3-rt-pro", () => {
+  it("forwards an explicit continuousPartials: false", () => {
     const p = parse(
       _buildConnectionUrl({ apiKey: "k", continuousPartials: false })
     );
     expect(p.get("continuous_partials")).toBe("false");
   });
 
-  it("does not default continuous_partials for non-u3-rt-pro models", () => {
+  it("forwards mode", () => {
+    const p = parse(_buildConnectionUrl({ apiKey: "k", mode: "max_accuracy" }));
+    expect(p.get("mode")).toBe("max_accuracy");
+  });
+
+  it("forwards agentContext as the connection-time agent_context seed", () => {
     const p = parse(
       _buildConnectionUrl({
         apiKey: "k",
-        speechModel: "universal-streaming-english"
+        agentContext: "Sure — what date would you like to book?"
       })
     );
-    expect(p.has("continuous_partials")).toBe(false);
-  });
-});
-
-describe("_buildConnectionUrl — speechModel", () => {
-  it("defaults speech_model to u3-rt-pro when unset", () => {
-    const p = parse(_buildConnectionUrl({ apiKey: "k" }));
-    expect(p.get("speech_model")).toBe("u3-rt-pro");
+    expect(p.get("agent_context")).toBe(
+      "Sure — what date would you like to book?"
+    );
   });
 
-  it("forwards an explicit speechModel", () => {
+  it("forwards previousContextNTurns, including 0 to disable carryover", () => {
+    expect(
+      parse(_buildConnectionUrl({ apiKey: "k", previousContextNTurns: 5 })).get(
+        "previous_context_n_turns"
+      )
+    ).toBe("5");
+    expect(
+      parse(_buildConnectionUrl({ apiKey: "k", previousContextNTurns: 0 })).get(
+        "previous_context_n_turns"
+      )
+    ).toBe("0");
+  });
+
+  it("forwards languageCode", () => {
+    const p = parse(_buildConnectionUrl({ apiKey: "k", languageCode: "es" }));
+    expect(p.get("language_code")).toBe("es");
+  });
+
+  it("forwards voiceFocus and voiceFocusThreshold", () => {
     const p = parse(
       _buildConnectionUrl({
         apiKey: "k",
-        speechModel: "universal-streaming-english"
+        voiceFocus: "near-field",
+        voiceFocusThreshold: 0.7
       })
     );
-    expect(p.get("speech_model")).toBe("universal-streaming-english");
+    expect(p.get("voice_focus")).toBe("near-field");
+    expect(p.get("voice_focus_threshold")).toBe("0.7");
   });
 
   it("never sends a deprecated end_of_turn_confidence_threshold param", () => {
-    const p = parse(
-      _buildConnectionUrl({
-        apiKey: "k",
-        speechModel: "universal-streaming-english"
-      })
-    );
+    const p = parse(_buildConnectionUrl({ apiKey: "k" }));
     expect(p.has("end_of_turn_confidence_threshold")).toBe(false);
   });
 });
 
-describe("AssemblyAISTT — model-aware validation", () => {
-  it("throws when prompt is set with a non-u3-rt-pro model", () => {
+describe("AssemblyAISTT — construction validation", () => {
+  it("throws when voiceFocusThreshold is set without voiceFocus", () => {
     expect(
-      () =>
-        new AssemblyAISTT({
-          apiKey: "k",
-          speechModel: "universal-streaming-english",
-          prompt: "Transcribe Spanish."
-        })
-    ).toThrow(/prompt.*u3-rt-pro/);
+      () => new AssemblyAISTT({ apiKey: "k", voiceFocusThreshold: 0.5 })
+    ).toThrow(/voiceFocusThreshold.*voiceFocus/);
   });
 
-  it("throws when continuousPartials is set with a non-u3-rt-pro model", () => {
+  it("throws when agentContext exceeds 1500 characters", () => {
     expect(
-      () =>
-        new AssemblyAISTT({
-          apiKey: "k",
-          speechModel: "universal-streaming-multilingual",
-          continuousPartials: true
-        })
-    ).toThrow(/continuousPartials.*u3-rt-pro/);
+      () => new AssemblyAISTT({ apiKey: "k", agentContext: "x".repeat(1501) })
+    ).toThrow(/agentContext.*1500/);
   });
 
-  it("throws when interruptionDelay is set with a non-u3-rt-pro model", () => {
+  it("throws when prompt exceeds 1500 characters", () => {
     expect(
-      () =>
-        new AssemblyAISTT({
-          apiKey: "k",
-          speechModel: "universal-streaming-multilingual",
-          interruptionDelay: 200
-        })
-    ).toThrow(/interruptionDelay.*u3-rt-pro/);
+      () => new AssemblyAISTT({ apiKey: "k", prompt: "x".repeat(1501) })
+    ).toThrow(/prompt.*1500/);
   });
 
-  it("allows the u3-rt-pro-only options on u3-rt-pro (the default)", () => {
+  it("throws when interruptionDelay is out of the [0, 1000] range", () => {
     expect(
-      () =>
-        new AssemblyAISTT({
-          apiKey: "k",
-          prompt: "Transcribe Spanish.",
-          continuousPartials: true,
-          interruptionDelay: 200
-        })
-    ).not.toThrow();
+      () => new AssemblyAISTT({ apiKey: "k", interruptionDelay: 1500 })
+    ).toThrow(/interruptionDelay/);
+    expect(
+      () => new AssemblyAISTT({ apiKey: "k", interruptionDelay: -1 })
+    ).toThrow(/interruptionDelay/);
   });
 
-  it("allows a non-u3-rt-pro model when no u3-only options are set", () => {
+  it("throws when previousContextNTurns is out of the [0, 100] range", () => {
+    expect(
+      () => new AssemblyAISTT({ apiKey: "k", previousContextNTurns: 101 })
+    ).toThrow(/previousContextNTurns/);
+    expect(
+      () => new AssemblyAISTT({ apiKey: "k", previousContextNTurns: -1 })
+    ).toThrow(/previousContextNTurns/);
+  });
+
+  it("accepts a fully-populated valid configuration", () => {
     expect(
       () =>
         new AssemblyAISTT({
           apiKey: "k",
-          speechModel: "universal-streaming-english",
+          mode: "balanced",
+          prompt: "The caller is booking a hotel.",
+          agentContext: "What date would you like to check in?",
+          previousContextNTurns: 5,
+          languageCode: "en",
+          voiceFocus: "near-field",
+          voiceFocusThreshold: 0.7,
           minTurnSilence: 400,
-          maxTurnSilence: 1280
+          maxTurnSilence: 1280,
+          interruptionDelay: 500,
+          vadThreshold: 0.3,
+          continuousPartials: true,
+          languageDetection: true
         })
     ).not.toThrow();
-  });
-});
-
-describe("AssemblyAISession — close diagnostics", () => {
-  it("logs the close code and reason on an unexpected close", async () => {
-    const { ws } = setupMockFetch();
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const provider = new AssemblyAISTT({ apiKey: "k" });
-    provider.createSession();
-    await flush();
-
-    ws.dispatchEvent(
-      Object.assign(new Event("close"), {
-        code: 1008,
-        reason: "Not authorized"
-      })
-    );
-
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("1008"));
-    errSpy.mockRestore();
-  });
-
-  it("does not log when close() initiated the teardown", async () => {
-    const { ws } = setupMockFetch();
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const provider = new AssemblyAISTT({ apiKey: "k" });
-    const session = provider.createSession();
-    await flush();
-
-    session.close();
-    ws.dispatchEvent(
-      Object.assign(new Event("close"), { code: 1000, reason: "" })
-    );
-
-    expect(errSpy).not.toHaveBeenCalled();
-    errSpy.mockRestore();
   });
 });
 
@@ -319,7 +295,7 @@ describe("_buildConnectionUrl — baseUrl override", () => {
         baseUrl: "wss://gateway.example.com/v1/acct/gw/assemblyai/v3/ws"
       })
     );
-    expect(p.get("speech_model")).toBe("u3-rt-pro");
+    expect(p.get("speech_model")).toBe("universal-3-5-pro");
     expect(p.get("sample_rate")).toBe("16000");
     expect(p.get("encoding")).toBe("pcm_s16le");
   });
@@ -332,11 +308,12 @@ void flush;
 void setupMockFetch;
 
 describe("AssemblyAISTT class shape", () => {
-  it("createSession returns an object with feed() and close()", () => {
+  it("createSession returns an object with feed(), close(), updateAgentContext()", () => {
     const provider = new AssemblyAISTT({ apiKey: "k" });
     const session = provider.createSession();
     expect(typeof session.feed).toBe("function");
     expect(typeof session.close).toBe("function");
+    expect(typeof session.updateAgentContext).toBe("function");
   });
 });
 
@@ -548,6 +525,92 @@ describe("AssemblyAISession — feed", () => {
   });
 });
 
+describe("AssemblyAISession — updateAgentContext", () => {
+  it("sends an UpdateConfiguration with agent_context when connected", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.updateAgentContext!("What date would you like to book?");
+
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "UpdateConfiguration",
+        agent_context: "What date would you like to book?"
+      })
+    );
+  });
+
+  it("does not send empty or whitespace-only agent context", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.updateAgentContext!("");
+    session.updateAgentContext!("   ");
+
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("caps agent context to the last 1500 characters", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    const long = "a".repeat(1000) + "b".repeat(1000);
+    session.updateAgentContext!(long);
+
+    const sent = JSON.parse(ws.send.mock.calls[0][0]);
+    expect(sent.type).toBe("UpdateConfiguration");
+    expect(sent.agent_context).toHaveLength(1500);
+    expect(sent.agent_context).toBe(long.slice(-1500));
+  });
+
+  it("buffers a pre-connect update and sends only the latest on open", async () => {
+    let resolveFetch: (resp: unknown) => void = () => {};
+    const fetchPromise = new Promise((r) => {
+      resolveFetch = r;
+    });
+    const ws = new MockWebSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => fetchPromise)
+    );
+
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+
+    session.updateAgentContext!("first");
+    session.updateAgentContext!("second");
+    expect(ws.send).not.toHaveBeenCalled();
+
+    resolveFetch({ webSocket: ws });
+    await flush();
+
+    const configSends = ws.send.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => s.includes("UpdateConfiguration"));
+    expect(configSends).toHaveLength(1);
+    expect(JSON.parse(configSends[0]).agent_context).toBe("second");
+  });
+
+  it("is a no-op after close()", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+    session.close();
+    ws.send.mockClear();
+
+    session.updateAgentContext!("too late");
+
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+});
+
 describe("AssemblyAISession — close", () => {
   it("sends Terminate then closes the WebSocket", async () => {
     const { ws } = setupMockFetch();
@@ -594,6 +657,42 @@ describe("AssemblyAISession — close", () => {
     expect(ws.close).toHaveBeenCalled();
     // No Terminate sent — there was never a live connection.
     expect(ws.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("AssemblyAISession — close diagnostics", () => {
+  it("logs the close code and reason on an unexpected close", async () => {
+    const { ws } = setupMockFetch();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    provider.createSession();
+    await flush();
+
+    ws.dispatchEvent(
+      Object.assign(new Event("close"), {
+        code: 1008,
+        reason: "Not authorized"
+      })
+    );
+
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("1008"));
+    errSpy.mockRestore();
+  });
+
+  it("does not log when close() initiated the teardown", async () => {
+    const { ws } = setupMockFetch();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.close();
+    ws.dispatchEvent(
+      Object.assign(new Event("close"), { code: 1000, reason: "" })
+    );
+
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });
 

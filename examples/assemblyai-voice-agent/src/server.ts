@@ -54,7 +54,7 @@ class MeloTTS implements TTSProvider {
   }
 }
 
-const SYSTEM_PROMPT = `You are a helpful voice assistant running on Cloudflare Workers, transcribed by AssemblyAI Universal-3 Pro. Keep your responses concise and conversational — you're being spoken aloud, not read. Aim for 1-3 sentences unless the user asks for more detail. Be warm and natural.
+const SYSTEM_PROMPT = `You are a helpful voice assistant running on Cloudflare Workers, transcribed by AssemblyAI Universal-3.5 Pro. Keep your responses concise and conversational — you're being spoken aloud, not read. Aim for 1-3 sentences unless the user asks for more detail. Be warm and natural.
 
 You have tools available:
 - get_current_time: Tell the user the current date and time
@@ -67,8 +67,10 @@ Use tools when the user's request matches. After calling a tool, incorporate the
  * Real-time voice agent: browser mic → WebSocket → AssemblyAI STT → LLM →
  * Workers AI TTS, all inside one Durable Object.
  *
- * STT is AssemblyAI Universal-3 Pro Streaming (`u3-rt-pro`), which handles
- * turn detection (punctuation-based) and barge-in (`SpeechStarted`) server-side.
+ * STT is AssemblyAI Universal-3.5 Pro Streaming (`universal-3-5-pro`), which
+ * handles turn detection and barge-in (`SpeechStarted`) server-side. After each
+ * reply, `withVoice` feeds the agent's spoken text back to AssemblyAI as
+ * `agent_context`, so the model knows the question the user is answering.
  * The only external credential needed is `ASSEMBLYAI_API_KEY`; the LLM and TTS
  * run on the Workers AI binding.
  */

@@ -2,7 +2,7 @@
   "name": "@cloudflare/voice-assemblyai",
   "private": true,
   "version": "0.0.1",
-  "description": "AssemblyAI Universal-3 Pro Streaming STT provider for Cloudflare Agents voice pipeline",
+  "description": "AssemblyAI Universal-3.5 Pro Streaming STT provider for Cloudflare Agents voice pipeline",
   "repository": {
     "directory": "voice-providers/assemblyai",
     "type": "git",

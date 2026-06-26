@@ -2,7 +2,7 @@
 
 AssemblyAI streaming speech-to-text provider for the [Cloudflare Agents](https://github.com/cloudflare/agents) voice pipeline.
 
-Uses AssemblyAI's real-time WebSocket API to transcribe audio continuously. A single session is created per call; the model handles turn detection and barge-in server-side. Defaults to [Universal-3 Pro Streaming](https://www.assemblyai.com/docs/streaming/universal-3-pro) (`u3-rt-pro`).
+Uses AssemblyAI's real-time WebSocket API to transcribe audio continuously. A single session is created per call; the model handles turn detection and barge-in server-side. Targets [Universal-3.5 Pro Streaming](https://www.assemblyai.com/docs/speech-to-text/streaming) (`universal-3-5-pro`) — AssemblyAI's next-generation flagship streaming model, with 19 languages, improved prompting, and conversational context carryover.
 
 ## Install
 
@@ -39,40 +39,56 @@ export class MyAgent extends VoiceAgent<Env> {
 
 Provide the key as a Worker secret: `npx wrangler secret put ASSEMBLYAI_API_KEY`. Get a key from the [AssemblyAI dashboard](https://www.assemblyai.com/dashboard/api-keys).
 
-As the user speaks, the client receives `transcript_interim` messages — exposed by the `useVoiceAgent` React hook as `interimTranscript` — for a live transcript. On `u3-rt-pro` these are stable partial segments (not word-by-word), kept flowing during long turns by `continuousPartials` (on by default).
+As the user speaks, the client receives `transcript_interim` messages — exposed by the `useVoiceAgent` React hook as `interimTranscript` — for a live transcript. These are stable partial segments (not word-by-word), kept flowing during long turns by `continuousPartials`.
+
+## Conversational context (`agent_context`)
+
+Universal-3.5 Pro carries prior finalized turns forward as context to improve accuracy on the next turn (`previousContextNTurns`, on by default). You can additionally feed it the agent's most recent spoken reply so it knows the question the user is answering — especially valuable for short replies (`"yes"`, `"7pm"`, a single name) and spelled-out entities (emails, account IDs). After the agent asks _"What's your email address?"_, this helps the model produce `"user@assemblyai.com"` instead of `"user at assemblyai dot com"`.
+
+**The voice pipeline does this automatically.** After the agent finishes speaking each reply (and the opening greeting), `withVoice` calls the session's `updateAgentContext()` with the spoken text, which is sent to AssemblyAI as an `UpdateConfiguration` message mid-session. No extra wiring is required.
+
+You can also seed context at connection time with the `agentContext` option (e.g. for an opening line spoken before the user's first turn), or call `updateAgentContext()` yourself for custom integrations:
+
+```typescript
+const session = transcriber.createSession(options);
+session.updateAgentContext?.("Sure — what date would you like to book?");
+```
 
 ## Options
 
-| Option               | Default                                | Description                                                                                                                                                               |
-| -------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apiKey`             | (required)                             | AssemblyAI API key (sent as the `Authorization` header, raw key)                                                                                                          |
-| `speechModel`        | `"u3-rt-pro"`                          | `u3-rt-pro`, `universal-streaming-english`, or `universal-streaming-multilingual`. `prompt`, `continuousPartials`, `interruptionDelay`, and barge-in are `u3-rt-pro`-only |
-| `domain`             | _none_                                 | Domain mode, e.g. `"medical-v1"` for Medical Mode (en/es/de/fr)                                                                                                           |
-| `keyterms`           | _none_                                 | Words/phrases to boost recognition (`string[]`)                                                                                                                           |
-| `prompt`             | _AssemblyAI default_                   | Custom transcription prompt. **`u3-rt-pro` only.** Omit to use the optimized default                                                                                      |
-| `minTurnSilence`     | `400` ms _(server 100)_                | Min silence before an end-of-turn check (lower = snappier, higher = more patient)                                                                                         |
-| `maxTurnSilence`     | `1280` ms _(server 1000)_              | Max silence before a turn is forced to end                                                                                                                                |
-| `interruptionDelay`  | `500` ms                               | First-partial / barge-in timing (0–1000 ms). **`u3-rt-pro` only.**                                                                                                        |
-| `vadThreshold`       | _server_                               | VAD silence-confidence (0–1). Raise in noisy environments                                                                                                                 |
-| `continuousPartials` | `true` _(u3-rt-pro)_                   | Steady ~3 s partials during long turns for a live transcript. **`u3-rt-pro` only.** Set `false` to opt out                                                                |
-| `languageDetection`  | `false`                                | Return detected-language metadata (`universal-streaming-multilingual`); surface via `onLanguageDetected`                                                                  |
-| `onLanguageDetected` | _none_                                 | `(code, confidence) => void` — fired when a turn carries language metadata                                                                                                |
-| `baseUrl`            | `wss://streaming.assemblyai.com/v3/ws` | WebSocket URL override, e.g. the EU host `wss://streaming.eu.assemblyai.com/v3/ws`                                                                                        |
+| Option                  | Default                                | Description                                                                                                                                                      |
+| ----------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apiKey`                | (required)                             | AssemblyAI API key (sent as the `Authorization` header, raw key)                                                                                                 |
+| `mode`                  | `"balanced"` _(server default)_        | Latency/accuracy preset: `"min_latency"`, `"balanced"`, or `"max_accuracy"`. Sets the per-mode defaults for turn silence, partials, VAD, and interruption timing |
+| `domain`                | _none_                                 | Domain mode, e.g. `"medical-v1"` for Medical Mode (en/es/de/fr)                                                                                                  |
+| `keyterms`              | _none_                                 | Words/phrases to boost recognition (`string[]`). Mutually exclusive with `prompt`                                                                                |
+| `prompt`                | _AssemblyAI default_                   | Natural-language context about the audio (domain, topic, scenario) — not formatting instructions. Max 1500 characters. Omit to use the optimized default         |
+| `agentContext`          | _none_                                 | Seed the agent's spoken reply as context at connection time. Max 1500 characters. Updated automatically mid-call by the pipeline                                 |
+| `previousContextNTurns` | _server (~3)_                          | Max prior conversation entries carried forward as context (0–100). `0` disables automatic carryover                                                              |
+| `languageCode`          | _multilingual_                         | Bias the model toward a single language (e.g. `"en"`, `"es"`, `"ja"`) when the session is monolingual. Omit for default code-switching                           |
+| `voiceFocus`            | _none_                                 | Noise suppression: `"near-field"` (headsets/handsets) or `"far-field"` (conference rooms, laptop mics). Omit to disable                                          |
+| `voiceFocusThreshold`   | _server_                               | How aggressively Voice Focus suppresses background audio (0–1, higher = more aggressive). Requires `voiceFocus`                                                  |
+| `minTurnSilence`        | _mode default_                         | Min silence (ms) before an end-of-turn check. Omit to use the `mode` default                                                                                     |
+| `maxTurnSilence`        | _mode default_                         | Max silence (ms) before a turn is forced to end. Omit to use the `mode` default                                                                                  |
+| `interruptionDelay`     | _mode default_                         | First-partial / barge-in timing (0–1000 ms). Omit to use the `mode` default                                                                                      |
+| `vadThreshold`          | _mode default_                         | VAD silence-confidence (0–1). Raise in noisy environments                                                                                                        |
+| `continuousPartials`    | _mode default_                         | Steady ~3 s partials during long turns for a live transcript. Set `false` to opt out                                                                             |
+| `languageDetection`     | `false`                                | Return detected-language metadata on Turn events; surface via `onLanguageDetected`                                                                               |
+| `onLanguageDetected`    | _none_                                 | `(code, confidence) => void` — fired when a turn carries language metadata                                                                                       |
+| `baseUrl`               | `wss://streaming.assemblyai.com/v3/ws` | WebSocket URL override, e.g. the EU host `wss://streaming.eu.assemblyai.com/v3/ws`                                                                               |
 
 ## How it works
 
-1. When the call starts, a WebSocket session is opened to AssemblyAI
+1. When the call starts, a WebSocket session is opened to AssemblyAI (`speech_model=universal-3-5-pro`)
 2. All audio chunks are forwarded continuously via `feed()` (16 kHz mono PCM)
 3. AssemblyAI emits `Turn` events — partials (`end_of_turn: false`) go to `onInterim`, the final transcript (`end_of_turn: true`) to `onUtterance`; `SpeechStarted` drives barge-in via `onSpeechStart`
 4. The pipeline runs `onTurn()` with the stable transcript
-5. On `close()`, a `Terminate` message is sent and the socket is closed (billing accrues on connection-open time, so closing promptly matters)
+5. After the agent speaks its reply, the pipeline calls `updateAgentContext()`, which sends an `UpdateConfiguration` with the spoken text so it primes the next user turn
+6. On `close()`, a `Terminate` message is sent and the socket is closed (billing accrues on connection-open time, so closing promptly matters)
 
 ## AssemblyAI documentation
 
-- [Universal-3 Pro Streaming](https://www.assemblyai.com/docs/streaming/universal-3-pro) — overview, quickstart, connection parameters, and session-based billing for the default `u3-rt-pro` model
-- [Turn detection & partials](https://www.assemblyai.com/docs/streaming/universal-3-pro/turn-detection-and-partials) — how `minTurnSilence` / `maxTurnSilence` / `continuousPartials` shape end-of-turn timing and the partial-transcript stream
-- [Message sequence](https://www.assemblyai.com/docs/streaming/universal-3-pro/u3-pro-message-sequence) — the `Begin` / `SpeechStarted` / `Turn` / `Termination` events this provider maps to `onSpeechStart` / `onInterim` / `onUtterance`
-- [Build your own voice agent — Streaming API](https://www.assemblyai.com/docs/voice-agents/u3-pro-streaming-api) — the raw WebSocket pattern (turn detection, barge-in, interruption) that this provider wraps
-- [Endpoints & data zones](https://www.assemblyai.com/docs/streaming/endpoints-and-data-zones) — regional hosts for `baseUrl`, e.g. the EU endpoint `wss://streaming.eu.assemblyai.com/v3/ws`
-- [Medical Mode](https://www.assemblyai.com/docs/streaming/medical-mode) — `domain: "medical-v1"` for clinical terminology
-- [Keyterms prompting](https://www.assemblyai.com/docs/streaming/keyterms-prompting) — bias recognition toward domain vocabulary via `keyterms`
+- [Streaming speech-to-text](https://www.assemblyai.com/docs/speech-to-text/streaming) — overview, quickstart, connection parameters, and session-based billing
+- [Turn detection & partials](https://www.assemblyai.com/docs/speech-to-text/universal-streaming) — how `minTurnSilence` / `maxTurnSilence` / `continuousPartials` and `mode` shape end-of-turn timing and the partial-transcript stream
+- [Build your own voice agent](https://www.assemblyai.com/docs/voice-agents) — the raw WebSocket pattern (turn detection, barge-in, interruption, `agent_context`) that this provider wraps
+- [Endpoints & data zones](https://www.assemblyai.com/docs/api-reference/overview) — regional hosts for `baseUrl`, e.g. the EU endpoint `wss://streaming.eu.assemblyai.com/v3/ws`

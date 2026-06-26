@@ -1078,6 +1078,34 @@ describe("VoiceAgent — continuous STT pipeline", () => {
   });
 });
 
+describe("VoiceAgent — agent context carryover", () => {
+  it("feeds the assistant's spoken reply back to the transcriber session", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    // Wait for the assistant reply to finish and the pipeline to settle.
+    await waitForType(ws, "transcript_end");
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "_get_agent_context" });
+    const ctx = (await waitForType(ws, "_agent_context")) as Record<
+      string,
+      unknown
+    >;
+    const contexts = ctx.contexts as string[];
+    expect(contexts).toContain("Echo: utterance 1 (20000 bytes)");
+
+    ws.close();
+  });
+});
+
 describe("VoiceAgent — multi-turn", () => {
   it("handles second utterance after first pipeline completes", async () => {
     const { ws } = await connectWS(uniquePath());
