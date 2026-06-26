@@ -1,0 +1,20 @@
+{
+  // Deterministic config for the offline executor e2e (executor.spec.ts), which
+  // POSTs raw code to /execute and /mcp/execute and never touches Workers AI.
+  // Intentionally has NO `ai` binding: a `remote: true` binding makes
+  // `wrangler dev` eagerly open a remote proxy session at startup, which needs
+  // Cloudflare credentials. The LLM specs (codemode.spec.ts, llm-codemode.spec.ts)
+  // use `wrangler.jsonc` (which keeps the remote `ai` binding) via
+  // playwright.llm.config.ts.
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "define": {
+    "__filename": "'index.ts'"
+  },
+  "durable_objects": {
+    "bindings": [{ "class_name": "CodemodeAgent", "name": "CodemodeAgent" }]
+  },
+  "main": "worker.ts",
+  "migrations": [{ "new_sqlite_classes": ["CodemodeAgent"], "tag": "v1" }],
+  "worker_loaders": [{ "binding": "LOADER" }]
+}

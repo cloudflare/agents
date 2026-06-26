@@ -194,9 +194,11 @@ jobs:
         working-directory: experimental/tanstack-recovery
 
   # Deterministic codemode Playwright suite (Layer 4b). Drives the dynamic
-  # Worker-loader code-generation flow in a real browser; offline, no Cloudflare
-  # credentials. Mirrors `e2e-ai-chat`. A `globalTimeout` in its
-  # playwright.config.ts bounds it so a hang can never silently run to the cap.
+  # Worker-loader code-generation flow (executor.spec.ts) against an AI-free
+  # worker; offline, no Cloudflare credentials. Mirrors `e2e-ai-chat`. A
+  # `globalTimeout` in its playwright.config.ts bounds it so a hang can never
+  # silently run to the cap. (The Workers-AI codemode specs run in the separate
+  # `e2e-codemode-llm` job below.)
   e2e-codemode:
     name: "E2E: codemode (Playwright)"
     timeout-minutes: 30
@@ -224,8 +226,46 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Run codemode e2e tests
+      - name: Run codemode deterministic e2e tests
         run: pnpm run test:e2e
+        working-directory: packages/codemode
+
+  # Workers-AI codemode Playwright suite. Needs the remote `ai` binding
+  # (wrangler.jsonc) and a healthy Workers AI edge connection, so it gets
+  # credentials. Real-model latency/flakiness is bounded by a hard globalTimeout
+  # in playwright.llm.config.ts so this can never silently run to the cap.
+  e2e-codemode-llm:
+    name: "E2E: codemode (Playwright, Workers AI)"
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run codemode Workers AI e2e tests
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:e2e:llm
         working-directory: packages/codemode
 
   # Browser-connector e2e (Layer 3c). Spawns a real `wrangler dev` (local Browser
