@@ -61,7 +61,7 @@
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.204",
     "@chat-adapter/telegram": "^4.29.0",
-    "agents": ">=0.16.0 <1.0.0",
+    "agents": ">=0.17.0 <1.0.0",
     "ai": "^6.0.182",
     "react": "^19.0.0",
     "vite": ">=6 <9",

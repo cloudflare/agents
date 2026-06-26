@@ -31,7 +31,7 @@
   "main": "src/index.ts",
   "name": "hono-agents",
   "peerDependencies": {
-    "agents": ">=0.16.0 <1.0.0",
+    "agents": ">=0.17.0 <1.0.0",
     "hono": "^4.6.17"
   },
   "repository": {

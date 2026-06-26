@@ -3755,7 +3755,7 @@ importers:
         specifier: ^3.0.204
         version: 3.0.210(react@19.2.7)(zod@4.4.3)
       agents:
-        specifier: '>=0.16.0 <1.0.0'
+        specifier: '>=0.17.0 <1.0.0'
         version: link:../agents
       nanoid:
         specifier: ^5.1.16
@@ -3945,7 +3945,7 @@ importers:
   packages/voice:
     dependencies:
       agents:
-        specifier: '>=0.16.0 <1.0.0'
+        specifier: '>=0.17.0 <1.0.0'
         version: link:../agents
       partysocket:
         specifier: ^1.0.0
@@ -4503,19 +4503,19 @@ importers:
   voice-providers/deepgram:
     dependencies:
       '@cloudflare/voice':
-        specifier: '*'
+        specifier: '>=0.3.3 <1.0.0'
         version: link:../../packages/voice
 
   voice-providers/elevenlabs:
     dependencies:
       '@cloudflare/voice':
-        specifier: '*'
+        specifier: '>=0.3.3 <1.0.0'
         version: link:../../packages/voice
 
   voice-providers/telnyx:
     dependencies:
       '@cloudflare/voice':
-        specifier: '*'
+        specifier: '>=0.3.3 <1.0.0'
         version: link:../../packages/voice
       '@telnyx/webrtc':
         specifier: ^2.27.1
@@ -4524,7 +4524,7 @@ importers:
   voice-providers/twilio:
     dependencies:
       '@cloudflare/voice':
-        specifier: '*'
+        specifier: '>=0.3.3 <1.0.0'
         version: link:../../packages/voice
 
   wip/issue-1625-live:
