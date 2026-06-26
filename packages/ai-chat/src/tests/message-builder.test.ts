@@ -1487,6 +1487,81 @@ describe("applyChunkToParts", () => {
         })
       ).toBe(false);
     });
+
+    it("returns true for tool-output-denied on an approval-responded part", () => {
+      // A continuation that re-validates the transcript can re-emit a denial
+      // for an approval the user already granted. The chunk must not reach the
+      // client, where the in-place updateToolPart would flip the rendered part
+      // from approval-responded back to output-denied.
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      applyChunkToParts(parts, {
+        type: "tool-approval-request",
+        toolCallId: "call_1",
+        approvalId: "appr-1"
+      });
+      (parts[0] as Record<string, unknown>).state = "approval-responded";
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-output-denied",
+          toolCallId: "call_1"
+        })
+      ).toBe(true);
+    });
+
+    it("returns true for tool-output-denied on a terminal part", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: "Sunny"
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-output-denied",
+          toolCallId: "call_1"
+        })
+      ).toBe(true);
+    });
+
+    it("returns false for a genuine first tool-output-denied (input-available)", () => {
+      // The first denial of a still-pending tool must pass through so the
+      // client sees the denial.
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-output-denied",
+          toolCallId: "call_1"
+        })
+      ).toBe(false);
+    });
+
+    it("returns false for tool-output-denied when no existing part matches", () => {
+      const parts = makeParts();
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-output-denied",
+          toolCallId: "call_unknown"
+        })
+      ).toBe(false);
+    });
   });
 });
 

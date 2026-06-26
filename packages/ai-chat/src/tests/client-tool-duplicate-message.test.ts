@@ -1562,6 +1562,57 @@ describe("applyChunkToParts: tool-approval-request", () => {
     expect(handled).toBe(true);
     expect(parts.length).toBe(0);
   });
+
+  it("does not regress an approval-responded (approved) part to approval-requested", () => {
+    // A continuation can replay the prior tool round-trip and re-emit
+    // tool-approval-request. That must not discard a decision the user already
+    // made (approval-responded) by flipping it back to approval-requested.
+    const parts: MessageParts = [
+      {
+        type: "tool-calculate",
+        toolCallId: "call_123",
+        toolName: "calculate",
+        state: "approval-responded",
+        input: { a: 5000, b: 3, operator: "*" },
+        approval: { id: "approval-abc", approved: true }
+      } as MessageParts[number]
+    ];
+
+    const handled = applyChunkToParts(parts, {
+      type: "tool-approval-request",
+      approvalId: "approval-abc",
+      toolCallId: "call_123"
+    } as StreamChunkData);
+
+    expect(handled).toBe(true);
+    const part = parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("approval-responded");
+    expect(part.approval).toEqual({ id: "approval-abc", approved: true });
+  });
+
+  it("does not regress a terminal output-available part to approval-requested", () => {
+    const parts: MessageParts = [
+      {
+        type: "tool-calculate",
+        toolCallId: "call_terminal",
+        toolName: "calculate",
+        state: "output-available",
+        input: { a: 2, b: 2, operator: "+" },
+        output: { result: 4 }
+      } as MessageParts[number]
+    ];
+
+    const handled = applyChunkToParts(parts, {
+      type: "tool-approval-request",
+      approvalId: "approval-late",
+      toolCallId: "call_terminal"
+    } as StreamChunkData);
+
+    expect(handled).toBe(true);
+    const part = parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("output-available");
+    expect(part.output).toEqual({ result: 4 });
+  });
 });
 
 describe("applyChunkToParts: tool-output-denied", () => {

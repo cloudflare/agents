@@ -396,30 +396,14 @@ test.describe("Tool approval auto-continuation e2e", () => {
               }
 
               if (data.type === MT.CF_AGENT_USE_CHAT_RESPONSE) {
-                // Capture the SDK-issued approvalId from the approval-request
-                // chunk (the tool declares needsApproval, so the part's
-                // approval.id is this id, distinct from the toolCallId).
+                // Capture the toolCallId from tool-input-available, but do NOT
+                // approve yet. For a needsApproval tool the AI SDK emits
+                // tool-input-available *before* tool-approval-request; approving
+                // on input-available races the server's approval-request chunk.
+                // We wait for tool-approval-request (below) — the realistic
+                // moment a client surfaces the Approve/Reject decision.
                 if (
-                  !approvalId &&
-                  typeof data.body === "string" &&
-                  data.body.includes("tool-approval-request")
-                ) {
-                  try {
-                    const chunk = JSON.parse(data.body as string);
-                    if (
-                      chunk.type === "tool-approval-request" &&
-                      chunk.approvalId
-                    ) {
-                      approvalId = chunk.approvalId;
-                    }
-                  } catch {
-                    // not JSON
-                  }
-                }
-
-                // Look for tool-input-available
-                if (
-                  !sentApproval &&
+                  !toolCallId &&
                   typeof data.body === "string" &&
                   data.body.includes("tool-input-available")
                 ) {
@@ -430,16 +414,41 @@ test.describe("Tool approval auto-continuation e2e", () => {
                       chunk.toolCallId
                     ) {
                       toolCallId = chunk.toolCallId;
-                      // Send tool APPROVAL with autoContinue
-                      ws.send(
-                        JSON.stringify({
-                          type: MT.CF_AGENT_TOOL_APPROVAL,
-                          toolCallId: chunk.toolCallId,
-                          approved: true,
-                          autoContinue: true
-                        })
-                      );
-                      sentApproval = true;
+                    }
+                  } catch {
+                    // not JSON
+                  }
+                }
+
+                // Approve only once the server has emitted the approval request
+                // (carrying the SDK-issued approvalId, distinct from the
+                // toolCallId). This avoids racing the tool-approval-request
+                // chunk and mirrors a real client's approval flow.
+                if (
+                  !sentApproval &&
+                  typeof data.body === "string" &&
+                  data.body.includes("tool-approval-request")
+                ) {
+                  try {
+                    const chunk = JSON.parse(data.body as string);
+                    if (
+                      chunk.type === "tool-approval-request" &&
+                      chunk.approvalId
+                    ) {
+                      approvalId = chunk.approvalId;
+                      const approvedToolCallId = chunk.toolCallId ?? toolCallId;
+                      if (approvedToolCallId) {
+                        toolCallId = approvedToolCallId;
+                        ws.send(
+                          JSON.stringify({
+                            type: MT.CF_AGENT_TOOL_APPROVAL,
+                            toolCallId: approvedToolCallId,
+                            approved: true,
+                            autoContinue: true
+                          })
+                        );
+                        sentApproval = true;
+                      }
                     }
                   } catch {
                     // not JSON

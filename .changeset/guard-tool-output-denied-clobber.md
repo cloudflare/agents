@@ -14,3 +14,16 @@ AI SDK deems unneeded (e.g. a tool without `needsApproval`); previously that
 silently turned a granted approval into a denial in the persisted message. This
 matches the first-write-wins guards already on the `tool-input-*` handlers and
 benefits both `@cloudflare/ai-chat` and `@cloudflare/think`.
+
+`isReplayChunk` now recognizes the same replayed `tool-output-denied` (for a
+part already settled or in `approval-responded`). The server-side guard only
+protects the persisted message; without this, the stale denial chunk was still
+stored in the resumable-stream buffer and broadcast to connected clients, where
+AI SDK v6's in-place `updateToolPart` would regress the rendered tool part back
+to `output-denied` (and replay it on reconnect). Filtering it at the broadcast
+boundary keeps the client UI consistent with the persisted state.
+
+`tool-approval-request` gains a matching first-write-wins guard: a continuation
+that replays a prior tool round-trip can re-emit the approval request, which
+previously regressed an already-`approval-responded` (or settled) part back to
+`approval-requested`, discarding the user's decision.
