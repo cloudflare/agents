@@ -281,8 +281,12 @@ function rewriteImports(
 ): string {
   // Match import/export statements with string specifiers
   // Handles: import x from 'y', import { x } from 'y', import 'y', export { x } from 'y', export * from 'y'
+  // The clause is matched as non-whitespace tokens separated by whitespace
+  // (`[\w*{},]+(?:\s+[\w*{},]+)*`) so no two adjacent quantifiers can consume
+  // the same whitespace — the previous `[\w*{}\s,]+\s+` form backtracked
+  // polynomially on near-match inputs like `import <many spaces> X` (#1537).
   const importExportRegex =
-    /(import\s+(?:[\w*{}\s,]+\s+from\s+)?|export\s+(?:[\w*{}\s,]+\s+)?from\s+)(['"])([^'"]+)\2/g;
+    /(import\s+(?:[\w*{},]+(?:\s+[\w*{},]+)*\s+from\s+)?|export\s+(?:[\w*{},]+(?:\s+[\w*{},]+)*\s+)?from\s+)(['"])([^'"]+)\2/g;
 
   // Get importer's output path to use as the base for resolving
   const importerOutputPath = pathMap.get(importer) ?? importer;
