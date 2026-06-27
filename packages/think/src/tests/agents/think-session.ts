@@ -3593,6 +3593,7 @@ export class ThinkToolsTestAgent extends Think {
           description: "Echo a message back (streaming)",
           inputSchema: z.object({ message: z.string() }),
           execute: async ({ message }: { message: string }) => {
+            this._echoExecuteCount++;
             async function* gen() {
               yield `echo-prelim-1: ${message}`;
               yield `echo-prelim-2: ${message}`;
@@ -3609,11 +3610,48 @@ export class ThinkToolsTestAgent extends Think {
           description: "Echo a message back (sync streaming)",
           inputSchema: z.object({ message: z.string() }),
           execute: ({ message }: { message: string }) => {
+            this._echoExecuteCount++;
             async function* gen() {
               yield `echo-prelim: ${message}`;
               yield `echo: ${message}`;
             }
             return gen();
+          }
+        })
+      };
+    }
+    if (mode === "async-generator") {
+      // Canonical AI SDK streaming tool: an `async function*` `execute`.
+      // Think preserves preliminary streaming for this form — each yielded
+      // value reaches the model as a `preliminary` tool-result, the last as
+      // the final value.
+      const self = this;
+      return {
+        echo: tool({
+          description: "Echo a message back (async generator streaming)",
+          inputSchema: z.object({ message: z.string() }),
+          execute: async function* ({ message }: { message: string }) {
+            self._echoExecuteCount++;
+            yield `echo-prelim-1: ${message}`;
+            yield `echo-prelim-2: ${message}`;
+            yield `echo: ${message}`;
+          }
+        })
+      };
+    }
+    if (mode === "needs-approval") {
+      // A raw AI SDK `needsApproval` tool (not a Think Action). Used to
+      // verify the dual-gate ordering: the AI SDK approval gate runs first,
+      // then — after approval — `beforeToolCall` is still the outer gate
+      // around the original `execute`.
+      return {
+        echo: tool({
+          description: "Echo a message back (requires approval)",
+          inputSchema: z.object({ message: z.string() }),
+          needsApproval: true,
+          execute: async ({ message }: { message: string }) => {
+            this._echoExecuteCount++;
+            return `echo: ${message}`;
           }
         })
       };
@@ -3649,7 +3687,10 @@ export class ThinkToolsTestAgent extends Think {
       echo: tool({
         description: "Echo a message back",
         inputSchema: z.object({ message: z.string() }),
-        execute: async ({ message }: { message: string }) => `echo: ${message}`
+        execute: async ({ message }: { message: string }) => {
+          this._echoExecuteCount++;
+          return `echo: ${message}`;
+        }
       })
     };
   }
@@ -3834,7 +3875,12 @@ export class ThinkToolsTestAgent extends Think {
     | "default"
     | "async-iterable"
     | "sync-iterable"
+    | "async-generator"
+    | "needs-approval"
     | "add-messages" = "default";
+
+  /** Counts how many times the `echo` tool's `execute` actually runs. */
+  private _echoExecuteCount = 0;
 
   private _midTurnInsideLoop: boolean | null = null;
   private _midTurnPersisted: boolean | null = null;
@@ -3887,9 +3933,20 @@ export class ThinkToolsTestAgent extends Think {
   } | null = null;
 
   async setEchoExecuteMode(
-    mode: "default" | "async-iterable" | "sync-iterable" | "add-messages"
+    mode:
+      | "default"
+      | "async-iterable"
+      | "sync-iterable"
+      | "async-generator"
+      | "needs-approval"
+      | "add-messages"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  /** How many times the `echo` tool's `execute` body actually ran. */
+  async getEchoExecuteCount(): Promise<number> {
+    return this._echoExecuteCount;
   }
 
   async useEchoActionForTest(
@@ -4335,6 +4392,30 @@ export class ThinkToolsTestAgent extends Think {
         ? JSON.stringify(ctx.output)
         : JSON.stringify({ error: String(ctx.error) })
     });
+  }
+
+  // Records every `tool-result` stream part the AI SDK emits, including the
+  // `preliminary: true` ones a streaming tool produces. Lets streaming tests
+  // assert that preliminary chunks survive `beforeToolCall` wrapping.
+  private _toolResultChunkLog: Array<{
+    outputJson: string;
+    preliminary: boolean;
+  }> = [];
+
+  override onChunk(ctx: ChunkContext): void {
+    if (ctx.chunk.type === "tool-result") {
+      const chunk = ctx.chunk as { output: unknown; preliminary?: boolean };
+      this._toolResultChunkLog.push({
+        outputJson: JSON.stringify(chunk.output),
+        preliminary: chunk.preliminary === true
+      });
+    }
+  }
+
+  async getToolResultChunkLog(): Promise<
+    Array<{ outputJson: string; preliminary: boolean }>
+  > {
+    return this._toolResultChunkLog;
   }
 
   async testChat(message: string): Promise<TestChatResult> {

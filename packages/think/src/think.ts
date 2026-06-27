@@ -84,6 +84,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   FlexibleSchema,
   InferSchema,
+  InferToolOutput,
   LanguageModel,
   ModelMessage,
   PrepareStepFunction,
@@ -2187,7 +2188,9 @@ export type StepConfig<TOOLS extends ToolSet = ToolSet> =
  * - `messages`   — conversation messages visible at tool execution time
  * - `abortSignal` — signal that aborts if the turn is cancelled
  *
- * Pass an explicit `TOOLS` generic for full input typing:
+ * Pass an explicit `TOOLS` generic for full input typing. With a concrete
+ * tool set, narrowing on `ctx.toolName` narrows `ctx.input` to that tool's
+ * input shape:
  *
  * ```ts
  * import type { ToolCallContext } from "@cloudflare/think";
@@ -2195,20 +2198,41 @@ export type StepConfig<TOOLS extends ToolSet = ToolSet> =
  *
  * beforeToolCall(ctx: ToolCallContext<typeof tools>) {
  *   if (ctx.toolName === "search") {
- *     ctx.input.query; // typed
+ *     ctx.input.query; // typed as string
  *   }
  * }
  * ```
  */
 export type ToolCallContext<TOOLS extends ToolSet = ToolSet> =
-  TypedToolCall<TOOLS> & {
-    /** Zero-based index of the current step where this tool call occurs. */
-    readonly stepNumber: number | undefined;
-    /** The conversation messages available at tool execution time. */
-    readonly messages: ReadonlyArray<ModelMessage>;
-    /** Signal for cancelling the operation. */
-    readonly abortSignal: AbortSignal | undefined;
-  };
+  PerToolCall<TOOLS> & ToolCallContextExtras;
+
+/** Per-call event extras attached to every {@link ToolCallContext}. */
+type ToolCallContextExtras = {
+  /** Zero-based index of the current step where this tool call occurs. */
+  readonly stepNumber: number | undefined;
+  /** The conversation messages available at tool execution time. */
+  readonly messages: ReadonlyArray<ModelMessage>;
+  /** Signal for cancelling the operation. */
+  readonly abortSignal: AbortSignal | undefined;
+};
+
+/**
+ * The `TypedToolCall<TOOLS>` union, re-keyed so that discriminating on
+ * `toolName` narrows `input` per tool.
+ *
+ * The AI SDK's `TypedToolCall` includes a `DynamicToolCall` arm whose
+ * `toolName: string` / `input: unknown` overlaps every static tool name —
+ * leaving it in the union collapses `ctx.input` to `unknown` even after a
+ * `toolName` check. When an explicit `TOOLS` generic is passed (so the keys
+ * are a literal union), we distribute over those keys and drop the dynamic
+ * arm so narrowing works. With the default `ToolSet` (keys are `string`) we
+ * fall back to the raw union, preserving the prior loose behavior.
+ */
+type PerToolCall<TOOLS extends ToolSet> = string extends keyof TOOLS
+  ? TypedToolCall<TOOLS>
+  : {
+      [K in keyof TOOLS]: Extract<TypedToolCall<TOOLS>, { toolName: K }>;
+    }[keyof TOOLS];
 
 /**
  * Decision returned by `beforeToolCall` to control tool execution.
@@ -2250,42 +2274,56 @@ export type ToolCallDecision =
  * - `messages`    — conversation messages visible at tool execution time
  * - `durationMs`  — wall-clock execution time in milliseconds
  * - `success`/`output`/`error` — discriminated outcome:
- *   - on success: `success: true`, `output: unknown`
+ *   - on success: `success: true`, `output` typed per tool
  *   - on failure: `success: false`, `error: unknown`
  *
- * Pass an explicit `TOOLS` generic for full input typing:
+ * Pass an explicit `TOOLS` generic for full input **and** output typing.
+ * On the success branch, narrowing on `ctx.toolName` narrows `ctx.output`
+ * to that tool's inferred output type (dynamic tools stay `unknown`):
  *
  * ```ts
  * import type { ToolCallResultContext } from "@cloudflare/think";
  * import type { tools } from "./my-tools";
  *
  * afterToolCall(ctx: ToolCallResultContext<typeof tools>) {
- *   if (ctx.success) {
- *     console.log(`${ctx.toolName} took ${ctx.durationMs}ms`, ctx.output);
- *   } else {
- *     console.error(`${ctx.toolName} failed:`, ctx.error);
+ *   if (ctx.toolName === "search" && ctx.success) {
+ *     ctx.output.results; // typed as the `search` tool's output
  *   }
  * }
  * ```
  */
 export type ToolCallResultContext<TOOLS extends ToolSet = ToolSet> =
-  TypedToolCall<TOOLS> & {
-    readonly stepNumber: number | undefined;
-    readonly messages: ReadonlyArray<ModelMessage>;
-    /** Wall-clock execution time in milliseconds. */
-    readonly durationMs: number;
-  } & (
-      | {
-          readonly success: true;
-          readonly output: unknown;
-          readonly error?: never;
-        }
-      | {
-          readonly success: false;
-          readonly output?: never;
-          readonly error: unknown;
-        }
-    );
+  string extends keyof TOOLS
+    ? TypedToolCall<TOOLS> & ToolCallResultBase & ToolCallOutcome<unknown>
+    : {
+        [K in keyof TOOLS]: Extract<TypedToolCall<TOOLS>, { toolName: K }> &
+          ToolCallResultBase &
+          ToolCallOutcome<InferToolOutput<TOOLS[K]>>;
+      }[keyof TOOLS];
+
+/** Per-call extras attached to every {@link ToolCallResultContext}. */
+type ToolCallResultBase = {
+  readonly stepNumber: number | undefined;
+  readonly messages: ReadonlyArray<ModelMessage>;
+  /** Wall-clock execution time in milliseconds. */
+  readonly durationMs: number;
+};
+
+/**
+ * The discriminated success/failure outcome of a tool call. On success the
+ * `output` is typed (`O`); on failure the `error` is `unknown`.
+ */
+type ToolCallOutcome<O> =
+  | {
+      readonly success: true;
+      readonly output: O;
+      readonly error?: never;
+    }
+  | {
+      readonly success: false;
+      readonly output?: never;
+      readonly error: unknown;
+    };
 
 /**
  * Context passed to the `onStepFinish` hook after each step completes.
@@ -2331,6 +2369,17 @@ export interface ExtensionConfig {
   /** JavaScript source code defining the extension's tools. */
   source: string;
 }
+
+/**
+ * @internal The subset of the AI SDK's `ToolExecuteOptions` that Think's
+ * tool wrapper reads when resolving a `beforeToolCall` decision.
+ */
+type ToolDecisionOptions = {
+  toolCallId: string;
+  messages: ModelMessage[];
+  abortSignal?: AbortSignal;
+  experimental_context?: unknown;
+};
 
 /**
  * An opinionated chat agent base class.
@@ -5979,17 +6028,26 @@ export class Think<
    *
    * **Streaming tools (AsyncIterable):** the AI SDK supports tools whose
    * `execute` returns `AsyncIterable<output>` to emit preliminary
-   * results before a final value. This works whether the iterator is
-   * returned directly (sync function, `async function*`) or wrapped in
-   * a Promise (`async function execute(...) { return makeIter(); }`).
-   * Because the wrapper must `await beforeToolCall` first, preliminary
-   * chunks are collapsed — only the *final* yielded value reaches the
-   * model. If you need true preliminary streaming, override
-   * `getTools()` to provide such tools and avoid using `beforeToolCall`
-   * for them (or accept the collapse).
+   * results before a final value. The canonical form is an async
+   * generator (`async function* execute(...)`), where calling `execute`
+   * synchronously returns a direct `AsyncIterable`. For that form Think
+   * preserves preliminary streaming: the wrapper is itself an async
+   * generator that `await`s `beforeToolCall` and then yields every
+   * chunk through unchanged. Non-streaming tools keep a scalar wrapper
+   * so they never emit a synthetic `preliminary` tool-result chunk.
+   *
+   * The non-canonical `async function execute(...) { return makeIter(); }`
+   * form returns a `Promise<AsyncIterable>`, which does not stream even
+   * in the raw AI SDK (it would surface the iterator object as the final
+   * output). Think collapses it to the last yielded value instead. If
+   * you need preliminary streaming, use an `async function*` `execute`.
    */
   private _wrapToolsWithDecision(tools: ToolSet): ToolSet {
     const wrapped: ToolSet = {};
+    // Capture `this` lexically so the streaming wrapper (which must be an
+    // async generator function expression, not an arrow) can reach the
+    // shared decision helper without a per-tool `.bind`.
+    const self = this;
     for (const [toolName, originalTool] of Object.entries(tools)) {
       const t = originalTool as Record<string, unknown>;
       const originalExecute = t.execute as
@@ -6006,96 +6064,79 @@ export class Think<
         metadata?.cfThinkAction === true &&
         metadata.cfThinkActionApprovalConfigured === true;
 
-      const wrappedExecute = async (
-        input: unknown,
-        options: {
-          toolCallId: string;
-          messages: ModelMessage[];
-          abortSignal?: AbortSignal;
-          experimental_context?: unknown;
-        }
-      ): Promise<unknown> => {
-        // Build the discriminated `TypedToolCall`-shaped context.
-        const toolCallBase = {
-          type: "tool-call" as const,
-          toolCallId: options.toolCallId,
-          toolName,
-          input,
-          ...(isDynamic ? { dynamic: true as const } : {})
-        };
+      // Canonical AI SDK streaming tools use an async generator `execute`
+      // (`async function* execute(...)`). Detect that form so we can keep
+      // preliminary streaming flowing through `beforeToolCall`. Everything
+      // else routes through the scalar wrapper so non-streaming tools never
+      // emit a synthetic `preliminary` tool-result.
+      const isStreamingExecute =
+        (originalExecute as { constructor?: { name?: string } }).constructor
+          ?.name === "AsyncGeneratorFunction";
 
-        const ctx = {
-          ...toolCallBase,
-          stepNumber: undefined,
-          messages: options.messages,
-          abortSignal: options.abortSignal
-        } as ToolCallContext;
-
-        // Subclass decision first.
-        const decision = await this.beforeToolCall(ctx);
-
-        // Extension observation dispatch — runs after the subclass so
-        // extensions see whatever effect the subclass had on the
-        // decision shape (input substitution shows up in the snapshot).
-        const dispatchInput =
-          decision && decision.action === "allow" && decision.input
-            ? decision.input
-            : input;
-        await this._pipelineExtensionToolCallStart({
-          toolCall: {
-            ...toolCallBase,
-            input: dispatchInput
-          } as TypedToolCall<ToolSet>,
-          stepNumber: undefined
-        });
-
-        // Resolve the decision.
-        if (!decision || decision.action === "allow") {
-          const finalInput = decision?.input ?? input;
-          const approvedInput = isApprovalConfiguredAction
-            ? this._activeTurnApprovedActionInputs.get(options.toolCallId)
-            : undefined;
-          if (
-            approvedInput !== undefined &&
-            !stableJsonEqual(finalInput, approvedInput)
-          ) {
-            return actionApprovalInputErrorEnvelope();
-          }
-          // Await before inspecting so we detect AsyncIterable returns
-          // whether the original `execute` returned them directly (sync
-          // function or `async function*`) or wrapped in a Promise (a
-          // plain async function that returns an iterator). Without the
-          // await, `Symbol.asyncIterator in result` would be false for
-          // any `Promise<AsyncIterable>`, the collapse below would be
-          // skipped, and the AI SDK would treat the iterator instance
-          // itself as the final output value (broken).
-          const result = await originalExecute(finalInput, options);
-          // If the resolved value is an AsyncIterable (streaming tool
-          // emitting preliminary outputs), collapse to the last yielded
-          // value. We trade preliminary streaming for `beforeToolCall`
-          // interception support.
-          if (
-            result != null &&
-            typeof result === "object" &&
-            Symbol.asyncIterator in (result as object)
-          ) {
-            let last: unknown;
-            for await (const part of result as AsyncIterable<unknown>) {
-              last = part;
+      const wrappedExecute = isStreamingExecute
+        ? (input: unknown, options: ToolDecisionOptions) =>
+            // Returning the generator synchronously (via the sync arrow)
+            // keeps it a *direct* AsyncIterable so the AI SDK streams the
+            // preliminary parts instead of awaiting a Promise<AsyncIterable>.
+            (async function* () {
+              const resolved = await self._resolveToolCallDecision(
+                toolName,
+                input,
+                options,
+                isDynamic,
+                isApprovalConfiguredAction
+              );
+              if (!resolved.execute) {
+                yield resolved.output;
+                return;
+              }
+              const result = await originalExecute(
+                resolved.finalInput,
+                options
+              );
+              if (
+                result != null &&
+                typeof result === "object" &&
+                Symbol.asyncIterator in (result as object)
+              ) {
+                // Stream the original tool's preliminary outputs through
+                // unchanged — the AI SDK emits each as a `preliminary`
+                // tool-result and the last as the final value.
+                yield* result as AsyncIterable<unknown>;
+              } else {
+                yield result;
+              }
+            })()
+        : async (
+            input: unknown,
+            options: ToolDecisionOptions
+          ): Promise<unknown> => {
+            const resolved = await self._resolveToolCallDecision(
+              toolName,
+              input,
+              options,
+              isDynamic,
+              isApprovalConfiguredAction
+            );
+            if (!resolved.execute) return resolved.output;
+            // Await before inspecting so we detect a direct AsyncIterable
+            // return even from a non-async-generator `execute` (e.g. a
+            // plain function that returns a generator). Such non-canonical
+            // streaming shapes are collapsed to their last yielded value.
+            const result = await originalExecute(resolved.finalInput, options);
+            if (
+              result != null &&
+              typeof result === "object" &&
+              Symbol.asyncIterator in (result as object)
+            ) {
+              let last: unknown;
+              for await (const part of result as AsyncIterable<unknown>) {
+                last = part;
+              }
+              return last;
             }
-            return last;
-          }
-          return result;
-        }
-        if (decision.action === "block") {
-          return (
-            decision.reason ??
-            `Tool "${toolName}" was blocked by beforeToolCall.`
-          );
-        }
-        // substitute
-        return decision.output;
-      };
+            return result;
+          };
 
       wrapped[toolName] = {
         ...(originalTool as object),
@@ -6103,6 +6144,82 @@ export class Think<
       } as ToolSet[string];
     }
     return wrapped;
+  }
+
+  /**
+   * Shared `beforeToolCall` resolution for both the scalar and streaming
+   * tool wrappers (see {@link _wrapToolsWithDecision}). Builds the
+   * `ToolCallContext`, consults the subclass `beforeToolCall` hook,
+   * dispatches the extension observation snapshot, and resolves the
+   * returned `ToolCallDecision` into either "run `execute` with this
+   * input" or "short-circuit with this output".
+   */
+  private async _resolveToolCallDecision(
+    toolName: string,
+    input: unknown,
+    options: ToolDecisionOptions,
+    isDynamic: boolean,
+    isApprovalConfiguredAction: boolean
+  ): Promise<
+    { execute: true; finalInput: unknown } | { execute: false; output: unknown }
+  > {
+    // Build the discriminated `TypedToolCall`-shaped context.
+    const toolCallBase = {
+      type: "tool-call" as const,
+      toolCallId: options.toolCallId,
+      toolName,
+      input,
+      ...(isDynamic ? { dynamic: true as const } : {})
+    };
+
+    const ctx = {
+      ...toolCallBase,
+      stepNumber: undefined,
+      messages: options.messages,
+      abortSignal: options.abortSignal
+    } as ToolCallContext;
+
+    // Subclass decision first.
+    const decision = await this.beforeToolCall(ctx);
+
+    // Extension observation dispatch — runs after the subclass so
+    // extensions see whatever effect the subclass had on the decision
+    // shape (input substitution shows up in the snapshot).
+    const dispatchInput =
+      decision && decision.action === "allow" && decision.input
+        ? decision.input
+        : input;
+    await this._pipelineExtensionToolCallStart({
+      toolCall: {
+        ...toolCallBase,
+        input: dispatchInput
+      } as TypedToolCall<ToolSet>,
+      stepNumber: undefined
+    });
+
+    // Resolve the decision.
+    if (!decision || decision.action === "allow") {
+      const finalInput = decision?.input ?? input;
+      const approvedInput = isApprovalConfiguredAction
+        ? this._activeTurnApprovedActionInputs.get(options.toolCallId)
+        : undefined;
+      if (
+        approvedInput !== undefined &&
+        !stableJsonEqual(finalInput, approvedInput)
+      ) {
+        return { execute: false, output: actionApprovalInputErrorEnvelope() };
+      }
+      return { execute: true, finalInput };
+    }
+    if (decision.action === "block") {
+      return {
+        execute: false,
+        output:
+          decision.reason ?? `Tool "${toolName}" was blocked by beforeToolCall.`
+      };
+    }
+    // substitute
+    return { execute: false, output: decision.output };
   }
 
   private async _pipelineExtensionToolCallStart(event: {
