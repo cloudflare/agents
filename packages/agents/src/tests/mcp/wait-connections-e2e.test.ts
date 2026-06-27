@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 
 /**
  * E2E tests for waitForConnections() through the full Agent lifecycle.
@@ -234,6 +235,56 @@ describe("waitForConnections E2E", () => {
       expect(result.connectionStates["regular-server"]).not.toBe("connecting");
       // OAuth server should be in authenticating state
       expect(result.connectionStates["oauth-server"]).toBe("authenticating");
+    });
+
+    // The tests above simulate hibernation by manually clearing the in-memory
+    // `_isRestored` flag (resetRestoredFlag). This one uses a *real* eviction:
+    // evictDurableObject tears down the instance, so the next access rebuilds
+    // the Agent from scratch and re-runs onStart → restoreConnectionsFromStorage
+    // against the persisted cf_agents_mcp_servers rows. That proves the
+    // MCPClientManager's in-memory connection map is genuinely rebuilt from
+    // storage on eviction, not merely re-read from a warm instance.
+    it("rebuilds MCP connections from storage after a real eviction", async () => {
+      const agentId = env.TestWaitConnectionsAgent.idFromName(
+        "hibernation-evict-roundtrip"
+      );
+      const stub = env.TestWaitConnectionsAgent.get(agentId);
+
+      // Boot the agent (creates internal tables) and persist an MCP server row.
+      await stub.__unsafe_ensureInitialized();
+      await stub.insertMcpServer(
+        "evict-roundtrip-server",
+        "Evict Round Trip Server",
+        "http://nonexistent-mcp.example.com",
+        "http://localhost:3000/callback",
+        null
+      );
+
+      // Restore once so the in-memory connection map is populated before
+      // eviction. onStart may have already restored (with no servers) and set
+      // the _isRestored flag, so clear it first to force a fresh restore.
+      await stub.resetRestoredFlag();
+      await stub.restoreAndWait(5000);
+      expect(await stub.hasMcpConnection("evict-roundtrip-server")).toBe(true);
+
+      // Real eviction: drops the MCPClientManager in-memory state (mcpConnections
+      // and the `_isRestored` flag) while leaving cf_agents_mcp_servers intact.
+      await evictDurableObject(stub);
+
+      // The rebuilt instance starts with an empty connection map — proving the
+      // in-memory state was actually torn down by the eviction.
+      expect(await stub.hasMcpConnection("evict-roundtrip-server")).toBe(false);
+
+      // Full lifecycle on the rebuilt instance: onStart →
+      // restoreConnectionsFromStorage → waitForConnections rebuilds the
+      // connection from the persisted row.
+      const result = await stub.hibernationRoundTrip(5000);
+
+      expect(result.connectionIds).toContain("evict-roundtrip-server");
+      const state = result.connectionStates["evict-roundtrip-server"];
+      expect(state).toBeDefined();
+      // Settled (failed against the mock), not stuck "connecting".
+      expect(state).not.toBe("connecting");
     });
   });
 
