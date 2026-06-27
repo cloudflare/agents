@@ -4,7 +4,9 @@ export type MessengerEventKind =
   | "direct-message"
   | "mention"
   | "subscribed-message"
+  | "command"
   | "action"
+  | "reaction"
   | "delivery-event";
 
 export interface MessengerAuthor {
@@ -55,6 +57,23 @@ export interface MessengerAction {
   value?: string;
 }
 
+export interface MessengerCommand {
+  command: string;
+  providerCommandId?: string;
+  raw?: unknown;
+  text?: string;
+  user?: MessengerAuthor;
+  values?: Record<string, unknown>;
+}
+
+export interface MessengerReaction {
+  added: boolean;
+  emoji: string;
+  messageId: string;
+  raw?: unknown;
+  user?: MessengerAuthor;
+}
+
 export interface MessengerCapabilities {
   canEditMessages?: boolean;
   canStream?: boolean;
@@ -68,10 +87,12 @@ export interface MessengerContext {
   action?: MessengerAction;
   author?: MessengerAuthor;
   capabilities: MessengerCapabilities;
+  command?: MessengerCommand;
   kind: MessengerEventKind;
   message?: MessengerMessage;
   messengerId: string;
   provider: string;
+  reaction?: MessengerReaction;
   thread: MessengerThread;
 }
 
@@ -84,12 +105,18 @@ export function messengerContextFromEvent(
 ): MessengerContext {
   return {
     action: event.action,
-    author: event.message?.author ?? event.action?.user,
+    author:
+      event.message?.author ??
+      event.action?.user ??
+      event.command?.user ??
+      event.reaction?.user,
     capabilities: event.capabilities,
+    command: event.command,
     kind: event.kind,
     message: event.message,
     messengerId: event.messengerId,
     provider: event.provider,
+    reaction: event.reaction,
     thread: event.thread
   };
 }
@@ -111,6 +138,15 @@ export function serializableMessengerEvent(
           value: event.action.value
         }
       : undefined,
+    command: event.command
+      ? {
+          command: event.command.command,
+          providerCommandId: event.command.providerCommandId,
+          text: event.command.text,
+          user: event.command.user ? { ...event.command.user } : undefined,
+          values: event.command.values ? { ...event.command.values } : undefined
+        }
+      : undefined,
     message: event.message
       ? {
           attachments: event.message.attachments.map((attachment) => ({
@@ -127,6 +163,14 @@ export function serializableMessengerEvent(
           isMention: event.message.isMention,
           providerMessageId: event.message.providerMessageId,
           text: event.message.text
+        }
+      : undefined,
+    reaction: event.reaction
+      ? {
+          added: event.reaction.added,
+          emoji: event.reaction.emoji,
+          messageId: event.reaction.messageId,
+          user: event.reaction.user ? { ...event.reaction.user } : undefined
         }
       : undefined
   };
@@ -166,6 +210,63 @@ export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
     } as UIMessage;
   }
 
+  if (event.command) {
+    const user = event.command.user;
+    const displayName = user?.fullName || user?.userName || user?.userId;
+    const details = [
+      `Slash command: ${event.command.command}`,
+      event.command.text ? `Text: ${event.command.text}` : undefined
+    ].filter(Boolean);
+    const text = displayName
+      ? `${displayName}: ${details.join("\n")}`
+      : details.join("\n");
+
+    return {
+      id: [
+        event.messengerId,
+        "command",
+        event.thread.id,
+        commandEventId(event.command)
+      ]
+        .filter(Boolean)
+        .join(":"),
+      role: "user",
+      parts: [{ type: "text", text }],
+      metadata: {
+        messenger: messengerContextFromEvent(event)
+      }
+    } as UIMessage;
+  }
+
+  if (event.reaction) {
+    const user = event.reaction.user;
+    const displayName = user?.fullName || user?.userName || user?.userId;
+    const details = [
+      `Reaction ${event.reaction.added ? "added" : "removed"}: ${event.reaction.emoji}`,
+      `Source message: ${event.reaction.messageId}`
+    ];
+    const text = displayName
+      ? `${displayName}: ${details.join("\n")}`
+      : details.join("\n");
+
+    return {
+      id: [
+        event.messengerId,
+        "reaction",
+        event.thread.id,
+        event.reaction.messageId,
+        event.reaction.emoji,
+        event.reaction.user?.userId ?? "unknown-user",
+        event.reaction.added ? "added" : "removed"
+      ].join(":"),
+      role: "user",
+      parts: [{ type: "text", text }],
+      metadata: {
+        messenger: messengerContextFromEvent(event)
+      }
+    } as UIMessage;
+  }
+
   if (!message) {
     throw new Error(`Messenger event ${event.kind} does not contain a message`);
   }
@@ -190,6 +291,44 @@ export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
       messenger: messengerContextFromEvent(event)
     }
   } as UIMessage;
+}
+
+function commandEventId(command: MessengerCommand): string {
+  return [
+    stableIdPart(command.providerCommandId ?? rawStringId(command.raw)),
+    stableIdPart(command.command),
+    command.user?.userId ?? "unknown-user",
+    stableIdPart(command.text ?? "no-text")
+  ].join(":");
+}
+
+function stableIdPart(value: string | undefined): string {
+  if (!value) {
+    return "unknown";
+  }
+
+  const safe = value.replace(/[^a-zA-Z0-9:_/-]/g, "_");
+  if (safe.length <= 80) {
+    return safe;
+  }
+  return `${safe.slice(0, 48)}_${hashString(value)}`;
+}
+
+function hashString(value: string): string {
+  let hash = 5381;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 33) ^ value.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function rawStringId(raw: unknown): string | undefined {
+  if (raw === null || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const candidate = raw as { id?: unknown };
+  return typeof candidate.id === "string" ? candidate.id : undefined;
 }
 
 function describeAttachments(attachments: MessengerAttachment[]): string {

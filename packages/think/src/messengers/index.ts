@@ -8,13 +8,18 @@ export {
   ThinkMessengerStateAgent,
   toMessengerAttachment,
   toMessengerAuthor,
+  toMessengerCommand,
   toMessengerMessage,
+  toMessengerReaction,
+  toMessengerThreadFromChannel,
   toMessengerThread
 } from "./chat-sdk";
 
 export type {
   ChatSdkMessengerEventInput,
   ChatSdkMessengerOptions,
+  MessengerBackgroundContext,
+  MessengerBackgroundIngress,
   MessengerConversationMode,
   MessengerConversationResolver,
   MessengerConversationTarget,
@@ -64,9 +69,11 @@ export type {
   MessengerAttachment,
   MessengerAuthor,
   MessengerCapabilities,
+  MessengerCommand,
   MessengerContext,
   MessengerEvent,
   MessengerEventKind,
   MessengerMessage,
+  MessengerReaction,
   MessengerThread
 } from "./events";
