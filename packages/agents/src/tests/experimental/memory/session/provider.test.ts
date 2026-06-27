@@ -1,5 +1,6 @@
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it, beforeEach } from "vitest";
 import { getAgentByName } from "../../../..";
 
@@ -387,6 +388,42 @@ describe("AgentSessionProvider — tree-structured messages", () => {
     const history = await agent2.getHistory();
     expect(history).toHaveLength(1);
     expect(history[0].id).toBe("m1");
+  });
+
+  // The lookup above shares one live DO, so nothing is reconstructed. This
+  // variant evicts the DO (production hibernation: in-memory state torn down,
+  // SQLite preserved) and proves history is rebuilt from storage on wake, and
+  // that a subsequent auto-parent append still attaches to the rehydrated tip.
+  it("persistence across a real Durable Object eviction", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    });
+    await agent.appendMessage({
+      id: "m2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Hi" }]
+    });
+
+    await evictDurableObject(agent as unknown as DurableObjectStub);
+
+    const history = await agent.getHistory();
+    expect(history.map((m) => m.id)).toEqual(["m1", "m2"]);
+
+    // The active-leaf tip (m2) is recovered from SQLite, so an auto-parent
+    // append lands as its child rather than orphaning a new root.
+    await agent.appendMessage({
+      id: "m3",
+      role: "user",
+      parts: [{ type: "text", text: "Follow-up" }]
+    });
+    expect((await agent.getHistory()).map((m) => m.id)).toEqual([
+      "m1",
+      "m2",
+      "m3"
+    ]);
   });
 });
 
