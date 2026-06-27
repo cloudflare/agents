@@ -6087,6 +6087,17 @@ export class Think<
                 isApprovalConfiguredAction
               );
               if (!resolved.execute) {
+                // Block/substitute is a scalar outcome, but this wrapper had
+                // to commit to an AsyncIterable shape synchronously (before the
+                // async decision was known) so the execute path can stream.
+                // The AI SDK's `executeTool` turns every yielded value into a
+                // `preliminary` tool-result plus a `final`, so this single
+                // yield surfaces one synthetic `preliminary` chunk to observers
+                // (e.g. onChunk) that the scalar wrapper never emits. The
+                // model-visible final output is identical and correct, and this
+                // matches how any streaming tool that emits a single value
+                // already behaves — so we accept it rather than regress
+                // streaming preservation for the (rare) block/substitute case.
                 yield resolved.output;
                 return;
               }
