@@ -198,6 +198,8 @@ describe("fetch_url — allowlist + SSRF", () => {
     "https://[::1]/x",
     "https://[fc00::1]/x", // ULA
     "https://[fe80::1]/x", // link-local
+    "https://[::ffff:127.0.0.1]/x", // IPv4-mapped (serializes to ::ffff:7f00:1)
+    "https://[::ffff:192.168.0.1]/x", // IPv4-mapped private
     "http://2130706433/", // decimal form of 127.0.0.1
     "http://0x7f.0.0.1/", // hex-dotted form of 127.0.0.1
     "http://0177.0.0.1/", // octal form of 127.0.0.1

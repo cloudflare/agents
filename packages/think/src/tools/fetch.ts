@@ -948,9 +948,19 @@ function isBlockedIpv6(ip: string): boolean {
   if (lower === "::1" || lower === "::") return true;
   if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // fc00::/7
   if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
-  // IPv4-mapped (::ffff:127.0.0.1)
-  const mapped = lower.match(/::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
-  if (mapped) return isBlockedIpv4(mapped[1]);
+  // IPv4-mapped, dotted form (::ffff:127.0.0.1).
+  const dotted = lower.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (dotted) return isBlockedIpv4(dotted[1]);
+  // IPv4-mapped, hex form. The WHATWG URL parser serializes
+  // `::ffff:127.0.0.1` as `::ffff:7f00:1`, so decode the trailing two hextets
+  // back into dotted IPv4 and reuse the v4 rules.
+  const hex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hex) {
+    const high = Number.parseInt(hex[1], 16);
+    const low = Number.parseInt(hex[2], 16);
+    const v4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+    return isBlockedIpv4(v4);
+  }
   return false;
 }
 
