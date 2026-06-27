@@ -370,6 +370,21 @@ const executeTool = createExecuteTool({
 
 The LLM writes JavaScript code. The tool sends it to a dynamic Worker isolate via `DynamicWorkerExecutor`. The sandbox can call workspace tools via `codemode.*` and optionally the full `state.*` filesystem API (`readFile`, `writeFile`, `glob`, `searchFiles`, `planEdits`, etc.). Fully isolated: no network access by default, configurable timeout.
 
+### Fetch tools (`@cloudflare/think/tools/fetch`)
+
+Opt-in, read-only HTTP reads. `createFetchTools()` generates a generic `fetch_url` tool (when a public `allowlist` is set) plus one `fetch_<name>` per binding target. Wired into Think via the `fetchTools` property, which auto-merges the generated tools between workspace tools and `getTools()` and adds a capability-prompt line; it injects `this.workspace` and a `tool:fetch` observability emit automatically.
+
+```typescript
+fetchTools = {
+  allowlist: ["https://developers.cloudflare.com/**"],
+  bindings: {
+    docsApi: { binding: this.env.DOCS_API, allowlist: ["/v1/docs/**"] }
+  }
+};
+```
+
+Key decisions: named tools (not one polymorphic tool) so per-target policy is baked in; `GET`-only (mutations belong in approval-gated actions, and recovery replays a turn so non-idempotent egress would be unsafe); Workers-grounded SSRF defenses (private/loopback/link-local/`*.internal` blocked for the public path, credentials rejected, IPv4 shorthand normalized by the WHATWG URL parser); three size knobs (`maxBytes` download cap, `maxModelChars` text truncation, `response: "workspace"` spill); allowlist-aware redirect policy with cross-origin header stripping; and a markdown-first default `Accept`. Results are returned as structured `{ ok, ... }` values, never thrown.
+
 ### Browser tools (`@cloudflare/think/tools/browser`)
 
 Two AI SDK tools for CDP-based browser automation:
@@ -532,6 +547,7 @@ Tests in `packages/think/src/tests/`, running inside the Workers runtime via `@c
 | `@cloudflare/think/extensions`       | `src/extensions/index.ts` | ExtensionManager, HostBridgeLoopback                   |
 | `@cloudflare/think/tools/workspace`  | `src/tools/workspace.ts`  | File operation tool factories (for custom backends)    |
 | `@cloudflare/think/tools/execute`    | `src/tools/execute.ts`    | Sandboxed code execution tool                          |
+| `@cloudflare/think/tools/fetch`      | `src/tools/fetch.ts`      | Opt-in allowlisted, read-only HTTP fetch tools         |
 | `@cloudflare/think/tools/browser`    | `src/tools/browser.ts`    | CDP browser automation tools (search + execute)        |
 | `@cloudflare/think/tools/extensions` | `src/tools/extensions.ts` | Extension management AI tools                          |
 

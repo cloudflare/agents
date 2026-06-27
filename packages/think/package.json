@@ -118,6 +118,10 @@
       "types": "./dist/tools/workspace.d.ts",
       "import": "./dist/tools/workspace.js"
     },
+    "./tools/fetch": {
+      "types": "./dist/tools/fetch.d.ts",
+      "import": "./dist/tools/fetch.js"
+    },
     "./tools/execute": {
       "types": "./dist/tools/execute.d.ts",
       "import": "./dist/tools/execute.js"

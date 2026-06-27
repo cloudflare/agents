@@ -254,6 +254,8 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { createFetchTools } from "./tools/fetch";
+import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
@@ -290,6 +292,15 @@ export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export type { WorkspaceLike } from "./tools/workspace";
 import type { WorkspaceLike } from "./tools/workspace";
+export type {
+  CreateFetchToolsOptions,
+  FetchBindingTarget,
+  FetchResult,
+  FetchToolEvent,
+  FetchErrorCode,
+  FetchResponseMode,
+  FetchRedirectPolicy
+} from "./tools/fetch";
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
@@ -2551,6 +2562,24 @@ export class Think<
     | boolean
     | NonNullable<Parameters<typeof createWorkspaceTools>[1]>["bash"] = true;
 
+  /**
+   * Opt-in HTTP fetch tools. Disabled by default — set to a config object to
+   * register a generic `fetch_url` tool (when `allowlist` is provided) and one
+   * `fetch_<name>` tool per `bindings` target. Read-only (GET), allowlisted,
+   * and bounded; see {@link createFetchTools}.
+   *
+   * The workspace and an observability hook are injected automatically, so omit
+   * `workspace`/`onEvent` here. This property is evaluated at construction, so
+   * use it for static config — for per-tenant/dynamic allowlists call
+   * `createFetchTools()` inside `getTools()` instead (it runs every turn).
+   *
+   * ```ts
+   * fetchTools = { allowlist: ["https://developers.cloudflare.com/**"] };
+   * ```
+   */
+  fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
+    false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
@@ -3944,6 +3973,9 @@ export class Think<
     const hasExtensionTools =
       toolNames.has("load_extension") || toolNames.has("list_extensions");
     const hasExecuteTool = toolNames.has("execute");
+    const hasFetchTools = [...toolNames].some((name) =>
+      name.startsWith("fetch_")
+    );
 
     const lines = [
       "You are running inside a Think agent.",
@@ -3981,6 +4013,12 @@ export class Think<
     if (hasExecuteTool) {
       lines.push(
         "- If sandboxed execution is available, prefer it for safe, bounded checks or coordinated multi-step operations."
+      );
+    }
+
+    if (hasFetchTools) {
+      lines.push(
+        "- If fetch tools are available, use them to read allowlisted HTTP resources (documentation, APIs). They are read-only and bounded; respect their allowlist and do not assume access to other URLs."
       );
     }
 
@@ -4862,6 +4900,20 @@ export class Think<
     const workspaceTools = createWorkspaceTools(this.workspace, {
       bash: this.workspaceBash
     });
+    const fetchToolSet: ToolSet = this.fetchTools
+      ? createFetchTools({
+          ...this.fetchTools,
+          workspace: this.workspace,
+          onEvent: (event: FetchToolEvent) => {
+            (
+              this._emit as unknown as (
+                type: string,
+                payload: Record<string, unknown>
+              ) => void
+            ).call(this, "tool:fetch", { ...event });
+          }
+        })
+      : {};
     const baseTools = this.getTools();
     const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
@@ -4876,6 +4928,7 @@ export class Think<
     );
     let tools: ToolSet = {
       ...workspaceTools,
+      ...fetchToolSet,
       ...baseTools,
       ...actionTools,
       ...extensionTools,

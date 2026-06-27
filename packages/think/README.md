@@ -327,6 +327,7 @@ Script execution requires a Worker Loader binding:
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
@@ -352,6 +353,7 @@ Script execution requires a Worker Loader binding:
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
 | `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
+| `fetchTools`               | `false`                            | Opt-in allowlisted HTTP read tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                         |
 | `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
 | `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
 | `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
@@ -902,6 +904,67 @@ getTools() {
 ```
 
 Requires `@cloudflare/codemode` and a `worker_loaders` binding in `wrangler.jsonc`.
+
+## Fetch tool
+
+Give the model a conservative, read-only way to read HTTP resources. It is **off by default** — set the `fetchTools` property (static config) or call `createFetchTools()` inside `getTools()` (dynamic/per-tenant). It registers a generic `fetch_url` tool when a public `allowlist` is configured, plus one `fetch_<name>` tool per binding target.
+
+```ts
+export class DocsAgent extends Think<Env> {
+  getModel() { ... }
+
+  fetchTools = {
+    allowlist: ["https://developers.cloudflare.com/**"],
+    bindings: {
+      docsApi: {
+        binding: this.env.DOCS_API, // a service binding / Fetcher
+        allowlist: ["/v1/docs/**"],
+        headers: { "x-agent": "think" }
+      }
+    }
+  };
+}
+```
+
+For per-tenant allowlists computed at request time, build the tools in `getTools()` (it runs every turn) instead of using the static property:
+
+```ts
+import { createFetchTools } from "@cloudflare/think/tools/fetch";
+
+getTools() {
+  return {
+    ...createFetchTools({ allowlist: this.allowedOriginsForTenant() })
+  };
+}
+```
+
+Behavior and safety:
+
+- **Read-only** — `GET` only. Mutations belong in explicit, approval-gated actions, not here.
+- **Allowlisted** — every request must match the configured allowlist; private, loopback, link-local, and `*.internal` targets are blocked even if the allowlist is misconfigured.
+- **Bounded** — `maxBytes` caps the download, `maxModelChars` truncates the model-facing text, and `response: "workspace"` (or `spillToWorkspace: true` with auto) writes large or binary bodies to a workspace file instead of bloating the transcript.
+- **Header-safe** — only headers in `modelHeaderAllowlist` (default `accept`, `accept-language`, `range`) may be set by the model; fixed binding headers are server-side only and are stripped on cross-origin redirects.
+- **Markdown-first** — a weighted default `Accept` header (`text/markdown` → `text/plain` → `application/json` → `text/html` → `*/*`) nudges content-negotiating endpoints to return clean markdown instead of HTML. Override per call (the model can set `accept`) or globally via `defaultAccept` (set to `""` to disable).
+- **Redirects** — followed only when the final URL is still allowlisted (`followRedirects`); binding targets never follow cross-origin redirects.
+
+Results are structured `{ ok, ... }` values: success carries `status`, `finalUrl`, `contentType`, `bytes`, `truncated`, and the `body`/`json`/`path`; failures carry a `code` (`disallowed_url`, `disallowed_redirect`, `timeout`, `non_2xx`, `unsupported_content_type`, `invalid_json`, `too_large`, `request_failed`). A `tool:fetch` observability event fires for each call, including blocked attempts.
+
+Allowlist semantics:
+
+- A bare origin (`https://example.com`) matches that origin and every subpath under it.
+- Patterns are globs: `**` matches any characters (including `/`), `*` matches any character except `/`. A pattern with an explicit path and no glob matches that path literally (e.g. `https://x.com/v1` matches only `/v1`, not `/v1/a`).
+- Matching ignores the query string and fragment (only scheme + host + port + path are compared); the original query/fragment are still sent.
+- Binding allowlists should be path-based (`/v1/docs/**`); a model-supplied absolute URL is only allowed if it matches the binding's allowlist.
+- `json` responses are bounded by `maxBytes` (not `maxModelChars`, which only truncates `text`). For large JSON APIs, lower `maxBytes` or use `response: "workspace"`.
+
+You do not need new machinery to gate egress: `beforeToolCall` can `block`/`substitute` a fetch, and channel `tools(...)` policy can narrow the available tools.
+
+### When to use what
+
+- **Fetch tool** — read a known, allowlisted URL or service binding. No code generation.
+- **Code execution tool** — compose or transform several calls in sandboxed code (set `globalOutbound` to control its network access).
+- **Browser Run** (`@cloudflare/think/tools/browser`) — rendered pages, auth flows, screenshots, CDP automation.
+- **Typed tools / `agentTool()`** — call a `WorkerEntrypoint`/Durable Object method with a typed schema, or delegate work to a sub-agent. Do not route these through fetch.
 
 ## Extensions
 

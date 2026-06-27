@@ -852,6 +852,7 @@ path.
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `workspaceBash`            | `true`                           | Include or configure the default workspace `bash` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `fetchTools`               | `false`                          | Opt-in allowlisted, read-only HTTP fetch tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `messageConcurrency`       | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `waitForMcpConnections`    | `false`                          | Wait for MCP servers before inference                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `chatRecovery`             | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns. Set to `{ maxAttempts, stableTimeoutMs, terminalMessage, onExhausted }` to tune bounded recovery.                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -1189,6 +1190,56 @@ handler action before the failure is logged. The next occurrence is still
 scheduled after the action succeeds or exhausts its retries, so failed
 occurrences do not block future runs.
 
+## Fetch tool
+
+Think can give the model a conservative, **read-only** way to read HTTP resources. It is **off by default**. Set the `fetchTools` property for static config, or call `createFetchTools()` inside `getTools()` for per-tenant/dynamic allowlists (it runs every turn). When configured, Think registers a generic `fetch_url` tool (when a public `allowlist` is provided) plus one `fetch_<name>` tool per binding target, and advertises the capability in the system prompt.
+
+```typescript
+export class DocsAgent extends Think<Env> {
+  getModel() {
+    /* ... */
+  }
+
+  fetchTools = {
+    allowlist: ["https://developers.cloudflare.com/**"],
+    bindings: {
+      docsApi: {
+        binding: this.env.DOCS_API, // a service binding / Fetcher
+        description: "Internal docs search API.",
+        allowlist: ["/v1/docs/**"],
+        headers: { "x-agent": "think" } // fixed, server-side, never model-set
+      }
+    }
+  };
+}
+```
+
+The model sees named tools — `fetch_url({ url, response?, headers? })` and `fetch_docsApi({ path, response?, headers? })` — rather than one polymorphic tool, so per-target policy is baked into each tool.
+
+**Safety model.** The threat surface is the Workers runtime: reaching loopback/`.internal`/internally bound targets, allowlist-bypass tricks, prompt-injected URLs, credential leakage, and context/storage bloat.
+
+- **Read-only** — `GET` only. Mutations belong in explicit, approval-gated [Actions](#actions), not here.
+- **Allowlisted** — every request must match the configured allowlist. URLs are normalized (host lowercased, credentials rejected, paths resolved) before matching, and private/loopback/link-local/`*.internal` targets are blocked for `fetch_url` even if the allowlist is misconfigured.
+- **Bounded** — `maxBytes` caps the download, `maxModelChars` truncates the model-facing text (`truncated: true`), and `response: "workspace"` (or `spillToWorkspace: true` in auto mode) writes large or binary bodies to a workspace file so the transcript stays small.
+- **Header-safe** — only headers in `modelHeaderAllowlist` (default `accept`, `accept-language`, `range`) may be set by the model; fixed binding headers are server-side only and are stripped on cross-origin redirects.
+- **Markdown-first** — a weighted default `Accept` header (`text/markdown` → `text/plain` → `application/json` → `text/html` → `*/*;q=0.1`) nudges content-negotiating endpoints (docs platforms, `llms.txt`-style endpoints) to return clean markdown instead of HTML, while still accepting anything so a strict server never returns `406`. Override per call (the model can set `accept`) or globally via `defaultAccept` (`""` disables it).
+- **Redirects** — `followRedirects` (`allowlisted` by default) follows a redirect only when the final URL is still allowlisted; binding targets never follow cross-origin redirects.
+
+Results are structured values (never thrown). Success carries `{ ok: true, status, finalUrl, contentType, bytes, truncated, response, body?/json?/path? }`; failure carries `{ ok: false, code, message, status?, finalUrl? }` where `code` is one of `disallowed_url`, `disallowed_redirect`, `timeout`, `aborted`, `non_2xx`, `unsupported_content_type`, `invalid_json`, `too_large`, `request_failed`. A `tool:fetch` observability event fires on every call, including blocked attempts, for audit.
+
+**Allowlist semantics.** A bare origin (`https://example.com`) matches that origin and every subpath. Patterns are globs — `**` matches any characters (including `/`) and `*` matches any character except `/`; a pattern with an explicit path and no glob matches that path literally (`https://x.com/v1` matches only `/v1`). Matching ignores the query string and fragment (only scheme + host + port + path are compared), though the original query/fragment are still sent. Binding allowlists should be path-based (`/v1/docs/**`). Note that `json` responses are bounded by `maxBytes` (only `text` is truncated by `maxModelChars`), so for large JSON APIs lower `maxBytes` or use `response: "workspace"`.
+
+You do not need new machinery to gate egress per call: `beforeToolCall` can `block` or `substitute` a fetch, and channel `tools(...)` policy can narrow which fetch tools are available.
+
+**When to use what:**
+
+| Capability                       | Use it for                                                                               |
+| -------------------------------- | ---------------------------------------------------------------------------------------- |
+| Fetch tool                       | Reading a known, allowlisted URL or service binding; no code generation                  |
+| `createExecuteTool()` (codemode) | Composing/transforming several calls in sandboxed code (`globalOutbound`)                |
+| Browser Run (`tools/browser`)    | Rendered pages, auth flows, screenshots, CDP automation                                  |
+| Typed tools / `agentTool()`      | Calling a `WorkerEntrypoint`/DO method with a typed schema, or delegating to a sub-agent |
+
 ## Session Integration
 
 Think uses [Session](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for conversation storage. Override `configureSession` to add persistent memory, compaction, search, and skills:
@@ -1228,6 +1279,7 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/workflows`           | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
