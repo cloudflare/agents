@@ -8,7 +8,11 @@ import type {
   RunAgentToolResult
 } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
-import { getAgentByName } from "agents";
+import {
+  AGENT_TOOL_MILESTONE_PART,
+  AGENT_TOOL_PROGRESS_PART,
+  getAgentByName
+} from "agents";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
 
@@ -139,6 +143,29 @@ type ParentStub = DurableObjectStub & {
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
     lifecycleOrder: string[];
   }>;
+  runChildWithAttachRaceForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    raceBody: string,
+    runId?: string
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
+  runChildWithProgressInjectionForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    progressBody: string,
+    milestoneBody: string,
+    runId?: string
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
   inspectChild(runId: string): Promise<AgentToolRunInspection | null>;
   getChildChunks(
     runId: string,
@@ -274,6 +301,74 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(laterChunks.every((chunk) => chunk.sequence > 0)).toBe(true);
     // afterSequence is a per-chunk cursor: everything past sequence 0.
     expect(laterChunks).toEqual(chunks.slice(1));
+  });
+
+  it("forwards a chunk that lands in the tail attach window (#1589)", async () => {
+    // A sub-agent that proxies a remote `toUIMessageStreamResponse()` streams
+    // chunks at network pace, so a chunk routinely lands in the window between
+    // the parent draining the stored backlog and attaching its live forwarder.
+    // Before the fix that chunk was stored but never forwarded — it vanished
+    // from the parent's stream, leaving tool parts stuck at `input-available`.
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+    const raceBody = JSON.stringify({
+      type: "tool-output-available",
+      toolCallId: "race-1589",
+      output: "race-output-1589"
+    });
+
+    const { result, events } = await parent.runChildWithAttachRaceForTest(
+      { prompt: "proxy remote tool output", chunkDelayMs: 30 },
+      raceBody,
+      runId
+    );
+
+    expect(result.status).toBe("completed");
+
+    const chunkBodies = events
+      .filter((event) => event.event.kind === "chunk")
+      .map((event) => (event.event as { kind: "chunk"; body: string }).body);
+    expect(chunkBodies).toContain(raceBody);
+  });
+
+  it("forwards non-stored progress + milestone frames through the replay→live handoff", async () => {
+    // `reportProgress()` progress + milestone frames ride the chat-response
+    // wire and are forwarded to a tailing parent, but are NOT durably stored —
+    // they carry no `chunk_index`. They therefore rely on the in-memory live
+    // sequence counter to be forwarded: that counter is intentionally separate
+    // from the resumable store's chunk_index. If forwards were sequenced off the
+    // stored chunk count instead, these non-stored frames would collide with the
+    // last stored chunk's sequence and the tail's high-water dedupe would
+    // silently drop them — live progress/milestones would never reach the
+    // parent. This lands both frames in the same drain↔register attach window
+    // the #1589 fix addresses and asserts they arrive verbatim.
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+    const progressBody = JSON.stringify({
+      type: AGENT_TOOL_PROGRESS_PART,
+      transient: true,
+      data: { message: "halfway", fraction: 0.5 }
+    });
+    const milestoneBody = JSON.stringify({
+      type: AGENT_TOOL_MILESTONE_PART,
+      data: { name: "phase-1", sequence: 0, at: 1, data: { sources: 2 } }
+    });
+
+    const { result, events } =
+      await parent.runChildWithProgressInjectionForTest(
+        { prompt: "report progress while proxied", chunkDelayMs: 30 },
+        progressBody,
+        milestoneBody,
+        runId
+      );
+
+    expect(result.status).toBe("completed");
+
+    const chunkBodies = events
+      .filter((event) => event.event.kind === "chunk")
+      .map((event) => (event.event as { kind: "chunk"; body: string }).body);
+    expect(chunkBodies).toContain(progressBody);
+    expect(chunkBodies).toContain(milestoneBody);
   });
 
   it("finalizes lifecycle hooks and terminal events during parent recovery reconciliation", async () => {

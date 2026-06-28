@@ -3638,9 +3638,60 @@ export class AIChatAgent<
     const stream = new ReadableStream<Uint8Array>({
       start: async (controller) => {
         let closed = false;
+
+        // Highest sequence already enqueued into this view. Stored chunk_index
+        // and the live forwarder sequence share one monotonic numbering (see
+        // `_getAgentToolStoredChunks`), so a single high-water mark dedupes the
+        // stored-replay → live-forwarding handoff: a chunk that lands in both
+        // the drained backlog AND the live buffer (because it was stored and
+        // broadcast during the drain) is emitted exactly once, in order.
+        let lastEmitted = options?.afterSequence ?? -1;
+        const emit = (chunk: AgentToolStoredChunk) => {
+          if (closed) return;
+          // Drop out-of-order / duplicate sequences. Guarantees in-order,
+          // exactly-once delivery so the parent can rebuild tool-call state
+          // (input-available → output-available) without gaps.
+          if (chunk.sequence <= lastEmitted) return;
+          lastEmitted = chunk.sequence;
+          try {
+            controller.enqueue(
+              agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+            );
+          } catch {
+            // The consumer detached (e.g. a parent's bounded re-attach budget
+            // expired) between the read view closing and our close() running.
+            // Drop the chunk instead of surfacing a stream rejection; the
+            // child run is unaffected.
+            close();
+          }
+        };
+
+        // While draining the stored backlog, live chunks are parked here rather
+        // than emitted directly, so they keep arriving (the forwarder is
+        // registered FIRST, below) but never race ahead of / interleave with
+        // the ordered backlog.
+        let draining = true;
+        const pending: AgentToolStoredChunk[] = [];
+        const forward = (chunk: AgentToolStoredChunk) => {
+          if (closed) return;
+          if (draining) {
+            pending.push(chunk);
+            return;
+          }
+          emit(chunk);
+        };
+
         const close = () => {
           if (closed) return;
           closed = true;
+          // Detach our forwarder so a run that was already terminal at attach
+          // (its `_closeAgentToolTailers` already ran) doesn't leak for the DO's
+          // lifetime. Drop the now-empty set too, so the broadcast idle-guard
+          // (`_agentToolForwarders.size`) goes cold again instead of paying the
+          // `interceptAgentToolBroadcast` cost on every subsequent broadcast.
+          const set = this._agentToolForwarders.get(runId);
+          set?.delete(forward);
+          if (set && set.size === 0) this._agentToolForwarders.delete(runId);
           controller.close();
         };
         const onAbort = () => close();
@@ -3652,36 +3703,19 @@ export class AIChatAgent<
           }
           options?.signal?.addEventListener("abort", onAbort, { once: true });
 
-          for (const chunk of await this.getAgentToolChunks(runId, options)) {
-            if (closed) return;
-            controller.enqueue(
-              agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
-            );
-          }
-
-          const inspection = await this.inspectAgentToolRun(runId);
-          if (!inspection || inspection.status !== "running") {
-            close();
-            return;
-          }
-
+          // Register the live forwarder BEFORE draining the stored backlog.
+          // Previously the forwarder was attached only AFTER `getAgentToolChunks`
+          // + `inspectAgentToolRun` resolved; any chunk the child stored AND
+          // broadcast during those `await` boundaries advanced the live sequence
+          // with no forwarder attached, so it was neither in the drained
+          // snapshot nor live-forwarded — silently dropped from the parent's
+          // forward stream. A network-paced proxied remote stream (a sub-agent
+          // returning a remote `toUIMessageStreamResponse()` from
+          // `onChatMessage`) hits this window constantly, leaving tool parts
+          // stuck at `input-available` on the client (#1589).
           const forwarders =
             this._agentToolForwarders.get(runId) ??
             new Set<(chunk: AgentToolStoredChunk) => void>();
-          const forward = (chunk: AgentToolStoredChunk) => {
-            if (closed) return;
-            try {
-              controller.enqueue(
-                agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
-              );
-            } catch {
-              // The consumer detached (e.g. a parent's bounded re-attach budget
-              // expired) between the read view closing and our close() running.
-              // Drop the chunk instead of surfacing a stream rejection; the
-              // child run is unaffected.
-              close();
-            }
-          };
           forwarders.add(forward);
           this._agentToolForwarders.set(runId, forwarders);
 
@@ -3689,7 +3723,31 @@ export class AIChatAgent<
             this._agentToolClosers.get(runId) ?? new Set<() => void>();
           closers.add(close);
           this._agentToolClosers.set(runId, closers);
+
+          for (const chunk of await this.getAgentToolChunks(runId, options)) {
+            if (closed) return;
+            emit(chunk);
+          }
+
+          // Flush anything that arrived live during the drain, then switch the
+          // forwarder to direct emit. No `await` between here and the loop above
+          // means no live chunk can slip past this handoff.
+          draining = false;
+          for (const chunk of pending) emit(chunk);
+          pending.length = 0;
+
+          const inspection = await this.inspectAgentToolRun(runId);
+          if (!inspection || inspection.status !== "running") {
+            close();
+            return;
+          }
         } catch (error) {
+          // Detach the up-front-registered forwarder (dropping the now-empty
+          // set) before surfacing the failure so it doesn't linger on this run.
+          closed = true;
+          const set = this._agentToolForwarders.get(runId);
+          set?.delete(forward);
+          if (set && set.size === 0) this._agentToolForwarders.delete(runId);
           controller.error(error);
         }
       },

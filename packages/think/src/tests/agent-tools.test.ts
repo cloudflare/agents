@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { getAgentByName } from "agents";
+import {
+  AGENT_TOOL_MILESTONE_PART,
+  AGENT_TOOL_PROGRESS_PART,
+  getAgentByName
+} from "agents";
 import { describe, expect, it } from "vitest";
 import type { ThinkAgentToolParent, ThinkTestAgent } from "./agents";
 import type {
@@ -64,6 +68,19 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     errorText: string,
     runId?: string
   ): Promise<RunAgentToolResult>;
+  runThinkChildWithAttachRaceForTest(
+    input: string,
+    raceBody: string,
+    chunkDelayMs: number,
+    runId?: string
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
+  runThinkChildWithProgressInjectionForTest(
+    input: string,
+    progressBody: string,
+    milestoneBody: string,
+    chunkDelayMs: number,
+    runId?: string
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
   startThinkChildWithoutTailForTest(
     input: string,
     errorText: string,
@@ -317,6 +334,74 @@ describe("Think agent tools", () => {
       status: "completed",
       summary: "Hello from the assistant!"
     });
+  });
+
+  it("forwards a chunk that lands in the tail attach window (#1589)", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+    const raceBody = JSON.stringify({
+      type: "tool-output-available",
+      toolCallId: "race-1589",
+      output: "race-output-1589"
+    });
+
+    // The injected chunk is broadcast from inside the child's
+    // `getAgentToolChunks` — after the stored backlog snapshot, in the window
+    // the buggy ordering left without a live forwarder. Pre-fix this chunk is
+    // silently dropped (tool part stuck at `input-available`); post-fix the
+    // forwarder is already attached and the chunk is replayed in order.
+    const { result, events } = await parent.runThinkChildWithAttachRaceForTest(
+      "proxy remote tool output",
+      raceBody,
+      30,
+      runId
+    );
+
+    expect(result.status).toBe("completed");
+    const chunkBodies = events
+      .filter((event) => event.event.kind === "chunk")
+      .map((event) => (event.event as { kind: "chunk"; body: string }).body);
+    expect(chunkBodies).toContain(raceBody);
+  });
+
+  it("forwards non-stored progress + milestone frames through the replay→live handoff", async () => {
+    // `reportProgress()` progress + milestone frames ride the chat-response
+    // wire and are forwarded to a tailing parent, but are NOT durably stored —
+    // they carry no `chunk_index`. They therefore rely on the in-memory live
+    // sequence counter to be forwarded: that counter is intentionally separate
+    // from the resumable store's chunk_index. If forwards were sequenced off the
+    // stored chunk count instead, these non-stored frames would collide with the
+    // last stored chunk's sequence and the tail's high-water dedupe would
+    // silently drop them — live progress/milestones would never reach the
+    // parent. Lands both frames in the same drain↔register attach window the
+    // #1589 fix addresses and asserts they arrive verbatim.
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+    const progressBody = JSON.stringify({
+      type: AGENT_TOOL_PROGRESS_PART,
+      transient: true,
+      data: { message: "halfway", fraction: 0.5 }
+    });
+    const milestoneBody = JSON.stringify({
+      type: AGENT_TOOL_MILESTONE_PART,
+      data: { name: "phase-1", sequence: 0, at: 1, data: { sources: 2 } }
+    });
+
+    const { result, events } =
+      await parent.runThinkChildWithProgressInjectionForTest(
+        "report progress while proxied",
+        progressBody,
+        milestoneBody,
+        30,
+        runId
+      );
+
+    expect(result.status).toBe("completed");
+    const chunkBodies = events
+      .filter((event) => event.event.kind === "chunk")
+      .map((event) => (event.event as { kind: "chunk"; body: string }).body);
+    expect(chunkBodies).toContain(progressBody);
+    expect(chunkBodies).toContain(milestoneBody);
   });
 
   it("does not contaminate a run's terminal status with an unrelated turn's error frame (#1575)", async () => {

@@ -7622,7 +7622,15 @@ export class Think<
     let forward: ((chunk: AgentToolStoredChunk) => void) | undefined;
     const detach = () => {
       if (forward) {
-        self._agentToolForwarders.get(runId)?.delete(forward);
+        const set = self._agentToolForwarders.get(runId);
+        set?.delete(forward);
+        // Drop the now-empty set so the broadcast idle-guard
+        // (`_agentToolForwarders.size`) goes cold again. Otherwise a run that
+        // was already terminal at attach — its `_finalizeAgentToolChildRunTailers`
+        // already ran and won't run again — leaves an empty set keyed by runId,
+        // and every subsequent broadcast on this DO keeps paying the
+        // `interceptAgentToolBroadcast` cost forever.
+        if (set && set.size === 0) self._agentToolForwarders.delete(runId);
         forward = undefined;
       }
     };
@@ -7647,26 +7655,16 @@ export class Think<
         }
         signal?.addEventListener("abort", close, { once: true });
 
-        const replayed = await self.getAgentToolChunks(runId, options);
-        for (const chunk of replayed) {
-          if (closed) return;
-          controller.enqueue(
-            agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
-          );
-        }
-        const lastReplay = replayed[replayed.length - 1]?.sequence;
-        if (lastReplay !== undefined) {
-          self._agentToolLiveSequences.set(runId, lastReplay + 1);
-        }
-        const row = self._readAgentToolChildRun(runId);
-        if (!row || row.completed_at !== null) {
-          close();
-          return;
-        }
-        forward = (chunk: AgentToolStoredChunk) => {
-          if (closed || chunk.sequence <= (options?.afterSequence ?? -1)) {
-            return;
-          }
+        // Stored chunk_index and the live forwarder sequence share one
+        // monotonic numbering (see `getAgentToolChunks` + the broadcast snoop),
+        // so a single high-water mark dedupes the stored-replay → live-
+        // forwarding handoff: a chunk that lands in both the drained backlog AND
+        // the live buffer (stored + broadcast during the drain) is emitted
+        // exactly once, in order.
+        let lastEmitted = options?.afterSequence ?? -1;
+        const emit = (chunk: AgentToolStoredChunk) => {
+          if (closed || chunk.sequence <= lastEmitted) return;
+          lastEmitted = chunk.sequence;
           try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
@@ -7680,12 +7678,80 @@ export class Think<
             detach();
           }
         };
+
+        // While draining the stored backlog, park live chunks rather than
+        // emitting them directly, so ordering/dedupe against the backlog is
+        // resolved by `emit` while the forwarder (registered FIRST, below)
+        // already catches everything the child produces.
+        let draining = true;
+        const pending: AgentToolStoredChunk[] = [];
+        forward = (chunk: AgentToolStoredChunk) => {
+          if (closed) return;
+          if (draining) {
+            pending.push(chunk);
+            return;
+          }
+          emit(chunk);
+        };
+
+        // Register the live forwarder BEFORE draining the stored backlog.
+        // Previously it was attached only AFTER `getAgentToolChunks` resolved;
+        // any chunk the child stored AND broadcast during that `await` advanced
+        // the live sequence with no forwarder attached, so it was neither in the
+        // drained snapshot nor live-forwarded — silently dropped from the
+        // parent's forward stream. A network-paced proxied child stream (a sub-
+        // agent returning a remote `toUIMessageStreamResponse()`) hits this
+        // window constantly, leaving tool parts stuck at `input-available`
+        // (#1589).
         const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
         forwarders.add(forward);
         self._agentToolForwarders.set(runId, forwarders);
         const closers = self._agentToolClosers.get(runId) ?? new Set();
         closers.add(close);
         self._agentToolClosers.set(runId, closers);
+
+        try {
+          const replayed = await self.getAgentToolChunks(runId, options);
+          for (const chunk of replayed) {
+            if (closed) return;
+            emit(chunk);
+          }
+
+          // Flush chunks that arrived live during the drain, then switch the
+          // forwarder to direct emit. No `await` between here and the drain loop
+          // means no live chunk can slip past this handoff.
+          draining = false;
+          for (const chunk of pending) emit(chunk);
+          pending.length = 0;
+
+          const row = self._readAgentToolChildRun(runId);
+          if (!row || row.completed_at !== null) {
+            close();
+            return;
+          }
+
+          // Run is still live: realign the live sequence to continue right after
+          // the highest emitted chunk (which now includes any captured during the
+          // drain). Realigning to `lastEmitted + 1` rather than the backlog's last
+          // sequence keeps a post-restart re-attach — where the in-memory counter
+          // is cold — from colliding with already-emitted chunks. Gating on the
+          // terminal check above also avoids repopulating `_agentToolLiveSequences`
+          // for an already-terminal run, which would re-heat the broadcast
+          // idle-guard for the DO's lifetime.
+          if (lastEmitted > (options?.afterSequence ?? -1)) {
+            self._agentToolLiveSequences.set(runId, lastEmitted + 1);
+          }
+        } catch (error) {
+          // A drain/read failure must surface to the consumer; detach first so
+          // the forwarder we registered up front doesn't linger on this run.
+          closed = true;
+          detach();
+          try {
+            controller.error(error);
+          } catch {
+            // Stream already torn down.
+          }
+        }
       },
       cancel() {
         // A consumer detaching from the tail (e.g. a parent's bounded re-attach

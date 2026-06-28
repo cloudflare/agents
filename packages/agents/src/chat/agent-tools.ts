@@ -421,7 +421,21 @@ export type {
 export interface AgentToolBroadcastHooks {
   /** Live tailers per run; iterated to forward each progress chunk. */
   forwarders: Map<string, Set<(chunk: AgentToolStoredChunk) => void>>;
-  /** Per-run forwarded-chunk counter; advanced even with no tailer attached. */
+  /**
+   * Per-run forwarded-chunk counter; advanced even with no tailer attached.
+   *
+   * This is deliberately a SEPARATE counter from the resumable stream's stored
+   * chunk_index — do NOT try to "simplify" it away by sequencing off the store
+   * position. Not every forwarded frame is durably stored: progress/milestone
+   * frames (`reportProgress`) ride the same `USE_CHAT_RESPONSE` wire type and
+   * are snooped + forwarded here, but persist out-of-band (progress snapshot /
+   * milestone rows), so they have no store position. Sourcing the sequence from
+   * the store would give them a colliding position and the tail's high-water
+   * dedupe (`emit`) would silently drop them, breaking live progress/milestone
+   * delivery to the parent. This counter sequences stored AND non-stored frames
+   * on one monotonic line; the tail realigns it to the stored high-water on each
+   * (re)attach so a replay→live handoff stays gap/duplicate-free.
+   */
   liveSequences: Map<string, number>;
   /** Per-run last error body, captured for replay to a late-attaching tailer. */
   lastErrors: Map<string, string>;
