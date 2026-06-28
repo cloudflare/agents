@@ -99,7 +99,7 @@ A `Think` subclass that, per turn:
 
 ```ts
 export class MyCoder extends CodingAgent<Env> {
-  repo = "https://github.com/org/repo"; // or override prepareWorkspace()
+  repo = "https://github.com/org/repo"; // a *default* — usually resolved per-instance, see §8
   workDir = "/workspace/repo";
   gateway = "default"; // AI Gateway id for tokenless egress
   sleepAfter = "15m";
@@ -108,8 +108,8 @@ export class MyCoder extends CodingAgent<Env> {
 
 Surface (initial):
 
-- **Config props:** `repo`, `workDir`, `gateway`, `sleepAfter`, `cliArgs`,
-  `permissionPolicy`.
+- **Config:** `repo`, `workDir`, `gateway`, `sleepAfter`, `cliArgs`,
+  `permissionPolicy` — resolved per-instance, not hardcoded (§8).
 - **Hooks:** `prepareWorkspace(sandbox)`, `onDiff(diff)`, `beforeToolCall(name,
 input)` (reuse Think's existing approval/authorization machinery for HITL),
   `beforeCommit(diff)`.
@@ -205,6 +205,11 @@ ephemeral; `CodingAgent` makes the DO the source of truth:
 The disk becomes a cache; multi-turn survives container sleep (real `--resume`
 against restored session data, edits accumulate).
 
+> This snapshot approach may be **superseded** by a durable-VFS filesystem
+> backend (§9), where state lives in the DO and the snapshot dance disappears.
+> Both sit behind the same filesystem seam, so v1 can ship snapshots and swap
+> later without an API change.
+
 ### 6. Recovery tuned to the DO lifecycle
 
 Because we own the CLI invocation we own the checkpoint, rather than depending on
@@ -224,6 +229,78 @@ assert the exact `UIMessage` chunk sequence. Pin the CLI version in the base
 image; bumping it must update the fixture. This is how we keep the maintenance
 tax bounded and visible.
 
+### 8. Configuration & topology
+
+**Dynamic config (resolve, don't hardcode).** The class-field form is the simple
+case; the common case is one repo _per instance / per thread_. Config resolves
+by precedence and is **frozen on the first turn** — the workspace is built around
+the repo, so changing it mid-session means a new thread, not a re-clone:
+
+```
+configure() (persisted in DO storage)  >  this.props (sub-agent Props)  >  class-field default
+```
+
+A threaded/delegated coder gets its repo at spawn — `subAgent(MyCoder, id, { repo, branch })`
+— and a standalone one via a `@callable() configure({ repo })` on first connect.
+`repo` is the minimum; `branch`, `baseRef`, and per-session env follow the same
+path.
+
+**Topology.** Because `CodingAgent` is a clean `Think` subclass, three shapes
+fall out of existing primitives with no new machinery:
+
+1. **Standalone** — one DO, one repo.
+2. **Threads** — a `Chats` directory of coding sessions (see
+   [`rfc-think-multi-session.md`](./rfc-think-multi-session.md)):
+   `class CodingSessions extends Chats<Env, SubAgentClass<MyCoder>>`. "New session
+   on repo X" = `createChat()` + `{ repo }` Props. You get a session dashboard,
+   per-thread isolated containers, and cross-session shared memory (repo
+   conventions, user prefs) via `RemoteContextProvider`. This is the
+   Codex-cloud / background-agents product shape.
+3. **Orchestrated** — delegated via `codingAgentTool`, incl. `delegate_parallel`
+   fan-out (the example's pattern).
+
+Requirement this places on the design: **nothing in `CodingAgent` may assume a
+top-level binding** — it must work as a `Chats` child and as an agent-tool facet.
+
+### 9. Two more seams, designed in from day one
+
+v1 implements only the container-backed versions, but both are interfaces so we
+don't get boxed in.
+
+**Filesystem backend.** Today: clone into the Sandbox + snapshot for durability
+(§5). Abstract file access behind a backend interface so the durable VFS in
+[`cloudflare/workspace`](https://github.com/cloudflare/workspace) can slot in
+later — it holds authoritative state in the DO (SQLite) and projects it into the
+container as a FUSE mount, with a cheap Worker (`just-bash`) backend for textual
+tooling alongside the container backend. If it pans out it **supersedes the
+snapshot durability plan** (state lives in the DO, not the disk) and unifies the
+cheap-grep / heavy-`npm` tool split. It is **preview-only / unstable** today with
+a real large-file I/O penalty (metadata ops are competitive-to-faster), so:
+spike it as an alternate backend, do **not** couple v1 to it.
+
+**Run / preview.** A coding agent that builds web apps must _run_ them. Two
+models, chosen by target:
+
+- container dev server (`vite dev` + Sandbox `exposePort`) — any stack, real HMR,
+  native deps; long-lived process + public URL;
+- Worker-native (`@cloudflare/worker-bundler` `createApp` → `env.LOADER`, assets
+  served host-side) — instant, scales to zero, durable, **but Workers-target only**.
+
+`CodingAgent.preview()` picks: a Workers-compatible project → `LOADER`
+(cheap/instant/durable); else → container dev server. The Worker-native path is
+also the _run_ primitive for the native runtime (§10).
+
+### 10. Future work: a Workers-native coding runtime (Runtime B)
+
+The `TurnRuntime` seam (§1) makes "our own coding agent" just a _second_ runtime
+behind the same `CodingAgent` shell: a model-driven Think loop with coding tools
+(read/edit/grep/bash) where the model is Workers AI / AI Gateway and the tools
+run in the Workspace — **no container** for the textual-edit case, escalating to
+a container only for `npm`/build (§9) and previewing via `env.LOADER` (§9). Same
+class, same threads, same UI. `delegate_parallel` could then race the CLI runtime
+against the native one on one task — an instant eval/dogfooding harness. Deferred
+to its own RFC; captured here so v1's seams don't preclude it.
+
 ## The alternatives
 
 - **Wrap `@ai-sdk/harness` `HarnessAgent` behind a public `TurnRuntime` API**
@@ -242,6 +319,12 @@ tax bounded and visible.
 - **Expose a public, pluggable turn-runtime API now.** Premature: one consumer.
   Keep the seam internal until a second runtime justifies a stable contract.
 
+- **Adopt `cloudflare/workspace` as the filesystem now.** Tempting — durability
+  becomes structural (state in the DO, not the disk) and the tool split unifies.
+  But it's preview-only / unstable with a large-file I/O penalty; coupling a
+  shipped class to it inherits that risk. Designed behind a backend seam (§9) and
+  spiked separately instead.
+
 - **Keep it an example, not a package class.** Status quo. Re-pays the full
   integration cost per use and leaves the durability/recovery gaps unsolved.
 
@@ -253,8 +336,14 @@ _Pending review._ Open questions to settle here:
 2. `@cloudflare/sandbox` as a peer dep of the `coding` subpath — acceptable?
 3. Class name across subpaths: shared `CodingAgent` (engine swap by import) vs
    per-CLI names (`ClaudeCodeAgent`, `CodexAgent`).
-4. Scope of the first PR: seam + claude-code adapter + rewrite the example to use
-   the class (delete its local mapper), with codex deferred.
+4. Config precedence + **freeze-on-first-turn** semantics (§8) — confirm repo is
+   immutable after turn 1.
+5. Put the filesystem behind a backend interface in v1 (container impl only) so a
+   `cloudflare/workspace` backend can land later without an API change (§9)?
+6. Is `preview()` (LOADER vs container dev server, §9) in v1 scope or a follow-up?
+7. Scope of the first PR: seam + claude-code adapter + `Chats`-child topology +
+   rewrite the example to use the class (delete its local mapper). Codex,
+   `preview()`, and the workspace-VFS spike deferred.
 
 ## History
 
