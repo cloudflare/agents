@@ -126,6 +126,7 @@ import {
   Agent,
   callable,
   getCurrentAgent,
+  isDurableObjectMemoryLimitReset,
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
@@ -191,6 +192,7 @@ import {
   ChatStreamStalledError,
   iterateWithStallWatchdog,
   sweepStaleChatRecoveryIncidents,
+  listActiveChatRecoveryIncidents,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
   recordChatTerminal,
@@ -13605,6 +13607,36 @@ export class Think<
    *    broadcast — the deferred re-run re-fires `onExhausted` + the banner
    *    (the terminal writes themselves are idempotent).
    */
+  /**
+   * Recovery continuation callbacks the alarm-boundary OOM circuit breaker may
+   * back off / purge (#1825). See `Agent._cf_handleAlarmMemoryLimitReset`.
+   */
+  protected override _cf_recoveryAlarmCallbacks(): string[] {
+    return ["_chatRecoveryContinue", "_chatRecoveryRetry"];
+  }
+
+  /**
+   * Seal any still-live recovery incident as an out-of-memory exhaustion when
+   * the alarm circuit breaker trips at its strike budget (#1825). Runs at the
+   * outermost alarm frame (post-unwind), so the terminal banner / `onExhausted`
+   * and the sealed-incident write can land where the mid-turn give-up's writes
+   * OOMed. Reuses the shared give-up spine via `_exhaustRecoveryGiveUp`.
+   */
+  protected override async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+    const active = await listActiveChatRecoveryIncidents(this.ctx.storage);
+    for (const { incident } of active) {
+      const callback: ChatRecoveryScheduleCallback =
+        incident.recoveryKind === "retry"
+          ? "_chatRecoveryRetry"
+          : "_chatRecoveryContinue";
+      await this._exhaustRecoveryGiveUp(
+        callback,
+        { incidentId: incident.incidentId },
+        "out_of_memory"
+      );
+    }
+  }
+
   private _exhaustRecoveryGiveUp(
     callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
@@ -13635,6 +13667,59 @@ export class Think<
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<void> {
     return this._exhaustRecoveryGiveUp(callback, data, "stable_timeout");
+  }
+
+  /**
+   * Apply the tight OOM-retry budget to a recovery error (#1825). Invoked from
+   * `_handleRecoveryCallbackError`, i.e. for an OOM that is *thrown* out of a
+   * recovery turn (typically from recovery bookkeeping or storage/SQL ops that
+   * reject with the memory-limit-reset message after an isolate reset). An OOM
+   * that surfaces as a returned `error` result means `continueLastTurn` already
+   * terminalized the turn (client error frame + `onError`), so it is NOT routed
+   * here — re-driving a terminalized turn would be wasteful and risk a second
+   * terminal signal. `error` may be an Error or a wrapper with a `cause` chain.
+   *
+   * The reliable terminator is the begin-path (`evaluateChatRecoveryIncident`),
+   * which seals once `oomAttempts` exceeds the budget; that runs before the
+   * memory-heavy turn, in the low-memory window where writes succeed. This
+   * method's job is to persist `oomAttempts` (small writes) so the begin path
+   * can act on it, and to schedule a delayed re-run while under budget.
+   *
+   * Returns `true` when the error was an OOM and this method owns the outcome:
+   *  - under budget → a delayed re-run was scheduled (best-effort: a transient
+   *    spike may clear);
+   *  - over budget (or untrackable, or the bookkeeping itself OOMed) →
+   *    terminalized via the give-up path with `reason="out_of_memory"`.
+   * Returns `false` for non-OOM errors so the caller proceeds normally.
+   */
+  private async _handleRecoveryOom(
+    callback: ChatRecoveryScheduleCallback,
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
+    error: unknown
+  ): Promise<boolean> {
+    if (!isDurableObjectMemoryLimitReset(error)) return false;
+    let decision: "rescheduled" | "exhausted" = "exhausted";
+    try {
+      decision = await this._chatRecoveryEngine().recordOomAndDecide({
+        incidentId: data?.incidentId,
+        callback,
+        data,
+        maxOomRetries: this._resolveChatRecoveryConfig().maxOomRetries
+      });
+    } catch (bookkeepingError) {
+      // The bump/reschedule writes can themselves reject in the degraded isolate
+      // that just OOMed. Fail closed (seal) rather than risk a silent wedge; the
+      // finite `maxRecoveryWork` backstop covers anything that slips past.
+      console.error(
+        "[Think] failed to record OOM recovery attempt; terminalizing",
+        bookkeepingError
+      );
+      decision = "exhausted";
+    }
+    if (decision === "exhausted") {
+      await this._exhaustRecoveryGiveUp(callback, data, "out_of_memory");
+    }
+    return true;
   }
 
   /**
@@ -13669,6 +13754,13 @@ export class Think<
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     error: unknown
   ): Promise<void> {
+    // A memory-limit reset is NOT a platform transient (re-running the same
+    // memory-heavy turn re-OOMs deterministically), so it must be classified
+    // BEFORE the transient check and routed through the tight OOM-retry budget
+    // instead of either deferring forever or terminalizing on the first hit
+    // (#1825). Returns true once it has owned the outcome (rescheduled or
+    // sealed); only fall through to the generic handling for non-OOM errors.
+    if (await this._handleRecoveryOom(callback, data, error)) return;
     if (isPlatformTransientError(error)) {
       const message = error instanceof Error ? error.message : String(error);
       try {

@@ -192,6 +192,39 @@ const SUPERSEDED_ISOLATE_PATTERN =
  */
 const CONNECTION_LOST_PATTERN = /network connection lost/i;
 
+/**
+ * The Durable Object memory-limit reset — the isolate exceeded its 128 MB limit
+ * and was reset by the platform (workerd surfaces this verbatim as
+ * "Durable Object's isolate exceeded its memory limit and was reset."; the D1
+ * sibling is "D1 DB's isolate exceeded its memory limit and was reset.").
+ *
+ * The match is the broad shared fragment "exceeded its memory limit" rather than
+ * the full "...and was reset" sentence: real-world surfacings truncate or reword
+ * the tail (some log pipelines clip the message; D1/storage wrappers re-prefix
+ * it), and a customer-reported loop (#1825) showed lines carrying only the
+ * "exceeded its memory limit" fragment. Missing a surfacing here means the
+ * circuit breaker never engages, so we err toward the broader match — and even a
+ * false positive is fail-safe (a tightly-bounded retry-then-seal, not data loss).
+ *
+ * This is DELIBERATELY a separate class from `SUPERSEDED_ISOLATE_PATTERN` /
+ * {@link isPlatformTransientError}, and is NOT folded into them. A supersede or
+ * connection-lost transient means "re-run the same work and it succeeds on a
+ * healthy isolate" — those classes can be deferred and retried *indefinitely*. A
+ * memory-limit reset is the opposite: re-running the SAME memory-heavy work
+ * deterministically re-OOMs (the footprint, not the platform, is the cause), so
+ * deferring it indefinitely would PRESERVE the one-shot row and re-run the
+ * doomed work forever (amplifying the loop and cost — see #1825). It is a
+ * poison-pill signal: callers must bound retries tightly and then SEAL.
+ *
+ * Accordingly the schedule executor (`_executeScheduleCallback`) and the
+ * alarm-boundary circuit breaker (`Agent.alarm`) treat it as its OWN class: a
+ * memory-limit reset is re-thrown (row preserved) so it reaches the breaker,
+ * which tolerates a few strikes (`maxAlarmMemoryLimitStrikes`) and then seals +
+ * purges the looping row — i.e. *bounded* deferral, never the unbounded deferral
+ * the transient classes get.
+ */
+const MEMORY_LIMIT_RESET_PATTERN = /exceeded its memory limit/i;
+
 function errorMessageOf(error: unknown): string {
   return error instanceof Error
     ? error.message
@@ -226,6 +259,20 @@ function* selfAndCauses(error: unknown): Generator<unknown> {
 export function isDurableObjectCodeUpdateReset(error: unknown): boolean {
   for (const e of selfAndCauses(error)) {
     if (SUPERSEDED_ISOLATE_PATTERN.test(errorMessageOf(e))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an error (or anything in its `cause` chain, or a raw error-message
+ * string) is a Durable Object memory-limit reset — see
+ * {@link MEMORY_LIMIT_RESET_PATTERN}. Unlike {@link isPlatformTransientError},
+ * re-running the same work re-OOMs deterministically, so callers must NOT defer
+ * it like a transient; they should bound retries tightly and then seal (#1825).
+ */
+export function isDurableObjectMemoryLimitReset(error: unknown): boolean {
+  for (const e of selfAndCauses(error)) {
+    if (MEMORY_LIMIT_RESET_PATTERN.test(errorMessageOf(e))) return true;
   }
   return false;
 }

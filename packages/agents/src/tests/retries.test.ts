@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isDurableObjectCodeUpdateReset,
+  isDurableObjectMemoryLimitReset,
   isErrorRetryable,
   isPlatformTransientError,
   jitterBackoff,
@@ -415,6 +416,84 @@ describe("retries", () => {
       const e = new Error("app error");
       (e as unknown as { cause: unknown }).cause = e;
       expect(isDurableObjectCodeUpdateReset(e)).toBe(false);
+    });
+  });
+
+  describe("isDurableObjectMemoryLimitReset", () => {
+    it("matches the DO and D1 memory-limit reset messages", () => {
+      expect(
+        isDurableObjectMemoryLimitReset(
+          new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          )
+        )
+      ).toBe(true);
+      expect(
+        isDurableObjectMemoryLimitReset(
+          new Error("D1 DB's isolate exceeded its memory limit and was reset.")
+        )
+      ).toBe(true);
+    });
+
+    it("matches a truncated/reworded surfacing missing the '...and was reset' tail", () => {
+      // Real-world logs (#1825) clipped the message to just the core fragment;
+      // the broadened predicate must still classify it so the circuit breaker
+      // can engage.
+      expect(
+        isDurableObjectMemoryLimitReset(
+          new Error("Durable Object's isolate exceeded its memory limit")
+        )
+      ).toBe(true);
+      expect(
+        isDurableObjectMemoryLimitReset(
+          "Error: the isolate exceeded its memory limit (128 MB)"
+        )
+      ).toBe(true);
+    });
+
+    it("looks through wrapper errors via the cause chain (SqlError shape)", () => {
+      const wrapped = new Error("SQL query failed", {
+        cause: new Error(
+          "Durable Object's isolate exceeded its memory limit and was reset."
+        )
+      });
+      expect(isDurableObjectMemoryLimitReset(wrapped)).toBe(true);
+    });
+
+    it("matches a raw error-message string (returned-result path)", () => {
+      expect(
+        isDurableObjectMemoryLimitReset(
+          "Durable Object's isolate exceeded its memory limit and was reset."
+        )
+      ).toBe(true);
+    });
+
+    it("is NOT classified as a platform transient (must not be deferred)", () => {
+      // The whole point of #1825: a memory reset re-OOMs on re-run, so it must
+      // NOT join the defer-and-retry-forever transient class.
+      const oom = new Error(
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      );
+      expect(isDurableObjectMemoryLimitReset(oom)).toBe(true);
+      expect(isPlatformTransientError(oom)).toBe(false);
+      expect(isDurableObjectCodeUpdateReset(oom)).toBe(false);
+    });
+
+    it("does not match lookalike application errors or empty inputs", () => {
+      expect(
+        isDurableObjectMemoryLimitReset(
+          new Error("Your plan exceeded its memory quota.")
+        )
+      ).toBe(false);
+      expect(isDurableObjectMemoryLimitReset(new Error("boom"))).toBe(false);
+      expect(isDurableObjectMemoryLimitReset(null)).toBe(false);
+      expect(isDurableObjectMemoryLimitReset(undefined)).toBe(false);
+    });
+
+    it("terminates on a cyclic cause chain", () => {
+      const e = new Error("app error");
+      (e as unknown as { cause: unknown }).cause = e;
+      expect(isDurableObjectMemoryLimitReset(e)).toBe(false);
     });
   });
 
