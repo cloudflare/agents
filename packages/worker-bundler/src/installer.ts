@@ -6,9 +6,12 @@
  */
 
 import * as semver from "semver";
+import { unzipSync } from "fflate";
 import type { FileSystem } from "./file-system";
+import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
+const PYPI_SIMPLE_API = "https://pypi.org/simple";
 const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
 /**
@@ -52,10 +55,33 @@ interface PackageJson {
   };
 }
 
+// Deliberately keeping this minimal
+interface PyprojectToml {
+  project?: {
+    name: string;
+    version: string;
+    dependencies?: string[];
+  };
+}
+
 interface NpmPackageMetadata {
   name: string;
   "dist-tags": Record<string, string>;
   versions: Record<string, PackageJson>;
+}
+
+interface PypiSimpleFile {
+  filename: string;
+  url: string;
+  hashes?: Record<string, string>;
+  "requires-python"?: string;
+  "core-metadata"?: boolean | { hash?: string; url?: string };
+  yanked?: boolean | string;
+}
+
+interface PypiSimpleMetadata {
+  name: string;
+  files: PypiSimpleFile[];
 }
 
 interface InstallOptions {
@@ -106,26 +132,85 @@ export async function installDependencies(
 
   // Read package.json
   const packageJsonContent = fileSystem.read("package.json");
-  if (!packageJsonContent) {
-    return result; // No package.json, nothing to install
+  const pyprojectTomlContent = fileSystem.read("pyproject.toml");
+
+  if (packageJsonContent && pyprojectTomlContent) {
+    result.warnings.push("Cannot have package.json and pyproject.toml");
+    return result;
   }
 
-  let packageJson: PackageJson;
+  if (packageJsonContent) {
+    let packageJson: PackageJson;
+    try {
+      packageJson = JSON.parse(packageJsonContent) as PackageJson;
+    } catch {
+      result.warnings.push("Failed to parse package.json");
+      return result;
+    }
+
+    // Collect dependencies to install
+    const depsToInstall: Record<string, string> = {
+      ...packageJson.dependencies,
+      ...(dev ? packageJson.devDependencies : {})
+    };
+
+    if (Object.keys(depsToInstall).length === 0) {
+      return result; // No dependencies to install
+    }
+
+    // Track installed packages to avoid duplicates
+    const installedPackages = new Map<string, string>(); // name -> version
+    // Track in-progress installations to avoid duplicate work
+    const inProgress = new Map<string, Promise<void>>();
+
+    // Install all dependencies in parallel
+    await Promise.all(
+      Object.entries(depsToInstall).map(([name, versionRange]) =>
+        installPackage(
+          name,
+          versionRange,
+          result,
+          fileSystem,
+          installedPackages,
+          inProgress,
+          registry
+        )
+      )
+    );
+  } else if (pyprojectTomlContent) {
+    return await installDependenciesPython(fileSystem, pyprojectTomlContent);
+  }
+  return result;
+}
+
+/**
+ * Install Python dependencies declared in a pyproject.toml file.
+ */
+async function installDependenciesPython(
+  fileSystem: FileSystem,
+  pyprojectTomlContent: string
+): Promise<InstallResult> {
+  const result: InstallResult = {
+    installed: [],
+    warnings: []
+  };
+
+  let pyprojectToml: PyprojectToml;
   try {
-    packageJson = JSON.parse(packageJsonContent) as PackageJson;
+    pyprojectToml = parseToml(pyprojectTomlContent) as PyprojectToml;
   } catch {
-    result.warnings.push("Failed to parse package.json");
+    result.warnings.push("Failed to parse pyproject.toml");
     return result;
   }
 
   // Collect dependencies to install
-  const depsToInstall: Record<string, string> = {
-    ...packageJson.dependencies,
-    ...(dev ? packageJson.devDependencies : {})
-  };
+  const depsToInstall: Record<string, string> = {};
+  depsToInstall["workers-runtime-sdk"] = "*"; // TODO: Should this always take the latest?
+  for (const dep of pyprojectToml.project?.dependencies ?? []) {
+    const name = dep.trim();
+    if (!name) continue;
 
-  if (Object.keys(depsToInstall).length === 0) {
-    return result; // No dependencies to install
+    depsToInstall[name] = "*"; // in the future this should be a version specifier, if one was set
   }
 
   // Track installed packages to avoid duplicates
@@ -135,19 +220,17 @@ export async function installDependencies(
 
   // Install all dependencies in parallel
   await Promise.all(
-    Object.entries(depsToInstall).map(([name, versionRange]) =>
-      installPackage(
-        name,
-        versionRange,
+    Object.entries(depsToInstall).map(([depName]) =>
+      installPythonPackage(
+        depName,
         result,
         fileSystem,
         installedPackages,
         inProgress,
-        registry
+        PYPI_SIMPLE_API
       )
     )
   );
-
   return result;
 }
 
@@ -251,6 +334,125 @@ async function installPackage(
 }
 
 /**
+ * Install a single Python package from PyPI.
+ *
+ * This is a minimal implementation: it downloads the latest version of the
+ * package as a source distribution and adds it to python_modules/. It does not
+ * resolve version ranges or install transitive dependencies.
+ */
+async function installPythonPackage(
+  name: string,
+  // _versionRange: string, // remove fully if package resolver impl. ends up not going through this path
+  result: InstallResult,
+  fileSystem: FileSystem,
+  installedPackages: Map<string, string>,
+  inProgress: Map<string, Promise<void>>,
+  registry: string
+): Promise<void> {
+  // Skip if already installed in this run
+  if (installedPackages.has(name)) {
+    return;
+  }
+
+  // TODO: In the JS impl., a check is done here for whether the package already exists in the filesystem
+  // Assess in the future whether this is sensible to repeat
+
+  // If installation is already in progress, wait for it
+  const existing = inProgress.get(name);
+  if (existing) {
+    return existing;
+  }
+
+  const installPromise = (async () => {
+    try {
+      const metadata = await fetchPythonPackageMetadata(name, registry);
+
+      const version = metadata.version;
+      const wheel = metadata.wheel;
+      const wheelUrl = wheel.url;
+
+      const response = await fetchWithTimeout(
+        wheelUrl,
+        {},
+        DEFAULT_TIMEOUT_MS * 2
+      );
+      if (!response.ok) {
+        throw new Error(
+          `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheelUrl})`
+        );
+      }
+
+      const buffer = await response.arrayBuffer();
+
+      const packageFilesWheel = stripWheelToPackage(
+        extractWheel(new Uint8Array(buffer), result)
+      );
+
+      // Mark as installed before writing to prevent cycles
+      installedPackages.set(name, version);
+      result.installed.push(`${name}@${version}`);
+
+      // Add files to python_modules
+      for (const [filePath, content] of Object.entries(packageFilesWheel)) {
+        fileSystem.write(`python_modules/${filePath}`, content);
+      }
+
+      // Fetch requires_dist from core metadata if available
+      const metadataUrl = getCoreMetadataUrl(wheel);
+      const requiresDist = metadataUrl
+        ? await fetchPythonRequiresDist(metadataUrl)
+        : [];
+
+      await Promise.all(
+        requiresDist.map((dep) =>
+          installPythonPackage(
+            parsePythonVersionString(dep)["name"], // This will change (ie look nicer) after we've completely fleshed out what this should return
+            result,
+            fileSystem,
+            installedPackages,
+            inProgress,
+            PYPI_SIMPLE_API
+          )
+        )
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      result.warnings.push(`Failed to install ${name}: ${message}`);
+    }
+  })();
+
+  inProgress.set(name, installPromise);
+
+  try {
+    await installPromise;
+  } finally {
+    inProgress.delete(name);
+  }
+}
+
+/**
+ * Strip a Python wheel down to just the package contents.
+ *
+ * Wheels contain the importable package alongside `.dist-info` metadata and
+ * `.data` directories. This removes those supporting directories and flattens
+ * the package directory so its files are at the root of the returned record.
+ */
+function stripWheelToPackage(
+  files: Record<string, string>
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [path, content] of Object.entries(files)) {
+    // Skip wheel metadata and data directories
+    if (path.includes(".dist-info/") || path.includes(".data/")) {
+      continue;
+    }
+    // We'll expect that any remaining directories in the wheel are importable packages
+    result[path] = content;
+  }
+  return result;
+}
+
+/**
  * Fetch package metadata from npm registry.
  */
 async function fetchPackageMetadata(
@@ -284,6 +486,215 @@ async function fetchPackageMetadata(
   }
 
   return (await response.json()) as NpmPackageMetadata;
+}
+
+async function fetchPythonPackageMetadata(
+  name: string,
+  registry: string
+): Promise<{ version: string; wheel: PypiSimpleFile }> {
+  // Normalize package name per PEP 503 (lowercase, replace [-_.] with -)
+  const normalizedName = name.toLowerCase().replace(/[-_.]+/g, "-");
+
+  // Fetch package metadata from PyPI Simple API
+  const metadataResponse = await fetchWithTimeout(
+    `${registry}/${normalizedName}/`,
+    {
+      headers: {
+        Accept: "application/vnd.pypi.simple.v1+json"
+      }
+    }
+  );
+
+  if (!metadataResponse.ok) {
+    const hint =
+      metadataResponse.status === 404
+        ? " (package not found — check the name in pyproject.toml)"
+        : "";
+    throw new Error(
+      `PyPI returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
+    );
+  }
+  const metadata = (await metadataResponse.json()) as PypiSimpleMetadata;
+
+  const wheel = selectWheel(metadata.files);
+  if (!wheel) {
+    throw new Error(`No compatible wheel found for ${name} on PyPI`);
+  }
+
+  const version = parseWheelVersion(wheel.filename);
+  if (!version) {
+    throw new Error(
+      `Could not parse version from wheel filename: ${wheel.filename}`
+    );
+  }
+
+  return { version, wheel };
+}
+
+/**
+ * Select a compatible wheel from PyPI Simple API files list.
+ * Prefers py3-none-any or py2.py3-none-any wheels for maximum compatibility.
+ * Selects the latest version from compatible wheels.
+ * TODO: implement proper platform/python version matching
+ */
+function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | undefined {
+  const wheels = files.filter((f) => f.filename.endsWith(".whl"));
+  if (wheels.length === 0) return undefined;
+
+  // Filter to universal wheels (py3-none-any or py2.py3-none-any)
+  const universal = wheels.filter(
+    (w) =>
+      w.filename.includes("-py3-none-any.whl") ||
+      w.filename.includes("-py2.py3-none-any.whl")
+  );
+
+  const candidates = universal.length > 0 ? universal : wheels;
+
+  // Select the wheel with the highest version
+  let latest: PypiSimpleFile | undefined;
+  let latestVersion: string | undefined;
+
+  for (const wheel of candidates) {
+    const version = parseWheelVersion(wheel.filename);
+    if (!version) continue;
+
+    if (
+      !latest ||
+      !latestVersion ||
+      comparePythonVersions(version, latestVersion) > 0
+    ) {
+      latest = wheel;
+      latestVersion = version;
+    }
+  }
+
+  return latest;
+}
+
+/**
+ * Compare two PEP 440 version strings.
+ * Returns >0 if a > b, <0 if a < b, 0 if equal.
+ *
+ * Python versions (PEP 440) are not semver-compatible (e.g. "3.6.2.1" has four
+ * release segments), so semver cannot be used here. This is a minimal
+ * comparison: it compares the dotted numeric release segments, and treats
+ * pre-release/dev versions (a/b/rc/alpha/beta/dev/pre) as lower than the same
+ * release so a stable release is preferred.
+ * TODO: full PEP 440 ordering (post-releases, local versions, epochs) if needed.
+ */
+function comparePythonVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const releaseMatch = v.match(/^[0-9]+(?:\.[0-9]+)*/);
+    const release = (releaseMatch?.[0] ?? "0").split(".").map(Number);
+    const rest = v.slice(releaseMatch?.[0].length ?? 0);
+    const isPre = /^[.\-_]?(a|b|c|rc|alpha|beta|dev|pre)/i.test(rest);
+    return { release, isPre };
+  };
+
+  const av = parse(a);
+  const bv = parse(b);
+
+  const len = Math.max(av.release.length, bv.release.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (av.release[i] ?? 0) - (bv.release[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+
+  // Same release: a stable version outranks a pre-release/dev version
+  if (av.isPre !== bv.isPre) return av.isPre ? -1 : 1;
+  return 0;
+}
+
+/**
+ * Parse version from a wheel filename.
+ * Wheel format: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
+ *
+ * With no build tag (5 parts): distribution-version-python-abi-platform.whl
+ * With build tag (6+ parts): distribution-version-build-python-abi-platform.whl
+ *
+ * TODO: handle edge cases with distribution names containing hyphens
+ */
+function parseWheelVersion(filename: string): string | undefined {
+  const parts = filename.replace(/\.whl$/, "").split("-");
+  if (parts.length < 5) return undefined;
+
+  // The last three parts are always: python_tag, abi_tag, platform_tag
+  // For 5 parts: distribution, version, py, abi, platform -> version is parts[1]
+  // For 6+ parts: distribution, version, build?, py, abi, platform -> version is parts[1]
+  return parts[1];
+}
+
+/**
+ * Get the core metadata URL from a PyPI Simple API file entry.
+ * Returns undefined if core metadata is not available.
+ *
+ * Per PEP 714: if core-metadata is true or an object (with hash),
+ * metadata is available at {file_url}.metadata unless a separate URL is provided.
+ */
+function getCoreMetadataUrl(file: PypiSimpleFile): string | undefined {
+  const cm = file["core-metadata"];
+  if (!cm) return undefined;
+
+  // If it's an object with an explicit URL, use that
+  if (typeof cm === "object" && cm.url) return cm.url;
+
+  // Otherwise (boolean true or object with just hash), use .metadata suffix
+  if (cm === true || typeof cm === "object") return `${file.url}.metadata`;
+
+  return undefined;
+}
+
+/**
+ * Fetch and parse Requires-Dist from a Python package's core metadata.
+ * Returns empty array if metadata is unavailable or parsing fails.
+ */
+async function fetchPythonRequiresDist(url: string): Promise<string[]> {
+  try {
+    const response = await fetchWithTimeout(url);
+    if (!response.ok) return [];
+    const contentType = response.headers.get("content-type") ?? "";
+    // PyPI tends to send this as `binary/octet-stream` even though it's actually text, this avoids an unhelpful warning
+    const text = contentType.startsWith("text/")
+      ? await response.text()
+      : new TextDecoder().decode(await response.arrayBuffer());
+    return parseRequiresDist(text);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Parse Requires-Dist headers from Python package METADATA file (RFC 822 format).
+ * Handles continuation lines (starting with whitespace).
+ */
+function parseRequiresDist(metadata: string): string[] {
+  const requires: string[] = [];
+  const lines = metadata.split(/\r?\n/);
+  let current: string | undefined;
+
+  for (const raw of lines) {
+    // Continuation line (starts with whitespace)
+    if (raw.startsWith(" ") || raw.startsWith("\t")) {
+      if (current !== undefined) {
+        current += " " + raw.trim();
+      }
+      continue;
+    }
+
+    // Process previous header if it was Requires-Dist
+    if (current !== undefined && current.startsWith("Requires-Dist:")) {
+      requires.push(current.slice("Requires-Dist:".length).trim());
+    }
+
+    current = raw;
+  }
+
+  // Process last header
+  if (current !== undefined && current.startsWith("Requires-Dist:")) {
+    requires.push(current.slice("Requires-Dist:".length).trim());
+  }
+
+  return requires;
 }
 
 /**
@@ -346,6 +757,34 @@ export async function fetchPackageFiles(
 
   // Extract the tarball (npm tarballs are gzipped tar files)
   return extractTarball(new Uint8Array(buffer));
+}
+
+/**
+ * Extract files from a ZIP archive (Python wheel).
+ *
+ * Python wheels are distributed as .whl files (ZIP archives).
+ */
+function extractWheel(
+  data: Uint8Array,
+  result: InstallResult
+): Record<string, string> {
+  const unzipped = unzipSync(data);
+  const files: Record<string, string> = {};
+  const textDecoder = new TextDecoder();
+
+  for (const [path, content] of Object.entries(unzipped)) {
+    // Todo: Remove this check once it's confirmed that compiled wasm binaries are working
+    // (blocking this for now so any such packages will fail gracefully in the interim)
+    if (!isTextFile(path)) {
+      result.warnings.push(
+        `Could not install file ${path}, extension must match an approved text format type. This may corrupt this dependency.`
+      );
+      continue;
+    }
+    files[path] = textDecoder.decode(content);
+  }
+
+  return files;
 }
 
 /**
@@ -500,7 +939,8 @@ function isTextFile(path: string): boolean {
     ".map",
     ".d.ts",
     ".d.mts",
-    ".d.cts"
+    ".d.cts",
+    ".py"
   ];
 
   // Check common config files without extensions
@@ -526,17 +966,59 @@ function isTextFile(path: string): boolean {
 }
 
 /**
- * Check if files contain a package.json with dependencies that need installing.
+ * Parse a Python version specifier string (PEP 508) and extract the package name.
+ *
+ * Accepts strings as they appear in `pyproject.toml` `[project].dependencies`
+ * or in PyPI JSON API `info.requires_dist` responses. Examples:
+ *   "requests"
+ *   "requests>=2.0"
+ *   "requests[security]>=2.0"
+ *   "requests (>=2.0)"
+ *   "requests; python_version < '3.8'"
+ *   "requests[security] >= 2.0 ; python_version < '3.8'"
+ *
+ * Returns a tuple of `[package_name, null, null]`. The second and third slots
+ * are placeholders reserved for future use (e.g. extras, version specifier).
+ */
+function parsePythonVersionString(spec: string): { name: string } {
+  // Drop the PEP 508 environment marker (everything after `;`)
+  let head = spec.split(";", 1)[0] ?? "";
+
+  // The package name is the leading run of characters allowed in a PEP 508
+  // identifier: letters, digits, `.`, `-`, `_`. Stop at the first character
+  // that isn't one of those (whitespace, `[`, `(`, `<`, `>`, `=`, `!`, `~`, etc.).
+  const match = head.match(/^\s*([A-Za-z0-9][A-Za-z0-9._-]*)/);
+  const name = match ? match[1]! : head.trim();
+
+  return { name: name };
+}
+
+/**
+ * Check if files contain a package.json or pyproject.toml with dependencies that need installing.
  */
 export function hasDependencies(files: FileSystem): boolean {
+  const pyprojectToml = files.read("pyproject.toml");
   const packageJson = files.read("package.json");
-  if (!packageJson) return false;
+  if (!packageJson && !pyprojectToml) return false;
 
-  try {
-    const pkg = JSON.parse(packageJson);
-    const deps = pkg.dependencies ?? {};
-    return Object.keys(deps).length > 0;
-  } catch {
-    return false;
+  if (packageJson) {
+    try {
+      const pkg = JSON.parse(packageJson);
+      const deps = pkg.dependencies ?? {};
+      return Object.keys(deps).length > 0;
+    } catch {
+      return false;
+    }
   }
+
+  if (pyprojectToml) {
+    try {
+      const pkg = parseToml(pyprojectToml) as PyprojectToml;
+      const deps = pkg.project?.dependencies ?? [];
+      return deps.length > 0;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }

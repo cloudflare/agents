@@ -36,6 +36,7 @@
     "@typescript/vfs": "^1.6.4",
     "es-module-lexer": "^2.1.0",
     "esbuild-wasm": "0.28.1",
+    "fflate": "^0.8.2",
     "resolve.exports": "^2.0.3",
     "semver": "^7.8.5",
     "smol-toml": "^1.7.0",
