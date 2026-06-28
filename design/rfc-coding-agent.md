@@ -327,18 +327,19 @@ AIChatAgent`; no Think core changes.
   goal (gated on cloudflare/agents#1829).
 - ✅ **No speculative multi-CLI adapter interface;** extract after codex.
 - ✅ **Filesystem / preview are Directions, not v1 seams.**
+- ✅ **Package name `@cloudflare/coding-agent`** with the `/claude-code` subpath
+  convention.
 
-Open questions still to settle:
+Open questions still to settle (deliberately left open for now):
 
-1. Package name (`@cloudflare/coding-agent`?) and the `/claude-code` subpath
-   convention.
-2. `HarnessEngine` vs `CliEngine` as the **default** for the first release —
+1. `HarnessEngine` vs `CliEngine` as the **default** for the first release —
    ship `CliEngine` now and migrate, or wait for #1829?
-3. Snapshot policy for `CliEngine` durability (§6): what's backed up, how often,
+2. Snapshot policy for `CliEngine` durability (§6): what's backed up, how often,
    and the `node_modules` question.
-4. First-PR scope: new package skeleton + `CliEngine` (lift the example's mapper)
-   - tokenless egress + §6 durability + dynamic config + rewrite the example onto
-     the package. Codex, `HarnessEngine`, preview, git ops, HITL, VFS deferred.
+3. First-PR scope: new package skeleton + `CliEngine` (lift the example's
+   mapper) + tokenless egress + §6 durability + dynamic config + rewrite the
+   example onto the package. Codex, `HarnessEngine`, preview, git ops, HITL, VFS
+   deferred.
 
 ## History
 
