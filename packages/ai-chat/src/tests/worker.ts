@@ -3416,6 +3416,112 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   /**
+   * Reproduce the post-restart cold-counter realign (Devin review on #1827,
+   * the hibernation / chat-recovery re-attach path). Seeds a RUNNING run with a
+   * stored backlog 0..N, wipes the in-memory live sequence (as a child DO
+   * restart / hibernation wake would), then tails it directly. After the drain
+   * the live counter must realign to N+1 so a NEW broadcast — the recovered
+   * turn's next chunk — forwards at N+1 instead of restarting at 0 and being
+   * silently dropped by `emit`'s high-water dedupe.
+   *
+   * Returns the drained backlog sequences, the live counter after the drain,
+   * and the forwarded post-restart chunk (null if it was dropped — the pre-fix
+   * behaviour).
+   */
+  async coldCounterReattachForwardsForTest(): Promise<{
+    drained: number[];
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = "cold-realign-run";
+    const requestId = "cold-realign-req";
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = [
+      JSON.stringify({ type: "text-start" }),
+      JSON.stringify({ type: "text-delta", delta: "a" }),
+      JSON.stringify({ type: "text-delta", delta: "b" })
+    ];
+    for (const body of backlog) {
+      await this["_storeStreamChunk"](streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    // Simulate a restart / hibernation wake: the in-memory live sequence map is
+    // cold; only the durable stored backlog survives.
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const stream = (await this.tailAgentToolRun(runId, {
+      afterSequence: -1
+    })) as unknown as ReadableStream<Uint8Array>;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const readLine = async (timeoutMs: number): Promise<string | null> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const nl = buffer.indexOf("\n");
+        if (nl >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line) return line;
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return null;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) return null;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+    };
+
+    const drained: number[] = [];
+    for (let i = 0; i < backlog.length; i++) {
+      const line = await readLine(2000);
+      if (line === null) break;
+      drained.push((JSON.parse(line) as { sequence: number }).sequence);
+    }
+
+    // Wait (bounded) for the post-drain realign to run.
+    const deadline = Date.now() + 2000;
+    while (
+      this["_agentToolLiveSequences"].get(runId) !== backlog.length &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const liveSequenceAfterDrain = this["_agentToolLiveSequences"].get(runId);
+
+    // The recovered turn now broadcasts a NEW chunk (not in the backlog).
+    const postBody = JSON.stringify({
+      type: "tool-output-available",
+      toolCallId: "post-restart",
+      output: "ok"
+    });
+    this["_broadcastChatMessage"]({
+      body: postBody,
+      done: false,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    });
+
+    const postLine = await readLine(2000);
+    const postRestart =
+      postLine === null
+        ? null
+        : (JSON.parse(postLine) as { sequence: number; body: string });
+    await reader.cancel();
+    return { drained, liveSequenceAfterDrain, postRestart };
+  }
+
+  /**
    * #1575: broadcast a chat error frame whose request id belongs to no
    * agent-tool run, simulating an unrelated turn failing on this agent
    * while a run is being tailed.
@@ -3697,6 +3803,22 @@ export class AIChatAgentToolParent extends Agent<Env> {
       inputPreview: input.prompt
     });
     return { result, events: this.events };
+  }
+
+  /**
+   * Drive the child's post-restart cold-counter realign probe (Devin review on
+   * #1827). Routed through `subAgent` so the child runs in its SQL-enabled DO.
+   */
+  async coldCounterChildReattachForTest(): Promise<{
+    drained: number[];
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.coldCounterReattachForwardsForTest();
   }
 
   async runChildWithDelayedAbort(

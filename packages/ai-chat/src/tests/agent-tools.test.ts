@@ -166,6 +166,11 @@ type ParentStub = DurableObjectStub & {
     milestoneBody: string,
     runId?: string
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
+  coldCounterChildReattachForTest(): Promise<{
+    drained: number[];
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }>;
   inspectChild(runId: string): Promise<AgentToolRunInspection | null>;
   getChildChunks(
     runId: string,
@@ -369,6 +374,34 @@ describe("AIChatAgent as an agent-tool child", () => {
       .map((event) => (event.event as { kind: "chunk"; body: string }).body);
     expect(chunkBodies).toContain(progressBody);
     expect(chunkBodies).toContain(milestoneBody);
+  });
+
+  it("realigns the live sequence on a cold-counter re-attach so post-restart chunks forward", async () => {
+    // After the CHILD's Durable Object restarts / wakes from hibernation, its
+    // in-memory live sequence map is cold while the durable backlog sits at N.
+    // Chat-recovery resumes the turn and the parent re-attaches via
+    // `tailAgentToolRun` WITHOUT re-running `startAgentToolRun` (which seeds the
+    // counter). The tail must realign the live counter to N+1 after draining, so
+    // the recovered turn's NEW broadcasts forward at N+1 instead of restarting
+    // at 0 and being silently dropped by the high-water dedupe (which would
+    // leave the parent stuck with no post-restart chunks).
+    const parent = await getParent();
+
+    const { drained, liveSequenceAfterDrain, postRestart } =
+      await parent.coldCounterChildReattachForTest();
+
+    // Backlog replayed in order, then the counter realigned to right after it.
+    expect(drained).toEqual([0, 1, 2]);
+    expect(liveSequenceAfterDrain).toBe(3);
+    // The post-restart broadcast forwards at the realigned sequence (3), not 0.
+    expect(postRestart).toMatchObject({
+      sequence: 3,
+      body: JSON.stringify({
+        type: "tool-output-available",
+        toolCallId: "post-restart",
+        output: "ok"
+      })
+    });
   });
 
   it("finalizes lifecycle hooks and terminal events during parent recovery reconciliation", async () => {

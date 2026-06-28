@@ -3741,6 +3741,25 @@ export class AIChatAgent<
             close();
             return;
           }
+
+          // Run is still live: realign the live sequence to continue right
+          // after the highest emitted chunk (the stored high-water plus
+          // anything captured during the drain). On a normal warm attach the
+          // in-memory counter is already in lockstep with the stored
+          // chunk_index, so this is a no-op. But after the CHILD's Durable
+          // Object restarts/wakes from hibernation, `_agentToolLiveSequences`
+          // is cold (empty) while the stored backlog sits at N, and a
+          // chat-recovery resume re-attaches via `tailAgentToolRun` WITHOUT
+          // re-running `startAgentToolRun` (which is what seeds the counter).
+          // Without this realign the broadcast snoop would hand the recovered
+          // turn's new chunks sequences from 0 — all <= N — and `emit`'s
+          // high-water dedupe would silently drop every one, leaving the parent
+          // stuck with no post-restart chunks. Gating on the still-running check
+          // also avoids re-heating the broadcast idle-guard for a terminal run.
+          // Mirrors @cloudflare/think's tail.
+          if (lastEmitted > (options?.afterSequence ?? -1)) {
+            this._agentToolLiveSequences.set(runId, lastEmitted + 1);
+          }
         } catch (error) {
           // Detach the up-front-registered forwarder (dropping the now-empty
           // set) before surfacing the failure so it doesn't linger on this run.
