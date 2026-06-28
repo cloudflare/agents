@@ -249,18 +249,39 @@ path.
 fall out of existing primitives with no new machinery:
 
 1. **Standalone** — one DO, one repo.
-2. **Threads** — a `Chats` directory of coding sessions (see
-   [`rfc-think-multi-session.md`](./rfc-think-multi-session.md)):
-   `class CodingSessions extends Chats<Env, SubAgentClass<MyCoder>>`. "New session
-   on repo X" = `createChat()` + `{ repo }` Props. You get a session dashboard,
-   per-thread isolated containers, and cross-session shared memory (repo
-   conventions, user prefs) via `RemoteContextProvider`. This is the
-   Codex-cloud / background-agents product shape.
+2. **Threads (a userland directory pattern, not a shipped class).** A plain
+   `Agent` owns a table of sessions with **domain-specific** metadata and spawns
+   one `CodingAgent` child per session:
+
+   ```ts
+   // userland — your rows, your columns
+   class CodingSessions extends Agent<Env> {
+     // sessions(id, repo, branch, status, lastDiff, updatedAt) — your schema
+     @callable() async create(repo: string) {
+       /* insert row + subAgent(MyCoder, id, { repo }) */
+     }
+     @callable() async list() {
+       /* your shape */
+     }
+   }
+   ```
+
+   This gives the Codex-cloud / background-agents product shape (session
+   dashboard, per-thread isolated containers, cross-session shared memory via
+   `RemoteContextProvider`) **without** a first-class `Chats` base class. We
+   deliberately do _not_ ship a generic directory: a coding directory's metadata
+   (`repo`/`branch`/`status`/`lastDiff`) is domain-specific and outgrows any
+   fixed `ChatSummary` schema immediately. What stays shipped are the
+   load-bearing primitives this leans on — `subAgent` + Props, `parentAgent()`,
+   and `RemoteContextProvider`/`RemoteSearchProvider` — plus a reference example.
+   (See the note added to [`rfc-think-multi-session.md`](./rfc-think-multi-session.md).)
+
 3. **Orchestrated** — delegated via `codingAgentTool`, incl. `delegate_parallel`
    fan-out (the example's pattern).
 
 Requirement this places on the design: **nothing in `CodingAgent` may assume a
-top-level binding** — it must work as a `Chats` child and as an agent-tool facet.
+top-level binding** — it must work as a userland directory child and as an
+agent-tool facet.
 
 ### 9. Two more seams, designed in from day one
 
@@ -341,7 +362,7 @@ _Pending review._ Open questions to settle here:
 5. Put the filesystem behind a backend interface in v1 (container impl only) so a
    `cloudflare/workspace` backend can land later without an API change (§9)?
 6. Is `preview()` (LOADER vs container dev server, §9) in v1 scope or a follow-up?
-7. Scope of the first PR: seam + claude-code adapter + `Chats`-child topology +
+7. Scope of the first PR: seam + claude-code adapter + userland-directory topology +
    rewrite the example to use the class (delete its local mapper). Codex,
    `preview()`, and the workspace-VFS spike deferred.
 
