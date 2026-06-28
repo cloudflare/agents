@@ -3758,7 +3758,7 @@ importers:
         specifier: ^3.0.204
         version: 3.0.210(react@19.2.7)(zod@4.4.3)
       agents:
-        specifier: '>=0.17.0 <1.0.0'
+        specifier: '>=0.17.1 <1.0.0'
         version: link:../agents
       nanoid:
         specifier: ^5.1.16
@@ -3826,7 +3826,7 @@ importers:
   packages/hono-agents:
     devDependencies:
       agents:
-        specifier: ^0.17.0
+        specifier: ^0.17.1
         version: link:../agents
       hono:
         specifier: ^4.12.27
@@ -3948,7 +3948,7 @@ importers:
   packages/voice:
     dependencies:
       agents:
-        specifier: '>=0.17.0 <1.0.0'
+        specifier: '>=0.17.1 <1.0.0'
         version: link:../agents
       partysocket:
         specifier: ^1.0.0
