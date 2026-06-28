@@ -6447,6 +6447,12 @@ export class Agent<
     // footprint, so the seal/purge writes can land where mid-turn ones OOMed.
     try {
       await this._cf_runAlarmBody();
+      // A clean alarm clears the strike counter so the breaker bounds
+      // CONSECUTIVE memory-limit resets, not lifetime ones (#1825). Without
+      // this a Durable Object that hits rare, non-consecutive transient
+      // spikes (e.g. one a month) would eventually reach the strike budget
+      // and wrongly seal healthy recovery work.
+      await this._cf_clearAlarmMemoryLimitStrikes();
     } catch (error) {
       if (!isDurableObjectMemoryLimitReset(error)) throw error;
       await this._cf_handleAlarmMemoryLimitReset(error);
@@ -6643,6 +6649,26 @@ export class Agent<
    * terminal banner and persist the sealed incident.
    */
   protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {}
+
+  /**
+   * Clear the durable memory-limit strike counter after a clean alarm so the
+   * circuit breaker counts CONSECUTIVE resets rather than lifetime ones
+   * (#1825). Reads first (cheap, usually cached) and only writes when a strike
+   * is actually recorded, so the common no-strike path costs no write.
+   * Best-effort: a stale strike only costs one extra tolerated spike later.
+   */
+  private async _cf_clearAlarmMemoryLimitStrikes(): Promise<void> {
+    try {
+      const prior = await this.ctx.storage.get<number>(
+        Agent._CF_OOM_ALARM_STRIKES_KEY
+      );
+      if (typeof prior === "number" && prior > 0) {
+        await this.ctx.storage.delete(Agent._CF_OOM_ALARM_STRIKES_KEY);
+      }
+    } catch {
+      // best-effort: a leftover strike is harmless beyond one extra tolerated spike
+    }
+  }
 
   /**
    * Alarm-boundary circuit breaker for Durable Object memory-limit resets

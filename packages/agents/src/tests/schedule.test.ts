@@ -1117,6 +1117,31 @@ describe("schedule operations", () => {
       expect(third).toEqual({ threw: false, remaining: 0 });
     });
 
+    it("a clean alarm resets the strike counter (consecutive, not lifetime)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "oom-breaker-reset-on-success"
+      );
+      const oom =
+        "Durable Object's isolate exceeded its memory limit and was reset.";
+      // One OOM records a strike and backs the row off (preserved).
+      expect(await agentStub.runOneShotThrowingForTest(oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await agentStub.getAlarmStrikesForTest()).toBe(1);
+      // A clean alarm clears the counter so spikes must be CONSECUTIVE to seal.
+      await agentStub.runCleanAlarmForTest();
+      expect(await agentStub.getAlarmStrikesForTest()).toBe(0);
+      // A later OOM therefore starts again at strike 1 (not accumulating toward
+      // the budget across healthy runs).
+      expect(await agentStub.runOneShotThrowingForTest(oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await agentStub.getAlarmStrikesForTest()).toBe(1);
+    });
+
     it("a non-memory error still rejects/ swallows as before (breaker is OOM-only)", async () => {
       const agentStub = await getAgentByName(
         env.TestScheduleAgent,
