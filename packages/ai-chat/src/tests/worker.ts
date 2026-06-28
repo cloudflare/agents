@@ -3522,6 +3522,102 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   /**
+   * Reproduce the cancelled-tailer-starves-siblings bug (Devin review on #1827).
+   * Two parents tail the SAME run; tailer A's consumer cancels its reader. With
+   * an empty `cancel` handler and an unguarded `controller.close()`, A's stale
+   * forwarder stays registered, and the next broadcast throws while emitting to
+   * A (enqueue on a cancelled stream → `close()` → `controller.close()` throws),
+   * which propagates out of `interceptAgentToolBroadcast`'s forward loop and
+   * starves sibling tailer B of that chunk. With the fix A is detached on cancel
+   * and `controller.close()` is guarded, so B still receives the chunk.
+   */
+  async cancelledTailerStarvationForTest(): Promise<{
+    siblingBodyAfterCancel: string | null;
+  }> {
+    const runId = "starve-run";
+    const requestId = "starve-req";
+    const streamId = this["_resumableStream"].start(requestId);
+    await this["_storeStreamChunk"](
+      streamId,
+      JSON.stringify({ type: "text-start" })
+    );
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    // One stored chunk (index 0) ⇒ live counter sits at 1, in lockstep.
+    this["_agentToolLiveSequences"].set(runId, 1);
+
+    // afterSequence: 0 ⇒ the drain skips the stored backlog, so both tailers go
+    // live immediately. A is registered first (iterated first in the broadcast).
+    const a = (await this.tailAgentToolRun(runId, {
+      afterSequence: 0
+    })) as unknown as ReadableStream<Uint8Array>;
+    const b = (await this.tailAgentToolRun(runId, {
+      afterSequence: 0
+    })) as unknown as ReadableStream<Uint8Array>;
+    const readerA = a.getReader();
+    const readerB = b.getReader();
+
+    // Wait until both forwarders are registered and live (drain complete).
+    const regDeadline = Date.now() + 2000;
+    while (
+      (this["_agentToolForwarders"].get(runId)?.size ?? 0) < 2 &&
+      Date.now() < regDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // A's consumer detaches.
+    await readerA.cancel();
+
+    // A new chunk is broadcast for the run.
+    const body = JSON.stringify({
+      type: "tool-output-available",
+      toolCallId: "sibling",
+      output: "ok"
+    });
+    this["_broadcastChatMessage"]({
+      body,
+      done: false,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    });
+
+    // B must still receive it.
+    const decoder = new TextDecoder();
+    let buf = "";
+    let siblingBodyAfterCancel: string | null = null;
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const nl = buf.indexOf("\n");
+      if (nl >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line) {
+          siblingBodyAfterCancel = (JSON.parse(line) as { body: string }).body;
+          break;
+        }
+        continue;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        readerB.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buf += decoder.decode(next.value, { stream: true });
+    }
+    await readerB.cancel();
+    return { siblingBodyAfterCancel };
+  }
+
+  /**
    * #1575: broadcast a chat error frame whose request id belongs to no
    * agent-tool run, simulating an unrelated turn failing on this agent
    * while a run is being tailed.
@@ -3819,6 +3915,20 @@ export class AIChatAgentToolParent extends Agent<Env> {
       crypto.randomUUID()
     );
     return child.coldCounterReattachForwardsForTest();
+  }
+
+  /**
+   * Drive the cancelled-tailer-starves-siblings probe (Devin review on #1827).
+   * Routed through `subAgent` so the child runs in its SQL-enabled DO.
+   */
+  async cancelledTailerStarvationChildForTest(): Promise<{
+    siblingBodyAfterCancel: string | null;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.cancelledTailerStarvationForTest();
   }
 
   async runChildWithDelayedAbort(

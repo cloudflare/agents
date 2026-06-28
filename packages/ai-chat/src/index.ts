@@ -3635,10 +3635,27 @@ export class AIChatAgent<
     runId: string,
     options?: { afterSequence?: number; signal?: AbortSignal }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    // Hoisted out of `start` so the `cancel` callback (a sibling of `start` on
+    // the underlying source) can reach them — an in-scope-only `closed`/`forward`
+    // is exactly why a cancelled consumer used to leave a zombie forwarder.
+    let closed = false;
+    let forward: ((chunk: AgentToolStoredChunk) => void) | undefined;
+    const detach = () => {
+      // Remove our forwarder and drop the now-empty set so the broadcast
+      // idle-guard (`_agentToolForwarders.size`) goes cold again. Otherwise a
+      // run that was already terminal at attach (its `_closeAgentToolTailers`
+      // already ran and won't run again) leaves an empty set keyed by runId, and
+      // every subsequent broadcast on this DO keeps paying the
+      // `interceptAgentToolBroadcast` cost forever.
+      if (forward) {
+        const set = this._agentToolForwarders.get(runId);
+        set?.delete(forward);
+        if (set && set.size === 0) this._agentToolForwarders.delete(runId);
+        forward = undefined;
+      }
+    };
     const stream = new ReadableStream<Uint8Array>({
       start: async (controller) => {
-        let closed = false;
-
         // Highest sequence already enqueued into this view. Stored chunk_index
         // and the live forwarder sequence share one monotonic numbering (see
         // `_getAgentToolStoredChunks`), so a single high-water mark dedupes the
@@ -3659,10 +3676,13 @@ export class AIChatAgent<
             );
           } catch {
             // The consumer detached (e.g. a parent's bounded re-attach budget
-            // expired) between the read view closing and our close() running.
-            // Drop the chunk instead of surfacing a stream rejection; the
-            // child run is unaffected.
-            close();
+            // expired) between the read view closing and our handling here.
+            // Just mark dead and detach — do NOT call `controller.close()` on an
+            // already-cancelled stream, which throws and would propagate out of
+            // `interceptAgentToolBroadcast`'s forward loop, starving the run's
+            // sibling tailers of this chunk. The child run is unaffected.
+            closed = true;
+            detach();
           }
         };
 
@@ -3672,7 +3692,7 @@ export class AIChatAgent<
         // the ordered backlog.
         let draining = true;
         const pending: AgentToolStoredChunk[] = [];
-        const forward = (chunk: AgentToolStoredChunk) => {
+        forward = (chunk: AgentToolStoredChunk) => {
           if (closed) return;
           if (draining) {
             pending.push(chunk);
@@ -3684,15 +3704,12 @@ export class AIChatAgent<
         const close = () => {
           if (closed) return;
           closed = true;
-          // Detach our forwarder so a run that was already terminal at attach
-          // (its `_closeAgentToolTailers` already ran) doesn't leak for the DO's
-          // lifetime. Drop the now-empty set too, so the broadcast idle-guard
-          // (`_agentToolForwarders.size`) goes cold again instead of paying the
-          // `interceptAgentToolBroadcast` cost on every subsequent broadcast.
-          const set = this._agentToolForwarders.get(runId);
-          set?.delete(forward);
-          if (set && set.size === 0) this._agentToolForwarders.delete(runId);
-          controller.close();
+          detach();
+          try {
+            controller.close();
+          } catch {
+            // Already closed (e.g. the consumer cancelled the reader first).
+          }
         };
         const onAbort = () => close();
 
@@ -3761,16 +3778,29 @@ export class AIChatAgent<
             this._agentToolLiveSequences.set(runId, lastEmitted + 1);
           }
         } catch (error) {
-          // Detach the up-front-registered forwarder (dropping the now-empty
-          // set) before surfacing the failure so it doesn't linger on this run.
+          // Detach the up-front-registered forwarder before surfacing the
+          // failure so it doesn't linger on this run, then guard
+          // `controller.error` — the stream may already be torn down (e.g. the
+          // consumer cancelled during the drain await), in which case
+          // `controller.error` throws.
           closed = true;
-          const set = this._agentToolForwarders.get(runId);
-          set?.delete(forward);
-          if (set && set.size === 0) this._agentToolForwarders.delete(runId);
-          controller.error(error);
+          detach();
+          try {
+            controller.error(error);
+          } catch {
+            // Stream already torn down.
+          }
         }
       },
-      cancel: () => {}
+      cancel: () => {
+        // A consumer detaching from the tail (e.g. a parent's bounded re-attach
+        // budget expiring via reader.cancel()) is read-only — it must NOT cancel
+        // the child run. Mark dead and detach the forwarder so no later broadcast
+        // reaches this torn-down controller (a lingering forwarder would throw on
+        // the next enqueue). Mirrors @cloudflare/think's read-only tail.
+        closed = true;
+        detach();
+      }
     });
     return stream as unknown as ReadableStream<AgentToolStoredChunk>;
   }

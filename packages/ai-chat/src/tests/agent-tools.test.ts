@@ -171,6 +171,9 @@ type ParentStub = DurableObjectStub & {
     liveSequenceAfterDrain: number | undefined;
     postRestart: { sequence: number; body: string } | null;
   }>;
+  cancelledTailerStarvationChildForTest(): Promise<{
+    siblingBodyAfterCancel: string | null;
+  }>;
   inspectChild(runId: string): Promise<AgentToolRunInspection | null>;
   getChildChunks(
     runId: string,
@@ -402,6 +405,27 @@ describe("AIChatAgent as an agent-tool child", () => {
         output: "ok"
       })
     });
+  });
+
+  it("does not starve sibling tailers when one tailer's consumer cancels", async () => {
+    // Two parents tail the same run; one consumer cancels its reader. The
+    // cancelled tailer must detach (not linger as a zombie forwarder), and the
+    // tail's `controller.close()` must be guarded — otherwise the next broadcast
+    // throws while emitting to the cancelled stream and that exception escapes
+    // `interceptAgentToolBroadcast`'s forward loop, starving every sibling tailer
+    // of the chunk. The surviving tailer must still receive the broadcast.
+    const parent = await getParent();
+
+    const { siblingBodyAfterCancel } =
+      await parent.cancelledTailerStarvationChildForTest();
+
+    expect(siblingBodyAfterCancel).toBe(
+      JSON.stringify({
+        type: "tool-output-available",
+        toolCallId: "sibling",
+        output: "ok"
+      })
+    );
   });
 
   it("finalizes lifecycle hooks and terminal events during parent recovery reconciliation", async () => {
