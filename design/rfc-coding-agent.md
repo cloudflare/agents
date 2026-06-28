@@ -1,372 +1,349 @@
 Status: proposed
 
-# RFC: First-class `CodingAgent` for Think
+# RFC: `CodingAgent` — a new `@cloudflare/coding-agent` package
 
-A Cloudflare-owned agent class that drives a CLI coding agent (Claude Code first,
-Codex/others later) inside a Cloudflare Sandbox, slotted in like any other Think
-agent:
+A Cloudflare-owned class that drives a coding agent (Claude Code first,
+Codex/others later) inside a Cloudflare Sandbox, with a chat UI, durable
+sessions, recovery, and orchestration-friendliness:
 
 ```ts
-import { CodingAgent } from "@cloudflare/think/claudecode";
+import { CodingAgent } from "@cloudflare/coding-agent/claude-code";
 
 export class MyCoder extends CodingAgent<Env> {
-  repo = "https://github.com/threepointone/aywson";
+  repo = "https://github.com/threepointone/aywson"; // a default — usually resolved per-instance
 }
 ```
 
 Prototyped in `examples/sandbox-coding-agent` (PR #1830). This RFC proposes
-promoting that prototype into the `@cloudflare/think` package as a supported
-class, and locks the surface before any core code moves.
+extracting and hardening that prototype into a **new package** — _not_ a Think
+subclass and _not_ a Think subpath — and locks the surface before code moves.
+
+> **What changed from the first draft of this RFC.** The original plan made
+> `CodingAgent` a `Think` subclass behind a new internal "turn runtime" seam in
+> Think core. Review killed that: a coding agent is not a chat-model agent, so
+> ~half of Think's surface (`getModel`, `getTools`, `beforeTurn`, compaction,
+> context blocks, structured output…) would be inert, the core refactor was the
+> riskiest part of the plan, and — crucially — coupling to Think's
+> replay-the-transcript model fights reuse of the AI SDK `HarnessAgent`, which
+> gives us tested stream-mapping and session lifecycle for free. The conclusion:
+> own a small new package with its own opinions and its own dependency schedule.
 
 ## The problem
 
 The big coding-agent CLIs (Claude Code, Codex, Gemini CLI, …) are an important,
-durable category: a user who wants "Claude Code, but as a stateful agent on my
-infra, with a UI, recovery, and orchestration" should get that in a few lines.
+durable category: someone who wants "Claude Code, but as a stateful agent on my
+infra, with a UI, recovery, and orchestration" should get it in a few lines.
 
-Today they can't, cleanly:
+Today it's all per-example boilerplate (`examples/sandbox-coding-agent`):
 
-- **Think has no turn seam for a non-model runtime.** `Think._runInferenceLoop`
-  is hardwired to `streamText({ model: getModel() })` (`packages/think/src/think.ts`).
-  A coding CLI is not a `LanguageModel` — it owns its own agentic loop, tools,
-  context, and session — so it cannot be returned from `getModel()`.
-- **The only escape hatch is `AIChatAgent.onChatMessage`**, which returns an
-  arbitrary `Response`. That is what the example uses for its child coding agent,
-  which means the child is _not_ a Think agent (can't orchestrate, doesn't share
-  Think's hooks/recovery semantics), and we hand-roll the CLI's `stream-json` →
-  `UIMessage` translation (`examples/sandbox-coding-agent/src/claude-code.ts`,
-  ~375 lines of mapper).
-- **Everything Cloudflare-specific is re-implemented per example**: the Sandbox
-  lifecycle, the zero-token AI Gateway egress trick, the session `--resume`
-  plumbing, the diff capture, and the (currently absent) durability story.
+- a hand-rolled ~375-line `stream-json` → `UIMessage` mapper
+  (`src/claude-code.ts`) that we maintain ourselves;
+- the Sandbox lifecycle, the zero-token AI Gateway egress trick, and the session
+  `--resume` plumbing, re-implemented each time;
+- **no durability story** — the container disk is ephemeral, so edits and the
+  CLI's native session are silently lost across a container sleep (documented as
+  a known gap in the example's README).
 
-We keep paying this cost every time someone wants a coding agent. The category
-is worth owning end-to-end.
+We re-pay this every time. The category is worth owning end-to-end — in the right
+place, with the right base.
 
 ## The proposal
 
-Ship `CodingAgent` as a first-class `Think` subclass under per-CLI subpath
-exports of `@cloudflare/think`. We own the whole stack, so we can do
-Cloudflare-native things a generic wrapper can't (snapshots for durability,
-tokenless gateway egress, DO-tuned recovery, HITL via Think approvals).
+Ship **`@cloudflare/coding-agent`**: a new package whose `CodingAgent` extends
+`AIChatAgent` (from `@cloudflare/ai-chat`) and drives a coding **engine** inside
+a Cloudflare Sandbox.
 
-**Strategic stance: own the public interface, keep the engine swappable.** The
-`CodingAgent` API is the durable bet. Whether it drives the CLI directly (now)
-or delegates to a matured `@ai-sdk/harness` later is an implementation detail
-behind the same class — users never re-learn an API.
+**Strategic stance: own the public surface; keep the engine pluggable.** The
+`CodingAgent` API is the durable bet. The engine that actually drives the CLI is
+swappable behind it (see §3).
 
-### 1. A minimal, internal turn seam in Think
+### 1. Base class: `AIChatAgent`, not `Think`
 
-Generalize the single convergence point so a turn can be produced by something
-other than `streamText`. This is the _private_ version of a "turn runtime" — not
-a public pluggable API; `CodingAgent` is its first and (initially) only consumer.
+`CodingAgent extends AIChatAgent`. This gives us, all already tested and shipped:
 
-```ts
-// internal to @cloudflare/think
-interface TurnRuntime {
-  // Must emit the same AI-SDK UI-message stream Think already consumes
-  // downstream, so persistence / recovery / agent-tools / UI are unchanged.
-  streamTurn(
-    ctx: TurnContext,
-    opts: { abortSignal: AbortSignal }
-  ): Promise<StreamableResult>;
-}
-```
+- `onChatMessage(...)` — returns a UI-message stream `Response`. **This is the
+  seam.** No new core machinery, no Think changes.
+- chat persistence, resumable streams, and `chatRecovery`;
+- `useAgentChat` client integration for the UI;
+- works as an **agent-tool child** (the example already delegates to it) — so
+  orchestration is "a `Think` (or any agent) delegates to a `CodingAgent` via
+  `codingAgentTool`," exactly the shipped example pattern.
 
-`_runInferenceLoop` resolves a runtime instead of hardcoding the model:
-
-```ts
-const runtime = this._turnRuntime() ?? new ModelTurnRuntime(this.getModel());
-const result = await runtime.streamTurn(finalTurnContext, { abortSignal });
-// everything below — UI piping, persistence, recovery — is untouched
-```
-
-`ModelTurnRuntime` wraps today's `streamText` path verbatim (no behavior change
-for existing agents). `CodingAgent` supplies a `CliTurnRuntime`. Because
-`HarnessAgent.stream()` (and our CLI mapper) already emit AI-SDK stream parts,
-the downstream consumer needs no changes.
+Nothing about Think's model loop applies to a coding agent, so we don't inherit
+it. (If a `CodingAgent` ever needs to orchestrate sub-agents itself, it uses
+`subAgent()` like any `Agent` — it doesn't need to _be_ a `Think`.)
 
 ### 2. `CodingAgent` (the owned class)
 
-A `Think` subclass that, per turn:
+A thin `AIChatAgent` whose `onChatMessage`, per turn:
 
-1. ensures a warm Sandbox with the repo present (clone, or restore from snapshot);
-2. runs the CLI headless against the latest user message, mapping its event
-   stream to `UIMessage` chunks;
-3. captures the resulting diff and persists session/continuation state.
-
-`getModel()` is unused on this path. Configuration is declarative:
+1. ensures a warm Sandbox with the repo present (clone / restore — §6);
+2. runs the engine against the latest user message, streaming its events as
+   `UIMessage` chunks;
+3. captures the diff and persists session/continuation state (§6).
 
 ```ts
 export class MyCoder extends CodingAgent<Env> {
-  repo = "https://github.com/org/repo"; // a *default* — usually resolved per-instance, see §8
+  repo = "https://github.com/org/repo"; // a default — usually resolved per-instance (§7)
   workDir = "/workspace/repo";
-  gateway = "default"; // AI Gateway id for tokenless egress
+  gateway = "default"; // AI Gateway id for tokenless egress (§5)
   sleepAfter = "15m";
 }
 ```
 
 Surface (initial):
 
-- **Config:** `repo`, `workDir`, `gateway`, `sleepAfter`, `cliArgs`,
-  `permissionPolicy` — resolved per-instance, not hardcoded (§8).
-- **Hooks:** `prepareWorkspace(sandbox)`, `onDiff(diff)`, `beforeToolCall(name,
-input)` (reuse Think's existing approval/authorization machinery for HITL),
-  `beforeCommit(diff)`.
-- **Built-in callables:** `getWorkspaceDiff()`, `getFileTree()`, optional
-  `commit()/openPR()` helpers.
-- Inherits all of Think: agent-tools (it can orchestrate _and_ be delegated to),
-  channels, MCP, persistence, recovery, resumable streams.
+- **Config:** `repo`, `workDir`, `gateway`, `sleepAfter`, `cliArgs` — resolved
+  per-instance, not hardcoded (§7).
+- **Hooks:** `prepareWorkspace(sandbox)`, `onDiff(diff)`.
+- **Built-in callables:** `getWorkspaceDiff()`, `getFileTree()`.
+- Inherits `AIChatAgent`: chat persistence, resumable streams, recovery,
+  agent-tool child behavior.
 
 Usage forms:
 
 ```ts
 // 1. subclass (above) — the 90% case
 // 2. config factory:
-const Coder = createCodingAgent({ cli: "claude-code", repo, gateway: "default" });
-// 3. as a delegated sub-agent (Think-on-Think, no @cloudflare/ai-chat child):
+const Coder = createCodingAgent({ engine: claudeCode, repo, gateway: "default" });
+// 3. delegated from an orchestrator (the example's pattern, unchanged):
 getTools() {
   return { delegate: codingAgentTool(MyCoder, { inputSchema: z.object({ task: z.string() }) }) };
 }
 ```
 
-### 3. Per-CLI adapter contract & packaging
+> Deferred out of v1 (see §10): `commit()` / `openPR()` (need git/GitHub creds —
+> fights the zero-secret story, needs its own auth design) and per-tool HITL /
+> `permissionPolicy` (brokering in-container tool calls for approval is a project
+> on its own, not a config flag).
 
-Same class name, swap the subpath, swap the engine:
+### 3. The engine seam (and why it answers "don't hand-roll the mapper")
 
-```ts
-import { CodingAgent } from "@cloudflare/think/claudecode"; // claude -p
-import { CodingAgent } from "@cloudflare/think/codex"; // codex exec
+`CodingAgent` delegates the turn to a `CodingEngine`. An engine takes the latest
+prompt + a durable session handle and emits AI-SDK stream parts. Two concrete
+engines, in priority order:
+
+- **`HarnessEngine` (the goal).** Wraps the AI SDK `HarnessAgent`, which is
+  itself an AI SDK `Agent`: `createSession()`, `stream({ session, prompt })`
+  emitting stream parts, plus `detach()/stop()/suspendTurn()/resumeFrom`. This
+  gives us the `stream-json` mapping, session lifecycle, and suspend/resume
+  **tested and maintained upstream** — the maintenance tax we'd otherwise own.
+  It requires a Cloudflare sandbox provider for harness (tracked as
+  cloudflare/agents#1829), which becomes a real workstream, not a footnote.
+- **`CliEngine` (ships first).** The example's concrete driver + mapper, lifted
+  and hardened. Works **today** with no dependency on harness or the provider.
+  It's the fallback for CLIs harness doesn't support and the bootstrap until
+  `HarnessEngine` is ready.
+
+We do **not** design a speculative multi-CLI "adapter interface" up front (a
+prior draft did; review flagged it as designing an abstraction from a single
+example). `CliEngine` ships claude-code concretely; the per-CLI adapter
+interface gets _extracted_ only once a second CLI (codex) actually lands and we
+can see the real shape.
+
+Independent package ⇒ independent deps: `@cloudflare/coding-agent` can pin
+whatever AI-SDK major `@ai-sdk/harness` needs **without gating `@cloudflare/think`
+or the rest of the repo.**
+
+### 4. Why a separate package (not a Think subpath)
+
+- **Layering.** A Think subpath would put `@cloudflare/sandbox` into the chat
+  agent base. `AGENTS.md` records the opposite preference: _"when a package
+  boundary feels wrong (e.g. a helper depending on a larger package just for an
+  adapter), prefer moving the adapter out."_ Containers don't belong in Think.
+- **Opinions.** A fresh package lets us bake coding-specific opinions (sandbox
+  lifecycle, diff capture, egress) without polluting a general base.
+- **Deps & release cadence.** Independent versioning and the AI-SDK-major
+  freedom above.
+
+Dependencies: `agents`, `@cloudflare/ai-chat`, `@cloudflare/sandbox`, and
+(for `HarnessEngine`) `@ai-sdk/harness` + the CF sandbox provider. New
+`packages/` deps need sign-off per `AGENTS.md`.
+
+```
+packages/coding-agent/src/
+  index.ts             # CodingAgent (extends AIChatAgent) + createCodingAgent + codingAgentTool
+  sandbox.ts           # Sandbox subclass: AI Gateway egress (+ snapshot helpers, §6)
+  engines/
+    cli.ts             # CliEngine (concrete; mapper lifted from the example)
+    harness.ts         # HarnessEngine (wraps HarnessAgent; gated on #1829)
+exports: "@cloudflare/coding-agent/claude-code" -> a CodingAgent bound to the claude engine
 ```
 
-Each subpath exports a `CodingAgent` pre-bound to one `CliAdapter`:
+### 5. Tokenless egress (scoped honestly)
 
-```ts
-interface CliAdapter {
-  name: string; // "claude-code"
-  minVersion: string; // asserted against the installed CLI
-  buildCommand(turn: {
-    prompt: string;
-    sessionId?: string;
-    args?: string[];
-  }): string;
-  bootEnv(ctx: { gatewayPlaceholderKey: string }): Record<string, string>;
-  // stream-json line → UI-message chunks (the only per-CLI complexity)
-  mapLine(line: string, sink: ChunkSink): void;
-  // resume / session identity
-  sessionFlag(sessionId: string | undefined): {
-    flag: string;
-    sessionId: string;
-  };
-  detectFailure(state: AdapterState): string | undefined;
-}
-```
+The example's `outboundByHost` + `env.AI.gateway()` interception moves into the
+package's Sandbox subclass (and, for `HarnessEngine`, into the CF sandbox
+provider). The honest scope:
 
-The claude-code adapter is the example's `ClaudeStreamMapper` + command builder,
-lifted and hardened. **Per-CLI `stream-json` drift is the real maintenance tax**
-(the cost `@ai-sdk/harness` amortizes across the ecosystem); we accept it and
-contain it with the conformance suite (§7) and a CLI version pinned in the base
-image. **Ship claude-code only first**; add `codex` once the adapter contract is
-proven.
+- it's **per-provider** — `api.anthropic.com`→anthropic, `api.openai.com`→openai,
+  etc. — so the egress map is engine/CLI-specific, not a universal switch;
+- it relies on the container platform terminating TLS for that host
+  (`interceptHttps`); we keep the documented fallback (`ANTHROPIC_BASE_URL` /
+  key pointed at a gateway URL) prominent;
+- CLIs that authenticate via OAuth / subscription (no rewritable base URL)
+  **cannot** be made tokenless this way — call that out rather than implying
+  "zero-secret always."
 
-Package layout:
+Within those bounds it's a genuine differentiator: for API-key CLIs, the
+container holds **no credentials**.
 
-```
-packages/think/src/coding/
-  index.ts           # CodingAgent base + createCodingAgent + codingAgentTool
-  runtime.ts         # CliTurnRuntime (TurnRuntime impl)
-  sandbox.ts         # Sandbox subclass: AI Gateway egress + backup/restore
-  adapters/
-    claude-code.ts   # CliAdapter (mapper lifted from the example)
-exports: "@cloudflare/think/claudecode" -> a CodingAgent bound to the claude adapter
-```
+### 6. Durability & recovery — two decoupled lifecycles
 
-`@cloudflare/sandbox` becomes a (peer?) dependency of the coding subpath only —
-not of the think core. (New `packages/` dependency → needs sign-off per
-`AGENTS.md`.)
+The crux, and the thing this package can do _well_ because it owns the whole
+stack. There are **two independent lifecycles with different shutdown
+behaviors**, and most bugs live in their seams:
 
-### 4. Tokenless egress, built in
+|           | Durable Object (control plane)                   | Sandbox container (compute)                      |
+| --------- | ------------------------------------------------ | ------------------------------------------------ |
+| Shutdown  | hibernation (state kept) / eviction (state kept) | `sleepAfter` sleep, OOM, crash — **disk wiped**  |
+| Trigger   | idle, deploy, restart                            | idle timer, platform — **independent of the DO** |
+| Authority | source of truth (SQLite)                         | a cache                                          |
 
-The `outboundByHost` + `env.AI.gateway()` interception from the example moves
-into `coding/sandbox.ts`, so every `CodingAgent` is zero-secret by default —
-no Anthropic key, no `cf-aig` token in the container, only a plaintext gateway
-id. This stops being per-example boilerplate.
+They fail **independently**: a DO can be evicted while its container keeps
+running orphaned; a container can sleep/crash while the DO is happily
+hibernating. So the design is a **reconcile-on-wake** protocol, not a single
+checkpoint:
 
-### 5. Durability via Sandbox snapshots
+- **Persist authority in the DO**, not the container: the session handle
+  (harness `resumeState` / the CLI session id) and a workspace checkpoint.
+- **On wake, reconcile:** is the session/container still live (attach) or gone
+  (re-create from the persisted state)?
 
-Resolves the gap documented in the example README. The container disk is
-ephemeral; `CodingAgent` makes the DO the source of truth:
+`HarnessEngine` gets most of this for free via session lifecycle:
 
-- on turn finish: `sandbox.createBackup({ directory })` of `workDir` **and**
-  `~/.claude` (session data), store the `DirectoryBackup` handle in DO storage
-  next to the session id;
-- in `prepareWorkspace`: restore if a backup exists, else clone.
+- idle → `session.detach()` (park, keep sandbox warm) + persist `resumeState`;
+- cold/stop → `session.stop()`;
+- wake → `createSession({ resumeFrom })`;
+- **mid-turn DO eviction → best-effort** `session.suspendTurn()` in the shutdown
+  window → persist `continuationState` → `continueStream()` on wake.
 
-The disk becomes a cache; multi-turn survives container sleep (real `--resume`
-against restored session data, edits accumulate).
+`CliEngine` approximates this with a workspace snapshot
+(`sandbox.createBackup`/`restoreBackup` of `workDir` + the CLI's session dir) +
+`--resume`. Two honesty notes the prior draft glossed:
 
-> This snapshot approach may be **superseded** by a durable-VFS filesystem
-> backend (§9), where state lives in the DO and the snapshot dance disappears.
-> Both sit behind the same filesystem seam, so v1 can ship snapshots and swap
-> later without an API change.
+1. **Claude `-p` cannot resume a killed turn.** `--resume` continues a session
+   with a _new_ prompt; it does not re-attach to a half-finished, process-killed
+   turn. So mid-turn recovery on `CliEngine` is **re-run**, and a naive re-run can
+   **double-apply** edits/commits. Mitigation: reset the tree to the last
+   checkpoint before re-running, and treat a dirty tree as the recovery signal.
+2. **Snapshot cost must be bounded.** Backing up a `node_modules`-laden tree to
+   R2 on every turn is slow/expensive. Make it incremental/conditional (skip when
+   the tree is clean; consider excluding `node_modules` and re-`install` on
+   restore). Verify that restoring the CLI's session dir into a _fresh_ container
+   actually resumes before relying on it.
 
-### 6. Recovery tuned to the DO lifecycle
+### 7. Configuration & topology
 
-Because we own the CLI invocation we own the checkpoint, rather than depending on
-a harness primitive:
-
-- **Between turns (reliable):** persisted session id + workspace snapshot →
-  resume on wake.
-- **Mid-turn eviction (best-effort):** persist a continuation marker; on wake,
-  prefer resume-the-same-turn over re-issue when the CLI supports it. Honest
-  caveat: abrupt eviction may not allow a clean checkpoint — still strictly
-  better than today's "orphan the process + restart."
-
-### 7. Conformance tests (the drift guard)
-
-One golden-transcript suite per CLI adapter: a recorded `stream-json` fixture →
-assert the exact `UIMessage` chunk sequence. Pin the CLI version in the base
-image; bumping it must update the fixture. This is how we keep the maintenance
-tax bounded and visible.
-
-### 8. Configuration & topology
-
-**Dynamic config (resolve, don't hardcode).** The class-field form is the simple
-case; the common case is one repo _per instance / per thread_. Config resolves
-by precedence and is **frozen on the first turn** — the workspace is built around
-the repo, so changing it mid-session means a new thread, not a re-clone:
+**Dynamic config (resolve, don't hardcode).** Config resolves by precedence:
 
 ```
 configure() (persisted in DO storage)  >  this.props (sub-agent Props)  >  class-field default
 ```
 
-A threaded/delegated coder gets its repo at spawn — `subAgent(MyCoder, id, { repo, branch })`
-— and a standalone one via a `@callable() configure({ repo })` on first connect.
-`repo` is the minimum; `branch`, `baseRef`, and per-session env follow the same
-path.
+Separate **immutable repo identity** from **mutable working state**: `repo` is
+frozen on first turn (the workspace is built around it; changing it = a new
+thread), but **`branch` / checkout are mutable in-session** — switching branches
+is a `git checkout`, a normal coding move, not a new container. A
+threaded/delegated coder gets config at spawn (`subAgent(MyCoder, id, { repo })`);
+a standalone one via `@callable() configure({ repo })` before the first turn.
 
-**Topology.** Because `CodingAgent` is a clean `Think` subclass, three shapes
-fall out of existing primitives with no new machinery:
+**Topology.** Three shapes, all from existing primitives:
 
 1. **Standalone** — one DO, one repo.
-2. **Threads (a userland directory pattern, not a shipped class).** A plain
-   `Agent` owns a table of sessions with **domain-specific** metadata and spawns
-   one `CodingAgent` child per session:
+2. **Threads (userland directory, not a shipped class).** A plain `Agent` owns a
+   session table with domain-specific columns (`repo`/`branch`/`status`/`lastDiff`)
+   and spawns one `CodingAgent` child per session. Gives the Codex-cloud /
+   background-agents shape (dashboard, per-thread containers, cross-session memory
+   via `RemoteContextProvider`) **without** a generic `Chats` base class (whose
+   fixed schema is outgrown immediately — see the note in
+   [`rfc-think-multi-session.md`](./rfc-think-multi-session.md)).
+3. **Orchestrated** — a `Think` (or any agent) delegates via `codingAgentTool`,
+   incl. `delegate_parallel` fan-out (the shipped example).
 
-   ```ts
-   // userland — your rows, your columns
-   class CodingSessions extends Agent<Env> {
-     // sessions(id, repo, branch, status, lastDiff, updatedAt) — your schema
-     @callable() async create(repo: string) {
-       /* insert row + subAgent(MyCoder, id, { repo }) */
-     }
-     @callable() async list() {
-       /* your shape */
-     }
-   }
-   ```
+Requirement: **nothing in `CodingAgent` may assume a top-level binding** — it
+must work as a directory child and as an agent-tool facet.
 
-   This gives the Codex-cloud / background-agents product shape (session
-   dashboard, per-thread isolated containers, cross-session shared memory via
-   `RemoteContextProvider`) **without** a first-class `Chats` base class. We
-   deliberately do _not_ ship a generic directory: a coding directory's metadata
-   (`repo`/`branch`/`status`/`lastDiff`) is domain-specific and outgrows any
-   fixed `ChatSummary` schema immediately. What stays shipped are the
-   load-bearing primitives this leans on — `subAgent` + Props, `parentAgent()`,
-   and `RemoteContextProvider`/`RemoteSearchProvider` — plus a reference example.
-   (See the note added to [`rfc-think-multi-session.md`](./rfc-think-multi-session.md).)
+### 8. Testing & CI
 
-3. **Orchestrated** — delegated via `codingAgentTool`, incl. `delegate_parallel`
-   fan-out (the example's pattern).
+Owning a _package_ (vs an example) raises the testing bar, so name it up front:
 
-Requirement this places on the design: **nothing in `CodingAgent` may assume a
-top-level binding** — it must work as a userland directory child and as an
-agent-tool facet.
-
-### 9. Two more seams, designed in from day one
-
-v1 implements only the container-backed versions, but both are interfaces so we
-don't get boxed in.
-
-**Filesystem backend.** Today: clone into the Sandbox + snapshot for durability
-(§5). Abstract file access behind a backend interface so the durable VFS in
-[`cloudflare/workspace`](https://github.com/cloudflare/workspace) can slot in
-later — it holds authoritative state in the DO (SQLite) and projects it into the
-container as a FUSE mount, with a cheap Worker (`just-bash`) backend for textual
-tooling alongside the container backend. If it pans out it **supersedes the
-snapshot durability plan** (state lives in the DO, not the disk) and unifies the
-cheap-grep / heavy-`npm` tool split. It is **preview-only / unstable** today with
-a real large-file I/O penalty (metadata ops are competitive-to-faster), so:
-spike it as an alternate backend, do **not** couple v1 to it.
-
-**Run / preview.** A coding agent that builds web apps must _run_ them. Two
-models, chosen by target:
-
-- container dev server (`vite dev` + Sandbox `exposePort`) — any stack, real HMR,
-  native deps; long-lived process + public URL;
-- Worker-native (`@cloudflare/worker-bundler` `createApp` → `env.LOADER`, assets
-  served host-side) — instant, scales to zero, durable, **but Workers-target only**.
-
-`CodingAgent.preview()` picks: a Workers-compatible project → `LOADER`
-(cheap/instant/durable); else → container dev server. The Worker-native path is
-also the _run_ primitive for the native runtime (§10).
-
-### 10. Future work: a Workers-native coding runtime (Runtime B)
-
-The `TurnRuntime` seam (§1) makes "our own coding agent" just a _second_ runtime
-behind the same `CodingAgent` shell: a model-driven Think loop with coding tools
-(read/edit/grep/bash) where the model is Workers AI / AI Gateway and the tools
-run in the Workspace — **no container** for the textual-edit case, escalating to
-a container only for `npm`/build (§9) and previewing via `env.LOADER` (§9). Same
-class, same threads, same UI. `delegate_parallel` could then race the CLI runtime
-against the native one on one task — an instant eval/dogfooding harness. Deferred
-to its own RFC; captured here so v1's seams don't preclude it.
+- **Unit:** engine mapping via recorded `stream-json` fixtures. Assert
+  **semantic equivalence** (the resulting message/tool/diff shape), _not_ a
+  byte-exact chunk sequence — exact-sequence golden tests churn on every benign
+  CLI change. `HarnessEngine` inherits upstream's tested mapping.
+- **Pin the CLI version** in the base image; a bump must update fixtures.
+- **End-to-end** (real Docker + real CLI + real egress) can't run in
+  `vitest-pool-workers`; gate it behind a **nightly / opt-in** job, not the PR
+  path. Keep the PR path on fixtures.
 
 ## The alternatives
 
-- **Wrap `@ai-sdk/harness` `HarnessAgent` behind a public `TurnRuntime` API**
-  (the prior proposal). Rejected as the _primary_ bet: it's experimental,
-  version-locked to the AI SDK major, and has no Cloudflare sandbox provider, so
-  we'd be building a provider _and_ a wrapper while ceding control of the surface.
-  Not discarded — it's the candidate _future engine_ behind `CodingAgent`'s API,
-  and writing `@ai-sdk/sandbox-cloudflare` remains tracked separately
-  (cloudflare/agents#1829).
+- **Make `CodingAgent` a `Think` subclass behind a new turn-runtime seam in Think
+  core** (this RFC's original plan). Rejected: ~half of Think's surface is inert
+  on a coding agent; the `_runInferenceLoop` refactor is the riskiest part of the
+  plan and touches every existing Think user; and Think's replay-the-transcript
+  model fights `HarnessAgent` reuse. `AIChatAgent.onChatMessage` already provides
+  the seam with zero core changes.
+- **Hand-roll the `stream-json` mapper as the only engine.** Rejected as the
+  _end state_: `HarnessAgent` gives tested mapping + session lifecycle for free.
+  We still ship `CliEngine` first (works today), but converge on `HarnessEngine`.
+- **A subpath of `@cloudflare/think`.** Rejected: puts containers in the chat
+  base, against the `AGENTS.md` layering preference; blocks independent deps.
+- **Adopt `cloudflare/workspace` as the filesystem now.** Deferred (§10):
+  preview-only / unstable with a large-file I/O penalty; spike behind a seam, do
+  not couple v1.
+- **Keep it an example, not a package.** Status quo — re-pays the integration
+  cost per use and leaves durability unsolved.
 
-- **Build `CodingAgent` on `AIChatAgent` instead of Think.** Quicker (the
-  `onChatMessage` seam already exists), but caps it at a leaf coding agent: it
-  can't orchestrate or delegate, and it diverges from Think's hook/recovery
-  model. We want coder and orchestrator to be the same base.
+## Directions (explicitly out of v1)
 
-- **Expose a public, pluggable turn-runtime API now.** Premature: one consumer.
-  Keep the seam internal until a second runtime justifies a stable contract.
+Captured so v1 doesn't preclude them; each is its own follow-up, **not** a
+designed-in seam in v1 (we won't build interfaces before their second consumer
+exists):
 
-- **Adopt `cloudflare/workspace` as the filesystem now.** Tempting — durability
-  becomes structural (state in the DO, not the disk) and the tool split unifies.
-  But it's preview-only / unstable with a large-file I/O penalty; coupling a
-  shipped class to it inherits that risk. Designed behind a backend seam (§9) and
-  spiked separately instead.
-
-- **Keep it an example, not a package class.** Status quo. Re-pays the full
-  integration cost per use and leaves the durability/recovery gaps unsolved.
+- **Durable-VFS filesystem** via [`cloudflare/workspace`](https://github.com/cloudflare/workspace):
+  authoritative state in the DO, projected into the container as a FUSE mount,
+  with a cheap Worker (`just-bash`) backend alongside the container backend. If it
+  pans out it **supersedes the snapshot durability** of §6 (state lives in the DO,
+  not the disk) and unifies the cheap-grep / heavy-`npm` split. Spike it.
+- **Run / preview.** `vite dev` + Sandbox `exposePort` (any stack) vs
+  `@cloudflare/worker-bundler` + `env.LOADER` (Workers-target, instant,
+  scale-to-zero). Make the choice **explicit**, not auto-detected.
+- **Git / PR ops** (`commit`/`openPR`) with a real credential design.
+- **Per-tool HITL / approvals** brokered across the container boundary.
+- **A Workers-native coding runtime** ("Runtime B"): a model-driven loop with
+  coding tools on Workers, container only when needed, preview via `env.LOADER`.
+  Could be a third engine behind the same `CodingAgent`. Enables a
+  `delegate_parallel` "race CLI vs native" eval harness. Its own RFC.
 
 ## The decision
 
-_Pending review._ Open questions to settle here:
+_Pending review._ Resolved by the discussion that drove the rewrite:
 
-1. Confirm Think-subclass + internal `TurnRuntime` seam over the AIChatAgent route.
-2. `@cloudflare/sandbox` as a peer dep of the `coding` subpath — acceptable?
-3. Class name across subpaths: shared `CodingAgent` (engine swap by import) vs
-   per-CLI names (`ClaudeCodeAgent`, `CodexAgent`).
-4. Config precedence + **freeze-on-first-turn** semantics (§8) — confirm repo is
-   immutable after turn 1.
-5. Put the filesystem behind a backend interface in v1 (container impl only) so a
-   `cloudflare/workspace` backend can land later without an API change (§9)?
-6. Is `preview()` (LOADER vs container dev server, §9) in v1 scope or a follow-up?
-7. Scope of the first PR: seam + claude-code adapter + userland-directory topology +
-   rewrite the example to use the class (delete its local mapper). Codex,
-   `preview()`, and the workspace-VFS spike deferred.
+- ✅ **Own package, not a Think subpath / subclass.** `CodingAgent extends
+AIChatAgent`; no Think core changes.
+- ✅ **Engine is pluggable;** `CliEngine` ships first, `HarnessEngine` is the
+  goal (gated on cloudflare/agents#1829).
+- ✅ **No speculative multi-CLI adapter interface;** extract after codex.
+- ✅ **Filesystem / preview are Directions, not v1 seams.**
+
+Open questions still to settle:
+
+1. Package name (`@cloudflare/coding-agent`?) and the `/claude-code` subpath
+   convention.
+2. `HarnessEngine` vs `CliEngine` as the **default** for the first release —
+   ship `CliEngine` now and migrate, or wait for #1829?
+3. Snapshot policy for `CliEngine` durability (§6): what's backed up, how often,
+   and the `node_modules` question.
+4. First-PR scope: new package skeleton + `CliEngine` (lift the example's mapper)
+   - tokenless egress + §6 durability + dynamic config + rewrite the example onto
+     the package. Codex, `HarnessEngine`, preview, git ops, HITL, VFS deferred.
 
 ## History
 
-- `examples/sandbox-coding-agent` (PR #1830) — the prototype this promotes.
-- cloudflare/agents#1829 — `@ai-sdk/sandbox-cloudflare` provider (future engine).
+- `examples/sandbox-coding-agent` (PR #1830) — the prototype this extracts.
+- cloudflare/agents#1829 — `@ai-sdk/sandbox-cloudflare` provider (gates
+  `HarnessEngine`).
+- [`rfc-think-multi-session.md`](./rfc-think-multi-session.md) — the "don't ship
+  a `Chats` base class" decision the threads topology relies on.
