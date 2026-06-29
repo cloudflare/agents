@@ -20,7 +20,7 @@ allowBuilds:
   protobufjs: false
   "@mongodb-js/zstd": true
   autoevals: set this to true or false
-  #better-sqlite3: true
+  better-sqlite3: true
   core-js-pure: true
   esbuild: true
   node-liblzma: true
@@ -30,7 +30,6 @@ allowBuilds:
   # Transitive dep of @cloudflare/tanstack-ai (tanstack-recovery harness). The
   # Workers AI binding path never uses the OpenRouter SDK, so its build is skipped.
   "@openrouter/sdk": false
-  better-sqlite3: set this to true or false
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
