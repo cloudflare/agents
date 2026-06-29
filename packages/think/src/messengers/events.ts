@@ -18,6 +18,14 @@ export interface MessengerAuthor {
 export interface MessengerAttachment {
   data?: ArrayBuffer;
   fetch?: () => Promise<ArrayBuffer>;
+  /**
+   * Platform-specific metadata needed to re-fetch the attachment after the
+   * event has been serialized (e.g. across a sub-agent Durable Object hop).
+   * Adapters store identifiers here — Telegram `fileId`, WhatsApp `mediaId`,
+   * etc. — that survive serialization even when `fetch`, `data`, and `raw`
+   * cannot, so a downstream agent can reconstruct the download closure.
+   */
+  fetchMetadata?: Record<string, string>;
   id?: string;
   mediaType?: string;
   name?: string;
@@ -114,6 +122,9 @@ export function serializableMessengerEvent(
     message: event.message
       ? {
           attachments: event.message.attachments.map((attachment) => ({
+            fetchMetadata: attachment.fetchMetadata
+              ? { ...attachment.fetchMetadata }
+              : undefined,
             id: attachment.id,
             mediaType: attachment.mediaType,
             name: attachment.name,

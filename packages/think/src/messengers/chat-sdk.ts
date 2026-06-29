@@ -740,6 +740,7 @@ export function toMessengerAuthor(author: ChatAuthor): MessengerAuthor {
 export function toMessengerAttachment(
   attachment: ChatAttachment
 ): MessengerAttachment {
+  const fetchMetadata = attachment.fetchMetadata;
   return {
     fetch: attachment.fetchData
       ? async () => {
@@ -754,12 +755,37 @@ export function toMessengerAttachment(
           return copy instanceof ArrayBuffer ? copy : new ArrayBuffer(0);
         }
       : undefined,
+    fetchMetadata: fetchMetadata ? { ...fetchMetadata } : undefined,
+    id: identifierFromFetchMetadata(fetchMetadata),
     mediaType: attachment.mimeType,
     name: attachment.name,
     raw: attachment,
     size: attachment.size,
     url: attachment.url
   };
+}
+
+const FETCH_METADATA_ID_KEYS = ["id", "fileId", "mediaId", "fileUniqueId"];
+
+/**
+ * Best-effort top-level id for an attachment whose adapter only records its
+ * identifier in `fetchMetadata` (e.g. Telegram `fileId`). This keeps id-based
+ * consumers working without per-adapter knowledge, while the full
+ * `fetchMetadata` is preserved verbatim for precise re-fetching.
+ */
+function identifierFromFetchMetadata(
+  fetchMetadata: Record<string, string> | undefined
+): string | undefined {
+  if (!fetchMetadata) {
+    return undefined;
+  }
+  for (const key of FETCH_METADATA_ID_KEYS) {
+    const value = fetchMetadata[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function stableNamePart(value: string): string {

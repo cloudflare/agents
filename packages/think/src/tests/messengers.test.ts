@@ -26,6 +26,7 @@ import {
   TextStreamCallback,
   textDeltaFromStreamChunk,
   ThinkMessengerRuntime,
+  toMessengerAttachment,
   toMessengerUserMessage,
   type MessengerEvent,
   type MessengerThinkHost
@@ -349,6 +350,7 @@ describe("think messengers core", () => {
           {
             data: new ArrayBuffer(1),
             fetch: () => Promise.resolve(new ArrayBuffer(1)),
+            fetchMetadata: { fileId: "AgACAgIfileid" },
             mediaType: "text/plain",
             name: "notes.txt",
             raw: { providerFile: true },
@@ -372,7 +374,39 @@ describe("think messengers core", () => {
     expect(cloned.event.message.attachments[0].raw).toBeUndefined();
     expect(cloned.event.message.attachments[0].data).toBeUndefined();
     expect(cloned.event.message.attachments[0].fetch).toBeUndefined();
+    expect(cloned.event.message.attachments[0].fetchMetadata).toEqual({
+      fileId: "AgACAgIfileid"
+    });
     expect(cloned.thread._type).toBe("chat:Thread");
+  });
+
+  it("preserves attachment fetchMetadata and backfills id when converting", () => {
+    const attachment = toMessengerAttachment({
+      fetchData: () => Promise.resolve(Buffer.from("hello")),
+      fetchMetadata: { fileId: "AgACAgItelegram" },
+      mimeType: "image/jpeg",
+      name: "photo.jpg",
+      size: 1024,
+      type: "image",
+      url: "https://example.com/photo.jpg"
+    });
+
+    expect(attachment.fetchMetadata).toEqual({ fileId: "AgACAgItelegram" });
+    expect(attachment.id).toBe("AgACAgItelegram");
+    expect(attachment.raw).toBeDefined();
+  });
+
+  it("leaves attachment id undefined when fetchMetadata has no known id key", () => {
+    const attachment = toMessengerAttachment({
+      fetchMetadata: { region: "us-east" },
+      mimeType: "image/jpeg",
+      name: "photo.jpg",
+      type: "image",
+      url: "https://example.com/photo.jpg"
+    });
+
+    expect(attachment.fetchMetadata).toEqual({ region: "us-east" });
+    expect(attachment.id).toBeUndefined();
   });
 
   it("parses and classifies messenger recovery snapshots", () => {
