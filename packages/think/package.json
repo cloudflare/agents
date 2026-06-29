@@ -24,6 +24,8 @@
     "think": "dist/cli/index.js"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.83",
+    "@ai-sdk/openai": "^3.0.70",
     "@cloudflare/codemode": ">=0.4.0",
     "@cloudflare/shell": ">=0.4.0",
     "aywson": "^0.0.16",
@@ -31,11 +33,10 @@
     "create-think": "workspace:*",
     "just-bash": "^3.0.2",
     "smol-toml": "^1.7.0",
+    "workers-ai-provider": "^3.2.1",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/anthropic": "^3.0.83",
-    "@ai-sdk/openai": "^3.0.70",
     "@ai-sdk/react": "^3.0.204",
     "@chat-adapter/telegram": "^4.31.0",
     "@cloudflare/ai-chat": "workspace:*",

@@ -26,8 +26,7 @@
     "ai": "^6.0.202",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "streamdown": "^2.5.0",
-    "workers-ai-provider": "^3.2.1"
+    "streamdown": "^2.5.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.42.3",

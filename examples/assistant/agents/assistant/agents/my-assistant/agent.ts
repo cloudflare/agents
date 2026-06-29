@@ -1,4 +1,3 @@
-import { createWorkersAI } from "workers-ai-provider";
 import { callable } from "agents";
 import {
   Think,
@@ -23,7 +22,7 @@ import type {
   StepContext
 } from "@cloudflare/think";
 import { tool, generateText } from "ai";
-import type { LanguageModel, ToolSet } from "ai";
+import type { ToolSet } from "ai";
 import { z } from "zod";
 import { AssistantDirectory } from "../../agent";
 import { SharedMCPClient } from "../../shared-mcp-client";
@@ -101,16 +100,13 @@ export class MyAssistant extends Think<Env> {
    */
   sharedMcp = new SharedMCPClient(() => this.parentAgent(AssistantDirectory));
 
-  getModel(): LanguageModel {
+  getModel() {
     const tier = this.getConfig<AgentConfig>()?.modelTier ?? "fast";
     const models: Record<string, string> = {
       fast: "@cf/moonshotai/kimi-k2.7-code",
       capable: "@cf/moonshotai/kimi-k2.7-code"
     };
-    return createWorkersAI({ binding: this.env.AI })(
-      models[tier] ?? models.fast,
-      { sessionAffinity: this.sessionAffinity }
-    );
+    return models[tier] ?? models.fast;
   }
 
   // Recover from a turn that overflows the context window mid-flight: compaction
@@ -169,7 +165,9 @@ When you learn something about the user or their project, save it to memory.`
       .onCompaction(
         createCompactFunction({
           summarize: (prompt) =>
-            generateText({ model: this.getModel(), prompt }).then((r) => r.text)
+            generateText({ model: this.resolveModel(), prompt }).then(
+              (r) => r.text
+            )
         })
       )
       .compactAfter(50000)

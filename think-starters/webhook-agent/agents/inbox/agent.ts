@@ -1,5 +1,4 @@
 import { Think } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -18,12 +17,10 @@ type Env = Cloudflare.Env & {
  */
 export class Inbox extends Think<Env> {
   override getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code",
-      {
-        sessionAffinity: this.sessionAffinity
-      }
-    );
+    // Resolved via the built-in workers-ai-provider off env.AI. Use a
+    // "@cf/..." id for Workers AI, or a "provider/model" slug like
+    // "openai/gpt-5.5" to route through AI Gateway.
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   /**

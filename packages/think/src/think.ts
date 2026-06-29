@@ -10,7 +10,8 @@
  * multi-session support.
  *
  * Configuration overrides:
- *   - getModel()            — return the LanguageModel to use
+ *   - getModel()            — return a model id string (resolved via the
+ *                             built-in workers-ai-provider) or a LanguageModel
  *   - getSystemPrompt()     — return the system prompt (fallback when no context blocks)
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
@@ -44,11 +45,13 @@
  * @example
  * ```typescript
  * import { Think } from "@cloudflare/think";
- * import { createWorkersAI } from "workers-ai-provider";
  *
  * export class MyAgent extends Think<Env> {
  *   getModel() {
- *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
+ *     // A string is resolved via the built-in workers-ai-provider off env.AI.
+ *     // Use a "@cf/..." id for Workers AI, or a "provider/model" slug like
+ *     // "openai/gpt-5.5" to route through AI Gateway.
+ *     return "@cf/moonshotai/kimi-k2.7-code";
  *   }
  *
  *   getSystemPrompt() {
@@ -105,6 +108,9 @@ import {
   streamText,
   tool
 } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
+import { anthropic } from "workers-ai-provider/anthropic";
+import { openai } from "workers-ai-provider/openai";
 import * as skills from "agents/skills";
 import { SkillRegistry } from "agents/skills";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
@@ -1905,8 +1911,12 @@ export interface TurnContext {
  * All fields are optional — return only what you want to change.
  */
 export interface TurnConfig {
-  /** Override the model for this turn (e.g. cheap model for continuations). */
-  model?: LanguageModel;
+  /**
+   * Override the model for this turn (e.g. cheap model for continuations).
+   * Accepts a model id string (resolved via the built-in provider, same rules
+   * as {@link Think.getModel}) or a `LanguageModel`.
+   */
+  model?: ThinkModel;
   /** Override the assembled system prompt. */
   system?: string;
   /** Override the assembled messages. */
@@ -2172,9 +2182,17 @@ export type PrepareStepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
  * return only the fields you want to override (`model`, `toolChoice`,
  * `activeTools`, `system`, `messages`, `experimental_context`,
  * `providerOptions`).
+ *
+ * `model` is widened to {@link ThinkModel}: like {@link Think.getModel}, you
+ * can return a model id string (resolved via the built-in provider) instead of
+ * a `LanguageModel`. Think resolves it before handing the step to the AI SDK.
  */
-export type StepConfig<TOOLS extends ToolSet = ToolSet> =
-  PrepareStepResult<TOOLS>;
+export type StepConfig<TOOLS extends ToolSet = ToolSet> = Omit<
+  PrepareStepResult<TOOLS>,
+  "model"
+> & {
+  model?: ThinkModel;
+};
 
 /**
  * Context passed to the `beforeToolCall` hook **before** the tool's
@@ -2388,6 +2406,39 @@ type ToolDecisionOptions = {
  *
  * @experimental The API surface may change before stabilizing.
  */
+/**
+ * Keys of the global `AiModels` interface (from `@cloudflare/workers-types`)
+ * whose model type extends `T`. Mirrors the derivation `workers-ai-provider`
+ * uses, so the set stays in sync with the installed workers-types version.
+ */
+type WorkersAIModelIdsExtending<T> = {
+  [K in keyof AiModels]: AiModels[K] extends T ? K : never;
+}[keyof AiModels];
+
+/**
+ * A model id accepted by {@link Think.getModel}.
+ *
+ * Provides editor autocomplete for the Workers AI text-generation catalog
+ * (`@cf/...`) while still accepting **any** string — including
+ * `"<provider>/<model>"` AI Gateway slugs like `"openai/gpt-5.5"`, whose
+ * validity is only known at runtime (the catalog is server-side and changes
+ * independently of these types). The `(string & {})` arm is what keeps
+ * arbitrary strings assignable without collapsing the autocomplete union.
+ */
+export type ThinkModelId =
+  | Exclude<
+      WorkersAIModelIdsExtending<BaseAiTextGeneration>,
+      WorkersAIModelIdsExtending<BaseAiTextToImage>
+    >
+  | (string & {});
+
+/**
+ * What {@link Think.getModel} may return: either a fully-constructed AI SDK
+ * `LanguageModel`, or a {@link ThinkModelId} string resolved through Think's
+ * built-in `workers-ai-provider`. Also the input type of {@link Think.resolveModel}.
+ */
+export type ThinkModel = LanguageModel | ThinkModelId;
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -3622,11 +3673,100 @@ export class Think<
   // ── Configuration overrides ─────────────────────────────────────
 
   /**
-   * Return the language model to use for inference.
-   * Must be overridden by subclasses.
+   * Return the model to use for inference. Must be overridden by subclasses.
+   *
+   * The return value can be either:
+   *
+   * - A **string** model id, resolved through the built-in
+   *   {@link https://www.npmjs.com/package/workers-ai-provider | workers-ai-provider}
+   *   off your `AI` binding (see {@link getAIBinding}). A `@cf/...` id hits
+   *   Workers AI directly; any other `"<provider>/<model>"` slug — e.g.
+   *   `"openai/gpt-5.5"`, `"anthropic/claude-sonnet-4-5"`, `"google/gemini-2.5-pro"`
+   *   — is routed through AI Gateway with resumable streaming on by default.
+   *   This is the common case: no extra package to install, no provider to wire.
+   * - A fully-constructed AI SDK `LanguageModel`, for any other provider or for
+   *   full control over provider/gateway options.
+   *
+   * @example String (Workers AI)
+   * ```typescript
+   * getModel() {
+   *   return "@cf/moonshotai/kimi-k2.7-code";
+   * }
+   * ```
+   *
+   * @example String (third-party via AI Gateway)
+   * ```typescript
+   * getModel() {
+   *   return "openai/gpt-5.5";
+   * }
+   * ```
+   *
+   * @example Bring your own provider
+   * ```typescript
+   * import { createOpenAI } from "@ai-sdk/openai";
+   * getModel() {
+   *   return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })("gpt-5.5");
+   * }
+   * ```
    */
-  getModel(): LanguageModel {
-    throw new Error("Override getModel() to return a LanguageModel.");
+  getModel(): ThinkModel {
+    throw new Error(
+      "Override getModel() to return a model id string (e.g. " +
+        '"@cf/moonshotai/kimi-k2.7-code" or "openai/gpt-5.5") or a LanguageModel.'
+    );
+  }
+
+  /**
+   * Return the Workers AI binding used by the built-in default provider when
+   * {@link getModel} returns a string. Defaults to `this.env.AI`. Override if
+   * your binding is named something other than `AI`.
+   */
+  getAIBinding(): Ai {
+    const binding = (this.env as { AI?: Ai }).AI;
+    if (!binding) {
+      throw new Error(
+        "Think's default model provider needs a Workers AI binding named " +
+          '"AI". Add `"ai": { "binding": "AI" }` to wrangler.jsonc, override ' +
+          "getAIBinding() to return your binding, or override getModel() to " +
+          "return a LanguageModel."
+      );
+    }
+    return binding;
+  }
+
+  /**
+   * Lazily-constructed, instance-cached default provider. Bundles the `openai`
+   * and `anthropic` wire-format plugins so a `"<provider>/<model>"` slug routes
+   * through AI Gateway out of the box (covers OpenAI, Anthropic, Google,
+   * xAI/Grok, Groq, and the OpenAI-compatible long tail).
+   *
+   * Cached per instance, which assumes {@link getAIBinding} is stable for the
+   * lifetime of the agent (the default `this.env.AI` always is).
+   */
+  private _defaultProvider?: ReturnType<typeof createWorkersAI>;
+
+  /**
+   * Resolve a model value into a concrete AI SDK `LanguageModel`.
+   *
+   * Defaults to resolving {@link getModel}. A `LanguageModel` is returned as-is;
+   * a string is built through the bundled default provider (see {@link getModel}
+   * for the slug rules). Use this whenever you need a usable model outside the
+   * main turn — e.g. a side `generateText` call for summarization/compaction —
+   * since `getModel()` may return a bare string.
+   */
+  resolveModel(model: ThinkModel = this.getModel()): LanguageModel {
+    if (typeof model !== "string") return model;
+    this._defaultProvider ??= createWorkersAI({
+      binding: this.getAIBinding(),
+      providers: [openai, anthropic]
+    });
+    // `@cf/...` ids take Workers AI chat settings (sessionAffinity improves
+    // prefix-cache hits). Any other slug is a catalog model routed through AI
+    // Gateway; we pass no per-call settings, which avoids forcing options a
+    // given provider/transport would reject.
+    return model.startsWith("@cf/")
+      ? this._defaultProvider(model, { sessionAffinity: this.sessionAffinity })
+      : this._defaultProvider(model);
   }
 
   /**
@@ -5023,7 +5163,7 @@ export class Think<
       );
     }
 
-    const model = this.getModel();
+    const model = this.resolveModel();
     const ctx: TurnContext = {
       system,
       messages,
@@ -5045,7 +5185,8 @@ export class Think<
       : undefined;
     const wantsStructuredOutput = structuredOutputSchema !== undefined;
 
-    const finalModel = config.model ?? model;
+    const finalModel =
+      config.model != null ? this.resolveModel(config.model) : model;
     const finalSystem =
       config.system ??
       this._systemPromptForTurn(
@@ -5223,21 +5364,29 @@ export class Think<
         // force the model to call `final_answer` so the turn always terminates
         // with a schema-shaped result instead of running out of steps. Respect a
         // `toolChoice` the subclass already set for this step.
-        if (
+        const stepResult =
           wantsStructuredOutput &&
           event.stepNumber >= finalMaxSteps - 1 &&
           (withMessages as { toolChoice?: unknown }).toolChoice === undefined
-        ) {
+            ? {
+                ...withMessages,
+                toolChoice: {
+                  type: "tool" as const,
+                  toolName: finalAnswerToolName
+                },
+                activeTools: [finalAnswerToolName]
+              }
+            : withMessages;
+        // `beforeStep` may return a string `model` (StepConfig widens it to
+        // ThinkModel); the AI SDK needs a concrete LanguageModel, so resolve it.
+        const stepModel = (stepResult as { model?: ThinkModel }).model;
+        if (typeof stepModel === "string") {
           return {
-            ...withMessages,
-            toolChoice: {
-              type: "tool" as const,
-              toolName: finalAnswerToolName
-            },
-            activeTools: [finalAnswerToolName]
-          };
+            ...stepResult,
+            model: this.resolveModel(stepModel)
+          } as PrepareStepResult<ToolSet>;
         }
-        return withMessages;
+        return stepResult as PrepareStepResult<ToolSet>;
       }) satisfies PrepareStepFunction<ToolSet>,
       onChunk: async (event) => {
         // Pass the AI SDK's chunk event through unchanged — gives users

@@ -1,5 +1,4 @@
 import { getAgentByName, routeAgentRequest } from "agents";
-import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { Think } from "@cloudflare/think";
 import { ThinkWorkflow } from "@cloudflare/think/workflows";
@@ -33,9 +32,7 @@ const reportDraftSchema = z.object({
 
 export class ReportAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {

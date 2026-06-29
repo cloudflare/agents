@@ -6,7 +6,6 @@ import {
   DurableBrowserSessionStore,
   type BrowserLiveView
 } from "agents/browser";
-import { createWorkersAI } from "workers-ai-provider";
 import type { ToolSet } from "ai";
 
 // The execute tool runs sandboxed code on a durable codemode runtime that
@@ -25,9 +24,7 @@ const BROWSER_SESSION_KEY = "main";
 
 export class LiveViewAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {

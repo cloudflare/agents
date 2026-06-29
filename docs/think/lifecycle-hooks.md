@@ -81,7 +81,9 @@ export class MyAgent extends Think<Env> {
       .onCompaction(
         createCompactFunction({
           summarize: (prompt) =>
-            generateText({ model: this.getModel(), prompt }).then((r) => r.text)
+            generateText({ model: this.resolveModel(), prompt }).then(
+              (r) => r.text
+            )
         })
       )
       .compactAfter(100_000)
@@ -109,7 +111,7 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 | `system`       | `string`                  | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
 | `messages`     | `ModelMessage[]`          | Assembled model messages (truncated)                                     |
 | `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + session + MCP + client + caller) |
-| `model`        | `LanguageModel`           | The model from `getModel()`                                              |
+| `model`        | `LanguageModel`           | The resolved model (a string from `getModel()` is already resolved here) |
 | `continuation` | `boolean`                 | Whether this is a continuation turn (auto-continue after tool result)    |
 | `body`         | `Record<string, unknown>` | Custom body fields from the client request                               |
 
@@ -119,7 +121,7 @@ All fields are optional. Return only what you want to change.
 
 | Field                      | Type                                           | Description                                                                                                                                                                       |
 | -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                    | `LanguageModel`                                | Override the model for this turn                                                                                                                                                  |
+| `model`                    | `ThinkModel`                                   | Override the model for this turn — a model id string or a `LanguageModel`                                                                                                         |
 | `system`                   | `string`                                       | Override the system prompt                                                                                                                                                        |
 | `messages`                 | `ModelMessage[]`                               | Override the assembled messages                                                                                                                                                   |
 | `tools`                    | `ToolSet`                                      | Extra tools to merge (additive)                                                                                                                                                   |
@@ -314,15 +316,15 @@ onStepFinish(step 1)
 
 `StepConfig<TOOLS>` is the AI SDK's `PrepareStepResult<TOOLS>`. Return only the fields to override for the current step.
 
-| Field                  | Type                                                   | Description                                                 |
-| ---------------------- | ------------------------------------------------------ | ----------------------------------------------------------- |
-| `model`                | `LanguageModel`                                        | Override the model for this step                            |
-| `toolChoice`           | `ToolChoice<TOOLS>`                                    | Force or disable tool calling for this step                 |
-| `activeTools`          | `Array<keyof TOOLS>`                                   | Limit which tools are available for this step               |
-| `system`               | `string \| SystemModelMessage \| SystemModelMessage[]` | Override the system message for this step                   |
-| `messages`             | `ModelMessage[]`                                       | Override the full message list for this step                |
-| `experimental_context` | `unknown`                                              | Override context passed to tool execution from this step on |
-| `providerOptions`      | `ProviderOptions`                                      | Provider-specific options for this step                     |
+| Field                  | Type                                                   | Description                                                               |
+| ---------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `model`                | `ThinkModel`                                           | Override the model for this step — a model id string or a `LanguageModel` |
+| `toolChoice`           | `ToolChoice<TOOLS>`                                    | Force or disable tool calling for this step                               |
+| `activeTools`          | `Array<keyof TOOLS>`                                   | Limit which tools are available for this step                             |
+| `system`               | `string \| SystemModelMessage \| SystemModelMessage[]` | Override the system message for this step                                 |
+| `messages`             | `ModelMessage[]`                                       | Override the full message list for this step                              |
+| `experimental_context` | `unknown`                                              | Override context passed to tool execution from this step on               |
+| `providerOptions`      | `ProviderOptions`                                      | Provider-specific options for this step                                   |
 
 ### Examples
 

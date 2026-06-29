@@ -20,8 +20,7 @@
     "ai": "^6.0.202",
     "chat": "^4.31.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "workers-ai-provider": "^3.2.1"
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.42.3",

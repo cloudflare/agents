@@ -1,5 +1,4 @@
 import { callable, routeAgentRequest } from "agents";
-import { createWorkersAI } from "workers-ai-provider";
 import { Think } from "@cloudflare/think";
 import type {
   ThinkScheduledTasks,
@@ -14,9 +13,7 @@ type Env = {
 
 export class TaskAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {

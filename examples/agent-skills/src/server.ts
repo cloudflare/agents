@@ -1,6 +1,5 @@
 import { callable, routeAgentRequest } from "agents";
 import { Think, skills } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
 import bundledSkills from "agents:skills";
 
 type Env = {
@@ -11,10 +10,7 @@ type Env = {
 
 export class SkillsAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code",
-      { sessionAffinity: this.sessionAffinity }
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {

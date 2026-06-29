@@ -32,21 +32,23 @@ If you only need a chat-protocol adapter where you own the loop and the `Respons
 ### Install
 
 ```sh
-npm install @cloudflare/think agents ai @cloudflare/shell zod workers-ai-provider
+npm install @cloudflare/think agents ai @cloudflare/shell zod
 ```
+
+`workers-ai-provider` is bundled with Think, so the common case needs no extra provider package — `getModel()` can return a model id string.
 
 ### Server
 
 ```typescript
 import { Think } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
 
 export class MyAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    // Resolved via Think's built-in workers-ai-provider off the `AI` binding.
+    // Use a "@cf/..." id for Workers AI, or a "provider/model" slug like
+    // "openai/gpt-5.5" to route through AI Gateway.
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 }
 
@@ -838,7 +840,8 @@ path.
 
 | Method / Property          | Default                          | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | -------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `getModel()`               | throws                           | Return the `LanguageModel` to use                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `getModel()`               | throws                           | Return a model id `string` (resolved via the bundled `workers-ai-provider` off `getAIBinding()` — a `@cf/...` id hits Workers AI, a `"provider/model"` slug routes through AI Gateway) or a `LanguageModel`                                                                                                                                                                                                                                                                                                                                                      |
+| `getAIBinding()`           | `this.env.AI`                    | Workers AI binding used to resolve string models from `getModel()`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `getSystemPrompt()`        | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `getTools()`               | `{}`                             | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `getScheduledTasks()`      | `{}`                             | Code-declared recurring prompts or handlers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -1087,7 +1090,7 @@ export class MyAgent extends Think<Env> {
       fast: "@cf/moonshotai/kimi-k2.7-code",
       capable: "@cf/meta/llama-4-scout-17b-16e-instruct"
     };
-    return createWorkersAI({ binding: this.env.AI })(models[tier]);
+    return models[tier];
   }
 }
 ```

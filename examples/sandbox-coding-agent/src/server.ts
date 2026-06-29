@@ -18,8 +18,7 @@ import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
 import { Think, type TurnConfig } from "@cloudflare/think";
 import { callable, routeAgentRequest } from "agents";
 import { agentTool } from "agents/agent-tools";
-import { tool, type LanguageModel, type ToolSet, type UIMessage } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
+import { tool, type ToolSet, type UIMessage } from "ai";
 import { z } from "zod";
 import { runClaudeCode } from "./claude-code";
 import { snapshotDiff, type WorkspaceDiff } from "./diff";
@@ -181,11 +180,8 @@ export class CodingOrchestrator extends Think<Env> {
   // Cap how many containers run at once (also bounded by container max_instances).
   override maxConcurrentAgentTools = 3;
 
-  override getModel(): LanguageModel {
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai("@cf/moonshotai/kimi-k2.7-code", {
-      sessionAffinity: this.sessionAffinity
-    });
+  override getModel() {
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   override getSystemPrompt(): string {

@@ -1,5 +1,4 @@
 import { getAgentByName, routeAgentRequest } from "agents";
-import { createWorkersAI } from "workers-ai-provider";
 import { Think } from "@cloudflare/think";
 import {
   ThinkMessengerStateAgent,
@@ -33,9 +32,7 @@ export type TelegramWebhookSetupResult = {
 
 export class SupportAgent extends Think<Env> {
   override getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   override getSystemPrompt() {

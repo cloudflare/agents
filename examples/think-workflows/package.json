@@ -13,7 +13,6 @@
     "@cloudflare/think": "*",
     "agents": "*",
     "ai": "^6.0.202",
-    "workers-ai-provider": "^3.2.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

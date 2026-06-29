@@ -12,8 +12,7 @@
   "dependencies": {
     "@cloudflare/think": "*",
     "agents": "*",
-    "ai": "^6.0.202",
-    "workers-ai-provider": "^3.2.1"
+    "ai": "^6.0.202"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260625.1",

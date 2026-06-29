@@ -1,9 +1,7 @@
 import { callable } from "agents";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { createWorkersAI } from "workers-ai-provider";
 import { Think, Workspace } from "@cloudflare/think";
 import type { ThinkScheduledTasks } from "@cloudflare/think";
-import type { LanguageModel } from "ai";
 import type { FileInfo, WorkspaceChangeEvent } from "@cloudflare/shell";
 import { nanoid } from "nanoid";
 import { MyAssistant } from "./agents/my-assistant/agent";
@@ -34,11 +32,8 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
   // (see `getScheduledTasks`) and leaves room for top-level agentic work
   // later. `getModel()` is a stub for that future use — nothing in the
   // accumulator role calls it.
-  override getModel(): LanguageModel {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code",
-      { sessionAffinity: this.sessionAffinity }
-    );
+  override getModel() {
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   /**
