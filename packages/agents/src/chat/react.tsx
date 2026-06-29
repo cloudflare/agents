@@ -2210,6 +2210,17 @@ export function useAgentChat<
     // A closed socket invalidates the per-socket resume-ACK dedupe: after a
     // reconnect the server sees a brand-new connection and must be ACKed
     // (and replay) again, so the previous entries must not suppress it.
+    //
+    // NOTE: deliberately does NOT reset `resumeInFlightRef` (#1837). The flag
+    // is owned by the in-flight resume and cleared only by its own `.finally`
+    // (or invalidated via the generation bump in this effect's cleanup).
+    // Clearing it here would set it false while the resume may still be
+    // mid-flight (post-handshake, before `makeRequest`'s finalizer runs),
+    // re-coupling correctness to close/open task ordering and reopening the
+    // overlap window. It is also unnecessary: a handshake-phase drop is already
+    // gated by `isAwaitingResume()` (and the pending promise's resolver re-binds
+    // to the new socket), and a streaming-phase drop closes the resume stream,
+    // which settles `makeRequest` and clears the flag via its `.finally`.
     function onAgentClose() {
       fallbackAckedResumeRequestIds.clear();
     }
