@@ -1054,6 +1054,25 @@ export function useAgentChat<
   // in the socket effect below (#1784).
   const hasConnectedOnceRef = useRef(false);
 
+  // True while a reconnect re-probe `resumeStream()` we issued is still in
+  // flight. AI SDK's `Chat.makeRequest` has no concurrency guard — every
+  // resume shares the single mutable `this.activeResponse`, and its `finally`
+  // finalizer reads `this.activeResponse.state` with a bare (unguarded) read
+  // before clearing it. Overlapping reconnect-driven resumes therefore race:
+  // a later resume clears `activeResponse` before an earlier one's finalizer
+  // runs, throwing `Cannot read properties of undefined (reading 'state')`
+  // (#1837). The `onAgentOpen` guard's `statusRef` is lagging React state and
+  // `isAwaitingResume()` only covers the handshake, so neither closes the
+  // post-handshake / pre-status-propagation window. Serialize resumes here:
+  // never issue a new re-probe `resumeStream()` while one is outstanding.
+  const resumeInFlightRef = useRef(false);
+  // Generation token for the in-flight resume. Bumped whenever the gate is
+  // force-reset (socket-effect cleanup, e.g. an agent swap on `_pk` change).
+  // A resume's `.finally` captures its generation and only clears the flag if
+  // it still matches — so a stale, orphaned resume settling after a newer one
+  // has taken over can't reopen the gate underneath it.
+  const resumeGenerationRef = useRef(0);
+
   const resumingToolContinuationRef = useRef(false);
   const pendingToolContinuationRef = useRef(false);
   const observedToolContinuationRequestIdRef = useRef<string | null>(null);
@@ -2212,11 +2231,26 @@ export function useAgentChat<
         !resume ||
         statusRef.current !== "ready" ||
         resumingToolContinuationRef.current ||
+        resumeInFlightRef.current ||
         customTransport.isAwaitingResume()
       ) {
         return;
       }
-      void Promise.resolve(resumeStreamRef.current?.()).catch(() => {});
+      const resumeStreamFn = resumeStreamRef.current;
+      if (!resumeStreamFn) return;
+      // Serialize resumes (#1837): hold the in-flight flag for the entire
+      // resume lifetime so a rapid second `open` (reconnect storm) can't
+      // overwrite the AI SDK's shared `activeResponse` mid-flight.
+      resumeInFlightRef.current = true;
+      const myGeneration = resumeGenerationRef.current;
+      void Promise.resolve(resumeStreamFn())
+        .catch(() => {})
+        .finally(() => {
+          // Skip if the gate was force-reset (agent swap) and a newer resume
+          // has since taken over — clearing here would reopen it spuriously.
+          if (resumeGenerationRef.current !== myGeneration) return;
+          resumeInFlightRef.current = false;
+        });
     }
 
     agent.addEventListener("message", onAgentMessage);
@@ -2238,6 +2272,12 @@ export function useAgentChat<
       setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
+      // Don't let an orphaned re-probe (e.g. agent swapped on `_pk` change)
+      // leave the serialization gate stuck closed for the next socket (#1837).
+      // Bump the generation so the orphaned resume's late `.finally` can't
+      // clear the gate out from under a newer resume on the next socket.
+      resumeGenerationRef.current++;
+      resumeInFlightRef.current = false;
     };
   }, [
     agent,
