@@ -9906,7 +9906,7 @@ export class Think<
   private _hasScheduledRecoveredContinuation(requestId: string): boolean {
     const rows = this.sql<{ payload: string | null }>`
       SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
+      WHERE callback IN ('_chatRecoveryContinue', '_chatRecoveryRetry')
     `;
     return rows.some((row) => {
       if (!row.payload) return false;

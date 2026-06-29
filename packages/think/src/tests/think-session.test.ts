@@ -4010,6 +4010,23 @@ describe("Think — onChatRecovery", () => {
     expect(incident?.status).toBe("scheduled");
   });
 
+  it("does not mark a running submission errored while a recovered retry is scheduled", async () => {
+    const agent = await freshRecoveryAgent(
+      `recover-retry-sweep-${crypto.randomUUID()}`
+    );
+    await agent.seedRunningSubmissionForTest("root-RS");
+    await agent.preScheduleRecoveryRetryForTest({
+      recoveredRequestId: "root-RS",
+      targetUserId: "user-RS",
+      incidentId: "inc-RS",
+      originalRequestId: "root-RS"
+    });
+
+    await agent.recoverSubmissionsOnStartForTest();
+
+    expect(await agent.getSubmissionStatusForTest("root-RS")).toBe("running");
+  });
+
   it("exhausts via onExhausted once the stable-state continue budget is spent", async () => {
     const agent = await freshRecoveryAgent(
       `stable-exhaust-${crypto.randomUUID()}`
