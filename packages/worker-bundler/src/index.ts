@@ -116,8 +116,7 @@ export async function createWorker(
   // Parse wrangler config for compatibility settings
   const wranglerConfig = parseWranglerConfig(fileSystem);
   const nodejsCompat = hasNodejsCompat(wranglerConfig);
-
-  // Auto-install dependencies if package.json has dependencies
+  // Auto-install dependencies if package.json or pyproject.toml has dependencies
   const installWarnings: string[] = [];
   if (hasDependencies(fileSystem)) {
     const installResult = await installDependencies(
@@ -144,35 +143,45 @@ export async function createWorker(
   }
 
   if (bundle) {
-    // Try bundling with esbuild-wasm
-    const result = await bundleWithEsbuild({
-      files: fileSystem,
-      entryPoint,
-      externals,
-      target,
-      minify,
-      sourcemap,
-      nodejsCompat,
-      jsx,
-      jsxImportSource,
-      define,
-      loader,
-      conditions,
-      virtualModules,
-      plugins
-    });
+    if (entryPoint.endsWith(".py")) {
+      let result = {
+        mainModule: entryPoint,
+        modules: files,
+        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-01-01",
+        compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
+          "python_workers"
+        ]
+      };
+      return result;
+    } else {
+      // Try bundling with esbuild-wasm
+      const result = await bundleWithEsbuild({
+        files: fileSystem,
+        entryPoint,
+        externals,
+        target,
+        minify,
+        sourcemap,
+        nodejsCompat,
+        jsx,
+        jsxImportSource,
+        define,
+        loader,
+        conditions,
+        plugins
+      });
 
-    // Add wrangler config if a config file was found
-    if (wranglerConfig !== undefined) {
-      result.wranglerConfig = wranglerConfig;
+      // Add wrangler config if a config file was found
+      if (wranglerConfig !== undefined) {
+        result.wranglerConfig = wranglerConfig;
+      }
+
+      // Add install warnings to result
+      if (installWarnings.length > 0) {
+        result.warnings = [...(result.warnings ?? []), ...installWarnings];
+      }
+      return result;
     }
-
-    // Add install warnings to result
-    if (installWarnings.length > 0) {
-      result.warnings = [...(result.warnings ?? []), ...installWarnings];
-    }
-
-    return result;
   } else {
     // No bundling - transform files and resolve dependencies.
     // Sourcemaps and the esbuild-only options (jsx, jsxImportSource, define,

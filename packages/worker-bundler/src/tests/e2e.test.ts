@@ -984,3 +984,72 @@ describe("hasNodejsCompat", () => {
     expect(hasNodejsCompat(undefined)).toBe(false);
   });
 });
+
+// Longer timeout duration given since Python workers can take longer to start
+describe("createWorker with python main", () => {
+  it("executes a Python script as the main module", async () => {
+    const dynamic_worker = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    return Response("hi")'
+        ].join("\n")
+      }
+    });
+    const id = "test-worker-" + testId++;
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: dynamic_worker.mainModule,
+      modules: dynamic_worker.modules,
+      compatibilityDate: dynamic_worker.compatibilityDate,
+      compatibilityFlags: dynamic_worker.compatibilityFlags
+    }));
+
+    let response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("hi");
+  });
+}, 20000);
+
+describe("createWorker with pyproject.toml", () => {
+  it("accepts a dummy pyproject.toml without throwing", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    return Response("ok")'
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          "",
+          "[tool.setuptools]",
+          'packages = ["dummy"]'
+        ].join("\n"),
+        "python_modules/dummy/__init__.py": "",
+        "python_modules/dummy/hello.py": [
+          "def greet(name: str) -> str:",
+          '    return f"hello, {name}"'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate:
+        createWorkerResult.wranglerConfig?.compatibilityDate ?? "2026-01-01",
+      compatibilityFlags: createWorkerResult.wranglerConfig?.compatibilityFlags
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+  });
+}, 20000);

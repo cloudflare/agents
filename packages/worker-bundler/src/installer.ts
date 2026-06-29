@@ -7,8 +7,10 @@
 
 import * as semver from "semver";
 import type { FileSystem } from "./file-system";
+import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
+const PY_REGISTRY = "https://files.pythonhosted.org";
 const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
 /**
@@ -49,6 +51,14 @@ interface PackageJson {
   dist?: {
     tarball: string;
     integrity?: string;
+  };
+}
+
+// Deliberately keeping this minimal
+interface PyprojectToml {
+  project: {
+    name: string;
+    version: string;
   };
 }
 
@@ -106,47 +116,58 @@ export async function installDependencies(
 
   // Read package.json
   const packageJsonContent = fileSystem.read("package.json");
-  if (!packageJsonContent) {
-    return result; // No package.json, nothing to install
-  }
+  const pyprojectTomlContent = fileSystem.read("pyproject.toml");
 
-  let packageJson: PackageJson;
-  try {
-    packageJson = JSON.parse(packageJsonContent) as PackageJson;
-  } catch {
-    result.warnings.push("Failed to parse package.json");
-    return result;
-  }
+  if (packageJsonContent) {
+    let packageJson: PackageJson;
+    try {
+      packageJson = JSON.parse(packageJsonContent) as PackageJson;
+    } catch {
+      result.warnings.push("Failed to parse package.json");
+      return result;
+    }
 
-  // Collect dependencies to install
-  const depsToInstall: Record<string, string> = {
-    ...packageJson.dependencies,
-    ...(dev ? packageJson.devDependencies : {})
-  };
+    // Collect dependencies to install
+    const depsToInstall: Record<string, string> = {
+      ...packageJson.dependencies,
+      ...(dev ? packageJson.devDependencies : {})
+    };
 
-  if (Object.keys(depsToInstall).length === 0) {
-    return result; // No dependencies to install
-  }
+    if (Object.keys(depsToInstall).length === 0) {
+      return result; // No dependencies to install
+    }
 
-  // Track installed packages to avoid duplicates
-  const installedPackages = new Map<string, string>(); // name -> version
-  // Track in-progress installations to avoid duplicate work
-  const inProgress = new Map<string, Promise<void>>();
+    // Track installed packages to avoid duplicates
+    const installedPackages = new Map<string, string>(); // name -> version
+    // Track in-progress installations to avoid duplicate work
+    const inProgress = new Map<string, Promise<void>>();
 
-  // Install all dependencies in parallel
-  await Promise.all(
-    Object.entries(depsToInstall).map(([name, versionRange]) =>
-      installPackage(
-        name,
-        versionRange,
-        result,
-        fileSystem,
-        installedPackages,
-        inProgress,
-        registry
+    // Install all dependencies in parallel
+    await Promise.all(
+      Object.entries(depsToInstall).map(([name, versionRange]) =>
+        installPackage(
+          name,
+          versionRange,
+          result,
+          fileSystem,
+          installedPackages,
+          inProgress,
+          registry
+        )
       )
-    )
-  );
+    );
+  }
+
+  if (pyprojectTomlContent) {
+    let pyprojectToml: PyprojectToml;
+    try {
+      pyprojectToml = parseToml(pyprojectTomlContent) as PyprojectToml;
+      console.log("we've got", pyprojectToml);
+    } catch {
+      result.warnings.push("Failed to parse pyproject.toml");
+      return result;
+    }
+  }
 
   return result;
 }
@@ -529,14 +550,27 @@ function isTextFile(path: string): boolean {
  * Check if files contain a package.json with dependencies that need installing.
  */
 export function hasDependencies(files: FileSystem): boolean {
+  const pyprojectToml = files.read("pyproject.toml");
   const packageJson = files.read("package.json");
-  if (!packageJson) return false;
+  if (!packageJson && !pyprojectToml) return false;
 
-  try {
-    const pkg = JSON.parse(packageJson);
-    const deps = pkg.dependencies ?? {};
-    return Object.keys(deps).length > 0;
-  } catch {
-    return false;
+  if (packageJson) {
+    try {
+      const pkg = JSON.parse(packageJson);
+      const deps = pkg.dependencies ?? {};
+      return Object.keys(deps).length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (pyprojectToml) {
+    try {
+      const pkg = JSON.parse(packageJson);
+      const deps = pkg.dependencies ?? {};
+      return Object.keys(deps).length > 0;
+    } catch {
+      return false;
+    }
   }
 }
