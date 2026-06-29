@@ -1,5 +1,17 @@
 # @cloudflare/agents
 
+## 0.17.2
+
+### Patch Changes
+
+- [#1836](https://github.com/cloudflare/agents/pull/1836) [`0544aa2`](https://github.com/cloudflare/agents/commit/0544aa2c2ac6cb8e3d3438153efe53ca711aebe2) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgentToolEvents` doubling streamed text in React StrictMode / SSR frameworks ([#1835](https://github.com/cloudflare/agents/issues/1835)).
+
+  The agent-tool-event reducer (`applyAgentToolEvent` → `applyToRun`) shallow-copied a run's `parts` array with `[...seeded.parts]` and then handed it to `applyChunkToParts`, which mutates part objects in place (e.g. `lastTextPart.text += delta`). Because the copied array still shared its element references with the previous state, those in-place mutations leaked back into `prev`. React double-invokes `setState` updaters in StrictMode and during dev hydration, so each `text-delta` chunk was applied twice against the same already-mutated `prev`, doubling every word. Affected Next.js, TanStack Start, Remix, and any `<React.StrictMode>` app. The reducer now clones each part before mutating, keeping it pure.
+
+- [#1838](https://github.com/cloudflare/agents/pull/1838) [`cc21f09`](https://github.com/cloudflare/agents/commit/cc21f094f49b287201ee7550548206dd0c3365ae) Thanks [@threepointone](https://github.com/threepointone)! - Fix reconnect-driven resume overlap throwing `Cannot read properties of undefined (reading 'state')` in `useAgentChat` ([#1837](https://github.com/cloudflare/agents/issues/1837)).
+
+  With `resume: true` (the default), the hook re-probes the stream from its WebSocket `onAgentOpen` handler on every reconnect. The AI SDK's `Chat.makeRequest` has no concurrency guard — every resume shares the single mutable `this.activeResponse`, and its `finally` finalizer reads `this.activeResponse.state.message` with a bare (unguarded) read before clearing it. Under a reconnect storm (flaky mobile link, or a Durable Object bounce on redeploy), a second resume could overwrite + clear `activeResponse` before an earlier resume's finalizer ran, so the earlier finalizer read `undefined` and threw. The old guard didn't close the window: `isAwaitingResume()` only covers the handshake (it flips false the instant `STREAM_RESUMING` resolves, before the AI SDK sets status to `submitted` in a later microtask) and `statusRef` is lagging React state. Resumes are now serialized via an in-flight flag, so a re-probe `resumeStream()` is never issued while one is still outstanding.
+
 ## 0.17.1
 
 ### Patch Changes
