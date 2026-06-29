@@ -306,7 +306,15 @@ function applyToRun<Part extends AgentToolRunPart>(
       };
     case "chunk": {
       if (!seeded) return undefined;
-      const parts = [...seeded.parts];
+      // `applyChunkToParts` mutates part objects in place (e.g.
+      // `lastTextPart.text += delta`). A shallow array copy (`[...seeded.parts]`)
+      // keeps the *element* references shared with the previous state, so those
+      // in-place mutations leak back into `prev`. React double-invokes setState
+      // updaters in StrictMode / dev hydration, replaying each chunk against the
+      // same (already-mutated) `prev` and doubling the text (#1835). Clone each
+      // part so the reducer stays pure — every mutation here is to a top-level
+      // field, so a per-part shallow copy is sufficient.
+      const parts = seeded.parts.map((part) => ({ ...part }) as Part);
       let parsed: unknown;
       try {
         parsed = JSON.parse(event.body);
