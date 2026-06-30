@@ -47,6 +47,8 @@ Universal-3.5 Pro carries prior finalized turns forward as context to improve ac
 
 **The voice pipeline does this automatically.** After the agent finishes speaking each reply (and the opening greeting), `withVoice` calls the session's `updateAgentContext()` with the spoken text, which is sent to AssemblyAI as an `UpdateConfiguration` message mid-session. No extra wiring is required.
 
+Setting `previousContextNTurns: 0` disables carryover entirely — the model ignores `agent_context`, so the provider skips the automatic updates rather than send messages the server would discard.
+
 You can also seed context at connection time with the `agentContext` option (e.g. for an opening line spoken before the user's first turn), or call `updateAgentContext()` yourself for custom integrations:
 
 ```typescript
@@ -64,7 +66,7 @@ session.updateAgentContext?.("Sure — what date would you like to book?");
 | `keyterms`              | _none_                                 | Words/phrases to boost recognition (`string[]`). Mutually exclusive with `prompt`                                                                                |
 | `prompt`                | _AssemblyAI default_                   | Natural-language context about the audio (domain, topic, scenario) — not formatting instructions. Max 1500 characters. Omit to use the optimized default         |
 | `agentContext`          | _none_                                 | Seed the agent's spoken reply as context at connection time. Max 1500 characters. Updated automatically mid-call by the pipeline                                 |
-| `previousContextNTurns` | _server (~3)_                          | Max prior conversation entries carried forward as context (0–100). `0` disables automatic carryover                                                              |
+| `previousContextNTurns` | _server (~3)_                          | Max prior conversation entries carried forward as context (0–100). `0` disables carryover (and the provider then skips `agent_context` updates)                  |
 | `languageCode`          | _multilingual_                         | Bias the model toward a single language (e.g. `"en"`, `"es"`, `"ja"`) when the session is monolingual. Omit for default code-switching                           |
 | `voiceFocus`            | _none_                                 | Noise suppression: `"near-field"` (headsets/handsets) or `"far-field"` (conference rooms, laptop mics). Omit to disable                                          |
 | `voiceFocusThreshold`   | _server_                               | How aggressively Voice Focus suppresses background audio (0–1, higher = more aggressive). Requires `voiceFocus`                                                  |

@@ -554,6 +554,41 @@ describe("AssemblyAISession — updateAgentContext", () => {
     expect(ws.send).not.toHaveBeenCalled();
   });
 
+  it("is a no-op when previousContextNTurns is 0 (carryover disabled)", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({
+      apiKey: "k",
+      previousContextNTurns: 0
+    });
+    const session = provider.createSession();
+    await flush();
+
+    session.updateAgentContext!("What date would you like to book?");
+
+    // Carryover is off — the server would discard agent_context, so skip the
+    // pointless UpdateConfiguration entirely.
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("still sends agent context for other previousContextNTurns values", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({
+      apiKey: "k",
+      previousContextNTurns: 5
+    });
+    const session = provider.createSession();
+    await flush();
+
+    session.updateAgentContext!("What date would you like to book?");
+
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "UpdateConfiguration",
+        agent_context: "What date would you like to book?"
+      })
+    );
+  });
+
   it("caps agent context to the last 1500 characters", async () => {
     const { ws } = setupMockFetch();
     const provider = new AssemblyAISTT({ apiKey: "k" });

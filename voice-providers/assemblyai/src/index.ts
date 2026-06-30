@@ -400,6 +400,9 @@ class AssemblyAISession implements TranscriberSession {
    */
   updateAgentContext(text: string): void {
     if (this.#closed) return;
+    // Carryover is explicitly disabled: the server discards agent_context when
+    // previous_context_n_turns is 0, so skip the pointless UpdateConfiguration.
+    if (this.#providerOpts.previousContextNTurns === 0) return;
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
     const capped =
