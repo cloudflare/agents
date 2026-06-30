@@ -223,16 +223,22 @@ describe("AssemblyAISTT — construction validation", () => {
     ).toThrow(/voiceFocusThreshold.*voiceFocus/);
   });
 
-  it("throws when agentContext exceeds 1500 characters", () => {
+  it("throws when agentContext exceeds 1750 characters", () => {
     expect(
-      () => new AssemblyAISTT({ apiKey: "k", agentContext: "x".repeat(1501) })
-    ).toThrow(/agentContext.*1500/);
+      () => new AssemblyAISTT({ apiKey: "k", agentContext: "x".repeat(1751) })
+    ).toThrow(/agentContext.*1750/);
   });
 
-  it("throws when prompt exceeds 1500 characters", () => {
+  it("accepts an agentContext up to 1750 characters", () => {
     expect(
-      () => new AssemblyAISTT({ apiKey: "k", prompt: "x".repeat(1501) })
-    ).toThrow(/prompt.*1500/);
+      () => new AssemblyAISTT({ apiKey: "k", agentContext: "x".repeat(1750) })
+    ).not.toThrow();
+  });
+
+  it("throws when prompt exceeds 1750 characters", () => {
+    expect(
+      () => new AssemblyAISTT({ apiKey: "k", prompt: "x".repeat(1751) })
+    ).toThrow(/prompt.*1750/);
   });
 
   it("throws when interruptionDelay is out of the [0, 1000] range", () => {
@@ -589,7 +595,7 @@ describe("AssemblyAISession — updateAgentContext", () => {
     );
   });
 
-  it("caps agent context to the last 1500 characters", async () => {
+  it("caps agent context to the last 1750 characters", async () => {
     const { ws } = setupMockFetch();
     const provider = new AssemblyAISTT({ apiKey: "k" });
     const session = provider.createSession();
@@ -600,8 +606,8 @@ describe("AssemblyAISession — updateAgentContext", () => {
 
     const sent = JSON.parse(ws.send.mock.calls[0][0]);
     expect(sent.type).toBe("UpdateConfiguration");
-    expect(sent.agent_context).toHaveLength(1500);
-    expect(sent.agent_context).toBe(long.slice(-1500));
+    expect(sent.agent_context).toHaveLength(1750);
+    expect(sent.agent_context).toBe(long.slice(-1750));
   });
 
   it("buffers a pre-connect update and sends only the latest on open", async () => {

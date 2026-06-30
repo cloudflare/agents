@@ -63,9 +63,9 @@ session.updateAgentContext?.("Sure — what date would you like to book?");
 | `apiKey`                | (required)                             | AssemblyAI API key (sent as the `Authorization` header, raw key)                                                                                                 |
 | `mode`                  | `"balanced"` _(server default)_        | Latency/accuracy preset: `"min_latency"`, `"balanced"`, or `"max_accuracy"`. Sets the per-mode defaults for turn silence, partials, VAD, and interruption timing |
 | `domain`                | _none_                                 | Domain mode, e.g. `"medical-v1"` for Medical Mode (en/es/de/fr)                                                                                                  |
-| `keyterms`              | _none_                                 | Words/phrases to boost recognition (`string[]`). Mutually exclusive with `prompt`                                                                                |
-| `prompt`                | _AssemblyAI default_                   | Natural-language context about the audio (domain, topic, scenario) — not formatting instructions. Max 1500 characters. Omit to use the optimized default         |
-| `agentContext`          | _none_                                 | Seed the agent's spoken reply as context at connection time. Max 1500 characters. Updated automatically mid-call by the pipeline                                 |
+| `keyterms`              | _none_                                 | Words/phrases to boost recognition (`string[]`). Can be combined with `prompt`                                                                                   |
+| `prompt`                | _AssemblyAI default_                   | Natural-language context about the audio (domain, topic, scenario) — not formatting instructions. Max 1750 characters. Omit to use the optimized default         |
+| `agentContext`          | _none_                                 | Seed the agent's spoken reply as context at connection time. Max 1750 characters. Updated automatically mid-call by the pipeline                                 |
 | `previousContextNTurns` | _server (~3)_                          | Max prior conversation entries carried forward as context (0–100). `0` disables carryover (and the provider then skips `agent_context` updates)                  |
 | `languageCode`          | _multilingual_                         | Bias the model toward a single language (e.g. `"en"`, `"es"`, `"ja"`) when the session is monolingual. Omit for default code-switching                           |
 | `voiceFocus`            | _none_                                 | Noise suppression: `"near-field"` (headsets/handsets) or `"far-field"` (conference rooms, laptop mics). Omit to disable                                          |
@@ -90,7 +90,9 @@ session.updateAgentContext?.("Sure — what date would you like to book?");
 
 ## AssemblyAI documentation
 
-- [Streaming speech-to-text](https://www.assemblyai.com/docs/speech-to-text/streaming) — overview, quickstart, connection parameters, and session-based billing
-- [Turn detection & partials](https://www.assemblyai.com/docs/speech-to-text/universal-streaming) — how `minTurnSilence` / `maxTurnSilence` / `continuousPartials` and `mode` shape end-of-turn timing and the partial-transcript stream
-- [Build your own voice agent](https://www.assemblyai.com/docs/voice-agents) — the raw WebSocket pattern (turn detection, barge-in, interruption, `agent_context`) that this provider wraps
-- [Endpoints & data zones](https://www.assemblyai.com/docs/api-reference/overview) — regional hosts for `baseUrl`, e.g. the EU endpoint `wss://streaming.eu.assemblyai.com/v3/ws`
+- [Streaming speech-to-text](https://www.assemblyai.com/docs/streaming/getting-started/transcribe-streaming-audio) — overview, quickstart, connection parameters, and session-based billing
+- [Optimizing accuracy and latency](https://www.assemblyai.com/docs/streaming/getting-started/optimizing-accuracy-and-latency) — how `minTurnSilence` / `maxTurnSilence` / `continuousPartials` and `mode` shape end-of-turn timing and the partial-transcript stream
+- [How Prompting and Keyterms works](https://www.assemblyai.com/docs/streaming/prompting-and-keyterms) — using `prompt` for audio context and `keyterms` to boost domain vocabulary (the two can be combined)
+- [Conversation Context](https://www.assemblyai.com/docs/streaming/universal-3-pro/context-carryover) — how `agentContext`, `updateAgentContext()`, and `previousContextNTurns` carry prior turns and the agent's spoken replies forward for better recognition
+- [Voice Focus](https://www.assemblyai.com/docs/streaming/voice-focus) — background-noise suppression via `voiceFocus` (`near-field` / `far-field`) and `voiceFocusThreshold`
+- [Endpoints & data zones](https://www.assemblyai.com/docs/api-reference/streaming-api/universal-3-pro-streaming) — regional hosts for `baseUrl`, e.g. the EU endpoint `wss://streaming.eu.assemblyai.com/v3/ws`

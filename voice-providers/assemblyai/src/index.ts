@@ -64,7 +64,7 @@ const SPEECH_MODEL = "universal-3-5-pro";
 const DEFAULT_BASE_URL = "wss://streaming.assemblyai.com/v3/ws";
 
 /** Server-side cap on `prompt` and `agent_context` (characters). */
-const MAX_PROMPT_CHARS = 1500;
+const MAX_PROMPT_CHARS = 1750;
 
 export interface AssemblyAISTTOptions {
   /** AssemblyAI API key. Sent as the `Authorization` header (raw key, no prefix). */
@@ -87,14 +87,14 @@ export interface AssemblyAISTTOptions {
    * Natural-language context about the audio (domain, topic, scenario) →
    * `prompt`. **Not** behavioral/formatting instructions — the transcription
    * behavior is managed by AssemblyAI. Omit to use the optimized default.
-   * Max 1500 characters. Mutually exclusive with `keyterms` server-side.
+   * Max 1750 characters. Can be combined with `keyterms`.
    */
   prompt?: string;
   /**
    * Seed the agent's most recent spoken reply (TTS text) at connection time →
    * `agent_context`. Use it to prime context for the user's first answer (e.g.
    * an opening greeting). Update it as the conversation progresses via the
-   * session's `updateAgentContext()`. Max 1500 characters.
+   * session's `updateAgentContext()`. Max 1750 characters.
    */
   agentContext?: string;
   /**
