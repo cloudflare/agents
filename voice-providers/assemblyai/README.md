@@ -95,4 +95,4 @@ session.updateAgentContext?.("Sure — what date would you like to book?");
 - [How Prompting and Keyterms works](https://www.assemblyai.com/docs/streaming/prompting-and-keyterms) — using `prompt` for audio context and `keyterms` to boost domain vocabulary (the two can be combined)
 - [Conversation Context](https://www.assemblyai.com/docs/streaming/universal-3-pro/context-carryover) — how `agentContext`, `updateAgentContext()`, and `previousContextNTurns` carry prior turns and the agent's spoken replies forward for better recognition
 - [Voice Focus](https://www.assemblyai.com/docs/streaming/voice-focus) — background-noise suppression via `voiceFocus` (`near-field` / `far-field`) and `voiceFocusThreshold`
-- [Endpoints & data zones](https://www.assemblyai.com/docs/api-reference/streaming-api/universal-3-pro-streaming) — regional hosts for `baseUrl`, e.g. the EU endpoint `wss://streaming.eu.assemblyai.com/v3/ws`
+- [Endpoints & data zones](https://www.assemblyai.com/docs/streaming/endpoints-and-data-zones) — regional hosts for `baseUrl`, e.g. the EU endpoint `wss://streaming.eu.assemblyai.com/v3/ws`
