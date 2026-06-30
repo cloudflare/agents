@@ -1,5 +1,11 @@
 # @cloudflare/ai-chat
 
+## 0.9.3
+
+### Patch Changes
+
+- [`58eea18`](https://github.com/cloudflare/agents/commit/58eea18f74dec943a5e9df3d78135f8980c445c4) Thanks [@threepointone](https://github.com/threepointone)! - trigger a release
+
 ## 0.9.2
 
 ### Patch Changes
