@@ -72,6 +72,43 @@ describe("addMcpServer callbackPath enforcement", () => {
   });
 });
 
+describe("addMcpServer default callback URL warning (#1378)", () => {
+  it("warns when the default callback URL is used without callbackPath", async () => {
+    const agentStub = await getAgentByName(
+      env.TestHttpMcpDedupAgent,
+      "test-default-callback-warn"
+    );
+    const { warnings } = (await agentStub.testDefaultCallbackUrlWarns()) as {
+      warnings: string[];
+    };
+    const warning = warnings.find((w) =>
+      w.includes("falling back to the default OAuth callback URL")
+    );
+    expect(warning).toBeDefined();
+    expect(warning).toContain('addMcpServer("warn-server")');
+    // Default URL embeds the agents prefix and the instance name
+    expect(warning).toContain("https://example.com/agents/");
+    expect(warning).toContain("/test-default-callback-warn/callback");
+    expect(warning).toContain("callbackPath");
+  });
+
+  it("does not warn when an explicit callbackPath is provided", async () => {
+    const agentStub = await getAgentByName(
+      env.TestHttpMcpDedupAgent,
+      "test-explicit-callback-no-warn"
+    );
+    const { warnings } =
+      (await agentStub.testExplicitCallbackPathDoesNotWarn()) as {
+        warnings: string[];
+      };
+    expect(
+      warnings.filter((w) =>
+        w.includes("falling back to the default OAuth callback URL")
+      )
+    ).toEqual([]);
+  });
+});
+
 describe("addMcpServer API overloads", () => {
   describe("new options-based API", () => {
     it("should resolve options object with all fields", async () => {
