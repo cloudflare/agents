@@ -1,6 +1,6 @@
 # AssemblyAI Voice Agent
 
-A real-time voice agent running entirely inside a Durable Object, using [AssemblyAI Universal-3.5 Pro Streaming](https://www.assemblyai.com/docs/speech-to-text/streaming) for speech-to-text. Talk to an AI assistant that can answer questions, set spoken reminders, and check the weather — with streaming responses, interruption (barge-in) support, and conversation memory across sessions.
+A real-time voice agent running entirely inside a Durable Object, using [AssemblyAI Universal 3.5 Pro Realtime](https://www.assemblyai.com/docs/speech-to-text/streaming) for speech-to-text. Talk to an AI assistant that can answer questions, set spoken reminders, and check the weather — with streaming responses, interruption (barge-in) support, and conversation memory across sessions.
 
 - **STT**: AssemblyAI `universal-3-5-pro` via [`@cloudflare/voice-assemblyai`](../../voice-providers/assemblyai) — turn detection + barge-in server-side, with `agent_context` carryover fed from the agent's spoken replies
 - **TTS**: Workers AI (MeloTTS, `@cf/myshell-ai/melotts`) — runs on the AI binding, no extra API key

@@ -1,6 +1,6 @@
 /**
  * @cloudflare/voice-assemblyai — AssemblyAI streaming STT provider for the
- * Cloudflare Agents voice pipeline. Uses AssemblyAI Universal-3.5 Pro Streaming
+ * Cloudflare Agents voice pipeline. Uses AssemblyAI Universal 3.5 Pro Realtime
  * (`universal-3-5-pro`); see README.md for options.
  */
 
@@ -55,8 +55,8 @@ export type AssemblyAILanguageCode =
   | (string & {});
 
 /**
- * The single streaming model this provider targets: AssemblyAI Universal-3.5
- * Pro Streaming. It supports `mode`, `prompt`, `agent_context`,
+ * The single model this provider targets: AssemblyAI Universal 3.5 Pro
+ * Realtime. It supports `mode`, `prompt`, `agent_context`,
  * `previous_context_n_turns`, `voice_focus`, and language detection.
  */
 const SPEECH_MODEL = "universal-3-5-pro";
@@ -254,7 +254,7 @@ function assertValidOptions(opts: AssemblyAISTTOptions): void {
 }
 
 /**
- * AssemblyAI Universal-3.5 Pro Streaming STT provider for the Cloudflare Agents
+ * AssemblyAI Universal 3.5 Pro Realtime STT provider for the Cloudflare Agents
  * voice pipeline. Connects via WebSocket per call; the model handles turn
  * detection via punctuation (no client-side speech-boundary signalling needed).
  *

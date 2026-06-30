@@ -508,12 +508,12 @@ tts = new WorkersAITTS(this.env.AI, {
 
 ### Third-Party Providers
 
-| Package                        | Class           | Description                              |
-| ------------------------------ | --------------- | ---------------------------------------- |
-| `@cloudflare/voice-assemblyai` | `AssemblyAISTT` | Continuous STT (Universal-3.5 Pro Streaming) |
-| `@cloudflare/voice-deepgram`   | `DeepgramSTT`   | Continuous STT                           |
-| `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS` | High-quality TTS                         |
-| `@cloudflare/voice-twilio`     | Twilio adapter  | Telephony (phone calls)                  |
+| Package                        | Class           | Description                                 |
+| ------------------------------ | --------------- | ------------------------------------------- |
+| `@cloudflare/voice-assemblyai` | `AssemblyAISTT` | Continuous STT (Universal 3.5 Pro Realtime) |
+| `@cloudflare/voice-deepgram`   | `DeepgramSTT`   | Continuous STT                              |
+| `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS` | High-quality TTS                            |
+| `@cloudflare/voice-twilio`     | Twilio adapter  | Telephony (phone calls)                     |
 
 **ElevenLabs TTS:**
 

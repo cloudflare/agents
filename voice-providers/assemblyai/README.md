@@ -2,7 +2,7 @@
 
 AssemblyAI streaming speech-to-text provider for the [Cloudflare Agents](https://github.com/cloudflare/agents) voice pipeline.
 
-Uses AssemblyAI's real-time WebSocket API to transcribe audio continuously. A single session is created per call; the model handles turn detection and barge-in server-side. Targets [Universal-3.5 Pro Streaming](https://www.assemblyai.com/docs/speech-to-text/streaming) (`universal-3-5-pro`) — AssemblyAI's next-generation flagship streaming model, with 19 languages, improved prompting, and conversational context carryover.
+Uses AssemblyAI's real-time WebSocket API to transcribe audio continuously. A single session is created per call; the model handles turn detection and barge-in server-side. Targets [Universal 3.5 Pro Realtime](https://www.assemblyai.com/docs/speech-to-text/streaming) (`universal-3-5-pro`) — AssemblyAI's next-generation flagship real-time model, with 19 languages, improved prompting, and conversational context carryover.
 
 ## Install
 
@@ -43,7 +43,7 @@ As the user speaks, the client receives `transcript_interim` messages — expose
 
 ## Conversational context (`agent_context`)
 
-Universal-3.5 Pro carries prior finalized turns forward as context to improve accuracy on the next turn (`previousContextNTurns`, on by default). You can additionally feed it the agent's most recent spoken reply so it knows the question the user is answering — especially valuable for short replies (`"yes"`, `"7pm"`, a single name) and spelled-out entities (emails, account IDs). After the agent asks _"What's your email address?"_, this helps the model produce `"user@assemblyai.com"` instead of `"user at assemblyai dot com"`.
+Universal 3.5 Pro Realtime carries prior finalized turns forward as context to improve accuracy on the next turn (`previousContextNTurns`, on by default). You can additionally feed it the agent's most recent spoken reply so it knows the question the user is answering — especially valuable for short replies (`"yes"`, `"7pm"`, a single name) and spelled-out entities (emails, account IDs). After the agent asks _"What's your email address?"_, this helps the model produce `"user@assemblyai.com"` instead of `"user at assemblyai dot com"`.
 
 **The voice pipeline does this automatically.** After the agent finishes speaking each reply (and the opening greeting), `withVoice` calls the session's `updateAgentContext()` with the spoken text, which is sent to AssemblyAI as an `UpdateConfiguration` message mid-session. No extra wiring is required.
 
