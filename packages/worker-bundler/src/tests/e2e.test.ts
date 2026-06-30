@@ -1052,4 +1052,70 @@ describe("createWorker with pyproject.toml", () => {
       .fetch(new Request("http://worker/"));
     expect(response.status).toBe(200);
   });
+
+  it("works with a pure python package", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import os",
+          //"from fastapi import FastAPI",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    #print(os.listdir('/session/metadata/python_modules'), 'that was stuff')",
+          "    #print(os.listdir('/session/metadata/'), 'that was stuff')",
+          '    return Response("ok")'
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["fastapi", "flask"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate:
+        createWorkerResult.wranglerConfig?.compatibilityDate ?? "2026-01-01",
+      compatibilityFlags: createWorkerResult.wranglerConfig?.compatibilityFlags
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+  });
+
+  it("works with a pure python package with specific version specified", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    return Response("ok")'
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["fastapi==0.138.0"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate:
+        createWorkerResult.wranglerConfig?.compatibilityDate ?? "2026-01-01",
+      compatibilityFlags: createWorkerResult.wranglerConfig?.compatibilityFlags
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+  });
 }, 20000);

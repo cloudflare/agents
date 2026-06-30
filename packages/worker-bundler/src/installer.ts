@@ -11,6 +11,7 @@ import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
 const PY_REGISTRY = "https://files.pythonhosted.org";
+const PYPI_JSON_API = "https://pypi.org/pypi";
 const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
 /**
@@ -59,6 +60,7 @@ interface PyprojectToml {
   project: {
     name: string;
     version: string;
+    dependencies?: string[];
   };
 }
 
@@ -162,13 +164,54 @@ export async function installDependencies(
     let pyprojectToml: PyprojectToml;
     try {
       pyprojectToml = parseToml(pyprojectTomlContent) as PyprojectToml;
-      console.log("we've got", pyprojectToml);
     } catch {
       result.warnings.push("Failed to parse pyproject.toml");
       return result;
     }
-  }
 
+    // Collect dependencies to install
+    const depsToInstall: Record<string, string> = {};
+    for (const dep of pyprojectToml.project?.dependencies ?? []) {
+      const trimmed = dep.trim();
+      if (!trimmed) continue;
+
+      //once base functionality is working, test this against more elaborate version strings
+      const match = trimmed.match(/^([A-Za-z0-9._-]+)(.*)$/);
+      if (!match) {
+        result.warnings.push(
+          `Skipping invalid pyproject.toml dependency: ${dep}`
+        );
+        continue;
+      }
+      //At present, versionSpec comes out including the leading comparison operator; this is being left in as it will likely be desirable to keep these together
+      const [, name, versionSpec] = match;
+      depsToInstall[name] = versionSpec.trim() || "*"; //the '*' default was done by kimi, reassess if it's not a good pattern
+    }
+
+    if (Object.keys(depsToInstall).length === 0) {
+      return result; // No dependencies to install
+    }
+
+    // Track installed packages to avoid duplicates
+    const installedPackages = new Map<string, string>(); // name -> version
+    // Track in-progress installations to avoid duplicate work
+    const inProgress = new Map<string, Promise<void>>();
+
+    // Install all dependencies in parallel
+    await Promise.all(
+      Object.entries(depsToInstall).map(([depName, depVersion]) =>
+        installPythonPackage(
+          depName,
+          depVersion,
+          result,
+          fileSystem,
+          installedPackages,
+          inProgress,
+          PY_REGISTRY
+        )
+      )
+    );
+  }
   return result;
 }
 
@@ -269,6 +312,125 @@ async function installPackage(
   } finally {
     inProgress.delete(name);
   }
+}
+
+/**
+ * Install a single Python package from PyPI.
+ *
+ * This is a minimal implementation: it downloads the latest version of the
+ * package as a source distribution and adds it to python_modules/. It does not
+ * resolve version ranges or install transitive dependencies.
+ */
+async function installPythonPackage(
+  name: string,
+  _versionRange: string,
+  result: InstallResult,
+  fileSystem: FileSystem,
+  installedPackages: Map<string, string>,
+  inProgress: Map<string, Promise<void>>,
+  registry: string
+): Promise<void> {
+  // Skip if already installed in this run
+  if (installedPackages.has(name)) {
+    return;
+  }
+
+  // Skip if the package already exists in the filesystem
+  if (fileSystem.read(`python_modules/${name}/__init__.py`) !== null) {
+    installedPackages.set(name, "existing");
+    return;
+  }
+
+  // If installation is already in progress, wait for it
+  const existing = inProgress.get(name);
+  if (existing) {
+    return existing;
+  }
+
+  const installPromise = (async () => {
+    try {
+      // the below was done in a separate function for the JS impl; move it?
+      // Fetch package metadata from PyPI JSON API
+      const metadataResponse = await fetchWithTimeout(
+        `${PYPI_JSON_API}/${name}/json`
+      );
+      if (!metadataResponse.ok) {
+        const hint =
+          metadataResponse.status === 404
+            ? " (package not found — check the name in pyproject.toml)"
+            : "";
+        throw new Error(
+          `PyPI returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
+        );
+      }
+      const metadata = (await metadataResponse.json()) as {
+        info: { version: string };
+      };
+
+      const version = metadata.info.version;
+      const sourceUrl = `${registry}/packages/source/${name[0]}/${name}/${name}-${version}.tar.gz`;
+
+      // Download source distribution
+      const response = await fetchWithTimeout(
+        sourceUrl,
+        {},
+        DEFAULT_TIMEOUT_MS * 2
+      );
+      if (!response.ok) {
+        throw new Error(
+          `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${sourceUrl})`
+        );
+      }
+
+      const buffer = await response.arrayBuffer();
+      const packageFiles = stripTopLevelDirectory(
+        await extractTarball(new Uint8Array(buffer))
+      );
+
+      // Mark as installed before writing to prevent cycles
+      installedPackages.set(name, version);
+      result.installed.push(`${name}@${version}`);
+
+      // Add files to python_modules
+      for (const [filePath, content] of Object.entries(packageFiles)) {
+        fileSystem.write(`python_modules/${name}/${filePath}`, content);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      result.warnings.push(`Failed to install ${name}: ${message}`);
+    }
+  })();
+
+  inProgress.set(name, installPromise);
+
+  try {
+    await installPromise;
+  } finally {
+    inProgress.delete(name);
+  }
+}
+
+/**
+ * Strip the top-level directory from extracted tarball paths.
+ *
+ * Python source distributions place files under `{name}-{version}/`, unlike
+ * npm tarballs which use a fixed `package/` prefix.
+ */
+function stripTopLevelDirectory(
+  files: Record<string, string>
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [path, content] of Object.entries(files)) {
+    const slashIndex = path.indexOf("/");
+    if (slashIndex === -1) {
+      continue; // Skip root-level files (e.g. PKG-INFO)
+    }
+    const newPath = path.slice(slashIndex + 1);
+    if (newPath) {
+      result[newPath] = content;
+    }
+  }
+  return result;
 }
 
 /**
@@ -547,7 +709,7 @@ function isTextFile(path: string): boolean {
 }
 
 /**
- * Check if files contain a package.json with dependencies that need installing.
+ * Check if files contain a package.json or pyproject.toml with dependencies that need installing.
  */
 export function hasDependencies(files: FileSystem): boolean {
   const pyprojectToml = files.read("pyproject.toml");
@@ -566,9 +728,9 @@ export function hasDependencies(files: FileSystem): boolean {
 
   if (pyprojectToml) {
     try {
-      const pkg = JSON.parse(packageJson);
-      const deps = pkg.dependencies ?? {};
-      return Object.keys(deps).length > 0;
+      const pkg = parseToml(pyprojectToml) as PyprojectToml;
+      const deps = pkg.project?.dependencies ?? [];
+      return deps.length > 0;
     } catch {
       return false;
     }

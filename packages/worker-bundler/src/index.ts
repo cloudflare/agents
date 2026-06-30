@@ -144,14 +144,17 @@ export async function createWorker(
 
   if (bundle) {
     if (entryPoint.endsWith(".py")) {
+      //note: probably desirable to move this out of the 'is bundle' path and change that default for 'bundle' to false for when the dependencies are python, since this seems to mostly be a JS thing
       let result = {
         mainModule: entryPoint,
-        modules: files,
+        modules: Object.fromEntries(fileSystem.files),
         compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-01-01",
         compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
           "python_workers"
         ]
       };
+
+      delete result.modules["pyproject.toml"];
       return result;
     } else {
       // Try bundling with esbuild-wasm
