@@ -12,7 +12,10 @@ const tsconfigs: string[] = [];
 
 for await (const file of await fg.glob("**/tsconfig.json", {
   followSymbolicLinks: false,
-  ignore: ["**/node_modules/**"]
+  // `automations/*` are standalone Flue projects (not pnpm workspace members);
+  // their deps are installed and typechecked inside their own CI workflows, so
+  // the monorepo typecheck cannot resolve their modules and must skip them.
+  ignore: ["**/node_modules/**", "automations/**"]
 })) {
   if (filter && !file.includes(filter)) continue;
   tsconfigs.push(file);
