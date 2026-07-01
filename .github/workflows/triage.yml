@@ -1,0 +1,47 @@
+name: Triage
+
+# Runs automatically on every newly opened issue. The Flue triage-agent
+# (automations/triage-agent) reads the issue and applies fitting labels from
+# the repo's EXISTING label set only. It cannot create labels or comment.
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage:
+    if: github.event.sender.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    # Deliberately minimal: label issues only. No pull-requests scope, and the
+    # agent is instructed not to comment or create labels.
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install triage-agent dependencies
+        working-directory: automations/triage-agent
+        run: npm install
+
+      - name: Run triage-agent
+        working-directory: automations/triage-agent
+        env:
+          # Inference via Cloudflare AI Gateway (same secrets as Bonk).
+          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
+          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
+          # Scoped to issue labeling only.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx flue run triage --target node \
+            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\"}"

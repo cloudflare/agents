@@ -1,0 +1,65 @@
+name: Repro
+
+# Triggered by commenting `/repro` on a GitHub issue.
+# Spins up the Flue repro-agent (automations/repro-agent), which scaffolds a
+# minimal Agents/Worker reproduction, deploys it to a temporary Cloudflare
+# preview account with `wrangler deploy --temporary`, verifies the bug, and
+# comments the findings back on the issue.
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  reproduce:
+    # Only on issues (not PRs), only on the `/repro` command,
+    # and never on comments authored by a bot.
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.sender.type != 'Bot' &&
+      contains(github.event.comment.body, '/repro')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Acknowledge command
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "🤖 repro-agent is on it — building and deploying a reproduction for this issue. This takes a few minutes."
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install repro-agent dependencies
+        working-directory: automations/repro-agent
+        run: npm install
+
+      - name: Run repro-agent
+        working-directory: automations/repro-agent
+        env:
+          # Inference: Pi/Flue routes through the Cloudflare AI Gateway using
+          # the same secrets Bonk uses. These stay in the parent process and
+          # are NOT forwarded into the agent's sandbox shell.
+          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
+          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
+          # Forwarded into the sandbox so the agent can read the issue and
+          # post its findings. Note: this is the GH token, NOT a Cloudflare
+          # token — so `wrangler deploy --temporary` stays unauthenticated.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx flue run reproduce --target node \
+            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\"}"

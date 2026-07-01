@@ -1,0 +1,23 @@
+{
+  "name": "@automations/pr-agent",
+  "description": "Flue agent that takes a GitHub issue (and any repro findings) and attempts to one-shot a fix PR for the Agents SDK",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "pr": "flue run pr --target node",
+    "dev": "flue dev --target node",
+    "build": "flue build --target node",
+    "typecheck": "tsc --noEmit",
+    "docs": "flue docs"
+  },
+  "dependencies": {
+    "@flue/runtime": "1.0.0-beta.9",
+    "valibot": "^1.4.2"
+  },
+  "devDependencies": {
+    "@flue/cli": "1.0.0-beta.9",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.105.0"
+  }
+}

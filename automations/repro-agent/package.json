@@ -1,0 +1,23 @@
+{
+  "name": "@automations/repro-agent",
+  "description": "Flue agent that reproduces Agents SDK GitHub issues by scaffolding and deploying a temporary Cloudflare Worker",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "reproduce": "flue run reproduce --target node",
+    "dev": "flue dev --target node",
+    "build": "flue build --target node",
+    "typecheck": "tsc --noEmit",
+    "docs": "flue docs"
+  },
+  "dependencies": {
+    "@flue/runtime": "1.0.0-beta.9",
+    "valibot": "^1.4.2"
+  },
+  "devDependencies": {
+    "@flue/cli": "1.0.0-beta.9",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.105.0"
+  }
+}

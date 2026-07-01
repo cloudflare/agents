@@ -1,0 +1,68 @@
+name: PR Agent
+
+# Triggered by commenting `/pr` on a GitHub issue.
+# Runs the Flue pr-agent (automations/pr-agent), which reads the issue and all
+# its comments (including any repro-agent findings) and attempts to one-shot a
+# fix PR: branch, change, test, push, and open the PR linked to the issue.
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  pr:
+    # Only on issues (not PRs), only on the `/pr` command,
+    # and never on comments authored by a bot.
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.sender.type != 'Bot' &&
+      contains(github.event.comment.body, '/pr')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Acknowledge command
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "🤖 pr-agent is on it — reading the issue and attempting a fix PR. This takes a few minutes."
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pr-agent dependencies
+        working-directory: automations/pr-agent
+        run: npm install
+
+      - name: Run pr-agent
+        working-directory: automations/pr-agent
+        env:
+          # Inference via Cloudflare AI Gateway (same secrets as Bonk). Stay in
+          # the parent process; not forwarded into the agent sandbox shell.
+          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
+          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
+          # Forwarded into the sandbox: read issue, push branch, open PR.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx flue run pr --target node \
+            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\"}"
