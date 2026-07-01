@@ -11,13 +11,35 @@ on:
     types: [created]
 
 jobs:
-  reproduce:
-    # Only on issues (not PRs), only on the `/repro` command,
-    # and never on comments authored by a bot.
+  # Gate: only members/owners/collaborators, only on issues (not PRs), and only
+  # when the comment is the exact `/repro` command. The coarse `contains()` in
+  # the job `if` avoids spinning a runner for unrelated comments; the parse step
+  # does an exact, word-boundary match so substrings like `/reprocess` or a
+  # `/repro` inside a URL do not trigger a run.
+  parse:
     if: >-
       github.event.issue.pull_request == null &&
       github.event.sender.type != 'Bot' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       contains(github.event.comment.body, '/repro')
+    runs-on: ubuntu-latest
+    outputs:
+      match: ${{ steps.check.outputs.match }}
+    steps:
+      - name: Exact command match
+        id: check
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if printf '%s' "$COMMENT_BODY" | grep -qiE '(^|[[:space:]])/repro([[:space:]]|$)'; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  reproduce:
+    needs: parse
+    if: needs.parse.outputs.match == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -30,9 +52,10 @@ jobs:
       - name: Acknowledge command
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          gh issue comment "${{ github.event.issue.number }}" \
-            --repo "${{ github.repository }}" \
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
             --body "🤖 repro-agent is on it — building and deploying a reproduction for this issue. This takes a few minutes."
 
       - name: Checkout repository
@@ -41,7 +64,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24.15.0
 
       - name: Install repro-agent dependencies
         working-directory: automations/repro-agent
@@ -50,16 +73,19 @@ jobs:
       - name: Run repro-agent
         working-directory: automations/repro-agent
         env:
-          # Inference: Pi/Flue routes through the Cloudflare AI Gateway using
-          # the same secrets Bonk uses. These stay in the parent process and
-          # are NOT forwarded into the agent's sandbox shell.
-          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
-          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
+          # Inference: Pi/Flue calls OpenAI directly. This stays in the parent
+          # process and is NOT forwarded into the agent's sandbox shell.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Forwarded into the sandbox so the agent can read the issue and
           # post its findings. Note: this is the GH token, NOT a Cloudflare
           # token — so `wrangler deploy --temporary` stays unauthenticated.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed via env (not interpolated into the command line) so a
+          # crafted repo/issue value cannot inject shell — the JSON is built
+          # with jq from these variables.
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          npx flue run reproduce --target node \
-            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\"}"
+          INPUT="$(jq -cn --argjson issueNumber "$ISSUE_NUMBER" --arg repo "$REPO" \
+            '{issueNumber: $issueNumber, repo: $repo}')"
+          npx flue run reproduce --target node --input "$INPUT"

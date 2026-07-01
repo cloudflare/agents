@@ -3,6 +3,11 @@ name: Triage
 # Runs automatically on every newly opened issue. The Flue triage-agent
 # (automations/triage-agent) reads the issue and applies fitting labels from
 # the repo's EXISTING label set only. It cannot create labels or comment.
+#
+# Unlike the `/repro` and `/pr` command workflows, triage is intentionally NOT
+# gated to org members: it runs on every issue (including community reports) so
+# they get labeled. It is low-risk — it can only add existing labels, cannot
+# comment, and has no pull-requests scope.
 
 on:
   issues:
@@ -16,9 +21,11 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.issue.number }}
       cancel-in-progress: true
-    # Deliberately minimal: label issues only. No pull-requests scope, and the
-    # agent is instructed not to comment or create labels.
+    # Deliberately minimal: read the repo (for checkout) and label issues.
+    # No pull-requests scope, and the agent is instructed not to comment or
+    # create labels.
     permissions:
+      contents: read
       issues: write
     steps:
       - name: Checkout repository
@@ -27,7 +34,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24.15.0
 
       - name: Install triage-agent dependencies
         working-directory: automations/triage-agent
@@ -36,12 +43,14 @@ jobs:
       - name: Run triage-agent
         working-directory: automations/triage-agent
         env:
-          # Inference via Cloudflare AI Gateway (same secrets as Bonk).
-          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
-          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
+          # Inference: Pi/Flue calls OpenAI directly.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Scoped to issue labeling only.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed via env (not interpolated into the command line); JSON built with jq.
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          npx flue run triage --target node \
-            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\"}"
+          INPUT="$(jq -cn --argjson issueNumber "$ISSUE_NUMBER" --arg repo "$REPO" \
+            '{issueNumber: $issueNumber, repo: $repo}')"
+          npx flue run triage --target node --input "$INPUT"

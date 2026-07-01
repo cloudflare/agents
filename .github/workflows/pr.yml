@@ -4,19 +4,42 @@ name: PR Agent
 # Runs the Flue pr-agent (automations/pr-agent), which reads the issue and all
 # its comments (including any repro-agent findings) and attempts to one-shot a
 # fix PR: branch, change, test, push, and open the PR linked to the issue.
+# The fix commit is attributed to the user who ran `/pr`.
 
 on:
   issue_comment:
     types: [created]
 
 jobs:
-  pr:
-    # Only on issues (not PRs), only on the `/pr` command,
-    # and never on comments authored by a bot.
+  # Gate: only members/owners/collaborators, only on issues (not PRs), and only
+  # when the comment is the exact `/pr` command. The coarse `contains()` in the
+  # job `if` avoids spinning a runner for unrelated comments; the parse step
+  # does an exact, word-boundary match so substrings like `/probably` or
+  # `/preview` (or a file path like `.github/workflows/pr.yml`) do not trigger.
+  parse:
     if: >-
       github.event.issue.pull_request == null &&
       github.event.sender.type != 'Bot' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       contains(github.event.comment.body, '/pr')
+    runs-on: ubuntu-latest
+    outputs:
+      match: ${{ steps.check.outputs.match }}
+    steps:
+      - name: Exact command match
+        id: check
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if printf '%s' "$COMMENT_BODY" | grep -qiE '(^|[[:space:]])/pr([[:space:]]|$)'; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  pr:
+    needs: parse
+    if: needs.parse.outputs.match == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -30,9 +53,10 @@ jobs:
       - name: Acknowledge command
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          gh issue comment "${{ github.event.issue.number }}" \
-            --repo "${{ github.repository }}" \
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
             --body "🤖 pr-agent is on it — reading the issue and attempting a fix PR. This takes a few minutes."
 
       - name: Checkout repository
@@ -46,7 +70,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24.15.0
           cache: pnpm
 
       - name: Install pr-agent dependencies
@@ -56,13 +80,22 @@ jobs:
       - name: Run pr-agent
         working-directory: automations/pr-agent
         env:
-          # Inference via Cloudflare AI Gateway (same secrets as Bonk). Stay in
-          # the parent process; not forwarded into the agent sandbox shell.
-          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
-          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
+          # Inference: Pi/Flue calls OpenAI directly. Stays in the parent
+          # process; not forwarded into the agent sandbox shell.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Forwarded into the sandbox: read issue, push branch, open PR.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed via env (not interpolated into the command line) so crafted
+          # values cannot inject shell; the JSON input is built with jq.
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          ACTOR_LOGIN: ${{ github.event.comment.user.login }}
+          ACTOR_ID: ${{ github.event.comment.user.id }}
         run: |
-          npx flue run pr --target node \
-            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\", \"actorLogin\": \"${{ github.event.comment.user.login }}\", \"actorId\": ${{ github.event.comment.user.id }}}"
+          INPUT="$(jq -cn \
+            --argjson issueNumber "$ISSUE_NUMBER" \
+            --arg repo "$REPO" \
+            --arg actorLogin "$ACTOR_LOGIN" \
+            --argjson actorId "$ACTOR_ID" \
+            '{issueNumber: $issueNumber, repo: $repo, actorLogin: $actorLogin, actorId: $actorId}')"
+          npx flue run pr --target node --input "$INPUT"
