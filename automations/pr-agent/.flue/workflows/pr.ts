@@ -34,6 +34,9 @@ export default defineWorkflow({
     // that person rather than a bot.
     actorLogin: v.optional(v.string()),
     actorId: v.optional(v.number()),
+    // Free-form text the user typed after `/pr`, e.g. constraints on the fix
+    // or a pointer to the suspect area. May be empty.
+    context: v.optional(v.string()),
   }),
 
   async run({ harness, input }) {
@@ -45,6 +48,7 @@ export default defineWorkflow({
         repo: input.repo ?? "cloudflare/agents",
         actorLogin: input.actorLogin ?? "",
         actorId: input.actorId ?? 0,
+        context: input.context ?? "",
       },
       result: v.object({
         prOpened: v.boolean(),

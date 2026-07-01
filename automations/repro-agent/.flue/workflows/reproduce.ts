@@ -30,6 +30,9 @@ export default defineWorkflow({
   input: v.object({
     issueNumber: v.number(),
     repo: v.optional(v.string()),
+    // Free-form text the user typed after `/repro`, e.g. extra repro steps or
+    // a pointer to the suspect area. May be empty.
+    context: v.optional(v.string()),
   }),
 
   async run({ harness, input }) {
@@ -39,6 +42,7 @@ export default defineWorkflow({
       args: {
         issueNumber: input.issueNumber,
         repo: input.repo ?? "cloudflare/agents",
+        context: input.context ?? "",
       },
       result: v.object({
         reproduced: v.boolean(),

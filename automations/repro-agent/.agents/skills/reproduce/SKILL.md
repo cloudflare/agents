@@ -3,7 +3,13 @@ name: reproduce
 description: Reproduce a cloudflare/agents GitHub issue by scaffolding a minimal Agents/Worker project and deploying it to a temporary Cloudflare account, then report findings back on the issue.
 ---
 
-You are given `issueNumber` and `repo` in the arguments. Reproduce the bug end-to-end and post your findings as an issue comment.
+You are given `issueNumber`, `repo`, and `context` in the arguments. Reproduce the bug end-to-end and post your findings as an issue comment.
+
+`context` is any free-form text the user typed after the `/repro` command (it
+may be empty). Treat it as an extra hint from the triggering user — e.g.
+additional reproduction steps, a specific version, or a pointer to the suspect
+area. Let it guide your reproduction, but the issue itself remains the source of
+truth.
 
 ## 1. Understand the issue
 

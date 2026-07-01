@@ -43,8 +43,10 @@ jobs:
       - name: Run triage-agent
         working-directory: automations/triage-agent
         env:
-          # Inference: Pi/Flue calls OpenAI directly.
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Inference via Cloudflare AI Gateway (same secrets as Bonk).
+          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
+          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
           # Scoped to issue labeling only.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Passed via env (not interpolated into the command line); JSON built with jq.

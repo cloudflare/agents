@@ -3,7 +3,12 @@ name: open-pr
 description: Take a cloudflare/agents GitHub issue plus any repro findings and one-shot a fix PR — branch, change, test, push, and open the PR linked to the issue.
 ---
 
-You are given `issueNumber`, `repo`, `actorLogin`, and `actorId` in the arguments. `actorLogin`/`actorId` identify the GitHub user who triggered `/pr`. Produce a focused fix PR, attributed to that user.
+You are given `issueNumber`, `repo`, `actorLogin`, `actorId`, and `context` in the arguments. `actorLogin`/`actorId` identify the GitHub user who triggered `/pr`. Produce a focused fix PR, attributed to that user.
+
+`context` is any free-form text the user typed after the `/pr` command (it may
+be empty). Treat it as a direct instruction from the triggering user — e.g.
+constraints on the fix, a preferred approach, or a pointer to the suspect area
+— and weight it highly, but stay within the scope of the issue.
 
 ## 1. Gather everything known
 
