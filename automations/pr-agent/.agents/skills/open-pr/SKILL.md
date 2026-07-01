@@ -108,14 +108,13 @@ The PR body (`pr-body.md`) must include:
 
 Capture the PR URL and branch name.
 
-## 7. Comment on the issue
+Do **not** post an acknowledgement or "opened a PR" comment on the issue. The
+PR links back to the issue via `Closes #<issueNumber>`, and the CI workflow adds
+a 🚀 reaction to the triggering `/pr` comment on success (and 😕 on failure), so
+a comment would just be noise. The only case where you comment is the skip path
+in step 1 (no PR exists to show).
 
-```bash
-gh issue comment <issueNumber> --repo <repo> \
-  --body "🤖 pr-agent opened a candidate fix: <prUrl>. Please review — it was generated automatically and may need adjustment."
-```
-
-## 8. Return the structured result
+## 7. Return the structured result
 
 Return exactly:
 

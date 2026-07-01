@@ -58,14 +58,15 @@ jobs:
       contents: read
       issues: write
     steps:
-      - name: Acknowledge command
+      - name: Acknowledge with 👀 reaction
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-            --body "🤖 repro-agent is on it — building and deploying a reproduction for this issue. This takes a few minutes."
+          gh api --method POST \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=eyes
 
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -103,3 +104,25 @@ jobs:
             --arg context "$CONTEXT" \
             '{issueNumber: $issueNumber, repo: $repo, context: $context}')"
           npx flue run reproduce --target node --input "$INPUT"
+
+      - name: React 🚀 on success
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api --method POST \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=rocket
+
+      - name: React 😕 on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api --method POST \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=confused
