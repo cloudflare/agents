@@ -65,4 +65,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           npx flue run pr --target node \
-            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\"}"
+            --input "{\"issueNumber\": ${{ github.event.issue.number }}, \"repo\": \"${{ github.repository }}\", \"actorLogin\": \"${{ github.event.comment.user.login }}\", \"actorId\": ${{ github.event.comment.user.id }}}"

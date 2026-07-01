@@ -3,7 +3,7 @@ name: open-pr
 description: Take a cloudflare/agents GitHub issue plus any repro findings and one-shot a fix PR — branch, change, test, push, and open the PR linked to the issue.
 ---
 
-You are given `issueNumber` and `repo` in the arguments. Produce a focused fix PR.
+You are given `issueNumber`, `repo`, `actorLogin`, and `actorId` in the arguments. `actorLogin`/`actorId` identify the GitHub user who triggered `/pr`. Produce a focused fix PR, attributed to that user.
 
 ## 1. Gather everything known
 
@@ -29,14 +29,27 @@ Read the relevant code in `packages/agents`, `packages/think`, etc. Confirm the
 hypothesis (or form your own) by reading the actual implementation. Identify the
 smallest change that fixes the reported behavior.
 
-## 3. Branch
+## 3. Branch and set commit identity
+
+Attribute the commit to the **user who triggered `/pr`** using their github.com
+noreply email. This makes the commit link to their GitHub profile and show
+their avatar, regardless of their email-privacy setting.
 
 ```bash
-git config user.name "repro-pr-agent[bot]"
-git config user.email "repro-pr-agent@users.noreply.github.com"
+# Use the triggering user's identity when provided; fall back to a bot identity.
+if [ -n "<actorLogin>" ] && [ "<actorId>" != "0" ]; then
+  git config user.name "<actorLogin>"
+  git config user.email "<actorId>+<actorLogin>@users.noreply.github.com"
+else
+  git config user.name "repro-pr-agent[bot]"
+  git config user.email "repro-pr-agent@users.noreply.github.com"
+fi
 BRANCH="fix/issue-<issueNumber>-$(date +%s)"
 git checkout -b "$BRANCH"
 ```
+
+The github.com noreply email format is exactly `<actorId>+<actorLogin>@users.noreply.github.com`
+(numeric id, a `+`, the login). Do not invent a different email.
 
 ## 4. Make the fix
 
@@ -80,6 +93,7 @@ gh pr create --repo <repo> \
 
 The PR body (`pr-body.md`) must include:
 - `Closes #<issueNumber>` so the issue auto-links.
+- a line noting the fix was authored on behalf of `@<actorLogin>` (who ran `/pr`).
 - **What was wrong** (root cause, citing the file/line).
 - **What changed** and why this is the minimal fix.
 - **Testing**: what you added/ran and the result.

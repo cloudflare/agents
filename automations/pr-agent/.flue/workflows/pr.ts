@@ -29,6 +29,11 @@ export default defineWorkflow({
   input: v.object({
     issueNumber: v.number(),
     repo: v.optional(v.string()),
+    // The GitHub user who triggered `/pr`. Used to attribute the commit to
+    // them via their github.com noreply email so the PR shows as authored by
+    // that person rather than a bot.
+    actorLogin: v.optional(v.string()),
+    actorId: v.optional(v.number()),
   }),
 
   async run({ harness, input }) {
@@ -38,6 +43,8 @@ export default defineWorkflow({
       args: {
         issueNumber: input.issueNumber,
         repo: input.repo ?? "cloudflare/agents",
+        actorLogin: input.actorLogin ?? "",
+        actorId: input.actorId ?? 0,
       },
       result: v.object({
         prOpened: v.boolean(),
