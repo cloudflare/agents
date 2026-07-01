@@ -1,0 +1,128 @@
+name: Repro
+
+# Triggered by commenting `/repro` on a GitHub issue.
+# Spins up the Flue repro-agent (automations/repro-agent), which scaffolds a
+# minimal Agents/Worker reproduction, deploys it to a temporary Cloudflare
+# preview account with `wrangler deploy --temporary`, verifies the bug, and
+# comments the findings back on the issue.
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  # Gate: only members/owners/collaborators, only on issues (not PRs), and only
+  # when the comment *starts with* the `/repro` command. The coarse `contains()`
+  # in the job `if` avoids spinning a runner for unrelated comments; the parse
+  # step requires the command at the start (so `/reprocess` or a `/repro` inside
+  # a URL do not trigger) and captures any text after it as extra context.
+  parse:
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.sender.type != 'Bot' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      contains(github.event.comment.body, '/repro')
+    runs-on: ubuntu-latest
+    outputs:
+      match: ${{ steps.check.outputs.match }}
+      context: ${{ steps.check.outputs.context }}
+    steps:
+      - name: Parse command and context
+        id: check
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # The comment must START WITH `/repro` (optionally indented). Anything
+          # after the command is captured as free-form context for the agent.
+          if printf '%s' "$COMMENT_BODY" | head -n1 | grep -qiE '^[[:space:]]*/repro([[:space:]]|$)'; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+            CONTEXT="$(printf '%s' "$COMMENT_BODY" | sed -E '1s@^[[:space:]]*/repro[[:space:]]*@@I')"
+            {
+              echo "context<<__PI_EOF__"
+              printf '%s\n' "$CONTEXT"
+              echo "__PI_EOF__"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  reproduce:
+    needs: parse
+    if: needs.parse.outputs.match == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Acknowledge with 👀 reaction
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api --method POST \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=eyes
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install repro-agent dependencies
+        working-directory: automations/repro-agent
+        run: npm install
+
+      - name: Run repro-agent
+        working-directory: automations/repro-agent
+        env:
+          # Inference: Pi/Flue routes through the Cloudflare AI Gateway using
+          # the same secrets Bonk uses. These stay in the parent process and
+          # are NOT forwarded into the agent's sandbox shell.
+          CLOUDFLARE_API_KEY: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
+          CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
+          # Forwarded into the sandbox so the agent can read the issue and
+          # post its findings. Note: this is the GH token, NOT a Cloudflare
+          # token — so `wrangler deploy --temporary` stays unauthenticated.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed via env (not interpolated into the command line) so a
+          # crafted repo/issue value cannot inject shell — the JSON is built
+          # with jq from these variables.
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          CONTEXT: ${{ needs.parse.outputs.context }}
+        run: |
+          INPUT="$(jq -cn --argjson issueNumber "$ISSUE_NUMBER" --arg repo "$REPO" \
+            --arg context "$CONTEXT" \
+            '{issueNumber: $issueNumber, repo: $repo, context: $context}')"
+          npx flue run reproduce --target node --input "$INPUT"
+
+      - name: React 🚀 on success
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api --method POST \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=rocket
+
+      - name: React 😕 on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api --method POST \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=confused
