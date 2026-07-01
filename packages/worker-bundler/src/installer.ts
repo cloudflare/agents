@@ -351,6 +351,7 @@ async function installPythonPackage(
     try {
       // the below was done in a separate function for the JS impl; move it?
       // Fetch package metadata from PyPI JSON API
+      // this appears to be necessary to determine which version to actually get when installing without a defined version
       const metadataResponse = await fetchWithTimeout(
         `${PYPI_JSON_API}/${name}/json`
       );
