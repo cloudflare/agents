@@ -19,9 +19,9 @@ const agent = defineAgent(() => ({
   model: "cloudflare-ai-gateway/claude-opus-4-8",
   sandbox: local({
     env: {
-      GH_TOKEN: process.env.GH_TOKEN,
-    },
-  }),
+      GH_TOKEN: process.env.GH_TOKEN
+    }
+  })
 }));
 
 export default defineWorkflow({
@@ -36,7 +36,7 @@ export default defineWorkflow({
     actorId: v.optional(v.number()),
     // Free-form text the user typed after `/pr`, e.g. constraints on the fix
     // or a pointer to the suspect area. May be empty.
-    context: v.optional(v.string()),
+    context: v.optional(v.string())
   }),
 
   async run({ harness, input }) {
@@ -48,7 +48,7 @@ export default defineWorkflow({
         repo: input.repo ?? "cloudflare/agents",
         actorLogin: input.actorLogin ?? "",
         actorId: input.actorId ?? 0,
-        context: input.context ?? "",
+        context: input.context ?? ""
       },
       result: v.object({
         prOpened: v.boolean(),
@@ -56,10 +56,10 @@ export default defineWorkflow({
         summary: v.string(),
         prUrl: v.optional(v.string()),
         branch: v.optional(v.string()),
-        testsPassed: v.optional(v.boolean()),
-      }),
+        testsPassed: v.optional(v.boolean())
+      })
     });
 
     return data;
-  },
+  }
 });

@@ -18,6 +18,7 @@ gh issue view <issueNumber> --repo <repo> --json title,body,labels,comments
 ```
 
 Read it carefully. Extract:
+
 - the **observed behavior** (the bug),
 - the **expected behavior**,
 - any **"To Reproduce" steps**, code snippets, versions, or stack traces.
@@ -73,6 +74,7 @@ npx wrangler deploy --temporary
 
 This creates/reuses a temporary preview account, deploys to a `*.workers.dev`
 URL, and prints a **Claim URL** valid for 60 minutes. Capture from the output:
+
 - the live `https://...workers.dev` URL → `liveUrl`
 - the `https://dash.cloudflare.com/claim-preview?claimToken=...` URL → `claimUrl`
 
@@ -102,6 +104,7 @@ gh issue comment <issueNumber> --repo <repo> --body-file comment.md
 ```
 
 The comment should contain:
+
 - **Verdict**: reproduced / could not reproduce / skipped, with one-line reason.
 - **Live URL** (and note the claim URL expires in 60 min — include it so a maintainer can claim the account to keep poking at it).
 - **Minimal repro**: the key files (`wrangler.jsonc` + the agent/worker source) in fenced code blocks, or a short `git`-style listing.
@@ -114,6 +117,7 @@ Capture the returned comment URL for `commentUrl`.
 ## 7. Return the structured result
 
 Return exactly:
+
 - `reproduced` (boolean)
 - `skipped` (boolean)
 - `summary` (string — one or two sentences)

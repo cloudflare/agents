@@ -9,24 +9,33 @@ agent (powered by Pi) that runs in GitHub Actions.
 
 ## Agents
 
-| Agent | Trigger | What it does | GH permissions |
-| --- | --- | --- | --- |
-| [`triage-agent`](./triage-agent) | every issue opened | applies fitting **existing** labels | `issues: write` |
-| [`repro-agent`](./repro-agent) | `/repro` comment | builds + deploys a minimal reproduction, comments findings | `issues: write` |
-| [`pr-agent`](./pr-agent) | `/pr` comment | one-shots a fix PR from the issue + repro | `contents: write`, `issues: write`, `pull-requests: write` |
+| Agent                            | Trigger            | What it does                                               | GH permissions                                             |
+| -------------------------------- | ------------------ | ---------------------------------------------------------- | ---------------------------------------------------------- |
+| [`triage-agent`](./triage-agent) | every issue opened | applies fitting **existing** labels                        | `issues: write`                                            |
+| [`repro-agent`](./repro-agent)   | `/repro` comment   | builds + deploys a minimal reproduction, comments findings | `issues: write`                                            |
+| [`pr-agent`](./pr-agent)         | `/pr` comment      | one-shots a fix PR from the issue + repro                  | `contents: write`, `issues: write`, `pull-requests: write` |
 
 CI entrypoints live in [`.github/workflows/`](../.github/workflows):
 `triage.yml`, `repro.yml`, `pr.yml`.
 
-### triage-agent (`/triage` → automatic)
+### triage-agent (automatic)
 
 Runs on every newly opened issue and applies labels from the repo's **existing**
-label set. Hard constraints: it can **only** apply labels that already exist
-(enforced by `gh issue edit --add-label`, which refuses unknown labels), and it
-**cannot create labels or comment**. Workflow permissions are scoped to
-`issues: write` only — no `pull-requests` access.
+label set. It is intentionally **not** member-gated (community issues should get
+labeled too), so it runs on untrusted input and is **locked down** accordingly:
 
-> **Future idea:** triage is a good candidate to become a *deployed* Think agent
+- **No shell, no filesystem tools.** A custom `SandboxFactory`
+  (`.flue/lib/locked-sandbox.ts`) replaces Flue's default workspace tool list
+  with an empty one. A prompt-injection in an issue body has no `bash` to run
+  `env` / `gh auth token` and no `edit`/`write` to tamper with anything.
+- **Three typed tools only** (`.flue/lib/github-tools.ts`): `view_issue`,
+  `list_labels`, `apply_labels`. The GitHub token, repo, and issue number are
+  read from `process.env` **inside** each tool — never exposed to the model.
+- **Cannot escalate.** `apply_labels` validates against existing labels (no
+  label creation), and there is no tool to comment, delete, or touch other
+  issues. Workflow permissions are scoped to `issues: write` only.
+
+> **Future idea:** triage is a good candidate to become a _deployed_ Think agent
 > (a `@cloudflare/think` Worker that the workflow calls, or that receives the
 > GitHub webhook directly) rather than a per-run CI agent — cheaper warm starts
 > and shared memory across issues. Kept as a CI Flue agent for now for
@@ -60,12 +69,12 @@ label set. Hard constraints: it can **only** apply labels that already exist
 All three agents route LLM inference through the **Cloudflare AI Gateway** using
 the same secrets the `bonk` workflow already uses:
 
-| Purpose | Env var (in workflow) | Secret |
-| --- | --- | --- |
-| LLM inference via CF AI Gateway | `CLOUDFLARE_API_KEY` | `CF_AI_GATEWAY_TOKEN` |
-| AI Gateway account | `CLOUDFLARE_ACCOUNT_ID` | `CF_AI_GATEWAY_ACCOUNT_ID` |
-| AI Gateway slug | `CLOUDFLARE_GATEWAY_ID` | `CF_AI_GATEWAY_NAME` |
-| Read issue / labels / push / PR | `GH_TOKEN` | `GITHUB_TOKEN` (auto) |
+| Purpose                         | Env var (in workflow)   | Secret                     |
+| ------------------------------- | ----------------------- | -------------------------- |
+| LLM inference via CF AI Gateway | `CLOUDFLARE_API_KEY`    | `CF_AI_GATEWAY_TOKEN`      |
+| AI Gateway account              | `CLOUDFLARE_ACCOUNT_ID` | `CF_AI_GATEWAY_ACCOUNT_ID` |
+| AI Gateway slug                 | `CLOUDFLARE_GATEWAY_ID` | `CF_AI_GATEWAY_NAME`       |
+| Read issue / labels / push / PR | `GH_TOKEN`              | `GITHUB_TOKEN` (auto)      |
 
 **Important credential boundary:** inference credentials live in the parent CI
 process only. They are **not** forwarded into the agent's `local()` sandbox

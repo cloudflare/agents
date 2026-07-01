@@ -8,6 +8,11 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "agents/**/*.ts", "workflows/**/*.ts", ".flue/**/*.ts"],
+  "include": [
+    "src/**/*.ts",
+    "agents/**/*.ts",
+    "workflows/**/*.ts",
+    ".flue/**/*.ts"
+  ],
   "exclude": ["dist", "node_modules"]
 }

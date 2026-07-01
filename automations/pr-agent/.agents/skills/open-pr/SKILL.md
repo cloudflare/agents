@@ -97,6 +97,7 @@ gh pr create --repo <repo> \
 ```
 
 The PR body (`pr-body.md`) must include:
+
 - `Closes #<issueNumber>` so the issue auto-links.
 - a line noting the fix was authored on behalf of `@<actorLogin>` (who ran `/pr`).
 - **What was wrong** (root cause, citing the file/line).
@@ -117,6 +118,7 @@ gh issue comment <issueNumber> --repo <repo> \
 ## 8. Return the structured result
 
 Return exactly:
+
 - `prOpened` (boolean)
 - `skipped` (boolean)
 - `summary` (string — one or two sentences)

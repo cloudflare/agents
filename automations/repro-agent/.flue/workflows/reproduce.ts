@@ -20,9 +20,9 @@ const agent = defineAgent(() => ({
   model: "cloudflare-ai-gateway/claude-opus-4-8",
   sandbox: local({
     env: {
-      GH_TOKEN: process.env.GH_TOKEN,
-    },
-  }),
+      GH_TOKEN: process.env.GH_TOKEN
+    }
+  })
 }));
 
 export default defineWorkflow({
@@ -32,7 +32,7 @@ export default defineWorkflow({
     repo: v.optional(v.string()),
     // Free-form text the user typed after `/repro`, e.g. extra repro steps or
     // a pointer to the suspect area. May be empty.
-    context: v.optional(v.string()),
+    context: v.optional(v.string())
   }),
 
   async run({ harness, input }) {
@@ -42,7 +42,7 @@ export default defineWorkflow({
       args: {
         issueNumber: input.issueNumber,
         repo: input.repo ?? "cloudflare/agents",
-        context: input.context ?? "",
+        context: input.context ?? ""
       },
       result: v.object({
         reproduced: v.boolean(),
@@ -51,10 +51,10 @@ export default defineWorkflow({
         liveUrl: v.optional(v.string()),
         claimUrl: v.optional(v.string()),
         rootCauseHypothesis: v.optional(v.string()),
-        commentUrl: v.optional(v.string()),
-      }),
+        commentUrl: v.optional(v.string())
+      })
     });
 
     return data;
-  },
+  }
 });
