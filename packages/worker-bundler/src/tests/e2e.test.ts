@@ -1059,12 +1059,9 @@ describe("createWorker with pyproject.toml", () => {
       files: {
         "index.py": [
           "from workers import Response, WorkerEntrypoint",
-          "import os",
-          //"from fastapi import FastAPI",
+          "from fastapi import FastAPI",
           "class Default(WorkerEntrypoint):",
           "  async def fetch(self, request):",
-          "    #print(os.listdir('/session/metadata/python_modules'), 'that was stuff')",
-          "    #print(os.listdir('/session/metadata/'), 'that was stuff')",
           '    return Response("ok")'
         ].join("\n"),
         "pyproject.toml": [

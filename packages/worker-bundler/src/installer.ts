@@ -421,7 +421,7 @@ function stripTopLevelDirectory(
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [path, content] of Object.entries(files)) {
-    const slashIndex = path.indexOf("/");
+    const slashIndex = path.indexOf("/", path.indexOf("/") + 1);
     if (slashIndex === -1) {
       continue; // Skip root-level files (e.g. PKG-INFO)
     }
@@ -683,7 +683,8 @@ function isTextFile(path: string): boolean {
     ".map",
     ".d.ts",
     ".d.mts",
-    ".d.cts"
+    ".d.cts",
+    ".py"
   ];
 
   // Check common config files without extensions
