@@ -66,6 +66,14 @@ const DEFAULT_BASE_URL = "wss://streaming.assemblyai.com/v3/ws";
 /** Server-side cap on `prompt` and `agent_context` (characters). */
 const MAX_PROMPT_CHARS = 1750;
 
+/**
+ * AssemblyAI requires each binary WebSocket message to carry 50–1000 ms of
+ * audio; undersized messages terminate the session. 50 ms at 16 kHz mono
+ * s16le = 1600 bytes. The browser pipeline sends 100 ms chunks (forwarded
+ * as-is), but telephony adapters relay 20 ms frames, which must be coalesced.
+ */
+const MIN_CHUNK_BYTES = 1600;
+
 export interface AssemblyAISTTOptions {
   /** AssemblyAI API key. Sent as the `Authorization` header (raw key, no prefix). */
   apiKey: string;
@@ -300,6 +308,9 @@ class AssemblyAISession implements TranscriberSession {
   #connected = false;
   #closed = false;
   #pendingChunks: ArrayBuffer[] = [];
+  // Sub-50ms audio accumulating toward MIN_CHUNK_BYTES (see #sendAudio).
+  #coalesceChunks: Uint8Array[] = [];
+  #coalesceBytes = 0;
   // Latest agent_context queued before the socket was ready. Only the most
   // recent value matters — older ones are stale once the agent speaks again.
   #pendingAgentContext: string | null = null;
@@ -370,12 +381,12 @@ class AssemblyAISession implements TranscriberSession {
       });
 
       // Apply any agent_context queued before the socket was ready, then flush
-      // buffered audio.
+      // buffered audio through the same coalescing path as live audio.
       if (this.#pendingAgentContext !== null) {
         this.#sendAgentContext(this.#pendingAgentContext);
         this.#pendingAgentContext = null;
       }
-      for (const chunk of this.#pendingChunks) ws.send(chunk);
+      for (const chunk of this.#pendingChunks) this.#sendAudio(chunk);
       this.#pendingChunks = [];
     } catch (err) {
       console.error("[AssemblyAISTT] Connection error:", err);
@@ -385,10 +396,38 @@ class AssemblyAISession implements TranscriberSession {
   feed(chunk: ArrayBuffer): void {
     if (this.#closed) return;
     if (this.#connected && this.#ws) {
-      this.#ws.send(chunk);
+      this.#sendAudio(chunk);
     } else {
       this.#pendingChunks.push(chunk);
     }
+  }
+
+  /**
+   * Send audio while honoring AssemblyAI's 50 ms minimum per WebSocket
+   * message. Chunks already ≥ {@link MIN_CHUNK_BYTES} pass through untouched;
+   * smaller frames (e.g. 20 ms telephony frames) accumulate until the total
+   * crosses the minimum, then go out as one message. A sub-minimum tail is
+   * held until more audio arrives and dropped at close().
+   */
+  #sendAudio(chunk: ArrayBuffer): void {
+    if (!this.#ws) return;
+    if (this.#coalesceBytes === 0 && chunk.byteLength >= MIN_CHUNK_BYTES) {
+      this.#ws.send(chunk);
+      return;
+    }
+    this.#coalesceChunks.push(new Uint8Array(chunk));
+    this.#coalesceBytes += chunk.byteLength;
+    if (this.#coalesceBytes < MIN_CHUNK_BYTES) return;
+
+    const merged = new Uint8Array(this.#coalesceBytes);
+    let offset = 0;
+    for (const part of this.#coalesceChunks) {
+      merged.set(part, offset);
+      offset += part.byteLength;
+    }
+    this.#coalesceChunks = [];
+    this.#coalesceBytes = 0;
+    this.#ws.send(merged.buffer);
   }
 
   /**
@@ -432,6 +471,8 @@ class AssemblyAISession implements TranscriberSession {
     if (this.#closed) return;
     this.#closed = true;
     this.#pendingChunks = [];
+    this.#coalesceChunks = [];
+    this.#coalesceBytes = 0;
     this.#pendingAgentContext = null;
 
     if (this.#ws && this.#connected) {

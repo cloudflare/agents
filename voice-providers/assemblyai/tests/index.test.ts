@@ -40,6 +40,13 @@ function setupMockFetch(): { ws: MockWebSocket; calls: MockFetchCall[] } {
 // Flush microtasks so the session's async #connect() runs.
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+// A PCM chunk of `bytes` length filled with `fill`, for identity/content
+// assertions. 3200 bytes = the pipeline's 100ms browser chunk; 640 bytes =
+// a 20ms telephony frame (both at 16kHz mono s16le).
+function pcm(bytes: number, fill = 0): ArrayBuffer {
+  return new Uint8Array(bytes).fill(fill).buffer;
+}
+
 beforeEach(() => {
   // Default no-op fetch so any test that doesn't set up its own mock never
   // makes a real network call (the session constructor connects on its own).
@@ -502,8 +509,8 @@ describe("AssemblyAISession — feed", () => {
     const provider = new AssemblyAISTT({ apiKey: "k" });
     const session = provider.createSession();
 
-    const chunkA = new Uint8Array([1, 2, 3]).buffer;
-    const chunkB = new Uint8Array([4, 5, 6]).buffer;
+    const chunkA = pcm(3200, 1);
+    const chunkB = pcm(3200, 2);
     session.feed(chunkA);
     session.feed(chunkB);
 
@@ -523,11 +530,117 @@ describe("AssemblyAISession — feed", () => {
     const session = provider.createSession();
     await flush();
 
-    const chunk = new Uint8Array([7, 8, 9]).buffer;
+    const chunk = pcm(3200, 7);
     session.feed(chunk);
 
     expect(ws.send).toHaveBeenCalledTimes(1);
     expect(ws.send).toHaveBeenCalledWith(chunk);
+  });
+});
+
+describe("AssemblyAISession — audio coalescing (50ms server minimum)", () => {
+  // AssemblyAI terminates the session when a binary message carries <50ms of
+  // audio (1600 bytes at 16kHz mono s16le), so sub-minimum frames must be
+  // coalesced before sending.
+
+  it("passes chunks ≥1600 bytes through untouched (same ArrayBuffer)", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    const exactMin = pcm(1600, 1);
+    const browserChunk = pcm(3200, 2);
+    session.feed(exactMin);
+    session.feed(browserChunk);
+
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    expect(ws.send.mock.calls[0][0]).toBe(exactMin);
+    expect(ws.send.mock.calls[1][0]).toBe(browserChunk);
+  });
+
+  it("coalesces 20ms telephony frames until the 50ms minimum is reached", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.feed(pcm(640, 1));
+    session.feed(pcm(640, 2));
+    expect(ws.send).not.toHaveBeenCalled();
+
+    session.feed(pcm(640, 3));
+    expect(ws.send).toHaveBeenCalledTimes(1);
+
+    const sent = new Uint8Array(ws.send.mock.calls[0][0] as ArrayBuffer);
+    expect(sent.byteLength).toBe(1920);
+    // Frames concatenated in feed order.
+    expect(sent[0]).toBe(1);
+    expect(sent[640]).toBe(2);
+    expect(sent[1280]).toBe(3);
+  });
+
+  it("combines a held small frame with the next large chunk in order", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.feed(pcm(640, 1));
+    expect(ws.send).not.toHaveBeenCalled();
+
+    session.feed(pcm(3200, 2));
+    expect(ws.send).toHaveBeenCalledTimes(1);
+
+    const sent = new Uint8Array(ws.send.mock.calls[0][0] as ArrayBuffer);
+    expect(sent.byteLength).toBe(3840);
+    expect(sent[0]).toBe(1);
+    expect(sent[639]).toBe(1);
+    expect(sent[640]).toBe(2);
+  });
+
+  it("coalesces small frames buffered before connect when flushing on open", async () => {
+    let resolveFetch: (resp: unknown) => void = () => {};
+    const fetchPromise = new Promise((r) => {
+      resolveFetch = r;
+    });
+    const ws = new MockWebSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => fetchPromise)
+    );
+
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+
+    // Five 20ms frames buffered while connecting: the first three flush as
+    // one 1920-byte message on open; the remaining two (1280 bytes) are held.
+    for (let i = 1; i <= 5; i++) session.feed(pcm(640, i));
+
+    resolveFetch({ webSocket: ws });
+    await flush();
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect((ws.send.mock.calls[0][0] as ArrayBuffer).byteLength).toBe(1920);
+
+    // The held tail flushes once more audio crosses the minimum.
+    session.feed(pcm(640, 6));
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    expect((ws.send.mock.calls[1][0] as ArrayBuffer).byteLength).toBe(1920);
+  });
+
+  it("drops a sub-minimum tail on close instead of sending it", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.feed(pcm(640, 1));
+    session.close();
+
+    // Only the Terminate control message goes out — no undersized audio.
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: "Terminate" }));
   });
 });
 

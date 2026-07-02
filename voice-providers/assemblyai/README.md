@@ -82,7 +82,7 @@ session.updateAgentContext?.("Sure — what date would you like to book?");
 ## How it works
 
 1. When the call starts, a WebSocket session is opened to AssemblyAI (`speech_model=universal-3-5-pro`)
-2. All audio chunks are forwarded continuously via `feed()` (16 kHz mono PCM)
+2. All audio chunks are forwarded continuously via `feed()` (16 kHz mono PCM). Frames smaller than AssemblyAI's 50 ms-per-message minimum (e.g. 20 ms telephony frames) are coalesced before sending
 3. AssemblyAI emits `Turn` events — partials (`end_of_turn: false`) go to `onInterim`, the final transcript (`end_of_turn: true`) to `onUtterance`; `SpeechStarted` drives barge-in via `onSpeechStart`
 4. The pipeline runs `onTurn()` with the stable transcript
 5. After the agent speaks its reply, the pipeline calls `updateAgentContext()`, which sends an `UpdateConfiguration` with the spoken text so it primes the next user turn
