@@ -117,7 +117,7 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
     const workersAi = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersAi("@cf/zai-org/glm-4.7-flash", {
+      model: workersAi("@cf/openai/gpt-oss-20b", {
         sessionAffinity: this.sessionAffinity
       }),
       system: SYSTEM_PROMPT,
