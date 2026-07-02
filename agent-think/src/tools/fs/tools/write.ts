@@ -25,7 +25,8 @@ export function createWriteTool(options: WriteToolOptions) {
 
   return tool({
     description:
-      "Write content to a file. Overwrites any existing file at the path.",
+      "Write content to a file. Overwrites any existing file at the path. " +
+      "Parent directories are created automatically.",
     inputSchema,
     execute: async ({ path, content }) => {
       const bytes = new TextEncoder().encode(content);
