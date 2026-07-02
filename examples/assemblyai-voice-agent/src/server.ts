@@ -213,7 +213,7 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
       onError: ({ error }) => console.error("[VoiceAgent] LLM error:", error)
     });
 
-    return result.textStream;
+    return result.fullStream;
   }
 
   async onCallStart(connection: Connection) {
