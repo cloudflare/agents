@@ -6,6 +6,7 @@
  */
 
 import * as semver from "semver";
+import { unzipSync } from "fflate";
 import type { FileSystem } from "./file-system";
 import { parse as parseToml } from "smol-toml";
 
@@ -366,10 +367,24 @@ async function installPythonPackage(
       }
       const metadata = (await metadataResponse.json()) as {
         info: { version: string };
+
+        //added for wheels
+        urls: Array<{
+          filename: string;
+          url: string;
+          packagetype: string;
+        }>;
       };
 
       const version = metadata.info.version;
-      const sourceUrl = `${registry}/packages/source/${name[0]}/${name}/${name}-${version}.tar.gz`;
+      let sourceUrl = `${registry}/packages/source/${name[0]}/${name}/${name}-${version}.tar.gz`;
+
+      //added for wheels
+      const wheel = metadata.urls.find(
+        (url) => url.packagetype === "bdist_wheel"
+      );
+      const wheelUrl = wheel?.url;
+      sourceUrl = wheelUrl;
 
       // Download source distribution
       const response = await fetchWithTimeout(
@@ -384,16 +399,22 @@ async function installPythonPackage(
       }
 
       const buffer = await response.arrayBuffer();
+
+      const packageFilesWheel = stripWheelToPackage(
+        extractWheel(new Uint8Array(buffer), result)
+      );
+
+      /*
       const packageFiles = stripTopLevelDirectory(
         await extractTarball(new Uint8Array(buffer))
-      );
+      );*/
 
       // Mark as installed before writing to prevent cycles
       installedPackages.set(name, version);
       result.installed.push(`${name}@${version}`);
 
       // Add files to python_modules
-      for (const [filePath, content] of Object.entries(packageFiles)) {
+      for (const [filePath, content] of Object.entries(packageFilesWheel)) {
         fileSystem.write(`python_modules/${name}/${filePath}`, content);
       }
     } catch (error) {
@@ -426,6 +447,38 @@ function stripTopLevelDirectory(
     if (slashIndex === -1) {
       continue; // Skip root-level files (e.g. PKG-INFO)
     }
+    const newPath = path.slice(slashIndex + 1);
+    if (newPath) {
+      result[newPath] = content;
+    }
+  }
+  return result;
+}
+
+/**
+ * Strip a Python wheel down to just the package contents.
+ *
+ * Wheels contain the importable package alongside `.dist-info` metadata and
+ * `.data` directories. This removes those supporting directories and flattens
+ * the package directory so its files are at the root of the returned record.
+ */
+function stripWheelToPackage(
+  files: Record<string, string>
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [path, content] of Object.entries(files)) {
+    // Skip wheel metadata and data directories
+    if (path.includes(".dist-info/") || path.includes(".data/")) {
+      continue;
+    }
+
+    const slashIndex = path.indexOf("/");
+    if (slashIndex === -1) {
+      // Top-level file (e.g., a single .py module)
+      result[path] = content;
+      continue;
+    }
+
     const newPath = path.slice(slashIndex + 1);
     if (newPath) {
       result[newPath] = content;
@@ -530,6 +583,32 @@ export async function fetchPackageFiles(
 
   // Extract the tarball (npm tarballs are gzipped tar files)
   return extractTarball(new Uint8Array(buffer));
+}
+
+/**
+ * Extract files from a ZIP archive (Python wheel).
+ *
+ * Python wheels are distributed as .whl files (ZIP archives).
+ */
+function extractWheel(
+  data: Uint8Array,
+  result: InstallResult
+): Record<string, string> {
+  const unzipped = unzipSync(data);
+  const files: Record<string, string> = {};
+  const textDecoder = new TextDecoder();
+
+  for (const [path, content] of Object.entries(unzipped)) {
+    if (!isTextFile(path)) {
+      result.warnings.push(
+        `Could not install file ${path}, extension must match an approved text format type. This may corrupt this dependency.`
+      );
+      continue;
+    }
+    files[path] = textDecoder.decode(content);
+  }
+
+  return files;
 }
 
 /**
