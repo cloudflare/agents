@@ -76,6 +76,7 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
   // --- Voice agent logic ---
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
+    console.log("[VoiceAgent] onTurn:", transcript);
     const workersAi = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
@@ -169,10 +170,17 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
         })
       },
       stopWhen: stepCountIs(3),
+      // gpt-oss-20b spends tokens on reasoning before it emits text; the
+      // Workers AI default cap (~256) can starve the spoken reply entirely.
+      maxOutputTokens: 2048,
       abortSignal: context.signal,
       // streamText swallows stream errors by default — log them so LLM
       // failures are visible instead of surfacing as an empty reply.
-      onError: ({ error }) => console.error("[VoiceAgent] LLM error:", error)
+      onError: ({ error }) => console.error("[VoiceAgent] LLM error:", error),
+      onFinish: ({ finishReason, text, reasoningText }) =>
+        console.log(
+          `[VoiceAgent] LLM finish: reason=${finishReason} textLen=${text.length} reasoningLen=${reasoningText?.length ?? 0}`
+        )
     });
 
     return result.fullStream;
