@@ -32,7 +32,7 @@ export type Tracer = {
   withSpan<T>(
     name: string,
     attributes: Attributes,
-    run: (span: Span) => MaybePromise<T>,
+    run: (span: Span) => MaybePromise<T>
   ): MaybePromise<T>;
   /**
    * Activates a span and returns whatever `activate` returns (typically the
@@ -46,7 +46,7 @@ export type Tracer = {
   startSpan<T>(
     name: string,
     attributes: Attributes,
-    activate: (span: Span) => T,
+    activate: (span: Span) => T
   ): T;
 };
 
@@ -73,7 +73,7 @@ class RuntimeTracer implements Tracer {
   withSpan<T>(
     name: string,
     attributes: Attributes,
-    run: (span: Span) => MaybePromise<T>,
+    run: (span: Span) => MaybePromise<T>
   ): MaybePromise<T> {
     return this.activate(name, attributes, (span) => {
       const result = run(span);
@@ -96,7 +96,7 @@ class RuntimeTracer implements Tracer {
   startSpan<T>(
     name: string,
     attributes: Attributes,
-    activate: (span: Span) => T,
+    activate: (span: Span) => T
   ): T {
     return this.activate(name, attributes, activate);
   }
@@ -109,7 +109,7 @@ class RuntimeTracer implements Tracer {
   private activate<T>(
     name: string,
     attributes: Attributes,
-    body: (span: ManagedSpan) => T,
+    body: (span: ManagedSpan) => T
   ): T {
     return this.runtime.startActiveSpan(name, (writer) => {
       setAttributes(writer, attributes);
@@ -148,11 +148,12 @@ class ManagedSpan implements Span {
       // Cancellation is a control path, not a failure: record it distinctly so
       // aborted operations do not inflate error rates. The Cloudflare span API
       // exposes no status code, so this classification rides on an attribute.
-      setAttributes(this.span, { "canceled": true });
+      setAttributes(this.span, { canceled: true });
     } else {
       setAttributes(this.span, {
-        "error": true,
-        "error.type": cause instanceof Error ? (cause.name || "Error") : typeof cause,
+        error: true,
+        "error.type":
+          cause instanceof Error ? cause.name || "Error" : typeof cause
       });
     }
 

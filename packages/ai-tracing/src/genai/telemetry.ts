@@ -1,5 +1,5 @@
-import { TraceAttribute } from "./attributes.js";
-import type { Attributes } from "../tracing/tracer.js";
+import { TraceAttribute } from "./attributes";
+import type { Attributes } from "../tracing/tracer";
 
 /** Integrations that project into the shared telemetry schema. */
 export type IntegrationName = "ai-sdk" | "pi-ai";
@@ -75,11 +75,12 @@ export function operationSpan(input: {
       [TraceAttribute.GenAI.AgentName]: input.context?.agentName,
       [TraceAttribute.GenAI.AgentVersion]: input.context?.agentVersion,
       [TraceAttribute.GenAI.ConversationID]: input.context?.conversationId,
-      [TraceAttribute.GenAI.OperationName]: TraceAttribute.GenAI.OperationNameValueInvokeAgent,
+      [TraceAttribute.GenAI.OperationName]:
+        TraceAttribute.GenAI.OperationNameValueInvokeAgent,
       [TraceAttribute.GenAI.ProviderName]: input.provider,
-      ...requestAttributes(input.request, input.model),
+      ...requestAttributes(input.request, input.model)
     },
-    name: "gen_ai.operation",
+    name: "gen_ai.operation"
   };
 }
 
@@ -97,17 +98,18 @@ export function modelCallSpan(input: {
       ...input.attributes,
       [TraceAttribute.AI.IntegrationName]: input.integration,
       [TraceAttribute.AI.OperationID]: input.operation,
-      [TraceAttribute.GenAI.OperationName]: TraceAttribute.GenAI.OperationNameValueChat,
+      [TraceAttribute.GenAI.OperationName]:
+        TraceAttribute.GenAI.OperationNameValueChat,
       [TraceAttribute.GenAI.ProviderName]: input.provider,
-      ...requestAttributes(input.request, input.model),
+      ...requestAttributes(input.request, input.model)
     },
-    name: "gen_ai.chat",
+    name: "gen_ai.chat"
   };
 }
 
 function requestAttributes(
   request: RequestSummary | undefined,
-  model: string | undefined,
+  model: string | undefined
 ): Attributes {
   return {
     [TraceAttribute.GenAI.OutputType]: request?.outputType,
@@ -119,7 +121,7 @@ function requestAttributes(
     [TraceAttribute.GenAI.RequestStream]: request?.stream,
     [TraceAttribute.GenAI.RequestTemperature]: request?.temperature,
     [TraceAttribute.GenAI.RequestTopK]: request?.topK,
-    [TraceAttribute.GenAI.RequestTopP]: request?.topP,
+    [TraceAttribute.GenAI.RequestTopP]: request?.topP
   };
 }
 
@@ -133,11 +135,12 @@ export function toolCallSpan(input: {
     attributes: {
       [TraceAttribute.AI.IntegrationName]: input.integration,
       [TraceAttribute.AI.OperationID]: input.operation,
-      [TraceAttribute.GenAI.OperationName]: TraceAttribute.GenAI.OperationNameValueExecuteTool,
+      [TraceAttribute.GenAI.OperationName]:
+        TraceAttribute.GenAI.OperationNameValueExecuteTool,
       [TraceAttribute.GenAI.ToolName]: input.toolName,
-      [TraceAttribute.GenAI.ToolType]: "function",
+      [TraceAttribute.GenAI.ToolType]: "function"
     },
-    name: "gen_ai.execute_tool",
+    name: "gen_ai.execute_tool"
   };
 }
 
@@ -150,26 +153,36 @@ export function finishAttributes(input: {
 }): Attributes {
   return {
     [TraceAttribute.AI.EmbeddingCount]: input.outputSummary?.embeddingCount,
-    [TraceAttribute.AI.EmbeddingDimensions]: input.outputSummary?.embeddingDimensions,
+    [TraceAttribute.AI.EmbeddingDimensions]:
+      input.outputSummary?.embeddingDimensions,
     [TraceAttribute.AI.OutputHasObject]: input.outputSummary?.hasObject,
     [TraceAttribute.AI.OutputHasText]: input.outputSummary?.hasText,
     [TraceAttribute.AI.ResponseFinishReason]: input.finishReason,
     [TraceAttribute.AI.ToolCount]: input.outputSummary?.toolCallCount,
     [TraceAttribute.AI.UsageTotalTokens]: input.usage?.totalTokens,
-    [TraceAttribute.GenAI.ResponseFinishReasons]: finishReasonsAttribute(input.finishReason),
+    [TraceAttribute.GenAI.ResponseFinishReasons]: finishReasonsAttribute(
+      input.finishReason
+    ),
     [TraceAttribute.GenAI.ResponseID]: input.response?.id,
     [TraceAttribute.GenAI.ResponseModel]: input.response?.model,
-    [TraceAttribute.GenAI.UsageCacheCreationInputTokens]: input.usage?.cacheCreationInputTokens,
-    [TraceAttribute.GenAI.UsageCacheReadInputTokens]: input.usage?.cacheReadInputTokens,
+    [TraceAttribute.GenAI.UsageCacheCreationInputTokens]:
+      input.usage?.cacheCreationInputTokens,
+    [TraceAttribute.GenAI.UsageCacheReadInputTokens]:
+      input.usage?.cacheReadInputTokens,
     [TraceAttribute.GenAI.UsageInputTokens]: input.usage?.inputTokens,
     [TraceAttribute.GenAI.UsageOutputTokens]: input.usage?.outputTokens,
-    [TraceAttribute.GenAI.UsageReasoningOutputTokens]: input.usage?.reasoningTokens,
+    [TraceAttribute.GenAI.UsageReasoningOutputTokens]:
+      input.usage?.reasoningTokens
   };
 }
 
-function finishReasonsAttribute(finishReason: string | undefined): string | undefined {
+function finishReasonsAttribute(
+  finishReason: string | undefined
+): string | undefined {
   // OTel GenAI defines gen_ai.response.finish_reasons as string[], but the
   // Cloudflare span attribute seam only accepts scalar values, so encode the
   // single-reason array as JSON.
-  return finishReason === undefined ? undefined : JSON.stringify([finishReason]);
+  return finishReason === undefined
+    ? undefined
+    : JSON.stringify([finishReason]);
 }

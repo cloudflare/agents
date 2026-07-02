@@ -24,7 +24,10 @@ export function readTokenCount(value: unknown): number | undefined {
 }
 
 /** Reads a numeric sub-field from a nested AI SDK token count object. */
-export function readNestedTokenField(value: unknown, key: string): number | undefined {
+export function readNestedTokenField(
+  value: unknown,
+  key: string
+): number | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
   }

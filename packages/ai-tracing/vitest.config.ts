@@ -7,8 +7,8 @@ export default defineConfig({
       "**/.plans/**",
       "**/.repos/**",
       "**/dist/**",
-      "**/node_modules/**",
+      "**/node_modules/**"
     ],
-    include: ["src/**/*.test.ts"],
-  },
+    include: ["src/**/*.test.ts"]
+  }
 });

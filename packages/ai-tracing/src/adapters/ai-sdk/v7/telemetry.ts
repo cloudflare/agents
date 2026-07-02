@@ -1,26 +1,24 @@
-import type { AISDKInstrumentationOptions } from "../options.js";
-import { readString } from "../read.js";
+import type { AISDKInstrumentationOptions } from "../options";
+import { readString } from "../read";
 import {
   modelCallSpan,
   operationSpan,
   toolCallSpan
-} from "../../../genai/telemetry.js";
-import type { Attributes } from "../../../tracing/tracer.js";
-import type { Span, Tracer } from "../../../tracing/tracer.js";
+} from "../../../genai/telemetry";
+import type { Attributes } from "../../../tracing/tracer";
+import type { Span, Tracer } from "../../../tracing/tracer";
 import {
   correlationAttributes,
   finishAttributesFromEvent,
   operationNameFromId,
   requestSummaryFromEvent,
   semanticContextFromEvent
-} from "./extract.js";
+} from "./extract";
 import type {
   AISDKV7ExecuteToolOptions,
-  AISDKV7LanguageModelCallEvent,
   AISDKV7OperationEvent,
-  AISDKV7Telemetry,
-  AISDKV7ToolExecutionEvent
-} from "./types.js";
+  AISDKV7Telemetry
+} from "./types";
 
 type AISDKV7OperationName =
   | "generateObject"
