@@ -207,17 +207,19 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
         })
       },
       stopWhen: stepCountIs(3),
-      abortSignal: context.signal
+      abortSignal: context.signal,
+      // streamText swallows stream errors by default — log them so LLM
+      // failures are visible instead of surfacing as an empty reply.
+      onError: ({ error }) => console.error("[VoiceAgent] LLM error:", error)
     });
 
     return result.textStream;
   }
 
   async onCallStart(connection: Connection) {
-    const messageCount =
-      this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_voice_messages
-    `[0]?.count ?? 0;
+    // getConversationHistory() (not raw SQL) — it creates the messages table
+    // on first use, so this works on a brand-new agent instance.
+    const messageCount = this.getConversationHistory().length;
 
     const greeting =
       messageCount > 0
