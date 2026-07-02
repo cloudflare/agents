@@ -4,7 +4,7 @@ A real-time voice agent running entirely inside a Durable Object, using [Assembl
 
 - **STT**: AssemblyAI `universal-3-5-pro` via [`@cloudflare/voice-assemblyai`](../../voice-providers/assemblyai) — turn detection + barge-in server-side, with `agent_context` carryover fed from the agent's spoken replies
 - **TTS**: Workers AI (MeloTTS, `@cf/myshell-ai/melotts`) — runs on the AI binding, no extra API key
-- **LLM**: Workers AI (`@cf/zai-org/glm-4.7-flash`), with `get_current_time` / `set_reminder` / `get_weather` tools
+- **LLM**: Workers AI (`@cf/openai/gpt-oss-20b`), with `get_current_time` / `set_reminder` / `get_weather` tools
 - **Transport**: plain WebSocket (browser mic → 16 kHz PCM frames) via the `useVoiceAgent` React hook — no SFU/WebRTC credentials needed
 
 ## Run it
