@@ -6,7 +6,7 @@ import {
 } from "agents";
 import {
   withVoice,
-  type TTSProvider,
+  WorkersAITTS,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
@@ -15,44 +15,6 @@ import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
 const VoiceAgent = withVoice(Agent);
-
-/**
- * Workers AI MeloTTS text-to-speech.
- *
- * MeloTTS runs entirely on the AI binding, so — like Aura — it needs no API
- * key beyond what Workers AI already provides. It takes `{ prompt, lang }` and
- * returns base64-encoded MP3 in an `audio` field, unlike Aura which streams
- * raw audio bytes, so it gets this small adapter rather than reusing the
- * built-in `WorkersAITTS` (which sends `{ text, speaker }` and reads raw bytes).
- *
- * It implements only `synthesize` (one MP3 per sentence) — no sub-sentence
- * streaming — but the voice pipeline still chunks the LLM output by sentence,
- * so audio comes back sentence-by-sentence and barge-in still works.
- */
-class MeloTTS implements TTSProvider {
-  #ai: Ai;
-  #lang: string;
-
-  constructor(ai: Ai, options?: { lang?: string }) {
-    this.#ai = ai;
-    this.#lang = options?.lang ?? "en";
-  }
-
-  async synthesize(text: string): Promise<ArrayBuffer | null> {
-    const result = (await this.#ai.run("@cf/myshell-ai/melotts", {
-      prompt: text,
-      lang: this.#lang
-    })) as { audio?: string };
-
-    if (!result?.audio) return null;
-
-    // MeloTTS returns base64-encoded MP3 — decode to raw bytes for playback.
-    const binary = atob(result.audio);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes.buffer;
-  }
-}
 
 const SYSTEM_PROMPT = `You are a helpful voice assistant running on Cloudflare Workers, transcribed by AssemblyAI Universal 3.5 Pro Realtime. Keep your responses concise and conversational — you're being spoken aloud, not read. Aim for 1-3 sentences unless the user asks for more detail. Be warm and natural.
 
@@ -76,7 +38,7 @@ Use tools when the user's request matches. After calling a tool, incorporate the
  */
 export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
   transcriber = new AssemblyAISTT({ apiKey: this.env.ASSEMBLYAI_API_KEY });
-  tts = new MeloTTS(this.env.AI);
+  tts = new WorkersAITTS(this.env.AI);
 
   // --- Single-speaker enforcement ---
   //
