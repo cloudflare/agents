@@ -1,8 +1,8 @@
 import type { AISDKInstrumentationOptions } from "../options";
 import { readString } from "../read";
-import { operationSpan } from "../../../genai/telemetry";
-import type { SemanticContext } from "../../../genai/telemetry";
-import type { Tracer } from "../../../tracing/tracer";
+import { operationSpan } from "../../genai/telemetry";
+import type { SemanticContext } from "../../genai/telemetry";
+import type { Tracer } from "../../tracing/tracer";
 import {
   extractModelInfo,
   extractRequestSummary,

@@ -1,13 +1,13 @@
-import { TraceAttribute } from "../../../genai/attributes";
-import { finishAttributes } from "../../../genai/telemetry";
+import { TraceAttribute } from "../../genai/attributes";
+import { finishAttributes } from "../../genai/telemetry";
 import type {
   OutputSummary,
   RequestSummary,
   ResponseSummary,
   SemanticContext,
   TokenUsageSummary
-} from "../../../genai/telemetry";
-import type { Attributes } from "../../../tracing/tracer";
+} from "../../genai/telemetry";
+import type { Attributes } from "../../tracing/tracer";
 import {
   readNestedTokenField,
   readNumber,

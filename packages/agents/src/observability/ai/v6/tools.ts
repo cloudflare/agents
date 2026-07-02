@@ -1,5 +1,5 @@
-import { toolCallSpan } from "../../../genai/telemetry";
-import type { Tracer } from "../../../tracing/tracer";
+import { toolCallSpan } from "../../genai/telemetry";
+import type { Tracer } from "../../tracing/tracer";
 
 export function wrapTools(tracer: Tracer, tools: unknown): unknown {
   if (typeof tools !== "object" || tools === null) {

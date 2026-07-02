@@ -259,3 +259,84 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | --------------- | ------------------------ | --------------------- |
 | `email:receive` | `{ from, to, subject? }` | An email is received  |
 | `email:reply`   | `{ from, to, subject? }` | A reply email is sent |
+
+## Tracing
+
+Alongside diagnostics-channel events, `agents/observability` exports a tracer built on the Workers runtime's native `tracing` API (`cloudflare:workers`). Spans follow the [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) and flow to your tail worker or observability pipeline like any other Workers spans. On runtimes without the `tracing` API, the tracer is a no-op.
+
+```ts
+import { tracer } from "agents/observability";
+
+const result = tracer.withSpan("my-operation", { "app.step": "ingest" }, () =>
+  doWork()
+);
+```
+
+`tracer.withSpan` owns the span lifetime — it finishes when the callback returns or its promise settles. For work that outlives a callback (streams, event-driven telemetry), `tracer.startSpan` hands you the span and you must call `span.finish()` or `span.fail(cause)`. `createTracer` builds a tracer from any `startActiveSpan`-shaped runtime, which is useful for tests.
+
+### AI SDK tracing
+
+`agents/observability/ai` instruments the Vercel AI SDK's text/object generation path.
+
+For AI SDK v6, wrap the SDK namespace:
+
+```ts
+import * as ai from "ai";
+import { wrapAISDK } from "agents/observability/ai";
+
+const { generateText, streamText } = wrapAISDK(ai);
+```
+
+The wrapper instruments `generateText`, `streamText`, `generateObject`, and `streamObject`. Each operation gets a root `gen_ai.operation` span; when `wrapLanguageModel` is available, provider `doGenerate` / `doStream` calls get child `gen_ai.chat` spans, and `tools.*.execute` calls get `gen_ai.execute_tool` spans. Stream spans stay open until the returned stream is consumed, cancelled, errors, or is returned early.
+
+For AI SDK v7, register the telemetry lifecycle adapter instead:
+
+```ts
+import { registerTelemetry } from "ai";
+import { createAISDKTelemetry } from "agents/observability/ai";
+
+registerTelemetry(createAISDKTelemetry());
+```
+
+The v7 adapter creates the same operation, language-model, and tool-execution spans through AI SDK telemetry callbacks, correlated with `ai.call.id` / `ai.tool.call_id` attributes.
+
+### Agent and conversation attributes
+
+`gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.agent.version`, and `gen_ai.conversation.id` are read from the AI SDK's own `experimental_telemetry` option, per call:
+
+```ts
+await generateText({
+  model,
+  prompt: "...",
+  experimental_telemetry: {
+    // Falls back to gen_ai.agent.name when metadata.agentName is absent.
+    functionId: "support-agent",
+    metadata: {
+      agentId: "agent-123",
+      agentVersion: "2026-07-01",
+      conversationId: "conversation-123"
+    }
+  }
+});
+```
+
+### Safety defaults
+
+The adapters do not emit prompts, messages, system instructions, tool inputs, tool outputs, schemas, headers, provider options, raw model outputs, or raw error messages. Only scalar attributes are emitted.
+
+Runtime/tool context attributes are opt-in. For v6, pass allowlists to `wrapAISDK`:
+
+```ts
+const traced = wrapAISDK(ai, {
+  includeRuntimeContext: ["requestId"],
+  includeToolsContext: {
+    weather: ["defaultUnit"]
+  }
+});
+```
+
+For v7, use the AI SDK's per-call `telemetry.includeRuntimeContext` and `telemetry.includeToolsContext` options instead — the SDK filters `runtimeContext` / `toolsContext` before telemetry integrations receive events, and the adapter emits the scalar fields the SDK includes.
+
+### Not instrumented
+
+`embed` / `embedMany`, `rerank`, `Agent` / `ToolLoopAgent`, automatic instrumentation or loader hooks, and prompt/message/tool-definition content capture are intentionally out of scope. Use the adapters as explicit compatibility wrappers.

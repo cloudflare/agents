@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { RecordingTracer } from "../../../test-support/recording-tracer";
-import { createAISDKV6Wrapper, type AISDKV6Namespace } from "./wrap";
+import { RecordingTracer } from "./recording-tracer";
+import {
+  createAISDKV6Wrapper,
+  type AISDKV6Namespace
+} from "../../observability/ai/v6/wrap";
 
 type TestModel = {
   readonly doGenerate: (params?: unknown) => Promise<unknown>;

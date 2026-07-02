@@ -4,9 +4,9 @@ import {
   modelCallSpan,
   operationSpan,
   toolCallSpan
-} from "../../../genai/telemetry";
-import type { Attributes } from "../../../tracing/tracer";
-import type { Span, Tracer } from "../../../tracing/tracer";
+} from "../../genai/telemetry";
+import type { Attributes } from "../../tracing/tracer";
+import type { Span, Tracer } from "../../tracing/tracer";
 import {
   correlationAttributes,
   finishAttributesFromEvent,
