@@ -80,7 +80,7 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
     const workersAi = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersAi("@cf/openai/gpt-oss-20b", {
+      model: workersAi("@cf/meta/llama-4-scout-17b-16e-instruct", {
         sessionAffinity: this.sessionAffinity
       }),
       system: SYSTEM_PROMPT,
@@ -170,8 +170,8 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
         })
       },
       stopWhen: stepCountIs(3),
-      // gpt-oss-20b spends tokens on reasoning before it emits text; the
-      // Workers AI default cap (~256) can starve the spoken reply entirely.
+      // Workers AI's default output cap (~256 tokens) can cut replies off
+      // mid-sentence — and starves reasoning models of text entirely.
       maxOutputTokens: 2048,
       abortSignal: context.signal,
       // streamText swallows stream errors by default — log them so LLM
