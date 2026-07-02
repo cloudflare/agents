@@ -350,8 +350,11 @@ class AssemblyAISession implements TranscriberSession {
 
       const ws = (resp as unknown as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
+        // Auth and config failures arrive as a plain HTTP response (e.g. 401)
+        // instead of an upgrade — surface the status and body.
+        const body = await resp.text().catch(() => "");
         console.error(
-          "[AssemblyAISTT] Failed to establish WebSocket connection"
+          `[AssemblyAISTT] Failed to establish WebSocket connection: HTTP ${resp.status}${body ? ` — ${body.slice(0, 300)}` : ""}`
         );
         return;
       }
@@ -542,6 +545,23 @@ class AssemblyAISession implements TranscriberSession {
 
     if (data.type === "SpeechStarted") {
       this.#sessionOpts?.onSpeechStart?.();
+      return;
+    }
+
+    // The server reports failures as an Error message before closing the
+    // socket — without logging it, only the (less specific) close code
+    // survives. The shared TranscriberSession interface has no error callback,
+    // so the console is the only surface.
+    if (data.type === "Error") {
+      console.error(
+        `[AssemblyAISTT] Server error (code=${data.error_code ?? "?"}): ${data.error ?? JSON.stringify(data)}`
+      );
+      return;
+    }
+    if (data.type === "Warning") {
+      console.warn(
+        `[AssemblyAISTT] Server warning (code=${data.warning_code ?? "?"}): ${data.warning ?? JSON.stringify(data)}`
+      );
       return;
     }
   }

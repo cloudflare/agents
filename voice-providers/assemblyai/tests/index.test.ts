@@ -888,6 +888,80 @@ describe("AssemblyAISession — close diagnostics", () => {
   });
 });
 
+describe("AssemblyAISession — server Error/Warning messages", () => {
+  it("logs server Error messages with code and text", async () => {
+    const { ws } = setupMockFetch();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    provider.createSession();
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "Error",
+          error_code: 3006,
+          error: "Input Validation Error"
+        })
+      })
+    );
+
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Input Validation Error")
+    );
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("3006"));
+    errSpy.mockRestore();
+  });
+
+  it("logs server Warning messages", async () => {
+    const { ws } = setupMockFetch();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    provider.createSession();
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "Warning",
+          warning_code: 1,
+          warning: "Session approaching expiry"
+        })
+      })
+    );
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Session approaching expiry")
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("logs the HTTP status and body when the upgrade yields no WebSocket", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          ({
+            webSocket: undefined,
+            status: 401,
+            text: async () => "Unauthorized"
+          }) as unknown as Response
+      )
+    );
+
+    const provider = new AssemblyAISTT({ apiKey: "bad-key" });
+    provider.createSession();
+    await flush();
+
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("401"));
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Unauthorized")
+    );
+    errSpy.mockRestore();
+  });
+});
+
 describe("AssemblyAISession — robustness", () => {
   it("ignores non-JSON messages without throwing", async () => {
     const { ws } = setupMockFetch();
