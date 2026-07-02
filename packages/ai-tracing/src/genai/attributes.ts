@@ -7,6 +7,7 @@
  */
 export const TraceAttribute = {
   AI: {
+    CallID: "ai.call.id",
     EmbeddingCount: "ai.embedding.count",
     EmbeddingDimensions: "ai.embedding.dimensions",
     IntegrationName: "ai.integration.name",
@@ -14,8 +15,9 @@ export const TraceAttribute = {
     OutputHasObject: "ai.output.has_object",
     OutputHasText: "ai.output.has_text",
     ResponseFinishReason: "ai.response.finish_reason",
+    ToolCallID: "ai.tool.call_id",
     ToolCount: "ai.tool.count",
-    UsageTotalTokens: "ai.usage.total_tokens",
+    UsageTotalTokens: "ai.usage.total_tokens"
   },
   GenAI: {
     AgentID: "gen_ai.agent.id",
@@ -46,6 +48,6 @@ export const TraceAttribute = {
     UsageCacheReadInputTokens: "gen_ai.usage.cache_read.input_tokens",
     UsageInputTokens: "gen_ai.usage.input_tokens",
     UsageOutputTokens: "gen_ai.usage.output_tokens",
-    UsageReasoningOutputTokens: "gen_ai.usage.reasoning.output_tokens",
-  },
+    UsageReasoningOutputTokens: "gen_ai.usage.reasoning.output_tokens"
+  }
 } as const;
