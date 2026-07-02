@@ -1,9 +1,6 @@
-import { finishAttributes } from "../../../genai/telemetry";
-import type {
-  OutputSummary,
-  TokenUsageSummary
-} from "../../../genai/telemetry";
-import type { Attributes, Span } from "../../../tracing/tracer";
+import { finishAttributes } from "../../genai/telemetry";
+import type { OutputSummary, TokenUsageSummary } from "../../genai/telemetry";
+import type { Attributes, Span } from "../../tracing/tracer";
 import { extractAISDKv6TokenUsage, extractFinishReason } from "./extract";
 
 type StreamSummary = {

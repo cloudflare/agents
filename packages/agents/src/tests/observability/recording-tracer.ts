@@ -1,6 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createTracer } from "../tracing/tracer";
-import type { AttributeValue, SpanWriter, Tracer } from "../tracing/tracer";
+import { createTracer } from "../../observability/tracing/tracer";
+import type {
+  AttributeValue,
+  SpanWriter,
+  Tracer
+} from "../../observability/tracing/tracer";
 
 export class RecordingTracer implements Tracer {
   readonly spans: RecordingSpan[] = [];

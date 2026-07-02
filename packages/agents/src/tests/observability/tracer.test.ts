@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RecordingTracer } from "../test-support/recording-tracer";
+import { RecordingTracer } from "./recording-tracer";
 
 describe("createTracer", () => {
   describe("withSpan (managed lifetime)", () => {

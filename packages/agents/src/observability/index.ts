@@ -170,3 +170,15 @@ export function subscribe<K extends keyof ChannelEventMap>(
   dcSubscribe(name, handler);
   return () => dcUnsubscribe(name, handler);
 }
+
+export { createTracer } from "./tracing/tracer";
+export type {
+  AttributeValue,
+  Attributes,
+  MaybePromise,
+  Span,
+  SpanRuntime,
+  SpanWriter,
+  Tracer
+} from "./tracing/tracer";
+export { tracer } from "./tracing/cloudflare";

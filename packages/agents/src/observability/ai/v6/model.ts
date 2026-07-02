@@ -1,5 +1,5 @@
-import { modelCallSpan } from "../../../genai/telemetry";
-import type { Tracer } from "../../../tracing/tracer";
+import { modelCallSpan } from "../../genai/telemetry";
+import type { Tracer } from "../../tracing/tracer";
 import {
   extractModelInfo,
   extractRequestSummary,

@@ -140,6 +140,11 @@
       "import": "./dist/observability/index.js",
       "require": "./dist/observability/index.js"
     },
+    "./observability/ai": {
+      "types": "./dist/observability/ai/index.d.ts",
+      "import": "./dist/observability/ai/index.js",
+      "require": "./dist/observability/ai/index.js"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
