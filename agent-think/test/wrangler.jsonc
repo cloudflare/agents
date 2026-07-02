@@ -1,0 +1,52 @@
+// Test-only wrangler config for the FAST pool-workers unit suite.
+//
+// Deliberately a STRIPPED copy of the production ../wrangler.jsonc: it keeps
+// the DO + binding shape the worker imports need, but drops the two things
+// miniflare can't run and that would otherwise fire in the background and crash
+// tests with "Failed to start container":
+//
+//   - the `containers` entry (Cloudflare Containers don't boot under miniflare)
+//   - the `triggers.crons` warm-pool prime (its alarm tries to start a container)
+//
+// The container path is covered by the e2e suite (wrangler dev --local), not
+// here. WARM_POOL_TARGET is 0 so the pool stays idle even if reached.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "agent-think",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-05-26",
+  "compatibility_flags": ["nodejs_compat", "enable_abortsignal_rpc"],
+
+  "ai": { "binding": "AI" },
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "ThinkAgent", "class_name": "ThinkAgent" },
+      { "name": "Sandbox", "class_name": "Sandbox" },
+      { "name": "WarmPool", "class_name": "WarmPool" }
+    ]
+  },
+
+  "r2_buckets": [
+    { "binding": "R2_SKILLS", "bucket_name": "agent-think-skills" }
+  ],
+
+  // The /thread/* route reads env.ASSETS; keep the binding so the SPA-fallback
+  // route is exercised. Points at the Vite output (run `pnpm build:client`).
+  "assets": {
+    "directory": "../dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": ["/thread/*"]
+  },
+
+  "vars": {
+    "PUBLIC_BASE_URL": "https://agent-think.test",
+    "WARM_POOL_TARGET": "0"
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] }
+  ]
+}

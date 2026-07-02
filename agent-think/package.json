@@ -1,0 +1,47 @@
+{
+  "name": "@cloudflare/agent-think",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Think agent that reproduces and fixes cloudflare/agents GitHub issues in a container-backed Workspace. Invoked as `@agent-think repro|pr` via the gh-app webhook service; streams a live thread UI and reports back on the issue.",
+  "scripts": {
+    "dev": "wrangler dev --ip 0.0.0.0",
+    "build:client": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "gen-types": "wrangler types",
+    "seed:r2": "node ./scripts/seed-skills.mjs",
+    "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "workspace:*",
+    "@cloudflare/think": "workspace:*",
+    "@cloudflare/worker-bundler": "^0.2.0",
+    "@cloudflare/workspace": "0.0.0-alpha.11",
+    "@platformatic/vfs": "^0.4.0",
+    "agents": "workspace:*",
+    "ai": "^6.0.202",
+    "diff": "^9.0.0",
+    "isomorphic-git": "^1.38.5",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "workers-ai-provider": "^3.3.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "@cloudflare/workers-types": "^4.20260629.1",
+    "@types/diff": "^8.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.5.12",
+    "@vitejs/plugin-react": "^6.0.3",
+    "msw": "^2.7.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "vitest": "4.1.9",
+    "wrangler": "^4.105.0",
+    "ws": "^8.20.1"
+  }
+}
