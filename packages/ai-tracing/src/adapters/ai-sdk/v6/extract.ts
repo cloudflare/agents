@@ -1,12 +1,17 @@
-import { finishAttributes } from "../../../genai/telemetry.js";
+import { finishAttributes } from "../../../genai/telemetry";
 import type {
   OutputSummary,
   RequestSummary,
   ResponseSummary,
-  TokenUsageSummary,
-} from "../../../genai/telemetry.js";
-import type { Attributes } from "../../../tracing/tracer.js";
-import { readNestedTokenField, readNumber, readString, readTokenCount } from "../read.js";
+  TokenUsageSummary
+} from "../../../genai/telemetry";
+import type { Attributes } from "../../../tracing/tracer";
+import {
+  readNestedTokenField,
+  readNumber,
+  readString,
+  readTokenCount
+} from "../read";
 
 /** Identity fields extracted from an AI SDK v6 language model object. */
 export type ModelInfo = {
@@ -25,18 +30,21 @@ export function finishAttributesFromResult(result: unknown): Attributes {
 
 export function extractRequestSummary(
   params: Record<string, unknown>,
-  operation: string,
+  operation: string
 ): RequestSummary {
   return {
     frequencyPenalty: readNumber(params.frequencyPenalty),
     maxTokens: readNumber(params.maxOutputTokens ?? params.maxTokens),
-    outputType: operation === "generateObject" || operation === "streamObject" ? "json" : "text",
+    outputType:
+      operation === "generateObject" || operation === "streamObject"
+        ? "json"
+        : "text",
     presencePenalty: readNumber(params.presencePenalty),
     seed: readNumber(params.seed),
     stream: operation === "streamText" || operation === "streamObject",
     temperature: readNumber(params.temperature),
     topK: readNumber(params.topK),
-    topP: readNumber(params.topP),
+    topP: readNumber(params.topP)
   };
 }
 
@@ -48,8 +56,10 @@ export function extractModelInfo(value: unknown): ModelInfo | undefined {
 
   // SAFETY: AI SDK model objects are records; we only read modelId and provider.
   const record = value as Record<string, unknown>;
-  const modelId = typeof record.modelId === "string" ? record.modelId : undefined;
-  const provider = typeof record.provider === "string" ? record.provider : undefined;
+  const modelId =
+    typeof record.modelId === "string" ? record.modelId : undefined;
+  const provider =
+    typeof record.provider === "string" ? record.provider : undefined;
 
   if (modelId === undefined && provider === undefined) {
     return undefined;
@@ -65,7 +75,9 @@ export function extractModelInfo(value: unknown): ModelInfo | undefined {
  * where `inputTokens`/`outputTokens` may be plain numbers or nested objects
  * like `{ total, cacheRead, cacheWrite }` / `{ total, reasoning }`.
  */
-export function extractAISDKv6TokenUsage(value: unknown): TokenUsageSummary | undefined {
+export function extractAISDKv6TokenUsage(
+  value: unknown
+): TokenUsageSummary | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
   }
@@ -84,9 +96,16 @@ export function extractAISDKv6TokenUsage(value: unknown): TokenUsageSummary | un
 
   const inputTokens = readTokenCount(usage.inputTokens);
   const outputTokens = readTokenCount(usage.outputTokens);
-  const totalTokens = typeof usage.totalTokens === "number" ? usage.totalTokens : undefined;
-  const cacheReadInputTokens = readNestedTokenField(usage.inputTokens, "cacheRead");
-  const cacheCreationInputTokens = readNestedTokenField(usage.inputTokens, "cacheWrite");
+  const totalTokens =
+    typeof usage.totalTokens === "number" ? usage.totalTokens : undefined;
+  const cacheReadInputTokens = readNestedTokenField(
+    usage.inputTokens,
+    "cacheRead"
+  );
+  const cacheCreationInputTokens = readNestedTokenField(
+    usage.inputTokens,
+    "cacheWrite"
+  );
   const reasoningTokens = readNestedTokenField(usage.outputTokens, "reasoning");
 
   if (
@@ -101,12 +120,14 @@ export function extractAISDKv6TokenUsage(value: unknown): TokenUsageSummary | un
   }
 
   return {
-    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+    ...(cacheCreationInputTokens !== undefined
+      ? { cacheCreationInputTokens }
+      : {}),
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
-    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {})
   };
 }
 
@@ -119,9 +140,13 @@ function summarizeOutput(value: unknown): OutputSummary | undefined {
   const record = value as Record<string, unknown>;
 
   const summary: OutputSummary = {
-    ...(typeof record.text === "string" ? { hasText: record.text.length > 0 } : {}),
+    ...(typeof record.text === "string"
+      ? { hasText: record.text.length > 0 }
+      : {}),
     ...(record.object !== undefined ? { hasObject: true } : {}),
-    ...(Array.isArray(record.toolCalls) ? { toolCallCount: record.toolCalls.length } : {}),
+    ...(Array.isArray(record.toolCalls)
+      ? { toolCallCount: record.toolCalls.length }
+      : {})
   };
 
   return Object.keys(summary).length > 0 ? summary : undefined;
@@ -160,9 +185,10 @@ function extractResponseInfo(value: unknown): ResponseSummary | undefined {
 
   // SAFETY: AI SDK result objects may expose a response record with id/model.
   const record = value as Record<string, unknown>;
-  const response = typeof record.response === "object" && record.response !== null
-    ? (record.response as Record<string, unknown>)
-    : undefined;
+  const response =
+    typeof record.response === "object" && record.response !== null
+      ? (record.response as Record<string, unknown>)
+      : undefined;
   const id = readString(record.responseId ?? response?.id);
   const model = readString(record.responseModel ?? response?.model);
 
@@ -172,6 +198,6 @@ function extractResponseInfo(value: unknown): ResponseSummary | undefined {
 
   return {
     ...(id !== undefined ? { id } : {}),
-    ...(model !== undefined ? { model } : {}),
+    ...(model !== undefined ? { model } : {})
   };
 }

@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { RecordingTracer } from "../test-support/recording-tracer.js";
+import { RecordingTracer } from "../test-support/recording-tracer";
 
 describe("createTracer", () => {
   describe("withSpan (managed lifetime)", () => {
     it("finishes a synchronously returned value and closes the span", () => {
       const tracing = new RecordingTracer();
 
-      const value = tracing.withSpan("op", { "a": 1 }, () => 42);
+      const value = tracing.withSpan("op", { a: 1 }, () => 42);
 
       expect(value).toBe(42);
-      expect(tracing.rootSpans[0]?.attributes).toMatchObject({ "a": 1 });
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({ a: 1 });
       expect(tracing.rootSpans[0]?.ended).toBe(true);
       expect(tracing.rootSpans[0]?.endCount).toBe(1);
     });
@@ -18,7 +18,7 @@ describe("createTracer", () => {
       const tracing = new RecordingTracer();
 
       const value = await Promise.resolve(
-        tracing.withSpan("op", {}, async () => "done"),
+        tracing.withSpan("op", {}, async () => "done")
       );
 
       expect(value).toBe("done");
@@ -32,12 +32,12 @@ describe("createTracer", () => {
       expect(() =>
         tracing.withSpan("op", {}, () => {
           throw cause;
-        }),
+        })
       ).toThrow(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        "error": true,
-        "error.type": "TypeError",
+        error: true,
+        "error.type": "TypeError"
       });
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("canceled");
       expect(tracing.rootSpans[0]?.ended).toBe(true);
@@ -51,15 +51,17 @@ describe("createTracer", () => {
         Promise.resolve(
           tracing.withSpan("op", {}, async () => {
             throw cause;
-          }),
-        ),
+          })
+        )
       ).rejects.toBe(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        "error": true,
-        "error.type": "Error",
+        error: true,
+        "error.type": "Error"
       });
-      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error.message");
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
+        "error.message"
+      );
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
   });
@@ -72,11 +74,13 @@ describe("createTracer", () => {
         Promise.resolve(
           tracing.withSpan("op", {}, async () => {
             throw abortError();
-          }),
-        ),
+          })
+        )
       ).rejects.toBeDefined();
 
-      expect(tracing.rootSpans[0]?.attributes).toMatchObject({ "canceled": true });
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+        canceled: true
+      });
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error");
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error.type");
       expect(tracing.rootSpans[0]?.ended).toBe(true);
@@ -88,7 +92,9 @@ describe("createTracer", () => {
       const span = tracing.startSpan("op", {}, (span) => span);
       span.fail({ name: "AbortError" });
 
-      expect(tracing.rootSpans[0]?.attributes).toMatchObject({ "canceled": true });
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+        canceled: true
+      });
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error");
     });
   });
@@ -100,8 +106,8 @@ describe("createTracer", () => {
       const span = tracing.startSpan("op", {}, (span) => span);
       expect(tracing.rootSpans[0]?.ended).toBe(false);
 
-      span.finish({ "ok": true });
-      expect(tracing.rootSpans[0]?.attributes).toMatchObject({ "ok": true });
+      span.finish({ ok: true });
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({ ok: true });
       expect(tracing.rootSpans[0]?.ended).toBe(true);
 
       // finish/fail after closing are idempotent no-ops.
@@ -118,12 +124,12 @@ describe("createTracer", () => {
       expect(() =>
         tracing.startSpan("op", {}, () => {
           throw cause;
-        }),
+        })
       ).toThrow(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        "error": true,
-        "error.type": "Error",
+        error: true,
+        "error.type": "Error"
       });
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
@@ -132,7 +138,7 @@ describe("createTracer", () => {
   it("skips attributes when the runtime is not tracing", () => {
     const tracing = new RecordingTracer({ isTraced: false });
 
-    tracing.withSpan("op", { "a": 1 }, () => undefined);
+    tracing.withSpan("op", { a: 1 }, () => undefined);
 
     expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("a");
     expect(tracing.rootSpans[0]?.ended).toBe(true);

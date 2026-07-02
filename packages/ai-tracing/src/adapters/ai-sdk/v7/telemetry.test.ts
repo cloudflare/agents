@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { RecordingTracer } from "../../../test-support/recording-tracer.js";
-import { createAISDKV7Telemetry } from "./telemetry.js";
+import { RecordingTracer } from "../../../test-support/recording-tracer";
+import { createAISDKV7Telemetry } from "./telemetry";
 
 describe("createAISDKV7Telemetry", () => {
   it("traces operation and model callbacks with call id correlation", () => {

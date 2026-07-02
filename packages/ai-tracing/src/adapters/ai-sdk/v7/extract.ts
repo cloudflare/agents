@@ -1,19 +1,19 @@
-import { TraceAttribute } from "../../../genai/attributes.js";
-import { finishAttributes } from "../../../genai/telemetry.js";
+import { TraceAttribute } from "../../../genai/attributes";
+import { finishAttributes } from "../../../genai/telemetry";
 import type {
   OutputSummary,
   RequestSummary,
   ResponseSummary,
   SemanticContext,
   TokenUsageSummary
-} from "../../../genai/telemetry.js";
-import type { Attributes } from "../../../tracing/tracer.js";
+} from "../../../genai/telemetry";
+import type { Attributes } from "../../../tracing/tracer";
 import {
   readNestedTokenField,
   readNumber,
   readString,
   readTokenCount
-} from "../read.js";
+} from "../read";
 
 /** Extracts the safe operation name from an AI SDK v7 operation id. */
 export function operationNameFromId(operationId: unknown): string {

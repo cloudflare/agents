@@ -1,10 +1,7 @@
-import { toolCallSpan } from "../../../genai/telemetry.js";
-import type { Tracer } from "../../../tracing/tracer.js";
+import { toolCallSpan } from "../../../genai/telemetry";
+import type { Tracer } from "../../../tracing/tracer";
 
-export function wrapTools(
-  tracer: Tracer,
-  tools: unknown,
-): unknown {
+export function wrapTools(tracer: Tracer, tools: unknown): unknown {
   if (typeof tools !== "object" || tools === null) {
     return tools;
   }
@@ -18,11 +15,7 @@ export function wrapTools(
   return wrappedTools;
 }
 
-function wrapTool(
-  tracer: Tracer,
-  toolName: string,
-  tool: unknown,
-): unknown {
+function wrapTool(tracer: Tracer, toolName: string, tool: unknown): unknown {
   if (typeof tool !== "object" || tool === null) {
     return tool;
   }
@@ -33,36 +26,34 @@ function wrapTool(
     return tool;
   }
 
-  const wrappedTool = Object.assign(Object.create(Object.getPrototypeOf(tool)), tool) as Record<
-    string,
-    unknown
-  > & {
+  const wrappedTool = Object.assign(
+    Object.create(Object.getPrototypeOf(tool)),
+    tool
+  ) as Record<string, unknown> & {
     execute: (...args: readonly unknown[]) => unknown;
   };
-  const originalExecute = toolRecord.execute.bind(tool) as (...args: readonly unknown[]) => unknown;
+  const originalExecute = toolRecord.execute.bind(tool) as (
+    ...args: readonly unknown[]
+  ) => unknown;
 
   wrappedTool.execute = (...args) => {
     const span = toolCallSpan({
       integration: "ai-sdk",
       operation: "tool.execute",
-      toolName,
+      toolName
     });
-    return tracer.withSpan(
-      span.name,
-      span.attributes,
-      (toolSpan) => {
-        const result = originalExecute(...args);
-        if (isPromiseLike(result)) {
-          return Promise.resolve(result).then((resolved) => {
-            toolSpan.finish();
-            return resolved;
-          });
-        }
+    return tracer.withSpan(span.name, span.attributes, (toolSpan) => {
+      const result = originalExecute(...args);
+      if (isPromiseLike(result)) {
+        return Promise.resolve(result).then((resolved) => {
+          toolSpan.finish();
+          return resolved;
+        });
+      }
 
-        toolSpan.finish();
-        return result;
-      },
-    );
+      toolSpan.finish();
+      return result;
+    });
   };
 
   return wrappedTool;

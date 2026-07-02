@@ -1,8 +1,8 @@
-import type { AISDKInstrumentationOptions } from "./adapters/ai-sdk/options.js";
-import { createAISDKV6Wrapper } from "./adapters/ai-sdk/v6/wrap.js";
-import { createAISDKV7Telemetry } from "./adapters/ai-sdk/v7/telemetry.js";
-import type { AISDKV7Telemetry } from "./adapters/ai-sdk/v7/types.js";
-import { tracer } from "./tracing/cloudflare.js";
+import type { AISDKInstrumentationOptions } from "./adapters/ai-sdk/options";
+import { createAISDKV6Wrapper } from "./adapters/ai-sdk/v6/wrap";
+import { createAISDKV7Telemetry } from "./adapters/ai-sdk/v7/telemetry";
+import type { AISDKV7Telemetry } from "./adapters/ai-sdk/v7/types";
+import { tracer } from "./tracing/cloudflare";
 
 /**
  * Wraps an AI SDK namespace with tracing.
@@ -30,4 +30,4 @@ export function createAISDKTelemetry(
   });
 }
 
-export type { AISDKV7Telemetry } from "./adapters/ai-sdk/v7/types.js";
+export type { AISDKV7Telemetry } from "./adapters/ai-sdk/v7/types";

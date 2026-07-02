@@ -1,10 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createTracer } from "../tracing/tracer.js";
-import type {
-  AttributeValue,
-  SpanWriter,
-  Tracer,
-} from "../tracing/tracer.js";
+import { createTracer } from "../tracing/tracer";
+import type { AttributeValue, SpanWriter, Tracer } from "../tracing/tracer";
 
 export class RecordingTracer implements Tracer {
   readonly spans: RecordingSpan[] = [];
@@ -17,7 +13,7 @@ export class RecordingTracer implements Tracer {
   constructor(options: { readonly isTraced?: boolean } = {}) {
     this.isTraced = options.isTraced ?? true;
     this.#tracer = createTracer({
-      startActiveSpan: (name, run) => this.recordSpan(name, run),
+      startActiveSpan: (name, run) => this.recordSpan(name, run)
     });
   }
 
@@ -32,12 +28,12 @@ export class RecordingTracer implements Tracer {
   recordSpan<T>(
     name: string,
     callback: (span: RecordingSpan) => T,
-    parent: RecordingSpan | undefined = this.#activeSpan.getStore(),
+    parent: RecordingSpan | undefined = this.#activeSpan.getStore()
   ): T {
     const span = new RecordingSpan({
       isTraced: this.isTraced,
       name,
-      parent,
+      parent
     });
 
     this.spans.push(span);

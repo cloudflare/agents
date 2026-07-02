@@ -11,7 +11,7 @@ declare module "cloudflare:workers" {
     readonly isTraced: boolean;
     setAttribute(
       key: string,
-      value: string | number | boolean | undefined,
+      value: string | number | boolean | undefined
     ): void;
     end(): void;
   };

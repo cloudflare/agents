@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { RecordingTracer } from "../../../test-support/recording-tracer.js";
-import { createAISDKV6Wrapper, type AISDKV6Namespace } from "./wrap.js";
+import { RecordingTracer } from "../../../test-support/recording-tracer";
+import { createAISDKV6Wrapper, type AISDKV6Namespace } from "./wrap";
 
 type TestModel = {
   readonly doGenerate: (params?: unknown) => Promise<unknown>;
@@ -21,9 +21,9 @@ describe("createAISDKV6Wrapper", () => {
         usage: {
           inputTokens: 4,
           outputTokens: 2,
-          totalTokens: 6,
-        },
-      }),
+          totalTokens: 6
+        }
+      })
     };
     const ai: AISDKV6Namespace = {
       generateText: async (params) => {
@@ -38,11 +38,11 @@ describe("createAISDKV6Wrapper", () => {
             middleware.wrapGenerate
               ? middleware.wrapGenerate({
                   doGenerate: () => original.doGenerate(),
-                  params: {},
+                  params: {}
                 })
-              : original.doGenerate(),
+              : original.doGenerate()
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
@@ -50,13 +50,13 @@ describe("createAISDKV6Wrapper", () => {
       experimental_telemetry: {
         functionId: "fixture-agent",
         metadata: {
-          conversationId: "conversation-1",
-        },
+          conversationId: "conversation-1"
+        }
       },
       maxOutputTokens: 20,
       model,
       prompt: "Say hello",
-      temperature: 0.2,
+      temperature: 0.2
     });
 
     expect(result).toMatchObject({ text: "Hello" });
@@ -79,7 +79,7 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.response.id": "response-1",
       "gen_ai.response.model": "served-model",
       "gen_ai.usage.input_tokens": 4,
-      "gen_ai.usage.output_tokens": 2,
+      "gen_ai.usage.output_tokens": 2
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
 
@@ -89,7 +89,7 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.operation.name": "chat",
       "gen_ai.provider.name": "test-provider",
       "gen_ai.request.model": "test-model",
-      "gen_ai.request.stream": false,
+      "gen_ai.request.stream": false
     });
     expect(modelCall?.ended).toBe(true);
   });
@@ -102,7 +102,7 @@ describe("createAISDKV6Wrapper", () => {
       provider: "test-provider",
       doGenerate: async (_params?: unknown) => {
         throw cause;
-      },
+      }
     };
     const ai: AISDKV6Namespace = {
       generateText: async (params) => {
@@ -117,30 +117,32 @@ describe("createAISDKV6Wrapper", () => {
             middleware.wrapGenerate
               ? middleware.wrapGenerate({
                   doGenerate: () => original.doGenerate(),
-                  params: {},
+                  params: {}
                 })
-              : original.doGenerate(),
+              : original.doGenerate()
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
 
     await expect(
-      wrapped.generateText({ model, prompt: "Say hello" }),
+      wrapped.generateText({ model, prompt: "Say hello" })
     ).rejects.toThrow(cause);
 
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "error": true,
-      "error.type": "Error",
+      error: true,
+      "error.type": "Error"
     });
-    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error.message");
+    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
+      "error.message"
+    );
     expect(tracing.rootSpans[0]?.children[0]?.attributes).toMatchObject({
-      "error": true,
-      "error.type": "Error",
+      error: true,
+      "error.type": "Error"
     });
     expect(tracing.rootSpans[0]?.children[0]?.attributes).not.toHaveProperty(
-      "error.message",
+      "error.message"
     );
     expect(tracing.rootSpans[0]?.ended).toBe(true);
     expect(tracing.rootSpans[0]?.children[0]?.ended).toBe(true);
@@ -161,17 +163,19 @@ describe("createAISDKV6Wrapper", () => {
             usage: {
               inputTokens: { cacheRead: 1, total: 8 },
               outputTokens: { reasoning: 2, total: 4 },
-              totalTokens: 12,
-            },
-          },
-        ]),
-      }),
+              totalTokens: 12
+            }
+          }
+        ])
+      })
     };
     const ai: AISDKV6Namespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const wrappedModel = params.model as TestModel & {
-          readonly doStream: () => Promise<{ readonly stream: AsyncIterable<unknown> }>;
+          readonly doStream: () => Promise<{
+            readonly stream: AsyncIterable<unknown>;
+          }>;
         };
         const providerResult = wrappedModel.doStream();
         return {
@@ -180,12 +184,14 @@ describe("createAISDKV6Wrapper", () => {
             for await (const chunk of resolvedProviderResult.stream) {
               yield chunk;
             }
-          })(),
+          })()
         };
       },
       wrapLanguageModel({ model: rawModel, middleware }) {
         const original = rawModel as TestModel & {
-          readonly doStream: () => Promise<{ readonly stream: AsyncIterable<unknown> }>;
+          readonly doStream: () => Promise<{
+            readonly stream: AsyncIterable<unknown>;
+          }>;
         };
         return {
           ...original,
@@ -193,17 +199,17 @@ describe("createAISDKV6Wrapper", () => {
             middleware.wrapStream
               ? middleware.wrapStream({
                   doStream: () => original.doStream(),
-                  params: {},
+                  params: {}
                 })
-              : original.doStream(),
+              : original.doStream()
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
     const result = (await wrapped.streamText?.({
       model,
-      prompt: "Say hello",
+      prompt: "Say hello"
     })) as { readonly textStream: AsyncIterable<unknown> };
 
     expect(tracing.rootSpans[0]?.ended).toBe(false);
@@ -227,7 +233,7 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.usage.input_tokens": 8,
       "gen_ai.usage.output_tokens": 4,
       "ai.usage.total_tokens": 12,
-      "gen_ai.usage.reasoning.output_tokens": 2,
+      "gen_ai.usage.reasoning.output_tokens": 2
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
 
@@ -240,7 +246,7 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.usage.output_tokens": 4,
       "gen_ai.operation.name": "chat",
       "gen_ai.request.stream": true,
-      "gen_ai.response.finish_reasons": '["stop"]',
+      "gen_ai.response.finish_reasons": '["stop"]'
     });
     expect(modelCall?.ended).toBe(true);
   });
@@ -255,15 +261,17 @@ describe("createAISDKV6Wrapper", () => {
       doStream: async () => ({
         stream: streamFrom([
           { type: "text-delta", delta: "Hello" },
-          { type: "error", error: cause },
-        ]),
-      }),
+          { type: "error", error: cause }
+        ])
+      })
     };
     const ai: AISDKV6Namespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const wrappedModel = params.model as TestModel & {
-          readonly doStream: () => Promise<{ readonly stream: AsyncIterable<unknown> }>;
+          readonly doStream: () => Promise<{
+            readonly stream: AsyncIterable<unknown>;
+          }>;
         };
         const providerResult = wrappedModel.doStream();
         return {
@@ -272,12 +280,14 @@ describe("createAISDKV6Wrapper", () => {
             for await (const chunk of resolvedProviderResult.stream) {
               yield chunk;
             }
-          })(),
+          })()
         };
       },
       wrapLanguageModel({ model: rawModel, middleware }) {
         const original = rawModel as TestModel & {
-          readonly doStream: () => Promise<{ readonly stream: AsyncIterable<unknown> }>;
+          readonly doStream: () => Promise<{
+            readonly stream: AsyncIterable<unknown>;
+          }>;
         };
         return {
           ...original,
@@ -285,17 +295,17 @@ describe("createAISDKV6Wrapper", () => {
             middleware.wrapStream
               ? middleware.wrapStream({
                   doStream: () => original.doStream(),
-                  params: {},
+                  params: {}
                 })
-              : original.doStream(),
+              : original.doStream()
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
     const result = (await wrapped.streamText?.({
       model,
-      prompt: "Say hello",
+      prompt: "Say hello"
     })) as { readonly textStream: AsyncIterable<unknown> };
 
     for await (const _chunk of result.textStream) {
@@ -303,15 +313,15 @@ describe("createAISDKV6Wrapper", () => {
     }
 
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "error": true,
-      "error.type": "Error",
+      error: true,
+      "error.type": "Error"
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
 
     const modelCall = tracing.rootSpans[0]?.children[0];
     expect(modelCall?.attributes).toMatchObject({
-      "error": true,
-      "error.type": "Error",
+      error: true,
+      "error.type": "Error"
     });
     expect(modelCall?.ended).toBe(true);
   });
@@ -331,17 +341,19 @@ describe("createAISDKV6Wrapper", () => {
             usage: {
               inputTokens: 8,
               outputTokens: 4,
-              totalTokens: 12,
-            },
-          },
-        ]),
-      }),
+              totalTokens: 12
+            }
+          }
+        ])
+      })
     };
     const ai: AISDKV6Namespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const wrappedModel = params.model as TestModel & {
-          readonly doStream: () => Promise<{ readonly stream: AsyncIterable<unknown> }>;
+          readonly doStream: () => Promise<{
+            readonly stream: AsyncIterable<unknown>;
+          }>;
         };
         const providerResult = wrappedModel.doStream();
         return {
@@ -350,12 +362,14 @@ describe("createAISDKV6Wrapper", () => {
             for await (const chunk of resolvedProviderResult.stream) {
               yield chunk;
             }
-          })(),
+          })()
         };
       },
       wrapLanguageModel({ model: rawModel, middleware }) {
         const original = rawModel as TestModel & {
-          readonly doStream: () => Promise<{ readonly stream: AsyncIterable<unknown> }>;
+          readonly doStream: () => Promise<{
+            readonly stream: AsyncIterable<unknown>;
+          }>;
         };
         return {
           ...original,
@@ -363,17 +377,17 @@ describe("createAISDKV6Wrapper", () => {
             middleware.wrapStream
               ? middleware.wrapStream({
                   doStream: () => original.doStream(),
-                  params: {},
+                  params: {}
                 })
-              : original.doStream(),
+              : original.doStream()
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
     const result = (await wrapped.streamText?.({
       model,
-      prompt: "Say hello",
+      prompt: "Say hello"
     })) as { readonly textStream: AsyncIterable<unknown> };
 
     let chunkCount = 0;
@@ -384,8 +398,12 @@ describe("createAISDKV6Wrapper", () => {
 
     expect(chunkCount).toBe(1);
     expect(tracing.rootSpans[0]?.ended).toBe(true);
-    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("ai.output.has_text");
-    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("ai.usage.total_tokens");
+    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
+      "ai.output.has_text"
+    );
+    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
+      "ai.usage.total_tokens"
+    );
 
     const modelCall = tracing.rootSpans[0]?.children[0];
     expect(modelCall?.ended).toBe(true);
@@ -401,14 +419,16 @@ describe("createAISDKV6Wrapper", () => {
         const result = Object.create({
           toUIMessageStreamResponse() {
             return new Response("ok");
-          },
+          }
         }) as {
           fullStream: AsyncIterable<unknown>;
           toUIMessageStreamResponse(): Response;
         };
-        result.fullStream = streamFrom([{ type: "text-delta", delta: "Hello" }]);
+        result.fullStream = streamFrom([
+          { type: "text-delta", delta: "Hello" }
+        ]);
         return result;
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
@@ -436,9 +456,9 @@ describe("createAISDKV6Wrapper", () => {
           { type: "text-delta", delta: "Hello" },
           (reason) => {
             cancelledReason = reason;
-          },
-        ),
-      }),
+          }
+        )
+      })
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
@@ -449,13 +469,15 @@ describe("createAISDKV6Wrapper", () => {
 
     await expect(reader.read()).resolves.toMatchObject({
       done: false,
-      value: { type: "text-delta", delta: "Hello" },
+      value: { type: "text-delta", delta: "Hello" }
     });
     await expect(reader.cancel("client closed")).resolves.toBeUndefined();
 
     expect(cancelledReason).toBe("client closed");
     expect(tracing.rootSpans[0]?.ended).toBe(true);
-    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("ai.output.has_text");
+    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
+      "ai.output.has_text"
+    );
   });
 
   it("preserves fullStream as a ReadableStream for AI SDK response helpers", async () => {
@@ -471,16 +493,16 @@ describe("createAISDKV6Wrapper", () => {
               usage: {
                 inputTokens: 3,
                 outputTokens: 2,
-                totalTokens: 5,
-              },
-            },
+                totalTokens: 5
+              }
+            }
           ]),
           toUIMessageStreamResponse() {
             return this.fullStream.pipeThrough(new TransformStream());
-          },
+          }
         };
         return result;
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
@@ -498,7 +520,7 @@ describe("createAISDKV6Wrapper", () => {
       "ai.output.has_text": true,
       "ai.usage.total_tokens": 5,
       "gen_ai.usage.input_tokens": 3,
-      "gen_ai.usage.output_tokens": 2,
+      "gen_ai.usage.output_tokens": 2
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
   });
@@ -506,7 +528,8 @@ describe("createAISDKV6Wrapper", () => {
   it("wraps tool execution as child spans without mutating the original tools", async () => {
     const tracing = new RecordingTracer();
     const multiplyTool = {
-      execute: async ({ a, b }: { readonly a: number; readonly b: number }) => a * b,
+      execute: async ({ a, b }: { readonly a: number; readonly b: number }) =>
+        a * b
     };
     const originalExecute = multiplyTool.execute;
     const ai: AISDKV6Namespace = {
@@ -518,15 +541,15 @@ describe("createAISDKV6Wrapper", () => {
         return {
           finishReason: "stop",
           text: `result: ${toolResult}`,
-          toolCalls: [{ toolName: "multiply" }],
+          toolCalls: [{ toolName: "multiply" }]
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
     await wrapped.generateText({
       prompt: "multiply",
-      tools: { multiply: multiplyTool },
+      tools: { multiply: multiplyTool }
     });
 
     expect(multiplyTool.execute).toBe(originalExecute);
@@ -535,18 +558,19 @@ describe("createAISDKV6Wrapper", () => {
     expect(toolSpan?.attributes).toMatchObject({
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": "multiply",
-      "gen_ai.tool.type": "function",
+      "gen_ai.tool.type": "function"
     });
     expect(toolSpan?.ended).toBe(true);
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "ai.tool.count": 1,
+      "ai.tool.count": 1
     });
   });
 
   it("wraps streamText tool execution without mutating the original tools", async () => {
     const tracing = new RecordingTracer();
     const multiplyTool = {
-      execute: async ({ a, b }: { readonly a: number; readonly b: number }) => a * b,
+      execute: async ({ a, b }: { readonly a: number; readonly b: number }) =>
+        a * b
     };
     const originalExecute = multiplyTool.execute;
     const ai: AISDKV6Namespace = {
@@ -560,15 +584,15 @@ describe("createAISDKV6Wrapper", () => {
         return {
           textStream: (async function* () {
             yield { type: "text-delta", delta: `result: ${await toolResult}` };
-          })(),
+          })()
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
     const result = wrapped.streamText?.({
       prompt: "multiply",
-      tools: { multiply: multiplyTool },
+      tools: { multiply: multiplyTool }
     }) as { readonly textStream: AsyncIterable<unknown> };
 
     for await (const _chunk of result.textStream) {
@@ -581,12 +605,12 @@ describe("createAISDKV6Wrapper", () => {
     expect(toolSpan?.attributes).toMatchObject({
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": "multiply",
-      "gen_ai.tool.type": "function",
+      "gen_ai.tool.type": "function"
     });
     expect(toolSpan?.ended).toBe(true);
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "ai.operation.id": "streamText",
-      "gen_ai.request.stream": true,
+      "gen_ai.request.stream": true
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
   });
@@ -596,7 +620,7 @@ describe("createAISDKV6Wrapper", () => {
     const model = {
       doGenerate: async () => ({ object: { answer: "Paris" } }),
       modelId: "object-model",
-      provider: "test-provider",
+      provider: "test-provider"
     };
     const ai: AISDKV6Namespace = {
       generateObject: async (params) => {
@@ -612,11 +636,11 @@ describe("createAISDKV6Wrapper", () => {
             middleware.wrapGenerate
               ? middleware.wrapGenerate({
                   doGenerate: () => original.doGenerate(),
-                  params: {},
+                  params: {}
                 })
-              : original.doGenerate(),
+              : original.doGenerate()
         };
-      },
+      }
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
@@ -627,12 +651,12 @@ describe("createAISDKV6Wrapper", () => {
       "ai.operation.id": "generateObject",
       "ai.output.has_object": true,
       "gen_ai.output.type": "json",
-      "gen_ai.request.stream": false,
+      "gen_ai.request.stream": false
     });
     expect(tracing.rootSpans[0]?.children[0]?.attributes).toMatchObject({
       "ai.operation.id": "doGenerate",
       "gen_ai.output.type": "json",
-      "gen_ai.request.stream": false,
+      "gen_ai.request.stream": false
     });
   });
 
@@ -641,8 +665,8 @@ describe("createAISDKV6Wrapper", () => {
     const ai: AISDKV6Namespace = {
       generateText: async () => ({ text: "unused" }),
       streamObject: () => ({
-        partialObjectStream: streamFrom([{ answer: "Paris" }]),
-      }),
+        partialObjectStream: streamFrom([{ answer: "Paris" }])
+      })
     };
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
@@ -661,7 +685,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "ai.operation.id": "streamObject",
       "gen_ai.output.type": "json",
-      "gen_ai.request.stream": true,
+      "gen_ai.request.stream": true
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
   });
@@ -669,25 +693,25 @@ describe("createAISDKV6Wrapper", () => {
   it("omits context by default and emits only allowlisted scalar context attributes", async () => {
     const tracing = new RecordingTracer();
     const ai: AISDKV6Namespace = {
-      generateText: async () => ({ text: "ok" }),
+      generateText: async () => ({ text: "ok" })
     };
 
     await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
       experimental_context: {
-        requestId: "req-1",
+        requestId: "req-1"
       },
       toolsContext: {
         weather: {
-          defaultUnit: "fahrenheit",
-        },
-      },
+          defaultUnit: "fahrenheit"
+        }
+      }
     });
 
     expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
-      "ai.runtime_context.requestId",
+      "ai.runtime_context.requestId"
     );
     expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
-      "ai.tool_context.weather.defaultUnit",
+      "ai.tool_context.weather.defaultUnit"
     );
 
     const configuredTracing = new RecordingTracer();
@@ -695,32 +719,32 @@ describe("createAISDKV6Wrapper", () => {
       options: {
         includeRuntimeContext: ["requestId", "privateObject"],
         includeToolsContext: {
-          weather: ["defaultUnit", "token"],
-        },
+          weather: ["defaultUnit", "token"]
+        }
       },
-      tracer: configuredTracing,
+      tracer: configuredTracing
     }).generateText({
       experimental_context: {
         privateObject: { secret: true },
-        requestId: "req-1",
+        requestId: "req-1"
       },
       toolsContext: {
         weather: {
           defaultUnit: "fahrenheit",
-          token: { secret: true },
-        },
-      },
+          token: { secret: true }
+        }
+      }
     });
 
     expect(configuredTracing.rootSpans[0]?.attributes).toMatchObject({
       "ai.runtime_context.requestId": "req-1",
-      "ai.tool_context.weather.defaultUnit": "fahrenheit",
+      "ai.tool_context.weather.defaultUnit": "fahrenheit"
     });
     expect(configuredTracing.rootSpans[0]?.attributes).not.toHaveProperty(
-      "ai.runtime_context.privateObject",
+      "ai.runtime_context.privateObject"
     );
     expect(configuredTracing.rootSpans[0]?.attributes).not.toHaveProperty(
-      "ai.tool_context.weather.token",
+      "ai.tool_context.weather.token"
     );
   });
 });
@@ -731,20 +755,22 @@ async function* streamFrom(chunks: readonly unknown[]): AsyncIterable<unknown> {
   }
 }
 
-function readableStreamFrom(chunks: readonly unknown[]): ReadableStream<unknown> {
+function readableStreamFrom(
+  chunks: readonly unknown[]
+): ReadableStream<unknown> {
   return new ReadableStream({
     start(controller) {
       for (const chunk of chunks) {
         controller.enqueue(chunk);
       }
       controller.close();
-    },
+    }
   });
 }
 
 function readableStreamWaitingForCancel(
   chunk: unknown,
-  onCancel: (reason: unknown) => void,
+  onCancel: (reason: unknown) => void
 ): ReadableStream<unknown> {
   let sent = false;
   return new ReadableStream({
@@ -758,7 +784,7 @@ function readableStreamWaitingForCancel(
     },
     cancel(reason) {
       onCancel(reason);
-    },
+    }
   });
 }
 

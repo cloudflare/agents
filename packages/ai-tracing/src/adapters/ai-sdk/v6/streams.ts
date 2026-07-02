@@ -1,7 +1,10 @@
-import { finishAttributes } from "../../../genai/telemetry.js";
-import type { OutputSummary, TokenUsageSummary } from "../../../genai/telemetry.js";
-import type { Attributes, Span } from "../../../tracing/tracer.js";
-import { extractAISDKv6TokenUsage, extractFinishReason } from "./extract.js";
+import { finishAttributes } from "../../../genai/telemetry";
+import type {
+  OutputSummary,
+  TokenUsageSummary
+} from "../../../genai/telemetry";
+import type { Attributes, Span } from "../../../tracing/tracer";
+import { extractAISDKv6TokenUsage, extractFinishReason } from "./extract";
 
 type StreamSummary = {
   readonly finishReason?: string;
@@ -11,7 +14,7 @@ type StreamSummary = {
 
 export function finishWhenStreamCompletes(
   result: unknown,
-  span: Span,
+  span: Span
 ): unknown {
   return patchStreamFields(result, {
     onComplete: (summary) => {
@@ -19,15 +22,17 @@ export function finishWhenStreamCompletes(
     },
     onError: (cause) => {
       span.fail(cause);
-    },
+    }
   });
 }
 
-function finishAttributesFromStreamSummary(summary: StreamSummary | undefined): Attributes {
+function finishAttributesFromStreamSummary(
+  summary: StreamSummary | undefined
+): Attributes {
   return finishAttributes({
     finishReason: summary?.finishReason,
     outputSummary: summary?.outputSummary,
-    usage: summary?.usage,
+    usage: summary?.usage
   });
 }
 
@@ -36,7 +41,7 @@ function patchStreamFields(
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
-  },
+  }
 ): unknown {
   if (typeof result !== "object" || result === null) {
     hooks.onComplete(undefined);
@@ -72,9 +77,9 @@ function patchStreamFields(
       enumerable: true,
       value: wrapReadableStream(record.baseStream, {
         onComplete: completeOnce,
-        onError: errorOnce,
+        onError: errorOnce
       }),
-      writable: true,
+      writable: true
     });
     return result;
   }
@@ -83,23 +88,24 @@ function patchStreamFields(
     "partialObjectStream",
     "textStream",
     "fullStream",
-    "stream",
+    "stream"
   ]);
 
   if (streamField) {
     Object.defineProperty(record, streamField.field, {
       configurable: true,
       enumerable: true,
-      value: streamField.kind === "readable"
-        ? wrapReadableStream(streamField.stream, {
-            onComplete: completeOnce,
-            onError: errorOnce,
-          })
-        : wrapAsyncIterable(streamField.stream, {
-            onComplete: completeOnce,
-            onError: errorOnce,
-          }),
-      writable: true,
+      value:
+        streamField.kind === "readable"
+          ? wrapReadableStream(streamField.stream, {
+              onComplete: completeOnce,
+              onError: errorOnce
+            })
+          : wrapAsyncIterable(streamField.stream, {
+              onComplete: completeOnce,
+              onError: errorOnce
+            }),
+      writable: true
     });
     patchedAny = true;
   }
@@ -112,7 +118,9 @@ function patchStreamFields(
   return result;
 }
 
-function attachKnownResultPromiseHandlers(result: Record<string, unknown>): void {
+function attachKnownResultPromiseHandlers(
+  result: Record<string, unknown>
+): void {
   const promiseLikeFields = [
     "content",
     "text",
@@ -122,7 +130,7 @@ function attachKnownResultPromiseHandlers(result: Record<string, unknown>): void
     "finishReason",
     "usage",
     "totalUsage",
-    "steps",
+    "steps"
   ];
 
   for (const field of promiseLikeFields) {
@@ -139,10 +147,18 @@ function attachKnownResultPromiseHandlers(result: Record<string, unknown>): void
 
 function findStreamField(
   result: Record<string, unknown>,
-  candidateFields: readonly string[],
+  candidateFields: readonly string[]
 ):
-  | { readonly field: string; readonly kind: "asyncIterable"; readonly stream: AsyncIterable<unknown> }
-  | { readonly field: string; readonly kind: "readable"; readonly stream: ReadableStream<unknown> }
+  | {
+      readonly field: string;
+      readonly kind: "asyncIterable";
+      readonly stream: AsyncIterable<unknown>;
+    }
+  | {
+      readonly field: string;
+      readonly kind: "readable";
+      readonly stream: ReadableStream<unknown>;
+    }
   | undefined {
   for (const field of candidateFields) {
     try {
@@ -166,7 +182,7 @@ function wrapReadableStream(
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
-  },
+  }
 ): ReadableStream<unknown> {
   let reader: ReadableStreamDefaultReader<unknown> | undefined;
   const state = createStreamState(hooks);
@@ -212,7 +228,7 @@ function wrapReadableStream(
       } finally {
         releaseReader();
       }
-    },
+    }
   });
 
   function releaseReader(): void {
@@ -235,7 +251,7 @@ function wrapAsyncIterable(
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
-  },
+  }
 ): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -253,7 +269,7 @@ function wrapAsyncIterable(
       } finally {
         state.cancel();
       }
-    },
+    }
   };
 }
 
@@ -302,12 +318,14 @@ function createStreamState(hooks: {
         return;
       }
 
-      hooks.onComplete(streamSummaryFromParts({
-        finishReason,
-        hasText,
-        toolCallCount,
-        usage,
-      }));
+      hooks.onComplete(
+        streamSummaryFromParts({
+          finishReason,
+          hasText,
+          toolCallCount,
+          usage
+        })
+      );
     },
     fail(cause) {
       if (closed) {
@@ -333,7 +351,7 @@ function createStreamState(hooks: {
       }
       finishReason = extractFinishReason(chunk) ?? finishReason;
       usage = extractAISDKv6TokenUsage(chunk) ?? usage;
-    },
+    }
   };
 }
 
@@ -352,12 +370,14 @@ function streamSummaryFromParts(input: {
   readonly usage: TokenUsageSummary | undefined;
 }): StreamSummary {
   return {
-    ...(input.finishReason !== undefined ? { finishReason: input.finishReason } : {}),
+    ...(input.finishReason !== undefined
+      ? { finishReason: input.finishReason }
+      : {}),
     outputSummary: {
       ...(input.hasText ? { hasText: true } : {}),
-      ...(input.toolCallCount > 0 ? { toolCallCount: input.toolCallCount } : {}),
+      ...(input.toolCallCount > 0 ? { toolCallCount: input.toolCallCount } : {})
     },
-    ...(input.usage ? { usage: input.usage } : {}),
+    ...(input.usage ? { usage: input.usage } : {})
   };
 }
 
