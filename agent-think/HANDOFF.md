@@ -210,10 +210,11 @@ doesn't try to boot a container.
 
 ## Immediate next steps (in order)
 
-1. **Commit agent-think to a branch** — it is still an untracked dir in the
-   cloudflare/agents checkout. (The gh-app side is committed: `e6c9305` on
-   team-apps `feat/add-mcp-ai-sources`.)
+1. ~~Commit agent-think to a branch~~ — done: `feat/agent-think`, PR #1861
+   (supersedes #1844). The gh-app side is committed too: `e6c9305` on
+   team-apps `feat/add-mcp-ai-sources`.
 2. Re-run the local e2e (`pnpm run test:e2e`) to confirm the flag fix took it
    green too.
 3. Exercise the `open-pr` skill on a real issue (only `reproduce` has a green
-   run so far), and confirm the grep/glob adapter fix in a live turn.
+   run so far), and confirm in a live turn: the grep/glob adapter fix AND the
+   new required-Vite-frontend repro recipe (seeded to the prod R2 bucket).
