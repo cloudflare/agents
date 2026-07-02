@@ -515,6 +515,21 @@ tts = new WorkersAITTS(this.env.AI, {
 | `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS` | High-quality TTS                            |
 | `@cloudflare/voice-twilio`     | Twilio adapter  | Telephony (phone calls)                     |
 
+**AssemblyAI STT:**
+
+```typescript
+import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
+
+export class MyAgent extends VoiceAgent<Env> {
+  transcriber = new AssemblyAISTT({
+    apiKey: this.env.ASSEMBLYAI_API_KEY
+  });
+  tts = new WorkersAITTS(this.env.AI);
+}
+```
+
+After each agent reply, the pipeline automatically feeds the spoken text back to AssemblyAI as conversational context (`agent_context`), improving recognition of short answers like "yes" or "7pm". See the [package README](https://github.com/cloudflare/agents/tree/main/voice-providers/assemblyai) for the full options table.
+
 **ElevenLabs TTS:**
 
 ```typescript
