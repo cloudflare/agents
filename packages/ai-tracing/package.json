@@ -1,0 +1,46 @@
+{
+  "name": "@cloudflare/ai-tracing",
+  "description": "Cloudflare-native tracing helpers for AI agents",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/ai-tracing",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "author": "Cloudflare Inc.",
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "ai",
+    "tracing",
+    "observability"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    "./ai-sdk": {
+      "types": "./dist/ai-sdk.d.ts",
+      "import": "./dist/ai-sdk.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
+  }
+}
