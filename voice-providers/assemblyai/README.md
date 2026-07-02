@@ -47,7 +47,9 @@ Universal 3.5 Pro Realtime carries prior finalized turns forward as context to i
 
 **The voice pipeline does this automatically.** After the agent finishes speaking each reply (and the opening greeting), `withVoice` calls the session's `updateAgentContext()` with the spoken text, which is sent to AssemblyAI as an `UpdateConfiguration` message mid-session. No extra wiring is required.
 
-Setting `previousContextNTurns: 0` disables carryover entirely — the model ignores `agent_context`, so the provider skips the automatic updates rather than send messages the server would discard.
+Setting `previousContextNTurns: 0` disables context carryover entirely, so the provider also skips the automatic `agent_context` updates.
+
+Context works best when it is concise: AssemblyAI recommends trimming long agent replies down to the substantive question before sending, since shorter context values leave more room for prior turns.
 
 You can also seed context at connection time with the `agentContext` option (e.g. for an opening line spoken before the user's first turn), or call `updateAgentContext()` yourself for custom integrations:
 
@@ -66,7 +68,7 @@ session.updateAgentContext?.("Sure — what date would you like to book?");
 | `keyterms`              | _none_                                 | Words/phrases to boost recognition (`string[]`). Can be combined with `prompt`                                                                                   |
 | `prompt`                | _AssemblyAI default_                   | Natural-language context about the audio (domain, topic, scenario) — not formatting instructions. Max 1750 characters. Omit to use the optimized default         |
 | `agentContext`          | _none_                                 | Seed the agent's spoken reply as context at connection time. Max 1750 characters. Updated automatically mid-call by the pipeline                                 |
-| `previousContextNTurns` | _server (~3)_                          | Max prior conversation entries carried forward as context (0–100). `0` disables carryover (and the provider then skips `agent_context` updates)                  |
+| `previousContextNTurns` | _server default_                       | Max prior conversation entries carried forward as context (0–100). `0` disables carryover (and the provider then skips `agent_context` updates)                  |
 | `languageCode`          | _multilingual_                         | Bias the model toward a single language (e.g. `"en"`, `"es"`, `"ja"`) when the session is monolingual. Omit for default code-switching                           |
 | `voiceFocus`            | _none_                                 | Noise suppression: `"near-field"` (headsets/handsets) or `"far-field"` (conference rooms, laptop mics). Omit to disable                                          |
 | `voiceFocusThreshold`   | _server_                               | How aggressively Voice Focus suppresses background audio (0–1, higher = more aggressive). Requires `voiceFocus`                                                  |
@@ -86,7 +88,7 @@ session.updateAgentContext?.("Sure — what date would you like to book?");
 3. AssemblyAI emits `Turn` events — partials (`end_of_turn: false`) go to `onInterim`, the final transcript (`end_of_turn: true`) to `onUtterance`; `SpeechStarted` drives barge-in via `onSpeechStart`
 4. The pipeline runs `onTurn()` with the stable transcript
 5. After the agent speaks its reply, the pipeline calls `updateAgentContext()`, which sends an `UpdateConfiguration` with the spoken text so it primes the next user turn
-6. On `close()`, a `Terminate` message is sent and the socket is closed (billing accrues on connection-open time, so closing promptly matters)
+6. On `close()`, a `Terminate` message is sent and the socket is closed promptly to end the billed session (streaming uses [session-based billing](https://www.assemblyai.com/docs/streaming/getting-started/transcribe-streaming-audio))
 
 ## AssemblyAI documentation
 

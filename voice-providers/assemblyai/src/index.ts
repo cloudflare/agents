@@ -109,7 +109,7 @@ export interface AssemblyAISTTOptions {
    * Max prior conversation entries (finalized user transcripts plus any
    * `agent_context` values) carried forward as context → `previous_context_n_turns`.
    * Range 0–100; `0` disables automatic context carryover. Omit to use the
-   * server default (~3).
+   * server default.
    */
   previousContextNTurns?: number;
   /**
