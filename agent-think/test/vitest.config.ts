@@ -2,7 +2,7 @@ import path from "node:path";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import agents from "agents/vite";
 import { defineConfig } from "vitest/config";
-import { stripNodeModulesSourceMapReferences } from "../scripts/vitest/strip-node-modules-source-map-references";
+import { stripNodeModulesSourceMapReferences } from "../../scripts/vitest/strip-node-modules-source-map-references";
 
 // FAST unit harness: runs the worker inside vitest-pool-workers (miniflare /
 // workerd), NOT a real `wrangler dev`. This exercises the pure HTTP-surface
@@ -11,7 +11,7 @@ import { stripNodeModulesSourceMapReferences } from "../scripts/vitest/strip-nod
 // backend, which cannot boot under miniflare. A full agent turn (submitMessages
 // → container) is covered by the separate e2e suite; keeping it out of here is
 // what makes this suite fast and deterministic.
-const testDir = path.join(import.meta.dirname, "test");
+const testDir = import.meta.dirname;
 
 export default defineConfig({
   plugins: [

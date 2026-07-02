@@ -4,7 +4,6 @@ dist/
 worker-configuration.d.ts
 .dev.vars
 .env
-cloudflare-warp-ca.pem
 
 # Host-specific WARP / corporate-MITM CA bundle dropped into ca/ for
 # builds behind a TLS-inspecting proxy. Never committed; ca/.keep is

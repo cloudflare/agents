@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config";
 
 /**
  * E2E vitest config. Runs against a live `wrangler dev --local` process
- * (started by `tests-e2e/setup.ts`), not inside the pool-workers Miniflare
+ * (started by `./setup.ts`), not inside the pool-workers Miniflare
  * runtime. Tests issue real HTTP requests over the network and drive a real
  * docker container + Workspace.
  *
@@ -11,8 +11,8 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   test: {
-    include: ["tests-e2e/**/*.test.ts"],
-    globalSetup: "./tests-e2e/setup.ts",
+    include: ["**/*.test.ts"],
+    globalSetup: "./setup.ts",
     testTimeout: 60_000,
     hookTimeout: 240_000,
     pool: "forks"

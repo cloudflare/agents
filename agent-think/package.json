@@ -11,8 +11,8 @@
     "typecheck": "tsc --noEmit",
     "gen-types": "wrangler types",
     "seed:r2": "node ./scripts/seed-skills.mjs",
-    "test": "vitest run",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+    "test": "vitest run --config test/vitest.config.ts",
+    "test:e2e": "vitest run --config tests-e2e/vitest.config.ts"
   },
   "dependencies": {
     "@cloudflare/ai-chat": "workspace:*",
