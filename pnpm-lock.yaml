@@ -159,9 +159,6 @@ importers:
       '@cloudflare/think':
         specifier: workspace:*
         version: link:../packages/think
-      '@cloudflare/worker-bundler':
-        specifier: ^0.2.0
-        version: link:../packages/worker-bundler
       '@cloudflare/workspace':
         specifier: 0.0.0-alpha.11
         version: 0.0.0-alpha.11(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)
@@ -196,9 +193,6 @@ importers:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.16.20
         version: 0.16.20(@cloudflare/workers-types@4.20260629.1)(@vitest/runner@4.1.9)(@vitest/snapshot@4.1.9)(vitest@4.1.9)
-      '@cloudflare/workers-types':
-        specifier: ^4.20260629.1
-        version: 4.20260629.1
       '@types/diff':
         specifier: ^8.0.0
         version: 8.0.0
@@ -208,9 +202,6 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.17)
-      '@types/ws':
-        specifier: ^8.5.12
-        version: 8.18.1
       '@vitejs/plugin-react':
         specifier: ^6.0.3
         version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -229,9 +220,6 @@ importers:
       wrangler:
         specifier: ^4.105.0
         version: 4.105.0(@cloudflare/workers-types@4.20260629.1)
-      ws:
-        specifier: ^8.20.1
-        version: 8.21.0
 
   examples/a2a:
     dependencies:

@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Think agent that reproduces and fixes cloudflare/agents GitHub issues in a container-backed Workspace. Invoked as `@agent-think repro|pr` via the gh-app webhook service; streams a live thread UI and reports back on the issue.",
+  "author": "Matt Carey <mcarey@cloudflare.com>",
   "scripts": {
     "dev": "wrangler dev --ip 0.0.0.0",
     "build:client": "vite build",
@@ -17,7 +18,6 @@
   "dependencies": {
     "@cloudflare/ai-chat": "workspace:*",
     "@cloudflare/think": "workspace:*",
-    "@cloudflare/worker-bundler": "^0.2.0",
     "@cloudflare/workspace": "0.0.0-alpha.11",
     "@platformatic/vfs": "^0.4.0",
     "agents": "workspace:*",
@@ -31,17 +31,14 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.20",
-    "@cloudflare/workers-types": "^4.20260629.1",
     "@types/diff": "^8.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@types/ws": "^8.5.12",
     "@vitejs/plugin-react": "^6.0.3",
     "msw": "^2.7.0",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
     "vitest": "4.1.9",
-    "wrangler": "^4.105.0",
-    "ws": "^8.20.1"
+    "wrangler": "^4.105.0"
   }
 }
