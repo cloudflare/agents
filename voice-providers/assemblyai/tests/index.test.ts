@@ -230,6 +230,44 @@ describe("AssemblyAISTT — construction validation", () => {
     ).toThrow(/voiceFocusThreshold.*voiceFocus/);
   });
 
+  it("throws when voiceFocusThreshold is out of the [0, 1] range", () => {
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          voiceFocus: "near-field",
+          voiceFocusThreshold: 1.1
+        })
+    ).toThrow(/voiceFocusThreshold/);
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          voiceFocus: "near-field",
+          voiceFocusThreshold: -0.1
+        })
+    ).toThrow(/voiceFocusThreshold/);
+  });
+
+  it("accepts voiceFocusThreshold boundary values 0 and 1", () => {
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          voiceFocus: "near-field",
+          voiceFocusThreshold: 0
+        })
+    ).not.toThrow();
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          voiceFocus: "far-field",
+          voiceFocusThreshold: 1
+        })
+    ).not.toThrow();
+  });
+
   it("throws when agentContext exceeds 1750 characters", () => {
     expect(
       () => new AssemblyAISTT({ apiKey: "k", agentContext: "x".repeat(1751) })

@@ -230,6 +230,14 @@ function assertValidOptions(opts: AssemblyAISTTOptions): void {
       "AssemblyAISTT: 'voiceFocusThreshold' requires 'voiceFocus' to be set."
     );
   }
+  if (
+    opts.voiceFocusThreshold !== undefined &&
+    (opts.voiceFocusThreshold < 0 || opts.voiceFocusThreshold > 1)
+  ) {
+    throw new Error(
+      `AssemblyAISTT: 'voiceFocusThreshold' must be between 0 and 1 (got ${opts.voiceFocusThreshold}).`
+    );
+  }
   if (opts.prompt !== undefined && opts.prompt.length > MAX_PROMPT_CHARS) {
     throw new Error(
       `AssemblyAISTT: 'prompt' exceeds the maximum of ${MAX_PROMPT_CHARS} characters (got ${opts.prompt.length}).`
