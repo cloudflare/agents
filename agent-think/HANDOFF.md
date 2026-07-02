@@ -41,7 +41,8 @@ agent-think  (this dir — cloudflare/agents repo — PUBLIC-safe, holds no App 
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
    ├─ WarmPool DO (src/warm-pool.ts) — keeps WARM_POOL_TARGET(=1) containers warm
    └─ live thread UI at /thread/:session  (React SPA, src/client.tsx)
-gh-app then posts "🧠 on it — watch the live thread <link>" on the issue.
+gh-app adds only the 👀 reaction (no "on it" comment — deliberate: less
+issue noise); the agent posts its results when the run finishes.
 ```
 
 Session name = `<repo-slug>-<issue>` (e.g. `cloudflare-agents-1859`). Both verbs
@@ -114,7 +115,7 @@ cause + three fixes, all deployed:
    the webhook response. `start()` used to run container gh-auth before
    `submitMessages`, so the RPC was canceled mid-attach — 👀 then silence,
    nothing ever logged. Now `start()` ONLY logs + `submitMessages` (returns in
-   ~1s; the "on it" comment posts reliably), and gh/git auth happens inside the
+   ~1s so gh-app's waitUntil always survives it), and gh/git auth happens inside the
    durable turn via `beforeTurn` → `#ensureGitAuth` (once per token; a
    re-dispatch with a fresh token re-auths automatically).
 
