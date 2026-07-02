@@ -7,7 +7,7 @@
   "name": "agent-think",
   "account_id": "b8afc92c7a87f699592038b756153d22",
   "main": "src/index.ts",
-  "compatibility_date": "2026-05-26",
+  "compatibility_date": "2026-06-11",
   // `enable_abortsignal_rpc` is required: CloudflareContainerBackend's health
   // probe passes an AbortSignal into `host.fetchPort(...)`, and the cross-DO
   // topology (Agent DO -> Sandbox DO) sends that call over Workers RPC.

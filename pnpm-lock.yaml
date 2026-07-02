@@ -196,6 +196,9 @@ importers:
       '@types/diff':
         specifier: ^8.0.0
         version: 8.0.0
+      '@types/node':
+        specifier: ^26.0.1
+        version: 26.0.1
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17

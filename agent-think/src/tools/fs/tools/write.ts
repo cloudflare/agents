@@ -1,6 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import type { FileStore } from "../stores/types";
+import { withFileLock } from "../file-lock";
 
 export interface WriteToolOptions {
   store: FileStore;
@@ -35,14 +36,18 @@ export function createWriteTool(options: WriteToolOptions) {
       }
       // Preserve the existing file's mode when overwriting so executable
       // scripts don't silently lose their +x bit. For new files we leave
-      // `mode` undefined and let the store apply its own default.
-      const existing = await store.stat(path);
-      await store.write(
-        path,
-        bytes,
-        existing ? { mode: existing.mode } : undefined
-      );
-      return { path, bytesWritten: bytes.length };
+      // `mode` undefined and let the store apply its own default. Runs under
+      // the shared per-file lock so a concurrent edit's read-modify-write on
+      // the same path cannot interleave with this stat-then-write.
+      return withFileLock(path, async () => {
+        const existing = await store.stat(path);
+        await store.write(
+          path,
+          bytes,
+          existing ? { mode: existing.mode } : undefined
+        );
+        return { path, bytesWritten: bytes.length };
+      });
     }
   });
 }

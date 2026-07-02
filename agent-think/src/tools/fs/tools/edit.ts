@@ -11,6 +11,7 @@ import {
   stripBom
 } from "../edit-diff";
 import type { FileStore } from "../stores/types";
+import { withFileLock } from "../file-lock";
 
 export interface EditToolOptions {
   store: FileStore;
@@ -73,25 +74,6 @@ function prepareArguments(input: unknown): { path: string; edits: Edit[] } {
   }
 
   return args as { path: string; edits: Edit[] };
-}
-
-// Per-path mutation queue. Edit and write should never race on the same file:
-// fuzzy matching reads the entire buffer, applies a textual change, then
-// writes — a concurrent edit landing between read and write would silently
-// clobber the first edit. Module-scoped so all tools sharing a store also
-// share the queue.
-const fileLocks = new Map<string, Promise<unknown>>();
-async function withFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
-  const prev = fileLocks.get(path) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  fileLocks.set(
-    path,
-    next.finally(() => {
-      // Clear only if we're still the tail of the chain.
-      if (fileLocks.get(path) === next) fileLocks.delete(path);
-    })
-  );
-  return next;
 }
 
 export function createEditTool(options: EditToolOptions) {
