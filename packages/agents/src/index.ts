@@ -12259,22 +12259,30 @@ export class Agent<
 
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
-      if (
-        conn.connectionState === MCPConnectionState.AUTHENTICATING &&
-        conn.options.transport.authProvider?.authUrl
-      ) {
-        return {
-          id: existingServer.id,
-          state: MCPConnectionState.AUTHENTICATING,
-          authUrl: conn.options.transport.authProvider.authUrl
-        };
-      }
-      if (conn.connectionState === MCPConnectionState.FAILED) {
+      if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
+        // Prefer the in-memory authUrl from a live OAuth flow; fall back to
+        // the persisted auth_url for a connection restored after hibernation,
+        // where the provider's in-memory URL is lost.
+        const authUrl =
+          conn.options.transport.authProvider?.authUrl ??
+          existingServer.auth_url;
+        if (authUrl) {
+          return {
+            id: existingServer.id,
+            state: MCPConnectionState.AUTHENTICATING,
+            authUrl
+          };
+        }
+        // No auth URL in memory or storage: fall through to re-run the
+        // connect flow and mint a fresh one, rather than reporting READY
+        // for an unauthenticated server.
+      } else if (conn.connectionState === MCPConnectionState.FAILED) {
         throw new Error(
           `MCP server "${serverName}" is in failed state: ${conn.connectionError}`
         );
+      } else {
+        return { id: existingServer.id, state: MCPConnectionState.READY };
       }
-      return { id: existingServer.id, state: MCPConnectionState.READY };
     }
 
     // RPC transport path: second argument is a DurableObjectNamespace
@@ -12402,7 +12410,10 @@ export class Agent<
         : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
     }
 
-    const id = requestedId ?? nanoid(8);
+    // Reuse the existing server's id (restore-through-addMcpServer, matching
+    // the RPC path above) before generating a new one, so re-adding a known
+    // server never orphans its storage row.
+    const id = requestedId ?? existingServer?.id ?? nanoid(8);
 
     // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
     let authProvider:

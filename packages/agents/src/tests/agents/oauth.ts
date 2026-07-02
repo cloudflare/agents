@@ -204,6 +204,26 @@ export class TestOAuthAgent extends Agent {
     }
   }
 
+  // Wrapper because DurableObjectStub RPC typing doesn't preserve
+  // addMcpServer's overloaded return type through the boundary.
+  async testAddMcpServer(
+    serverName: string,
+    url: string
+  ): Promise<{ id: string; state: string; authUrl?: string }> {
+    const result = await this.addMcpServer(serverName, url, {
+      callbackHost: "http://example.com"
+    });
+    return {
+      id: result.id,
+      state: result.state,
+      authUrl: "authUrl" in result ? result.authUrl : undefined
+    };
+  }
+
+  testGetMcpServerState(serverId: string): string | undefined {
+    return this.getMcpServers().servers[serverId]?.state;
+  }
+
   getMcpServerFromDb(serverId: string) {
     const servers = this.sql<{
       id: string;

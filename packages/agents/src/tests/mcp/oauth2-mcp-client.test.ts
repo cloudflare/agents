@@ -80,6 +80,90 @@ describe("OAuth2 MCP Client - Hibernation", () => {
   });
 });
 
+describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
+  // Regression test for #1855: a connection restored from storage mid-OAuth
+  // has connectionState AUTHENTICATING but no in-memory authProvider.authUrl,
+  // and addMcpServer used to fall through to reporting READY for it.
+  it("returns authenticating with the persisted authUrl for a restored connection awaiting OAuth", async () => {
+    // Unique per attempt: connection restore runs once per DO instance, so a
+    // reused instance (e.g. on test retry) would skip it.
+    const agentName = `test-add-mcp-server-after-wake-${nanoid(8)}`;
+    const agentId = env.TestOAuthAgent.idFromName(agentName);
+    const agentStub = env.TestOAuthAgent.get(agentId);
+    const serverId = nanoid(8);
+    const serverUrl = "http://example.com/mcp";
+    const authUrl = "http://example.com/oauth/authorize";
+    const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+
+    await agentStub.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        callback_url TEXT NOT NULL,
+        client_id TEXT,
+        auth_url TEXT,
+        server_options TEXT
+      )
+    `;
+
+    // A server left mid-OAuth: auth_url was persisted, consent never completed.
+    await agentStub.sql`
+      INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (${serverId}, ${"test-oauth-server"}, ${serverUrl}, ${"test-client-id"}, ${authUrl}, ${callbackUrl}, ${null})
+    `;
+
+    // Wake the agent so the connection is restored from storage.
+    await agentStub.setName(agentName);
+
+    // The restored connection is in-memory and awaiting the OAuth callback.
+    expect(await agentStub.hasMcpConnection(serverId)).toBe(true);
+
+    const result = await agentStub.testAddMcpServer(
+      "test-oauth-server",
+      serverUrl
+    );
+
+    expect(result.id).toBe(serverId);
+    expect(result.state).toBe("authenticating");
+    expect(result.authUrl).toBe(authUrl);
+
+    // addMcpServer's return value and getMcpServers() must agree on the
+    // state of the same connection in the same tick.
+    expect(result.state).toBe(await agentStub.testGetMcpServerState(serverId));
+  });
+
+  it("prefers the live in-memory authUrl during an in-flight OAuth flow", async () => {
+    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentStub = env.TestOAuthAgent.get(agentId);
+    const serverId = nanoid(8);
+    const serverUrl = "http://example.com/mcp";
+    const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+
+    await agentStub.setName("default");
+
+    // Live dance: in-memory authUrl is set on the connection's authProvider
+    // while the stored auth_url is still NULL.
+    await agentStub.setupMockMcpConnection(
+      serverId,
+      "live-oauth-server",
+      serverUrl,
+      callbackUrl,
+      "client-id"
+    );
+    await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
+
+    const result = await agentStub.testAddMcpServer(
+      "live-oauth-server",
+      serverUrl
+    );
+
+    expect(result.id).toBe(serverId);
+    expect(result.state).toBe("authenticating");
+    expect(result.authUrl).toBe("http://example.com/oauth/authorize");
+  });
+});
+
 describe("OAuth2 MCP Client - Callback Handling", () => {
   it("should process OAuth callback with valid connection", async () => {
     const agentId = env.TestOAuthAgent.newUniqueId();
