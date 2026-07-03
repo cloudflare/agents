@@ -46,7 +46,7 @@ import { openai } from "workers-ai-provider/openai";
 import { getAgentByName } from "agents";
 import type { CommandCenterAgent } from "./command-center";
 import { releaseContainer, resolveContainerId } from "./pool";
-import { createExecTool } from "./tools/exec";
+import { createBashTool } from "./tools/bash";
 import {
   createEditTool,
   createReadTool,
@@ -96,7 +96,12 @@ export class ThinkAgent extends ThinkBase {
   /** repro/pr can be long: clone, install, deploy or fix, verify. */
   override maxSteps = 60;
 
-  /** We expose our own `exec` tool; skip Think's built-in bash. */
+  /**
+   * We expose our own `bash` tool (two exec backends); skip Think's
+   * built-in just-bash. Note: even if this flag is ever flipped back,
+   * getTools() spreads after the workspace tools, so our `bash` would
+   * silently shadow Think's — desired, but worth knowing.
+   */
   override workspaceBash = false;
 
   readonly #containerBackend: CloudflareContainerBackend;
@@ -187,7 +192,7 @@ export class ThinkAgent extends ThinkBase {
 
   /**
    * Operator escape hatch: wipe this session back to a clean slate. For
-   * poisoned sessions — e.g. an unbounded exec-output backlog that OOMs the
+   * poisoned sessions — e.g. an unbounded bash-output backlog that OOMs the
    * DO and then CPU-death-loops every wake before recovery can run (see
    * PLANS/agents/agent-think-1845-rca.md). Drops ALL durable state (messages,
    * workspace VFS, submissions), releases the container assignment, and
@@ -389,7 +394,15 @@ export class ThinkAgent extends ThinkBase {
     // than in start(), so dispatch stays fast and a slow container attach
     // can't be killed by the caller's cancellation (see start()).
     await this.#ensureGitAuth();
-    return { maxOutputTokens: 16384 };
+    return {
+      maxOutputTokens: 16384,
+      // Only our four tools reach the model. Think merges its workspace
+      // built-ins (list/find/grep/delete) unconditionally; this allowlist
+      // makes the AI SDK drop their definitions from the provider request
+      // entirely (~600 prompt tokens reclaimed per call). ls/grep/rm/find
+      // happen through `bash`, like pi and Claude Code. See TOOLS.md.
+      activeTools: Object.keys(this.getTools())
+    };
   }
 
   /**
@@ -464,7 +477,7 @@ export class ThinkAgent extends ThinkBase {
         ? [
             "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
             "comment that triggered you, then continue with the task:",
-            `  exec({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
+            `  bash({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
             "(👀 was added when your trigger was seen; your 🚀 tells the",
             "humans the agent itself is running.)",
             ""
@@ -488,7 +501,7 @@ export class ThinkAgent extends ThinkBase {
       "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
       "    re-configure the token.",
       "  - IMPORTANT: run every `gh`, `git`, `npm`, `curl`, and `wrangler`",
-      '    command on the `container` backend — exec({ command, backend: "container" }).',
+      '    command on the `container` backend — bash({ command, backend: "container" }).',
       "    The `shell` backend has none of them and no network; it is only for",
       "    cat/grep/sed/jq-style text work.",
       "  - The dedicated read/write/edit tools operate on the same workspace",
@@ -507,7 +520,7 @@ export class ThinkAgent extends ThinkBase {
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
-      exec: createExecTool({
+      bash: createBashTool({
         workspace: ws,
         maxBytes: 32 * 1024,
         backends: {

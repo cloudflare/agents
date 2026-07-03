@@ -145,11 +145,11 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
   in `run_worker_first`. Symptom: the UI's HTTP calls work while every
   `wss://` connect fails. (This bit us on the command center; the repro-skill
   recipe carries the same rule.)
-- **Unbounded exec output can kill a session irrecoverably.** Exec output
+- **Unbounded bash output can kill a session irrecoverably.** Command output
   streams through the DO; a chatty command (full monorepo `pnpm install`)
   OOMed the isolate, and the persisted backlog then CPU-death-looped every
   wake before recovery could run (see PLANS/agents/agent-think-1845-rca.md).
-  Skills + the exec tool description mandate redirect-to-file + tail for
+  Skills + the bash tool description mandate redirect-to-file + tail for
   noisy commands. Operator escape hatch: `AgentThink.resetSession(session)`
   RPC wipes the session clean.
 - **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the

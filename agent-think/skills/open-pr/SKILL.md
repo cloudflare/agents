@@ -11,7 +11,7 @@ on the fix, a preferred approach, or a pointer to the suspect area — and weigh
 it highly, but stay within the scope of the issue.
 
 All `gh`, `git`, `npm`, `curl`, and `wrangler` commands must run on the
-`container` backend (`exec({ command, backend: "container" })`) — the `shell`
+`container` backend (`bash({ command, backend: "container" })`) — the `shell`
 backend has no real binaries or network. `gh` is already authenticated as the
 app; use it directly (no token handling). Work only under `/workspace` (the
 shared filesystem); never use `/tmp`.

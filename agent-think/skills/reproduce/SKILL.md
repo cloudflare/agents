@@ -12,7 +12,7 @@ suspect area. Let it guide your reproduction, but the issue itself remains the
 source of truth.
 
 All `gh`, `git`, `npm`, `curl`, and `wrangler` commands must run on the
-`container` backend (`exec({ command, backend: "container" })`) — the `shell`
+`container` backend (`bash({ command, backend: "container" })`) — the `shell`
 backend has no real binaries or network. `gh` is already authenticated as the
 app; use it directly (no token handling).
 
