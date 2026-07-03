@@ -12,7 +12,7 @@
  * fast but limited to its built-in command set) and a "container"
  * backend (Cloudflare Container running wsd, full Linux userland).
  *
- * Design notes (see TOOLS.md):
+ * Design notes (see design/tools.md):
  * - Exit code is data, not an exception: every call returns
  *   `{ exitCode, stdout, stderr }`, so failing commands surface
  *   their output without error-path gymnastics.

@@ -400,7 +400,7 @@ export class ThinkAgent extends ThinkBase {
       // built-ins (list/find/grep/delete) unconditionally; this allowlist
       // makes the AI SDK drop their definitions from the provider request
       // entirely (~600 prompt tokens reclaimed per call). ls/grep/rm/find
-      // happen through `bash`, like pi and Claude Code. See TOOLS.md.
+      // happen through `bash`, like pi and Claude Code. See design/tools.md.
       activeTools: Object.keys(this.getTools())
     };
   }
