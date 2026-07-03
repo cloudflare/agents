@@ -12260,22 +12260,27 @@ export class Agent<
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
       if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
+        const authProvider = conn.options.transport.authProvider;
         // Prefer the in-memory authUrl from a live OAuth flow; fall back to
         // the persisted auth_url for a connection restored after hibernation,
-        // where the provider's in-memory URL is lost.
-        const authUrl =
-          conn.options.transport.authProvider?.authUrl ??
-          existingServer.auth_url;
-        if (authUrl) {
+        // where the provider's in-memory URL is lost. A persisted URL is
+        // only served while its OAuth state is still redeemable.
+        const authUrl = authProvider?.authUrl ?? existingServer.auth_url;
+        if (
+          authUrl &&
+          (authProvider?.authUrl ||
+            (await this._isAuthUrlStateRedeemable(authUrl, authProvider)))
+        ) {
           return {
             id: existingServer.id,
             state: MCPConnectionState.AUTHENTICATING,
             authUrl
           };
         }
-        // No auth URL in memory or storage: fall through to re-run the
-        // connect flow and mint a fresh one, rather than reporting READY
-        // for an unauthenticated server.
+        // No servable auth URL — none in memory or storage, or the persisted
+        // one's OAuth state has expired: fall through to re-run the connect
+        // flow and mint a fresh one, rather than reporting READY for an
+        // unauthenticated server or handing out a dead sign-in link.
       } else if (conn.connectionState === MCPConnectionState.FAILED) {
         throw new Error(
           `MCP server "${serverName}" is in failed state: ${conn.connectionError}`
@@ -12490,6 +12495,37 @@ export class Agent<
     }
 
     return { id, state: MCPConnectionState.READY };
+  }
+
+  /**
+   * Check whether a persisted authorization URL can still complete its OAuth
+   * flow. The state nonce and code verifier behind the URL expire (10 minutes
+   * for the built-in provider), so a URL restored after a long hibernation
+   * may be a dead link. Fails open: URLs without a state parameter and
+   * providers that cannot validate are treated as redeemable.
+   */
+  private async _isAuthUrlStateRedeemable(
+    authUrl: string,
+    authProvider: AgentMcpOAuthProvider | undefined
+  ): Promise<boolean> {
+    if (!authProvider?.checkState) {
+      return true;
+    }
+    let state: string | null;
+    try {
+      state = new URL(authUrl).searchParams.get("state");
+    } catch {
+      return true;
+    }
+    if (!state) {
+      return true;
+    }
+    try {
+      const { valid } = await authProvider.checkState(state);
+      return valid;
+    } catch {
+      return true;
+    }
   }
 
   async removeMcpServer(id: string) {

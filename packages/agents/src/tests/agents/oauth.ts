@@ -224,6 +224,44 @@ export class TestOAuthAgent extends Agent {
     return this.getMcpServers().servers[serverId]?.state;
   }
 
+  async testAddMcpServerExpectingError(
+    serverName: string,
+    url: string
+  ): Promise<{ threw: boolean; message: string }> {
+    try {
+      await this.addMcpServer(serverName, url, {
+        callbackHost: "http://example.com"
+      });
+      return { threw: false, message: "" };
+    } catch (err) {
+      return {
+        threw: true,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  // Seed an OAuth state row at the key the agent's default provider reads
+  // (DurableObjectOAuthClientProvider.stateKey with clientName = agent name),
+  // as if redirectToAuthorization had run `ageMs` ago.
+  async seedProviderOAuthState(
+    serverId: string,
+    nonce: string,
+    options?: { ageMs?: number }
+  ): Promise<void> {
+    await this.ctx.storage.put(`/${this.name}/${serverId}/state/${nonce}`, {
+      nonce,
+      serverId,
+      createdAt: Date.now() - (options?.ageMs ?? 0)
+    });
+  }
+
+  listMcpServerIdsByName(serverName: string): string[] {
+    return this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_mcp_servers WHERE name = ${serverName}
+    `.map((row) => row.id);
+  }
+
   getMcpServerFromDb(serverId: string) {
     const servers = this.sql<{
       id: string;
