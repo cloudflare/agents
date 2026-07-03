@@ -168,7 +168,8 @@ Capture the PR URL and branch name.
 
 Do **not** post an acknowledgement or "opened a PR" comment on the issue. The
 PR links back to the issue via `Closes #<issueNumber>`. The only case where you
-comment is the skip path in step 1 (no PR exists to show).
+comment is the skip path in the **Gather everything known** step (no PR
+exists to show).
 
 ## 8. Return the structured result
 

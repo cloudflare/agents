@@ -58,6 +58,9 @@ import {
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
 const CONTEXT_KEY = "agent-think-context";
+// resetSession aborts the isolate AFTER its RPC response has been delivered;
+// this is the grace window for that ack, not a tuning knob.
+const RESET_ABORT_DELAY_MS = 100;
 const REPO_ROOT = "/workspace/repo";
 // Kimi K2.7 Code on Workers AI (bills via Workers AI, NOT Unified Billing —
 // switched back 2026-07-03 after unified-billing credits ran dry mid-run;
@@ -198,7 +201,7 @@ export class ThinkAgent extends ThinkBase {
     await this.ctx.storage.deleteAll();
     // Abort after the RPC returns so the caller gets its ack; the next
     // request builds a fresh isolate over the now-empty storage.
-    setTimeout(() => this.ctx.abort(), 100);
+    setTimeout(() => this.ctx.abort(), RESET_ABORT_DELAY_MS);
   }
 
   /**

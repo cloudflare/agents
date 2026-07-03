@@ -83,8 +83,8 @@ Every repro deploy MUST ship a minimal Vite + React page at the Worker's root UR
 1. In `$REPRO_DIR`, create the 7 files below.
 2. `npm install > /tmp/install.log 2>&1; tail -15 /tmp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local file like this — streaming megabytes of live output through the session can kill it.
 3. Sanity-check the build before deploying: `npx vite build` (catches config errors cheaply; do NOT run `vite dev` — it blocks waiting for a browser).
-4. Deploy per step 4 below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
-5. After deploy, confirm the root URL serves the page (step 5) and include the URL + click instructions in your report (step 7).
+4. Deploy per the **Deploy** step below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
+5. After deploy, confirm the root URL serves the page (the **Verify** step) and include the URL + click instructions in your report (the **Report back** step).
 
 **package.json**
 

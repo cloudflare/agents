@@ -56,9 +56,11 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
 
 Reactions are the liveness protocol (an "on it" comment was tried and removed
 as noise): 👀 from gh-app = webhook seen and dispatched; 🚀 from the agent =
-the Think turn actually woke up (added in beforeTurn — if you see 👀 but no 🚀
-within ~a minute, the turn is dead, not slow). Results arrive as an issue
-comment when the run finishes; gh-app posts ❌ if dispatch itself fails.
+the MODEL's own first action (the system prompt tells it to `gh api` the
+reaction from the container), so it proves the whole chain — turn awake,
+container attached, gh authed, model responding. 👀 without 🚀 within a couple
+of minutes = the run is dead, not slow. Results arrive as an issue comment
+when the run finishes; gh-app posts ❌ if dispatch itself fails.
 
 Session name = `<repo-slug>-<issue>` (e.g. `cloudflare-agents-1859`). Both
 verbs on one issue reuse the same DO/workspace/thread, and `submitMessages`
