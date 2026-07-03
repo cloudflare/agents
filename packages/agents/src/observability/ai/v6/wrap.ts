@@ -41,19 +41,26 @@ export function createAISDKV6Wrapper<T extends Record<string, unknown>>(
   instrumentation: AISDKV6Instrumentation
 ): T {
   const target = isModuleNamespace(ai) ? Object.setPrototypeOf({}, ai) : ai;
+  // Cache wrappers so repeated property reads return the same function
+  // (memoization patterns like `wrapped.streamText === wrapped.streamText`).
+  const wrapperCache = new Map<PropertyKey, AISDKV6Operation>();
 
   return new Proxy(target, {
     get(proxyTarget, property, receiver) {
       const original = Reflect.get(proxyTarget, property, receiver) as unknown;
-      const wrapLanguageModel = readWrapLanguageModel(ai);
 
       if (isWrappedOperationName(property) && typeof original === "function") {
-        return createOperationWrapper(
-          property,
-          toAISDKV6Operation(original),
-          wrapLanguageModel,
-          instrumentation
-        );
+        let wrapper = wrapperCache.get(property);
+        if (!wrapper) {
+          wrapper = createOperationWrapper(
+            property,
+            toAISDKV6Operation(original),
+            readWrapLanguageModel(ai),
+            instrumentation
+          );
+          wrapperCache.set(property, wrapper);
+        }
+        return wrapper;
       }
 
       return original;
@@ -124,6 +131,13 @@ function createOperationWrapper(
         span.name,
         span.attributes,
         (operationSpan) => {
+          // Untraced invocations take the pristine path: original params, no
+          // tool wrapping, no model middleware, no stream patching.
+          if (!operationSpan.isTraced) {
+            operationSpan.finish();
+            return operation(params, ...args);
+          }
+
           const result = operation(
             operationParamsForCall(
               params,
@@ -152,6 +166,10 @@ function createOperationWrapper(
       span.name,
       span.attributes,
       async (operationSpan) => {
+        if (!operationSpan.isTraced) {
+          return operation(params, ...args);
+        }
+
         const result = await operation(
           operationParamsForCall(
             params,

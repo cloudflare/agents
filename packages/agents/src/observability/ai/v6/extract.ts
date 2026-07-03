@@ -50,6 +50,13 @@ export function extractRequestSummary(
 
 /** Extracts model identity from an AI SDK v6 model object. */
 export function extractModelInfo(value: unknown): ModelInfo | undefined {
+  // Gateway-style string model ids still identify the model.
+  if (typeof value === "string") {
+    return value.length > 0
+      ? { modelId: value, provider: undefined }
+      : undefined;
+  }
+
   if (typeof value !== "object" || value === null) {
     return undefined;
   }
@@ -98,15 +105,20 @@ export function extractAISDKv6TokenUsage(
   const outputTokens = readTokenCount(usage.outputTokens);
   const totalTokens =
     typeof usage.totalTokens === "number" ? usage.totalTokens : undefined;
-  const cacheReadInputTokens = readNestedTokenField(
-    usage.inputTokens,
-    "cacheRead"
-  );
-  const cacheCreationInputTokens = readNestedTokenField(
-    usage.inputTokens,
-    "cacheWrite"
-  );
-  const reasoningTokens = readNestedTokenField(usage.outputTokens, "reasoning");
+  // The public result usage keeps details in inputTokenDetails/outputTokenDetails
+  // (with deprecated flat fields); provider-level usage nests them on the token
+  // counts themselves. Read all shapes.
+  const cacheReadInputTokens =
+    readNestedTokenField(usage.inputTokenDetails, "cacheReadTokens") ??
+    readNestedTokenField(usage.inputTokens, "cacheRead") ??
+    readNumber(usage.cachedInputTokens);
+  const cacheCreationInputTokens =
+    readNestedTokenField(usage.inputTokenDetails, "cacheWriteTokens") ??
+    readNestedTokenField(usage.inputTokens, "cacheWrite");
+  const reasoningTokens =
+    readNestedTokenField(usage.outputTokenDetails, "reasoningTokens") ??
+    readNestedTokenField(usage.outputTokens, "reasoning") ??
+    readNumber(usage.reasoningTokens);
 
   if (
     inputTokens === undefined &&
@@ -192,7 +204,9 @@ export function extractResponseInfo(
       ? (record.response as Record<string, unknown>)
       : undefined;
   const id = readString(record.responseId ?? response?.id);
-  const model = readString(record.responseModel ?? response?.model);
+  const model = readString(
+    record.responseModel ?? response?.modelId ?? response?.model
+  );
 
   if (id === undefined && model === undefined) {
     return undefined;

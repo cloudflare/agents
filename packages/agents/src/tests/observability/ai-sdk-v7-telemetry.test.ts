@@ -57,7 +57,7 @@ describe("createAISDKV7Telemetry", () => {
     expect(tracing.spans[0]?.attributes).toMatchObject({
       "cloudflare.agents.call.id": "call-1",
       "cloudflare.agents.integration.name": "ai-sdk",
-      "cloudflare.agents.operation.id": "generateText",
+      "cloudflare.agents.operation.name": "generateText",
       "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
       "cloudflare.agents.runtime_context.requestId": "req-1",
@@ -85,7 +85,7 @@ describe("createAISDKV7Telemetry", () => {
     expect(tracing.spans[1]?.name).toBe("chat test-model");
     expect(tracing.spans[1]?.attributes).toMatchObject({
       "cloudflare.agents.call.id": "call-1",
-      "cloudflare.agents.operation.id": "doGenerate",
+      "cloudflare.agents.operation.name": "doGenerate",
       "gen_ai.operation.name": "chat",
       "gen_ai.response.id": "response-1"
     });
@@ -150,7 +150,7 @@ describe("createAISDKV7Telemetry", () => {
     expect(toolSpan?.name).toBe("execute_tool multiply");
     expect(toolSpan?.attributes).toMatchObject({
       "cloudflare.agents.call.id": "call-1",
-      "cloudflare.agents.operation.id": "tool.execute",
+      "cloudflare.agents.operation.name": "tool.execute",
       "cloudflare.agents.tool_context.multiply.unit": "count",
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.call.id": "tool-call-1",
@@ -293,5 +293,73 @@ describe("createAISDKV7Telemetry", () => {
       "cloudflare.agents.metadata.requestId"
     ]);
     expect(tracing.spans[0]?.ended).toBe(true);
+  });
+
+  it("keeps tool spans separate when concurrent operations reuse a tool call id", async () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({ tracer: tracing });
+    const sharedToolCallId = "tool-call-shared";
+
+    telemetry.onStart?.({ callId: "op-1", operationId: "ai.streamText" });
+    telemetry.onStart?.({ callId: "op-2", operationId: "ai.streamText" });
+    telemetry.onToolExecutionStart?.({
+      callId: "op-1",
+      toolCall: { toolCallId: sharedToolCallId, toolName: "first" }
+    });
+    telemetry.onToolExecutionStart?.({
+      callId: "op-2",
+      toolCall: { toolCallId: sharedToolCallId, toolName: "second" }
+    });
+
+    const [firstResult, secondResult] = await Promise.all([
+      telemetry.executeTool?.({
+        callId: "op-1",
+        execute: async () => "from-op-1",
+        toolCallId: sharedToolCallId
+      }),
+      telemetry.executeTool?.({
+        callId: "op-2",
+        execute: async () => "from-op-2",
+        toolCallId: sharedToolCallId
+      })
+    ]);
+
+    telemetry.onToolExecutionEnd?.({
+      callId: "op-1",
+      toolCall: { toolCallId: sharedToolCallId, toolName: "first" }
+    });
+    telemetry.onToolExecutionEnd?.({
+      callId: "op-2",
+      toolCall: { toolCallId: sharedToolCallId, toolName: "second" }
+    });
+    telemetry.onEnd?.({ callId: "op-1", operationId: "ai.streamText" });
+    telemetry.onEnd?.({ callId: "op-2", operationId: "ai.streamText" });
+
+    expect(firstResult).toBe("from-op-1");
+    expect(secondResult).toBe("from-op-2");
+
+    const toolSpans = tracing.spans.filter(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
+    expect(toolSpans).toHaveLength(2);
+
+    const firstSpan = toolSpans.find(
+      (span) => span.attributes["cloudflare.agents.call.id"] === "op-1"
+    );
+    const secondSpan = toolSpans.find(
+      (span) => span.attributes["cloudflare.agents.call.id"] === "op-2"
+    );
+    expect(firstSpan?.attributes).toMatchObject({
+      "gen_ai.tool.call.id": sharedToolCallId,
+      "gen_ai.tool.name": "first"
+    });
+    expect(secondSpan?.attributes).toMatchObject({
+      "gen_ai.tool.call.id": sharedToolCallId,
+      "gen_ai.tool.name": "second"
+    });
+    expect(firstSpan?.ended).toBe(true);
+    expect(secondSpan?.ended).toBe(true);
+    expect(firstSpan?.attributes).not.toHaveProperty(["otel.status_code"]);
+    expect(secondSpan?.attributes).not.toHaveProperty(["otel.status_code"]);
   });
 });

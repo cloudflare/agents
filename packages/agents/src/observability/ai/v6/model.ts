@@ -53,19 +53,22 @@ export function wrapModel(
           params,
           parentOperation
         );
-        const modelCall = tracer.openSpan(
+        // The provider call runs INSIDE the activation callback so its work
+        // (fetch subrequests, etc.) nests under the chat span; the span stays
+        // caller-owned because the stream outlives the callback.
+        return tracer.openSpan(
           span.name,
           span.attributes,
-          (span) => span
+          async (modelCall) => {
+            try {
+              const result = await doStream();
+              return finishWhenStreamCompletes(result, modelCall);
+            } catch (cause: unknown) {
+              modelCall.fail(cause);
+              throw cause;
+            }
+          }
         );
-
-        try {
-          const result = await doStream();
-          return finishWhenStreamCompletes(result, modelCall);
-        } catch (cause: unknown) {
-          modelCall.fail(cause);
-          throw cause;
-        }
       }
     }
   });

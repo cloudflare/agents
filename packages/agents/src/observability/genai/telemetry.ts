@@ -192,7 +192,7 @@ export function operationSpan(input: {
     attributes: {
       ...input.attributes,
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
-      [TraceAttribute.Cloudflare.OperationID]: input.operation,
+      [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.AgentID]: input.context?.agentId,
       [TraceAttribute.GenAI.AgentName]: input.context?.agentName,
       [TraceAttribute.GenAI.AgentVersion]: input.context?.agentVersion,
@@ -224,7 +224,7 @@ export function modelCallSpan(input: {
     attributes: {
       ...input.attributes,
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
-      [TraceAttribute.Cloudflare.OperationID]: input.operation,
+      [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueChat,
       [TraceAttribute.GenAI.ProviderName]: normalizeProviderName(
@@ -266,7 +266,7 @@ export function toolCallSpan(input: {
   return {
     attributes: {
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
-      [TraceAttribute.Cloudflare.OperationID]: input.operation,
+      [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueExecuteTool,
       [TraceAttribute.GenAI.ToolCallID]: input.toolCallId,

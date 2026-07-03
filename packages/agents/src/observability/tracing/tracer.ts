@@ -52,6 +52,11 @@ export type AgentTracer = {
 
 /** Active span handle passed to instrumented work. */
 export type AgentSpan = {
+  /**
+   * Whether this invocation is actually being traced. Instrumentation can use
+   * this to skip expensive capture work when nobody is listening.
+   */
+  readonly isTraced: boolean;
   /** Records the optional finish attributes and ends the span. Idempotent. */
   finish(attributes?: TraceAttributes): void;
   /**
@@ -130,6 +135,10 @@ class ManagedSpan implements AgentSpan {
 
   constructor(private readonly span: SpanWriter) {}
 
+  get isTraced(): boolean {
+    return this.span.isTraced;
+  }
+
   finish(attributes: TraceAttributes = {}): void {
     if (this.#closed) {
       return;
@@ -178,10 +187,16 @@ function setAttributes(span: SpanWriter, attributes: TraceAttributes): void {
     return;
   }
 
-  for (const [key, value] of Object.entries(attributes)) {
-    if (value !== undefined) {
-      span.setAttribute(key, value);
+  // Fail-safe: a throwing writer must not leak the span or replace the
+  // application's original error with a telemetry one.
+  try {
+    for (const [key, value] of Object.entries(attributes)) {
+      if (value !== undefined) {
+        span.setAttribute(key, value);
+      }
     }
+  } catch {
+    // Drop the attributes; the span still closes.
   }
 }
 

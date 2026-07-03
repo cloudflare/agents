@@ -1403,12 +1403,9 @@ const { streamText: tracedStreamText } = wrapAISDK({
 // Drains the underlying model stream when a drain loop exits early (in-stream
 // error break, stall abort, user abort). The AI SDK tees its base stream, so
 // an abandoned tee branch would otherwise leave the tracing wrapper's
-// operation span open forever.
-const inferenceStreamFinalizers = new WeakMap<object, () => void>();
-
-function drainInferenceStream(result: object): void {
-  inferenceStreamFinalizers.get(result)?.();
-}
+// operation span open forever. Entries are deleted before invocation so
+// repeated finalization cannot start additional tee consumers.
+const inferenceStreamFinalizers = new WeakMap<object, () => Promise<void>>();
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -5173,6 +5170,27 @@ export class Think<
    * key collisions. Inert for the AI SDK's own OpenTelemetry telemetry unless
    * the caller enables it.
    */
+  /**
+   * Finalizes the traced inference stream after a drain loop exits: drains the
+   * abandoned tee branch so the operation span closes even on early exits.
+   * Idempotent (the finalizer is removed before it runs); the drain rides
+   * `ctx.waitUntil` so it survives turn completion without blocking it.
+   */
+  private _drainInferenceStream(result: object): void {
+    const finalize = inferenceStreamFinalizers.get(result);
+    if (!finalize) {
+      return;
+    }
+
+    inferenceStreamFinalizers.delete(result);
+    try {
+      this.ctx.waitUntil(finalize());
+    } catch {
+      // waitUntil unavailable (tests, exotic contexts): still drain.
+      void finalize();
+    }
+  }
+
   private _turnTelemetry(
     base: Parameters<typeof streamText>[0]["experimental_telemetry"]
   ): Parameters<typeof streamText>[0]["experimental_telemetry"] {
@@ -5603,11 +5621,11 @@ export class Think<
     } satisfies StreamableResult;
 
     const finalized = this._transformInferenceResult(streamResult);
-    inferenceStreamFinalizers.set(finalized, () => {
-      // Best-effort: consumeStream never rejects (onError swallows) and is a
-      // no-op when the stream already ran to completion.
-      void result.consumeStream({ onError: () => {} });
-    });
+    inferenceStreamFinalizers.set(finalized, () =>
+      // consumeStream never rejects (onError swallows) and is a no-op when the
+      // stream already ran to completion.
+      Promise.resolve(result.consumeStream({ onError: () => {} }))
+    );
     return finalized;
   }
 
@@ -11618,7 +11636,7 @@ export class Think<
         }
       } finally {
         this._insideInferenceLoop = false;
-        drainInferenceStream(result);
+        this._drainInferenceStream(result);
       }
 
       // Recoverable context overflow: discard the partial, close the stream
@@ -12083,7 +12101,7 @@ export class Think<
         }
       } finally {
         this._insideInferenceLoop = false;
-        drainInferenceStream(result);
+        this._drainInferenceStream(result);
       }
 
       // Recoverable context overflow: discard the partial, close this stream

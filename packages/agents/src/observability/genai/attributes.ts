@@ -13,7 +13,7 @@ export const TraceAttribute = {
     EmbeddingCount: "cloudflare.agents.embedding.count",
     IntegrationName: "cloudflare.agents.integration.name",
     MetadataPrefix: "cloudflare.agents.metadata.",
-    OperationID: "cloudflare.agents.operation.id",
+    OperationName: "cloudflare.agents.operation.name",
     OutputHasObject: "cloudflare.agents.output.has_object",
     OutputHasText: "cloudflare.agents.output.has_text",
     ResponseFinishReason: "cloudflare.agents.response.finish_reason",

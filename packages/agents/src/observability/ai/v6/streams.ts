@@ -57,9 +57,8 @@ function patchStreamFields(
     return result;
   }
 
-  // SAFETY: AI SDK stream results are records with stream fields and promise-like properties.
+  // SAFETY: AI SDK stream results are records with stream fields.
   const record = result as Record<string, unknown>;
-  attachKnownResultPromiseHandlers(record);
 
   let patchedAny = false;
   let closed = false;
@@ -80,43 +79,50 @@ function patchStreamFields(
     hooks.onError(cause);
   };
 
-  if (isReadableStream(record.baseStream)) {
-    Object.defineProperty(record, "baseStream", {
-      configurable: true,
-      enumerable: true,
-      value: wrapReadableStream(record.baseStream, {
-        onComplete: completeOnce,
-        onError: errorOnce
-      }),
-      writable: true
-    });
-    return result;
-  }
+  // Instrumentation must fail open: if the SDK's private stream fields change
+  // shape or refuse patching, close the span and return the result untouched
+  // rather than breaking an otherwise valid call.
+  try {
+    if (isReadableStream(record.baseStream)) {
+      Object.defineProperty(record, "baseStream", {
+        configurable: true,
+        enumerable: true,
+        value: wrapReadableStream(record.baseStream, {
+          onComplete: completeOnce,
+          onError: errorOnce
+        }),
+        writable: true
+      });
+      return result;
+    }
 
-  const streamField = findStreamField(record, [
-    "partialObjectStream",
-    "textStream",
-    "fullStream",
-    "stream"
-  ]);
+    const streamField = findStreamField(record, [
+      "partialObjectStream",
+      "textStream",
+      "fullStream",
+      "stream"
+    ]);
 
-  if (streamField) {
-    Object.defineProperty(record, streamField.field, {
-      configurable: true,
-      enumerable: true,
-      value:
-        streamField.kind === "readable"
-          ? wrapReadableStream(streamField.stream, {
-              onComplete: completeOnce,
-              onError: errorOnce
-            })
-          : wrapAsyncIterable(streamField.stream, {
-              onComplete: completeOnce,
-              onError: errorOnce
-            }),
-      writable: true
-    });
-    patchedAny = true;
+    if (streamField) {
+      Object.defineProperty(record, streamField.field, {
+        configurable: true,
+        enumerable: true,
+        value:
+          streamField.kind === "readable"
+            ? wrapReadableStream(streamField.stream, {
+                onComplete: completeOnce,
+                onError: errorOnce
+              })
+            : wrapAsyncIterable(streamField.stream, {
+                onComplete: completeOnce,
+                onError: errorOnce
+              }),
+        writable: true
+      });
+      patchedAny = true;
+    }
+  } catch {
+    patchedAny = false;
   }
 
   if (!patchedAny) {
@@ -125,33 +131,6 @@ function patchStreamFields(
   }
 
   return result;
-}
-
-function attachKnownResultPromiseHandlers(
-  result: Record<string, unknown>
-): void {
-  const promiseLikeFields = [
-    "content",
-    "text",
-    "object",
-    "value",
-    "values",
-    "finishReason",
-    "usage",
-    "totalUsage",
-    "steps"
-  ];
-
-  for (const field of promiseLikeFields) {
-    try {
-      const value = result[field];
-      if (isPromiseLike(value)) {
-        void Promise.resolve(value).catch(() => {});
-      }
-    } catch {
-      // Ignore getter failures while attaching safeguards.
-    }
-  }
 }
 
 function findStreamField(
@@ -369,8 +348,9 @@ function createStreamState(hooks: {
       closed = true;
       hooks.onError(cause);
     },
-    observeChunk(chunk) {
+    observeChunk(rawChunk) {
       firstChunkAtMs ??= Date.now();
+      const chunk = unwrapChunkEnvelope(rawChunk);
       // AI SDK v6 signals mid-stream provider failures as an in-band
       // `{ type: "error" }` chunk rather than rejecting the stream, so the
       // stream still reaches normal completion afterward. Record it here and
@@ -392,6 +372,25 @@ function createStreamState(hooks: {
       response = extractResponseInfo(chunk) ?? response;
     }
   };
+}
+
+/**
+ * The streamText result's private `baseStream` carries `{ part, partialOutput }`
+ * envelopes rather than bare stream parts; `fullStream` and provider-level
+ * streams carry bare parts. Unwrap the envelope when present so chunk
+ * inspection sees the actual part in both cases.
+ */
+function unwrapChunkEnvelope(chunk: unknown): unknown {
+  if (typeof chunk !== "object" || chunk === null) {
+    return chunk;
+  }
+
+  const part = (chunk as Record<string, unknown>).part;
+  return typeof part === "object" &&
+    part !== null &&
+    "type" in (part as Record<string, unknown>)
+    ? part
+    : chunk;
 }
 
 function isErrorChunk(chunk: unknown): chunk is { readonly error: unknown } {
@@ -482,15 +481,5 @@ function isToolCallChunk(chunk: unknown): boolean {
     typeof chunk === "object" &&
     chunk !== null &&
     (chunk as Record<string, unknown>).type === "tool-call"
-  );
-}
-
-function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
-  return (
-    value !== null &&
-    value !== undefined &&
-    (typeof value === "object" || typeof value === "function") &&
-    "then" in value &&
-    typeof value.then === "function"
   );
 }

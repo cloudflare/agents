@@ -67,7 +67,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(tracing.rootSpans[0]?.name).toBe("invoke_agent fixture-agent");
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "cloudflare.agents.integration.name": "ai-sdk",
-      "cloudflare.agents.operation.id": "generateText",
+      "cloudflare.agents.operation.name": "generateText",
       "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
       "cloudflare.agents.usage.total_tokens": 6,
@@ -92,8 +92,10 @@ describe("createAISDKV6Wrapper", () => {
 
     const modelCall = tracing.rootSpans[0]?.children[0];
     expect(modelCall?.name).toBe("chat test-model");
+    // The chat span nests under the operation root.
+    expect(modelCall?.parent).toBe(tracing.rootSpans[0]);
     expect(modelCall?.attributes).toMatchObject({
-      "cloudflare.agents.operation.id": "doGenerate",
+      "cloudflare.agents.operation.name": "doGenerate",
       "gen_ai.operation.name": "chat",
       "gen_ai.provider.name": "test-provider",
       "gen_ai.request.model": "test-model"
@@ -232,7 +234,7 @@ describe("createAISDKV6Wrapper", () => {
     // bare operation.
     expect(tracing.rootSpans[0]?.name).toBe("invoke_agent");
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.operation.id": "streamText",
+      "cloudflare.agents.operation.name": "streamText",
       "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
       "gen_ai.operation.name": "invoke_agent",
@@ -250,8 +252,11 @@ describe("createAISDKV6Wrapper", () => {
 
     const modelCall = tracing.rootSpans[0]?.children[0];
     expect(modelCall?.name).toBe("chat stream-model");
+    // The chat span nests under the operation root even though doStream runs
+    // inside the caller-owned activation callback.
+    expect(modelCall?.parent).toBe(tracing.rootSpans[0]);
     expect(modelCall?.attributes).toMatchObject({
-      "cloudflare.agents.operation.id": "doStream",
+      "cloudflare.agents.operation.name": "doStream",
       "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
       "gen_ai.usage.input_tokens": 8,
@@ -624,7 +629,7 @@ describe("createAISDKV6Wrapper", () => {
     });
     expect(toolSpan?.ended).toBe(true);
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.operation.id": "streamText",
+      "cloudflare.agents.operation.name": "streamText",
       "gen_ai.request.stream": true
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
@@ -663,7 +668,7 @@ describe("createAISDKV6Wrapper", () => {
 
     expect(result).toMatchObject({ object: { answer: "Paris" } });
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.operation.id": "generateObject",
+      "cloudflare.agents.operation.name": "generateObject",
       "cloudflare.agents.output.has_object": true,
       "gen_ai.output.type": "json"
     });
@@ -671,7 +676,7 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.request.stream"
     ]);
     expect(tracing.rootSpans[0]?.children[0]?.attributes).toMatchObject({
-      "cloudflare.agents.operation.id": "doGenerate",
+      "cloudflare.agents.operation.name": "doGenerate",
       "gen_ai.output.type": "json"
     });
     expect(tracing.rootSpans[0]?.children[0]?.attributes).not.toHaveProperty([
@@ -702,7 +707,7 @@ describe("createAISDKV6Wrapper", () => {
 
     expect(chunks).toEqual([{ answer: "Paris" }]);
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.operation.id": "streamObject",
+      "cloudflare.agents.operation.name": "streamObject",
       "gen_ai.output.type": "json",
       "gen_ai.request.stream": true
     });
@@ -1085,6 +1090,181 @@ describe("createAISDKV6Wrapper", () => {
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
         "cloudflare.agents.metadata.conversationId"
       ]);
+    });
+  });
+
+  it("returns identical wrapper functions on repeated property reads", () => {
+    const tracing = new RecordingTracer();
+    const ai: AISDKV6Namespace = {
+      generateText: async () => ({ text: "ok" }),
+      streamText: () => ({ textStream: streamFrom([]) })
+    };
+
+    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+
+    expect(wrapped.generateText).toBe(wrapped.generateText);
+    expect(wrapped.streamText).toBe(wrapped.streamText);
+  });
+
+  it("reads public-result usage details and response.modelId", async () => {
+    const tracing = new RecordingTracer();
+    const ai: AISDKV6Namespace = {
+      generateText: async () => ({
+        finishReason: "stop",
+        response: { id: "resp-9", modelId: "served-9" },
+        text: "Hi",
+        usage: {
+          inputTokenDetails: { cacheReadTokens: 3, cacheWriteTokens: 2 },
+          inputTokens: 10,
+          outputTokenDetails: { reasoningTokens: 4 },
+          outputTokens: 6,
+          totalTokens: 16
+        }
+      })
+    };
+
+    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      prompt: "hello"
+    });
+
+    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "cloudflare.agents.usage.total_tokens": 16,
+      "gen_ai.response.id": "resp-9",
+      "gen_ai.response.model": "served-9",
+      "gen_ai.usage.cache_creation.input_tokens": 2,
+      "gen_ai.usage.cache_read.input_tokens": 3,
+      "gen_ai.usage.input_tokens": 10,
+      "gen_ai.usage.output_tokens": 6,
+      "gen_ai.usage.reasoning.output_tokens": 4
+    });
+  });
+
+  it("reads deprecated flat cachedInputTokens and reasoningTokens usage fields", async () => {
+    const tracing = new RecordingTracer();
+    const ai: AISDKV6Namespace = {
+      generateText: async () => ({
+        text: "Hi",
+        usage: {
+          cachedInputTokens: 5,
+          inputTokens: 9,
+          outputTokens: 3,
+          reasoningTokens: 1,
+          totalTokens: 12
+        }
+      })
+    };
+
+    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      prompt: "hello"
+    });
+
+    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "gen_ai.usage.cache_read.input_tokens": 5,
+      "gen_ai.usage.input_tokens": 9,
+      "gen_ai.usage.output_tokens": 3,
+      "gen_ai.usage.reasoning.output_tokens": 1
+    });
+  });
+
+  it("records string model ids on the root span", async () => {
+    const tracing = new RecordingTracer();
+    let receivedModel: unknown;
+    const ai: AISDKV6Namespace = {
+      generateText: async (params) => {
+        receivedModel = params.model;
+        return { text: "ok" };
+      },
+      wrapLanguageModel({ model: rawModel }) {
+        return rawModel;
+      }
+    };
+
+    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      model: "gateway/model-9",
+      prompt: "hello"
+    });
+
+    expect(receivedModel).toBe("gateway/model-9");
+    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "gen_ai.request.model": "gateway/model-9"
+    });
+  });
+
+  describe("untraced fast path", () => {
+    it("never invokes wrapLanguageModel when the runtime is not tracing", async () => {
+      const tracing = new RecordingTracer({ isTraced: false });
+      let wrapLanguageModelCalls = 0;
+      const model = {
+        modelId: "test-model",
+        provider: "test-provider",
+        doGenerate: async () => ({ text: "ok" })
+      };
+      const ai: AISDKV6Namespace = {
+        generateText: async (params) => {
+          const currentModel = params.model as TestModel;
+          return currentModel.doGenerate();
+        },
+        wrapLanguageModel({ model: rawModel }) {
+          wrapLanguageModelCalls += 1;
+          return rawModel;
+        }
+      };
+
+      const result = await createAISDKV6Wrapper(ai, {
+        tracer: tracing
+      }).generateText({ model, prompt: "hello" });
+
+      expect(result).toMatchObject({ text: "ok" });
+      expect(wrapLanguageModelCalls).toBe(0);
+    });
+
+    it("passes the original tools through untouched when not tracing", async () => {
+      const tracing = new RecordingTracer({ isTraced: false });
+      const multiplyTool = {
+        execute: async ({ a, b }: { readonly a: number; readonly b: number }) =>
+          a * b
+      };
+      const originalExecute = multiplyTool.execute;
+      let receivedTools: unknown;
+      const ai: AISDKV6Namespace = {
+        generateText: async (params) => {
+          receivedTools = params.tools;
+          return { text: "ok" };
+        }
+      };
+
+      const tools = { multiply: multiplyTool };
+      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+        prompt: "multiply",
+        tools
+      });
+
+      expect(receivedTools).toBe(tools);
+      const received = receivedTools as
+        | { readonly multiply: typeof multiplyTool }
+        | undefined;
+      expect(received?.multiply).toBe(multiplyTool);
+      expect(received?.multiply.execute).toBe(originalExecute);
+    });
+
+    it("returns the exact original stream result when not tracing", async () => {
+      const tracing = new RecordingTracer({ isTraced: false });
+      const originalStream = streamFrom([{ type: "text-delta", delta: "Hi" }]);
+      const originalResult = { textStream: originalStream };
+      const ai: AISDKV6Namespace = {
+        generateText: async () => ({ text: "unused" }),
+        streamText: () => originalResult
+      };
+
+      const result = createAISDKV6Wrapper(ai, { tracer: tracing }).streamText?.(
+        { prompt: "hello" }
+      );
+
+      expect(result).toBe(originalResult);
+      // The stream field is left untouched — no patching on the fast path.
+      expect(originalResult.textStream).toBe(originalStream);
+      // The span closes immediately instead of waiting on consumption.
+      expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
   });
 });

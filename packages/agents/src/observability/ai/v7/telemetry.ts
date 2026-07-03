@@ -54,7 +54,12 @@ export function createAISDKV7Telemetry(
 ): AISDKV7Telemetry {
   const operations = new Map<string, OperationState>();
   const modelSpans = new Map<string, AgentSpan[]>();
+  // Keyed by `${callId}:${toolCallId}` — concurrent operations can reuse a
+  // provider tool-call id, and a flat key would let one overwrite/finish the
+  // other's span.
   const toolSpans = new Map<string, ToolState>();
+  const toolSpanKey = (callId: string, toolCallId: string): string =>
+    `${callId}:${toolCallId}`;
 
   const finishOperation = (event: AISDKV7OperationEvent): void => {
     const state = operations.get(event.callId);
@@ -154,7 +159,7 @@ export function createAISDKV7Telemetry(
         operation: "tool.execute",
         toolName
       });
-      toolSpans.set(toolCallId, {
+      toolSpans.set(toolSpanKey(event.callId, toolCallId), {
         callId: event.callId,
         spanSpec: {
           name: span.name,
@@ -173,7 +178,7 @@ export function createAISDKV7Telemetry(
         return;
       }
 
-      const state = toolSpans.get(toolCallId);
+      const state = toolSpans.get(toolSpanKey(event.callId, toolCallId));
       if (!state) {
         return;
       }
@@ -190,7 +195,7 @@ export function createAISDKV7Telemetry(
       } else {
         span.finish();
       }
-      toolSpans.delete(toolCallId);
+      toolSpans.delete(toolSpanKey(event.callId, toolCallId));
     },
 
     onEnd: finishOperation,
@@ -217,8 +222,10 @@ export function createAISDKV7Telemetry(
     },
 
     executeTool<T>(options: AISDKV7ExecuteToolOptions<T>): PromiseLike<T> {
-      const state = toolSpans.get(options.toolCallId);
-      if (!state || state.callId !== options.callId) {
+      const state = toolSpans.get(
+        toolSpanKey(options.callId, options.toolCallId)
+      );
+      if (!state) {
         return options.execute();
       }
 
@@ -231,13 +238,15 @@ export function createAISDKV7Telemetry(
             return Promise.resolve(options.execute()).catch(
               (cause: unknown) => {
                 span.fail(cause);
-                toolSpans.delete(options.toolCallId);
+                toolSpans.delete(
+                  toolSpanKey(options.callId, options.toolCallId)
+                );
                 throw cause;
               }
             );
           } catch (cause: unknown) {
             span.fail(cause);
-            toolSpans.delete(options.toolCallId);
+            toolSpans.delete(toolSpanKey(options.callId, options.toolCallId));
             throw cause;
           }
         }
