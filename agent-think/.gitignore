@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+dist/
+.dev.vars
+.env
+
+# Host-specific WARP / corporate-MITM CA bundle dropped into ca/ for
+# builds behind a TLS-inspecting proxy. Never committed; ca/.keep is
+# kept so the Dockerfile COPY always has a source.
+ca/*.crt
+!ca/.keep
