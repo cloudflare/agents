@@ -107,10 +107,12 @@ function finishWhenIterableCompletes(
       // generator body (which otherwise resumes under the CONSUMER's context)
       // runs — and creates any nested spans — under the tool span.
       const iterator = inSpanContext(() => iterable[Symbol.asyncIterator]());
+      let exhausted = false;
       try {
         while (true) {
           const step = await inSpanContext(() => iterator.next());
           if (step.done) {
+            exhausted = true;
             return step.value;
           }
           yield step.value;
@@ -119,6 +121,17 @@ function finishWhenIterableCompletes(
         span.fail(cause);
         throw cause;
       } finally {
+        if (!exhausted) {
+          // Early consumer termination (break/cancel while suspended at
+          // yield): forward return() so the tool generator's own finally
+          // blocks run, still inside the tool span's context. A no-op when
+          // the underlying iterator already settled (e.g. next() threw).
+          try {
+            await inSpanContext(() => iterator.return?.(undefined));
+          } catch {
+            // Cleanup failures must not mask the consumer's exit reason.
+          }
+        }
         // Covers normal completion and early consumer return; a no-op after
         // fail() since span closure is idempotent.
         span.finish();

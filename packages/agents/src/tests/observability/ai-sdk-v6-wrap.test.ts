@@ -924,6 +924,61 @@ describe("createAISDKV6Wrapper", () => {
     expect(innerSpan?.ended).toBe(true);
   });
 
+  it("runs the tool generator's own cleanup when the consumer stops early", async () => {
+    const tracing = new RecordingTracer();
+    let cleanedUp = false;
+    const tools = {
+      count: {
+        async *execute(_input: object) {
+          try {
+            yield "chunk-1";
+            yield "chunk-2";
+            yield "chunk-3";
+          } finally {
+            // Cleanup opens a span so the test can also assert it parents
+            // under the execute_tool span (return() runs in span context).
+            await tracing.withSpan("cleanup", {}, () => undefined);
+            cleanedUp = true;
+          }
+        }
+      }
+    };
+    const ai: AISDKV6Namespace = {
+      generateText: async (params) => {
+        const wrappedToolset = params.tools as typeof tools;
+        return { output: wrappedToolset.count.execute({}), text: "ok" };
+      }
+    };
+
+    const result = (await createAISDKV6Wrapper(ai, {
+      tracer: tracing
+    }).generateText({
+      prompt: "count",
+      tools
+    })) as { readonly output: AsyncIterable<unknown> };
+
+    for await (const _chunk of result.output) {
+      // Early consumer termination must still run the tool's finally block.
+      break;
+    }
+
+    // return() forwarding is asynchronous; give it a tick to settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(cleanedUp).toBe(true);
+    const toolSpan = tracing.rootSpans[0]?.children[0];
+    expect(toolSpan?.attributes["gen_ai.operation.name"]).toBe("execute_tool");
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.attributes).not.toHaveProperty(["otel.status_code"]);
+    expect(toolSpan?.attributes).not.toHaveProperty(["error.type"]);
+    expect(toolSpan?.attributes).not.toHaveProperty([
+      "cloudflare.agents.canceled"
+    ]);
+    const cleanupSpan = tracing.spans.find((span) => span.name === "cleanup");
+    expect(cleanupSpan).toBeDefined();
+    expect(cleanupSpan?.parent).toBe(toolSpan);
+  });
+
   it("records gen_ai.tool.call.id when the SDK passes a toolCallId to execute", async () => {
     const tracing = new RecordingTracer();
     const multiplyTool = {
