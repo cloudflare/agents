@@ -523,3 +523,47 @@ body {
   font-size: 12px;
   text-align: center;
 }
+
+/* ── Requester avatar + tooltip ────────────────────────────────── */
+
+.avatar {
+  position: relative;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+}
+
+.avatar__img,
+.avatar__fallback {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: block;
+}
+
+.avatar__fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.avatar:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+  pointer-events: none;
+}

@@ -190,6 +190,22 @@ function threadStatusLabel(t: ThreadMeta): string {
       : "done";
 }
 
+function RequesterAvatar({ thread }: { thread: ThreadMeta }) {
+  const by = thread.requestedBy;
+  if (!by) return null;
+  return (
+    <span className="avatar" data-tip={`${by.login}: ${thread.instruction}`}>
+      {by.avatarUrl ? (
+        <img className="avatar__img" src={by.avatarUrl} alt={by.login} />
+      ) : (
+        <span className="avatar__fallback">
+          {by.login.slice(0, 2).toUpperCase()}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="metric">
@@ -311,7 +327,10 @@ function CommandCenterView({
                 <span className="run__title">
                   {t.repo}#{t.issueNumber}
                 </span>
-                <span className="run__instruction">{t.instruction}</span>
+                <span className="run__instruction">
+                  {t.issueTitle ?? t.instruction}
+                </span>
+                <RequesterAvatar thread={t} />
                 <span className="run__meta">
                   {t.tools} tools
                   {t.toolErrors > 0 ? ` · ${t.toolErrors} err` : ""} ·{" "}
@@ -435,7 +454,9 @@ function App() {
                   {relativeTime(t.updatedAt)}
                 </span>
               </span>
-              <span className="sidebar__item-snippet">{t.instruction}</span>
+              <span className="sidebar__item-snippet">
+                {t.issueTitle ?? t.instruction}
+              </span>
             </button>
           ))}
         </nav>

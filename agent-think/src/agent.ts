@@ -76,6 +76,10 @@ export interface RunContext {
   installationToken: string;
   /** Triggering comment id — see DispatchInput.commentId. */
   commentId?: number;
+  /** GitHub issue title, forwarded to the command center. */
+  issueTitle?: string;
+  /** Who mentioned @agent-think, forwarded to the command center. */
+  requestedBy?: { login: string; avatarUrl?: string };
 }
 
 class ThinkBase extends Think<Env> {}
@@ -207,7 +211,9 @@ export class ThinkAgent extends ThinkBase {
         session: this.name,
         repo: ctx.repo,
         issueNumber: ctx.issueNumber,
-        instruction: ctx.instruction
+        instruction: ctx.instruction,
+        issueTitle: ctx.issueTitle,
+        requestedBy: ctx.requestedBy
       })
     );
     const submission = await this.submitMessages(

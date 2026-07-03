@@ -24,6 +24,10 @@ export interface ThreadMeta {
   issueNumber: number;
   /** Latest instruction the user typed after @agent-think. */
   instruction: string;
+  /** GitHub issue title (as of the dispatch). */
+  issueTitle?: string;
+  /** Who asked agent-think to look at it. */
+  requestedBy?: { login: string; avatarUrl?: string };
   status: ThreadStatus;
   /** First dispatch, epoch ms. */
   createdAt: number;
@@ -52,6 +56,8 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
     repo: string;
     issueNumber: number;
     instruction: string;
+    issueTitle?: string;
+    requestedBy?: { login: string; avatarUrl?: string };
   }): Promise<void> {
     const now = Date.now();
     const prev = this.state.threads[input.session];
@@ -60,6 +66,8 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
       repo: input.repo,
       issueNumber: input.issueNumber,
       instruction: input.instruction,
+      issueTitle: input.issueTitle ?? prev?.issueTitle,
+      requestedBy: input.requestedBy ?? prev?.requestedBy,
       status: "running",
       createdAt: prev?.createdAt ?? now,
       updatedAt: now,

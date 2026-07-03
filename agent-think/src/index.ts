@@ -70,6 +70,10 @@ export interface DispatchInput {
    * but a NEW mention on the same issue always starts a fresh turn.
    */
   commentId?: number;
+  /** GitHub issue title, for the command-center UI. */
+  issueTitle?: string;
+  /** Who mentioned @agent-think, for the command-center UI. */
+  requestedBy?: { login: string; avatarUrl?: string };
 }
 
 export interface DispatchResult {
@@ -111,7 +115,9 @@ async function runDispatch(
     issueNumber: input.issueNumber,
     instruction: input.instruction,
     installationToken: input.installationToken,
-    commentId: input.commentId
+    commentId: input.commentId,
+    issueTitle: input.issueTitle,
+    requestedBy: input.requestedBy
   });
   const submissionId = await agent.start();
   const threadUrl = `${publicBaseUrl(env)}/thread/${session}`;
