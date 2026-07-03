@@ -199,6 +199,36 @@ function Metric({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+interface RepoAgg {
+  repo: string;
+  issues: number;
+  running: number;
+  done: number;
+  errored: number;
+  updatedAt: number;
+}
+
+function aggregateRepos(threads: ThreadMeta[]): RepoAgg[] {
+  const byRepo = new Map<string, RepoAgg>();
+  for (const t of threads) {
+    const agg = byRepo.get(t.repo) ?? {
+      repo: t.repo,
+      issues: 0,
+      running: 0,
+      done: 0,
+      errored: 0,
+      updatedAt: 0
+    };
+    agg.issues += 1;
+    if (t.status === "running") agg.running += 1;
+    else if (t.status === "error") agg.errored += 1;
+    else agg.done += 1;
+    agg.updatedAt = Math.max(agg.updatedAt, t.updatedAt);
+    byRepo.set(t.repo, agg);
+  }
+  return [...byRepo.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 function CommandCenterView({
   threads,
   status,
@@ -214,6 +244,7 @@ function CommandCenterView({
   const toolErrors = threads.reduce((n, t) => n + t.toolErrors, 0);
   const runs = threads.reduce((n, t) => n + t.runs, 0);
   const last = threads[0]?.updatedAt;
+  const repos = aggregateRepos(threads);
 
   return (
     <div className="app app--wide">
@@ -231,6 +262,32 @@ function CommandCenterView({
           <Metric label="tool errors" value={toolErrors} />
           <Metric label="failed threads" value={errored} />
         </div>
+
+        {repos.length > 0 && (
+          <>
+            <div className="section__label">repos</div>
+            <div className="repos">
+              {repos.map((r) => (
+                <a
+                  key={r.repo}
+                  className="repoCard"
+                  href={`https://github.com/${r.repo}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <div className="repoCard__name">{r.repo}</div>
+                  <div className="repoCard__url">github.com/{r.repo}</div>
+                  <div className="repoCard__counts">
+                    {r.issues} issue{r.issues === 1 ? "" : "s"}
+                    {r.running > 0 ? ` · ${r.running} running` : ""}
+                    {r.done > 0 ? ` · ${r.done} done` : ""}
+                    {r.errored > 0 ? ` · ${r.errored} failed` : ""}
+                  </div>
+                </a>
+              ))}
+            </div>
+          </>
+        )}
 
         <div className="section__label">
           recent activity
@@ -279,6 +336,7 @@ function App() {
   const [path, setPath] = useState(window.location.pathname);
   const [ccStatus, setCcStatus] = useState<ConnectionStatus>("connecting");
   const [cc, setCc] = useState<CommandCenterState>({ threads: {} });
+  const [query, setQuery] = useState("");
 
   useAgent<CommandCenterState>({
     // Kebab-case of the DO binding `CommandCenter`; one shared instance.
@@ -304,6 +362,12 @@ function App() {
   const threads = Object.values(cc.threads).sort(
     (a, b) => b.updatedAt - a.updatedAt
   );
+  const q = query.trim().toLowerCase();
+  const visibleThreads = q
+    ? threads.filter((t) =>
+        `${t.repo}#${t.issueNumber} ${t.instruction}`.toLowerCase().includes(q)
+      )
+    : threads;
 
   return (
     <div className="shell">
@@ -312,15 +376,25 @@ function App() {
           className={`sidebar__home ${session ? "" : "sidebar__home--active"}`}
           onClick={() => navigate("/")}
         >
-          <span className="logo">◆</span> agent-think
+          <span className="logo">◆</span> Agent Think
         </button>
 
-        <div className="sidebar__label">threads</div>
+        <input
+          className="sidebar__search"
+          type="search"
+          placeholder="Search threads"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+
+        <div className="sidebar__label">recents</div>
         <nav className="sidebar__list">
-          {threads.length === 0 && (
-            <div className="sidebar__empty">no threads yet</div>
+          {visibleThreads.length === 0 && (
+            <div className="sidebar__empty">
+              {threads.length === 0 ? "no threads yet" : "no matches"}
+            </div>
           )}
-          {threads.map((t) => (
+          {visibleThreads.map((t) => (
             <button
               key={t.session}
               className={`sidebar__item ${
