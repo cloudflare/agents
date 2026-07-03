@@ -9,9 +9,11 @@ trusted on the repo triggers it from an issue comment:
 ```
 
 e.g. `@agent-think reproduce this issue` or `@agent-think open a PR fixing this`.
-It runs the matching skill (reproduce / open-pr) in a real Linux container and
-reports back on the issue as the **agent-think GitHub App** — never
-impersonating the triggering user.
+It runs the matching skill (reproduce / open-pr / sync-docs) in a real Linux
+container and reports back as the **agent-think GitHub App** — never
+impersonating the triggering user. `sync-docs` is invoked from a pull request
+conversation; it opens a draft patch in `cloudflare/cloudflare-docs` and resumes
+when that repository's long-running CI completes.
 
 ## Aims
 
@@ -29,7 +31,7 @@ impersonating the triggering user.
 ## How it works
 
 ```
-@agent-think <instruction>            (GitHub issue comment)
+@agent-think <instruction>            (GitHub issue or PR comment)
    │  issue_comment webhook
    ▼
 gh-app  (GitLab: cloudflare/ai-agents/team-apps, apps/gh-app — PRIVATE)
@@ -49,6 +51,8 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    ├─ CommandCenterAgent DO (src/command-center.ts) — singleton ("main")
    │     registry of every thread + per-thread counters; ThinkAgent reports
    │     lifecycle events fire-and-forget (observing must never break a run)
+   ├─ WakeUpRegistry DO (src/wake-up.ts) — one object per external action id;
+   │     maps wake_up registrations to sessions, consumed after delivery
    └─ UI (React SPA, src/client.tsx): `/` command center (metrics + ChatGPT-
       style thread sidebar, live via agents state sync); /thread/:session
       live thread view
@@ -58,13 +62,15 @@ The 👀 reaction is the only pickup signal (an "on it" comment was tried and
 removed as noise); the agent posts its results on the issue when the run
 finishes, and gh-app posts a ❌ comment if dispatch itself fails.
 
-Session name = `<repo-slug>-<issue>` (e.g. `cloudflare-agents-1859`). Both
-verbs on one issue reuse the same DO/workspace/thread, and `submitMessages`
-uses idempotency key `repo#issue`, so webhook redeliveries and repeat mentions
-join the existing turn instead of forking a second one.
+Session name = `<repo-slug>-<issue-or-pr>` (e.g. `cloudflare-agents-1859`).
+All instructions on one issue/PR reuse the same DO/workspace/thread. Initial
+turn idempotency is per triggering comment: webhook/RPC retries for one comment
+reuse its submission, while a fresh mention starts a new turn.
 
 Skills are mounted read-only from R2 at `/workspace/.agents/skills`; the model
 picks the skill(s) matching the free-form instruction — there is no fixed verb.
+The docs skill uses a shallow blobless sparse checkout, so the multi-gigabyte
+`cloudflare-docs` repository never enters the Agent DO or container in full.
 
 ## Rules we hold ourselves to
 
@@ -83,7 +89,10 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
   where no caller can cancel it. Keep dispatch ~1s forever.
 - **No Cloudflare Workflow.** An earlier shape wrapped the turn in a Workflow;
   its 10-min step timeout + retry-from-scratch was the main death mode. Think's
-  native durable `submitMessages` is the durability layer.
+  native durable `submitMessages` is the durability layer. Long waits use the
+  generic `wake_up` tool instead: a turn registers an external action id and
+  ends; the producer later reports the result through `AgentThink.wakeUp`, which
+  submits it as a new durable user message on the registered session.
 - **Compute is decoupled from state** (Aron's hackspace pattern:
   github.com/aron/cloudflare-workspaces-prototype, `hackspace` branch). The
   Agent DO owns the Workspace; containers are separate warm-pooled Sandbox DOs.
@@ -126,8 +135,20 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
   alive). Without it the Docker build's HTTPS fetches fail with certificate
   errors. Hosts without WARP need nothing.
 - **Editing `skills/**` does nothing until you reseed R2**
-(`npm run seed:r2`, or `-- --local` for local dev). The deployed worker
-  reads skills from the bucket, not from the repo.
+(`npm run seed:r2`, or `-- --local` for local dev). The deployed worker reads
+  skills from the bucket, not from the repo.
+- **Wake-up registrations are one-shot.** `WakeUpRegistry` stores external
+  action id → Think session. The `wake_up` tool registers it and tells the model
+  to end the turn; `AgentThink.wakeUp` submits the external result as a new user
+  message, then consumes the registration. A retrying action must register the
+  same stable id again after starting its next attempt.
+- **The only current wake-up producer is pinned to Cloudflare Docs.** It requires
+  GitHub App Actions read permission plus the `workflow_run` subscription, and
+  accepts only the `CI` workflow in `cloudflare/cloudflare-docs`, on an open
+  draft PR authored by `agent-think[bot]`, whose head starts
+  `agent-think/docs-sync-` and whose current SHA matches the event. No other
+  repository can wake the agent through this handler. Automatic repair stops
+  after three failed runs.
 - **Deploy order matters**: agent-think first (creates the `AgentThink`
   entrypoint), then gh-app (whose service binding points at it).
 - **Dedup semantics**: gh-app marks `handled:comments:<id>` BEFORE dispatch,

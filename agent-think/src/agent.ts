@@ -20,9 +20,9 @@
  * container with the token, then runs one agent turn.
  *
  * Skills are mounted read-only from R2 at /workspace/.agents/skills;
- * both `reproduce` and `open-pr` ship in the bucket, and the model
- * picks the matching one(s) from the instruction — there is no fixed
- * verb.
+ * `reproduce`, `open-pr`, and `sync-docs` ship in the bucket, and the
+ * model picks the matching one(s) from the instruction — there is no
+ * fixed verb.
  */
 
 import type {
@@ -54,6 +54,11 @@ import {
   type WorkspaceLike as FsWorkspaceLike,
   WorkspaceFileStore
 } from "./tools/fs/index";
+import {
+  createWakeUpTool,
+  type WakeUpEvent,
+  wakeUpSubmissionKey
+} from "./wake-up";
 
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
@@ -89,7 +94,7 @@ export class ThinkAgent extends ThinkBase {
   // submitMessages persists the turn and Think resumes it across a DO
   // eviction. Left at the default (enabled).
 
-  /** repro/pr can be long: clone, install, deploy or fix, verify. */
+  /** repro/fix/docs runs can be long: clone, install, deploy, verify. */
   override maxSteps = 60;
 
   /** We expose our own `exec` tool; skip Think's built-in bash. */
@@ -179,6 +184,62 @@ export class ThinkAgent extends ThinkBase {
 
   async getContext(): Promise<RunContext | null> {
     return this.#context;
+  }
+
+  /**
+   * Submit an external action's result as a new user message on this thread.
+   * The AgentThink entrypoint resolves action id -> session through the generic
+   * WakeUpRegistry; event producers never choose a Think session directly.
+   */
+  async resumeWakeUp(
+    event: WakeUpEvent
+  ): Promise<{ submissionId: string; accepted: boolean }> {
+    const ctx = this.#context;
+    if (!ctx) throw new Error("Cannot wake a session before an initial run");
+    if (event.installationToken) {
+      await this.setContext({
+        ...ctx,
+        installationToken: event.installationToken
+      });
+    }
+    this.#report((cc) =>
+      cc.recordDispatch({
+        session: this.name,
+        repo: ctx.repo,
+        issueNumber: ctx.issueNumber,
+        instruction: ctx.instruction,
+        issueTitle: ctx.issueTitle,
+        requestedBy: ctx.requestedBy
+      })
+    );
+    const submission = await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: event.result }]
+        }
+      ],
+      {
+        idempotencyKey: wakeUpSubmissionKey(event.id, event.eventId),
+        metadata: {
+          source: "wake-up",
+          instruction: "resume external action",
+          wakeUpId: event.id,
+          wakeUpEventId: event.eventId
+        }
+      }
+    );
+    this.#log("wake-up:submitted", {
+      id: event.id,
+      eventId: event.eventId,
+      submissionId: submission.submissionId,
+      accepted: submission.accepted
+    });
+    return {
+      submissionId: submission.submissionId,
+      accepted: submission.accepted
+    };
   }
 
   /**
@@ -432,19 +493,22 @@ export class ThinkAgent extends ThinkBase {
     const ctx = this.#context;
     return [
       `You are agent-think, acting as the agent-think GitHub App (not any user).`,
-      `You are working on issue #${ctx?.issueNumber} in ${ctx?.repo}.`,
+      `You are working on issue or pull request #${ctx?.issueNumber} in ${ctx?.repo}.`,
       "",
       "The user invoked you with this instruction:",
       `  ${ctx?.instruction || "(no instruction — default to reproducing the issue)"}`,
       "",
-      "Two skills are available under /workspace/.agents/skills:",
+      "Three skills are available under /workspace/.agents/skills:",
       "  - reproduce/SKILL.md — reproduce the issue in a minimal project,",
       "    deploy it, verify the symptom, and report findings on the issue.",
       "  - open-pr/SKILL.md   — locate the root cause, make the minimal fix,",
       "    verify it, and open a PR that closes the issue.",
+      "  - sync-docs/SKILL.md — inspect a source PR for user-facing changes,",
+      "    patch cloudflare/cloudflare-docs, open a draft PR, and hand CI",
+      "    follow-up to the workflow_run continuation.",
       "",
-      "Decide from the instruction which skill(s) to follow (one, or reproduce",
-      "then open-pr if asked to fix what you repro). Read the matching SKILL.md",
+      "Decide from the instruction which skill(s) to follow (one or more).",
+      "Read every matching SKILL.md",
       "first and follow it exactly, including the structured result it specifies.",
       "",
       "Environment:",
@@ -474,6 +538,10 @@ export class ThinkAgent extends ThinkBase {
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
+      wake_up: createWakeUpTool({
+        env: this.env,
+        session: this.name
+      }),
       exec: createExecTool({
         workspace: ws,
         maxBytes: 32 * 1024,

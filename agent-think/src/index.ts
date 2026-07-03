@@ -5,9 +5,10 @@
  *
  *   1. `AgentThink` (WorkerEntrypoint) — the RPC surface the gh-app
  *      webhook service calls over a service binding. gh-app owns the
- *      GitHub App: it verifies the webhook, parses `@agent-think
- *      <verb> …` out of an issue comment, mints a short-lived
- *      installation token, and calls `dispatch(...)` with it. This
+ *      GitHub App: it verifies webhooks, parses `@agent-think <verb> …`
+ *      out of an issue/PR comment, and calls `dispatch(...)` with a
+ *      short-lived installation token. It also reports completed external
+ *      actions through generic `wakeUp(...)` continuations. This
  *      worker holds NO GitHub App credentials — only the per-turn
  *      installation token it is handed — so it is safe to open-source
  *      as a public example while gh-app stays private in GitLab.
@@ -29,6 +30,13 @@ import { CommandCenterAgent } from "./command-center";
 import { Sandbox } from "./sandbox";
 import { WarmPool } from "./warm-pool";
 import { primePool } from "./pool";
+import {
+  type WakeUpEvent,
+  WakeUpRegistry,
+  type WakeUpResult,
+  validateWakeUpEvent,
+  wakeUpRegistry
+} from "./wake-up";
 
 // ThinkAgent owns the Workspace; Sandbox is the container-host DO the warm
 // pool hands out; WarmPool keeps one container pre-warmed. The proxies let
@@ -38,6 +46,7 @@ export {
   CommandCenterAgent,
   Sandbox,
   WarmPool,
+  WakeUpRegistry,
   WorkspaceProxy,
   WorkspaceServiceProxy
 };
@@ -96,6 +105,43 @@ export class AgentThink extends WorkerEntrypoint<Env> {
    */
   async dispatch(input: DispatchInput): Promise<DispatchResult> {
     return runDispatch(this.env, input);
+  }
+
+  /**
+   * Deliver a completed external action to the Think session that registered
+   * its id through the wake_up tool. The caller supplies the result, not a
+   * session name; WakeUpRegistry owns that correlation.
+   */
+  async wakeUp(input: WakeUpEvent): Promise<WakeUpResult> {
+    validateWakeUpEvent(input);
+    const registry = wakeUpRegistry(this.env, input.id);
+    const claim = await registry.claim(input.eventId);
+    if (!claim.claimed) return { woken: false, reason: claim.reason };
+
+    try {
+      const agent = await getAgentByName<Env, ThinkAgent>(
+        this.env.ThinkAgent,
+        claim.registration.session
+      );
+      const submission = await agent.resumeWakeUp(input);
+      const completed = await registry.complete(
+        input.eventId,
+        claim.registration.session
+      );
+      if (!completed) {
+        throw new Error(
+          `Wake-up registration ${JSON.stringify(input.id)} changed before delivery completed`
+        );
+      }
+      return {
+        woken: true,
+        session: claim.registration.session,
+        ...submission
+      };
+    } catch (error) {
+      await registry.release(input.eventId, claim.registration.session);
+      throw error;
+    }
   }
 }
 

@@ -26,7 +26,9 @@
       { "name": "Sandbox", "class_name": "Sandbox" },
       { "name": "WarmPool", "class_name": "WarmPool" },
       // Singleton registry behind the command-center UI (threads + metrics).
-      { "name": "CommandCenter", "class_name": "CommandCenterAgent" }
+      { "name": "CommandCenter", "class_name": "CommandCenterAgent" },
+      // One object per external action id: maps wake_up registrations to sessions.
+      { "name": "WakeUpRegistry", "class_name": "WakeUpRegistry" }
     ]
   },
 
@@ -51,6 +53,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
-    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] }
+    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] },
+    { "tag": "v4", "new_sqlite_classes": ["WakeUpRegistry"] }
   ]
 }
