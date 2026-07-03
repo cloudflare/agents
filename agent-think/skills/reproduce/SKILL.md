@@ -264,7 +264,31 @@ set `reproduced: false` and explain — the issue may be fixed, version-specific
 or need more detail. Either way the deployed page must demo the behavior a
 human should look at.
 
-## 6. Report back on the issue
+## 6. Push the repro to a branch
+
+Publish the repro project as an **orphan branch on the target repo** so anyone
+(human or agent) can pull exactly what you built and run it:
+
+```bash
+cd /workspace/repo
+git checkout --orphan repro/issue-<issueNumber>
+git rm -rfq --cached . && git clean -fdq
+tar -C "$REPRO_DIR" --exclude node_modules --exclude dist \
+  --exclude .wrangler --exclude .env -cf - . | tar -xf -
+git add -A
+git commit -m "repro for #<issueNumber>: <one-line issue title>"
+git push -f origin repro/issue-<issueNumber>
+```
+
+- Orphan branch = no base-repo history; the checkout IS the runnable repro
+  (`git clone -b repro/issue-<issueNumber> ... && npm install && npm run deploy`).
+- One canonical branch per issue: re-runs force-push the same
+  `repro/issue-<issueNumber>` branch.
+- Capture `https://github.com/<repo>/tree/repro/issue-<issueNumber>` as
+  `reproBranchUrl`. If the push is rejected (branch protection), say so in the
+  report and continue — the branch is best-effort, the report is not.
+
+## 7. Report back on the issue
 
 Post a comment with `gh`. Build the body in a file to keep formatting clean:
 
@@ -278,6 +302,8 @@ The comment should contain:
 - **Live URL** plus one line of click instructions ("open it, press _Trigger
   bug_, watch the log") — the page is the demo. Note the claim URL expires in
   60 min and include it so a maintainer can claim the account to keep poking.
+- **Repro branch**: the `reproBranchUrl` link — "pull this branch to run the
+  repro yourself". This is what other agents check out to build on your work.
 - **Minimal repro**: the key files (`wrangler.jsonc` + the agent/worker source) in fenced code blocks, or a short `git`-style listing.
 - **What you observed** vs. **expected**, including relevant curl output / errors.
 - **Root-cause hypothesis** if you have one (point at the suspect file/line in `packages/`).
@@ -285,7 +311,7 @@ The comment should contain:
 
 Capture the returned comment URL for `commentUrl`.
 
-## 7. Return the structured result
+## 8. Return the structured result
 
 Return exactly:
 
@@ -294,5 +320,6 @@ Return exactly:
 - `summary` (string — one or two sentences)
 - `liveUrl` (string, optional)
 - `claimUrl` (string, optional)
+- `reproBranchUrl` (string, optional)
 - `rootCauseHypothesis` (string, optional)
 - `commentUrl` (string, optional)
