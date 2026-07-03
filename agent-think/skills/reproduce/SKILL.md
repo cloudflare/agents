@@ -84,7 +84,7 @@ Every repro deploy MUST ship a minimal Vite + React page at the Worker's root UR
 2. `npm install > /tmp/install.log 2>&1; tail -15 /tmp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local file like this — streaming megabytes of live output through the session can kill it.
 3. Sanity-check the build before deploying: `npx vite build` (catches config errors cheaply; do NOT run `vite dev` — it blocks waiting for a browser).
 4. Deploy per step 4 below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
-5. After deploy, confirm the root URL serves the page (step 5) and include the URL + click instructions in your report (step 6).
+5. After deploy, confirm the root URL serves the page (step 5) and include the URL + click instructions in your report (step 7).
 
 **package.json**
 
@@ -269,18 +269,23 @@ human should look at.
 Publish the repro project as an **orphan branch on the target repo** so anyone
 (human or agent) can pull exactly what you built and run it:
 
+Never do this inside `/workspace/repo` — the clone must stay intact for the
+root-cause hypothesis and any follow-up PR work. Publish from a scratch dir:
+
 ```bash
-cd /workspace/repo
-git checkout --orphan repro/issue-<issueNumber>
-git rm -rfq --cached . && git clean -fdq
+PUBLISH_DIR="/workspace/repro-publish-<issueNumber>"
+mkdir -p "$PUBLISH_DIR" && cd "$PUBLISH_DIR"
+git init -q -b repro/issue-<issueNumber>
 tar -C "$REPRO_DIR" --exclude node_modules --exclude dist \
   --exclude .wrangler --exclude .env -cf - . | tar -xf -
 git add -A
-git commit -m "repro for #<issueNumber>: <one-line issue title>"
-git push -f origin repro/issue-<issueNumber>
+git commit -q -m "repro for #<issueNumber>: <one-line issue title>"
+git push -f https://github.com/<repo>.git HEAD:repro/issue-<issueNumber>
+cd /workspace && rm -rf "$PUBLISH_DIR"
 ```
 
-- Orphan branch = no base-repo history; the checkout IS the runnable repro
+- The scratch `git init` publishes an orphan branch with no base-repo
+  history; the checkout IS the runnable repro
   (`git clone -b repro/issue-<issueNumber> ... && npm install && npm run deploy`).
 - One canonical branch per issue: re-runs force-push the same
   `repro/issue-<issueNumber>` branch.
