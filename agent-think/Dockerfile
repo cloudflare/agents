@@ -26,7 +26,7 @@ RUN apt-get update \
       ca-certificates curl xz-utils git bash unzip \
       fuse3 libfuse2t64 \
       build-essential \
-      gh \
+      gh jq \
  && rm -rf /var/lib/apt/lists/*
 
 # Optional WARP / corporate-MITM CA bundle.
