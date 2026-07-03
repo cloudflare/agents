@@ -237,11 +237,10 @@ client assets and the deploy-config redirect wrangler follows:
 npm run deploy   # = vite build && wrangler deploy --temporary
 ```
 
-This creates/reuses a temporary preview account, deploys to a `*.workers.dev`
-URL, and prints a **Claim URL** valid for 60 minutes. Capture from the output:
-
-- the live `https://...workers.dev` URL → `liveUrl`
-- the `https://dash.cloudflare.com/claim-preview?claimToken=...` URL → `claimUrl`
+This creates/reuses a temporary preview account and deploys to a
+`*.workers.dev` URL. Capture the live `https://...workers.dev` URL from the
+output → `liveUrl`. Ignore the claim URL the deploy prints — it never goes in
+a report.
 
 If the build/deploy itself fails in a way that **is** the bug, that is a valid
 reproduction — record the exact error. If it fails for an unrelated reason, fix
@@ -305,8 +304,8 @@ The comment should contain:
 
 - **Verdict**: reproduced / could not reproduce / skipped, with one-line reason.
 - **Live URL** plus one line of click instructions ("open it, press _Trigger
-  bug_, watch the log") — the page is the demo. Note the claim URL expires in
-  60 min and include it so a maintainer can claim the account to keep poking.
+  bug_, watch the log") — the page is the demo. Phrase it exactly like:
+  "Repro URL (expires after 60 mins): <liveUrl>".
 - **Repro branch**: the `reproBranchUrl` link — "pull this branch to run the
   repro yourself". This is what other agents check out to build on your work.
 - **Minimal repro**: the key files (`wrangler.jsonc` + the agent/worker source) in fenced code blocks, or a short `git`-style listing.
@@ -324,7 +323,6 @@ Return exactly:
 - `skipped` (boolean)
 - `summary` (string — one or two sentences)
 - `liveUrl` (string, optional)
-- `claimUrl` (string, optional)
 - `reproBranchUrl` (string, optional)
 - `rootCauseHypothesis` (string, optional)
 - `commentUrl` (string, optional)
