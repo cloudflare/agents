@@ -77,14 +77,22 @@ git checkout -b "$BRANCH"
 Install and run the affected package's checks (monorepo uses pnpm + Nx):
 
 ```bash
-pnpm install --frozen-lockfile
+# NOISY commands (installs, builds, test suites) MUST be redirected to a
+# container-local file and tailed — streaming megabytes of live output
+# through the session can kill it irrecoverably:
+CI=1 pnpm install --frozen-lockfile --reporter=append-only \
+  > /tmp/install.log 2>&1 || (tail -40 /tmp/install.log; false)
+tail -20 /tmp/install.log
 # Prefer scoped/affected runs; fall back to package scripts.
 pnpm -w exec oxfmt --check . || pnpm -w exec oxfmt --write .
 pnpm -w exec oxlint . || true
-# Run the relevant package's typecheck + tests, e.g.:
-pnpm --filter <package> typecheck
-pnpm --filter <package> test
+# Run the relevant package's typecheck + tests, redirected the same way:
+pnpm --filter <package> typecheck > /tmp/typecheck.log 2>&1; tail -30 /tmp/typecheck.log
+pnpm --filter <package> test > /tmp/test.log 2>&1; tail -40 /tmp/test.log
 ```
+
+(`/tmp` is fine for LOG files — the never-use-/tmp rule is about files the
+read/write/edit tools need to see.)
 
 Record whether tests passed in `testsPassed`. If you cannot make tests pass and
 the failure is your change's fault, fix it; if tests are unrelated/flaky, note
@@ -111,9 +119,9 @@ pnpm --filter <package> build
 npm install /workspace/<package>-x.y.z.tgz
 ```
 
-   If the repro run left a `repro/issue-<issueNumber>` branch, start from that
-   project instead and just swap the dependency to the packed build — the same
-   UI then demos broken-before / fixed-after.
+If the repro run left a `repro/issue-<issueNumber>` branch, start from that
+project instead and just swap the dependency to the packed build — the same
+UI then demos broken-before / fixed-after.
 
 3. Deploy and verify the fix is actually observable in the page:
 

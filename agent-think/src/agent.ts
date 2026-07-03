@@ -45,7 +45,7 @@ import { createWorkersAI } from "workers-ai-provider";
 import { openai } from "workers-ai-provider/openai";
 import { getAgentByName } from "agents";
 import type { CommandCenterAgent } from "./command-center";
-import { resolveContainerId } from "./pool";
+import { releaseContainer, resolveContainerId } from "./pool";
 import { createExecTool } from "./tools/exec";
 import {
   createEditTool,
@@ -179,6 +179,25 @@ export class ThinkAgent extends ThinkBase {
 
   async getContext(): Promise<RunContext | null> {
     return this.#context;
+  }
+
+  /**
+   * Operator escape hatch: wipe this session back to a clean slate. For
+   * poisoned sessions — e.g. an unbounded exec-output backlog that OOMs the
+   * DO and then CPU-death-loops every wake before recovery can run (see
+   * PLANS/agents/agent-think-1845-rca.md). Drops ALL durable state (messages,
+   * workspace VFS, submissions), releases the container assignment, and
+   * aborts the isolate so the next dispatch starts completely fresh.
+   * RPC-only; deliberately not exposed over HTTP in production.
+   */
+  async resetSession(): Promise<void> {
+    this.#log("session-reset", {});
+    await releaseContainer(this.env, this.ctx.id.toString());
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    // Abort after the RPC returns so the caller gets its ack; the next
+    // request builds a fresh isolate over the now-empty storage.
+    setTimeout(() => this.ctx.abort(), 100);
   }
 
   /**
