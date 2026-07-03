@@ -46,7 +46,12 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    │        resolveContainerId(env, id) → env.Sandbox.get(idFromName(uuid))
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
    ├─ WarmPool DO (src/warm-pool.ts) — keeps WARM_POOL_TARGET(=1) containers warm
-   └─ live thread UI at /thread/:session  (React SPA, src/client.tsx)
+   ├─ CommandCenterAgent DO (src/command-center.ts) — singleton ("main")
+   │     registry of every thread + per-thread counters; ThinkAgent reports
+   │     lifecycle events fire-and-forget (observing must never break a run)
+   └─ UI (React SPA, src/client.tsx): `/` command center (metrics + ChatGPT-
+      style thread sidebar, live via agents state sync); /thread/:session
+      live thread view
 ```
 
 The 👀 reaction is the only pickup signal (an "on it" comment was tried and
@@ -130,6 +135,11 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
   ❌ comment is for. Issue-level triage marks only after success (retryable).
 - **A re-mention with a fresh token mid-turn is fine**: `#ensureGitAuth`
   re-auths whenever the context token changes (checked every `beforeTurn`).
+- **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the
+  new code; a running turn loses its container connection and burns minutes on
+  Think's (working) recovery — it re-auths and resumes, but don't deploy while
+  runs are active. Check for recent turn activity first (observability logs /
+  the command center).
 
 ## Development
 
@@ -150,9 +160,11 @@ npm run seed:r2  # push skills/** to the R2 bucket (add -- --local for dev)
   the full agent path without gh-app or webhooks.
 - Deploys target the `agents` Cloudflare account
   (`CLOUDFLARE_ACCOUNT_ID=b8afc92c7a87f699592038b756153d22`).
-- Model: `@cf/moonshotai/kimi-k2.7-code` through the account's default AI
-  Gateway (`createWorkersAI({ binding, gateway: { id: "default" } })`) for
-  retries + observability.
+- Model: `openai/gpt-5.5` through the account's default AI Gateway
+  (`createWorkersAI({ binding, gateway, providers: [openai] })` — the catalog
+  slug routes via the gateway delegate; Unified Billing, no OpenAI key).
+  NOTE: the `providers: [openai]` plugin is REQUIRED for `{provider}/{model}`
+  slugs — without it workers-ai-provider refuses to build the model.
 
 ## Where the pieces live
 

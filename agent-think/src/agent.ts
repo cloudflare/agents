@@ -42,6 +42,9 @@ import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/conta
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
+import { openai } from "workers-ai-provider/openai";
+import { getAgentByName } from "agents";
+import type { CommandCenterAgent } from "./command-center";
 import { resolveContainerId } from "./pool";
 import { createExecTool } from "./tools/exec";
 import {
@@ -56,9 +59,12 @@ export { WorkspaceProxy, WorkspaceServiceProxy };
 
 const CONTEXT_KEY = "agent-think-context";
 const REPO_ROOT = "/workspace/repo";
-// Kimi K2.7 Code — Moonshot's coding-tuned model on Workers AI. Better
-// tool-calling + code reasoning than k2.6 for the reproduce/fix loop.
-const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+// GPT-5.5 through AI Gateway's model catalog (Unified Billing — the request
+// goes out via the AI binding with no provider key; the account's default
+// gateway has `wholesale` enabled so OpenAI usage is billed through
+// Cloudflare). The `{provider}/{model}` slug form is what routes it through
+// the gateway delegate rather than Workers AI.
+const MODEL_ID = "openai/gpt-5.5";
 
 /** Per-issue run context, set by `dispatch` before the turn is submitted. */
 export interface RunContext {
@@ -194,6 +200,14 @@ export class ThinkAgent extends ThinkBase {
       issue: ctx.issueNumber,
       instruction: ctx.instruction
     });
+    this.#report((cc) =>
+      cc.recordDispatch({
+        session: this.name,
+        repo: ctx.repo,
+        issueNumber: ctx.issueNumber,
+        instruction: ctx.instruction
+      })
+    );
     const submission = await this.submitMessages(
       [
         {
@@ -294,15 +308,35 @@ export class ThinkAgent extends ThinkBase {
     console.log(`agent-think ${JSON.stringify({ event, session, ...data })}`);
   }
 
+  /**
+   * Fire-and-forget lifecycle reporting to the command-center registry
+   * (singleton CommandCenterAgent, name "main"). Deliberately not awaited on
+   * the run path and errors are swallowed: the command center observes runs,
+   * it must never be able to break one.
+   */
+  #report(
+    fn: (
+      cc: Awaited<ReturnType<typeof getAgentByName<Env, CommandCenterAgent>>>
+    ) => Promise<unknown>
+  ): void {
+    this.ctx.waitUntil(
+      getAgentByName<Env, CommandCenterAgent>(this.env.CommandCenter, "main")
+        .then(fn)
+        .catch(() => {})
+    );
+  }
+
   // ── Think hooks ────────────────────────────────────────────────
 
   override getModel() {
     // Route through the account's default AI Gateway so model calls get
-    // Gateway-side retries, caching, and observability. `gateway.id` is the
-    // gateway name; "default" exists on every account.
+    // Gateway-side retries, caching, and observability. The `openai` provider
+    // plugin lets the `openai/...` catalog slug dispatch through the gateway
+    // delegate (OpenAI wire format over the AI binding, Unified Billing).
     return createWorkersAI({
       binding: this.env.AI,
-      gateway: { id: "default" }
+      gateway: { id: "default" },
+      providers: [openai]
     })(MODEL_ID);
   }
 
@@ -338,6 +372,9 @@ export class ThinkAgent extends ThinkBase {
   // assistant message is persisted; onChatError on a turn failure.
 
   override async afterToolCall(hook: ToolCallResultContext): Promise<void> {
+    this.#report((cc) =>
+      cc.recordTool({ session: this.name, ok: hook.success })
+    );
     this.#log("tool", {
       tool: hook.toolName,
       ok: hook.success,
@@ -347,12 +384,22 @@ export class ThinkAgent extends ThinkBase {
   }
 
   override async onChatResponse(): Promise<void> {
+    this.#report((cc) =>
+      cc.recordTurn({ session: this.name, outcome: "done" })
+    );
     this.#log("turn:done", {
       assistantChars: collectAssistantText(this.messages).length
     });
   }
 
   override onChatError(error: unknown, ctx?: { stage?: string }): unknown {
+    this.#report((cc) =>
+      cc.recordTurn({
+        session: this.name,
+        outcome: "error",
+        error: String(error).slice(0, 300)
+      })
+    );
     this.#log("turn:error", {
       stage: ctx?.stage,
       error: String(error).slice(0, 800)

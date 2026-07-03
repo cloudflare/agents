@@ -43,7 +43,9 @@
       // Container host, handed out by the warm pool.
       { "name": "Sandbox", "class_name": "Sandbox" },
       // Keeps one container pre-warmed; resolves session -> Sandbox.
-      { "name": "WarmPool", "class_name": "WarmPool" }
+      { "name": "WarmPool", "class_name": "WarmPool" },
+      // Singleton registry behind the command-center UI (threads + metrics).
+      { "name": "CommandCenter", "class_name": "CommandCenterAgent" }
     ]
   },
 
@@ -89,6 +91,7 @@
   // ThinkAgent already existed (v1). Sandbox + WarmPool are new sqlite DOs.
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
-    { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] }
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
+    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] }
   ]
 }

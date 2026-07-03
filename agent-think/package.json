@@ -16,6 +16,7 @@
     "test:e2e": "vitest run --config tests-e2e/vitest.config.ts"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.70",
     "@cloudflare/ai-chat": "workspace:*",
     "@cloudflare/think": "workspace:*",
     "@cloudflare/workspace": "0.0.0-alpha.11",

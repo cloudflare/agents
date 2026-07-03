@@ -25,6 +25,7 @@
 
 import { getAgentByName, routeAgentRequest } from "agents";
 import { ThinkAgent, WorkspaceProxy, WorkspaceServiceProxy } from "./agent";
+import { CommandCenterAgent } from "./command-center";
 import { Sandbox } from "./sandbox";
 import { WarmPool } from "./warm-pool";
 import { primePool } from "./pool";
@@ -32,7 +33,14 @@ import { primePool } from "./pool";
 // ThinkAgent owns the Workspace; Sandbox is the container-host DO the warm
 // pool hands out; WarmPool keeps one container pre-warmed. The proxies let
 // wsd's /ws callback route back into the Agent DO that owns the workspace.
-export { ThinkAgent, Sandbox, WarmPool, WorkspaceProxy, WorkspaceServiceProxy };
+export {
+  ThinkAgent,
+  CommandCenterAgent,
+  Sandbox,
+  WarmPool,
+  WorkspaceProxy,
+  WorkspaceServiceProxy
+};
 
 /**
  * The dispatch payload gh-app sends per invocation. `installationToken`
@@ -107,20 +115,6 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/" || url.pathname === "") {
-      return new Response(
-        [
-          "agent-think",
-          "",
-          "  Reachable via the gh-app service binding (AgentThink.dispatch).",
-          "  Invoked from GitHub as: @agent-think <instruction>",
-          "",
-          "  GET /thread/:session   live agent thread UI"
-        ].join("\n"),
-        { headers: { "content-type": "text/plain" } }
-      );
-    }
-
     // Dev-only local trigger + readback, so `wrangler dev --local` can drive a
     // real run end-to-end (real container, real Workspace) without gh-app. The
     // production deploy sets no LOCAL_DEV var, so these 404 there.
@@ -174,11 +168,18 @@ export default {
     const routed = await routeAgentRequest(request, env);
     if (routed) return routed;
 
-    // SPA fallback for the thread viewer: /thread/:session is a client-side
-    // route, so serve the built index.html and let the React app read the
-    // session from the path. `run_worker_first: ["/thread/*"]` funnels these
-    // here; the hashed JS/CSS assets are served directly by the assets layer.
-    if (url.pathname.startsWith("/thread/")) {
+    // SPA fallback: `/` (the command center) and /thread/:session are
+    // client-side routes, so serve the built index.html and let the React app
+    // route on the path. In prod the assets layer serves `/` directly (it is
+    // not in run_worker_first); this branch also covers environments where
+    // asset-first routing is not emulated (vitest pool, some dev setups).
+    // `run_worker_first: ["/thread/*"]` funnels thread URLs here; hashed
+    // JS/CSS assets are served directly by the assets layer.
+    if (
+      url.pathname.startsWith("/thread/") ||
+      url.pathname === "/" ||
+      url.pathname === ""
+    ) {
       const asset = await env.ASSETS.fetch(new URL("/index.html", url.origin));
       return new Response(asset.body, {
         status: 200,

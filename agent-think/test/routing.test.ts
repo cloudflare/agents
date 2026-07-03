@@ -8,18 +8,14 @@ import { describe, expect, it } from "vitest";
 // to the e2e suite. SELF drives the real worker exactly as deployed, with the
 // real bindings from wrangler.jsonc.
 describe("agent-think HTTP surface", () => {
-  it("GET / returns the plain-text help/health page", async () => {
+  it("GET / serves the command-center SPA (assets layer)", async () => {
+    // The root is the command center: `/` is not in run_worker_first, so the
+    // assets layer serves the built index.html directly and the SPA routes
+    // client-side. An operator hitting the root URL gets the dashboard.
     const res = await SELF.fetch("https://agent-think.test/");
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("text/plain");
-
-    const body = await res.text();
-    // Assert the human-facing contract: the banner names the worker and points
-    // at the two ways it's reached (the gh-app service binding and the thread
-    // UI). This is what an operator hitting the root URL should see.
-    expect(body).toContain("agent-think");
-    expect(body).toContain("AgentThink.dispatch");
-    expect(body).toContain("/thread/:session");
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toContain('<div id="root">');
   });
 
   it("returns 404 for an unknown path (no ingress over HTTP)", async () => {

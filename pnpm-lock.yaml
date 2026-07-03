@@ -153,6 +153,9 @@ importers:
 
   agent-think:
     dependencies:
+      '@ai-sdk/openai':
+        specifier: ^3.0.70
+        version: 3.0.74(zod@4.4.3)
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../packages/ai-chat
