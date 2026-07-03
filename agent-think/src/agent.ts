@@ -333,7 +333,11 @@ export class ThinkAgent extends ThinkBase {
     this.ctx.waitUntil(
       getAgentByName<Env, CommandCenterAgent>(this.env.CommandCenter, "main")
         .then(fn)
-        .catch(() => {})
+        .catch((err) =>
+          // Log-only: reporting must never break the run, but a silent
+          // failure here made the command center undebuggable.
+          this.#log("report-error", { error: String(err).slice(0, 200) })
+        )
     );
   }
 

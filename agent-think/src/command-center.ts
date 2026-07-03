@@ -100,6 +100,11 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
   }
 
   #put(meta: ThreadMeta): void {
+    // One structured line per update so runs are reconstructable from the
+    // observability logs (the registry itself has no other log output).
+    console.log(
+      `command-center ${JSON.stringify({ session: meta.session, status: meta.status, tools: meta.tools })}`
+    );
     this.setState({
       threads: { ...this.state.threads, [meta.session]: meta }
     });
