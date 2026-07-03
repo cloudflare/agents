@@ -1,4 +1,5 @@
 packages:
+  - "agent-think"
   - "examples/*"
   - "packages/*"
   - "voice-providers/*"
@@ -30,6 +31,8 @@ allowBuilds:
   # Transitive dep of @cloudflare/tanstack-ai (tanstack-recovery harness). The
   # Workers AI binding path never uses the OpenRouter SDK, so its build is skipped.
   "@openrouter/sdk": false
+  # agent-think's unit tests mock GitHub over MSW; its postinstall is not needed.
+  msw: false
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
