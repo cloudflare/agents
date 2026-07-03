@@ -881,6 +881,49 @@ describe("createAISDKV6Wrapper", () => {
     expect(toolSpan?.ended).toBe(true);
   });
 
+  it("runs streaming tool generator bodies under the tool span's context", async () => {
+    const tracing = new RecordingTracer();
+    const tools = {
+      count: {
+        async *execute(_input: object) {
+          yield "chunk-1";
+          // Opened between yields: the generator resumes at the CONSUMER's
+          // next() call site, so without context re-entry this span would
+          // become a root span instead of a child of the tool span.
+          await tracing.withSpan("inner", {}, () => undefined);
+          yield "chunk-2";
+        }
+      }
+    };
+    const ai: AISDKV6Namespace = {
+      generateText: async (params) => {
+        const wrappedToolset = params.tools as typeof tools;
+        return { output: wrappedToolset.count.execute({}), text: "ok" };
+      }
+    };
+
+    const result = (await createAISDKV6Wrapper(ai, {
+      tracer: tracing
+    }).generateText({
+      prompt: "count",
+      tools
+    })) as { readonly output: AsyncIterable<unknown> };
+
+    const chunks = [];
+    for await (const chunk of result.output) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["chunk-1", "chunk-2"]);
+    const toolSpan = tracing.rootSpans[0]?.children[0];
+    expect(toolSpan?.attributes["gen_ai.operation.name"]).toBe("execute_tool");
+    const innerSpan = tracing.spans.find((span) => span.name === "inner");
+    expect(innerSpan).toBeDefined();
+    expect(innerSpan?.parent).toBe(toolSpan);
+    expect(tracing.rootSpans).not.toContain(innerSpan);
+    expect(innerSpan?.ended).toBe(true);
+  });
+
   it("records gen_ai.tool.call.id when the SDK passes a toolCallId to execute", async () => {
     const tracing = new RecordingTracer();
     const multiplyTool = {
@@ -1264,6 +1307,39 @@ describe("createAISDKV6Wrapper", () => {
       // The stream field is left untouched — no patching on the fast path.
       expect(originalResult.textStream).toBe(originalStream);
       // The span closes immediately instead of waiting on consumption.
+      expect(tracing.rootSpans[0]?.ended).toBe(true);
+    });
+
+    it("never enumerates telemetry metadata when not tracing", async () => {
+      const tracing = new RecordingTracer({ isTraced: false });
+      const originalResult = { text: "ok" };
+      const ai: AISDKV6Namespace = {
+        generateText: async () => originalResult
+      };
+      // Direct reads (agentName for the span name) are allowed; enumeration
+      // (the attribute passthrough) must not happen on the untraced path.
+      const hostileMetadata = new Proxy(
+        { agentName: "safe-agent" },
+        {
+          getOwnPropertyDescriptor() {
+            throw new Error("metadata must not be enumerated when untraced");
+          },
+          ownKeys(): ArrayLike<string | symbol> {
+            throw new Error("metadata must not be enumerated when untraced");
+          }
+        }
+      );
+
+      const result = await createAISDKV6Wrapper(ai, {
+        tracer: tracing
+      }).generateText({
+        experimental_telemetry: { metadata: hostileMetadata },
+        prompt: "hello"
+      });
+
+      expect(result).toBe(originalResult);
+      // The span name still uses the directly read agent name.
+      expect(tracing.rootSpans[0]?.name).toBe("invoke_agent safe-agent");
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
   });

@@ -199,6 +199,21 @@ export function extractResponseInfo(
 
   // SAFETY: AI SDK result objects may expose a response record with id/model.
   const record = value as Record<string, unknown>;
+
+  // Provider-level `response-metadata` stream parts carry id/modelId at the
+  // top level (no nested response record).
+  if (record.type === "response-metadata") {
+    const id = readString(record.id);
+    const model = readString(record.modelId);
+    if (id === undefined && model === undefined) {
+      return undefined;
+    }
+    return {
+      ...(id !== undefined ? { id } : {}),
+      ...(model !== undefined ? { model } : {})
+    };
+  }
+
   const response =
     typeof record.response === "object" && record.response !== null
       ? (record.response as Record<string, unknown>)

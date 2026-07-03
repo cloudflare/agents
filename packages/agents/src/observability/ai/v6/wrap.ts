@@ -1,7 +1,12 @@
 import type { AISDKInstrumentationOptions } from "../options";
 import { readString } from "../read";
-import { metadataAttributes, operationSpan } from "../../genai/telemetry";
+import {
+  metadataAttributes,
+  operationSpan,
+  operationSpanName
+} from "../../genai/telemetry";
 import type { SemanticContext } from "../../genai/telemetry";
+import { writeSpanAttributes } from "../../tracing/tracer";
 import type { AgentTracer } from "../../tracing/tracer";
 import {
   extractModelInfo,
@@ -118,18 +123,16 @@ function createOperationWrapper(
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   instrumentation: AISDKV6Instrumentation
 ): AISDKV6Operation {
+  // Only the span NAME is computed before the sampling check (it is required
+  // to open a span at all, and needs a single metadata property the SDK reads
+  // anyway). The full attribute spec — metadata enumeration, request fields,
+  // context allowlists — is computed lazily, after isTraced confirms someone
+  // is listening, so untraced calls never touch caller getters beyond that.
   if (isStreamOperation(operationName)) {
     return (params, ...args) => {
-      const model = extractModelInfo(params.model);
-      const span = operationSpanForCall(
-        operationName,
-        model,
-        params,
-        instrumentation.options
-      );
       return instrumentation.tracer.openSpan(
-        span.name,
-        span.attributes,
+        operationSpanName(agentNameForCall(params)),
+        {},
         (operationSpan) => {
           // Untraced invocations take the pristine path: original params, no
           // tool wrapping, no model middleware, no stream patching.
@@ -137,6 +140,14 @@ function createOperationWrapper(
             operationSpan.finish();
             return operation(params, ...args);
           }
+
+          const span = operationSpanForCall(
+            operationName,
+            extractModelInfo(params.model),
+            params,
+            instrumentation.options
+          );
+          writeSpanAttributes(operationSpan, span.attributes);
 
           const result = operation(
             operationParamsForCall(
@@ -155,20 +166,21 @@ function createOperationWrapper(
   }
 
   return async (params, ...args) => {
-    const model = extractModelInfo(params.model);
-    const span = operationSpanForCall(
-      operationName,
-      model,
-      params,
-      instrumentation.options
-    );
     return instrumentation.tracer.withSpan(
-      span.name,
-      span.attributes,
+      operationSpanName(agentNameForCall(params)),
+      {},
       async (operationSpan) => {
         if (!operationSpan.isTraced) {
           return operation(params, ...args);
         }
+
+        const span = operationSpanForCall(
+          operationName,
+          extractModelInfo(params.model),
+          params,
+          instrumentation.options
+        );
+        writeSpanAttributes(operationSpan, span.attributes);
 
         const result = await operation(
           operationParamsForCall(
@@ -185,6 +197,27 @@ function createOperationWrapper(
       }
     );
   };
+}
+
+/**
+ * Reads only the agent name (metadata.agentName / gen_ai.agent.name /
+ * functionId) for the span name — direct property reads, no enumeration.
+ */
+function agentNameForCall(params: AISDKV6CallParams): string | undefined {
+  const telemetry =
+    typeof params.experimental_telemetry === "object" &&
+    params.experimental_telemetry !== null
+      ? (params.experimental_telemetry as Record<string, unknown>)
+      : undefined;
+  const metadata =
+    typeof telemetry?.metadata === "object" && telemetry.metadata !== null
+      ? (telemetry.metadata as Record<string, unknown>)
+      : undefined;
+
+  return (
+    readString(metadata?.agentName ?? metadata?.["gen_ai.agent.name"]) ??
+    readString(telemetry?.functionId)
+  );
 }
 
 function operationParamsForCall(

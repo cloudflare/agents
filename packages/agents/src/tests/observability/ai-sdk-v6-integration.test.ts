@@ -90,7 +90,10 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
       (span) => span.attributes["gen_ai.operation.name"] === "chat"
     );
     expect(chatSpan?.attributes).toMatchObject({
-      "cloudflare.agents.operation.name": "doStream"
+      "cloudflare.agents.operation.name": "doStream",
+      // Populated from the provider-level response-metadata stream part.
+      "gen_ai.response.id": "resp-1",
+      "gen_ai.response.model": "mock-model-served"
     });
     expect(chatSpan?.ended).toBe(true);
   });

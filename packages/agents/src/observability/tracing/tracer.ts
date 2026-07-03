@@ -139,6 +139,15 @@ class ManagedSpan implements AgentSpan {
     return this.span.isTraced;
   }
 
+  /** INTERNAL: see {@link writeSpanAttributes}. */
+  writeAttributes(attributes: TraceAttributes): void {
+    if (this.#closed) {
+      return;
+    }
+
+    setAttributes(this.span, attributes);
+  }
+
   finish(attributes: TraceAttributes = {}): void {
     if (this.#closed) {
       return;
@@ -179,6 +188,21 @@ class ManagedSpan implements AgentSpan {
 
     this.#closed = true;
     this.span.end();
+  }
+}
+
+/**
+ * INTERNAL: writes attributes onto an open managed span. Lets instrumentation
+ * defer expensive attribute computation until after the isTraced check (span
+ * names must exist at open time; attributes need not). Not part of the public
+ * barrel surface.
+ */
+export function writeSpanAttributes(
+  span: AgentSpan,
+  attributes: TraceAttributes
+): void {
+  if (span instanceof ManagedSpan) {
+    span.writeAttributes(attributes);
   }
 }
 

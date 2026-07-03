@@ -362,4 +362,75 @@ describe("createAISDKV7Telemetry", () => {
     expect(firstSpan?.attributes).not.toHaveProperty(["otel.status_code"]);
     expect(secondSpan?.attributes).not.toHaveProperty(["otel.status_code"]);
   });
+
+  it("reads public-result usage detail shapes on operation events", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({ tracer: tracing });
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onEnd?.({
+      callId: "call-1",
+      operationId: "ai.generateText",
+      totalUsage: {
+        inputTokenDetails: { cacheReadTokens: 3, cacheWriteTokens: 2 },
+        inputTokens: 10,
+        outputTokenDetails: { reasoningTokens: 4 },
+        outputTokens: 6,
+        totalTokens: 16
+      }
+    });
+
+    expect(tracing.spans[0]?.attributes).toMatchObject({
+      "cloudflare.agents.usage.total_tokens": 16,
+      "gen_ai.usage.cache_creation.input_tokens": 2,
+      "gen_ai.usage.cache_read.input_tokens": 3,
+      "gen_ai.usage.input_tokens": 10,
+      "gen_ai.usage.output_tokens": 6,
+      "gen_ai.usage.reasoning.output_tokens": 4
+    });
+    expect(tracing.spans[0]?.ended).toBe(true);
+  });
+
+  it("reads deprecated flat usage fields on operation events", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({ tracer: tracing });
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onEnd?.({
+      callId: "call-1",
+      operationId: "ai.generateText",
+      totalUsage: {
+        cachedInputTokens: 5,
+        inputTokens: 9,
+        outputTokens: 3,
+        reasoningTokens: 1,
+        totalTokens: 12
+      }
+    });
+
+    expect(tracing.spans[0]?.attributes).toMatchObject({
+      "gen_ai.usage.cache_read.input_tokens": 5,
+      "gen_ai.usage.input_tokens": 9,
+      "gen_ai.usage.output_tokens": 3,
+      "gen_ai.usage.reasoning.output_tokens": 1
+    });
+  });
+
+  it("prefers the nested response.modelId over the event modelId", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({ tracer: tracing });
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onEnd?.({
+      callId: "call-1",
+      modelId: "requested-model",
+      operationId: "ai.generateText",
+      response: { id: "resp-1", modelId: "served-model" }
+    });
+
+    expect(tracing.spans[0]?.attributes).toMatchObject({
+      "gen_ai.response.id": "resp-1",
+      "gen_ai.response.model": "served-model"
+    });
+  });
 });

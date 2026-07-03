@@ -1,6 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { toolCallSpan } from "../../genai/telemetry";
 import { readString } from "../read";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
+
+/** Context snapshot type returned by AsyncLocalStorage.snapshot(). */
+type ContextSnapshot = <R>(fn: () => R) => R;
 
 export function wrapTools(tracer: AgentTracer, tools: unknown): unknown {
   if (typeof tools !== "object" || tools === null) {
@@ -51,11 +55,15 @@ function wrapTool(
     // The span may outlive this call frame (streaming tools yield after
     // returning), so the wrapper owns the span lifetime via openSpan.
     return tracer.openSpan(span.name, span.attributes, (toolSpan) => {
+      // Captured inside the activation so generator bodies (which resume at
+      // the consumer's next() call sites) can be re-entered into the tool
+      // span's async context.
+      const inSpanContext = AsyncLocalStorage.snapshot() as ContextSnapshot;
       const result = originalExecute(...args);
 
       if (isPromiseLike(result)) {
         return Promise.resolve(result).then(
-          (resolved) => settleToolResult(resolved, toolSpan),
+          (resolved) => settleToolResult(resolved, toolSpan, inSpanContext),
           (cause: unknown) => {
             toolSpan.fail(cause);
             throw cause;
@@ -63,7 +71,7 @@ function wrapTool(
         );
       }
 
-      return settleToolResult(result, toolSpan);
+      return settleToolResult(result, toolSpan, inSpanContext);
     });
   };
 
@@ -75,9 +83,13 @@ function wrapTool(
  * generators) return an iterable whose consumption is the tool's real
  * duration, so the span closes when iteration ends instead of at creation.
  */
-function settleToolResult(result: unknown, span: AgentSpan): unknown {
+function settleToolResult(
+  result: unknown,
+  span: AgentSpan,
+  inSpanContext: ContextSnapshot
+): unknown {
   if (isAsyncIterable(result)) {
-    return finishWhenIterableCompletes(result, span);
+    return finishWhenIterableCompletes(result, span, inSpanContext);
   }
 
   span.finish();
@@ -86,13 +98,22 @@ function settleToolResult(result: unknown, span: AgentSpan): unknown {
 
 function finishWhenIterableCompletes(
   iterable: AsyncIterable<unknown>,
-  span: AgentSpan
+  span: AgentSpan,
+  inSpanContext: ContextSnapshot
 ): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
+      // Each pull re-enters the tool span's captured async context, so the
+      // generator body (which otherwise resumes under the CONSUMER's context)
+      // runs — and creates any nested spans — under the tool span.
+      const iterator = inSpanContext(() => iterable[Symbol.asyncIterator]());
       try {
-        for await (const chunk of iterable) {
-          yield chunk;
+        while (true) {
+          const step = await inSpanContext(() => iterator.next());
+          if (step.done) {
+            return step.value;
+          }
+          yield step.value;
         }
       } catch (cause: unknown) {
         span.fail(cause);

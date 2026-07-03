@@ -145,8 +145,10 @@ function responseSummaryFromEvent(
       ? (event.response as Record<string, unknown>)
       : undefined;
   const id = readString(event.responseId ?? response?.id);
+  // Prefer the served model (nested response metadata) over the requested
+  // model id carried on the event itself.
   const model = readString(
-    event.responseModel ?? event.modelId ?? response?.model
+    event.responseModel ?? response?.modelId ?? response?.model ?? event.modelId
   );
 
   if (id === undefined && model === undefined) {
@@ -171,15 +173,20 @@ function tokenUsageFromEvent(
   const inputTokens = readTokenCount(usage.inputTokens);
   const outputTokens = readTokenCount(usage.outputTokens);
   const totalTokens = readNumber(usage.totalTokens);
-  const cacheReadInputTokens = readNestedTokenField(
-    usage.inputTokens,
-    "cacheRead"
-  );
-  const cacheCreationInputTokens = readNestedTokenField(
-    usage.inputTokens,
-    "cacheWrite"
-  );
-  const reasoningTokens = readNestedTokenField(usage.outputTokens, "reasoning");
+  // Mirror the v6 extractor: public result shapes keep details in
+  // inputTokenDetails/outputTokenDetails (with deprecated flat fields);
+  // provider-level usage nests them on the token counts themselves.
+  const cacheReadInputTokens =
+    readNestedTokenField(usage.inputTokenDetails, "cacheReadTokens") ??
+    readNestedTokenField(usage.inputTokens, "cacheRead") ??
+    readNumber(usage.cachedInputTokens);
+  const cacheCreationInputTokens =
+    readNestedTokenField(usage.inputTokenDetails, "cacheWriteTokens") ??
+    readNestedTokenField(usage.inputTokens, "cacheWrite");
+  const reasoningTokens =
+    readNestedTokenField(usage.outputTokenDetails, "reasoningTokens") ??
+    readNestedTokenField(usage.outputTokens, "reasoning") ??
+    readNumber(usage.reasoningTokens);
 
   if (
     inputTokens === undefined &&

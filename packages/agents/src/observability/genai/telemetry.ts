@@ -178,6 +178,18 @@ export function metadataAttributes(
   return attributes;
 }
 
+/**
+ * Cheap root-span name for an agent operation: needs only the agent name (the
+ * one value instrumentation may read before the sampling check), never the
+ * full attribute spec.
+ */
+export function operationSpanName(agentName: string | undefined): string {
+  return spanName(
+    TraceAttribute.GenAI.OperationNameValueInvokeAgent,
+    agentName
+  );
+}
+
 /** Builds the root span for an SDK operation such as generateText or streamText. */
 export function operationSpan(input: {
   readonly attributes: TraceAttributes | undefined;
