@@ -74,6 +74,8 @@ export interface RunContext {
   instruction: string;
   /** Short-lived GitHub App installation token. */
   installationToken: string;
+  /** Triggering comment id — see DispatchInput.commentId. */
+  commentId?: number;
 }
 
 class ThinkBase extends Think<Env> {}
@@ -225,9 +227,18 @@ export class ThinkAgent extends ThinkBase {
         }
       ],
       {
-        // Native dedup: a redelivered webhook (same repo#issue) returns the
-        // existing submission instead of starting a duplicate turn.
-        idempotencyKey: `${ctx.repo}#${ctx.issueNumber}`,
+        // Idempotency is per TRIGGERING COMMENT, not per issue: a retried
+        // dispatch for the same comment returns the existing submission, but
+        // a new @agent-think mention on the same issue starts a fresh turn.
+        // (A per-issue key silently swallowed every re-mention once the
+        // first turn completed — accepted:false, nothing runs.) Webhook
+        // redeliveries never even reach dispatch: gh-app dedups them in KV
+        // before calling us. Dev dispatches without a commentId get a random
+        // key, i.e. every /dev/dispatch is a fresh turn.
+        idempotencyKey:
+          ctx.commentId !== undefined
+            ? `${ctx.repo}#${ctx.issueNumber}#comment-${ctx.commentId}`
+            : crypto.randomUUID(),
         metadata: { source: "gh-app", instruction: ctx.instruction }
       }
     );

@@ -64,6 +64,12 @@ export interface DispatchInput {
   instruction: string;
   /** Short-lived GitHub App installation token, minted by gh-app. */
   installationToken: string;
+  /**
+   * The triggering issue-comment id. Drives turn idempotency: the same
+   * comment never starts two turns (RPC retries, at-least-once delivery),
+   * but a NEW mention on the same issue always starts a fresh turn.
+   */
+  commentId?: number;
 }
 
 export interface DispatchResult {
@@ -104,7 +110,8 @@ async function runDispatch(
     repo: input.repo,
     issueNumber: input.issueNumber,
     instruction: input.instruction,
-    installationToken: input.installationToken
+    installationToken: input.installationToken,
+    commentId: input.commentId
   });
   const submissionId = await agent.start();
   const threadUrl = `${publicBaseUrl(env)}/thread/${session}`;
