@@ -19,12 +19,14 @@ const inputSchema = z.object({
     .number()
     .int()
     .min(1)
+    .max(10_000_000)
     .optional()
     .describe("Line number to start reading from (1-indexed)"),
   limit: z
     .number()
     .int()
     .min(1)
+    .max(100_000)
     .optional()
     .describe("Maximum number of lines to read")
 });

@@ -12,7 +12,7 @@ suspect area. Let it guide your reproduction, but the issue itself remains the
 source of truth.
 
 All `gh`, `git`, `npm`, `curl`, and `wrangler` commands must run on the
-`container` backend (`exec({ command, backend: "container" })`) — the `shell`
+`container` backend (`bash({ command, backend: "container" })`) — the `shell`
 backend has no real binaries or network. `gh` is already authenticated as the
 app; use it directly (no token handling).
 
@@ -81,10 +81,10 @@ Every repro deploy MUST ship a minimal Vite + React page at the Worker's root UR
 **Steps**
 
 1. In `$REPRO_DIR`, create the 7 files below.
-2. `npm install` (pin `agents` to the exact version under test if the bug is version-specific).
+2. `npm install > /tmp/install.log 2>&1; tail -15 /tmp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local file like this — streaming megabytes of live output through the session can kill it.
 3. Sanity-check the build before deploying: `npx vite build` (catches config errors cheaply; do NOT run `vite dev` — it blocks waiting for a browser).
-4. Deploy per step 4 below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
-5. After deploy, confirm the root URL serves the page (step 5) and include the URL + click instructions in your report (step 6).
+4. Deploy per the **Deploy** step below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
+5. After deploy, confirm the root URL serves the page (the **Verify** step) and include the URL + click instructions in your report (the **Report back** step).
 
 **package.json**
 
@@ -237,11 +237,10 @@ client assets and the deploy-config redirect wrangler follows:
 npm run deploy   # = vite build && wrangler deploy --temporary
 ```
 
-This creates/reuses a temporary preview account, deploys to a `*.workers.dev`
-URL, and prints a **Claim URL** valid for 60 minutes. Capture from the output:
-
-- the live `https://...workers.dev` URL → `liveUrl`
-- the `https://dash.cloudflare.com/claim-preview?claimToken=...` URL → `claimUrl`
+This creates/reuses a temporary preview account and deploys to a
+`*.workers.dev` URL. Capture the live `https://...workers.dev` URL from the
+output → `liveUrl`. Ignore the claim URL the deploy prints — it never goes in
+a report.
 
 If the build/deploy itself fails in a way that **is** the bug, that is a valid
 reproduction — record the exact error. If it fails for an unrelated reason, fix
@@ -264,7 +263,36 @@ set `reproduced: false` and explain — the issue may be fixed, version-specific
 or need more detail. Either way the deployed page must demo the behavior a
 human should look at.
 
-## 6. Report back on the issue
+## 6. Push the repro to a branch
+
+Publish the repro project as an **orphan branch on the target repo** so anyone
+(human or agent) can pull exactly what you built and run it:
+
+Never do this inside `/workspace/repo` — the clone must stay intact for the
+root-cause hypothesis and any follow-up PR work. Publish from a scratch dir:
+
+```bash
+PUBLISH_DIR="/workspace/repro-publish-<issueNumber>"
+mkdir -p "$PUBLISH_DIR" && cd "$PUBLISH_DIR"
+git init -q -b repro/issue-<issueNumber>
+tar -C "$REPRO_DIR" --exclude node_modules --exclude dist \
+  --exclude .wrangler --exclude .env -cf - . | tar -xf -
+git add -A
+git commit -q -m "repro for #<issueNumber>: <one-line issue title>"
+git push -f https://github.com/<repo>.git HEAD:repro/issue-<issueNumber>
+cd /workspace && rm -rf "$PUBLISH_DIR"
+```
+
+- The scratch `git init` publishes an orphan branch with no base-repo
+  history; the checkout IS the runnable repro
+  (`git clone -b repro/issue-<issueNumber> ... && npm install && npm run deploy`).
+- One canonical branch per issue: re-runs force-push the same
+  `repro/issue-<issueNumber>` branch.
+- Capture `https://github.com/<repo>/tree/repro/issue-<issueNumber>` as
+  `reproBranchUrl`. If the push is rejected (branch protection), say so in the
+  report and continue — the branch is best-effort, the report is not.
+
+## 7. Report back on the issue
 
 Post a comment with `gh`. Build the body in a file to keep formatting clean:
 
@@ -276,8 +304,10 @@ The comment should contain:
 
 - **Verdict**: reproduced / could not reproduce / skipped, with one-line reason.
 - **Live URL** plus one line of click instructions ("open it, press _Trigger
-  bug_, watch the log") — the page is the demo. Note the claim URL expires in
-  60 min and include it so a maintainer can claim the account to keep poking.
+  bug_, watch the log") — the page is the demo. Phrase it exactly like:
+  "Repro URL (expires after 60 mins): <liveUrl>".
+- **Repro branch**: the `reproBranchUrl` link — "pull this branch to run the
+  repro yourself". This is what other agents check out to build on your work.
 - **Minimal repro**: the key files (`wrangler.jsonc` + the agent/worker source) in fenced code blocks, or a short `git`-style listing.
 - **What you observed** vs. **expected**, including relevant curl output / errors.
 - **Root-cause hypothesis** if you have one (point at the suspect file/line in `packages/`).
@@ -285,7 +315,7 @@ The comment should contain:
 
 Capture the returned comment URL for `commentUrl`.
 
-## 7. Return the structured result
+## 8. Return the structured result
 
 Return exactly:
 
@@ -293,6 +323,6 @@ Return exactly:
 - `skipped` (boolean)
 - `summary` (string — one or two sentences)
 - `liveUrl` (string, optional)
-- `claimUrl` (string, optional)
+- `reproBranchUrl` (string, optional)
 - `rootCauseHypothesis` (string, optional)
 - `commentUrl` (string, optional)

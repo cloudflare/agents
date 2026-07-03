@@ -26,7 +26,7 @@ RUN apt-get update \
       ca-certificates curl xz-utils git bash unzip \
       fuse3 libfuse2t64 \
       build-essential \
-      gh \
+      gh jq \
  && rm -rf /var/lib/apt/lists/*
 
 # Optional WARP / corporate-MITM CA bundle.
@@ -94,7 +94,7 @@ RUN NODE_VERSION=24.16.0 && \
       https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
       | tar -xJ -C /usr/local --strip-components=1 && \
     node --version && npm --version && \
-    npm install -g esbuild@0.25.0 wrangler@4 && \
+    npm install -g esbuild@0.25.0 wrangler@4 pnpm@10 && \
     BUN_VERSION=1.2.23 && \
     curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt https://bun.sh/install \
       | bash -s "bun-v${BUN_VERSION}" && \
