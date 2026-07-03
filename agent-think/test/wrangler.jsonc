@@ -40,7 +40,7 @@
   "assets": {
     "directory": "client-fixture",
     "binding": "ASSETS",
-    "run_worker_first": ["/thread/*"]
+    "run_worker_first": ["/thread/*", "/agents/*", "/api/*"]
   },
 
   "vars": {

@@ -135,6 +135,12 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
   ❌ comment is for. Issue-level triage marks only after success (retryable).
 - **A re-mention with a fresh token mid-turn is fine**: `#ensureGitAuth`
   re-auths whenever the context token changes (checked every `beforeTurn`).
+- **WebSocket upgrades need `run_worker_first`.** The assets layer passes
+  ordinary no-asset-match requests through to the worker, but NOT WebSocket
+  upgrades — a WS to `/agents/*` dies at the assets router unless the path is
+  in `run_worker_first`. Symptom: the UI's HTTP calls work while every
+  `wss://` connect fails. (This bit us on the command center; the repro-skill
+  recipe carries the same rule.)
 - **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the
   new code; a running turn loses its container connection and burns minutes on
   Think's (working) recovery — it re-auths and resumes, but don't deploy while

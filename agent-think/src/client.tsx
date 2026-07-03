@@ -372,10 +372,9 @@ function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // HTTP hydrate + poll fallback: the domain sits behind Cloudflare Access,
-  // which passes authenticated HTTP but tends to eat WebSocket upgrades. Load
-  // a snapshot immediately, and keep polling while the WS sync is not
-  // connected (the WS remains the low-latency path when it does work).
+  // HTTP hydrate + poll fallback: load a snapshot immediately so the page
+  // paints without waiting for the WS handshake, and keep polling while the
+  // WS sync is not connected (the WS remains the low-latency path).
   useEffect(() => {
     let stop = false;
     const load = async () => {
