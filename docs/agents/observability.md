@@ -280,6 +280,8 @@ Failed spans carry `otel.status_code: "ERROR"` and `error.type` (the OpenTelemet
 
 `agents/observability/ai` instruments the Vercel AI SDK's text/object generation path.
 
+**Think agents are traced out of the box** — no configuration. Every turn's inference call becomes an `invoke_agent {agent class}` root span carrying the agent/conversation identity plus turn attributes (`cloudflare.agents.turn.request_id`, `.trigger`, `.admission`, `.channel`, …), with `chat {model}` and `execute_tool {tool}` children. Enable `observability: { traces: { enabled: true } }` in `wrangler.jsonc` to see them. Per-call `experimental_telemetry.metadata` from `beforeTurn` is merged in (caller values win): reserved keys map to their dedicated attributes, `userId` maps to `user.id`, and any other scalar entry lands as `cloudflare.agents.metadata.{key}`.
+
 For AI SDK v6, wrap the SDK namespace:
 
 ```ts

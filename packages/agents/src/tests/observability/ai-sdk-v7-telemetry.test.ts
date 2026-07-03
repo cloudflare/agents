@@ -263,4 +263,35 @@ describe("createAISDKV7Telemetry", () => {
       expect(recordedValues).not.toContain(secret);
     }
   });
+
+  it("passes telemetry metadata through to root span attributes", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({ tracer: tracing });
+
+    telemetry.onStart?.({
+      callId: "call-1",
+      metadata: {
+        nested: { a: 1 },
+        requestId: "req-1",
+        workspaceId: "ws-9"
+      },
+      operationId: "ai.generateText"
+    });
+    telemetry.onEnd?.({
+      callId: "call-1",
+      operationId: "ai.generateText"
+    });
+
+    expect(tracing.spans[0]?.attributes).toMatchObject({
+      "cloudflare.agents.metadata.workspaceId": "ws-9",
+      "cloudflare.agents.turn.request_id": "req-1"
+    });
+    expect(tracing.spans[0]?.attributes).not.toHaveProperty([
+      "cloudflare.agents.metadata.nested"
+    ]);
+    expect(tracing.spans[0]?.attributes).not.toHaveProperty([
+      "cloudflare.agents.metadata.requestId"
+    ]);
+    expect(tracing.spans[0]?.ended).toBe(true);
+  });
 });

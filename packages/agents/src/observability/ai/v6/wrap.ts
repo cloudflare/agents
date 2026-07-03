@@ -1,6 +1,6 @@
 import type { AISDKInstrumentationOptions } from "../options";
 import { readString } from "../read";
-import { operationSpan } from "../../genai/telemetry";
+import { metadataAttributes, operationSpan } from "../../genai/telemetry";
 import type { SemanticContext } from "../../genai/telemetry";
 import type { AgentTracer } from "../../tracing/tracer";
 import {
@@ -219,7 +219,10 @@ function operationSpanForCall(
   options: AISDKInstrumentationOptions | undefined
 ): ReturnType<typeof operationSpan> {
   return operationSpan({
-    attributes: contextAttributes(params, options),
+    attributes: {
+      ...metadataAttributes(telemetryMetadata(params)),
+      ...contextAttributes(params, options)
+    },
     context: semanticContext(params),
     integration: "ai-sdk",
     model: model?.modelId,
@@ -227,6 +230,21 @@ function operationSpanForCall(
     provider: model?.provider,
     request: extractRequestSummary(params, operation)
   });
+}
+
+/** Reads the per-call `experimental_telemetry.metadata` record, if present. */
+function telemetryMetadata(
+  params: AISDKV6CallParams
+): Record<string, unknown> | undefined {
+  const telemetry =
+    typeof params.experimental_telemetry === "object" &&
+    params.experimental_telemetry !== null
+      ? (params.experimental_telemetry as Record<string, unknown>)
+      : undefined;
+
+  return typeof telemetry?.metadata === "object" && telemetry.metadata !== null
+    ? (telemetry.metadata as Record<string, unknown>)
+    : undefined;
 }
 
 /**

@@ -106,8 +106,10 @@ import {
   jsonSchema,
   stepCountIs,
   streamText,
-  tool
+  tool,
+  wrapLanguageModel
 } from "ai";
+import { wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
@@ -1382,7 +1384,31 @@ type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 const admittedTurnContext = new AsyncLocalStorage<{
   agent: unknown;
   requestId: string;
+  trigger: TurnTrigger;
+  admission: "queue";
+  channel?: string | undefined;
+  continuation?: boolean | undefined;
+  generation?: number | undefined;
 }>();
+
+// Route Think's inference through the always-on Cloudflare-native tracing
+// wrapper: every turn's streamText call becomes an `invoke_agent` root span
+// with `chat`/`execute_tool` children in Workers Observability. No-op on
+// runtimes without the `tracing` API.
+const { streamText: tracedStreamText } = wrapAISDK({
+  streamText,
+  wrapLanguageModel
+});
+
+// Drains the underlying model stream when a drain loop exits early (in-stream
+// error break, stall abort, user abort). The AI SDK tees its base stream, so
+// an abandoned tee branch would otherwise leave the tracing wrapper's
+// operation span open forever.
+const inferenceStreamFinalizers = new WeakMap<object, () => void>();
+
+function drainInferenceStream(result: object): void {
+  inferenceStreamFinalizers.get(result)?.();
+}
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -5139,6 +5165,43 @@ export class Think<
    * Merges tools, assembles context, fires lifecycle hooks, wraps tools
    * for interception, and calls streamText.
    */
+  /**
+   * Merges Think's identity and current-turn metadata into the AI SDK
+   * telemetry options so the tracing wrapper can attribute the turn's
+   * `invoke_agent` root span (agent/conversation identity plus
+   * `cloudflare.agents.turn.*` attributes). Caller-provided metadata wins on
+   * key collisions. Inert for the AI SDK's own OpenTelemetry telemetry unless
+   * the caller enables it.
+   */
+  private _turnTelemetry(
+    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
+  ): Parameters<typeof streamText>[0]["experimental_telemetry"] {
+    const turn = admittedTurnContext.getStore();
+    return {
+      ...base,
+      metadata: {
+        agentId: this.name,
+        agentName: this.constructor.name,
+        conversationId: this.name,
+        ...(turn?.agent === this
+          ? {
+              requestId: turn.requestId,
+              trigger: turn.trigger,
+              admission: turn.admission,
+              ...(turn.channel !== undefined && { channel: turn.channel }),
+              ...(turn.continuation !== undefined && {
+                continuation: turn.continuation
+              }),
+              ...(turn.generation !== undefined && {
+                generation: turn.generation
+              })
+            }
+          : {}),
+        ...base?.metadata
+      }
+    };
+  }
+
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
@@ -5365,7 +5428,7 @@ export class Think<
           : [])
     ];
 
-    const result = streamText({
+    const result = tracedStreamText({
       model: finalModel,
       system: turnSystem,
       messages: finalMessages,
@@ -5393,7 +5456,9 @@ export class Think<
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
-      experimental_telemetry: config.experimental_telemetry,
+      experimental_telemetry: this._turnTelemetry(
+        config.experimental_telemetry
+      ),
       // Forward the per-turn stream transform(s) from TurnConfig so callers
       // can inspect/rewrite the stream (e.g. emit `source` parts derived from
       // tool results) without owning the stream pipeline themselves.
@@ -5537,7 +5602,13 @@ export class Think<
       output: outputPromise
     } satisfies StreamableResult;
 
-    return this._transformInferenceResult(streamResult);
+    const finalized = this._transformInferenceResult(streamResult);
+    inferenceStreamFinalizers.set(finalized, () => {
+      // Best-effort: consumeStream never rejects (onError swallows) and is a
+      // no-op when the stream already ran to completion.
+      void result.consumeStream({ onError: () => {} });
+    });
+    return finalized;
   }
 
   /** @internal Test seam — override in test agents to wrap the stream (e.g. error injection). */
@@ -6640,7 +6711,15 @@ export class Think<
     spec: QueueTurnSpec<T>
   ): Promise<T> {
     return admittedTurnContext.run(
-      { agent: this, requestId: spec.requestId },
+      {
+        agent: this,
+        requestId: spec.requestId,
+        trigger: spec.trigger,
+        admission: spec.admission,
+        channel: spec.channel,
+        continuation: spec.continuation,
+        generation: spec.generation
+      },
       async () => {
         const startedAt = Date.now();
         this._emit("chat:turn:start", {
@@ -11539,6 +11618,7 @@ export class Think<
         }
       } finally {
         this._insideInferenceLoop = false;
+        drainInferenceStream(result);
       }
 
       // Recoverable context overflow: discard the partial, close the stream
@@ -12003,6 +12083,7 @@ export class Think<
         }
       } finally {
         this._insideInferenceLoop = false;
+        drainInferenceStream(result);
       }
 
       // Recoverable context overflow: discard the partial, close this stream

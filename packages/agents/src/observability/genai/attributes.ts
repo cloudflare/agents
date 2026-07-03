@@ -12,12 +12,26 @@ export const TraceAttribute = {
     CallID: "cloudflare.agents.call.id",
     EmbeddingCount: "cloudflare.agents.embedding.count",
     IntegrationName: "cloudflare.agents.integration.name",
+    MetadataPrefix: "cloudflare.agents.metadata.",
     OperationID: "cloudflare.agents.operation.id",
     OutputHasObject: "cloudflare.agents.output.has_object",
     OutputHasText: "cloudflare.agents.output.has_text",
     ResponseFinishReason: "cloudflare.agents.response.finish_reason",
     ToolCount: "cloudflare.agents.tool.count",
+    TurnAdmission: "cloudflare.agents.turn.admission",
+    TurnAttempt: "cloudflare.agents.turn.attempt",
+    TurnChannel: "cloudflare.agents.turn.channel",
+    TurnContinuation: "cloudflare.agents.turn.continuation",
+    TurnGeneration: "cloudflare.agents.turn.generation",
+    TurnQueueWaitMs: "cloudflare.agents.turn.queue_wait_ms",
+    TurnRequestID: "cloudflare.agents.turn.request_id",
+    TurnSubmissionID: "cloudflare.agents.turn.submission_id",
+    TurnSubmissionWaitMs: "cloudflare.agents.turn.submission_wait_ms",
+    TurnTrigger: "cloudflare.agents.turn.trigger",
     UsageTotalTokens: "cloudflare.agents.usage.total_tokens"
+  },
+  General: {
+    UserID: "user.id"
   },
   GenAI: {
     AgentID: "gen_ai.agent.id",

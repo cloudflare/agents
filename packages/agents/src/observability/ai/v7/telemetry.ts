@@ -2,6 +2,7 @@ import type { AISDKInstrumentationOptions } from "../options";
 import { readString } from "../read";
 import {
   modelCallSpan,
+  metadataAttributes,
   operationSpan,
   toolCallSpan
 } from "../../genai/telemetry";
@@ -83,6 +84,7 @@ export function createAISDKV7Telemetry(
 
       const span = operationSpan({
         attributes: {
+          ...metadataAttributes(eventMetadata(event)),
           ...correlationAttributes({ callId: event.callId }),
           ...contextAttributes(event)
         },
@@ -385,4 +387,12 @@ function isScalarAttributeValue(
     typeof value === "number" ||
     typeof value === "boolean"
   );
+}
+
+/** Reads the telemetry metadata record from an AI SDK v7 event, if present. */
+function eventMetadata(event: object): Record<string, unknown> | undefined {
+  const record = event as Record<string, unknown>;
+  return typeof record.metadata === "object" && record.metadata !== null
+    ? (record.metadata as Record<string, unknown>)
+    : undefined;
 }

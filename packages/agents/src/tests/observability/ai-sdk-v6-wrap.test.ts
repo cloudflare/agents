@@ -958,6 +958,135 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.operation.name": "invoke_agent"
     });
   });
+
+  describe("telemetry metadata passthrough", () => {
+    it("maps reserved turn keys to dedicated turn attributes", async () => {
+      const tracing = new RecordingTracer();
+      const ai: AISDKV6Namespace = {
+        generateText: async () => ({ text: "ok" })
+      };
+
+      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+        experimental_telemetry: {
+          metadata: {
+            admission: "queue",
+            channel: "web",
+            continuation: true,
+            generation: 2,
+            queueWaitMs: 12,
+            requestId: "req-1",
+            trigger: "ws-chat"
+          }
+        },
+        prompt: "hello"
+      });
+
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+        "cloudflare.agents.turn.admission": "queue",
+        "cloudflare.agents.turn.channel": "web",
+        "cloudflare.agents.turn.continuation": true,
+        "cloudflare.agents.turn.generation": 2,
+        "cloudflare.agents.turn.queue_wait_ms": 12,
+        "cloudflare.agents.turn.request_id": "req-1",
+        "cloudflare.agents.turn.trigger": "ws-chat"
+      });
+      // Reserved keys do not also pass through under the metadata prefix.
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.metadata.requestId"
+      ]);
+    });
+
+    it("maps userId to the semconv user.id attribute", async () => {
+      const tracing = new RecordingTracer();
+      const ai: AISDKV6Namespace = {
+        generateText: async () => ({ text: "ok" })
+      };
+
+      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+        experimental_telemetry: {
+          metadata: { userId: "user-7" }
+        },
+        prompt: "hello"
+      });
+
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+        "user.id": "user-7"
+      });
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.metadata.userId"
+      ]);
+    });
+
+    it("passes arbitrary scalar keys through under cloudflare.agents.metadata", async () => {
+      const tracing = new RecordingTracer();
+      const ai: AISDKV6Namespace = {
+        generateText: async () => ({ text: "ok" })
+      };
+
+      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+        experimental_telemetry: {
+          metadata: { beta: true, priority: 3, workspaceId: "ws-9" }
+        },
+        prompt: "hello"
+      });
+
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+        "cloudflare.agents.metadata.beta": true,
+        "cloudflare.agents.metadata.priority": 3,
+        "cloudflare.agents.metadata.workspaceId": "ws-9"
+      });
+    });
+
+    it("drops object and array metadata values", async () => {
+      const tracing = new RecordingTracer();
+      const ai: AISDKV6Namespace = {
+        generateText: async () => ({ text: "ok" })
+      };
+
+      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+        experimental_telemetry: {
+          metadata: { list: [1, 2], nested: { a: 1 } }
+        },
+        prompt: "hello"
+      });
+
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.metadata.nested"
+      ]);
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.metadata.list"
+      ]);
+    });
+
+    it("consumes identity keys into semantic context without passthrough", async () => {
+      const tracing = new RecordingTracer();
+      const ai: AISDKV6Namespace = {
+        generateText: async () => ({ text: "ok" })
+      };
+
+      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+        experimental_telemetry: {
+          metadata: { agentId: "a", agentName: "n", conversationId: "c" }
+        },
+        prompt: "hello"
+      });
+
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+        "gen_ai.agent.id": "a",
+        "gen_ai.agent.name": "n",
+        "gen_ai.conversation.id": "c"
+      });
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.metadata.agentId"
+      ]);
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.metadata.agentName"
+      ]);
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.metadata.conversationId"
+      ]);
+    });
+  });
 });
 
 async function* streamFrom(chunks: readonly unknown[]): AsyncIterable<unknown> {

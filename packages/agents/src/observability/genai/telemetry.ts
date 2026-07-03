@@ -112,6 +112,72 @@ function normalizeProviderName(
   }
 }
 
+/**
+ * Reserved telemetry-metadata keys that map to dedicated attributes on the
+ * operation root span. Everything else scalar passes through under
+ * `cloudflare.agents.metadata.{key}`; identity keys are consumed by
+ * SemanticContext extraction and never passed through.
+ */
+const RESERVED_METADATA_ATTRIBUTES: Readonly<Record<string, string>> = {
+  admission: TraceAttribute.Cloudflare.TurnAdmission,
+  attempt: TraceAttribute.Cloudflare.TurnAttempt,
+  channel: TraceAttribute.Cloudflare.TurnChannel,
+  continuation: TraceAttribute.Cloudflare.TurnContinuation,
+  generation: TraceAttribute.Cloudflare.TurnGeneration,
+  queueWaitMs: TraceAttribute.Cloudflare.TurnQueueWaitMs,
+  requestId: TraceAttribute.Cloudflare.TurnRequestID,
+  submissionId: TraceAttribute.Cloudflare.TurnSubmissionID,
+  submissionWaitMs: TraceAttribute.Cloudflare.TurnSubmissionWaitMs,
+  trigger: TraceAttribute.Cloudflare.TurnTrigger,
+  userId: TraceAttribute.General.UserID
+};
+
+const CONSUMED_METADATA_KEYS = new Set([
+  "agentId",
+  "agentName",
+  "agentVersion",
+  "conversationId",
+  "gen_ai.agent.id",
+  "gen_ai.agent.name",
+  "gen_ai.agent.version",
+  "gen_ai.conversation.id"
+]);
+
+/**
+ * Projects the AI SDK's per-call `experimental_telemetry.metadata` onto root
+ * span attributes: reserved keys map to their dedicated attributes, any other
+ * SCALAR entry passes through as `cloudflare.agents.metadata.{key}`, and
+ * object/array values are dropped (scalar-only attribute rule).
+ */
+export function metadataAttributes(
+  metadata: Record<string, unknown> | undefined
+): TraceAttributes {
+  if (metadata === undefined) {
+    return {};
+  }
+
+  const attributes: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (CONSUMED_METADATA_KEYS.has(key)) {
+      continue;
+    }
+    if (
+      typeof value !== "string" &&
+      typeof value !== "number" &&
+      typeof value !== "boolean"
+    ) {
+      continue;
+    }
+
+    const reserved = RESERVED_METADATA_ATTRIBUTES[key];
+    attributes[
+      reserved ?? `${TraceAttribute.Cloudflare.MetadataPrefix}${key}`
+    ] = value;
+  }
+
+  return attributes;
+}
+
 /** Builds the root span for an SDK operation such as generateText or streamText. */
 export function operationSpan(input: {
   readonly attributes: TraceAttributes | undefined;

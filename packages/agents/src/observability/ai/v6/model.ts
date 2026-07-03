@@ -19,6 +19,12 @@ export function wrapModel(
     return model;
   }
 
+  // Gateway-style string model ids can't take middleware; leave them to the
+  // SDK's own resolution (the operation root span still carries the model).
+  if (typeof model !== "object" || model === null) {
+    return model;
+  }
+
   const modelInfo = extractModelInfo(model);
   return wrapLanguageModel({
     model,
