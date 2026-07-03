@@ -99,6 +99,11 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
     });
   }
 
+  /** Read-only snapshot for the HTTP fallback (see /api/command-center). */
+  async getSnapshot(): Promise<CommandCenterState> {
+    return this.state;
+  }
+
   #put(meta: ThreadMeta): void {
     // One structured line per update so runs are reconstructable from the
     // observability logs (the registry itself has no other log output).

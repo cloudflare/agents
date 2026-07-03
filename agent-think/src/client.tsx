@@ -353,6 +353,30 @@ function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  // HTTP hydrate + poll fallback: the domain sits behind Cloudflare Access,
+  // which passes authenticated HTTP but tends to eat WebSocket upgrades. Load
+  // a snapshot immediately, and keep polling while the WS sync is not
+  // connected (the WS remains the low-latency path when it does work).
+  useEffect(() => {
+    let stop = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/command-center");
+        if (res.ok && !stop) setCc(await res.json());
+      } catch {
+        /* transient — next poll retries */
+      }
+    };
+    void load();
+    const timer = setInterval(() => {
+      if (ccStatus !== "connected") void load();
+    }, 10_000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [ccStatus]);
+
   const navigate = (to: string) => {
     window.history.pushState(null, "", to);
     setPath(to);

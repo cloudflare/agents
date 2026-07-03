@@ -170,6 +170,15 @@ export default {
       }
     }
 
+    // Read-only state snapshot for the command-center UI. The domain sits
+    // behind Cloudflare Access, which passes authenticated HTTP but eats
+    // WebSocket upgrades — the UI uses this to hydrate and poll whenever the
+    // agents WS state sync cannot connect.
+    if (request.method === "GET" && url.pathname === "/api/command-center") {
+      const cc = await getAgentByName(env.CommandCenter, "main");
+      return Response.json(await cc.getSnapshot());
+    }
+
     // The agents WebSocket transport lives under /agents/*; route it to
     // the ThinkAgent DO so the thread UI can stream the live message log.
     const routed = await routeAgentRequest(request, env);
