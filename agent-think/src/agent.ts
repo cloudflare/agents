@@ -59,12 +59,13 @@ export { WorkspaceProxy, WorkspaceServiceProxy };
 
 const CONTEXT_KEY = "agent-think-context";
 const REPO_ROOT = "/workspace/repo";
-// GPT-5.5 through AI Gateway's model catalog (Unified Billing — the request
-// goes out via the AI binding with no provider key; the account's default
-// gateway has `wholesale` enabled so OpenAI usage is billed through
-// Cloudflare). The `{provider}/{model}` slug form is what routes it through
-// the gateway delegate rather than Workers AI.
-const MODEL_ID = "openai/gpt-5.5";
+// Kimi K2.7 Code on Workers AI (bills via Workers AI, NOT Unified Billing —
+// switched back 2026-07-03 after unified-billing credits ran dry mid-run;
+// gpt-5.5 burned ~200k input tokens/call once tool outputs bloated the
+// thread). To go back: MODEL_ID = "openai/gpt-5.5" — the gateway delegate
+// plumbing (`providers: [openai]`) is already in place and inert for @cf/
+// models.
+const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
 /** Per-issue run context, set by `dispatch` before the turn is submitted. */
 export interface RunContext {
