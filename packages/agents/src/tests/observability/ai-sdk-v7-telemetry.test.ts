@@ -53,38 +53,45 @@ describe("createAISDKV7Telemetry", () => {
     });
 
     expect(tracing.spans).toHaveLength(2);
+    expect(tracing.spans[0]?.name).toBe("invoke_agent fixture-agent");
     expect(tracing.spans[0]?.attributes).toMatchObject({
-      "ai.call.id": "call-1",
-      "ai.integration.name": "ai-sdk",
-      "ai.operation.id": "generateText",
-      "ai.output.has_text": true,
-      "ai.response.finish_reason": "stop",
-      "ai.runtime_context.requestId": "req-1",
-      "ai.usage.total_tokens": 6,
+      "cloudflare.agents.call.id": "call-1",
+      "cloudflare.agents.integration.name": "ai-sdk",
+      "cloudflare.agents.operation.id": "generateText",
+      "cloudflare.agents.output.has_text": true,
+      "cloudflare.agents.response.finish_reason": "stop",
+      "cloudflare.agents.runtime_context.requestId": "req-1",
+      "cloudflare.agents.usage.total_tokens": 6,
       "gen_ai.agent.name": "fixture-agent",
       "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "invoke_agent",
       "gen_ai.provider.name": "test-provider",
       "gen_ai.request.max_tokens": 20,
       "gen_ai.request.model": "test-model",
-      "gen_ai.request.stream": false,
       "gen_ai.request.temperature": 0.2,
       "gen_ai.response.finish_reasons": '["stop"]',
       "gen_ai.response.model": "served-model",
       "gen_ai.usage.input_tokens": 4,
       "gen_ai.usage.output_tokens": 2
     });
-    expect(tracing.spans[0]?.attributes).not.toHaveProperty(
-      "ai.runtime_context.privateObject"
-    );
+    // gen_ai.request.stream is only emitted on streaming operations.
+    expect(tracing.spans[0]?.attributes).not.toHaveProperty([
+      "gen_ai.request.stream"
+    ]);
+    expect(tracing.spans[0]?.attributes).not.toHaveProperty([
+      "cloudflare.agents.runtime_context.privateObject"
+    ]);
     expect(tracing.spans[0]?.ended).toBe(true);
+    expect(tracing.spans[1]?.name).toBe("chat test-model");
     expect(tracing.spans[1]?.attributes).toMatchObject({
-      "ai.call.id": "call-1",
-      "ai.operation.id": "doGenerate",
+      "cloudflare.agents.call.id": "call-1",
+      "cloudflare.agents.operation.id": "doGenerate",
       "gen_ai.operation.name": "chat",
-      "gen_ai.request.stream": false,
       "gen_ai.response.id": "response-1"
     });
+    expect(tracing.spans[1]?.attributes).not.toHaveProperty([
+      "gen_ai.request.stream"
+    ]);
     expect(tracing.spans[1]?.ended).toBe(true);
   });
 
@@ -138,20 +145,21 @@ describe("createAISDKV7Telemetry", () => {
 
     expect(result).toBe(42);
     const toolSpan = tracing.spans.find(
-      (span) => span.name === "gen_ai.execute_tool"
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
     );
+    expect(toolSpan?.name).toBe("execute_tool multiply");
     expect(toolSpan?.attributes).toMatchObject({
-      "ai.call.id": "call-1",
-      "ai.operation.id": "tool.execute",
-      "ai.tool.call_id": "tool-call-1",
-      "ai.tool_context.multiply.unit": "count",
+      "cloudflare.agents.call.id": "call-1",
+      "cloudflare.agents.operation.id": "tool.execute",
+      "cloudflare.agents.tool_context.multiply.unit": "count",
       "gen_ai.operation.name": "execute_tool",
+      "gen_ai.tool.call.id": "tool-call-1",
       "gen_ai.tool.name": "multiply",
       "gen_ai.tool.type": "function"
     });
-    expect(toolSpan?.attributes).not.toHaveProperty(
-      "ai.tool_context.multiply.token"
-    );
+    expect(toolSpan?.attributes).not.toHaveProperty([
+      "cloudflare.agents.tool_context.multiply.token"
+    ]);
     expect(toolSpan?.children[0]?.name).toBe("inside.tool");
     expect(toolSpan?.ended).toBe(true);
   });
@@ -191,19 +199,19 @@ describe("createAISDKV7Telemetry", () => {
 
     for (const span of tracing.spans) {
       expect(span.ended).toBe(true);
-      expect(span.attributes).not.toHaveProperty("error.message");
+      expect(span.attributes).not.toHaveProperty(["error.message"]);
     }
     expect(tracing.spans[0]?.attributes).toMatchObject({
-      error: true,
-      "error.type": "Error"
+      "error.type": "Error",
+      "otel.status_code": "ERROR"
     });
     expect(tracing.spans[1]?.attributes).toMatchObject({
-      error: true,
-      "error.type": "Error"
+      "error.type": "Error",
+      "otel.status_code": "ERROR"
     });
     expect(tracing.spans[2]?.attributes).toMatchObject({
-      error: true,
-      "error.type": "Error"
+      "error.type": "Error",
+      "otel.status_code": "ERROR"
     });
   });
 

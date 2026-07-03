@@ -1,5 +1,5 @@
 import { TraceAttribute } from "./attributes";
-import type { Attributes } from "../tracing/tracer";
+import type { TraceAttributes } from "../tracing/tracer";
 
 /** Integrations that project into the shared telemetry schema. */
 export type IntegrationName = "ai-sdk" | "pi-ai";
@@ -52,13 +52,69 @@ export type SemanticContext = {
 
 /** Name and initial attributes for a model-operation span. */
 export type SpanSpec = {
-  readonly attributes: Attributes;
+  readonly attributes: TraceAttributes;
   readonly name: string;
 };
 
+/**
+ * Builds a semconv-formula span name (`"{operation} {target}"`), falling back
+ * to the bare operation when the target is missing or the combined name
+ * exceeds 64 UTF-8 bytes (Workers Observability name budget; semconv itself
+ * sanctions the bare-operation fallback). The stable query key is always
+ * `gen_ai.operation.name`, never the span name.
+ */
+function spanName(operation: string, target: string | undefined): string {
+  if (!target) {
+    return operation;
+  }
+
+  const name = `${operation} ${target}`;
+  return new TextEncoder().encode(name).length <= 64 ? name : operation;
+}
+
+/**
+ * Normalizes an AI SDK provider identifier to the semconv
+ * `gen_ai.provider.name` enum where a member exists: sub-provider suffixes
+ * are stripped (`anthropic.messages` → `anthropic`) and known aliases mapped.
+ * Unknown providers pass through verbatim (semconv sanctions custom values).
+ */
+function normalizeProviderName(
+  provider: string | undefined
+): string | undefined {
+  if (provider === undefined) {
+    return undefined;
+  }
+
+  const base = provider.split(".")[0] ?? provider;
+  switch (base) {
+    case "amazon-bedrock":
+      return "aws.bedrock";
+    case "google":
+      return provider.startsWith("google.vertex")
+        ? "gcp.vertex_ai"
+        : "gcp.gemini";
+    case "mistral":
+      return "mistral_ai";
+    case "xai":
+      return "x_ai";
+    case "azure":
+      return "azure.ai.openai";
+    case "deepseek":
+      return "deepseek";
+    case "openai":
+    case "anthropic":
+    case "cohere":
+    case "groq":
+    case "perplexity":
+      return base;
+    default:
+      return provider;
+  }
+}
+
 /** Builds the root span for an SDK operation such as generateText or streamText. */
 export function operationSpan(input: {
-  readonly attributes: Attributes | undefined;
+  readonly attributes: TraceAttributes | undefined;
   readonly context?: SemanticContext | undefined;
   readonly integration: IntegrationName;
   readonly model: string | undefined;
@@ -69,24 +125,29 @@ export function operationSpan(input: {
   return {
     attributes: {
       ...input.attributes,
-      [TraceAttribute.AI.IntegrationName]: input.integration,
-      [TraceAttribute.AI.OperationID]: input.operation,
+      [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
+      [TraceAttribute.Cloudflare.OperationID]: input.operation,
       [TraceAttribute.GenAI.AgentID]: input.context?.agentId,
       [TraceAttribute.GenAI.AgentName]: input.context?.agentName,
       [TraceAttribute.GenAI.AgentVersion]: input.context?.agentVersion,
       [TraceAttribute.GenAI.ConversationID]: input.context?.conversationId,
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueInvokeAgent,
-      [TraceAttribute.GenAI.ProviderName]: input.provider,
+      [TraceAttribute.GenAI.ProviderName]: normalizeProviderName(
+        input.provider
+      ),
       ...requestAttributes(input.request, input.model)
     },
-    name: "gen_ai.operation"
+    name: spanName(
+      TraceAttribute.GenAI.OperationNameValueInvokeAgent,
+      input.context?.agentName
+    )
   };
 }
 
 /** Builds the child span for an underlying model call. */
 export function modelCallSpan(input: {
-  readonly attributes?: Attributes | undefined;
+  readonly attributes?: TraceAttributes | undefined;
   readonly integration: IntegrationName;
   readonly model: string | undefined;
   readonly operation: string;
@@ -96,21 +157,23 @@ export function modelCallSpan(input: {
   return {
     attributes: {
       ...input.attributes,
-      [TraceAttribute.AI.IntegrationName]: input.integration,
-      [TraceAttribute.AI.OperationID]: input.operation,
+      [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
+      [TraceAttribute.Cloudflare.OperationID]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueChat,
-      [TraceAttribute.GenAI.ProviderName]: input.provider,
+      [TraceAttribute.GenAI.ProviderName]: normalizeProviderName(
+        input.provider
+      ),
       ...requestAttributes(input.request, input.model)
     },
-    name: "gen_ai.chat"
+    name: spanName(TraceAttribute.GenAI.OperationNameValueChat, input.model)
   };
 }
 
 function requestAttributes(
   request: RequestSummary | undefined,
   model: string | undefined
-): Attributes {
+): TraceAttributes {
   return {
     [TraceAttribute.GenAI.OutputType]: request?.outputType,
     [TraceAttribute.GenAI.RequestFrequencyPenalty]: request?.frequencyPenalty,
@@ -118,7 +181,9 @@ function requestAttributes(
     [TraceAttribute.GenAI.RequestModel]: model,
     [TraceAttribute.GenAI.RequestPresencePenalty]: request?.presencePenalty,
     [TraceAttribute.GenAI.RequestSeed]: request?.seed,
-    [TraceAttribute.GenAI.RequestStream]: request?.stream,
+    // Semconv: gen_ai.request.stream is set if and only if streaming.
+    [TraceAttribute.GenAI.RequestStream]:
+      request?.stream === true ? true : undefined,
     [TraceAttribute.GenAI.RequestTemperature]: request?.temperature,
     [TraceAttribute.GenAI.RequestTopK]: request?.topK,
     [TraceAttribute.GenAI.RequestTopP]: request?.topP
@@ -129,18 +194,23 @@ function requestAttributes(
 export function toolCallSpan(input: {
   readonly integration: IntegrationName;
   readonly operation: string;
+  readonly toolCallId?: string | undefined;
   readonly toolName: string;
 }): SpanSpec {
   return {
     attributes: {
-      [TraceAttribute.AI.IntegrationName]: input.integration,
-      [TraceAttribute.AI.OperationID]: input.operation,
+      [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
+      [TraceAttribute.Cloudflare.OperationID]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueExecuteTool,
+      [TraceAttribute.GenAI.ToolCallID]: input.toolCallId,
       [TraceAttribute.GenAI.ToolName]: input.toolName,
       [TraceAttribute.GenAI.ToolType]: "function"
     },
-    name: "gen_ai.execute_tool"
+    name: spanName(
+      TraceAttribute.GenAI.OperationNameValueExecuteTool,
+      input.toolName
+    )
   };
 }
 
@@ -149,17 +219,21 @@ export function finishAttributes(input: {
   readonly finishReason: string | undefined;
   readonly outputSummary: OutputSummary | undefined;
   readonly response?: ResponseSummary | undefined;
+  readonly timeToFirstChunkSeconds?: number | undefined;
   readonly usage: TokenUsageSummary | undefined;
-}): Attributes {
+}): TraceAttributes {
   return {
-    [TraceAttribute.AI.EmbeddingCount]: input.outputSummary?.embeddingCount,
-    [TraceAttribute.AI.EmbeddingDimensions]:
+    [TraceAttribute.GenAI.ResponseTimeToFirstChunk]:
+      input.timeToFirstChunkSeconds,
+    [TraceAttribute.Cloudflare.EmbeddingCount]:
+      input.outputSummary?.embeddingCount,
+    [TraceAttribute.GenAI.EmbeddingsDimensionCount]:
       input.outputSummary?.embeddingDimensions,
-    [TraceAttribute.AI.OutputHasObject]: input.outputSummary?.hasObject,
-    [TraceAttribute.AI.OutputHasText]: input.outputSummary?.hasText,
-    [TraceAttribute.AI.ResponseFinishReason]: input.finishReason,
-    [TraceAttribute.AI.ToolCount]: input.outputSummary?.toolCallCount,
-    [TraceAttribute.AI.UsageTotalTokens]: input.usage?.totalTokens,
+    [TraceAttribute.Cloudflare.OutputHasObject]: input.outputSummary?.hasObject,
+    [TraceAttribute.Cloudflare.OutputHasText]: input.outputSummary?.hasText,
+    [TraceAttribute.Cloudflare.ResponseFinishReason]: input.finishReason,
+    [TraceAttribute.Cloudflare.ToolCount]: input.outputSummary?.toolCallCount,
+    [TraceAttribute.Cloudflare.UsageTotalTokens]: input.usage?.totalTokens,
     [TraceAttribute.GenAI.ResponseFinishReasons]: finishReasonsAttribute(
       input.finishReason
     ),

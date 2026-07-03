@@ -1,8 +1,8 @@
 /** Attribute values accepted by custom spans. */
-export type AttributeValue = string | number | boolean | undefined;
+export type TraceAttributeValue = string | number | boolean | undefined;
 
 /** Initial or finish attributes attached to a span. */
-export type Attributes = Readonly<Record<string, AttributeValue>>;
+export type TraceAttributes = Readonly<Record<string, TraceAttributeValue>>;
 
 /** A value that may complete synchronously or through a promise-like result. */
 export type MaybePromise<T> = T | PromiseLike<T>;
@@ -10,7 +10,7 @@ export type MaybePromise<T> = T | PromiseLike<T>;
 /** Minimal runtime span surface used by tracers. */
 export type SpanWriter = {
   readonly isTraced: boolean;
-  setAttribute(key: string, value: AttributeValue): void;
+  setAttribute(key: string, value: TraceAttributeValue): void;
   end(): void;
 };
 
@@ -19,41 +19,41 @@ export type SpanRuntime = {
   startActiveSpan<T>(name: string, run: (span: SpanWriter) => T): T;
 };
 
-/** Tracer seam used by integrations. */
-export type Tracer = {
+/** AgentTracer seam used by integrations. */
+export type AgentTracer = {
   /**
    * Runs `run` inside an active span whose lifetime the tracer owns: the span
    * finishes when `run` returns (or its promise resolves) and fails when `run`
-   * throws or rejects. Callers do not call {@link Span.finish}/{@link Span.fail};
+   * throws or rejects. Callers do not call {@link AgentSpan.finish}/{@link AgentSpan.fail};
    * doing so early is safe but the tracer guarantees closure.
    *
    * @template T The value produced by the instrumented work.
    */
   withSpan<T>(
     name: string,
-    attributes: Attributes,
-    run: (span: Span) => MaybePromise<T>
+    attributes: TraceAttributes,
+    run: (span: AgentSpan) => MaybePromise<T>
   ): MaybePromise<T>;
   /**
    * Activates a span and returns whatever `activate` returns (typically the
-   * {@link Span} handle itself). The caller owns the span lifetime and MUST call
-   * {@link Span.finish} or {@link Span.fail}; an unfinished span leaks. Use this
+   * {@link AgentSpan} handle itself). The caller owns the span lifetime and MUST call
+   * {@link AgentSpan.finish} or {@link AgentSpan.fail}; an unfinished span leaks. Use this
    * for work that outlives the callback, such as streams and event-driven
    * telemetry. A throw from `activate` still fails the span before rethrowing.
    *
    * @template T The value returned to the caller, usually the span handle.
    */
-  startSpan<T>(
+  openSpan<T>(
     name: string,
-    attributes: Attributes,
-    activate: (span: Span) => T
+    attributes: TraceAttributes,
+    activate: (span: AgentSpan) => T
   ): T;
 };
 
 /** Active span handle passed to instrumented work. */
-export type Span = {
+export type AgentSpan = {
   /** Records the optional finish attributes and ends the span. Idempotent. */
-  finish(attributes?: Attributes): void;
+  finish(attributes?: TraceAttributes): void;
   /**
    * Ends the span as not-successful. Genuine failures record `error`/`error.type`;
    * recognized cancellations (an `AbortError`) record `canceled` instead so aborts
@@ -63,17 +63,17 @@ export type Span = {
 };
 
 /** Creates a tracer from a runtime span capability. */
-export function createTracer(runtime: SpanRuntime): Tracer {
+export function createTracer(runtime: SpanRuntime): AgentTracer {
   return new RuntimeTracer(runtime);
 }
 
-class RuntimeTracer implements Tracer {
+class RuntimeTracer implements AgentTracer {
   constructor(private readonly runtime: SpanRuntime) {}
 
   withSpan<T>(
     name: string,
-    attributes: Attributes,
-    run: (span: Span) => MaybePromise<T>
+    attributes: TraceAttributes,
+    run: (span: AgentSpan) => MaybePromise<T>
   ): MaybePromise<T> {
     return this.activate(name, attributes, (span) => {
       const result = run(span);
@@ -93,10 +93,10 @@ class RuntimeTracer implements Tracer {
     });
   }
 
-  startSpan<T>(
+  openSpan<T>(
     name: string,
-    attributes: Attributes,
-    activate: (span: Span) => T
+    attributes: TraceAttributes,
+    activate: (span: AgentSpan) => T
   ): T {
     return this.activate(name, attributes, activate);
   }
@@ -108,7 +108,7 @@ class RuntimeTracer implements Tracer {
    */
   private activate<T>(
     name: string,
-    attributes: Attributes,
+    attributes: TraceAttributes,
     body: (span: ManagedSpan) => T
   ): T {
     return this.runtime.startActiveSpan(name, (writer) => {
@@ -125,12 +125,12 @@ class RuntimeTracer implements Tracer {
   }
 }
 
-class ManagedSpan implements Span {
+class ManagedSpan implements AgentSpan {
   #closed = false;
 
   constructor(private readonly span: SpanWriter) {}
 
-  finish(attributes: Attributes = {}): void {
+  finish(attributes: TraceAttributes = {}): void {
     if (this.#closed) {
       return;
     }
@@ -145,13 +145,16 @@ class ManagedSpan implements Span {
     }
 
     if (isCancellation(cause)) {
-      // Cancellation is a control path, not a failure: record it distinctly so
-      // aborted operations do not inflate error rates. The Cloudflare span API
-      // exposes no status code, so this classification rides on an attribute.
-      setAttributes(this.span, { canceled: true });
+      // Cancellation is a control path, not a failure: OTel semconv leaves
+      // status Unset and records no error.type for cancellations, so aborted
+      // operations do not inflate error rates. The vendor marker is additive.
+      setAttributes(this.span, { "cloudflare.agents.canceled": true });
     } else {
+      // The native span API has no status codes; `otel.status_code` is the
+      // spec-defined attribute encoding for status-less backends, so a future
+      // OTel-native tracer maps it 1:1 to setStatus({ code: ERROR }).
       setAttributes(this.span, {
-        error: true,
+        "otel.status_code": "ERROR",
         "error.type":
           cause instanceof Error ? cause.name || "Error" : typeof cause
       });
@@ -170,7 +173,7 @@ class ManagedSpan implements Span {
   }
 }
 
-function setAttributes(span: SpanWriter, attributes: Attributes): void {
+function setAttributes(span: SpanWriter, attributes: TraceAttributes): void {
   if (!span.isTraced) {
     return;
   }

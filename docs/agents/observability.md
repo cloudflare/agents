@@ -272,7 +272,9 @@ const result = tracer.withSpan("my-operation", { "app.step": "ingest" }, () =>
 );
 ```
 
-`tracer.withSpan` owns the span lifetime — it finishes when the callback returns or its promise settles. For work that outlives a callback (streams, event-driven telemetry), `tracer.startSpan` hands you the span and you must call `span.finish()` or `span.fail(cause)`. `createTracer` builds a tracer from any `startActiveSpan`-shaped runtime, which is useful for tests.
+`tracer.withSpan` owns the span lifetime — it finishes when the callback returns or its promise settles. For work that outlives a callback (streams, event-driven telemetry), `tracer.openSpan` hands you the span and you must call `span.finish()` or `span.fail(cause)`.
+
+Failed spans carry `otel.status_code: "ERROR"` and `error.type` (the OpenTelemetry status encoding for status-less backends). Cancellations (an `AbortError`) are not errors: they carry `cloudflare.agents.canceled: true` and leave the status untouched, matching OTel semantics.
 
 ### AI SDK tracing
 
@@ -287,7 +289,7 @@ import { wrapAISDK } from "agents/observability/ai";
 const { generateText, streamText } = wrapAISDK(ai);
 ```
 
-The wrapper instruments `generateText`, `streamText`, `generateObject`, and `streamObject`. Each operation gets a root `gen_ai.operation` span; when `wrapLanguageModel` is available, provider `doGenerate` / `doStream` calls get child `gen_ai.chat` spans, and `tools.*.execute` calls get `gen_ai.execute_tool` spans. Stream spans stay open until the returned stream is consumed, cancelled, errors, or is returned early.
+The wrapper instruments `generateText`, `streamText`, `generateObject`, and `streamObject`. Span names follow the GenAI semconv formula, falling back to the bare operation when the combined name would exceed 64 bytes: each operation gets a root `invoke_agent {agent name}` span (`gen_ai.operation.name: "invoke_agent"` — query on the attribute, not the name); when `wrapLanguageModel` is available, provider `doGenerate` / `doStream` calls get child `chat {model}` spans, and `tools.*.execute` calls get `execute_tool {tool}` spans carrying `gen_ai.tool.call.id`. Stream spans stay open until the returned stream is consumed, cancelled, errors, or is returned early, and record `gen_ai.response.time_to_first_chunk` (seconds). Streaming tools (async-generator `execute`) keep their tool span open until the iterable is consumed.
 
 For AI SDK v7, register the telemetry lifecycle adapter instead:
 
@@ -298,7 +300,7 @@ import { createAISDKTelemetry } from "agents/observability/ai";
 registerTelemetry(createAISDKTelemetry());
 ```
 
-The v7 adapter creates the same operation, language-model, and tool-execution spans through AI SDK telemetry callbacks, correlated with `ai.call.id` / `ai.tool.call_id` attributes.
+The v7 adapter creates the same operation, language-model, and tool-execution spans through AI SDK telemetry callbacks, correlated with `cloudflare.agents.call.id` / `gen_ai.tool.call.id` attributes.
 
 ### Agent and conversation attributes
 

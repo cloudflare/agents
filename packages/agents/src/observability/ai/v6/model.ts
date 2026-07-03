@@ -1,5 +1,5 @@
 import { modelCallSpan } from "../../genai/telemetry";
-import type { Tracer } from "../../tracing/tracer";
+import type { AgentTracer } from "../../tracing/tracer";
 import {
   extractModelInfo,
   extractRequestSummary,
@@ -10,7 +10,7 @@ import { finishWhenStreamCompletes } from "./streams";
 import type { AISDKV6WrapLanguageModel } from "./types";
 
 export function wrapModel(
-  tracer: Tracer,
+  tracer: AgentTracer,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   model: unknown,
   parentOperation: string
@@ -47,7 +47,7 @@ export function wrapModel(
           params,
           parentOperation
         );
-        const modelCall = tracer.startSpan(
+        const modelCall = tracer.openSpan(
           span.name,
           span.attributes,
           (span) => span

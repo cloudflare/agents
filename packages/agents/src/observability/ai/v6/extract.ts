@@ -5,7 +5,7 @@ import type {
   ResponseSummary,
   TokenUsageSummary
 } from "../../genai/telemetry";
-import type { Attributes } from "../../tracing/tracer";
+import type { TraceAttributes } from "../../tracing/tracer";
 import {
   readNestedTokenField,
   readNumber,
@@ -19,7 +19,7 @@ export type ModelInfo = {
   readonly provider: string | undefined;
 };
 
-export function finishAttributesFromResult(result: unknown): Attributes {
+export function finishAttributesFromResult(result: unknown): TraceAttributes {
   const finishReason = extractFinishReason(result);
   const outputSummary = summarizeOutput(result);
   const response = extractResponseInfo(result);
@@ -178,7 +178,9 @@ export function extractFinishReason(value: unknown): string | undefined {
   return undefined;
 }
 
-function extractResponseInfo(value: unknown): ResponseSummary | undefined {
+export function extractResponseInfo(
+  value: unknown
+): ResponseSummary | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
   }

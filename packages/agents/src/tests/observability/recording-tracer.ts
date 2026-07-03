@@ -1,18 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createTracer } from "../../observability/tracing/tracer";
 import type {
-  AttributeValue,
+  TraceAttributeValue,
   SpanWriter,
-  Tracer
+  AgentTracer
 } from "../../observability/tracing/tracer";
 
-export class RecordingTracer implements Tracer {
+export class RecordingTracer implements AgentTracer {
   readonly spans: RecordingSpan[] = [];
   readonly rootSpans: RecordingSpan[] = [];
   readonly isTraced: boolean;
 
   readonly #activeSpan = new AsyncLocalStorage<RecordingSpan | undefined>();
-  readonly #tracer: Tracer;
+  readonly #tracer: AgentTracer;
 
   constructor(options: { readonly isTraced?: boolean } = {}) {
     this.isTraced = options.isTraced ?? true;
@@ -21,12 +21,12 @@ export class RecordingTracer implements Tracer {
     });
   }
 
-  withSpan: Tracer["withSpan"] = (name, attributes, run) => {
+  withSpan: AgentTracer["withSpan"] = (name, attributes, run) => {
     return this.#tracer.withSpan(name, attributes, run);
   };
 
-  startSpan: Tracer["startSpan"] = (name, attributes, activate) => {
-    return this.#tracer.startSpan(name, attributes, activate);
+  openSpan: AgentTracer["openSpan"] = (name, attributes, activate) => {
+    return this.#tracer.openSpan(name, attributes, activate);
   };
 
   recordSpan<T>(
@@ -54,7 +54,7 @@ export class RecordingTracer implements Tracer {
 export class RecordingSpan implements SpanWriter {
   readonly name: string;
   readonly parent: RecordingSpan | undefined;
-  readonly attributes: Record<string, AttributeValue> = {};
+  readonly attributes: Record<string, TraceAttributeValue> = {};
   readonly children: RecordingSpan[] = [];
 
   #ended = false;
@@ -83,7 +83,7 @@ export class RecordingSpan implements SpanWriter {
     return this.#endCount;
   }
 
-  setAttribute(key: string, value: AttributeValue): void {
+  setAttribute(key: string, value: TraceAttributeValue): void {
     if (!this.isTraced || value === undefined) {
       return;
     }

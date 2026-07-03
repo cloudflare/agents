@@ -36,10 +36,12 @@ describe("createTracer", () => {
       ).toThrow(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        error: true,
-        "error.type": "TypeError"
+        "error.type": "TypeError",
+        "otel.status_code": "ERROR"
       });
-      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("canceled");
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "cloudflare.agents.canceled"
+      ]);
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
 
@@ -56,12 +58,12 @@ describe("createTracer", () => {
       ).rejects.toBe(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        error: true,
-        "error.type": "Error"
+        "error.type": "Error",
+        "otel.status_code": "ERROR"
       });
-      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty(
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
         "error.message"
-      );
+      ]);
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
   });
@@ -79,31 +81,40 @@ describe("createTracer", () => {
       ).rejects.toBeDefined();
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        canceled: true
+        "cloudflare.agents.canceled": true
       });
-      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error");
-      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error.type");
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "otel.status_code"
+      ]);
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "error.type"
+      ]);
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
 
     it("classifies a non-Error AbortError-named cause as canceled", () => {
       const tracing = new RecordingTracer();
 
-      const span = tracing.startSpan("op", {}, (span) => span);
+      const span = tracing.openSpan("op", {}, (span) => span);
       span.fail({ name: "AbortError" });
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        canceled: true
+        "cloudflare.agents.canceled": true
       });
-      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error");
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "otel.status_code"
+      ]);
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "error.type"
+      ]);
     });
   });
 
-  describe("startSpan (caller-owned lifetime)", () => {
+  describe("openSpan (caller-owned lifetime)", () => {
     it("returns the span without ending it until the caller finishes", () => {
       const tracing = new RecordingTracer();
 
-      const span = tracing.startSpan("op", {}, (span) => span);
+      const span = tracing.openSpan("op", {}, (span) => span);
       expect(tracing.rootSpans[0]?.ended).toBe(false);
 
       span.finish({ ok: true });
@@ -114,7 +125,9 @@ describe("createTracer", () => {
       span.finish();
       span.fail(new Error("late"));
       expect(tracing.rootSpans[0]?.endCount).toBe(1);
-      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty("error");
+      expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+        "otel.status_code"
+      ]);
     });
 
     it("fails the span when the activation callback throws, then rethrows", () => {
@@ -122,14 +135,14 @@ describe("createTracer", () => {
       const cause = new Error("activate failed");
 
       expect(() =>
-        tracing.startSpan("op", {}, () => {
+        tracing.openSpan("op", {}, () => {
           throw cause;
         })
       ).toThrow(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        error: true,
-        "error.type": "Error"
+        "error.type": "Error",
+        "otel.status_code": "ERROR"
       });
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });

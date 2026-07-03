@@ -1,6 +1,6 @@
 import * as cloudflareWorkers from "cloudflare:workers";
 import { createTracer } from "./tracer";
-import type { SpanRuntime, SpanWriter, Tracer } from "./tracer";
+import type { SpanRuntime, SpanWriter, AgentTracer } from "./tracer";
 
 const noopSpan: SpanWriter = {
   isTraced: false,
@@ -20,4 +20,4 @@ const noopRuntime: SpanRuntime = {
 const runtime: SpanRuntime =
   (cloudflareWorkers as { tracing?: SpanRuntime }).tracing ?? noopRuntime;
 
-export const tracer: Tracer = createTracer(runtime);
+export const tracer: AgentTracer = createTracer(runtime);

@@ -2,7 +2,7 @@ import type { AISDKInstrumentationOptions } from "../options";
 import { readString } from "../read";
 import { operationSpan } from "../../genai/telemetry";
 import type { SemanticContext } from "../../genai/telemetry";
-import type { Tracer } from "../../tracing/tracer";
+import type { AgentTracer } from "../../tracing/tracer";
 import {
   extractModelInfo,
   extractRequestSummary,
@@ -29,7 +29,7 @@ export type { AISDKV6Namespace } from "./types";
 /** Tracing configuration for the AI SDK v6 wrapper. */
 export type AISDKV6Instrumentation = {
   readonly options?: AISDKInstrumentationOptions;
-  readonly tracer: Tracer;
+  readonly tracer: AgentTracer;
 };
 
 /**
@@ -120,7 +120,7 @@ function createOperationWrapper(
         params,
         instrumentation.options
       );
-      return instrumentation.tracer.startSpan(
+      return instrumentation.tracer.openSpan(
         span.name,
         span.attributes,
         (operationSpan) => {
@@ -173,7 +173,7 @@ function operationParamsForCall(
   params: AISDKV6CallParams,
   operationName: AISDKV6OperationName,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
-  tracer: Tracer
+  tracer: AgentTracer
 ): AISDKV6CallParams {
   return {
     ...params,
@@ -289,7 +289,7 @@ function contextAttributes(
   for (const key of options?.includeRuntimeContext ?? []) {
     const value = runtimeContext?.[key];
     if (isScalarAttributeValue(value)) {
-      attributes[`ai.runtime_context.${key}`] = value;
+      attributes[`cloudflare.agents.runtime_context.${key}`] = value;
     }
   }
 
@@ -311,7 +311,7 @@ function contextAttributes(
     for (const key of keys) {
       const value = toolContext?.[key];
       if (isScalarAttributeValue(value)) {
-        attributes[`ai.tool_context.${toolName}.${key}`] = value;
+        attributes[`cloudflare.agents.tool_context.${toolName}.${key}`] = value;
       }
     }
   }

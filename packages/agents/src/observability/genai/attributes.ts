@@ -2,28 +2,29 @@
  * Local trace attribute keys used by the Cloudflare GenAI projection.
  *
  * `gen_ai.*` keys follow OpenTelemetry GenAI semantic conventions where they
- * exist. `ai.*` keys are package-local compatibility attributes for stable
- * dashboards and correlation; they are intentionally not OTel semantic keys.
+ * exist (Development status — tracked so spec churn stays an internal edit;
+ * none of these constants are exported from the package). Keys with no
+ * semconv home live under the `cloudflare.agents.*` vendor namespace — never
+ * bare top-level keys, never `ai.*` (the Vercel AI SDK's de-facto namespace).
  */
 export const TraceAttribute = {
-  AI: {
-    CallID: "ai.call.id",
-    EmbeddingCount: "ai.embedding.count",
-    EmbeddingDimensions: "ai.embedding.dimensions",
-    IntegrationName: "ai.integration.name",
-    OperationID: "ai.operation.id",
-    OutputHasObject: "ai.output.has_object",
-    OutputHasText: "ai.output.has_text",
-    ResponseFinishReason: "ai.response.finish_reason",
-    ToolCallID: "ai.tool.call_id",
-    ToolCount: "ai.tool.count",
-    UsageTotalTokens: "ai.usage.total_tokens"
+  Cloudflare: {
+    CallID: "cloudflare.agents.call.id",
+    EmbeddingCount: "cloudflare.agents.embedding.count",
+    IntegrationName: "cloudflare.agents.integration.name",
+    OperationID: "cloudflare.agents.operation.id",
+    OutputHasObject: "cloudflare.agents.output.has_object",
+    OutputHasText: "cloudflare.agents.output.has_text",
+    ResponseFinishReason: "cloudflare.agents.response.finish_reason",
+    ToolCount: "cloudflare.agents.tool.count",
+    UsageTotalTokens: "cloudflare.agents.usage.total_tokens"
   },
   GenAI: {
     AgentID: "gen_ai.agent.id",
     AgentName: "gen_ai.agent.name",
     AgentVersion: "gen_ai.agent.version",
     ConversationID: "gen_ai.conversation.id",
+    EmbeddingsDimensionCount: "gen_ai.embeddings.dimension.count",
     OperationName: "gen_ai.operation.name",
     OperationNameValueChat: "chat",
     OperationNameValueExecuteTool: "execute_tool",
@@ -42,6 +43,8 @@ export const TraceAttribute = {
     ResponseFinishReasons: "gen_ai.response.finish_reasons",
     ResponseID: "gen_ai.response.id",
     ResponseModel: "gen_ai.response.model",
+    ResponseTimeToFirstChunk: "gen_ai.response.time_to_first_chunk",
+    ToolCallID: "gen_ai.tool.call.id",
     ToolName: "gen_ai.tool.name",
     ToolType: "gen_ai.tool.type",
     UsageCacheCreationInputTokens: "gen_ai.usage.cache_creation.input_tokens",

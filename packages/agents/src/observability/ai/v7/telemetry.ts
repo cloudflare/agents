@@ -5,8 +5,8 @@ import {
   operationSpan,
   toolCallSpan
 } from "../../genai/telemetry";
-import type { Attributes } from "../../tracing/tracer";
-import type { Span, Tracer } from "../../tracing/tracer";
+import type { TraceAttributes } from "../../tracing/tracer";
+import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 import {
   correlationAttributes,
   finishAttributesFromEvent,
@@ -29,19 +29,19 @@ type AISDKV7OperationName =
 type OperationState = {
   readonly callId: string;
   readonly operationName: AISDKV7OperationName;
-  readonly span: Span;
+  readonly span: AgentSpan;
 };
 
 type ToolState = {
   readonly callId: string;
   readonly spanSpec: ReturnType<typeof toolCallSpan>;
-  span?: Span | undefined;
+  span?: AgentSpan | undefined;
 };
 
 /** Tracing configuration for the AI SDK v7 telemetry adapter. */
 export type AISDKV7Instrumentation = {
   readonly options?: AISDKInstrumentationOptions | undefined;
-  readonly tracer: Tracer;
+  readonly tracer: AgentTracer;
 };
 
 /**
@@ -52,7 +52,7 @@ export function createAISDKV7Telemetry(
   instrumentation: AISDKV7Instrumentation
 ): AISDKV7Telemetry {
   const operations = new Map<string, OperationState>();
-  const modelSpans = new Map<string, Span[]>();
+  const modelSpans = new Map<string, AgentSpan[]>();
   const toolSpans = new Map<string, ToolState>();
 
   const finishOperation = (event: AISDKV7OperationEvent): void => {
@@ -93,7 +93,7 @@ export function createAISDKV7Telemetry(
         provider: readString(event.provider),
         request: requestSummaryFromEvent(event, operationName)
       });
-      const operation = instrumentation.tracer.startSpan(
+      const operation = instrumentation.tracer.openSpan(
         span.name,
         span.attributes,
         (activeSpan) => activeSpan
@@ -121,7 +121,7 @@ export function createAISDKV7Telemetry(
         provider: readString(event.provider),
         request: requestSummaryFromEvent(event, state.operationName)
       });
-      const modelSpan = instrumentation.tracer.startSpan(
+      const modelSpan = instrumentation.tracer.openSpan(
         span.name,
         span.attributes,
         (activeSpan) => activeSpan
@@ -178,7 +178,7 @@ export function createAISDKV7Telemetry(
 
       const span =
         state.span ??
-        instrumentation.tracer.startSpan(
+        instrumentation.tracer.openSpan(
           state.spanSpec.name,
           state.spanSpec.attributes,
           (activeSpan) => activeSpan
@@ -220,7 +220,7 @@ export function createAISDKV7Telemetry(
         return options.execute();
       }
 
-      return instrumentation.tracer.startSpan(
+      return instrumentation.tracer.openSpan(
         state.spanSpec.name,
         state.spanSpec.attributes,
         (span) => {
@@ -264,9 +264,9 @@ function isStreamOperation(operationName: AISDKV7OperationName): boolean {
 }
 
 function shiftModelSpan(
-  spansByCallId: Map<string, Span[]>,
+  spansByCallId: Map<string, AgentSpan[]>,
   callId: string
-): Span | undefined {
+): AgentSpan | undefined {
   const spans = spansByCallId.get(callId);
   const span = spans?.shift();
   if (spans && spans.length === 0) {
@@ -279,7 +279,7 @@ function shiftModelSpan(
 function finishOpenModelSpans(
   callId: string,
   cause: unknown,
-  spansByCallId: Map<string, Span[]>
+  spansByCallId: Map<string, AgentSpan[]>
 ): void {
   const spans = spansByCallId.get(callId);
   if (!spans) {
@@ -300,7 +300,7 @@ function finishOpenToolSpans(
   callId: string,
   cause: unknown,
   spansByToolCallId: Map<string, ToolState>,
-  tracer: Tracer
+  tracer: AgentTracer
 ): void {
   for (const [toolCallId, state] of spansByToolCallId) {
     if (state.callId !== callId) {
@@ -309,7 +309,7 @@ function finishOpenToolSpans(
 
     const span =
       state.span ??
-      tracer.startSpan(
+      tracer.openSpan(
         state.spanSpec.name,
         state.spanSpec.attributes,
         (activeSpan) => activeSpan
@@ -332,12 +332,12 @@ function eventObject(event: unknown): Record<string, unknown> {
 function contextAttributes(event: {
   readonly runtimeContext?: unknown;
   readonly toolsContext?: unknown;
-}): Attributes {
+}): TraceAttributes {
   const attributes: Record<string, string | number | boolean> = {};
   const runtimeContext = recordValue(event.runtimeContext);
   for (const [key, value] of Object.entries(runtimeContext ?? {})) {
     if (isScalarAttributeValue(value)) {
-      attributes[`ai.runtime_context.${key}`] = value;
+      attributes[`cloudflare.agents.runtime_context.${key}`] = value;
     }
   }
 
@@ -348,7 +348,7 @@ function contextAttributes(event: {
     const toolContext = recordValue(toolContextValue);
     for (const [key, value] of Object.entries(toolContext ?? {})) {
       if (isScalarAttributeValue(value)) {
-        attributes[`ai.tool_context.${toolName}.${key}`] = value;
+        attributes[`cloudflare.agents.tool_context.${toolName}.${key}`] = value;
       }
     }
   }
@@ -359,12 +359,12 @@ function contextAttributes(event: {
 function toolContextAttributes(
   toolName: string,
   toolContextValue: unknown
-): Attributes {
+): TraceAttributes {
   const attributes: Record<string, string | number | boolean> = {};
   const toolContext = recordValue(toolContextValue);
   for (const [key, value] of Object.entries(toolContext ?? {})) {
     if (isScalarAttributeValue(value)) {
-      attributes[`ai.tool_context.${toolName}.${key}`] = value;
+      attributes[`cloudflare.agents.tool_context.${toolName}.${key}`] = value;
     }
   }
 

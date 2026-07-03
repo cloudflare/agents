@@ -7,7 +7,7 @@ import type {
   SemanticContext,
   TokenUsageSummary
 } from "../../genai/telemetry";
-import type { Attributes } from "../../tracing/tracer";
+import type { TraceAttributes } from "../../tracing/tracer";
 import {
   readNestedTokenField,
   readNumber,
@@ -74,7 +74,7 @@ export function requestSummaryFromEvent(
 }
 
 /** Extracts safe finish attributes from an AI SDK v7 result-like event. */
-export function finishAttributesFromEvent(event: object): Attributes {
+export function finishAttributesFromEvent(event: object): TraceAttributes {
   const record = eventRecord(event);
   return finishAttributes({
     finishReason: extractFinishReason(record),
@@ -88,10 +88,10 @@ export function finishAttributesFromEvent(event: object): Attributes {
 export function correlationAttributes(input: {
   readonly callId: string;
   readonly toolCallId?: string | undefined;
-}): Attributes {
+}): TraceAttributes {
   return {
-    [TraceAttribute.AI.CallID]: input.callId,
-    [TraceAttribute.AI.ToolCallID]: input.toolCallId
+    [TraceAttribute.Cloudflare.CallID]: input.callId,
+    [TraceAttribute.GenAI.ToolCallID]: input.toolCallId
   };
 }
 

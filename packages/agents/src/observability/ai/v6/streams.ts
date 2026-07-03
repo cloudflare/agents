@@ -1,17 +1,27 @@
 import { finishAttributes } from "../../genai/telemetry";
-import type { OutputSummary, TokenUsageSummary } from "../../genai/telemetry";
-import type { Attributes, Span } from "../../tracing/tracer";
-import { extractAISDKv6TokenUsage, extractFinishReason } from "./extract";
+import type {
+  OutputSummary,
+  ResponseSummary,
+  TokenUsageSummary
+} from "../../genai/telemetry";
+import type { TraceAttributes, AgentSpan } from "../../tracing/tracer";
+import {
+  extractAISDKv6TokenUsage,
+  extractFinishReason,
+  extractResponseInfo
+} from "./extract";
 
 type StreamSummary = {
   readonly finishReason?: string;
   readonly outputSummary?: OutputSummary;
+  readonly response?: ResponseSummary;
+  readonly timeToFirstChunkSeconds?: number;
   readonly usage?: TokenUsageSummary;
 };
 
 export function finishWhenStreamCompletes(
   result: unknown,
-  span: Span
+  span: AgentSpan
 ): unknown {
   return patchStreamFields(result, {
     onComplete: (summary) => {
@@ -25,10 +35,12 @@ export function finishWhenStreamCompletes(
 
 function finishAttributesFromStreamSummary(
   summary: StreamSummary | undefined
-): Attributes {
+): TraceAttributes {
   return finishAttributes({
     finishReason: summary?.finishReason,
     outputSummary: summary?.outputSummary,
+    response: summary?.response,
+    timeToFirstChunkSeconds: summary?.timeToFirstChunkSeconds,
     usage: summary?.usage
   });
 }
@@ -285,7 +297,29 @@ function createStreamState(hooks: {
   let hasText = false;
   let toolCallCount = 0;
   let usage: TokenUsageSummary | undefined;
+  let response: ResponseSummary | undefined;
   let observedError: { readonly cause: unknown } | undefined;
+  let observedAbort = false;
+  let firstChunkAtMs: number | undefined;
+  const startedAtMs = Date.now();
+
+  const settleObserved = (): boolean => {
+    if (observedError) {
+      hooks.onError(observedError.cause);
+      return true;
+    }
+
+    if (observedAbort) {
+      // AI SDK v6 signals aborts as an in-band `{ type: "abort" }` chunk and
+      // completes the stream normally — it never rejects with an AbortError.
+      // Surface a structurally AbortError-shaped cause so the tracer
+      // classifies the span as canceled instead of a false success.
+      hooks.onError({ name: "AbortError" });
+      return true;
+    }
+
+    return false;
+  };
 
   return {
     get closed() {
@@ -297,8 +331,7 @@ function createStreamState(hooks: {
       }
 
       closed = true;
-      if (observedError) {
-        hooks.onError(observedError.cause);
+      if (settleObserved()) {
         return;
       }
 
@@ -310,8 +343,7 @@ function createStreamState(hooks: {
       }
 
       closed = true;
-      if (observedError) {
-        hooks.onError(observedError.cause);
+      if (settleObserved()) {
         return;
       }
 
@@ -319,6 +351,11 @@ function createStreamState(hooks: {
         streamSummaryFromParts({
           finishReason,
           hasText,
+          response,
+          timeToFirstChunkSeconds:
+            firstChunkAtMs === undefined
+              ? undefined
+              : (firstChunkAtMs - startedAtMs) / 1000,
           toolCallCount,
           usage
         })
@@ -333,12 +370,16 @@ function createStreamState(hooks: {
       hooks.onError(cause);
     },
     observeChunk(chunk) {
+      firstChunkAtMs ??= Date.now();
       // AI SDK v6 signals mid-stream provider failures as an in-band
       // `{ type: "error" }` chunk rather than rejecting the stream, so the
       // stream still reaches normal completion afterward. Record it here and
       // fail the span on completion instead of treating it as a success.
       if (isErrorChunk(chunk)) {
         observedError = { cause: chunk.error };
+      }
+      if (isAbortChunk(chunk)) {
+        observedAbort = true;
       }
       if (isContentChunk(chunk)) {
         hasText = true;
@@ -348,6 +389,7 @@ function createStreamState(hooks: {
       }
       finishReason = extractFinishReason(chunk) ?? finishReason;
       usage = extractAISDKv6TokenUsage(chunk) ?? usage;
+      response = extractResponseInfo(chunk) ?? response;
     }
   };
 }
@@ -360,9 +402,19 @@ function isErrorChunk(chunk: unknown): chunk is { readonly error: unknown } {
   );
 }
 
+function isAbortChunk(chunk: unknown): boolean {
+  return (
+    typeof chunk === "object" &&
+    chunk !== null &&
+    (chunk as Record<string, unknown>).type === "abort"
+  );
+}
+
 function streamSummaryFromParts(input: {
   readonly finishReason: string | undefined;
   readonly hasText: boolean;
+  readonly response: ResponseSummary | undefined;
+  readonly timeToFirstChunkSeconds: number | undefined;
   readonly toolCallCount: number;
   readonly usage: TokenUsageSummary | undefined;
 }): StreamSummary {
@@ -374,6 +426,10 @@ function streamSummaryFromParts(input: {
       ...(input.hasText ? { hasText: true } : {}),
       ...(input.toolCallCount > 0 ? { toolCallCount: input.toolCallCount } : {})
     },
+    ...(input.response ? { response: input.response } : {}),
+    ...(input.timeToFirstChunkSeconds !== undefined
+      ? { timeToFirstChunkSeconds: input.timeToFirstChunkSeconds }
+      : {}),
     ...(input.usage ? { usage: input.usage } : {})
   };
 }
