@@ -34,10 +34,11 @@
     { "binding": "R2_SKILLS", "bucket_name": "agent-think-skills" }
   ],
 
-  // The /thread/* route reads env.ASSETS; keep the binding so the SPA-fallback
-  // route is exercised. Points at the Vite output (run `pnpm build:client`).
+  // The / and /thread/* routes read env.ASSETS; keep the binding so the
+  // SPA-fallback routes are exercised. Points at a committed fixture (not the
+  // Vite output) so the suite is hermetic on CI with no client build.
   "assets": {
-    "directory": "../dist/client",
+    "directory": "client-fixture",
     "binding": "ASSETS",
     "run_worker_first": ["/thread/*"]
   },
