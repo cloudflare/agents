@@ -106,8 +106,6 @@ export class ThinkAgent extends ThinkBase {
    * issue (new short-lived token) re-authenticates automatically.
    */
   #authedToken: string | null = null;
-  /** Comment id already 🚀-reacted, so continuations don't re-fire. */
-  #rocketedFor: number | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -383,51 +381,11 @@ export class ThinkAgent extends ThinkBase {
   }
 
   override async beforeTurn() {
-    // 🚀 on the triggering comment the moment the turn actually wakes: 👀
-    // (added by gh-app) only proves the webhook was seen; 🚀 proves the
-    // Think turn is running. Fire-and-forget — a reaction must never block
-    // or break a turn.
-    this.#signalTurnAlive();
     // Container gh/git auth runs here — inside the durable turn — rather
     // than in start(), so dispatch stays fast and a slow container attach
     // can't be killed by the caller's cancellation (see start()).
     await this.#ensureGitAuth();
     return { maxOutputTokens: 16384 };
-  }
-
-  /**
-   * Add a 🚀 reaction to the triggering comment, once per dispatch. Direct
-   * REST with the installation token (no container round-trip); GitHub
-   * dedupes repeat reactions from the same identity, so recovery re-fires
-   * are harmless.
-   */
-  #signalTurnAlive(): void {
-    const ctx = this.#context;
-    if (!ctx?.commentId || !ctx.installationToken) return;
-    if (this.#rocketedFor === ctx.commentId) return;
-    this.#rocketedFor = ctx.commentId;
-    this.ctx.waitUntil(
-      fetch(
-        `https://api.github.com/repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${ctx.installationToken}`,
-            Accept: "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "agent-think",
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ content: "rocket" })
-        }
-      )
-        .then((r) => {
-          if (!r.ok) this.#log("rocket-failed", { status: r.status });
-        })
-        .catch((err) =>
-          this.#log("rocket-failed", { error: String(err).slice(0, 120) })
-        )
-    );
   }
 
   /**
@@ -498,6 +456,16 @@ export class ThinkAgent extends ThinkBase {
       "The user invoked you with this instruction:",
       `  ${ctx?.instruction || "(no instruction — default to reproducing the issue)"}`,
       "",
+      ...(ctx?.commentId
+        ? [
+            "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
+            "comment that triggered you, then continue with the task:",
+            `  exec({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
+            "(👀 was added when your trigger was seen; your 🚀 tells the",
+            "humans the agent itself is running.)",
+            ""
+          ]
+        : []),
       "Two skills are available under /workspace/.agents/skills:",
       "  - reproduce/SKILL.md — reproduce the issue in a minimal project,",
       "    deploy it, verify the symptom, and report findings on the issue.",
