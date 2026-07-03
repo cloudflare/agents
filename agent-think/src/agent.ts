@@ -396,11 +396,12 @@ export class ThinkAgent extends ThinkBase {
     await this.#ensureGitAuth();
     return {
       maxOutputTokens: 16384,
-      // Only our four tools reach the model. Think merges its workspace
+      // Only our four tools reach the model (read/write/edit/bash — pi's
+      // codingTools shape, Claude Code's names). Think merges its workspace
       // built-ins (list/find/grep/delete) unconditionally; this allowlist
       // makes the AI SDK drop their definitions from the provider request
       // entirely (~600 prompt tokens reclaimed per call). ls/grep/rm/find
-      // happen through `bash`, like pi and Claude Code. See design/tools.md.
+      // happen through `bash`.
       activeTools: Object.keys(this.getTools())
     };
   }
