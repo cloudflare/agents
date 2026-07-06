@@ -384,17 +384,16 @@ async function installPythonPackage(
         (url) => url.packagetype === "bdist_wheel"
       );
       const wheelUrl = wheel?.url;
-      sourceUrl = wheelUrl;
 
       // Download source distribution
       const response = await fetchWithTimeout(
-        sourceUrl,
+        wheelUrl,
         {},
         DEFAULT_TIMEOUT_MS * 2
       );
       if (!response.ok) {
         throw new Error(
-          `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${sourceUrl})`
+          `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheelUrl})`
         );
       }
 
