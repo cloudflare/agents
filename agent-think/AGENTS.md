@@ -54,9 +54,13 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
       live thread view
 ```
 
-The 👀 reaction is the only pickup signal (an "on it" comment was tried and
-removed as noise); the agent posts its results on the issue when the run
-finishes, and gh-app posts a ❌ comment if dispatch itself fails.
+Reactions are the liveness protocol (an "on it" comment was tried and removed
+as noise): 👀 from gh-app = webhook seen and dispatched; 🚀 from the agent =
+the MODEL's own first action (the system prompt tells it to `gh api` the
+reaction from the container), so it proves the whole chain — turn awake,
+container attached, gh authed, model responding. 👀 without 🚀 within a couple
+of minutes = the run is dead, not slow. Results arrive as an issue comment
+when the run finishes; gh-app posts ❌ if dispatch itself fails.
 
 Session name = `<repo-slug>-<issue>` (e.g. `cloudflare-agents-1859`). Both
 verbs on one issue reuse the same DO/workspace/thread, and `submitMessages`
@@ -141,6 +145,13 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
   in `run_worker_first`. Symptom: the UI's HTTP calls work while every
   `wss://` connect fails. (This bit us on the command center; the repro-skill
   recipe carries the same rule.)
+- **Unbounded bash output can kill a session irrecoverably.** Command output
+  streams through the DO; a chatty command (full monorepo `pnpm install`)
+  OOMed the isolate, and the persisted backlog then CPU-death-looped every
+  wake before recovery could run (see PLANS/agents/agent-think-1845-rca.md).
+  Skills + the bash tool description mandate redirect-to-file + tail for
+  noisy commands. Operator escape hatch: `AgentThink.resetSession(session)`
+  RPC wipes the session clean.
 - **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the
   new code; a running turn loses its container connection and burns minutes on
   Think's (working) recovery — it re-auths and resumes, but don't deploy while

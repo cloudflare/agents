@@ -97,6 +97,19 @@ export class AgentThink extends WorkerEntrypoint<Env> {
   async dispatch(input: DispatchInput): Promise<DispatchResult> {
     return runDispatch(this.env, input);
   }
+
+  /**
+   * Operator escape hatch for a poisoned session (see ThinkAgent.resetSession).
+   * Reachable only over the service-binding RPC surface.
+   */
+  async resetSession(session: string): Promise<{ reset: boolean }> {
+    const agent = await getAgentByName<Env, ThinkAgent>(
+      this.env.ThinkAgent,
+      session
+    );
+    await agent.resetSession();
+    return { reset: true };
+  }
 }
 
 /**

@@ -45,8 +45,8 @@ import { createWorkersAI } from "workers-ai-provider";
 import { openai } from "workers-ai-provider/openai";
 import { getAgentByName } from "agents";
 import type { CommandCenterAgent } from "./command-center";
-import { resolveContainerId } from "./pool";
-import { createExecTool } from "./tools/exec";
+import { releaseContainer, resolveContainerId } from "./pool";
+import { createBashTool } from "./tools/bash";
 import {
   createEditTool,
   createReadTool,
@@ -58,13 +58,18 @@ import {
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
 const CONTEXT_KEY = "agent-think-context";
+// resetSession aborts the isolate AFTER its RPC response has been delivered;
+// this is the grace window for that ack, not a tuning knob.
+const RESET_ABORT_DELAY_MS = 100;
 const REPO_ROOT = "/workspace/repo";
-// GPT-5.5 through AI Gateway's model catalog (Unified Billing — the request
-// goes out via the AI binding with no provider key; the account's default
-// gateway has `wholesale` enabled so OpenAI usage is billed through
-// Cloudflare). The `{provider}/{model}` slug form is what routes it through
-// the gateway delegate rather than Workers AI.
+// GPT-5.5 (medium reasoning) through AI Gateway's model catalog — Unified
+// Billing over the AI binding, no provider key. `reasoning_effort` is a
+// first-class workers-ai-provider model setting forwarded into the request
+// (verified live: completion_tokens_details.reasoning_tokens > 0).
+// Fallback if unified-billing credits run dry (gateway 402s):
+// MODEL_ID = "@cf/moonshotai/kimi-k2.7-code" bills via Workers AI instead.
 const MODEL_ID = "openai/gpt-5.5";
+const REASONING_EFFORT = "medium";
 
 /** Per-issue run context, set by `dispatch` before the turn is submitted. */
 export interface RunContext {
@@ -92,7 +97,12 @@ export class ThinkAgent extends ThinkBase {
   /** repro/pr can be long: clone, install, deploy or fix, verify. */
   override maxSteps = 60;
 
-  /** We expose our own `exec` tool; skip Think's built-in bash. */
+  /**
+   * We expose our own `bash` tool (two exec backends); skip Think's
+   * built-in just-bash. Note: even if this flag is ever flipped back,
+   * getTools() spreads after the workspace tools, so our `bash` would
+   * silently shadow Think's — desired, but worth knowing.
+   */
   override workspaceBash = false;
 
   readonly #containerBackend: CloudflareContainerBackend;
@@ -179,6 +189,25 @@ export class ThinkAgent extends ThinkBase {
 
   async getContext(): Promise<RunContext | null> {
     return this.#context;
+  }
+
+  /**
+   * Operator escape hatch: wipe this session back to a clean slate. For
+   * poisoned sessions — e.g. an unbounded bash-output backlog that OOMs the
+   * DO and then CPU-death-loops every wake before recovery can run (see
+   * PLANS/agents/agent-think-1845-rca.md). Drops ALL durable state (messages,
+   * workspace VFS, submissions), releases the container assignment, and
+   * aborts the isolate so the next dispatch starts completely fresh.
+   * RPC-only; deliberately not exposed over HTTP in production.
+   */
+  async resetSession(): Promise<void> {
+    this.#log("session-reset", {});
+    await releaseContainer(this.env, this.ctx.id.toString());
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    // Abort after the RPC returns so the caller gets its ack; the next
+    // request builds a fresh isolate over the now-empty storage.
+    setTimeout(() => this.ctx.abort(), RESET_ABORT_DELAY_MS);
   }
 
   /**
@@ -358,7 +387,12 @@ export class ThinkAgent extends ThinkBase {
       binding: this.env.AI,
       gateway: { id: "default" },
       providers: [openai]
-    })(MODEL_ID);
+      // DelegateCallOptions' typing lags the runtime: the model reads
+      // settings.reasoning_effort and forwards it into the request (verified
+      // live — completion_tokens_details.reasoning_tokens > 0 at "medium").
+    })(MODEL_ID, {
+      reasoning_effort: REASONING_EFFORT
+    } as Parameters<ReturnType<typeof createWorkersAI>>[1]);
   }
 
   override async beforeTurn() {
@@ -366,7 +400,16 @@ export class ThinkAgent extends ThinkBase {
     // than in start(), so dispatch stays fast and a slow container attach
     // can't be killed by the caller's cancellation (see start()).
     await this.#ensureGitAuth();
-    return { maxOutputTokens: 16384 };
+    return {
+      maxOutputTokens: 16384,
+      // Only our four tools reach the model (read/write/edit/bash — pi's
+      // codingTools shape, Claude Code's names). Think merges its workspace
+      // built-ins (list/find/grep/delete) unconditionally; this allowlist
+      // makes the AI SDK drop their definitions from the provider request
+      // entirely (~600 prompt tokens reclaimed per call). ls/grep/rm/find
+      // happen through `bash`.
+      activeTools: Object.keys(this.getTools())
+    };
   }
 
   /**
@@ -437,6 +480,16 @@ export class ThinkAgent extends ThinkBase {
       "The user invoked you with this instruction:",
       `  ${ctx?.instruction || "(no instruction — default to reproducing the issue)"}`,
       "",
+      ...(ctx?.commentId
+        ? [
+            "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
+            "comment that triggered you, then continue with the task:",
+            `  bash({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
+            "(👀 was added when your trigger was seen; your 🚀 tells the",
+            "humans the agent itself is running.)",
+            ""
+          ]
+        : []),
       "Two skills are available under /workspace/.agents/skills:",
       "  - reproduce/SKILL.md — reproduce the issue in a minimal project,",
       "    deploy it, verify the symptom, and report findings on the issue.",
@@ -455,7 +508,7 @@ export class ThinkAgent extends ThinkBase {
       "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
       "    re-configure the token.",
       "  - IMPORTANT: run every `gh`, `git`, `npm`, `curl`, and `wrangler`",
-      '    command on the `container` backend — exec({ command, backend: "container" }).',
+      '    command on the `container` backend — bash({ command, backend: "container" }).',
       "    The `shell` backend has none of them and no network; it is only for",
       "    cat/grep/sed/jq-style text work.",
       "  - The dedicated read/write/edit tools operate on the same workspace",
@@ -474,7 +527,7 @@ export class ThinkAgent extends ThinkBase {
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
-      exec: createExecTool({
+      bash: createBashTool({
         workspace: ws,
         maxBytes: 32 * 1024,
         backends: {
