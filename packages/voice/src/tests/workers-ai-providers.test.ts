@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkersAIFluxSTT, WorkersAINova3STT } from "../workers-ai-providers";
 
 class MockWebSocket {
@@ -41,12 +41,22 @@ class MockWebSocket {
 }
 
 class MockAi {
+  mode: "socket" | "throw" | "no_socket" = "socket";
+  deferRun = false;
   sockets: MockWebSocket[] = [];
   calls: Array<{
     model: string;
     input: Record<string, unknown>;
     options?: Record<string, unknown>;
   }> = [];
+  #resolveRun: (() => void) | null = null;
+
+  resolveRun(): void {
+    const resolve = this.#resolveRun;
+    if (!resolve) return;
+    this.#resolveRun = null;
+    resolve();
+  }
 
   async run(
     model: string,
@@ -54,6 +64,13 @@ class MockAi {
     options?: Record<string, unknown>
   ): Promise<unknown> {
     this.calls.push({ model, input, options });
+    if (this.deferRun) {
+      await new Promise<void>((resolve) => {
+        this.#resolveRun = resolve;
+      });
+    }
+    if (this.mode === "throw") throw new Error("run failed");
+    if (this.mode === "no_socket") return {};
     const webSocket = new MockWebSocket();
     this.sockets.push(webSocket);
     return { webSocket: webSocket as unknown as WebSocket };
@@ -69,6 +86,68 @@ async function waitForConnect(ai: MockAi): Promise<MockWebSocket> {
 }
 
 describe("WorkersAIFluxSTT", () => {
+  it("resolves readiness after the WebSocket is accepted and pending audio is flushed", async () => {
+    const ai = new MockAi();
+    const session = new WorkersAIFluxSTT(ai).createSession();
+    const chunk = new ArrayBuffer(4);
+
+    session.feed(chunk);
+    if (!session.waitUntilReady) throw new Error("expected readiness method");
+    await session.waitUntilReady();
+
+    const socket = ai.sockets[0];
+    expect(socket.accepted).toBe(true);
+    expect(socket.sent).toEqual([chunk]);
+  });
+
+  it("rejects readiness when ai.run throws", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    ai.mode = "throw";
+    try {
+      const session = new WorkersAIFluxSTT(ai).createSession();
+      if (!session.waitUntilReady) throw new Error("expected readiness method");
+
+      await expect(session.waitUntilReady()).rejects.toThrow("run failed");
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("rejects readiness when ai.run returns no WebSocket", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    ai.mode = "no_socket";
+    try {
+      const session = new WorkersAIFluxSTT(ai).createSession();
+      if (!session.waitUntilReady) throw new Error("expected readiness method");
+
+      await expect(session.waitUntilReady()).rejects.toThrow(
+        "Workers AI Flux STT did not return a WebSocket"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("settles readiness when closed before the WebSocket connects", async () => {
+    const ai = new MockAi();
+    ai.deferRun = true;
+    const session = new WorkersAIFluxSTT(ai).createSession();
+    if (!session.waitUntilReady) throw new Error("expected readiness method");
+
+    const ready = session.waitUntilReady();
+    await Promise.resolve();
+    session.close();
+
+    await expect(ready).resolves.toBeUndefined();
+    ai.resolveRun();
+
+    const socket = await waitForConnect(ai);
+    expect(socket.accepted).toBe(true);
+    expect(socket.closed).toBe(true);
+  });
+
   it("uses the latest interim transcript when EndOfTurn transcript is empty", async () => {
     const ai = new MockAi();
     const utterances: string[] = [];

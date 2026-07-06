@@ -54,6 +54,17 @@ describe("AudioConnectionManager — transcriber sessions", () => {
     expect(transcriber.lastSession).not.toBeNull();
   });
 
+  it("returns the created transcriber session", () => {
+    const cm = new AudioConnectionManager("test");
+    const transcriber = new SpyTranscriber();
+    cm.initConnection("c1");
+
+    const session = cm.startTranscriberSession("c1", transcriber, {});
+
+    expect(session).toBeInstanceOf(SpySession);
+    expect(session).toBe(transcriber.lastSession);
+  });
+
   it("feeds audio to the transcriber session via bufferAudio", () => {
     const cm = new AudioConnectionManager("test");
     const transcriber = new SpyTranscriber();

@@ -78,6 +78,61 @@ class TestTranscriber implements Transcriber {
   }
 }
 
+type TestTranscriberMode =
+  | "default"
+  | "pending_ready"
+  | "reject_ready"
+  | "create_throw";
+
+function isTestTranscriberMode(value: unknown): value is TestTranscriberMode {
+  return (
+    value === "default" ||
+    value === "pending_ready" ||
+    value === "reject_ready" ||
+    value === "create_throw"
+  );
+}
+
+class ControlledReadyTranscriberSession extends TestTranscriberSession {
+  #ready: Promise<void>;
+  #resolveReady: (() => void) | null = null;
+  #rejectReady: ((reason: unknown) => void) | null = null;
+
+  constructor(options?: TranscriberSessionOptions) {
+    super(options);
+    this.#ready = new Promise<void>((resolve, reject) => {
+      this.#resolveReady = resolve;
+      this.#rejectReady = reject;
+    });
+    this.#ready.catch(() => {});
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.#ready;
+  }
+
+  resolveReady(): void {
+    const resolve = this.#resolveReady;
+    if (!resolve) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    resolve();
+  }
+
+  rejectReady(message = "readiness failed"): void {
+    const reject = this.#rejectReady;
+    if (!reject) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    reject(new Error(message));
+  }
+
+  close(): void {
+    super.close();
+    this.resolveReady();
+  }
+}
+
 const v3FinishReason = (unified: "stop" | "tool-calls") => ({
   unified,
   raw: undefined
@@ -300,6 +355,31 @@ export class TestVoiceAgent extends VoiceBase {
   #interruptCount = 0;
   #beforeCallStartResult = true;
   #turnDelayMs = 0;
+  #transcriberMode: TestTranscriberMode = "default";
+  #lastReadySession: ControlledReadyTranscriberSession | null = null;
+
+  createTranscriber(_connection: Connection): Transcriber | null {
+    const mode = this.#transcriberMode;
+    if (mode === "default") return null;
+    if (mode === "create_throw") {
+      return {
+        createSession(): TranscriberSession {
+          throw new Error("create session failed");
+        }
+      };
+    }
+
+    return {
+      createSession: (options?: TranscriberSessionOptions) => {
+        const session = new ControlledReadyTranscriberSession(options);
+        this.#lastReadySession = session;
+        if (mode === "reject_ready") {
+          session.rejectReady();
+        }
+        return session;
+      }
+    };
+  }
 
   async onTurn(
     transcript: string,
@@ -340,6 +420,27 @@ export class TestVoiceAgent extends VoiceBase {
           break;
         case "_set_turn_delay":
           this.#turnDelayMs = parsed.value;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_set_transcriber_mode":
+          if (isTestTranscriberMode(parsed.value)) {
+            this.#transcriberMode = parsed.value;
+            this.#lastReadySession = null;
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_resolve_transcriber_ready":
+          this.#lastReadySession?.resolveReady();
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_reject_transcriber_ready":
+          this.#lastReadySession?.rejectReady();
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );

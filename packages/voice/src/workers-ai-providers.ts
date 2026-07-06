@@ -182,6 +182,10 @@ class FluxSession implements TranscriberSession {
   #pendingChunks: ArrayBuffer[] = [];
   #currentTranscript = "";
 
+  #ready: Promise<void>;
+  #resolveReady: (() => void) | null = null;
+  #rejectReady: ((reason: unknown) => void) | null = null;
+
   constructor(
     ai: AiLike,
     config: FluxSessionConfig,
@@ -190,7 +194,16 @@ class FluxSession implements TranscriberSession {
     this.#onInterim = options?.onInterim;
     this.#onSpeechStart = options?.onSpeechStart;
     this.#onUtterance = options?.onUtterance;
+    this.#ready = new Promise<void>((resolve, reject) => {
+      this.#resolveReady = resolve;
+      this.#rejectReady = reject;
+    });
+    this.#ready.catch(() => {});
     this.#connect(ai, config);
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.#ready;
   }
 
   async #connect(ai: AiLike, config: FluxSessionConfig): Promise<void> {
@@ -217,12 +230,17 @@ class FluxSession implements TranscriberSession {
           ws.accept();
           ws.close();
         }
+        this.#resolveReadiness();
         return;
       }
 
       const ws = (resp as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
+        const error = new Error(
+          "Workers AI Flux STT did not return a WebSocket"
+        );
         console.error("[FluxSTT] Failed to establish WebSocket connection");
+        this.#rejectReadiness(error);
         return;
       }
 
@@ -247,8 +265,10 @@ class FluxSession implements TranscriberSession {
         ws.send(chunk);
       }
       this.#pendingChunks = [];
+      this.#resolveReadiness();
     } catch (err) {
       console.error("[FluxSTT] Connection error:", err);
+      this.#rejectReadiness(err);
     }
   }
 
@@ -275,6 +295,23 @@ class FluxSession implements TranscriberSession {
       this.#ws = null;
     }
     this.#connected = false;
+    this.#resolveReadiness();
+  }
+
+  #resolveReadiness(): void {
+    const resolve = this.#resolveReady;
+    if (!resolve) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    resolve();
+  }
+
+  #rejectReadiness(reason: unknown): void {
+    const reject = this.#rejectReady;
+    if (!reject) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    reject(reason);
   }
 
   #handleMessage(event: MessageEvent): void {

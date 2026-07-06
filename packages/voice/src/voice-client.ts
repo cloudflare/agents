@@ -643,7 +643,7 @@ export class VoiceClient {
         break;
       case "status":
         this.#status = msg.status as VoiceStatus;
-        if (msg.status === "listening" || msg.status === "idle") {
+        if (msg.status === "listening") {
           this.#error = null;
           this.#emit("error", null);
         }

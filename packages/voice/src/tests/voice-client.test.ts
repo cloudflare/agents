@@ -648,6 +648,32 @@ describe("VoiceClient playback interrupt", () => {
   });
 });
 
+describe("VoiceClient errors", () => {
+  it("preserves a server error when an idle status follows it", () => {
+    const transport = new MockTransport();
+    const errors: Array<string | null> = [];
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    client.addEventListener("error", (error) => errors.push(error));
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition failed to start"
+      })
+    );
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.error).toBe("Speech recognition failed to start");
+    expect(errors.at(-1)).toBe("Speech recognition failed to start");
+
+    transport.receive(JSON.stringify({ type: "status", status: "listening" }));
+
+    expect(client.error).toBeNull();
+    expect(errors.at(-1)).toBeNull();
+  });
+});
+
 describe("VoiceClient gapless playback", () => {
   // 1600 samples of 16-bit PCM = 0.1s at 16kHz
   function pcm16Chunk(): ArrayBuffer {

@@ -137,10 +137,11 @@ export class AudioConnectionManager {
     connectionId: string,
     transcriber: Transcriber,
     options: TranscriberSessionOptions
-  ): void {
+  ): TranscriberSession {
     this.closeTranscriberSession(connectionId);
     const session = transcriber.createSession(options);
     this.#transcriberSessions.set(connectionId, session);
+    return session;
   }
 
   closeTranscriberSession(connectionId: string): void {

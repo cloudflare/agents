@@ -85,6 +85,25 @@ function waitForType(ws: WebSocket, type: string) {
   );
 }
 
+async function waitForAck(ws: WebSocket, command: string): Promise<void> {
+  await waitForMessageMatching(
+    ws,
+    (m) =>
+      typeof m === "object" &&
+      m !== null &&
+      (m as Record<string, unknown>).type === "_ack" &&
+      (m as Record<string, unknown>).command === command
+  );
+}
+
+async function setTranscriberMode(
+  ws: WebSocket,
+  value: "default" | "pending_ready" | "reject_ready" | "create_throw"
+): Promise<void> {
+  sendJSON(ws, { type: "_set_transcriber_mode", value });
+  await waitForAck(ws, "_set_transcriber_mode");
+}
+
 function waitForBinary(ws: WebSocket, timeout = 5000): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -204,6 +223,174 @@ describe("VoiceAgent — protocol", () => {
       unknown
     >;
     expect(config.format).toBe("mp3");
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — transcriber readiness", () => {
+  it("does not send listening or run onCallStart before readiness resolves", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await setTranscriberMode(ws, "pending_ready");
+
+    const audioConfig = waitForType(ws, "audio_config");
+    sendJSON(ws, { type: "start_call" });
+    await audioConfig;
+
+    const beforeReady = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "_counts"
+    );
+    sendJSON(ws, { type: "_get_counts" });
+
+    const beforeReadyMessages = await beforeReady;
+    expect(beforeReadyMessages).not.toContainEqual({
+      type: "status",
+      status: "listening"
+    });
+    expect(beforeReadyMessages.at(-1)).toMatchObject({
+      type: "_counts",
+      callStart: 0
+    });
+
+    sendJSON(ws, { type: "_resolve_transcriber_ready" });
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "_get_counts" });
+    const counts = (await waitForType(ws, "_counts")) as Record<
+      string,
+      unknown
+    >;
+    expect(counts.callStart).toBe(1);
+    ws.close();
+  });
+
+  it("sends a visible error, returns idle, and cleans up when readiness rejects", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setTranscriberMode(ws, "reject_ready");
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message: "Speech recognition failed to start"
+      });
+      expect(startupMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+
+      sendJSON(ws, { type: "_get_counts" });
+      const failedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(failedCounts.callStart).toBe(0);
+      expect(failedCounts.callEnd).toBe(1);
+
+      await setTranscriberMode(ws, "default");
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      sendJSON(ws, { type: "_get_counts" });
+      const restartedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(restartedCounts.callStart).toBe(1);
+      expect(restartedCounts.callEnd).toBe(1);
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("sends a visible error, returns idle, and cleans up when session creation throws", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setTranscriberMode(ws, "create_throw");
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message: "Speech recognition failed to start"
+      });
+      expect(startupMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+
+      sendJSON(ws, { type: "_get_counts" });
+      const counts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(counts.callStart).toBe(0);
+      expect(counts.callEnd).toBe(1);
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("ignores stale readiness after end_call", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await setTranscriberMode(ws, "pending_ready");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForType(ws, "audio_config");
+
+    sendJSON(ws, { type: "end_call" });
+    await waitForStatus(ws, "idle");
+
+    const afterEnd = collectMessagesUntil(ws, (msg) => msg.type === "_counts");
+    sendJSON(ws, { type: "_resolve_transcriber_ready" });
+    sendJSON(ws, { type: "_get_counts" });
+    const afterEndMessages = await afterEnd;
+
+    expect(afterEndMessages).not.toContainEqual({
+      type: "status",
+      status: "listening"
+    });
+    expect(afterEndMessages.some((msg) => msg.type === "error")).toBe(false);
+    expect(afterEndMessages.at(-1)).toMatchObject({
+      type: "_counts",
+      callStart: 0,
+      callEnd: 1
+    });
+    ws.close();
+  });
+
+  it("starts immediately for custom transcribers without waitUntilReady", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "_get_counts" });
+    const counts = (await waitForType(ws, "_counts")) as Record<
+      string,
+      unknown
+    >;
+    expect(counts.callStart).toBe(1);
     ws.close();
   });
 });
