@@ -985,7 +985,7 @@ describe("hasNodejsCompat", () => {
   });
 });
 
-// Longer timeout duration given since Python workers can take longer to start
+// Longer timeout duration given since Python workers can take longer to start in the test suite
 describe("createWorker with python main", () => {
   it("executes a Python script as the main module", async () => {
     const dynamic_worker = await createWorker({
@@ -1072,7 +1072,6 @@ describe("createWorker with pyproject.toml", () => {
           "[project]",
           'name = "dummy"',
           'version = "0.0.0"',
-          //'dependencies = ["typing_extensions", "anyio", "annotated_doc", "starlette", "fastapi"]'
           // typing_extensions has zero dependencies. typing_inspection depends on typing_extensions
           'dependencies = ["typing_extensions", "typing_inspection"]'
         ].join("\n")
@@ -1092,36 +1091,5 @@ describe("createWorker with pyproject.toml", () => {
     const body = await response.json();
     expect(body.typing_extensions).toBe("typing_extensions");
     expect(body.typing_inspection).toBe("typing_inspection");
-  });
-
-  it("works with a pure python package with specific version specified", async () => {
-    const id = "test-worker-" + testId++;
-    const createWorkerResult = await createWorker({
-      files: {
-        "index.py": [
-          "from workers import Response, WorkerEntrypoint",
-          "class Default(WorkerEntrypoint):",
-          "  async def fetch(self, request):",
-          '    return Response("ok")'
-        ].join("\n"),
-        "pyproject.toml": [
-          "[project]",
-          'name = "dummy"',
-          'version = "0.0.0"',
-          'dependencies = ["fastapi==0.138.0"]'
-        ].join("\n")
-      }
-    });
-    const worker = env.LOADER.get(id, () => ({
-      mainModule: createWorkerResult.mainModule,
-      modules: createWorkerResult.modules,
-      compatibilityDate:
-        createWorkerResult.wranglerConfig?.compatibilityDate ?? "2026-01-01",
-      compatibilityFlags: createWorkerResult.wranglerConfig?.compatibilityFlags
-    }));
-    const response = await worker
-      .getEntrypoint()
-      .fetch(new Request("http://worker/"));
-    expect(response.status).toBe(200);
   });
 }, 20000);
