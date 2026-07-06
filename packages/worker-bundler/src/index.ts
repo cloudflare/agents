@@ -142,49 +142,48 @@ export async function createWorker(
     );
   }
 
+  if (entryPoint.endsWith(".py")) {
+    let result = {
+      mainModule: entryPoint,
+      modules: Object.fromEntries(fileSystem.files),
+      compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-01-01",
+      compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
+        "python_workers"
+      ]
+    };
+
+    delete result.modules["pyproject.toml"]; //This doesn't need to persist to the worker
+    return result;
+  }
+
   if (bundle) {
-    if (entryPoint.endsWith(".py")) {
-      //note: probably desirable to move this out of the 'is bundle' path and change that default for 'bundle' to false for when the dependencies are python, since this seems to mostly be a JS thing
-      let result = {
-        mainModule: entryPoint,
-        modules: Object.fromEntries(fileSystem.files),
-        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-01-01",
-        compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
-          "python_workers"
-        ]
-      };
+    // Try bundling with esbuild-wasm
+    const result = await bundleWithEsbuild({
+      files: fileSystem,
+      entryPoint,
+      externals,
+      target,
+      minify,
+      sourcemap,
+      nodejsCompat,
+      jsx,
+      jsxImportSource,
+      define,
+      loader,
+      conditions,
+      plugins
+    });
 
-      delete result.modules["pyproject.toml"];
-      return result;
-    } else {
-      // Try bundling with esbuild-wasm
-      const result = await bundleWithEsbuild({
-        files: fileSystem,
-        entryPoint,
-        externals,
-        target,
-        minify,
-        sourcemap,
-        nodejsCompat,
-        jsx,
-        jsxImportSource,
-        define,
-        loader,
-        conditions,
-        plugins
-      });
-
-      // Add wrangler config if a config file was found
-      if (wranglerConfig !== undefined) {
-        result.wranglerConfig = wranglerConfig;
-      }
-
-      // Add install warnings to result
-      if (installWarnings.length > 0) {
-        result.warnings = [...(result.warnings ?? []), ...installWarnings];
-      }
-      return result;
+    // Add wrangler config if a config file was found
+    if (wranglerConfig !== undefined) {
+      result.wranglerConfig = wranglerConfig;
     }
+
+    // Add install warnings to result
+    if (installWarnings.length > 0) {
+      result.warnings = [...(result.warnings ?? []), ...installWarnings];
+    }
+    return result;
   } else {
     // No bundling - transform files and resolve dependencies.
     // Sourcemaps and the esbuild-only options (jsx, jsxImportSource, define,
