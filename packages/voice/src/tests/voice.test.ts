@@ -98,10 +98,20 @@ async function waitForAck(ws: WebSocket, command: string): Promise<void> {
 
 async function setTranscriberMode(
   ws: WebSocket,
-  value: "default" | "pending_ready" | "reject_ready" | "create_throw"
+  value:
+    | "default"
+    | "pending_ready"
+    | "pending_ready_no_close_settle"
+    | "reject_ready"
+    | "create_throw"
 ): Promise<void> {
   sendJSON(ws, { type: "_set_transcriber_mode", value });
   await waitForAck(ws, "_set_transcriber_mode");
+}
+
+async function waitForMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function waitForBinary(ws: WebSocket, timeout = 5000): Promise<ArrayBuffer> {
@@ -295,6 +305,8 @@ describe("VoiceAgent — transcriber readiness", () => {
       >;
       expect(failedCounts.callStart).toBe(0);
       expect(failedCounts.callEnd).toBe(1);
+      expect(failedCounts.keepAliveAcquired).toBe(1);
+      expect(failedCounts.keepAliveReleased).toBe(1);
 
       await setTranscriberMode(ws, "default");
       sendJSON(ws, { type: "start_call" });
@@ -307,6 +319,8 @@ describe("VoiceAgent — transcriber readiness", () => {
       >;
       expect(restartedCounts.callStart).toBe(1);
       expect(restartedCounts.callEnd).toBe(1);
+      expect(restartedCounts.keepAliveAcquired).toBe(2);
+      expect(restartedCounts.keepAliveReleased).toBe(1);
     } finally {
       ws.close();
       errorLog.mockRestore();
@@ -343,6 +357,8 @@ describe("VoiceAgent — transcriber readiness", () => {
       >;
       expect(counts.callStart).toBe(0);
       expect(counts.callEnd).toBe(1);
+      expect(counts.keepAliveAcquired).toBe(1);
+      expect(counts.keepAliveReleased).toBe(1);
     } finally {
       ws.close();
       errorLog.mockRestore();
@@ -373,9 +389,120 @@ describe("VoiceAgent — transcriber readiness", () => {
     expect(afterEndMessages.at(-1)).toMatchObject({
       type: "_counts",
       callStart: 0,
-      callEnd: 1
+      callEnd: 1,
+      keepAliveAcquired: 1,
+      keepAliveReleased: 1
     });
     ws.close();
+  });
+
+  it("ignores stale readiness rejection after end_call", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await setTranscriberMode(ws, "pending_ready_no_close_settle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForType(ws, "audio_config");
+
+    sendJSON(ws, { type: "end_call" });
+    await waitForStatus(ws, "idle");
+
+    const afterEnd = collectMessagesUntil(ws, (msg) => msg.type === "_counts");
+    sendJSON(ws, { type: "_reject_transcriber_ready" });
+    await waitForMicrotasks();
+    sendJSON(ws, { type: "_get_counts" });
+    const afterEndMessages = await afterEnd;
+
+    expect(afterEndMessages).not.toContainEqual({
+      type: "status",
+      status: "listening"
+    });
+    expect(afterEndMessages.some((msg) => msg.type === "error")).toBe(false);
+    expect(afterEndMessages.at(-1)).toMatchObject({
+      type: "_counts",
+      callStart: 0,
+      callEnd: 1,
+      keepAliveAcquired: 1,
+      keepAliveReleased: 1
+    });
+    ws.close();
+  });
+
+  it("ignores stale readiness rejection after a later startup succeeds", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await setTranscriberMode(ws, "pending_ready_no_close_settle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForType(ws, "audio_config");
+
+    sendJSON(ws, { type: "end_call" });
+    await waitForStatus(ws, "idle");
+
+    await setTranscriberMode(ws, "default");
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const afterRestart = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "_counts"
+    );
+    sendJSON(ws, { type: "_reject_transcriber_ready_at", index: 0 });
+    await waitForMicrotasks();
+    sendJSON(ws, { type: "_get_counts" });
+    const afterRestartMessages = await afterRestart;
+
+    expect(afterRestartMessages.some((msg) => msg.type === "error")).toBe(
+      false
+    );
+    expect(afterRestartMessages.at(-1)).toMatchObject({
+      type: "_counts",
+      callStart: 1,
+      callEnd: 1,
+      keepAliveAcquired: 2,
+      keepAliveReleased: 1
+    });
+    ws.close();
+  });
+
+  it("ignores stale readiness rejection after disconnect", async () => {
+    const path = uniquePath();
+    const { ws } = await connectWS(path);
+    await waitForStatus(ws, "idle");
+    await setTranscriberMode(ws, "pending_ready_no_close_settle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForType(ws, "audio_config");
+
+    ws.close();
+    await waitForMicrotasks();
+
+    const { ws: nextWs } = await connectWS(path);
+    await waitForStatus(nextWs, "idle");
+
+    const afterDisconnect = collectMessagesUntil(
+      nextWs,
+      (msg) => msg.type === "_counts"
+    );
+    sendJSON(nextWs, { type: "_reject_transcriber_ready" });
+    await waitForMicrotasks();
+    sendJSON(nextWs, { type: "_get_counts" });
+    const afterDisconnectMessages = await afterDisconnect;
+
+    expect(afterDisconnectMessages).not.toContainEqual({
+      type: "status",
+      status: "listening"
+    });
+    expect(afterDisconnectMessages.some((msg) => msg.type === "error")).toBe(
+      false
+    );
+    expect(afterDisconnectMessages.at(-1)).toMatchObject({
+      type: "_counts",
+      callStart: 0,
+      keepAliveAcquired: 1,
+      keepAliveReleased: 1
+    });
+    nextWs.close();
   });
 
   it("starts immediately for custom transcribers without waitUntilReady", async () => {

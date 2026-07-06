@@ -672,6 +672,46 @@ describe("VoiceClient errors", () => {
     expect(client.error).toBeNull();
     expect(errors.at(-1)).toBeNull();
   });
+
+  it("stops local audio when a startup error returns the call to idle", async () => {
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    await client.startCall();
+
+    expect(audioInput.started).toBe(true);
+    expect(audioInput.stopped).toBe(false);
+    expect(audioInput.onAudioLevel).not.toBeNull();
+    expect(audioInput.onAudioData).not.toBeNull();
+
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition failed to start"
+      })
+    );
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.status).toBe("idle");
+    expect(client.error).toBe("Speech recognition failed to start");
+    expect(audioInput.stopped).toBe(true);
+    expect(audioInput.onAudioLevel).toBeNull();
+    expect(audioInput.onAudioData).toBeNull();
+    expect(transport.sentJSON).not.toContainEqual({ type: "end_call" });
+
+    transport.disconnect();
+    transport.connect();
+
+    expect(
+      transport.sentJSON.filter((message) => message.type === "start_call")
+    ).toHaveLength(1);
+  });
 });
 
 describe("VoiceClient gapless playback", () => {

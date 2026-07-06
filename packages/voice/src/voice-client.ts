@@ -528,6 +528,12 @@ export class VoiceClient {
     if (this.#transport?.connected) {
       this.#transport.sendJSON({ type: "end_call" });
     }
+    this.#stopLocalCall();
+    this.#status = "idle";
+    this.#emit("statuschange", "idle");
+  }
+
+  #stopLocalCall(): void {
     if (this.#options.audioInput) {
       this.#options.audioInput.stop();
       this.#options.audioInput.onAudioLevel = null;
@@ -538,8 +544,6 @@ export class VoiceClient {
     this.#stopPlayback();
     this.#closeAudioContext();
     this.#resetDetection();
-    this.#status = "idle";
-    this.#emit("statuschange", "idle");
   }
 
   toggleMute(): void {
@@ -643,6 +647,10 @@ export class VoiceClient {
         break;
       case "status":
         this.#status = msg.status as VoiceStatus;
+        if (msg.status === "idle" && this.#inCall) {
+          this.#inCall = false;
+          this.#stopLocalCall();
+        }
         if (msg.status === "listening") {
           this.#error = null;
           this.#emit("error", null);

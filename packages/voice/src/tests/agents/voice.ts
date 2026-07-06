@@ -81,6 +81,7 @@ class TestTranscriber implements Transcriber {
 type TestTranscriberMode =
   | "default"
   | "pending_ready"
+  | "pending_ready_no_close_settle"
   | "reject_ready"
   | "create_throw";
 
@@ -88,6 +89,7 @@ function isTestTranscriberMode(value: unknown): value is TestTranscriberMode {
   return (
     value === "default" ||
     value === "pending_ready" ||
+    value === "pending_ready_no_close_settle" ||
     value === "reject_ready" ||
     value === "create_throw"
   );
@@ -97,9 +99,11 @@ class ControlledReadyTranscriberSession extends TestTranscriberSession {
   #ready: Promise<void>;
   #resolveReady: (() => void) | null = null;
   #rejectReady: ((reason: unknown) => void) | null = null;
+  #settleOnClose: boolean;
 
-  constructor(options?: TranscriberSessionOptions) {
+  constructor(options?: TranscriberSessionOptions, settleOnClose = true) {
     super(options);
+    this.#settleOnClose = settleOnClose;
     this.#ready = new Promise<void>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
@@ -129,7 +133,7 @@ class ControlledReadyTranscriberSession extends TestTranscriberSession {
 
   close(): void {
     super.close();
-    this.resolveReady();
+    if (this.#settleOnClose) this.resolveReady();
   }
 }
 
@@ -357,6 +361,21 @@ export class TestVoiceAgent extends VoiceBase {
   #turnDelayMs = 0;
   #transcriberMode: TestTranscriberMode = "default";
   #lastReadySession: ControlledReadyTranscriberSession | null = null;
+  #readySessions: ControlledReadyTranscriberSession[] = [];
+  #keepAliveAcquiredCount = 0;
+  #keepAliveReleasedCount = 0;
+
+  async keepAlive(): Promise<() => void> {
+    const dispose = await super.keepAlive();
+    this.#keepAliveAcquiredCount++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#keepAliveReleasedCount++;
+      dispose();
+    };
+  }
 
   createTranscriber(_connection: Connection): Transcriber | null {
     const mode = this.#transcriberMode;
@@ -371,8 +390,12 @@ export class TestVoiceAgent extends VoiceBase {
 
     return {
       createSession: (options?: TranscriberSessionOptions) => {
-        const session = new ControlledReadyTranscriberSession(options);
+        const session = new ControlledReadyTranscriberSession(
+          options,
+          mode !== "pending_ready_no_close_settle"
+        );
         this.#lastReadySession = session;
+        this.#readySessions.push(session);
         if (mode === "reject_ready") {
           session.rejectReady();
         }
@@ -445,13 +468,23 @@ export class TestVoiceAgent extends VoiceBase {
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
           break;
+        case "_reject_transcriber_ready_at":
+          if (typeof parsed.index === "number") {
+            this.#readySessions[parsed.index]?.rejectReady();
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
         case "_get_counts":
           connection.send(
             JSON.stringify({
               type: "_counts",
               callStart: this.#callStartCount,
               callEnd: this.#callEndCount,
-              interrupt: this.#interruptCount
+              interrupt: this.#interruptCount,
+              keepAliveAcquired: this.#keepAliveAcquiredCount,
+              keepAliveReleased: this.#keepAliveReleasedCount
             })
           );
           break;
