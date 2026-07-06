@@ -42,7 +42,11 @@ import type {
   Transcriber,
   TranscriberSession
 } from "./types";
-import { AudioConnectionManager, sendVoiceJSON } from "./audio-pipeline";
+import {
+  AudioConnectionManager,
+  runBackground,
+  sendVoiceJSON
+} from "./audio-pipeline";
 
 // Re-export SentenceChunker for direct use
 export { SentenceChunker } from "./sentence-chunker";
@@ -314,24 +318,30 @@ export function withVoice<TBase extends AgentLike>(
             case "hello":
               break;
             case "start_call":
-              this.#handleStartCall(
-                connection,
-                (parsed as { preferred_format?: string }).preferred_format
+              runBackground("start_call", () =>
+                this.#handleStartCall(
+                  connection,
+                  (parsed as { preferred_format?: string }).preferred_format
+                )
               );
               break;
             case "end_call":
-              this.#handleEndCall(connection);
+              runBackground("end_call", () => this.#handleEndCall(connection));
               break;
             case "start_of_speech":
             case "end_of_speech":
               break;
             case "interrupt":
-              this.#handleInterrupt(connection);
+              runBackground("interrupt", () =>
+                this.#handleInterrupt(connection)
+              );
               break;
             case "text_message": {
               const text = (parsed as unknown as { text?: string }).text;
               if (typeof text === "string") {
-                this.#handleTextMessage(connection, text);
+                runBackground("text_message", () =>
+                  this.#handleTextMessage(connection, text)
+                );
               }
               break;
             }
@@ -586,7 +596,11 @@ export function withVoice<TBase extends AgentLike>(
 
         await session.waitUntilReady?.();
       } catch (error) {
-        this.#handleTranscriberStartupFailure(connection, startupToken, error);
+        await this.#handleTranscriberStartupFailure(
+          connection,
+          startupToken,
+          error
+        );
         return;
       }
 
@@ -604,11 +618,11 @@ export function withVoice<TBase extends AgentLike>(
       );
     }
 
-    #handleTranscriberStartupFailure(
+    async #handleTranscriberStartupFailure(
       connection: Connection,
       startupToken: symbol,
       error: unknown
-    ): void {
+    ): Promise<void> {
       if (!this.#isCurrentStartup(connection.id, startupToken)) return;
 
       console.error("[VoiceAgent] Transcriber startup failed:", error);
@@ -620,7 +634,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#cm.cleanup(connection.id);
       this.#releaseKeepAlive(connection.id);
       this.#sendJSON(connection, { type: "status", status: "idle" });
-      this.onCallEnd(connection);
+      await this.onCallEnd(connection);
     }
 
     #releaseKeepAlive(connectionId: string) {
@@ -631,19 +645,19 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    #handleEndCall(connection: Connection) {
+    #handleEndCall(connection: Connection): void | Promise<void> {
       this.#startupTokens.delete(connection.id);
       this.#cm.cleanup(connection.id);
       this.#releaseKeepAlive(connection.id);
       this.#sendJSON(connection, { type: "status", status: "idle" });
-      this.onCallEnd(connection);
+      return this.onCallEnd(connection);
     }
 
-    #handleInterrupt(connection: Connection) {
+    #handleInterrupt(connection: Connection): void | Promise<void> {
       this.#cm.abortPipeline(connection.id);
       this.#cm.clearAudioBuffer(connection.id);
       this.#sendJSON(connection, { type: "status", status: "listening" });
-      this.onInterrupt(connection);
+      return this.onInterrupt(connection);
     }
 
     #handleBargeIn(connection: Connection) {

@@ -176,6 +176,32 @@ class FakeAudioInput implements VoiceAudioInput {
   }
 }
 
+class DeferredAudioInput implements VoiceAudioInput {
+  onAudioLevel: ((rms: number) => void) | null = null;
+  onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
+  startCalled = false;
+  running = false;
+  stopCount = 0;
+  #resolveStart: (() => void) | null = null;
+
+  async start(): Promise<void> {
+    this.startCalled = true;
+    await new Promise<void>((resolve) => {
+      this.#resolveStart = resolve;
+    });
+    this.running = true;
+  }
+
+  stop(): void {
+    this.stopCount++;
+    this.running = false;
+  }
+
+  resolveStart(): void {
+    this.#resolveStart?.();
+  }
+}
+
 let originalAudioContext: typeof AudioContext | undefined;
 let originalAudio: typeof Audio | undefined;
 let audioContext: FakeAudioContext;
@@ -207,6 +233,16 @@ async function waitForSourceCount(
   throw new Error(
     `expected ${count} audio sources, got ${audioContext.sources.length}`
   );
+}
+
+async function waitForAudioInputStart(
+  audioInput: DeferredAudioInput
+): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    if (audioInput.startCalled) return;
+    await Promise.resolve();
+  }
+  throw new Error("expected audio input start to be called");
 }
 
 beforeEach(() => {
@@ -711,6 +747,69 @@ describe("VoiceClient errors", () => {
     expect(
       transport.sentJSON.filter((message) => message.type === "start_call")
     ).toHaveLength(1);
+  });
+
+  it("stops local audio if startup fails before audio input start resolves", async () => {
+    const transport = new MockTransport();
+    const audioInput = new DeferredAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    const startCall = client.startCall();
+    await waitForAudioInputStart(audioInput);
+
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition failed to start"
+      })
+    );
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.status).toBe("idle");
+    expect(client.error).toBe("Speech recognition failed to start");
+    expect(audioInput.stopCount).toBe(1);
+    expect(audioInput.running).toBe(false);
+
+    audioInput.resolveStart();
+    await startCall;
+
+    expect(audioInput.running).toBe(false);
+    expect(audioInput.stopCount).toBe(2);
+    expect(audioInput.onAudioLevel).toBeNull();
+    expect(audioInput.onAudioData).toBeNull();
+  });
+
+  it("does not stop local audio for the initial idle status during startup", async () => {
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    await client.startCall();
+
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.status).toBe("idle");
+    expect(audioInput.started).toBe(true);
+    expect(audioInput.stopped).toBe(false);
+    expect(audioInput.onAudioLevel).not.toBeNull();
+    expect(audioInput.onAudioData).not.toBeNull();
+
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(JSON.stringify({ type: "status", status: "listening" }));
+
+    expect(client.status).toBe("listening");
+    expect(audioInput.stopped).toBe(false);
   });
 });
 
