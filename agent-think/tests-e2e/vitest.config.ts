@@ -1,3 +1,4 @@
+import path from "node:path";
 import { defineConfig } from "vitest/config";
 
 /**
@@ -9,10 +10,12 @@ import { defineConfig } from "vitest/config";
  * Slow (~30s+ boot for cold docker, then minutes for a real model turn). Kept
  * separate from the default vitest run so `npm test` stays fast.
  */
+const testDir = import.meta.dirname;
+
 export default defineConfig({
   test: {
-    include: ["**/*.test.ts"],
-    globalSetup: "./setup.ts",
+    include: [path.join(testDir, "**/*.test.ts")],
+    globalSetup: path.join(testDir, "setup.ts"),
     testTimeout: 60_000,
     hookTimeout: 240_000,
     pool: "forks"

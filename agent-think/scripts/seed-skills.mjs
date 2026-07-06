@@ -2,9 +2,8 @@
  * Seed the agent-think-skills R2 bucket from ./skills.
  *
  * Uploads every skills/<name>/SKILL.md to the bucket under the
- * `.agents/skills/<name>/SKILL.md` key, matching the mount prefix in
- * wrangler.jsonc (R2Bucket(env.R2_SKILLS, { prefix: ".agents/" }) →
- * /workspace/.agents). Run after editing a skill:
+ * `.agents/skills/<name>/SKILL.md` key consumed by Think's native
+ * `skills.r2(...)` source. Run after editing a skill:
  *
  *   npm run seed:r2            # remote bucket
  *   npm run seed:r2 -- --local # local (wrangler dev) bucket
