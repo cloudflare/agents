@@ -14,7 +14,7 @@ All `gh`, `git`, `npm`, `curl`, and `wrangler` commands must run on the
 `container` backend (`bash({ command, backend: "container" })`) — the `shell`
 backend has no real binaries or network. `gh` is already authenticated as the
 app; use it directly (no token handling). Work only under `/workspace` (the
-shared filesystem); never use `/tmp`.
+shared filesystem), except for temporary files in `/tmp`.
 
 ## 0. Clone the repo
 
@@ -91,8 +91,7 @@ pnpm --filter <package> typecheck > /tmp/typecheck.log 2>&1; tail -30 /tmp/typec
 pnpm --filter <package> test > /tmp/test.log 2>&1; tail -40 /tmp/test.log
 ```
 
-(`/tmp` is fine for LOG files — the never-use-/tmp rule is about files the
-read/write/edit tools need to see.)
+(`/tmp` is fine for temporary files that the container creates and consumes.)
 
 Record whether tests passed in `testsPassed`. If you cannot make tests pass and
 the failure is your change's fault, fix it; if tests are unrelated/flaky, note
@@ -140,6 +139,7 @@ deploying something meaningless.
 ## 7. Commit, push, open the PR
 
 ```bash
+git status --short
 git add -A
 git commit -m "fix: <concise description> (#<issueNumber>)"
 git push -u origin "$BRANCH"
@@ -148,10 +148,10 @@ gh pr create --repo <repo> \
   --base main \
   --head "$BRANCH" \
   --title "fix: <concise description> (#<issueNumber>)" \
-  --body-file pr-body.md
+  --body-file /tmp/pr-body.md
 ```
 
-The PR body (`pr-body.md`) must include:
+Write the PR body outside the workspace at `/tmp/pr-body.md`. It must include:
 
 - `Closes #<issueNumber>` so the issue auto-links.
 - **What was wrong** (root cause, citing the file/line).
