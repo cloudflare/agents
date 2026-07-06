@@ -62,13 +62,14 @@ const CONTEXT_KEY = "agent-think-context";
 // this is the grace window for that ack, not a tuning knob.
 const RESET_ABORT_DELAY_MS = 100;
 const REPO_ROOT = "/workspace/repo";
-// Kimi K2.7 Code on Workers AI (bills via Workers AI, NOT Unified Billing —
-// switched back 2026-07-03 after unified-billing credits ran dry mid-run;
-// gpt-5.5 burned ~200k input tokens/call once tool outputs bloated the
-// thread). To go back: MODEL_ID = "openai/gpt-5.5" — the gateway delegate
-// plumbing (`providers: [openai]`) is already in place and inert for @cf/
-// models.
-const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+// GPT-5.5 (medium reasoning) through AI Gateway's model catalog — Unified
+// Billing over the AI binding, no provider key. `reasoning_effort` is a
+// first-class workers-ai-provider model setting forwarded into the request
+// (verified live: completion_tokens_details.reasoning_tokens > 0).
+// Fallback if unified-billing credits run dry (gateway 402s):
+// MODEL_ID = "@cf/moonshotai/kimi-k2.7-code" bills via Workers AI instead.
+const MODEL_ID = "openai/gpt-5.5";
+const REASONING_EFFORT = "medium";
 
 /** Per-issue run context, set by `dispatch` before the turn is submitted. */
 export interface RunContext {
@@ -386,7 +387,12 @@ export class ThinkAgent extends ThinkBase {
       binding: this.env.AI,
       gateway: { id: "default" },
       providers: [openai]
-    })(MODEL_ID);
+      // DelegateCallOptions' typing lags the runtime: the model reads
+      // settings.reasoning_effort and forwards it into the request (verified
+      // live — completion_tokens_details.reasoning_tokens > 0 at "medium").
+    })(MODEL_ID, {
+      reasoning_effort: REASONING_EFFORT
+    } as Parameters<ReturnType<typeof createWorkersAI>>[1]);
   }
 
   override async beforeTurn() {
