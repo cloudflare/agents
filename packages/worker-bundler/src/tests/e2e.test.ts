@@ -1059,16 +1059,22 @@ describe("createWorker with pyproject.toml", () => {
       files: {
         "index.py": [
           "from workers import Response, WorkerEntrypoint",
-          "from fastapi import FastAPI",
+          "import typing_extensions",
+          "import typing_inspection",
           "class Default(WorkerEntrypoint):",
           "  async def fetch(self, request):",
-          '    return Response("ok")'
+          "    return Response.json({",
+          '      "typing_extensions": typing_extensions.__name__,',
+          '      "typing_inspection": typing_inspection.__name__',
+          "    })"
         ].join("\n"),
         "pyproject.toml": [
           "[project]",
           'name = "dummy"',
           'version = "0.0.0"',
-          'dependencies = ["fastapi", "flask"]'
+          //'dependencies = ["typing_extensions", "anyio", "annotated_doc", "starlette", "fastapi"]'
+          // typing_extensions has zero dependencies. typing_inspection depends on typing_extensions
+          'dependencies = ["typing_extensions", "typing_inspection"]'
         ].join("\n")
       }
     });
@@ -1083,6 +1089,9 @@ describe("createWorker with pyproject.toml", () => {
       .getEntrypoint()
       .fetch(new Request("http://worker/"));
     expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.typing_extensions).toBe("typing_extensions");
+    expect(body.typing_inspection).toBe("typing_inspection");
   });
 
   it("works with a pure python package with specific version specified", async () => {
