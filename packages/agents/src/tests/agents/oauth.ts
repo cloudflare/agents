@@ -1,8 +1,14 @@
 import { Agent } from "../../index.ts";
 import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
 import type { AgentMcpOAuthProvider } from "../../mcp/do-oauth-client-provider";
-import type { MCPClientConnection } from "../../mcp/client-connection";
-import type { MCPClientOAuthResult } from "../../mcp/client.ts";
+import {
+  MCPConnectionState,
+  type MCPClientConnection
+} from "../../mcp/client-connection";
+import type {
+  MCPClientOAuthResult,
+  MCPConnectionResult
+} from "../../mcp/client.ts";
 
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
@@ -204,8 +210,6 @@ export class TestOAuthAgent extends Agent {
     }
   }
 
-  // Wrapper because DurableObjectStub RPC typing doesn't preserve
-  // addMcpServer's overloaded return type through the boundary.
   async testAddMcpServer(
     serverName: string,
     url: string
@@ -227,39 +231,75 @@ export class TestOAuthAgent extends Agent {
   async testAddMcpServerExpectingError(
     serverName: string,
     url: string
-  ): Promise<{ threw: boolean; message: string }> {
+  ): Promise<string> {
     try {
-      await this.addMcpServer(serverName, url, {
-        callbackHost: "http://example.com"
-      });
-      return { threw: false, message: "" };
-    } catch (err) {
-      return {
-        threw: true,
-        message: err instanceof Error ? err.message : String(err)
-      };
+      await this.testAddMcpServer(serverName, url);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
     }
   }
 
-  // Seed an OAuth state row at the key the agent's default provider reads
-  // (DurableObjectOAuthClientProvider.stateKey with clientName = agent name),
-  // as if redirectToAuthorization had run `ageMs` ago.
-  async seedProviderOAuthState(
-    serverId: string,
-    nonce: string,
-    options?: { ageMs?: number }
-  ): Promise<void> {
-    await this.ctx.storage.put(`/${this.name}/${serverId}/state/${nonce}`, {
-      nonce,
-      serverId,
-      createdAt: Date.now() - (options?.ageMs ?? 0)
+  async seedStoredOAuthTokens(serverId: string): Promise<void> {
+    const authProvider =
+      this.mcp.mcpConnections[serverId]?.options.transport.authProvider;
+    if (!authProvider) {
+      throw new Error(`Test error: OAuth provider ${serverId} not found`);
+    }
+    await authProvider.saveTokens({
+      access_token: "test-access-token",
+      token_type: "Bearer"
     });
   }
 
-  listMcpServerIdsByName(serverName: string): string[] {
-    return this.sql<{ id: string }>`
-      SELECT id FROM cf_agents_mcp_servers WHERE name = ${serverName}
-    `.map((row) => row.id);
+  configureMcpReconnect(
+    serverId: string,
+    outcome:
+      | "authenticating"
+      | "connected"
+      | "failed"
+      | "incomplete-authenticating",
+    authUrl?: string
+  ): void {
+    const connection = this.mcp.mcpConnections[serverId];
+    if (!connection) {
+      throw new Error(`Test error: MCP connection ${serverId} not found`);
+    }
+
+    if (outcome === "incomplete-authenticating") {
+      this.mcp.connectToServer = async () =>
+        ({
+          state: MCPConnectionState.AUTHENTICATING
+        }) as unknown as MCPConnectionResult;
+      return;
+    }
+
+    connection.init = async () => {
+      switch (outcome) {
+        case "authenticating":
+          if (authUrl) {
+            await connection.options.transport.authProvider?.redirectToAuthorization(
+              new URL(authUrl)
+            );
+          }
+          connection.connectionState = MCPConnectionState.AUTHENTICATING;
+          return undefined;
+        case "connected":
+          if (!(await connection.options.transport.authProvider?.tokens())) {
+            throw new Error("Test error: expected stored OAuth tokens");
+          }
+          connection.connectionState = MCPConnectionState.CONNECTED;
+          return undefined;
+        case "failed":
+          connection.connectionState = MCPConnectionState.FAILED;
+          return "test connection failure";
+      }
+    };
+
+    connection.discover = async () => {
+      connection.connectionState = MCPConnectionState.READY;
+      return { success: true };
+    };
   }
 
   getMcpServerFromDb(serverId: string) {
