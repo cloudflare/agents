@@ -350,9 +350,8 @@ async function installPythonPackage(
 
   const installPromise = (async () => {
     try {
-      // the below was done in a separate function for the JS impl; move it?
+      // The JS impl. does the metadata part in another function, consider moving it if this gets too long
       // Fetch package metadata from PyPI JSON API
-      // this appears to be necessary to determine which version to actually get when installing without a defined version
       const metadataResponse = await fetchWithTimeout(
         `${PYPI_JSON_API}/${name}/json`
       );
@@ -368,7 +367,6 @@ async function installPythonPackage(
       const metadata = (await metadataResponse.json()) as {
         info: { version: string };
 
-        //added for wheels
         urls: Array<{
           filename: string;
           url: string;
@@ -379,13 +377,11 @@ async function installPythonPackage(
       const version = metadata.info.version;
       let sourceUrl = `${registry}/packages/source/${name[0]}/${name}/${name}-${version}.tar.gz`;
 
-      //added for wheels
       const wheel = metadata.urls.find(
         (url) => url.packagetype === "bdist_wheel"
       );
       const wheelUrl = wheel?.url;
 
-      // Download source distribution
       const response = await fetchWithTimeout(
         wheelUrl,
         {},
@@ -402,11 +398,6 @@ async function installPythonPackage(
       const packageFilesWheel = stripWheelToPackage(
         extractWheel(new Uint8Array(buffer), result)
       );
-
-      /*
-      const packageFiles = stripTopLevelDirectory(
-        await extractTarball(new Uint8Array(buffer))
-      );*/
 
       // Mark as installed before writing to prevent cycles
       installedPackages.set(name, version);
@@ -429,29 +420,6 @@ async function installPythonPackage(
   } finally {
     inProgress.delete(name);
   }
-}
-
-/**
- * Strip the top-level directory from extracted tarball paths.
- *
- * Python source distributions place files under `{name}-{version}/`, unlike
- * npm tarballs which use a fixed `package/` prefix.
- */
-function stripTopLevelDirectory(
-  files: Record<string, string>
-): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [path, content] of Object.entries(files)) {
-    const slashIndex = path.indexOf("/", path.indexOf("/") + 1);
-    if (slashIndex === -1) {
-      continue; // Skip root-level files (e.g. PKG-INFO)
-    }
-    const newPath = path.slice(slashIndex + 1);
-    if (newPath) {
-      result[newPath] = content;
-    }
-  }
-  return result;
 }
 
 /**
