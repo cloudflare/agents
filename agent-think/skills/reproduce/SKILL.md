@@ -3,10 +3,12 @@ name: reproduce
 description: Reproduce a cloudflare/agents GitHub issue by scaffolding a minimal Agents/Worker project and deploying it to a temporary Cloudflare account, then report findings back on the issue.
 ---
 
-You are given `issueNumber`, `repo`, and `context` in the arguments. Reproduce the bug end-to-end and post your findings as an issue comment.
+The agent system prompt gives you `issueNumber`, `repo`, and the user's
+instruction. Use those values directly; there is no separate arguments object.
+Reproduce the bug end-to-end and post your findings as an issue comment.
 
-`context` is any free-form text the user typed after the `@agent-think repro`
-command (it may be empty). Treat it as an extra hint from the triggering user
+The instruction is the free-form text the user typed after `@agent-think` (it
+may be empty). Treat it as an extra hint from the triggering user
 — e.g. additional reproduction steps, a specific version, or a pointer to the
 suspect area. Let it guide your reproduction, but the issue itself remains the
 source of truth.
@@ -18,10 +20,14 @@ app; use it directly (no token handling).
 
 ## 0. Clone the repo
 
-The workspace starts empty. Clone the target repo into `/workspace/repo` first:
+Clone the target repo directly under `/workspace` using its repository name
+(`cloudflare/agents` → `/workspace/agents`):
 
 ```bash
-git clone --depth=1 https://github.com/<repo>.git /workspace/repo
+REPO_DIR="/workspace/$(basename <repo>)"
+if [ ! -d "$REPO_DIR/.git" ]; then
+  git clone --depth=1 https://github.com/<repo>.git "$REPO_DIR"
+fi
 ```
 
 ## 1. Understand the issue
@@ -43,17 +49,16 @@ a short, polite comment saying the repro-agent skipped it and why.
 
 ## 2. Understand the relevant code
 
-With the repo cloned at `/workspace/repo`, read the relevant parts of
+With the repo cloned at `$REPO_DIR`, read the relevant parts of
 `packages/agents`, `packages/think`, or the matching `think-starters/` template
 to understand the area the issue touches. Match the user's versions where it
 matters.
 
 ## 3. Scaffold a minimal reproduction
 
-Work in a scratch dir **under `/workspace`**, never touch the checkout. Do NOT
-use `/tmp` or any path outside `/workspace`: only `/workspace` is the shared
-filesystem that both the container shell AND the `read`/`write`/`edit` tools
-see. Files written elsewhere are invisible to those tools.
+Work in a scratch dir under `/workspace`, never touch the checkout. The entire
+workspace is container-local; `/workspace/temp` is available for logs and other
+scratch files. The shell and `read`/`write`/`edit` tools see the same files.
 
 ```bash
 REPRO_DIR="/workspace/repro-<issueNumber>"
@@ -81,7 +86,7 @@ Every repro deploy MUST ship a minimal Vite + React page at the Worker's root UR
 **Steps**
 
 1. In `$REPRO_DIR`, create the 7 files below.
-2. `npm install > /tmp/install.log 2>&1; tail -15 /tmp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local file like this — streaming megabytes of live output through the session can kill it.
+2. `mkdir -p /workspace/temp && npm install > /workspace/temp/install.log 2>&1; tail -15 /workspace/temp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local file like this — streaming megabytes of live output through the session can kill it.
 3. Sanity-check the build before deploying: `npx vite build` (catches config errors cheaply; do NOT run `vite dev` — it blocks waiting for a browser).
 4. Deploy per the **Deploy** step below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
 5. After deploy, confirm the root URL serves the page (the **Verify** step) and include the URL + click instructions in your report (the **Report back** step).
@@ -268,7 +273,7 @@ human should look at.
 Publish the repro project as an **orphan branch on the target repo** so anyone
 (human or agent) can pull exactly what you built and run it:
 
-Never do this inside `/workspace/repo` — the clone must stay intact for the
+Never do this inside `$REPO_DIR` — the clone must stay intact for the
 root-cause hypothesis and any follow-up PR work. Publish from a scratch dir:
 
 ```bash
