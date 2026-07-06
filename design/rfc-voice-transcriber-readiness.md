@@ -2,11 +2,23 @@
 
 Status: accepted
 
+## Summary
+
+`withVoice()` currently treats transcriber session creation as if the session is ready immediately. That is not true for streaming STT providers that connect asynchronously.
+
+This RFC adds an optional `waitUntilReady()` method to `TranscriberSession` and has `withVoice()` await it before sending `listening` or running `onCallStart()`.
+
+The API shape is generic. The first implementation is intentionally narrow: wire it through `withVoice()` and implement readiness for `WorkersAIFluxSTT`, which is the path that exposed the startup race.
+
 ## The Problem
 
-A startup race in the voice-agent example exposed that `withVoice()` has no transcriber readiness signal. On call start, `withVoice()` creates the transcriber session and then immediately calls `onCallStart()`. The example's `onCallStart()` speaks an initial greeting. The observed failure happened with Workers AI Flux STT and Inworld TTS 2: the Flux upstream WebSocket sometimes failed during startup with `InferenceUpstreamError`. The browser then continued sending audio, but the failed Flux session never emitted interim or final transcripts, so the app stayed in `listening` with no visible user transcript or assistant response.
+While prototyping Inworld TTS 2 support for the voice-agent example, we found a startup race in `withVoice()`.
 
-The temporary example-level fix waited briefly before playing the greeting. That proved the issue was sequencing, but it was not the right abstraction. An example should not know that one provider combination needs to wait for a transcriber provider to finish async startup.
+On call start, `withVoice()` creates the transcriber session and then immediately calls `onCallStart()`. The example's `onCallStart()` speaks an initial greeting. That means the voice pipeline can start TTS and browser audio playback while the STT provider is still connecting.
+
+The observed failure used Workers AI Flux STT. Flux opens an upstream WebSocket asynchronously. In the prototype, that upstream WebSocket sometimes failed during startup with `InferenceUpstreamError`. The browser continued sending audio, but the failed Flux session never emitted interim or final transcripts, so the app stayed in `listening` with no visible user transcript or assistant response.
+
+The prototype workaround was to wait briefly before playing the greeting. That proved the issue was sequencing, but it was not the right abstraction. An example should not encode provider-specific startup timing. The voice pipeline should know whether the transcriber is still connecting, ready, or failed.
 
 The core issue is that `TranscriberSession` has no readiness signal. The voice pipeline can feed audio into a pending session, but it cannot distinguish between:
 
@@ -18,7 +30,14 @@ The core issue is that `TranscriberSession` has no readiness signal. The voice p
 
 Add an optional transcriber readiness hook to `@cloudflare/voice` so `withVoice()` can wait for async transcriber startup before running `onCallStart()`.
 
-This RFC intentionally scopes the first implementation to `withVoice()` and `WorkersAIFluxSTT`, because Flux is the transcriber path that exposed the race. Nova 3 and `withVoiceInput()` should use the same readiness shape later, but they do not need to be included in the minimal fix for async transcriber startup sequencing.
+This RFC defines a generic readiness shape for transcriber sessions, but intentionally limits the first wiring to `withVoice()` and `WorkersAIFluxSTT`. Flux is the path that exposed the startup race, and `withVoice()` is the path where an initial `onCallStart()` greeting can run before STT is ready. Nova 3 and `withVoiceInput()` should adopt the same readiness shape later, but are outside this minimal sequencing fix.
+
+### Non-goals
+
+- Shipping or specifying Inworld TTS 2 support. The Inworld prototype is context for how the race was found.
+- Making every transcriber provider implement readiness in this change.
+- Wiring readiness through `withVoiceInput()` in this change.
+- Redesigning turn-taking, retries, or the voice wire protocol.
 
 ### API
 
@@ -123,7 +142,7 @@ Remove any provider-specific startup delay workaround from `examples/voice-agent
    Delete any provider-specific startup delay in `examples/voice-agent/src/server.ts`.
 
 7. Verify.
-   Run the voice tests, relevant provider tests, voice-agent build, and full repo check. Deploy the voice-agent example and verify Flux with an initial `onCallStart()` greeting in the browser, including the known Inworld TTS 2 repro path if available.
+   Run the voice tests, relevant provider tests, voice-agent build, and full repo check. Deploy the voice-agent example and verify Flux with an initial `onCallStart()` greeting in the browser, including the original Inworld TTS 2 prototype repro path if available.
 
 ## Tests
 
@@ -205,7 +224,7 @@ An async `createSession()` would express readiness directly, but it would be a l
 
 ### Implement Flux and Nova 3 Together
 
-Implementing both Workers AI streaming STT providers would make provider semantics more uniform, but it expands this fix into `withVoiceInput()` as well. The immediate production issue is Flux under `withVoice()`, so the first change should stay narrow and avoid altering Nova 3 behavior until it is tested end-to-end in its primary input-only path.
+Implementing both Workers AI streaming STT providers would make provider semantics more uniform, but it expands this fix into `withVoiceInput()` as well. The immediate issue we found is Flux under `withVoice()`, so the first change should stay narrow and avoid altering Nova 3 behavior until it is tested end-to-end in its primary input-only path.
 
 ### Retry Flux Startup Internally
 
