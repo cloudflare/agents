@@ -83,6 +83,7 @@ import {
 } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
+import { AgentState, DEFAULT_STATE, type AgentStateHost } from "./agent/state";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import type { McpAgent } from "./mcp";
 export {
@@ -1095,12 +1096,9 @@ type AgentToolRecoveryInspection =
 const CURRENT_SCHEMA_VERSION = 11;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
-const STATE_ROW_ID = "cf_state_row_id";
 // Legacy key — no longer written, but read for backward compatibility with
 // DOs that were created before the single-row state optimization.
 const STATE_WAS_CHANGED = "cf_state_was_changed";
-
-const DEFAULT_STATE = {} as unknown;
 
 async function sha256Hex(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
@@ -1147,25 +1145,6 @@ function isValidParentPath(
 }
 
 /**
- * Internal key used to store the readonly flag in connection state.
- * Prefixed with _cf_ to avoid collision with user state keys.
- */
-const CF_READONLY_KEY = "_cf_readonly";
-
-/**
- * Internal key used to store the no-protocol flag in connection state.
- * When set, protocol messages (identity, state sync, MCP servers) are not
- * sent to this connection — neither on connect nor via broadcasts.
- */
-const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
-
-/**
- * Internal key used to store voice call state in connection state.
- * Used by the voice mixin to track whether a connection is in an active call.
- */
-const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
-
-/**
  * Internal key used to remember the outer `/sub/...` URL for a
  * WebSocket accepted by the parent on behalf of a child facet.
  * Hibernated events then wake the parent, which forwards frames to
@@ -1176,54 +1155,6 @@ const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
 
 const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
-
-/**
- * The set of all internal keys stored in connection state that must be
- * hidden from user code and preserved across setState calls.
- */
-const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
-  CF_READONLY_KEY,
-  CF_NO_PROTOCOL_KEY,
-  CF_VOICE_IN_CALL_KEY,
-  CF_SUB_AGENT_OUTER_URL_KEY,
-  CF_SUB_AGENT_TAGS_KEY
-]);
-
-/** Check if a raw connection state object contains any internal keys. */
-function rawHasInternalKeys(raw: Record<string, unknown>): boolean {
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) return true;
-  }
-  return false;
-}
-
-/** Return a copy of `raw` with all internal keys removed, or null if no user keys remain. */
-function stripInternalKeys(
-  raw: Record<string, unknown>
-): Record<string, unknown> | null {
-  const result: Record<string, unknown> = {};
-  let hasUserKeys = false;
-  for (const key of Object.keys(raw)) {
-    if (!CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-      hasUserKeys = true;
-    }
-  }
-  return hasUserKeys ? result : null;
-}
-
-/** Return a copy containing only the internal keys present in `raw`. */
-function extractInternalFlags(
-  raw: Record<string, unknown>
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-    }
-  }
-  return result;
-}
 
 /** Max length for error strings broadcast to clients. */
 const MAX_ERROR_STRING_LENGTH = 500;
@@ -1576,35 +1507,12 @@ export class Agent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Server<Env, Props> {
-  private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
-
-  /**
-   * Stores raw state accessors for wrapped connections.
-   * Used by internal flag methods (readonly, no-protocol) to read/write
-   * _cf_-prefixed keys without going through the user-facing state/setState.
-   */
-  private _rawStateAccessors = new WeakMap<
-    Connection,
-    {
-      getRaw: () => Record<string, unknown> | null;
-      setRaw: (state: unknown) => unknown;
-    }
-  >();
-
-  /**
-   * Cached persistence-hook dispatch mode, computed once in the constructor.
-   * - "new"  → call onStateChanged
-   * - "old"  → call onStateUpdate (deprecated)
-   * - "none" → neither hook is overridden, skip entirely
-   */
-  private _persistenceHookMode: "new" | "old" | "none" = "none";
 
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
 
-  private _protocolBroadcastExcludeIds = new Set<string>();
   private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
   private _cf_virtualSubAgentConnections = new Map<
     string,
@@ -1688,6 +1596,16 @@ export class Agent<
    */
   initialState: State = DEFAULT_STATE as State;
 
+  private readonly _state = new AgentState<State>(this._createStateHost());
+
+  private get _cachedState(): State {
+    return this._state.getCachedState();
+  }
+
+  private set _cachedState(state: State) {
+    this._state.setCachedState(state);
+  }
+
   /**
    * Stable key for Workers AI session affinity (prefix-cache optimization).
    *
@@ -1713,52 +1631,7 @@ export class Agent<
    * Current state of the Agent
    */
   get state(): State {
-    if (this._state !== DEFAULT_STATE) {
-      // state was previously set, and populated internal state
-      return this._state;
-    }
-    // looks like this is the first time the state is being accessed
-    // check if the state was set in a previous life
-    const result = this.sql<{ state: State | undefined }>`
-      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
-    `;
-
-    // Row existence is the signal that state was previously set.
-    // This handles all values including falsy ones (null, 0, false, "").
-    if (result.length > 0) {
-      const state = result[0].state as string;
-
-      try {
-        this._state = JSON.parse(state);
-      } catch (e) {
-        console.error(
-          "Failed to parse stored state, falling back to initialState:",
-          e
-        );
-        if (this.initialState !== DEFAULT_STATE) {
-          this._state = this.initialState;
-          // Persist the fixed state to prevent future parse errors
-          this._setStateInternal(this.initialState);
-        } else {
-          // No initialState defined - clear corrupted data to prevent infinite retry loop
-          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
-          return undefined as State;
-        }
-      }
-      return this._state;
-    }
-
-    // ok, this is the first time the state is being accessed
-    // and the state was not set in a previous life
-    // so we need to set the initial state (if provided)
-    if (this.initialState === DEFAULT_STATE) {
-      // no initial state provided, so we return undefined
-      return undefined as State;
-    }
-    // initial state provided, so we set the state,
-    // update db and return the initial state
-    this._setStateInternal(this.initialState);
-    return this.initialState;
+    return this._state.state;
   }
 
   /**
@@ -1851,6 +1724,29 @@ export class Agent<
       payload,
       timestamp: Date.now()
     } as ObservabilityEvent);
+  }
+
+  private _createStateHost(): AgentStateHost<State> {
+    const thisAgent = this;
+    return {
+      agent: this,
+      ctx: this.ctx,
+      get initialState() {
+        return thisAgent.initialState;
+      },
+      sql: <T = Record<string, string | number | boolean | null>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ) => this.sql<T>(strings, ...values),
+      getConnections: () => this.getConnections(),
+      broadcast: (message, without) => this.broadcast(message, without),
+      validateStateChange: (nextState, source) =>
+        this.validateStateChange(nextState, source),
+      onStateChanged: (state, source) => this.onStateChanged(state, source),
+      onStateUpdate: (state, source) => this.onStateUpdate(state, source),
+      onError: (error) => this.onError(error),
+      _emit: (type, payload) => this._emit(type, payload)
+    };
   }
 
   /**
@@ -2305,9 +2201,9 @@ export class Agent<
 
       const base = Agent.prototype;
       if (proto.onStateChanged !== base.onStateChanged) {
-        this._persistenceHookMode = "new";
+        this._state.setPersistenceHookMode("new");
       } else if (proto.onStateUpdate !== base.onStateUpdate) {
-        this._persistenceHookMode = "old";
+        this._state.setPersistenceHookMode("old");
       }
       // default "none" already set in field initializer
     }
@@ -2333,7 +2229,7 @@ export class Agent<
       if (await this._cf_forwardSubAgentWebSocketMessage(connection, message)) {
         return;
       }
-      this._ensureConnectionWrapped(connection);
+      this._state.ensureConnectionWrapped(connection);
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
@@ -2362,7 +2258,7 @@ export class Agent<
               return;
             }
             try {
-              this._setStateInternal(parsed.state as State, connection);
+              this._state.setInternal(parsed.state as State, connection);
             } catch (e) {
               // validateStateChange (or another sync error) rejected the update.
               // Log the full error server-side, send a generic message to the client.
@@ -2456,12 +2352,12 @@ export class Agent<
 
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
-      this._ensureConnectionWrapped(connection);
+      this._state.ensureConnectionWrapped(connection);
       const subAgentOuterUrl = ctx.request.headers.get(
         SUB_AGENT_OUTER_URL_HEADER
       );
       if (subAgentOuterUrl) {
-        this._unsafe_setConnectionFlag(
+        this._state.unsafeSetConnectionFlag(
           connection,
           CF_SUB_AGENT_OUTER_URL_KEY,
           subAgentOuterUrl
@@ -2532,17 +2428,11 @@ export class Agent<
               );
             }
 
-            const wasExcludedFromStateInitBroadcast =
-              this._protocolBroadcastExcludeIds.has(connection.id);
-            let currentState: State | undefined;
-            this._protocolBroadcastExcludeIds.add(connection.id);
-            try {
-              currentState = this.state;
-            } finally {
-              if (!wasExcludedFromStateInitBroadcast) {
-                this._protocolBroadcastExcludeIds.delete(connection.id);
-              }
-            }
+            const currentState =
+              this._state.excludeConnectionFromProtocolBroadcast(
+                connection.id,
+                () => this.state
+              );
 
             if (currentState !== undefined) {
               connection.send(
@@ -2560,7 +2450,7 @@ export class Agent<
               })
             );
           } else {
-            this._setConnectionNoProtocol(connection);
+            this._state.setConnectionNoProtocol(connection);
           }
 
           this._emit("connect", { connectionId: connection.id });
@@ -2755,216 +2645,12 @@ export class Agent<
   }
 
   /**
-   * Broadcast a protocol message only to connections that have protocol
-   * messages enabled. Connections where shouldSendProtocolMessages returned
-   * false are excluded automatically.
-   * @param msg The JSON-encoded protocol message
-   * @param excludeIds Additional connection IDs to exclude (e.g. the source)
-   */
-  private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
-    const exclude = [...excludeIds, ...this._protocolBroadcastExcludeIds];
-    for (const conn of this.getConnections()) {
-      if (!this.isConnectionProtocolEnabled(conn)) {
-        exclude.push(conn.id);
-      }
-    }
-    this.broadcast(msg, exclude);
-  }
-
-  private _setStateInternal(
-    nextState: State,
-    source: Connection | "server" = "server"
-  ): void {
-    // Validation/gating hook (sync only)
-    this.validateStateChange(nextState, source);
-
-    // Persist state — row existence in cf_agents_state is the signal that
-    // state was set (no separate wasChanged flag needed).
-    this._state = nextState;
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_state (id, state)
-      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
-    `;
-
-    // Broadcast state to protocol-enabled connections, excluding the source
-    this._broadcastProtocol(
-      JSON.stringify({
-        state: nextState,
-        type: MessageType.CF_AGENT_STATE
-      }),
-      source !== "server" ? [source.id] : []
-    );
-
-    // Notification hook (non-gating). Run after broadcast and do not block.
-    // Use waitUntil for reliability after the handler returns.
-    const { connection, request, email } = agentContext.getStore() || {};
-    this.ctx.waitUntil(
-      (async () => {
-        try {
-          await agentContext.run(
-            { agent: this, connection, request, email },
-            async () => {
-              this._emit("state:update");
-              await this._callStatePersistenceHook(nextState, source);
-            }
-          );
-        } catch (e) {
-          // onStateChanged/onStateUpdate errors should not affect state or broadcasts
-          try {
-            await this.onError(e);
-          } catch {
-            // swallow
-          }
-        }
-      })()
-    );
-  }
-
-  /**
    * Update the Agent's state
    * @param state New state to set
    * @throws Error if called from a readonly connection context
    */
   setState(state: State): void {
-    // Check if the current context has a readonly connection
-    const store = agentContext.getStore();
-    if (store?.connection && this.isConnectionReadonly(store.connection)) {
-      throw new Error("Connection is readonly");
-    }
-    this._setStateInternal(state, "server");
-  }
-
-  /**
-   * Wraps connection.state and connection.setState so that internal
-   * _cf_-prefixed flags (readonly, no-protocol) are hidden from user code
-   * and cannot be accidentally overwritten.
-   *
-   * Idempotent — safe to call multiple times on the same connection.
-   * After hibernation, the _rawStateAccessors WeakMap is empty but the
-   * connection's state getter still reads from the persisted WebSocket
-   * attachment. Calling this method re-captures the raw getter so that
-   * predicate methods (isConnectionReadonly, isConnectionProtocolEnabled)
-   * work correctly post-hibernation.
-   */
-  private _ensureConnectionWrapped(connection: Connection) {
-    if (this._rawStateAccessors.has(connection)) return;
-
-    // As of compatibility date 2026-03-17 the runtime defaults a server-side
-    // WebSocket's `binaryType` to "blob" (the `websocket_standard_binary_type`
-    // flag), so binary frames arrive as `Blob` instead of `ArrayBuffer`. The
-    // Agent protocol and every downstream consumer (e.g. voice audio frames,
-    // user-defined `onMessage` handlers that do `message instanceof ArrayBuffer`)
-    // have always relied on binary frames being delivered as `ArrayBuffer`.
-    //
-    // For non-hibernating agents (`static options = { hibernate: false }`)
-    // messages are delivered through `addEventListener("message", ...)`, where
-    // this new default applies and would silently break binary handling. Pin
-    // it back to "arraybuffer" so the contract holds regardless of the app's
-    // compatibility date. This first runs in `onConnect` before the client can
-    // send any frame, so it takes effect for every message on the connection.
-    //
-    // This is defense-in-depth: partyserver >= 0.5.7 also pins `binaryType` in
-    // `accept()`, but agents may run against an older partyserver or a custom
-    // connection, so we keep our own pin. It runs once per connection per
-    // isolate lifetime (gated by the `_rawStateAccessors` check above); after a
-    // hibernation wake that in-memory map is empty, so it re-pins on the first
-    // call. The hibernatable `webSocketMessage` handler always delivers
-    // `ArrayBuffer` regardless of this flag, so for hibernating agents this is a
-    // harmless no-op.
-    try {
-      if (connection.binaryType !== "arraybuffer") {
-        connection.binaryType = "arraybuffer";
-      }
-    } catch {
-      // Some connection shims may not expose a settable `binaryType`; the
-      // protocol still works for string frames, so ignore and continue.
-    }
-
-    // Determine whether `state` is an accessor (getter) or a data property.
-    // partyserver always defines `state` as a getter via Object.defineProperties,
-    // but we handle the data-property case to stay robust for hibernate: false
-    // and any future connection implementations.
-    const descriptor = Object.getOwnPropertyDescriptor(connection, "state");
-
-    let getRaw: () => Record<string, unknown> | null;
-    let setRaw: (state: unknown) => unknown;
-
-    if (descriptor?.get) {
-      // Accessor property — bind the original getter directly.
-      // The getter reads from the serialized WebSocket attachment, so it
-      // always returns the latest value even after setState updates it.
-      getRaw = descriptor.get.bind(connection) as () => Record<
-        string,
-        unknown
-      > | null;
-      setRaw = connection.setState.bind(connection);
-    } else {
-      // Data property — track raw state in a closure variable.
-      // Reading `connection.state` after our override would call our filtered
-      // getter (circular), so we snapshot the value here and keep it in sync.
-      let rawState = (connection.state ?? null) as Record<
-        string,
-        unknown
-      > | null;
-      getRaw = () => rawState;
-      setRaw = (state: unknown) => {
-        rawState = state as Record<string, unknown> | null;
-        return rawState;
-      };
-    }
-
-    this._rawStateAccessors.set(connection, { getRaw, setRaw });
-
-    // Override state getter to hide all internal _cf_ flags from user code
-    Object.defineProperty(connection, "state", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        const raw = getRaw();
-        if (raw != null && typeof raw === "object" && rawHasInternalKeys(raw)) {
-          return stripInternalKeys(raw);
-        }
-        return raw;
-      }
-    });
-
-    // Override setState to preserve internal flags when user sets state
-    Object.defineProperty(connection, "setState", {
-      configurable: true,
-      writable: true,
-      value(stateOrFn: unknown | ((prev: unknown) => unknown)) {
-        const raw = getRaw();
-        const flags =
-          raw != null && typeof raw === "object"
-            ? extractInternalFlags(raw as Record<string, unknown>)
-            : {};
-        const hasFlags = Object.keys(flags).length > 0;
-
-        let newUserState: unknown;
-        if (typeof stateOrFn === "function") {
-          // Pass only the user-visible state (without internal flags) to the callback
-          const userVisible = hasFlags
-            ? stripInternalKeys(raw as Record<string, unknown>)
-            : raw;
-          newUserState = (stateOrFn as (prev: unknown) => unknown)(userVisible);
-        } else {
-          newUserState = stateOrFn;
-        }
-
-        // Merge back internal flags if any were set
-        if (hasFlags) {
-          if (newUserState != null && typeof newUserState === "object") {
-            return setRaw({
-              ...(newUserState as Record<string, unknown>),
-              ...flags
-            });
-          }
-          // User set null — store just the flags
-          return setRaw(flags);
-        }
-        return setRaw(newUserState);
-      }
-    });
+    this._state.setState(state);
   }
 
   /**
@@ -2973,17 +2659,7 @@ export class Agent<
    * @param readonly Whether the connection should be readonly (default: true)
    */
   setConnectionReadonly(connection: Connection, readonly = true) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (readonly) {
-      accessors.setRaw({ ...raw, [CF_READONLY_KEY]: true });
-    } else {
-      // Remove the key entirely instead of storing false — avoids dead keys
-      // accumulating in the connection attachment.
-      const { [CF_READONLY_KEY]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    }
+    this._state.setConnectionReadonly(connection, readonly);
   }
 
   /**
@@ -2995,12 +2671,7 @@ export class Agent<
    * @returns True if the connection is readonly
    */
   isConnectionReadonly(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !!raw?.[CF_READONLY_KEY];
+    return this._state.isConnectionReadonly(connection);
   }
 
   /**
@@ -3014,14 +2685,13 @@ export class Agent<
    * code should use `connection.state` and `connection.setState()` instead.
    *
    * @internal
+   * @deprecated Tombstone — this forwarder will be removed in a future major.
+   * The behaviour now lives on `AgentState.unsafeGetConnectionFlag`; the
+   * state subsystem is slated to be exposed as `agent.stateOps` (see
+   * `AgentStateApi`). Do not add new callers.
    */
   _unsafe_getConnectionFlag(connection: Connection, key: string): unknown {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return raw?.[key];
+    return this._state.unsafeGetConnectionFlag(connection, key);
   }
 
   /**
@@ -3033,21 +2703,17 @@ export class Agent<
    * and hidden from `connection.state`.
    *
    * @internal
+   * @deprecated Tombstone — this forwarder will be removed in a future major.
+   * The behaviour now lives on `AgentState.unsafeSetConnectionFlag`; the
+   * state subsystem is slated to be exposed as `agent.stateOps` (see
+   * `AgentStateApi`). Do not add new callers.
    */
   _unsafe_setConnectionFlag(
     connection: Connection,
     key: string,
     value: unknown
   ): void {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (value === undefined) {
-      const { [key]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    } else {
-      accessors.setRaw({ ...raw, [key]: value });
-    }
+    this._state.unsafeSetConnectionFlag(connection, key, value);
   }
 
   /**
@@ -3097,23 +2763,7 @@ export class Agent<
    * @returns True if the connection receives protocol messages
    */
   isConnectionProtocolEnabled(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !raw?.[CF_NO_PROTOCOL_KEY];
-  }
-
-  /**
-   * Mark a connection as having protocol messages disabled.
-   * Called internally when shouldSendProtocolMessages returns false.
-   */
-  private _setConnectionNoProtocol(connection: Connection) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    accessors.setRaw({ ...raw, [CF_NO_PROTOCOL_KEY]: true });
+    return this._state.isConnectionProtocolEnabled(connection);
   }
 
   /**
@@ -3154,25 +2804,6 @@ export class Agent<
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   onStateUpdate(_state: State | undefined, _source: Connection | "server") {
     // override this to handle state updates (deprecated — use onStateChanged)
-  }
-
-  /**
-   * Dispatch to the appropriate persistence hook based on the mode
-   * cached in the constructor. No prototype walks at call time.
-   */
-  private async _callStatePersistenceHook(
-    state: State | undefined,
-    source: Connection | "server"
-  ): Promise<void> {
-    switch (this._persistenceHookMode) {
-      case "new":
-        await this.onStateChanged(state, source);
-        break;
-      case "old":
-        await this.onStateUpdate(state, source);
-        break;
-      // "none": neither hook overridden — skip
-    }
   }
 
   /**
@@ -6976,7 +6607,7 @@ export class Agent<
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return null;
     }
-    this._ensureConnectionWrapped(connection);
+    this._state.ensureConnectionWrapped(connection);
     connection.setState(state);
     return this._cf_getForwardedSubAgentState(connection);
   }
@@ -6985,8 +6616,8 @@ export class Agent<
     connection: Connection,
     ownerPath: ReadonlyArray<AgentPathStep>
   ): SubAgentConnectionMeta | null {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
+    this._state.ensureConnectionWrapped(connection);
+    const outerUri = this._state.unsafeGetConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
     );
@@ -6995,7 +6626,7 @@ export class Agent<
     const target = this._cf_subAgentPathFromOuterUri(outerUri, ownerPath);
     if (!target) return null;
 
-    const raw = this._cf_getRawConnectionState(connection);
+    const raw = this._state.getRawConnectionState(connection);
     const rawTags =
       raw != null && typeof raw === "object"
         ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
@@ -7014,8 +6645,8 @@ export class Agent<
   private _cf_subAgentTargetPath(
     connection: Connection
   ): ReadonlyArray<AgentPathStep> | null {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
+    this._state.ensureConnectionWrapped(connection);
+    const outerUri = this._state.unsafeGetConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
     );
@@ -7062,9 +6693,9 @@ export class Agent<
   }
 
   private _cf_connectionHasSubAgentTarget(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
+    this._state.ensureConnectionWrapped(connection);
     return (
-      typeof this._unsafe_getConnectionFlag(
+      typeof this._state.unsafeGetConnectionFlag(
         connection,
         CF_SUB_AGENT_OUTER_URL_KEY
       ) === "string"
@@ -7170,8 +6801,8 @@ export class Agent<
     child: SubAgentWebSocketEndpoint;
     meta: SubAgentConnectionMeta;
   } | null> {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
+    this._state.ensureConnectionWrapped(connection);
+    const outerUri = this._state.unsafeGetConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
     );
@@ -7215,7 +6846,7 @@ export class Agent<
 
     const childUri = new URL(forwardReq?.url ?? uri);
     childUri.pathname = match.remainingPath;
-    const raw = this._cf_getRawConnectionState(connection);
+    const raw = this._state.getRawConnectionState(connection);
     const rawTags =
       raw != null && typeof raw === "object"
         ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
@@ -7257,7 +6888,7 @@ export class Agent<
         this.setConnectionReadonly(connection, true);
       }
       if (!this.shouldSendProtocolMessages(connection, { request })) {
-        this._setConnectionNoProtocol(connection);
+        this._state.setConnectionNoProtocol(connection);
       }
 
       const childTags = await this.getConnectionTags(connection, { request });
@@ -7374,7 +7005,7 @@ export class Agent<
     } as unknown as Connection;
 
     stored.connection = connection;
-    this._ensureConnectionWrapped(connection);
+    this._state.ensureConnectionWrapped(connection);
     return connection;
   }
 
@@ -7382,7 +7013,7 @@ export class Agent<
     bridge: SubAgentConnectionBridgeLike,
     connection: Connection
   ): void {
-    this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
+    this._state.unsafeSetConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
       ...connection.tags
     ]);
     const stored = this._cf_virtualSubAgentConnections.get(connection.id);
@@ -7392,7 +7023,7 @@ export class Agent<
         id: connection.id,
         uri: connection.uri,
         tags: [...connection.tags],
-        state: this._cf_getRawConnectionState(connection)
+        state: this._state.getRawConnectionState(connection)
       },
       connection: stored?.connection ?? connection
     });
@@ -7418,13 +7049,8 @@ export class Agent<
     }
   }
 
-  private _cf_getRawConnectionState(connection: Connection): unknown {
-    this._ensureConnectionWrapped(connection);
-    return this._rawStateAccessors.get(connection)?.getRaw() ?? null;
-  }
-
   private _cf_getForwardedSubAgentState(connection: Connection): unknown {
-    const raw = this._cf_getRawConnectionState(connection);
+    const raw = this._state.getRawConnectionState(connection);
     if (raw == null || typeof raw !== "object") return raw;
     const { [CF_SUB_AGENT_OUTER_URL_KEY]: _, ...rest } = raw as Record<
       string,
@@ -12552,7 +12178,7 @@ export class Agent<
   }
 
   private broadcastMcpServers() {
-    this._broadcastProtocol(
+    this._state.broadcastProtocol(
       JSON.stringify({
         mcp: this.getMcpServers(),
         type: MessageType.CF_AGENT_MCP_SERVERS

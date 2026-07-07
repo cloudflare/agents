@@ -19,9 +19,9 @@ export class TestProtocolMessagesAgent extends Agent<
   { count: number }
 > {
   // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
-  // Child field initializers run after super(), at which point _state is DEFAULT_STATE.
+  // Child field initializers run after super(), at which point _cachedState is DEFAULT_STATE.
   // @ts-expect-error - accessing private field for testing
-  private _stateSentinel: { count: number } = this._state;
+  private _stateSentinel: { count: number } = this._cachedState;
 
   initialState = { count: 0 };
   static options = { hibernate: true };
@@ -57,7 +57,7 @@ export class TestProtocolMessagesAgent extends Agent<
   async resetStateForLazyInitTest() {
     this.sql`DELETE FROM cf_agents_state WHERE id = ${"cf_state_row_id"}`;
     // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._cachedState = this._stateSentinel;
   }
 
   @callable()
