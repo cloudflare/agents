@@ -61,8 +61,9 @@ export interface RunLifecycleOptions {
  * - `start()` acquires/renews the container assignment lease.
  * - `withWorkspace()` is scoped: every successful acquire has a finally-release,
  *   and the final concurrent user closes all Workspace RPC streams.
- * - `finish()` is idempotent, closes transport before ending the lease, and
- *   reports the terminal status even when cleanup fails.
+ * - `finish()` is idempotent and best-effort: it closes transport before
+ *   ending the lease, reports terminal status, logs cleanup failures, and never
+ *   turns a completed agent run into an error because observability failed.
  * - an isolate lost without `finish()` leaves only a bounded lease, never a
  *   permanently pinned container.
  */
@@ -236,7 +237,9 @@ export class RunLifecycle {
     }
 
     if (cleanupErrors.length > 0) {
-      throw new RunLifecycleError("finish", new AggregateError(cleanupErrors));
+      this.#options.log("run-lifecycle-finish-error", {
+        errors: cleanupErrors.map((error) => String(error).slice(0, 300))
+      });
     }
   }
 }

@@ -113,6 +113,7 @@ export class ThinkAgent extends ThinkBase {
    * issue (new short-lived token) re-authenticates automatically.
    */
   #authedToken: string | null = null;
+  #reportTail: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -227,18 +228,16 @@ export class ThinkAgent extends ThinkBase {
       issue: ctx.issueNumber,
       instruction: ctx.instruction
     });
-    const commandCenter = await getAgentByName<Env, CommandCenterAgent>(
-      this.env.CommandCenter,
-      "main"
+    this.#report((commandCenter) =>
+      commandCenter.recordDispatch({
+        session: this.name,
+        repo: ctx.repo,
+        issueNumber: ctx.issueNumber,
+        instruction: ctx.instruction,
+        issueTitle: ctx.issueTitle,
+        requestedBy: ctx.requestedBy
+      })
     );
-    await commandCenter.recordDispatch({
-      session: this.name,
-      repo: ctx.repo,
-      issueNumber: ctx.issueNumber,
-      instruction: ctx.instruction,
-      issueTitle: ctx.issueTitle,
-      requestedBy: ctx.requestedBy
-    });
     const submission = await this.submitMessages(
       [
         {
@@ -379,15 +378,19 @@ export class ThinkAgent extends ThinkBase {
       cc: Awaited<ReturnType<typeof getAgentByName<Env, CommandCenterAgent>>>
     ) => Promise<unknown>
   ): void {
-    this.ctx.waitUntil(
-      getAgentByName<Env, CommandCenterAgent>(this.env.CommandCenter, "main")
-        .then(fn)
-        .catch((err) =>
-          // Log-only: reporting must never break the run, but a silent
-          // failure here made the command center undebuggable.
-          this.#log("report-error", { error: String(err).slice(0, 200) })
-        )
-    );
+    // Serialize observer updates without awaiting them on the run path. This
+    // preserves dispatch → tools → terminal ordering for fast turns while a
+    // slow/broken Command Center can never block or fail the actual run.
+    this.#reportTail = this.#reportTail
+      .then(() =>
+        getAgentByName<Env, CommandCenterAgent>(this.env.CommandCenter, "main")
+      )
+      .then(fn)
+      .then(() => undefined)
+      .catch((err) =>
+        this.#log("report-error", { error: String(err).slice(0, 200) })
+      );
+    this.ctx.waitUntil(this.#reportTail);
   }
 
   // ── Think hooks ────────────────────────────────────────────────
@@ -466,17 +469,15 @@ export class ThinkAgent extends ThinkBase {
   }
 
   async #recordTerminal(outcome: RunOutcome): Promise<void> {
-    const cc = await getAgentByName<Env, CommandCenterAgent>(
-      this.env.CommandCenter,
-      "main"
+    this.#report((commandCenter) =>
+      commandCenter.recordTurn({
+        session: this.name,
+        outcome: outcome.status,
+        ...(outcome.status === "error"
+          ? { error: outcome.error.slice(0, 300) }
+          : {})
+      })
     );
-    await cc.recordTurn({
-      session: this.name,
-      outcome: outcome.status,
-      ...(outcome.status === "error"
-        ? { error: outcome.error.slice(0, 300) }
-        : {})
-    });
   }
 
   // ── Lifecycle logging: reconstruct a run from the deployed logs ──
