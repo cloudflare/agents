@@ -16,6 +16,8 @@
  */
 
 import type {
+  ChatRecoveryExhaustedContext,
+  ChatResponseResult,
   ToolCallResultContext,
   TurnContext,
   WorkspaceLike as ThinkWorkspaceLike
@@ -29,7 +31,7 @@ import {
   type WorkspaceStub
 } from "@cloudflare/workspace";
 import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
-import { type ToolSet } from "ai";
+import type { LanguageModel, ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { openai } from "workers-ai-provider/openai";
 import { getAgentByName } from "agents";
@@ -47,6 +49,12 @@ import {
   createReadTool,
   createWriteTool
 } from "./tools/fs/index";
+import { buildRunEnvelope, type RunTarget } from "./run-context";
+import {
+  classifyRunOutcome,
+  RunLifecycle,
+  type RunOutcome
+} from "./run-lifecycle";
 
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
@@ -64,27 +72,23 @@ const MODEL_ID = "openai/gpt-5.5";
 const REASONING_EFFORT = "medium";
 
 /** Per-issue run context, set by `dispatch` before the turn is submitted. */
-export interface RunContext {
-  repo: string;
-  issueNumber: number;
-  /** Free-form instruction the user typed after `@agent-think`. */
-  instruction: string;
+export interface RunContext extends RunTarget {
   /** Short-lived GitHub App installation token. */
   installationToken: string;
-  /** Triggering comment id — see DispatchInput.commentId. */
-  commentId?: number;
-  /** GitHub issue title, forwarded to the command center. */
-  issueTitle?: string;
-  /** Who mentioned @agent-think, forwarded to the command center. */
-  requestedBy?: { login: string; avatarUrl?: string };
 }
 
 class ThinkBase extends Think<Env> {}
 
 export class ThinkAgent extends ThinkBase {
-  // Think's own chat recovery IS the durability layer now (no Workflow):
-  // submitMessages persists the turn and Think resumes it across a DO
-  // eviction. Left at the default (enabled).
+  /** Agent-think has no media attachment store; drop aged inline media. */
+  override mediaEviction = { externalizeToWorkspace: false };
+
+  // Think's own chat recovery is the durability layer. Its terminal hook must
+  // also release agent-think's external resources and command-center status.
+  override chatRecovery = {
+    onExhausted: (ctx: ChatRecoveryExhaustedContext) =>
+      this.#finishRun("error", `Recovery exhausted: ${ctx.reason}`)
+  };
 
   /** repro/pr can be long: clone, install, deploy or fix, verify. */
   override maxSteps = 60;
@@ -99,6 +103,7 @@ export class ThinkAgent extends ThinkBase {
 
   readonly #containerBackend: CloudflareContainerBackend;
   readonly #workspaceFs: Workspace;
+  readonly #runLifecycle: RunLifecycle;
   #context: RunContext | null = null;
   /**
    * The installation token the container's `gh`/`git` is currently
@@ -133,6 +138,14 @@ export class ThinkAgent extends ThinkBase {
     this.workspace = adaptToThinkWorkspace(
       this.#workspaceFs
     ) as unknown as ThinkWorkspaceLike;
+    this.#runLifecycle = new RunLifecycle({
+      env,
+      sessionId: ctx.id.toString(),
+      workspace: this.#workspaceFs,
+      reportTerminal: (outcome) => this.#recordTerminal(outcome),
+      log: (event, data) => this.#log(event, data),
+      fork: (effect) => this.ctx.waitUntil(effect)
+    });
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context =
@@ -180,6 +193,7 @@ export class ThinkAgent extends ThinkBase {
    */
   async resetSession(): Promise<void> {
     this.#log("session-reset", {});
+    await this.#workspaceFs.close();
     await releaseContainer(this.env, this.ctx.id.toString());
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
@@ -213,16 +227,18 @@ export class ThinkAgent extends ThinkBase {
       issue: ctx.issueNumber,
       instruction: ctx.instruction
     });
-    this.#report((cc) =>
-      cc.recordDispatch({
-        session: this.name,
-        repo: ctx.repo,
-        issueNumber: ctx.issueNumber,
-        instruction: ctx.instruction,
-        issueTitle: ctx.issueTitle,
-        requestedBy: ctx.requestedBy
-      })
+    const commandCenter = await getAgentByName<Env, CommandCenterAgent>(
+      this.env.CommandCenter,
+      "main"
     );
+    await commandCenter.recordDispatch({
+      session: this.name,
+      repo: ctx.repo,
+      issueNumber: ctx.issueNumber,
+      instruction: ctx.instruction,
+      issueTitle: ctx.issueTitle,
+      requestedBy: ctx.requestedBy
+    });
     const submission = await this.submitMessages(
       [
         {
@@ -231,10 +247,7 @@ export class ThinkAgent extends ThinkBase {
           parts: [
             {
               type: "text",
-              text:
-                "Carry out the user's instruction for this issue now. Activate the " +
-                "matching skill first and follow it end to end, then reply with the " +
-                "structured result that skill specifies."
+              text: buildRunEnvelope(ctx)
             }
           ]
         }
@@ -379,7 +392,7 @@ export class ThinkAgent extends ThinkBase {
 
   // ── Think hooks ────────────────────────────────────────────────
 
-  override getModel() {
+  override getModel(): LanguageModel {
     // Route through the account's default AI Gateway so model calls get
     // Gateway-side retries, caching, and observability. The `openai` provider
     // plugin lets the `openai/...` catalog slug dispatch through the gateway
@@ -406,10 +419,9 @@ export class ThinkAgent extends ThinkBase {
   }
 
   override async beforeTurn(ctx: TurnContext) {
-    // Container gh/git auth runs here — inside the durable turn — rather
-    // than in start(), so dispatch stays fast and a slow container attach
-    // can't be killed by the caller's cancellation (see start()).
-    await this.#ensureGitAuth();
+    // Container auth is scoped: no Workspace transport remains open while the
+    // model is thinking, so infrastructure /ws cannot become the turn root.
+    await this.#runLifecycle.withWorkspace(() => this.#ensureGitAuth());
     return {
       maxOutputTokens: 16384,
       // Only our four tools reach the model (read/write/edit/bash — pi's
@@ -445,6 +457,28 @@ export class ThinkAgent extends ThinkBase {
     this.#log("git-auth-ok", {});
   }
 
+  async #finishRun(outcome: "done" | "error", error?: string): Promise<void> {
+    await this.#runLifecycle.finish(
+      outcome === "done"
+        ? { status: "done" }
+        : { status: "error", error: error ?? "Agent run failed" }
+    );
+  }
+
+  async #recordTerminal(outcome: RunOutcome): Promise<void> {
+    const cc = await getAgentByName<Env, CommandCenterAgent>(
+      this.env.CommandCenter,
+      "main"
+    );
+    await cc.recordTurn({
+      session: this.name,
+      outcome: outcome.status,
+      ...(outcome.status === "error"
+        ? { error: outcome.error.slice(0, 300) }
+        : {})
+    });
+  }
+
   // ── Lifecycle logging: reconstruct a run from the deployed logs ──
   //
   // These are the Think turn-lifecycle overrides (not the submission-observer
@@ -463,26 +497,39 @@ export class ThinkAgent extends ThinkBase {
     });
   }
 
-  override async onChatResponse(): Promise<void> {
-    this.#report((cc) =>
-      cc.recordTurn({ session: this.name, outcome: "done" })
-    );
-    this.#log("turn:done", {
-      assistantChars: collectAssistantText(this.messages).length
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    const assistantText = collectAssistantText([result.message]);
+    const outcome = classifyRunOutcome({
+      status: result.status,
+      assistantText,
+      error: result.error
     });
+    await this.#runLifecycle.finish(outcome);
+    if (outcome.status === "done") {
+      this.#log("turn:done", { assistantChars: assistantText.length });
+    } else {
+      this.#log("turn:error", {
+        stage: "response",
+        error: outcome.error.slice(0, 800)
+      });
+    }
   }
 
   override onChatError(error: unknown, ctx?: { stage?: string }): unknown {
-    this.#report((cc) =>
-      cc.recordTurn({
-        session: this.name,
-        outcome: "error",
-        error: String(error).slice(0, 300)
-      })
+    const message = String(error);
+    // Some setup failures never reach onChatResponse. Cleanup immediately;
+    // a later durable recovery begins a fresh lease and may overwrite the
+    // command-center status with success.
+    this.ctx.waitUntil(
+      this.#finishRun("error", message).catch((cleanupError) =>
+        this.#log("turn-cleanup-error", {
+          error: String(cleanupError).slice(0, 300)
+        })
+      )
     );
     this.#log("turn:error", {
       stage: ctx?.stage,
-      error: String(error).slice(0, 800)
+      error: message.slice(0, 800)
     });
     return error;
   }
@@ -496,16 +543,6 @@ export class ThinkAgent extends ThinkBase {
       "The user invoked you with this instruction:",
       `  ${ctx?.instruction || "(no instruction — default to reproducing the issue)"}`,
       "",
-      ...(ctx?.commentId
-        ? [
-            "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
-            "comment that triggered you, then continue with the task:",
-            `  bash({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
-            "(👀 was added when your trigger was seen; your 🚀 tells the",
-            "humans the agent itself is running.)",
-            ""
-          ]
-        : []),
       "Two skills are available through Think's skill catalog:",
       "  - reproduce — reproduce and report an issue.",
       "  - open-pr   — locate, fix, verify, and open a PR.",
@@ -533,7 +570,7 @@ export class ThinkAgent extends ThinkBase {
   override getTools(): ToolSet {
     if (!this.#context) return {} as ToolSet;
     const store = new ContainerFileStore(this.#workspaceFs.shell);
-    return {
+    return this.#runLifecycle.scopeTools({
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
@@ -550,7 +587,7 @@ export class ThinkAgent extends ThinkBase {
         },
         defaultBackend: "container"
       })
-    };
+    });
   }
 }
 

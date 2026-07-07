@@ -1,0 +1,52 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "agent-think-e2e",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat", "enable_abortsignal_rpc"],
+
+  "ai": { "binding": "AI" },
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "../Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 10
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "ThinkAgent", "class_name": "ThinkAgent" },
+      { "name": "Sandbox", "class_name": "Sandbox" },
+      { "name": "WarmPool", "class_name": "WarmPool" },
+      { "name": "CommandCenter", "class_name": "CommandCenterAgent" }
+    ]
+  },
+
+  "r2_buckets": [
+    { "binding": "R2_SKILLS", "bucket_name": "agent-think-skills" }
+  ],
+
+  "assets": {
+    "directory": "../dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": ["/thread/*", "/agents/*", "/api/*", "/__test/*"]
+  },
+
+  "vars": {
+    "LOCAL_DEV": "1",
+    "PUBLIC_BASE_URL": "http://127.0.0.1:8799",
+    "WARM_POOL_TARGET": "0",
+    "WARM_POOL_REFRESH_INTERVAL": "100",
+    "WARM_POOL_ASSIGNMENT_IDLE_TTL_MS": "1000"
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
+    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] }
+  ]
+}

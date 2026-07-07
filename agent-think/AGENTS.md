@@ -92,6 +92,15 @@ the container's coding filesystem.
   ThinkAgent to its warm-pooled Sandbox, but `sync: "none"` prevents repo data,
   `.git`, `node_modules`, builds, and logs from entering DO SQLite. The DO owns
   only durable turn/recovery state. Skills use Think's native R2 source.
+- **Run identity is durable input, not prompt configuration.** The first user
+  message carries an `<agent-think-run>` JSON envelope (repo, issue,
+  instruction, requester, triggering comment). Skills fail closed without it.
+  This survives context-block prompt assembly, eviction, and continuation.
+- **Workspace transport is scoped.** Container auth and every file/bash tool
+  run through `RunLifecycle.withWorkspace`; the last concurrent user closes the
+  RPC/WebSocket handle. A bounded, renewable WarmPool lease protects the
+  assigned container while the durable turn is active, then idle eviction owns
+  cleanup after terminal completion.
 - **Everything runs on the `container` backend.** It provides the real Linux
   filesystem, toolchain, and network used by bash and the file tools.
 - **Repros must be clickable.** The reproduce skill mandates a minimal
@@ -165,9 +174,10 @@ pnpm run deploy  # vite build (thread UI) + wrangler deploy (worker + image)
 npm run seed:r2  # push skills/** to the R2 bucket (add -- --local for dev)
 ```
 
-- Vitest configs live next to their suites: `test/vitest.config.ts` (unit) and
-  `tests-e2e/vitest.config.ts` (e2e). `vite.config.ts` at the root builds only
-  the thread UI into `dist/client`.
+- Vitest configs live next to their suites: `test/vitest.config.ts` (Workers
+  runtime module/DO tests) and `tests-e2e/vitest.config.ts` (real Wrangler +
+  Docker infrastructure, with only inference replaced by a test subclass).
+  `vite.config.ts` at the root builds only the thread UI into `dist/client`.
 - Local-only HTTP surface (gated on `LOCAL_DEV=1`, set automatically by the
   e2e harness): `POST /dev/dispatch` and `GET /dev/messages/:session` — drive
   the full agent path without gh-app or webhooks.

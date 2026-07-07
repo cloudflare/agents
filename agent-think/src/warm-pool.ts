@@ -67,11 +67,16 @@ interface ContainerWithState {
   getState(): Promise<ContainerState>;
 }
 
-/** Persisted assignment row: the container UUID plus a last-touched stamp. */
+/** Persisted assignment row: container identity, idle clock, and active run lease. */
 export interface AssignmentRecord {
   uuid: string;
-  /** Wall-clock ms of the last `getContainer` call — drives idle eviction. */
+  /** Wall-clock ms when the assignment most recently became idle. */
   touchedAt: number;
+  /**
+   * A live turn renews this bounded lease. If its isolate disappears, the
+   * lease expires and normal idle eviction eventually reclaims the container.
+   */
+  activeLease?: { id: string; expiresAt: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +112,7 @@ export function selectExpiredAssignments(
   const expired: Array<{ sandboxId: string; uuid: string; touchedAt: number }> =
     [];
   for (const [sandboxId, record] of assignments) {
+    if (record.activeLease && record.activeLease.expiresAt > now) continue;
     if (record.touchedAt <= cutoff) {
       expired.push({
         sandboxId,
@@ -246,6 +252,49 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     throw new Error("Failed to start container");
   }
 
+  /** Mark an assigned container active for one durable turn. */
+  async beginActivity(
+    sandboxId: string,
+    leaseId: string,
+    leaseMs: number
+  ): Promise<void> {
+    await this.init();
+    const existing = this.assignments.get(sandboxId);
+    if (!existing) throw new Error(`No container assigned to ${sandboxId}`);
+    const now = this.now();
+    existing.touchedAt = now;
+    existing.activeLease = {
+      id: leaseId,
+      expiresAt: now + Math.max(1, leaseMs)
+    };
+    await this.persist();
+  }
+
+  /** Extend a lease only when the caller still owns it. */
+  async renewActivity(
+    sandboxId: string,
+    leaseId: string,
+    leaseMs: number
+  ): Promise<boolean> {
+    await this.init();
+    const existing = this.assignments.get(sandboxId);
+    if (!existing || existing.activeLease?.id !== leaseId) return false;
+    existing.activeLease.expiresAt = this.now() + Math.max(1, leaseMs);
+    await this.persist();
+    return true;
+  }
+
+  /** End a lease without destroying the sticky session container. */
+  async endActivity(sandboxId: string, leaseId: string): Promise<boolean> {
+    await this.init();
+    const existing = this.assignments.get(sandboxId);
+    if (!existing || existing.activeLease?.id !== leaseId) return false;
+    delete existing.activeLease;
+    existing.touchedAt = this.now();
+    await this.persist();
+    return true;
+  }
+
   /**
    * Look up an existing container assignment without allocating.
    * Returns the container UUID if the sandbox ID has an active assignment, null otherwise.
@@ -306,6 +355,15 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     await this.init();
     this.config = { ...DEFAULT_CONFIG, ...config };
     await this.ctx.storage.put("config", this.config);
+
+    // init() may have scheduled with the previous/default cadence. Pull the
+    // next alarm forward when configuration asks for a shorter interval, but
+    // never postpone an alarm that is already due sooner.
+    const nextRefresh = this.now() + this.config.refreshInterval;
+    const scheduled = await this.ctx.storage.getAlarm();
+    if (scheduled === null || scheduled > nextRefresh) {
+      await this.ctx.storage.setAlarm(nextRefresh);
+    }
   }
 
   /**

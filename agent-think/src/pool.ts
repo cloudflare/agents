@@ -15,7 +15,7 @@
 import type { WarmPool, WarmPoolConfig } from "./warm-pool";
 import type { Sandbox } from "./sandbox";
 
-interface PoolEnv {
+export interface PoolEnv {
   WarmPool: DurableObjectNamespace<WarmPool>;
   Sandbox: DurableObjectNamespace<Sandbox>;
   WARM_POOL_TARGET?: string;
@@ -52,6 +52,36 @@ export async function resolveContainerId(
   const stub = poolStub(env);
   await stub.configure(readConfig(env));
   return stub.getContainer(sessionId);
+}
+
+/** Allocate/touch a container and protect it while a durable run is active. */
+export async function beginContainerActivity(
+  env: PoolEnv,
+  sessionId: string,
+  leaseId: string,
+  leaseMs: number
+): Promise<void> {
+  await resolveContainerId(env, sessionId);
+  await poolStub(env).beginActivity(sessionId, leaseId, leaseMs);
+}
+
+/** Renew a live run lease without reconnecting Workspace. */
+export async function renewContainerActivity(
+  env: PoolEnv,
+  sessionId: string,
+  leaseId: string,
+  leaseMs: number
+): Promise<boolean> {
+  return poolStub(env).renewActivity(sessionId, leaseId, leaseMs);
+}
+
+/** End a live run lease; the sticky assignment remains until normal idle eviction. */
+export async function endContainerActivity(
+  env: PoolEnv,
+  sessionId: string,
+  leaseId: string
+): Promise<boolean> {
+  return poolStub(env).endActivity(sessionId, leaseId);
 }
 
 /**
