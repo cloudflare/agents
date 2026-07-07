@@ -151,6 +151,9 @@ export default {
           issueNumber?: number;
           instruction?: string;
           installationToken?: string;
+          commentId?: number;
+          issueTitle?: string;
+          requestedBy?: { login: string; avatarUrl?: string };
         };
         if (!body.repo || typeof body.issueNumber !== "number") {
           return Response.json(
@@ -163,7 +166,10 @@ export default {
             repo: body.repo,
             issueNumber: body.issueNumber,
             instruction: body.instruction ?? "reproduce this issue",
-            installationToken: body.installationToken ?? ""
+            installationToken: body.installationToken ?? "",
+            commentId: body.commentId,
+            issueTitle: body.issueTitle,
+            requestedBy: body.requestedBy
           });
           return Response.json(result, { status: 202 });
         } catch (error) {

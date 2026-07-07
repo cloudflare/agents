@@ -9,7 +9,7 @@
     "dev": "wrangler dev --ip 0.0.0.0",
     "build:client": "vite build",
     "deploy": "vite build && wrangler deploy",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tests-e2e/tsconfig.json",
     "gen-types": "wrangler types",
     "seed:r2": "node ./scripts/seed-skills.mjs",
     "test": "vitest run --config test/vitest.config.ts",

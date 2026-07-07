@@ -3,8 +3,19 @@ name: open-pr
 description: Take a cloudflare/agents GitHub issue plus any repro findings and one-shot a fix PR — branch, change, test, push, and open the PR linked to the issue.
 ---
 
-The agent system prompt gives you `issueNumber`, `repo`, and the user's
-instruction. Use those values directly; there is no separate arguments object.
+The first user message contains an `<agent-think-run>` envelope with `repository`,
+`issue`, `instruction`, `requested-by`, and (when available) `trigger-comment-id`.
+Use those values exactly. Never infer or substitute another target from examples,
+workspace contents, GitHub searches, or concurrent issues. If the envelope or a
+required field is absent, stop without cloning/editing/pushing/posting and return a
+structured skipped result. When `trigger-comment-id` is present, your first
+container action is the liveness reaction:
+
+```bash
+gh api repos/<repository>/issues/comments/<trigger-comment-id>/reactions \
+  -f content=rocket
+```
+
 Produce a focused fix PR, authored as **yourself** — the agent-think GitHub App.
 Do not impersonate any user.
 
@@ -48,7 +59,8 @@ known.
 needing design, is too vague, spans many subsystems, or you cannot locate a
 confident root cause, stop: return `prOpened: false`, `skipped: true`, and a
 `summary` explaining why. Post a brief, polite comment saying the pr-agent is
-skipping it and what additional detail would help.
+skipping it and what additional detail would help; begin it with
+`Requested by @<requestedBy>` when the run envelope has a requester.
 
 ## 2. Locate the root cause
 
@@ -161,6 +173,8 @@ gh pr create --repo <repo> \
 
 Write the PR body outside the checkout at `/workspace/temp/pr-body.md`. It must include:
 
+- `Requested by @<requestedBy>` near the top, using the exact sanitized
+  `requested-by` mention from the run envelope (omit only when it is `unknown`).
 - `Closes #<issueNumber>` so the issue auto-links.
 - **What was wrong** (root cause, citing the file/line).
 - **What changed** and why this is the minimal fix.
