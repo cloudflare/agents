@@ -19,6 +19,7 @@ export {
   ThinkFiberTestAgent,
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
+  ThinkSkillsPromptTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -55,6 +56,7 @@ import type {
   ThinkFiberTestAgent,
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
+  ThinkSkillsPromptTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -195,6 +197,7 @@ export type Env = {
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
   ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
   ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;
+  ThinkSkillsPromptTestAgent: DurableObjectNamespace<ThinkSkillsPromptTestAgent>;
   ThinkAsyncConfigSessionAgent: DurableObjectNamespace<ThinkAsyncConfigSessionAgent>;
   ThinkConfigTestAgent: DurableObjectNamespace<ThinkConfigTestAgent>;
   ThinkLegacyConfigMigrationAgent: DurableObjectNamespace<ThinkLegacyConfigMigrationAgent>;

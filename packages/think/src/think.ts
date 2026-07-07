@@ -12,7 +12,7 @@
  * Configuration overrides:
  *   - getModel()            — return a model id string (resolved via the
  *                             built-in workers-ai-provider) or a LanguageModel
- *   - getSystemPrompt()     — return the system prompt (fallback when no context blocks)
+ *   - getSystemPrompt()     — return the base system prompt (fallback when no context blocks)
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
  *   - configureSession()    — add context blocks, compaction, search, skills
@@ -1892,7 +1892,7 @@ export interface TurnInput {
  * Contains everything Think assembled — the hook can inspect and override.
  */
 export interface TurnContext {
-  /** Assembled system prompt (from context blocks or getSystemPrompt fallback). */
+  /** Assembled system prompt (context blocks plus the base prompt when skills are enabled). */
   system: string;
   /** Assembled model messages (truncated, pruned). */
   messages: ModelMessage[];
@@ -3770,8 +3770,9 @@ export class Think<
   }
 
   /**
-   * Return the system prompt for the assistant.
+   * Return the base system prompt for the assistant.
    * Used as fallback when no context blocks are configured via `configureSession`.
+   * A catalog registered by `getSkills()` augments rather than replaces it.
    */
   getSystemPrompt(): string {
     return [
@@ -5148,7 +5149,12 @@ export class Think<
         : undefined;
 
     const frozenPrompt = await this.session.freezeSystemPrompt();
-    const rawBaseSystem = frozenPrompt || this.getSystemPrompt();
+    // User-configured context retains its existing replacement semantics, but
+    // first-class skills are framework-added context: their catalog must not
+    // silently erase the agent's identity and always-on instructions.
+    const rawBaseSystem = this._skillRegistry
+      ? [this.getSystemPrompt(), frozenPrompt].filter(Boolean).join("\n\n")
+      : frozenPrompt || this.getSystemPrompt();
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
       : rawBaseSystem;

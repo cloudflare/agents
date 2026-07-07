@@ -6,6 +6,7 @@ import { subscribe } from "agents/observability";
 import type {
   ThinkTestAgent,
   ThinkSessionTestAgent,
+  ThinkSkillsPromptTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -88,6 +89,13 @@ function closeWS(ws: WebSocket): Promise<void> {
 async function freshSessionAgent(name: string) {
   return getServerByName(
     env.ThinkSessionTestAgent as unknown as DurableObjectNamespace<ThinkSessionTestAgent>,
+    name
+  );
+}
+
+async function freshSkillsPromptAgent(name: string) {
+  return getServerByName(
+    env.ThinkSkillsPromptTestAgent as unknown as DurableObjectNamespace<ThinkSkillsPromptTestAgent>,
     name
   );
 }
@@ -960,6 +968,29 @@ describe("Think — Session integration", () => {
 // ── Context blocks ───────────────────────────────────────────────
 
 describe("Think — context blocks", () => {
+  it("keeps getSystemPrompt when getSkills registers its catalog context", async () => {
+    const agent = await freshSkillsPromptAgent("ctx-skills-base-prompt");
+
+    const result = await agent.testChat("Use the prompt test skill.");
+    expect(result.done).toBe(true);
+
+    const system = await agent.getCapturedSystem();
+    expect(system).toContain("CUSTOM SKILLS AGENT SYSTEM PROMPT");
+    expect(system).toContain("prompt-test");
+    expect(system).toContain("Verify skill catalog prompt composition.");
+  });
+
+  it("keeps replacement semantics for context blocks when skills are disabled", async () => {
+    const agent = await freshSessionAgent("ctx-replaces-base-prompt");
+
+    const result = await agent.testChat("Hello!");
+    expect(result.done).toBe(true);
+
+    const system = await agent.getCapturedSystem();
+    expect(system).toContain("MEMORY");
+    expect(system).not.toContain("You are a careful, capable assistant");
+  });
+
   it("should configure session with context blocks", async () => {
     const agent = await freshSessionAgent("ctx-basic");
 

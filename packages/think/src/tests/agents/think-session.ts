@@ -42,7 +42,8 @@ import type {
   ActionAuthorizationContext,
   ActionAuthorizationDecision,
   StepContext,
-  ChunkContext
+  ChunkContext,
+  SkillSource
 } from "../../think";
 import {
   sanitizeMessage,
@@ -3185,6 +3186,7 @@ export class ThinkAgentToolParent extends Agent {
 
 export class ThinkSessionTestAgent extends Think {
   private _response = "Hello from session agent!";
+  private _capturedSystem = "";
 
   override configureSession(session: Session) {
     return session
@@ -3197,6 +3199,10 @@ export class ThinkSessionTestAgent extends Think {
 
   override getModel(): LanguageModel {
     return createMockModel(this._response);
+  }
+
+  override beforeTurn(ctx: TurnContext): void {
+    this._capturedSystem = ctx.system;
   }
 
   async setResponse(response: string): Promise<void> {
@@ -3216,6 +3222,10 @@ export class ThinkSessionTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  async getCapturedSystem(): Promise<string> {
+    return this._capturedSystem;
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
@@ -3271,6 +3281,66 @@ export class ThinkSessionTestAgent extends Think {
 
   async hostGetContext(label: string): Promise<string | null> {
     return this._hostGetContext(label);
+  }
+}
+
+// ── ThinkSkillsPromptTestAgent ───────────────────────────────
+// Exercises first-class skills and base-system-prompt composition together.
+
+const promptTestSkillSource: SkillSource = {
+  id: "prompt-test-skills",
+  fingerprint: "prompt-test-skills-v1",
+  async list() {
+    return [
+      {
+        name: "prompt-test",
+        description: "Verify skill catalog prompt composition."
+      }
+    ];
+  },
+  async load(name) {
+    return name === "prompt-test"
+      ? {
+          name,
+          description: "Verify skill catalog prompt composition.",
+          body: "Follow the prompt composition test procedure."
+        }
+      : null;
+  }
+};
+
+export class ThinkSkillsPromptTestAgent extends Think {
+  private _capturedSystem = "";
+
+  override getSystemPrompt(): string {
+    return "CUSTOM SKILLS AGENT SYSTEM PROMPT";
+  }
+
+  override getSkills(): SkillSource[] {
+    return [promptTestSkillSource];
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("Skills prompt test response");
+  }
+
+  override beforeTurn(ctx: TurnContext): void {
+    this._capturedSystem = ctx.system;
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async getCapturedSystem(): Promise<string> {
+    return this._capturedSystem;
   }
 }
 

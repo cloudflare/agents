@@ -10,6 +10,7 @@ export {
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkSessionTestAgent,
+  ThinkSkillsPromptTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,

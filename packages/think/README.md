@@ -209,8 +209,8 @@ export class MyAgent extends Think<Env> {
 
 Think supports the [Agent Skills](https://agentskills.io/) directory format as
 a first-class API. Return one or more `SkillSource` objects from `getSkills()`;
-Think adds the skill catalog to the prompt and exposes `activate_skill` and
-`read_skill_resource` tools when skills are available.
+Think appends the skill catalog to `getSystemPrompt()` and exposes
+`activate_skill` and `read_skill_resource` tools when skills are available.
 
 ```ts
 import { Think, skills } from "@cloudflare/think";
@@ -268,9 +268,10 @@ can read `{ name, path }` or a qualified path such as
 from other skills.
 
 Skills are on-demand instructions, not always-on system prompt text. The model
-sees the catalog first, then calls `activate_skill` when a user task matches a
-skill description. Use `getSystemPrompt()` or a Session context block for
-behavior that should apply to every turn.
+sees their catalog alongside the base prompt, then calls `activate_skill` when a
+user task matches a skill description. Enabling skills does not replace
+`getSystemPrompt()`. Use that method or a Session context block for behavior that
+should apply to every turn.
 
 Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
 enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
@@ -334,7 +335,7 @@ Script execution requires a Worker Loader binding:
 | Method / Property          | Default                            | Description                                                                                                                                                                                                                  |
 | -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `getModel()`               | throws                             | Return the `LanguageModel` to use                                                                                                                                                                                            |
-| `getSystemPrompt()`        | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                                                                                                                              |
+| `getSystemPrompt()`        | careful assistant operating prompt | Base prompt; skill catalogs augment it, otherwise it is the fallback when no context blocks exist                                                                                                                            |
 | `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
 | `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
 | `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |
