@@ -3,8 +3,9 @@ name: open-pr
 description: Take a cloudflare/agents GitHub issue plus any repro findings and one-shot a fix PR — branch, change, test, push, and open the PR linked to the issue.
 ---
 
-The first user message contains an `<agent-think-run>` envelope with `repository`,
-`issue`, `instruction`, `requested-by`, and (when available) `trigger-comment-id`.
+The current user message contains an `<agent-think-run>` envelope with
+`repository`, `issue`, `instruction`, `requested-by`, and (when available)
+`trigger-comment-id`.
 Use those values exactly. Never infer or substitute another target from examples,
 workspace contents, GitHub searches, or concurrent issues. If the envelope or a
 required field is absent, stop without cloning/editing/pushing/posting and return a

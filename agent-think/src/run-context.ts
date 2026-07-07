@@ -38,11 +38,7 @@ export function validateRunTarget(target: RunTarget): RunTarget {
   return target;
 }
 
-/**
- * Durable, model-visible run identity. This deliberately duplicates the
- * system prompt: context blocks may change prompt assembly, but a submitted
- * user message is persisted with the turn and survives every continuation.
- */
+/** Stable trace identity applied to every inference, including recovery. */
 export function buildRunTelemetry(
   target: RunTarget,
   agentId: string,
@@ -61,6 +57,11 @@ export function buildRunTelemetry(
   };
 }
 
+/**
+ * Durable, model-visible run identity. This deliberately duplicates the
+ * read-only Session context: the submitted user message is persisted with the
+ * turn and survives every continuation.
+ */
 export function buildRunEnvelope(target: RunTarget): string {
   validateRunTarget(target);
   const envelope = {

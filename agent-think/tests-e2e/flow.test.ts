@@ -170,6 +170,6 @@ describe("E2E: production graph with inference adapter", () => {
       issueBase + 2
     );
     const terminal = await waitForThread(session, "error");
-    expect(terminal.lastError).toContain("without a final assistant report");
+    expect(terminal.lastError).toContain("step safety limit after a tool call");
   }, 120_000);
 });
