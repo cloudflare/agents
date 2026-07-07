@@ -11,6 +11,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { Agent, getAgentByName } from "agents";
 import {
+  createLegacyMcpHandler,
   createMcpHandler,
   DurableObjectEventStore,
   type TransportState,
@@ -124,7 +125,9 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
     eventStore: new DurableObjectEventStore(this.ctx.storage)
   });
 
-  handler = createMcpHandler(this.server, { transport: this.transport });
+  handler = createLegacyMcpHandler(this.server, {
+    transport: this.transport
+  });
 
   initialState = { counter: 0 };
 

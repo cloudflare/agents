@@ -1,11 +1,7 @@
 import { createExecutionContext } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/server";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createLegacyMcpHandler } from "../../mcp/handler-legacy";
-
-vi.mock("../../mcp/handler-warning", () => ({
-  warnLegacyHandlerCompatibility: () => {}
-}));
 
 describe("SDK v2 server on the existing legacy handler", () => {
   it("serves a 2025 initialize request through WorkerTransport", async () => {

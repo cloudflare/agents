@@ -74,12 +74,7 @@ function createServer() {
   return server;
 }
 
-const apiHandler = {
-  async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
-  }
-};
+const apiHandler = createMcpHandler(createServer);
 
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",

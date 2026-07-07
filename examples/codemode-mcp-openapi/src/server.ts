@@ -1,4 +1,4 @@
-import { createMcpHandler } from "agents/mcp";
+import { createLegacyMcpHandler } from "agents/mcp";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { openApiMcpServer } from "@cloudflare/codemode/mcp";
 
@@ -101,6 +101,6 @@ async () => {
       }
     });
 
-    return createMcpHandler(server)(request, env, ctx);
+    return createLegacyMcpHandler(server)(request, env, ctx);
   }
 };

@@ -1051,6 +1051,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -1076,6 +1079,12 @@ importers:
       '@cloudflare/codemode':
         specifier: '*'
         version: link:../../packages/codemode
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -1822,6 +1831,9 @@ importers:
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
         specifier: 2.0.0-beta.2
         version: 2.0.0-beta.2
@@ -1883,6 +1895,9 @@ importers:
       '@cloudflare/workers-oauth-provider':
         specifier: ^0.8.1
         version: 0.8.1
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
         specifier: 2.0.0-beta.2
         version: 2.0.0-beta.2
@@ -2029,6 +2044,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -3759,9 +3777,18 @@ importers:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
         version: 1.42.3(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(workerd@1.20260625.1)(wrangler@4.105.0(@cloudflare/workers-types@4.20260629.1))
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@vitejs/plugin-react':
         specifier: ^6.0.3
         version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
       chess.js:
         specifier: ^1.4.0
         version: 1.4.0
@@ -3813,12 +3840,6 @@ importers:
       '@cloudflare/codemode':
         specifier: '>=0.4.0'
         version: link:../codemode
-      '@modelcontextprotocol/sdk':
-        specifier: 1.29.0
-        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
-      '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.2
-        version: 2.0.0-beta.2
       '@rolldown/plugin-babel':
         specifier: ^0.2.3
         version: 0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -3859,6 +3880,12 @@ importers:
       '@modelcontextprotocol/conformance-v2':
         specifier: npm:@modelcontextprotocol/conformance@0.2.0-alpha.9
         version: '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)'
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@tanstack/ai':
         specifier: 0.38.0
         version: 0.38.0(@opentelemetry/api@1.9.1)
@@ -4161,6 +4188,9 @@ importers:
       '@gsap/react':
         specifier: ^2.1.2
         version: 2.1.2(gsap@3.15.0)(react@19.2.7)
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
         specifier: 2.0.0-beta.2
         version: 2.0.0-beta.2
@@ -4170,6 +4200,9 @@ importers:
       '@use-it/interval':
         specifier: ^1.0.0
         version: 1.0.0(react@19.2.7)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
       astro:
         specifier: ^7.0.3
         version: 7.0.3(@astrojs/markdown-remark@7.2.0)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)(@types/node@26.0.1)(aws4fetch@1.0.20)(jiti@2.7.0)(rollup@4.62.2)(tsx@4.22.4)(yaml@2.9.0)

@@ -25,7 +25,7 @@ import * as z from "zod";
  *
  * Used by both server variants under test (see worker.ts):
  *  - McpAgent
- *  - createMcpHandler + WorkerTransport inside an Agent
+ *  - createLegacyMcpHandler + WorkerTransport inside an Agent
  */
 
 // 1x1 red PNG pixel

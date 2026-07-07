@@ -91,7 +91,8 @@ server.registerTool("whoami", { description: "Who am I?" }, async (context) => {
   };
 });
 
-return createMcpHandler(server)(request, env, ctx);`
+const apiHandler = createMcpHandler(createServer);
+return apiHandler(request, env, ctx);`
   },
   {
     title: "Codemode MCP",
@@ -99,13 +100,13 @@ return createMcpHandler(server)(request, env, ctx);`
       "Collapse a large API surface into a single code tool. The current Codemode MCP adapter remains on the SDK v1 compatibility lane while its client/server bridge is migrated separately.",
     snippet: `import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { codeMcpServer } from "@cloudflare/codemode/mcp";
-import { createMcpHandler } from "agents/mcp";
+import { createLegacyMcpHandler } from "agents/mcp";
 
 const upstream = createUpstreamServer();
 const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 const server = await codeMcpServer({ server: upstream, executor });
 
-return createMcpHandler(server, { route: "/codemode" })(
+return createLegacyMcpHandler(server, { route: "/codemode" })(
   request,
   env,
   ctx

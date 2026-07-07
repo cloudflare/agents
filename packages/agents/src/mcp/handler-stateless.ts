@@ -8,7 +8,6 @@ import {
   type CreateMcpHandlerOptions as SdkCreateMcpHandlerOptions,
   type McpHandlerRequestOptions,
   type McpHttpHandler,
-  type McpRequestContext,
   type McpServerFactory
 } from "@modelcontextprotocol/server";
 import {
@@ -16,11 +15,8 @@ import {
   runWithAuthContext,
   type McpAuthContext
 } from "./auth-context";
-import { createLegacyMcpHandler } from "./handler-legacy";
-import {
-  WorkerTransport,
-  withoutLegacyTransportWarning
-} from "./worker-transport";
+import { createLegacyMcpHandlerInternal } from "./handler-legacy";
+import { WorkerTransport } from "./worker-transport";
 import type { CORSOptions } from "./types";
 
 export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOptions {
@@ -40,7 +36,7 @@ export type StatelessMcpHandler = Omit<McpHttpHandler, "fetch"> & {
   };
 };
 
-export type StatelessMcpServerInput = McpServer | Server | McpServerFactory;
+export type StatelessMcpServerInput = McpServerFactory;
 
 const DEFAULT_CORS_OPTIONS: Required<CORSOptions> = {
   origin: "*",
@@ -120,29 +116,6 @@ function reportError(
   }
 }
 
-function isV2Server(value: unknown): value is McpServer | Server {
-  return value instanceof McpServer || value instanceof Server;
-}
-
-function unsupportedFactoryProduct(value: unknown): TypeError {
-  const name =
-    typeof value === "object" && value !== null
-      ? value.constructor?.name
-      : typeof value;
-  return new TypeError(
-    `createMcpHandler factory returned unsupported ${name ?? "value"}. ` +
-      'Return the McpServer or Server exported by "@modelcontextprotocol/server".'
-  );
-}
-
-function wrapFactory(factory: McpServerFactory): McpServerFactory {
-  return async (context: McpRequestContext) => {
-    const product = await factory(context);
-    if (!isV2Server(product)) throw unsupportedFactoryProduct(product);
-    return product;
-  };
-}
-
 const STATELESS_LEGACY_REVERSE_REQUEST_ERROR =
   "Server-to-client requests are unavailable in stateless legacy mode. " +
   "Use inputRequired(...) for MCP 2026-07-28 clients, or route 2025-era " +
@@ -161,7 +134,9 @@ function createLegacyRequestHandler(
   route: string,
   onerror?: (error: Error) => void
 ) {
-  return async (
+  const activeTeardowns = new Set<() => Promise<void>>();
+
+  const fetch = async (
     request: Request,
     options: McpHandlerRequestOptions | undefined,
     authContext: McpAuthContext | undefined,
@@ -169,13 +144,29 @@ function createLegacyRequestHandler(
   ): Promise<Response> => {
     let product: McpServer | Server | undefined;
     let transport: WorkerTransport | undefined;
-    let toreDown = false;
-    const teardown = () => {
-      if (toreDown) return;
-      toreDown = true;
-      void transport?.close().catch(() => {});
-      void product?.close().catch(() => {});
+    let markResourcesReady!: () => void;
+    const resourcesReady = new Promise<void>((resolve) => {
+      markResourcesReady = resolve;
+    });
+    let resourcesAreReady = false;
+    const ready = () => {
+      if (resourcesAreReady) return;
+      resourcesAreReady = true;
+      markResourcesReady();
     };
+    let teardownPromise: Promise<void> | undefined;
+    const teardown = () => {
+      return (teardownPromise ??= (async () => {
+        await resourcesReady;
+        activeTeardowns.delete(teardown);
+        await Promise.all([
+          transport?.close().catch(() => {}),
+          product?.close().catch(() => {})
+        ]);
+      })());
+    };
+    const onAbort = () => void teardown();
+    activeTeardowns.add(teardown);
 
     try {
       product = await factory({
@@ -185,9 +176,12 @@ function createLegacyRequestHandler(
         }),
         requestInfo: request
       });
-      transport = withoutLegacyTransportWarning(
-        () => new WorkerTransport({ sessionIdGenerator: undefined })
-      );
+      transport = new WorkerTransport({ sessionIdGenerator: undefined });
+      ready();
+      if (teardownPromise) {
+        await teardown();
+        throw new Error("This MCP handler has been closed");
+      }
 
       const send = transport.send.bind(transport);
       transport.send = async (message, sendOptions) => {
@@ -205,7 +199,7 @@ function createLegacyRequestHandler(
         await send(message, sendOptions);
       };
 
-      const handler = createLegacyMcpHandler(
+      const handler = createLegacyMcpHandlerInternal(
         product as never,
         {
           route,
@@ -221,7 +215,7 @@ function createLegacyRequestHandler(
           })
         }
       );
-      request.signal.addEventListener("abort", teardown, { once: true });
+      request.signal.addEventListener("abort", onAbort, { once: true });
       const response = await handler(
         request,
         undefined,
@@ -232,7 +226,8 @@ function createLegacyRequestHandler(
         response.body === null ||
         !response.headers.get("content-type")?.includes("text/event-stream")
       ) {
-        teardown();
+        request.signal.removeEventListener("abort", onAbort);
+        await teardown();
         return response;
       }
 
@@ -242,19 +237,22 @@ function createLegacyRequestHandler(
           try {
             const { done, value } = await reader.read();
             if (done) {
-              teardown();
+              request.signal.removeEventListener("abort", onAbort);
+              await teardown();
               controller.close();
             } else if (value !== undefined) {
               controller.enqueue(value);
             }
           } catch (error) {
-            teardown();
+            request.signal.removeEventListener("abort", onAbort);
+            await teardown();
             controller.error(error);
           }
         },
-        cancel(reason) {
-          teardown();
-          return reader.cancel(reason).catch(() => {});
+        async cancel(reason) {
+          request.signal.removeEventListener("abort", onAbort);
+          await teardown();
+          await reader.cancel(reason).catch(() => {});
         }
       });
       return new Response(body, {
@@ -263,89 +261,19 @@ function createLegacyRequestHandler(
         headers: response.headers
       });
     } catch (error) {
-      teardown();
+      ready();
+      request.signal.removeEventListener("abort", onAbort);
+      await teardown();
       reportError(onerror, error);
       return internalErrorResponse(
         requestIdFromParsedBody(options?.parsedBody)
       );
     }
   };
-}
-
-const CONCURRENT_INSTANCE_ERROR =
-  "createMcpHandler received concurrent requests for one McpServer instance.\n" +
-  "Cloudflare Workers can run requests concurrently within an isolate. Pass a\n" +
-  "factory (() => new McpServer(...)) to create an isolated server per request.";
-
-type InstanceLease = {
-  begin(): void;
-  factory: McpServerFactory;
-  releaseUnused(): void;
-  closeActive(): Promise<void>;
-};
-
-function createInstanceLease(instance: McpServer | Server): InstanceLease {
-  let active = false;
-  let consumed = false;
-  let closeActive: (() => Promise<void>) | undefined;
 
   return {
-    begin() {
-      if (active) throw new Error(CONCURRENT_INSTANCE_ERROR);
-      active = true;
-      consumed = false;
-    },
-    factory: async () => {
-      if (!active || consumed) {
-        throw new Error("MCP server instance lease was not available");
-      }
-      consumed = true;
-
-      const protocol =
-        instance instanceof McpServer ? instance.server : instance;
-      const previousOnClose = protocol.onclose;
-      const originalClose = instance.close.bind(instance);
-      let released = false;
-
-      const release = () => {
-        if (released) return;
-        released = true;
-        active = false;
-        consumed = false;
-        closeActive = undefined;
-        protocol.onclose = previousOnClose;
-        const mutableInstance = instance as unknown as {
-          close?: () => Promise<void>;
-        };
-        delete mutableInstance.close;
-      };
-
-      protocol.onclose = () => {
-        release();
-        previousOnClose?.();
-      };
-
-      const close = async () => {
-        try {
-          await originalClose();
-        } finally {
-          release();
-        }
-      };
-      Object.defineProperty(instance, "close", {
-        value: close,
-        writable: true,
-        configurable: true
-      });
-      closeActive = close;
-      return instance;
-    },
-    releaseUnused() {
-      if (active && !consumed) active = false;
-    },
-    async closeActive() {
-      await closeActive?.();
-    }
+    fetch,
+    close: () => Promise.all(Array.from(activeTeardowns, (close) => close()))
   };
 }
 
@@ -384,7 +312,7 @@ function wrapResponseBodyWithAuthContext(
 }
 
 export function createStatelessMcpHandler(
-  serverOrFactory: StatelessMcpServerInput,
+  factory: StatelessMcpServerInput,
   options: CreateStatelessMcpHandlerOptions = {}
 ): StatelessMcpHandler {
   const optionRecord = options as Record<string, unknown>;
@@ -415,14 +343,6 @@ export function createStatelessMcpHandler(
     ...sdkOptions
   } = options;
 
-  const lease =
-    typeof serverOrFactory === "function"
-      ? undefined
-      : createInstanceLease(serverOrFactory);
-  const factory =
-    typeof serverOrFactory === "function"
-      ? wrapFactory(serverOrFactory)
-      : lease!.factory;
   const sdkHandler = createSdkMcpHandler(factory, {
     ...sdkOptions,
     legacy: "reject"
@@ -431,12 +351,15 @@ export function createStatelessMcpHandler(
     legacy === "stateless"
       ? createLegacyRequestHandler(factory, route, sdkOptions.onerror)
       : undefined;
+  let closed = false;
 
   const serve = async (
     request: Request,
     requestOptions?: McpHandlerRequestOptions,
     workerCtx?: ExecutionContext
   ): Promise<Response> => {
+    if (closed) throw new Error("This MCP handler has been closed");
+
     if (new URL(request.url).pathname !== route) {
       return withCors(new Response("Not Found", { status: 404 }), corsOptions);
     }
@@ -448,8 +371,7 @@ export function createStatelessMcpHandler(
     const legacyRequest =
       statelessLegacyHandler !== undefined &&
       (await isLegacyRequest(request, requestOptions?.parsedBody));
-
-    lease?.begin();
+    if (closed) throw new Error("This MCP handler has been closed");
 
     try {
       const verified = workerCtx
@@ -479,7 +401,7 @@ export function createStatelessMcpHandler(
           : undefined;
       const invoke = async () => {
         if (legacyRequest && statelessLegacyHandler) {
-          return statelessLegacyHandler(
+          return statelessLegacyHandler.fetch(
             request,
             upstreamOptions,
             resolvedAuthContext,
@@ -491,13 +413,11 @@ export function createStatelessMcpHandler(
       const response = resolvedAuthContext
         ? await runWithAuthContext(resolvedAuthContext, invoke)
         : await invoke();
-      lease?.releaseUnused();
       return withCors(
         wrapResponseBodyWithAuthContext(response, resolvedAuthContext),
         corsOptions
       );
     } catch (error) {
-      lease?.releaseUnused();
       reportError(sdkOptions.onerror, error);
       return withCors(internalErrorResponse(), corsOptions);
     }
@@ -519,8 +439,8 @@ export function createStatelessMcpHandler(
     notify: sdkHandler.notify,
     bus: sdkHandler.bus,
     close: async () => {
-      await sdkHandler.close();
-      await lease?.closeActive();
+      closed = true;
+      await Promise.all([sdkHandler.close(), statelessLegacyHandler?.close()]);
     }
   }) as StatelessMcpHandler;
 }

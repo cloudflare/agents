@@ -672,10 +672,13 @@ export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./client";
 export type { McpClientOptions } from "./types";
 
 export {
+  createLegacyMcpHandler,
   createMcpHandler,
   experimental_createMcpHandler,
+  type CreateLegacyMcpHandlerOptions,
   type CreateMcpHandlerOptions,
   type CreateStatelessMcpHandlerOptions,
+  type LegacyMcpHandler,
   type StatelessMcpHandler
 } from "./handler";
 

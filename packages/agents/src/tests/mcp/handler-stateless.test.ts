@@ -1,13 +1,9 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
 import { McpServer as LegacyMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  McpServer,
-  Server,
-  type CallToolResult
-} from "@modelcontextprotocol/server";
+import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler, getMcpAuthContext } from "../../mcp";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 const VERIFIED_OAUTH_CONTEXT = Symbol.for(
   "cloudflare.workers-oauth-provider.verified-context.v1"
@@ -85,7 +81,7 @@ function createServer() {
 
 describe("createMcpHandler SDK v2", () => {
   it("serves the modern protocol from an upstream server", async () => {
-    const handler = createMcpHandler(createServer());
+    const handler = createMcpHandler(() => createServer());
 
     const response = await handler(
       modernRequest("server/discover"),
@@ -207,54 +203,114 @@ describe("createMcpHandler SDK v2", () => {
     expect(typeof handler.bus.publish).toBe("function");
   });
 
-  it("allows sequential instance reuse", async () => {
-    const handler = createMcpHandler(createServer());
+  it("does not serve stateless legacy requests after close", async () => {
+    let factoryCalls = 0;
+    const handler = createMcpHandler(() => {
+      factoryCalls++;
+      return createServer();
+    });
 
-    const first = await handler(
-      legacyInitializeRequest(1),
-      env,
-      createExecutionContext()
-    );
-    await first.text();
-    const second = await handler(
-      legacyInitializeRequest(2),
-      env,
-      createExecutionContext()
-    );
+    await handler.close();
 
-    expect(first.status).toBe(200);
-    expect(second.status).toBe(200);
+    await expect(handler.fetch(legacyInitializeRequest())).rejects.toThrow(
+      "This MCP handler has been closed"
+    );
+    expect(factoryCalls).toBe(0);
   });
 
-  it("rejects overlapping use of one server instance", async () => {
-    let releaseTool: (() => void) | undefined;
+  it("does not start a legacy server when close wins request classification", async () => {
+    let factoryCalls = 0;
+    let releaseClassification!: () => void;
+    let markClassificationStarted!: () => void;
+    const classificationStarted = new Promise<void>((resolve) => {
+      markClassificationStarted = resolve;
+    });
+    const classificationGate = new Promise<void>((resolve) => {
+      releaseClassification = resolve;
+    });
+    const request = legacyInitializeRequest();
+    const cloneRequest = request.clone.bind(request);
+    Object.defineProperty(request, "clone", {
+      value: () => {
+        const clone = cloneRequest();
+        const readBody = clone.text.bind(clone);
+        Object.defineProperty(clone, "text", {
+          value: async () => {
+            markClassificationStarted();
+            await classificationGate;
+            return readBody();
+          }
+        });
+        return clone;
+      }
+    });
+    const handler = createMcpHandler(() => {
+      factoryCalls++;
+      return createServer();
+    });
+    const pendingResponse = handler.fetch(request);
+    await classificationStarted;
+
+    await handler.close();
+    releaseClassification();
+
+    await expect(pendingResponse).rejects.toThrow(
+      "This MCP handler has been closed"
+    );
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("closes active stateless legacy servers", async () => {
+    let serverClosed = false;
+    const handler = createMcpHandler(() => {
+      const server = createServer();
+      server.server.onclose = () => {
+        serverClosed = true;
+      };
+      return server;
+    });
+    const response = await handler.fetch(legacyInitializeRequest());
+
+    await handler.close();
+
+    expect(serverClosed).toBe(true);
+    await response.body?.cancel();
+  });
+
+  it("closes a stateless legacy server whose factory resolves during close", async () => {
+    let resolveFactory!: (server: McpServer) => void;
+    let markFactoryStarted!: () => void;
+    const factoryStarted = new Promise<void>((resolve) => {
+      markFactoryStarted = resolve;
+    });
+    let serverClosed = false;
+    const handler = createMcpHandler(() => {
+      markFactoryStarted();
+      return new Promise<McpServer>((resolve) => {
+        resolveFactory = resolve;
+      });
+    });
+    const pendingResponse = handler.fetch(legacyInitializeRequest());
+    await factoryStarted;
+    const closing = handler.close();
     const server = createServer();
-    server.registerTool(
-      "wait",
-      { inputSchema: {} },
-      () =>
-        new Promise<CallToolResult>((resolve) => {
-          releaseTool = () =>
-            resolve({ content: [{ type: "text", text: "done" }] });
-        })
-    );
-    const handler = createMcpHandler(server);
+    const closeServer = server.close.bind(server);
+    server.close = async () => {
+      serverClosed = true;
+      await closeServer();
+    };
 
-    const firstPromise = handler(
-      modernRequest("tools/call", { name: "wait", arguments: {} }),
-      env,
-      createExecutionContext()
-    );
-    await vi.waitFor(() => expect(releaseTool).toBeTypeOf("function"));
-    await expect(
-      handler(modernRequest("server/discover"), env, createExecutionContext())
-    ).rejects.toThrow(
-      "createMcpHandler received concurrent requests for one McpServer instance"
-    );
-    releaseTool?.();
-    const first = await firstPromise;
+    resolveFactory(server);
+    await closing;
+    await pendingResponse;
 
-    expect(first.status).toBe(200);
+    expect(serverClosed).toBe(true);
+  });
+
+  it("requires a factory for SDK v2 servers", () => {
+    expect(() => createMcpHandler(createServer() as never)).toThrow(
+      "Pass a factory returning McpServer or Server"
+    );
   });
 
   it("constructs an isolated server for each factory request", async () => {
@@ -406,7 +462,7 @@ describe("createMcpHandler SDK v2", () => {
 
   it("rejects v1-only options for a v2 server", () => {
     expect(() =>
-      createMcpHandler(createServer(), {
+      createMcpHandler(() => createServer(), {
         transport: {}
       } as never)
     ).toThrow('option "transport" is only supported with an MCP SDK v1 server');
@@ -451,8 +507,8 @@ describe("createMcpHandler SDK v2", () => {
   });
 });
 
-describe("createMcpHandler SDK v1 compatibility", () => {
-  it("keeps v1 server inputs on the legacy handler", async () => {
+describe("createMcpHandler deprecated SDK v1 overload", () => {
+  it("forwards SDK v1 server inputs to the legacy handler", async () => {
     const server = new LegacyMcpServer({ name: "legacy", version: "1.0.0" });
     const handler = createMcpHandler(server, { enableJsonResponse: true });
 
@@ -467,6 +523,6 @@ describe("createMcpHandler SDK v1 compatibility", () => {
   });
 
   it("rejects unsupported server lookalikes", () => {
-    expect(() => createMcpHandler({} as Server)).toThrow("unsupported server");
+    expect(() => createMcpHandler({} as never)).toThrow("unsupported server");
   });
 });

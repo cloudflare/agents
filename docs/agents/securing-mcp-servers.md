@@ -10,11 +10,11 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp";
 
 // A Worker that exposes an MCP server
-const apiHandler = {
-  async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    return createMcpHandler(server)(request, env, ctx);
-  }
-};
+function createServer() {
+  return new McpServer({ name: "authenticated-server", version: "1.0.0" });
+}
+
+const apiHandler = createMcpHandler(createServer);
 
 // Wrap with OAuth protection
 export default new OAuthProvider({

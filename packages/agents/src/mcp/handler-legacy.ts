@@ -7,12 +7,7 @@ import {
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
 
-/**
- * @deprecated Used only with the MCP SDK v1 createMcpHandler compatibility
- * lane. Import McpServer or Server from "@modelcontextprotocol/server" and use
- * CreateStatelessMcpHandlerOptions. Removed in the next major version.
- */
-export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
+export interface CreateLegacyMcpHandlerOptions extends WorkerTransportOptions {
   /**
    * The route path that this MCP handler should respond to.
    * If specified, the handler will only process requests that match this route.
@@ -31,15 +26,32 @@ export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
   transport?: WorkerTransport;
 }
 
-export function createLegacyMcpHandler(
-  server: McpServer | Server,
-  options: CreateMcpHandlerOptions = {},
-  internal?: { authInfo?: AuthInfo; parsedBody?: unknown }
-): (
+export type CreateMcpHandlerOptions = CreateLegacyMcpHandlerOptions;
+
+export type LegacyMcpHandler = (
   request: Request,
   env: unknown,
   ctx: ExecutionContext
-) => Promise<Response> {
+) => Promise<Response>;
+
+type LegacyMcpHandlerInternalOptions = {
+  authInfo?: AuthInfo;
+  parsedBody?: unknown;
+};
+
+export function createLegacyMcpHandler(
+  server: McpServer | Server,
+  options: CreateLegacyMcpHandlerOptions = {}
+): LegacyMcpHandler {
+  return createLegacyMcpHandlerInternal(server, options);
+}
+
+/** @internal Used by the SDK v2 handler's stateless 2025 fallback. */
+export function createLegacyMcpHandlerInternal(
+  server: McpServer | Server,
+  options: CreateLegacyMcpHandlerOptions,
+  internal?: LegacyMcpHandlerInternalOptions
+): LegacyMcpHandler {
   const route = options.route ?? "/mcp";
   const {
     route: _route,

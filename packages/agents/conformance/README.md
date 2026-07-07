@@ -9,7 +9,7 @@ Runs the official MCP conformance suites against Agents implementations inside w
 | `test:conformance:client`                          | Stable SDK v1 client    | n/a                   | `Agent` + `MCPClientManager`                          |
 | `test:conformance:server:handler`                  | `2026-07-28`            | `/mcp-handler`        | SDK v2 stateless `createMcpHandler`                   |
 | `test:conformance:server:handler:stateless-legacy` | 2025 stateless fallback | `/mcp-handler`        | Same SDK v2 handler, default `legacy: "stateless"`    |
-| `test:conformance:server:handler:legacy`           | Stable SDK v1           | `/mcp-handler-legacy` | Complete handler/`WorkerTransport` compatibility lane |
+| `test:conformance:server:handler:legacy`           | Stable SDK v1           | `/mcp-handler-legacy` | Explicit `createLegacyMcpHandler` + `WorkerTransport` |
 | `test:conformance:server:mcp-agent`                | Stable SDK v1           | `/mcp-agent`          | Retained stateful `McpAgent`                          |
 
 The stable `@modelcontextprotocol/conformance@0.1.16` dependency remains authoritative for the v1 client and server lanes. The independently exact-pinned `conformance-v2` npm alias exercises both generations served by the SDK v2 handler.
