@@ -305,18 +305,6 @@ export class ThinkAgent extends ThinkBase {
     this.#log("git-auth-exit", { exitCode: result.exitCode });
   }
 
-  async gitDiff(): Promise<string> {
-    const handle = await this.#workspaceFs.shell.exec(
-      `git -C ${quote(repoDirectory(this.#context?.repo))} diff --no-ext-diff`,
-      { encoding: "utf8", backend: "container" }
-    );
-    const result = await handle.result();
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || "git diff failed");
-    }
-    return result.stdout;
-  }
-
   /** Dev/e2e proof that container files are not pulled into the host DO VFS. */
   async debugWorkspaceIsolation(): Promise<{
     containerFileExists: boolean;
