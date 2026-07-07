@@ -293,8 +293,8 @@ export class ThinkAgent extends ThinkBase {
       issue: ctx.issueNumber,
       instruction: ctx.instruction
     });
-    this.#report((cc) =>
-      cc.recordDispatch({
+    this.#report((commandCenter) =>
+      commandCenter.recordDispatch({
         session: this.name,
         repo: ctx.repo,
         issueNumber: ctx.issueNumber,
