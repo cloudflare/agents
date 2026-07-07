@@ -49,7 +49,11 @@ import {
   createReadTool,
   createWriteTool
 } from "./tools/fs/index";
-import { buildRunEnvelope, type RunTarget } from "./run-context";
+import {
+  buildRunEnvelope,
+  buildRunTelemetry,
+  type RunTarget
+} from "./run-context";
 import {
   classifyRunOutcome,
   RunLifecycle,
@@ -427,6 +431,15 @@ export class ThinkAgent extends ThinkBase {
     await this.#runLifecycle.withWorkspace(() => this.#ensureGitAuth());
     return {
       maxOutputTokens: 16384,
+      ...(this.#context
+        ? {
+            experimental_telemetry: buildRunTelemetry(
+              this.#context,
+              this.name,
+              this.constructor.name
+            )
+          }
+        : {}),
       // Only our four tools reach the model (read/write/edit/bash — pi's
       // codingTools shape, Claude Code's names). Think merges its workspace
       // built-ins (list/find/grep/delete) unconditionally; this allowlist
