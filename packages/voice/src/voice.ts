@@ -537,41 +537,54 @@ export function withVoice<TBase extends AgentLike>(
       // from leaking keepAlive refs during the beforeCallStart window.
       this.#cm.initConnection(connection.id);
 
-      const allowed = await this.beforeCallStart(connection);
-      if (!this.#isCurrentStartup(connection.id, startupToken)) return;
-      if (!allowed) {
-        this.#startupTokens.delete(connection.id);
-        this.#cm.cleanup(connection.id);
-        return;
-      }
+      let provider: Transcriber | undefined;
 
-      const provider = this.createTranscriber(connection) ?? this.transcriber;
-      if (!provider) {
-        console.error(
-          "[VoiceAgent] No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber()."
-        );
+      try {
+        const allowed = await this.beforeCallStart(connection);
+        if (!this.#isCurrentStartup(connection.id, startupToken)) return;
+        if (!allowed) {
+          this.#startupTokens.delete(connection.id);
+          this.#cm.cleanup(connection.id);
+          return;
+        }
+
+        provider = this.createTranscriber(connection) ?? this.transcriber;
+        if (!provider) {
+          const message =
+            "No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber().";
+          console.error(`[VoiceAgent] ${message}`);
+          this.#sendJSON(connection, {
+            type: "error",
+            message
+          });
+          this.#startupTokens.delete(connection.id);
+          this.#cm.cleanup(connection.id);
+          return;
+        }
+
+        const dispose = await this.keepAlive();
+        if (!this.#isCurrentStartup(connection.id, startupToken)) {
+          dispose();
+          return;
+        }
+        this.#keepAliveDispose.set(connection.id, dispose);
+
+        const configuredFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
         this.#sendJSON(connection, {
-          type: "error",
-          message:
-            "No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber()."
+          type: "audio_config",
+          format: configuredFormat
         });
-        this.#startupTokens.delete(connection.id);
-        this.#cm.cleanup(connection.id);
+      } catch (error) {
+        await this.#handleStartupFailure(
+          connection,
+          startupToken,
+          error,
+          "Voice call failed to start"
+        );
         return;
       }
 
-      const dispose = await this.keepAlive();
-      if (!this.#isCurrentStartup(connection.id, startupToken)) {
-        dispose();
-        return;
-      }
-      this.#keepAliveDispose.set(connection.id, dispose);
-
-      const configuredFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
-      this.#sendJSON(connection, {
-        type: "audio_config",
-        format: configuredFormat
-      });
+      if (!provider) return;
 
       let session: TranscriberSession;
       try {
@@ -623,13 +636,29 @@ export function withVoice<TBase extends AgentLike>(
       startupToken: symbol,
       error: unknown
     ): Promise<void> {
+      await this.#handleStartupFailure(
+        connection,
+        startupToken,
+        error,
+        "Speech recognition failed to start",
+        "[VoiceAgent] Transcriber startup failed:"
+      );
+    }
+
+    async #handleStartupFailure(
+      connection: Connection,
+      startupToken: symbol,
+      error: unknown,
+      clientMessage: string,
+      logPrefix = "[VoiceAgent] Call startup failed:"
+    ): Promise<void> {
       if (!this.#isCurrentStartup(connection.id, startupToken)) return;
 
-      console.error("[VoiceAgent] Transcriber startup failed:", error);
+      console.error(logPrefix, error);
       this.#startupTokens.delete(connection.id);
       this.#sendJSON(connection, {
         type: "error",
-        message: "Speech recognition failed to start"
+        message: clientMessage
       });
       this.#cm.cleanup(connection.id);
       this.#releaseKeepAlive(connection.id);

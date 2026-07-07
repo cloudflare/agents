@@ -357,7 +357,8 @@ export class TestVoiceAgent extends VoiceBase {
   #callStartCount = 0;
   #callEndCount = 0;
   #interruptCount = 0;
-  #beforeCallStartResult = true;
+  #beforeCallStartResult: boolean | "throw" = true;
+  #keepAliveShouldThrow = false;
   #turnDelayMs = 0;
   #transcriberMode: TestTranscriberMode = "default";
   #lastReadySession: ControlledReadyTranscriberSession | null = null;
@@ -366,6 +367,10 @@ export class TestVoiceAgent extends VoiceBase {
   #keepAliveReleasedCount = 0;
 
   async keepAlive(): Promise<() => void> {
+    if (this.#keepAliveShouldThrow) {
+      throw new Error("keepAlive failed");
+    }
+
     const dispose = await super.keepAlive();
     this.#keepAliveAcquiredCount++;
     let released = false;
@@ -415,6 +420,10 @@ export class TestVoiceAgent extends VoiceBase {
   }
 
   beforeCallStart(_connection: Connection): boolean {
+    if (this.#beforeCallStartResult === "throw") {
+      throw new Error("beforeCallStart failed");
+    }
+
     return this.#beforeCallStartResult;
   }
 
@@ -436,7 +445,17 @@ export class TestVoiceAgent extends VoiceBase {
       const parsed = JSON.parse(message);
       switch (parsed.type) {
         case "_set_before_call_start":
-          this.#beforeCallStartResult = parsed.value;
+          if (parsed.value === true || parsed.value === false) {
+            this.#beforeCallStartResult = parsed.value;
+          } else if (parsed.value === "throw") {
+            this.#beforeCallStartResult = "throw";
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_set_keep_alive_throw":
+          this.#keepAliveShouldThrow = parsed.value === true;
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );

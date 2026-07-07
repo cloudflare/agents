@@ -138,9 +138,18 @@ export class AudioConnectionManager {
     transcriber: Transcriber,
     options: TranscriberSessionOptions
   ): TranscriberSession {
+    const hadSession = this.#transcriberSessions.has(connectionId);
     this.closeTranscriberSession(connectionId);
     const session = transcriber.createSession(options);
     this.#transcriberSessions.set(connectionId, session);
+
+    const buffer = this.#audioBuffers.get(connectionId);
+    if (!hadSession && buffer) {
+      for (const chunk of buffer) {
+        session.feed(chunk);
+      }
+    }
+
     return session;
   }
 

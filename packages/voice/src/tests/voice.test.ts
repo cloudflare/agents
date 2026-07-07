@@ -109,6 +109,19 @@ async function setTranscriberMode(
   await waitForAck(ws, "_set_transcriber_mode");
 }
 
+async function setBeforeCallStart(
+  ws: WebSocket,
+  value: boolean | "throw"
+): Promise<void> {
+  sendJSON(ws, { type: "_set_before_call_start", value });
+  await waitForAck(ws, "_set_before_call_start");
+}
+
+async function setKeepAliveThrow(ws: WebSocket, value: boolean): Promise<void> {
+  sendJSON(ws, { type: "_set_keep_alive_throw", value });
+  await waitForAck(ws, "_set_keep_alive_throw");
+}
+
 async function waitForMicrotasks(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -359,6 +372,110 @@ describe("VoiceAgent — transcriber readiness", () => {
       expect(counts.callEnd).toBe(1);
       expect(counts.keepAliveAcquired).toBe(1);
       expect(counts.keepAliveReleased).toBe(1);
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("sends a visible error, returns idle, and cleans up when beforeCallStart throws", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setBeforeCallStart(ws, "throw");
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message: "Voice call failed to start"
+      });
+      expect(startupMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+
+      sendJSON(ws, { type: "_get_counts" });
+      const failedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(failedCounts.callStart).toBe(0);
+      expect(failedCounts.callEnd).toBe(1);
+      expect(failedCounts.keepAliveAcquired).toBe(0);
+      expect(failedCounts.keepAliveReleased).toBe(0);
+
+      await setBeforeCallStart(ws, true);
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      sendJSON(ws, { type: "_get_counts" });
+      const restartedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(restartedCounts.callStart).toBe(1);
+      expect(restartedCounts.callEnd).toBe(1);
+      expect(restartedCounts.keepAliveAcquired).toBe(1);
+      expect(restartedCounts.keepAliveReleased).toBe(0);
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("sends a visible error, returns idle, and cleans up when keepAlive rejects", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setKeepAliveThrow(ws, true);
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message: "Voice call failed to start"
+      });
+      expect(startupMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+
+      sendJSON(ws, { type: "_get_counts" });
+      const failedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(failedCounts.callStart).toBe(0);
+      expect(failedCounts.callEnd).toBe(1);
+      expect(failedCounts.keepAliveAcquired).toBe(0);
+      expect(failedCounts.keepAliveReleased).toBe(0);
+
+      await setKeepAliveThrow(ws, false);
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      sendJSON(ws, { type: "_get_counts" });
+      const restartedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(restartedCounts.callStart).toBe(1);
+      expect(restartedCounts.callEnd).toBe(1);
+      expect(restartedCounts.keepAliveAcquired).toBe(1);
+      expect(restartedCounts.keepAliveReleased).toBe(0);
     } finally {
       ws.close();
       errorLog.mockRestore();
