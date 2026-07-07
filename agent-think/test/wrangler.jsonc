@@ -13,7 +13,7 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "agent-think",
-  "main": "../src/index.ts",
+  "main": "worker.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat", "enable_abortsignal_rpc"],
 
@@ -26,7 +26,11 @@
       { "name": "Sandbox", "class_name": "Sandbox" },
       { "name": "WarmPool", "class_name": "WarmPool" },
       // Singleton registry behind the command-center UI (threads + metrics).
-      { "name": "CommandCenter", "class_name": "CommandCenterAgent" }
+      { "name": "CommandCenter", "class_name": "CommandCenterAgent" },
+      {
+        "name": "AgentThinkPromptTestAgent",
+        "class_name": "AgentThinkPromptTestAgent"
+      }
     ]
   },
 
@@ -51,6 +55,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
-    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] }
+    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] },
+    { "tag": "v4", "new_sqlite_classes": ["AgentThinkPromptTestAgent"] }
   ]
 }

@@ -17,6 +17,7 @@
 
 import type {
   ChatResponseResult,
+  Session,
   ToolCallResultContext,
   TurnContext,
   WorkspaceLike as ThinkWorkspaceLike
@@ -79,6 +80,66 @@ export interface RunContext {
   issueTitle?: string;
   /** Who mentioned @agent-think, forwarded to the command center. */
   requestedBy?: { login: string; avatarUrl?: string };
+}
+
+/**
+ * Register agent-think's identity and operating contract as durable, read-only
+ * Session context. Unlike getSystemPrompt(), this block remains present when
+ * Think adds its own skills catalog context.
+ */
+export function configureAgentThinkSession(
+  session: Session,
+  getContext: () => RunContext | null
+): Session {
+  return session.withContext("agent-think", {
+    description: "Run identity, user instruction, and operating contract.",
+    provider: {
+      get: async () => agentThinkInstructions(getContext())
+    }
+  });
+}
+
+function agentThinkInstructions(ctx: RunContext | null): string | null {
+  if (!ctx) return null;
+  return [
+    "You are agent-think, acting as the agent-think GitHub App (not any user).",
+    `You are working on issue #${ctx.issueNumber} in ${ctx.repo}.`,
+    "",
+    "The user invoked you with this instruction:",
+    `  ${ctx.instruction || "(no instruction — default to reproducing the issue)"}`,
+    "",
+    ...(ctx.commentId
+      ? [
+          "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
+          "comment that triggered you, then continue with the task:",
+          `  bash({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
+          "(👀 was added when your trigger was seen; your 🚀 tells the",
+          "humans the agent itself is running.)",
+          ""
+        ]
+      : []),
+    "Two skills are available through Think's skill catalog:",
+    "  - reproduce — reproduce and report an issue.",
+    "  - open-pr   — locate, fix, verify, and open a PR.",
+    "",
+    "Decide which skill matches the instruction and activate it before acting.",
+    "Follow it exactly, including the structured result it specifies.",
+    "",
+    "Environment:",
+    `  - Clone ${ctx.repo} to ${repoDirectory(ctx.repo)}.`,
+    "    Keep .git, node_modules, builds, and logs in their normal locations",
+    "    there. /workspace/temp is available for scratch data.",
+    "  - /workspace is container-local and is NEVER synchronized through the",
+    "    Agent Durable Object.",
+    "  - `gh`, `git`, `curl`, `npm`, `node`, and `wrangler` run in the",
+    "    container. `gh` and `git` are ALREADY AUTHENTICATED there as the app",
+    "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
+    "    re-configure the token.",
+    "  - The dedicated read/write/edit tools operate on the same container",
+    "    filesystem, so prefer them for file content operations.",
+    "",
+    "When done, reply with the structured summary the skill specifies."
+  ].join("\n");
 }
 
 class ThinkBase extends Think<Env> {}
@@ -165,6 +226,9 @@ export class ThinkAgent extends ThinkBase {
   async setContext(context: RunContext): Promise<void> {
     this.#context = context;
     await this.ctx.storage.put(CONTEXT_KEY, context);
+    // The context block provider reads #context. Re-freeze it for every
+    // dispatch so a re-mention on the same issue sees the latest instruction.
+    await this.session.refreshSystemPrompt();
   }
 
   async getContext(): Promise<RunContext | null> {
@@ -381,6 +445,10 @@ export class ThinkAgent extends ThinkBase {
 
   // ── Think hooks ────────────────────────────────────────────────
 
+  override configureSession(session: Session): Session {
+    return configureAgentThinkSession(session, () => this.#context);
+  }
+
   override getModel() {
     // Route through the account's default AI Gateway so model calls get
     // Gateway-side retries, caching, and observability. The `openai` provider
@@ -497,49 +565,6 @@ export class ThinkAgent extends ThinkBase {
       error: String(error).slice(0, 800)
     });
     return error;
-  }
-
-  override getSystemPrompt(): string {
-    const ctx = this.#context;
-    return [
-      `You are agent-think, acting as the agent-think GitHub App (not any user).`,
-      `You are working on issue #${ctx?.issueNumber} in ${ctx?.repo}.`,
-      "",
-      "The user invoked you with this instruction:",
-      `  ${ctx?.instruction || "(no instruction — default to reproducing the issue)"}`,
-      "",
-      ...(ctx?.commentId
-        ? [
-            "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
-            "comment that triggered you, then continue with the task:",
-            `  bash({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
-            "(👀 was added when your trigger was seen; your 🚀 tells the",
-            "humans the agent itself is running.)",
-            ""
-          ]
-        : []),
-      "Two skills are available through Think's skill catalog:",
-      "  - reproduce — reproduce and report an issue.",
-      "  - open-pr   — locate, fix, verify, and open a PR.",
-      "",
-      "Decide which skill matches the instruction and activate it before acting.",
-      "Follow it exactly, including the structured result it specifies.",
-      "",
-      "Environment:",
-      `  - Clone ${ctx?.repo ?? "the repo"} to ${repoDirectory(ctx?.repo)}.`,
-      "    Keep .git, node_modules, builds, and logs in their normal locations",
-      "    there. /workspace/temp is available for scratch data.",
-      "  - /workspace is container-local and is NEVER synchronized through the",
-      "    Agent Durable Object.",
-      "  - `gh`, `git`, `curl`, `npm`, `node`, and `wrangler` run in the",
-      "    container. `gh` and `git` are ALREADY AUTHENTICATED there as the app",
-      "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
-      "    re-configure the token.",
-      "  - The dedicated read/write/edit tools operate on the same container",
-      "    filesystem, so prefer them for file content operations.",
-      "",
-      "When done, reply with the structured summary the skill specifies."
-    ].join("\n");
   }
 
   override getTools(): ToolSet {
