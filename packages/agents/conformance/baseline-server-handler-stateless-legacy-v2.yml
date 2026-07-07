@@ -1,0 +1,16 @@
+# Expected failures for SDK v2's default stateless 2025 compatibility lane.
+# Every scenario runs unmodified. Reverse-request scenarios fail immediately
+# because the wrapper has no session return path; complete SDK v1 compatibility
+# remains covered separately by baseline-server-handler.yml.
+server:
+  - tools-call-sampling
+  - tools-call-elicitation
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+
+  # The fallback is deliberately sessionless, so the referee cannot open
+  # multiple session-addressed SSE streams and emits its applicability warning.
+  - server-sse-multiple-streams
+
+  # Host/Origin validation remains an explicit upstream middleware choice.
+  - dns-rebinding-protection

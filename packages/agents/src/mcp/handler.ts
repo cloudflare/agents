@@ -1,122 +1,79 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer as LegacyMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server as LegacyServer } from "@modelcontextprotocol/sdk/server/index.js";
 import {
-  WorkerTransport,
-  type WorkerTransportOptions
-} from "./worker-transport";
-import { runWithAuthContext, type McpAuthContext } from "./auth-context";
+  McpServer,
+  Server,
+  type McpServerFactory
+} from "@modelcontextprotocol/server";
+import {
+  createLegacyMcpHandler,
+  type CreateMcpHandlerOptions
+} from "./handler-legacy";
+import {
+  createStatelessMcpHandler,
+  type CreateStatelessMcpHandlerOptions,
+  type StatelessMcpHandler
+} from "./handler-stateless";
+import { warnLegacyHandlerCompatibility } from "./handler-warning";
 
-export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
-  /**
-   * The route path that this MCP handler should respond to.
-   * If specified, the handler will only process requests that match this route.
-   * @default "/mcp"
-   */
-  route?: string;
-  /**
-   * An optional auth context to use for handling MCP requests.
-   * If not provided, the handler will look for props in the execution context.
-   */
-  authContext?: McpAuthContext;
-  /**
-   * An optional transport to use for handling MCP requests.
-   * If not provided, a WorkerTransport will be created with the provided WorkerTransportOptions.
-   */
-  transport?: WorkerTransport;
-}
+export type LegacyMcpHandler = ReturnType<typeof createLegacyMcpHandler>;
+
+/**
+ * @deprecated This server comes from MCP SDK v1 and runs in legacy handler
+ * compatibility mode. Import McpServer or Server from
+ * "@modelcontextprotocol/server" to receive new MCP protocol features.
+ * Removed in the next major version.
+ */
+export function createMcpHandler(
+  server: LegacyMcpServer | LegacyServer,
+  options?: CreateMcpHandlerOptions
+): LegacyMcpHandler;
 
 export function createMcpHandler(
-  server: McpServer | Server,
-  options: CreateMcpHandlerOptions = {}
-): (
-  request: Request,
-  env: unknown,
-  ctx: ExecutionContext
-) => Promise<Response> {
-  const route = options.route ?? "/mcp";
-  const {
-    route: _route,
-    authContext,
-    transport: providedTransport,
-    ...transportOptions
-  } = options;
+  serverOrFactory: McpServer | Server | McpServerFactory,
+  options?: CreateStatelessMcpHandlerOptions
+): StatelessMcpHandler;
 
-  return async (
-    request: Request,
-    _env: unknown,
-    ctx: ExecutionContext
-  ): Promise<Response> => {
-    const url = new URL(request.url);
-    if (route && url.pathname !== route) {
-      return new Response("Not Found", { status: 404 });
-    }
+export function createMcpHandler(
+  serverOrFactory:
+    | LegacyMcpServer
+    | LegacyServer
+    | McpServer
+    | Server
+    | McpServerFactory,
+  options: CreateMcpHandlerOptions | CreateStatelessMcpHandlerOptions = {}
+): LegacyMcpHandler | StatelessMcpHandler {
+  if (typeof serverOrFactory === "function") {
+    return createStatelessMcpHandler(
+      serverOrFactory,
+      options as CreateStatelessMcpHandlerOptions
+    );
+  }
 
-    const transport =
-      providedTransport ?? new WorkerTransport(transportOptions);
+  if (
+    serverOrFactory instanceof McpServer ||
+    serverOrFactory instanceof Server
+  ) {
+    return createStatelessMcpHandler(
+      serverOrFactory,
+      options as CreateStatelessMcpHandlerOptions
+    );
+  }
 
-    const buildAuthContext = () => {
-      if (authContext) {
-        return authContext;
-      }
+  if (
+    serverOrFactory instanceof LegacyMcpServer ||
+    serverOrFactory instanceof LegacyServer
+  ) {
+    warnLegacyHandlerCompatibility();
+    return createLegacyMcpHandler(
+      serverOrFactory,
+      options as CreateMcpHandlerOptions
+    );
+  }
 
-      if (ctx.props && Object.keys(ctx.props).length > 0) {
-        return {
-          props: ctx.props as Record<string, unknown>
-        };
-      }
-
-      return undefined;
-    };
-
-    const handleRequest = async () => {
-      return await transport.handleRequest(request);
-    };
-
-    const resolvedAuthContext = buildAuthContext();
-
-    // Guard for stateful usage where a pre-connected transport is passed via options.
-    // If someone passes a transport that's already connected to this server, skip reconnecting.
-    // Note: If a developer incorrectly uses a global server with per-request transports,
-    // the MCP SDK 1.26.0+ will throw an error when trying to connect an already-connected server.
-    if (!transport.started) {
-      // Check if server is already connected (McpServer has isConnected(), Server uses transport getter)
-      const isServerConnected =
-        server instanceof McpServer
-          ? server.isConnected()
-          : server.transport !== undefined;
-
-      if (isServerConnected) {
-        throw new Error(
-          "Server is already connected to a transport. Create a new McpServer instance per request for stateless handlers."
-        );
-      }
-
-      await server.connect(transport);
-    }
-
-    try {
-      if (resolvedAuthContext) {
-        return await runWithAuthContext(resolvedAuthContext, handleRequest);
-      } else {
-        return await handleRequest();
-      }
-    } catch (error) {
-      console.error("MCP handler error:", error);
-
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32603,
-            message:
-              error instanceof Error ? error.message : "Internal server error"
-          },
-          id: null
-        }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      );
-    }
-  };
+  throw new TypeError(
+    'createMcpHandler received an unsupported server. Import McpServer or Server from "@modelcontextprotocol/server", or pass an existing MCP SDK v1 server while compatibility mode is available.'
+  );
 }
 
 let didWarnAboutExperimentalCreateMcpHandler = false;
@@ -125,13 +82,9 @@ let didWarnAboutExperimentalCreateMcpHandler = false;
  * @deprecated This has been renamed to createMcpHandler, and experimental_createMcpHandler will be removed in the next major version
  */
 export function experimental_createMcpHandler(
-  server: McpServer | Server,
+  server: LegacyMcpServer | LegacyServer,
   options: CreateMcpHandlerOptions = {}
-): (
-  request: Request,
-  env: unknown,
-  ctx: ExecutionContext
-) => Promise<Response> {
+): LegacyMcpHandler {
   if (!didWarnAboutExperimentalCreateMcpHandler) {
     didWarnAboutExperimentalCreateMcpHandler = true;
     console.warn(
@@ -140,3 +93,9 @@ export function experimental_createMcpHandler(
   }
   return createMcpHandler(server, options);
 }
+
+export type {
+  CreateMcpHandlerOptions,
+  CreateStatelessMcpHandlerOptions,
+  StatelessMcpHandler
+};

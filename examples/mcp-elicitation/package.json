@@ -10,6 +10,9 @@
   },
   "type": "module",
   "dependencies": {
-    "agents": "*"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/server": "2.0.0-beta.2",
+    "agents": "*",
+    "zod": "^4.4.3"
   }
 }

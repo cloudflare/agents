@@ -28,6 +28,7 @@
     "@cfworker/json-schema": "^4.1.1",
     "@cloudflare/codemode": ">=0.4.0",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/server": "2.0.0-beta.2",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
@@ -41,6 +42,7 @@
   "devDependencies": {
     "@ai-sdk/react": "^3.0.204",
     "@modelcontextprotocol/conformance": "0.1.16",
+    "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.9",
     "@tanstack/ai": "0.38.0",
     "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
@@ -293,9 +295,11 @@
     "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
-    "test:conformance": "pnpm run test:conformance:client && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler",
+    "test:conformance": "pnpm run test:conformance:client && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler && pnpm run test:conformance:server:handler:stateless-legacy && pnpm run test:conformance:server:handler:legacy",
     "test:conformance:client": "bash conformance/run.sh client --suite all",
     "test:conformance:server:mcp-agent": "bash conformance/run.sh server-mcp-agent",
-    "test:conformance:server:handler": "bash conformance/run.sh server-handler"
+    "test:conformance:server:handler": "bash conformance/run.sh server-handler",
+    "test:conformance:server:handler:stateless-legacy": "bash conformance/run.sh server-handler-stateless-legacy",
+    "test:conformance:server:handler:legacy": "bash conformance/run.sh server-handler-legacy"
   }
 }

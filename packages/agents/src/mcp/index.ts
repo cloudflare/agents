@@ -1,5 +1,9 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  McpServer as StatelessMcpServer,
+  Server as StatelessServer
+} from "@modelcontextprotocol/server";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   JSONRPCMessage,
@@ -29,6 +33,9 @@ import type { EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp
 import { DurableObjectEventStore } from "./event-store";
 import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 
+/**
+ * @deprecated For new servers, use createMcpHandler to get the latest MCP 26-07-28 spec (stateless by default)
+ */
 export abstract class McpAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -276,6 +283,14 @@ export abstract class McpAgent<
 
     await this.init();
     const server = await this.server;
+    if (
+      server instanceof StatelessMcpServer ||
+      server instanceof StatelessServer
+    ) {
+      throw new TypeError(
+        'McpAgent uses MCP SDK v1 and cannot serve McpServer from "@modelcontextprotocol/server". For MCP SDK v2, use createMcpHandler. Existing McpAgent applications should continue importing McpServer from "@modelcontextprotocol/sdk/server/mcp.js".'
+      );
+    }
     // Connect to the MCP server
     this._transport = this.initTransport();
 
@@ -659,7 +674,9 @@ export type { McpClientOptions } from "./types";
 export {
   createMcpHandler,
   experimental_createMcpHandler,
-  type CreateMcpHandlerOptions
+  type CreateMcpHandlerOptions,
+  type CreateStatelessMcpHandlerOptions,
+  type StatelessMcpHandler
 } from "./handler";
 
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
@@ -670,5 +687,6 @@ export type { ClearableEventStore } from "./transport";
 export {
   WorkerTransport,
   type WorkerTransportOptions,
-  type TransportState
+  type TransportState,
+  type MCPStorageApi
 } from "./worker-transport";

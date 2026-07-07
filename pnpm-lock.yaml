@@ -1715,9 +1715,18 @@ importers:
 
   examples/mcp-elicitation:
     dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       agents:
         specifier: '*'
         version: link:../../packages/agents
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   examples/mcp-rpc-transport:
     dependencies:
@@ -1800,9 +1809,9 @@ importers:
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
-      '@modelcontextprotocol/sdk':
-        specifier: 1.29.0
-        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -1861,9 +1870,9 @@ importers:
       '@cloudflare/workers-oauth-provider':
         specifier: ^0.8.1
         version: 0.8.1
-      '@modelcontextprotocol/sdk':
-        specifier: 1.29.0
-        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -3794,6 +3803,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@rolldown/plugin-babel':
         specifier: ^0.2.3
         version: 0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -3831,6 +3843,9 @@ importers:
       '@modelcontextprotocol/conformance':
         specifier: 0.1.16
         version: 0.1.16(@cfworker/json-schema@4.1.1)
+      '@modelcontextprotocol/conformance-v2':
+        specifier: npm:@modelcontextprotocol/conformance@0.2.0-alpha.9
+        version: '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)'
       '@tanstack/ai':
         specifier: 0.38.0
         version: 0.38.0(@opentelemetry/api@1.9.1)
@@ -4133,6 +4148,9 @@ importers:
       '@gsap/react':
         specifier: ^2.1.2
         version: 2.1.2(gsap@3.15.0)(react@19.2.7)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@orama/orama':
         specifier: ^3.1.18
         version: 3.1.18
@@ -6292,6 +6310,10 @@ packages:
     resolution: {integrity: sha512-GI7qiN0r39/MH2srVUR3AXaEN0YLCro20lIBbnvc1frBhszenxvUifBuTzxeVQVagILfBzCIcnungUOma8OrgA==}
     hasBin: true
 
+  '@modelcontextprotocol/conformance@0.2.0-alpha.9':
+    resolution: {integrity: sha512-Bi5P5TQlOQGPJxCT7UAHbpG7wsR7sNZskHGtCoZBo6vDu416D2FXPgM4wKbg91teIgj4HjGkhnzlvP7U2dszfQ==}
+    hasBin: true
+
   '@modelcontextprotocol/sdk@1.29.0':
     resolution: {integrity: sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ==}
     engines: {node: '>=18'}
@@ -6301,6 +6323,10 @@ packages:
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
+
+  '@modelcontextprotocol/server@2.0.0-beta.2':
+    resolution: {integrity: sha512-XK+sgFntT5ZzeqtTGpT9uti+Sqmq7YJZdx/N76eLJv9UA9vKvP04Qh9Hc45LCeIHGfTKRwDG6eh4C1Hs4omyIg==}
+    engines: {node: '>=20'}
 
   '@mongodb-js/zstd@7.0.0':
     resolution: {integrity: sha512-mQ2s0pYYiav+tzCDR05Zptem8Ey2v8s11lri5RKGhTtL4COVCvVCk5vtyRYNT+9L8qSfyOqqefF9UtnW8mC5jA==}
@@ -13974,6 +14000,21 @@ snapshots:
       - '@cfworker/json-schema'
       - supports-color
 
+  '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@octokit/rest': 22.0.1
+      commander: 14.0.3
+      eventsource-parser: 3.1.0
+      express: 5.2.1
+      jose: 6.2.3
+      undici: 7.28.0
+      yaml: 2.9.0
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - supports-color
+
   '@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)':
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.27)
@@ -13997,6 +14038,10 @@ snapshots:
       '@cfworker/json-schema': 4.1.1
     transitivePeerDependencies:
       - supports-color
+
+  '@modelcontextprotocol/server@2.0.0-beta.2':
+    dependencies:
+      zod: 4.4.3
 
   '@mongodb-js/zstd@7.0.0':
     dependencies:

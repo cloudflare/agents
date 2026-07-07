@@ -10,10 +10,12 @@ import {
   createMcpHandler,
   DurableObjectEventStore,
   McpAgent,
+  type StatelessMcpHandler,
   type TransportState,
   WorkerTransport
 } from "../src/mcp/index.ts";
 import { createEverythingServer } from "./everything-server.ts";
+import { createEverythingServerV2 } from "./everything-server-v2.ts";
 
 /**
  * Conformance worker — hosts everything the MCP conformance suite needs from
@@ -30,9 +32,10 @@ import { createEverythingServer } from "./everything-server.ts";
  *    route) and then calls /run again to continue the scenario.
  *
  * Servers under test (`conformance server --url ...`):
- *  - /mcp-agent: McpAgent
- *  - /mcp-handler: createMcpHandler + WorkerTransport inside an Agent
- *  Both register the same "everything server" feature set (everything-server.ts).
+ *  - /mcp-handler: SDK v2 stateless createMcpHandler
+ *  - /mcp-handler-legacy: SDK v1 compatibility createMcpHandler + WorkerTransport
+ *  - /mcp-agent: retained SDK v1 McpAgent
+ *  Each generation has its own everything-server fixture.
  */
 
 type Env = {
@@ -300,8 +303,17 @@ export class ConformanceHost extends Agent<Env> {
   }
 }
 
+/** Primary SDK v2 stateless server conformance target. */
+const everythingStatelessHandler: StatelessMcpHandler = createMcpHandler(
+  () =>
+    createEverythingServerV2({
+      notify: everythingStatelessHandler.notify
+    }),
+  { route: "/mcp-handler" }
+);
+
 /**
- * Server conformance variant 1: McpAgent.
+ * Retained SDK v1 McpAgent conformance target.
  */
 export class EverythingMcpAgent extends McpAgent<Env> {
   server = createEverythingServer();
@@ -316,8 +328,8 @@ const everythingMcpAgentHandler = EverythingMcpAgent.serve("/mcp-agent", {
 const TRANSPORT_STATE_KEY = "mcp_transport_state";
 
 /**
- * Server conformance variant 2: createMcpHandler + WorkerTransport inside an
- * Agent (modeled on the mcp-elicitation example).
+ * SDK v1 createMcpHandler compatibility target inside an Agent (modeled on
+ * the mcp-elicitation example).
  */
 export class EverythingHandlerAgent extends Agent<Env> {
   server = createEverythingServer({
@@ -341,7 +353,7 @@ export class EverythingHandlerAgent extends Agent<Env> {
 
   async onMcpRequest(request: Request) {
     return createMcpHandler(this.server, {
-      route: "/mcp-handler",
+      route: "/mcp-handler-legacy",
       transport: this.transport
     })(request, this.env, {} as ExecutionContext);
   }
@@ -351,11 +363,15 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
+    if (url.pathname === "/mcp-handler") {
+      return everythingStatelessHandler(request, env, ctx);
+    }
+
     if (url.pathname === "/mcp-agent") {
       return everythingMcpAgentHandler.fetch(request, env, ctx);
     }
 
-    if (url.pathname === "/mcp-handler") {
+    if (url.pathname === "/mcp-handler-legacy") {
       const sessionId =
         request.headers.get("mcp-session-id") ?? crypto.randomUUID();
       const agent = await getAgentByName(env.EverythingHandlerAgent, sessionId);

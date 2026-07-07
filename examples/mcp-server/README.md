@@ -1,6 +1,6 @@
 # MCP Server Example (Raw Transport)
 
-This example demonstrates how to create an unauthenticated stateless MCP server using `WebStandardStreamableHTTPServerTransport` from the `@modelcontextprotocol/sdk` directly, **without** the Agents SDK helpers.
+This example is a retained SDK v1 raw-transport reference. It demonstrates an unauthenticated stateless MCP server using `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/sdk` directly, **without** the Agents SDK helpers. New applications should prefer `createMcpHandler` with `@modelcontextprotocol/server`.
 
 This gives you full control over the transport layer. If you want a simpler approach, see [`mcp-worker`](../mcp-worker) which uses `createMcpHandler()` from the Agents SDK.
 

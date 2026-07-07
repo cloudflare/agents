@@ -1,60 +1,49 @@
 # MCP conformance tests
 
-Runs the official [MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
-(`@modelcontextprotocol/conformance`) against the MCP implementations in this
-package, the same way the
-[MCP TypeScript SDK does](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/test/conformance).
+Runs the official MCP conformance suites against Agents implementations inside workerd via `wrangler dev`.
 
-Everything under test runs inside workerd (via `wrangler dev`), so the
-implementations are exercised as they actually run in production — Durable
-Object storage, real routes, real transports — not a Node approximation.
+## Lanes
 
-## What is tested
+| Command                                            | Protocol/lifecycle      | Endpoint              | Implementation                                        |
+| -------------------------------------------------- | ----------------------- | --------------------- | ----------------------------------------------------- |
+| `test:conformance:client`                          | Stable SDK v1 client    | n/a                   | `Agent` + `MCPClientManager`                          |
+| `test:conformance:server:handler`                  | `2026-07-28`            | `/mcp-handler`        | SDK v2 stateless `createMcpHandler`                   |
+| `test:conformance:server:handler:stateless-legacy` | 2025 stateless fallback | `/mcp-handler`        | Same SDK v2 handler, default `legacy: "stateless"`    |
+| `test:conformance:server:handler:legacy`           | Stable SDK v1           | `/mcp-handler-legacy` | Complete handler/`WorkerTransport` compatibility lane |
+| `test:conformance:server:mcp-agent`                | Stable SDK v1           | `/mcp-agent`          | Retained stateful `McpAgent`                          |
 
-| Suite    | Implementation under test                                                               | Entry point                      |
-| -------- | --------------------------------------------------------------------------------------- | -------------------------------- |
-| `client` | `Agent` + `MCPClientManager` (+ `DurableObjectOAuthClientProvider` for OAuth scenarios) | `ConformanceHost` in `worker.ts` |
-| `server` | `McpAgent`                                                                              | `/mcp-agent` in `worker.ts`      |
-| `server` | `createMcpHandler` + `WorkerTransport` inside an `Agent`                                | `/mcp-handler` in `worker.ts`    |
+The stable `@modelcontextprotocol/conformance@0.1.16` dependency remains authoritative for the v1 client and server lanes. The independently exact-pinned `conformance-v2` npm alias exercises both generations served by the SDK v2 handler.
 
-Both server variants register the same feature set (`everything-server.ts`,
-ported from the TypeScript SDK's conformance "everything server").
+The v2 modern fixture is separate from the frozen SDK v1 fixture. It is adapted from the TypeScript SDK's current conformance server and includes modern envelopes, subscriptions, caching, request-header validation, and multi-round-trip input-required tools.
 
-## How it works
+## Baselines
 
-```
-conformance CLI ──spawns per scenario──▶ driver.mjs (Node, plays "browser")
-                                            │ POST /agents/conformance-host/<uuid>/run
-                                            ▼
-wrangler dev ──▶ ConformanceHost (Agent DO) ──addMcpServer()──▶ conformance test server
-                       ▲ real OAuth callback route ◀── driver follows authUrl redirect
-```
+Each lifecycle has its own baseline:
 
-- **Client suite**: the conformance CLI starts a reference MCP server per
-  scenario and spawns `driver.mjs` to connect to it. The driver forwards the
-  scenario to a fresh `ConformanceHost` agent instance, which connects out via
-  `addMcpServer()`. For OAuth scenarios the worker returns the authorization
-  URL and the driver simulates the user's browser: it follows the redirect
-  chain into the worker's real `/callback` route, then resumes the scenario.
-- **Server suites**: the conformance CLI acts as a reference MCP client and
-  talks directly to the two server endpoints on the worker.
+- `baseline-server-handler-v2.yml` — modern SDK v2;
+- `baseline-server-handler-stateless-legacy-v2.yml` — SDK v2's stateless 2025 fallback;
+- `baseline-server-handler.yml` — complete SDK v1 handler compatibility;
+- `baseline-server-mcp-agent.yml` — retained stateful Agent;
+- `baseline-client.yml` — stable Agents MCP client.
+
+Expected failures are scenario names. A stale entry fails the run, so fixing a gap requires removing its baseline entry.
 
 ## Running locally
 
 ```sh
 cd packages/agents
-pnpm run test:conformance                    # all three suites
-pnpm run test:conformance:client             # client only
-pnpm run test:conformance:server:mcp-agent   # McpAgent server only
-pnpm run test:conformance:server:handler     # createMcpHandler server only
+pnpm run test:conformance
 
-# Single scenario:
-bash conformance/run.sh client --scenario initialize
-bash conformance/run.sh server-mcp-agent --scenario tools-call-simple-text
+# Individual lanes
+pnpm run test:conformance:server:handler
+pnpm run test:conformance:server:handler:stateless-legacy
+pnpm run test:conformance:server:handler:legacy
+pnpm run test:conformance:server:mcp-agent
+pnpm run test:conformance:client
+
+# One scenario (extra CLI arguments pass through)
+bash conformance/run.sh server-handler --scenario server-stateless
+bash conformance/run.sh server-handler-stateless-legacy --scenario tools-list
 ```
 
-## Baselines (expected failures)
-
-Known gaps are recorded in `baseline-*.yml` so CI stays green while still
-catching regressions and new failures. Each entry documents why the scenario
-fails — remove entries as the gaps get fixed.
+The runner refuses to start when its port is occupied, preventing an accidental run against a stale Worker, and tears down the complete Wrangler/workerd process tree on exit.

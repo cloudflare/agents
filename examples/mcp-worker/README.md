@@ -20,8 +20,8 @@ Open the browser to see the built-in tool tester, or connect with the [MCP Inspe
 ## How it works
 
 ```typescript
+import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 function createServer() {

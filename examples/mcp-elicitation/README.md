@@ -1,10 +1,41 @@
-# MCP Elicitation Demo
+# MCP Elicitation: modern MRTR and legacy sessions
 
-An MCP server example showing elicitation with the Agents SDK. The MCP endpoint is served at `/mcp` (e.g. `http://localhost:8787/mcp` under `wrangler dev`).
+This example serves two MCP generations on one `/mcp` endpoint:
 
-Two tools demonstrate the two elicitation modes:
+- **MCP 2026-07-28** goes directly to a stateless SDK v2 `createMcpHandler`. Its `increase-counter` tool returns `inputRequired(...)`; a current client collects the amount and retries the tool with that response.
+- **MCP 2025-era traffic** keeps the existing SDK v1 server, Durable Object session, persistent `WorkerTransport`, and push-style `elicitation/create` requests. It demonstrates both form-mode (`increase-counter`) and URL-mode (`connect-account`) elicitation.
 
-- **`increase-counter`** — form-mode: elicits an amount from the user via a `requestedSchema` form.
-- **`connect-account`** — url-mode: sends a link for the user to open out-of-band, keeping the sensitive URL out of tool-result text.
+The Worker calls `isLegacyRequest(request)` before any Durable Object lookup. Modern requests therefore do not create or wake `MyAgent`.
 
-Pair it with the [`mcp-client`](../mcp-client/) example, which renders both elicitation modes in a browser UI.
+The [`mcp-client`](../mcp-client/) example remains a 2025-era client and renders both legacy elicitation modes in a browser UI. Client-side MRTR support is outside this example.
+
+## Run
+
+```sh
+pnpm install
+pnpm run dev
+```
+
+Connect a current MCP client to `http://localhost:8787/mcp` for the modern path, or pair the example with [`mcp-client`](../mcp-client/) for the legacy path.
+
+## Key routing pattern
+
+```ts
+const modernHandler = createMcpHandler(createModernServer, {
+  route: "/mcp",
+  legacy: "reject"
+});
+
+export default {
+  async fetch(request, env, ctx) {
+    if (!(await isLegacyRequest(request))) {
+      return modernHandler(request, env, ctx);
+    }
+
+    const sessionId =
+      request.headers.get("mcp-session-id") ?? crypto.randomUUID();
+    const agent = await getAgentByName(bindings.MyAgent, sessionId);
+    return agent.onMcpRequest(request);
+  }
+};
+```

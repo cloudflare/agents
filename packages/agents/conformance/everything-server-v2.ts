@@ -1,0 +1,1526 @@
+/**
+ * SDK v2 conformance fixture adapted from the MCP TypeScript SDK's current
+ * `test/conformance/src/everythingServer.ts`. It runs inside workerd and is
+ * intentionally separate from the frozen SDK v1 fixture.
+ */
+import type {
+  CallToolResult,
+  GetPromptResult,
+  InputRequests,
+  InputRequiredResult,
+  ReadResourceResult,
+  ServerContext
+} from "@modelcontextprotocol/server";
+import {
+  acceptedContent,
+  CLIENT_CAPABILITIES_META_KEY,
+  createRequestStateCodec,
+  fromJsonSchema,
+  inputRequired,
+  McpServer,
+  ProtocolError,
+  ProtocolErrorCode,
+  ResourceTemplate
+} from "@modelcontextprotocol/server";
+import * as z from "zod/v4";
+
+// Server state
+const resourceSubscriptions = new Set<string>();
+const watchedResourceContent = "Watched resource content";
+
+// Sample base64 encoded 1x1 red PNG pixel for testing
+const TEST_IMAGE_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+// Sample base64 encoded minimal WAV file for testing
+const TEST_AUDIO_BASE64 =
+  "UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZGF0YQIAAAA=";
+
+// ===== MULTI-ROUND-TRIP requestState INTEGRITY (SEP-2322) =====
+//
+// `requestState` round-trips through the client and comes back as
+// attacker-controlled input. The SDK treats it as an opaque string and applies
+// no protection of its own, so a server that lets it influence behavior MUST
+// integrity-protect it when minting and MUST reject state that fails
+// verification (see the migration guide). This fixture uses the SDK-provided
+// `createRequestStateCodec` helper — `mint` HMAC-seals the payload with a
+// per-process key and a TTL, and `verify` is the function dropped into
+// `ServerOptions.requestState.verify` so the seam rejects tampered or expired
+// state with `-32602` before the handler runs (which is what the
+// `input-required-result-tampered-state` conformance scenario asserts). The
+// key is process-local because the 2026-07-28 path serves every request from
+// a fresh server instance — the state itself is the only thing that survives
+// between rounds.
+let sharedRequestStateCodec:
+  | ReturnType<typeof createRequestStateCodec<Record<string, unknown>>>
+  | undefined;
+
+function getRequestStateCodec() {
+  // The fixture needs one isolate-wide signing key, but workerd forbids random
+  // generation at module scope. The factory runs inside the request handler.
+  return (sharedRequestStateCodec ??= createRequestStateCodec<
+    Record<string, unknown>
+  >({
+    key: crypto.getRandomValues(new Uint8Array(32))
+  }));
+}
+
+export interface EverythingServerV2Options {
+  notify: {
+    toolsChanged(): void;
+    promptsChanged(): void;
+  };
+}
+
+// Function to create a new MCP server instance for one stateless request.
+export function createEverythingServerV2(options: EverythingServerV2Options) {
+  const requestStateCodec = getRequestStateCodec();
+  const mcpServer = new McpServer(
+    {
+      name: "mcp-conformance-test-server",
+      version: "1.0.0"
+    },
+    {
+      capabilities: {
+        tools: {
+          listChanged: true
+        },
+        resources: {
+          subscribe: true,
+          listChanged: true
+        },
+        prompts: {
+          listChanged: true
+        },
+        // `logging` is deprecated as of protocol version 2026-07-28
+        // (SEP-2577). Intentionally retained so the 2025-era
+        // logging/setLevel conformance leg still negotiates the
+        // capability; the 2026-07-28 path uses the per-request
+        // envelope and ignores this field.
+        logging: {},
+        completions: {}
+      },
+      // Seam-level integrity check (SEP-2322): every re-entered MRTR
+      // request that carries requestState is verified before the handler
+      // runs. A rejection answers a wire-level -32602 with
+      // data.reason 'invalid_request_state'.
+      requestState: { verify: requestStateCodec.verify }
+    }
+  );
+
+  // Helper to send log messages using the underlying server
+  function sendLog(
+    level:
+      | "debug"
+      | "info"
+      | "notice"
+      | "warning"
+      | "error"
+      | "critical"
+      | "alert"
+      | "emergency",
+    message: string,
+    data?: unknown
+  ) {
+    mcpServer.server
+      .notification({
+        method: "notifications/message",
+        params: {
+          level,
+          logger: "conformance-test-server",
+          data: data ?? message
+        }
+      })
+      .catch(() => {
+        // Ignore error if no client is connected
+      });
+  }
+
+  // ===== TOOLS =====
+
+  // SEP-2243 x-mcp-header tool — arms the http-custom-header-server-validation
+  // conformance scenario (which skips when no tool with an x-mcp-header
+  // annotation is found). The schema is hand-written JSON so the annotation
+  // survives serialization unchanged.
+  mcpServer.registerTool(
+    "test_x_mcp_header",
+    {
+      description: "Tests SEP-2243 Mcp-Param-* server-side validation",
+      inputSchema: fromJsonSchema<{ region?: string; level?: number }>({
+        type: "object",
+        properties: {
+          region: {
+            type: "string",
+            description: "mirrored into Mcp-Param-Region",
+            "x-mcp-header": "Region"
+          },
+          level: { type: "integer", description: "non-mirrored argument" }
+        }
+      } as Parameters<typeof fromJsonSchema>[0])
+    },
+    async (args): Promise<CallToolResult> => ({
+      content: [{ type: "text", text: `region=${args.region ?? "<none>"}` }]
+    })
+  );
+
+  // SEP-2575 `server-stateless` diagnostic fixtures: the scenario hardcodes
+  // these three tool names, and at conformance alpha.8 (conformance#372) the
+  // checks behind them fail as untestable when the names are missing.
+
+  // Requires the `sampling` client capability via an MRTR createMessage
+  // input request; the scenario calls it with empty clientCapabilities and
+  // expects -32021 over HTTP 400.
+  mcpServer.registerTool(
+    "test_missing_capability",
+    {
+      description:
+        "SEP-2575: requires the `sampling` client capability (drives the -32021 undeclared-capability rejection)",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      if (ctx.mcpReq.inputResponses?.["llm_answer"] === undefined) {
+        return inputRequired({
+          inputRequests: {
+            llm_answer: inputRequired.createMessage({
+              messages: [
+                {
+                  role: "user",
+                  content: {
+                    type: "text",
+                    text: "Reply with the single word: pong"
+                  }
+                }
+              ],
+              maxTokens: 16
+            })
+          }
+        });
+      }
+      return {
+        content: [{ type: "text", text: "sampling round-trip complete" }]
+      };
+    }
+  );
+
+  // A plain successful call: the check only asserts that the response stream
+  // carries no independent top-level JSON-RPC request. It must not elicit
+  // (the scenario declares no `elicitation` capability); the referee's own
+  // reference server does not elicit here either.
+  mcpServer.registerTool(
+    "test_streaming_elicitation",
+    {
+      description:
+        "SEP-2575: yields a response stream carrying no independent top-level JSON-RPC requests",
+      inputSchema: z.object({})
+    },
+    async (): Promise<CallToolResult> => ({
+      content: [
+        {
+          type: "text",
+          text: "stream observed: result frames only, no top-level requests"
+        }
+      ]
+    })
+  );
+
+  // `ctx.mcpReq.log` is gated on the request's `_meta.logLevel`; the scenario
+  // omits it and asserts no notifications/message frame appears.
+  mcpServer.registerTool(
+    "test_logging_tool",
+    {
+      description:
+        "SEP-2575: logs via ctx.mcpReq.log so the no-log-without-logLevel rule is exercised",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult> => {
+      await ctx.mcpReq.log(
+        "info",
+        "test_logging_tool ran (delivered only when the request set _meta.logLevel)"
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: "logged through the request-scoped, logLevel-gated channel"
+          }
+        ]
+      };
+    }
+  );
+
+  // Simple text tool
+  mcpServer.registerTool(
+    "test_simple_text",
+    {
+      description: "Tests simple text content response"
+    },
+    async (): Promise<CallToolResult> => {
+      return {
+        content: [
+          { type: "text", text: "This is a simple text response for testing." }
+        ]
+      };
+    }
+  );
+
+  // Image content tool
+  mcpServer.registerTool(
+    "test_image_content",
+    {
+      description: "Tests image content response"
+    },
+    async (): Promise<CallToolResult> => {
+      return {
+        content: [
+          { type: "image", data: TEST_IMAGE_BASE64, mimeType: "image/png" }
+        ]
+      };
+    }
+  );
+
+  // Audio content tool
+  mcpServer.registerTool(
+    "test_audio_content",
+    {
+      description: "Tests audio content response"
+    },
+    async (): Promise<CallToolResult> => {
+      return {
+        content: [
+          { type: "audio", data: TEST_AUDIO_BASE64, mimeType: "audio/wav" }
+        ]
+      };
+    }
+  );
+
+  // Embedded resource tool
+  mcpServer.registerTool(
+    "test_embedded_resource",
+    {
+      description: "Tests embedded resource content response"
+    },
+    async (): Promise<CallToolResult> => {
+      return {
+        content: [
+          {
+            type: "resource",
+            resource: {
+              uri: "test://embedded-resource",
+              mimeType: "text/plain",
+              text: "This is an embedded resource content."
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Multiple content types tool
+  mcpServer.registerTool(
+    "test_multiple_content_types",
+    {
+      description:
+        "Tests response with multiple content types (text, image, resource)"
+    },
+    async (): Promise<CallToolResult> => {
+      return {
+        content: [
+          { type: "text", text: "Multiple content types test:" },
+          { type: "image", data: TEST_IMAGE_BASE64, mimeType: "image/png" },
+          {
+            type: "resource",
+            resource: {
+              uri: "test://mixed-content-resource",
+              mimeType: "application/json",
+              text: JSON.stringify({ test: "data", value: 123 })
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Tool with logging
+  mcpServer.registerTool(
+    "test_tool_with_logging",
+    {
+      description: "Tests tool that emits log messages during execution",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult> => {
+      await ctx.mcpReq.notify({
+        method: "notifications/message",
+        params: {
+          level: "info",
+          data: "Tool execution started"
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await ctx.mcpReq.notify({
+        method: "notifications/message",
+        params: {
+          level: "info",
+          data: "Tool processing data"
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await ctx.mcpReq.notify({
+        method: "notifications/message",
+        params: {
+          level: "info",
+          data: "Tool execution completed"
+        }
+      });
+      return {
+        content: [
+          { type: "text", text: "Tool with logging executed successfully" }
+        ]
+      };
+    }
+  );
+
+  // Tool with progress
+  mcpServer.registerTool(
+    "test_tool_with_progress",
+    {
+      description: "Tests tool that reports progress notifications",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult> => {
+      const progressToken = ctx.mcpReq._meta?.progressToken;
+      // Per spec, servers MUST NOT emit notifications/progress without a
+      // client-supplied token — only report progress when one was sent.
+      if (progressToken !== undefined) {
+        for (const progress of [0, 50, 100]) {
+          await ctx.mcpReq.notify({
+            method: "notifications/progress",
+            params: {
+              progressToken,
+              progress,
+              total: 100,
+              message: `Completed step ${progress} of ${100}`
+            }
+          });
+          if (progress < 100) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        }
+      }
+
+      return {
+        content: [
+          { type: "text", text: String(progressToken ?? "no-progress-token") }
+        ]
+      };
+    }
+  );
+
+  // Error handling tool
+  mcpServer.registerTool(
+    "test_error_handling",
+    {
+      description: "Tests error response handling"
+    },
+    async (): Promise<CallToolResult> => {
+      throw new Error("This tool intentionally returns an error for testing");
+    }
+  );
+
+  // SEP-1699: Reconnection test tool - closes SSE stream mid-call to test client reconnection
+  mcpServer.registerTool(
+    "test_reconnection",
+    {
+      description:
+        "Tests SSE stream disconnection and client reconnection (SEP-1699). Server will close the stream mid-call and send the result after client reconnects.",
+      inputSchema: z.object({})
+    },
+    async (): Promise<CallToolResult> => {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Reconnection test completed successfully. If you received this, the client properly reconnected after stream closure."
+          }
+        ]
+      };
+    }
+  );
+
+  // Sampling tool - requests LLM completion from client
+  mcpServer.registerTool(
+    "test_sampling",
+    {
+      description: "Tests server-initiated sampling (LLM completion request)",
+      inputSchema: z.object({
+        prompt: z.string().describe("The prompt to send to the LLM")
+      })
+    },
+    async (args, ctx): Promise<CallToolResult> => {
+      try {
+        // Request sampling from client
+        const result = (await ctx.mcpReq.send({
+          method: "sampling/createMessage",
+          params: {
+            messages: [
+              {
+                role: "user",
+                content: {
+                  type: "text",
+                  text: args.prompt
+                }
+              }
+            ],
+            maxTokens: 100
+          }
+        })) as {
+          content?: { text?: string };
+          message?: { content?: { text?: string } };
+        };
+
+        const modelResponse =
+          result.content?.text ||
+          result.message?.content?.text ||
+          "No response";
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `LLM response: ${modelResponse}`
+            }
+          ]
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Sampling not supported or error: ${error instanceof Error ? error.message : String(error)}`
+            }
+          ]
+        };
+      }
+    }
+  );
+
+  // Elicitation tool - requests user input from client
+  mcpServer.registerTool(
+    "test_elicitation",
+    {
+      description: "Tests server-initiated elicitation (user input request)",
+      inputSchema: z.object({
+        message: z.string().describe("The message to show the user")
+      })
+    },
+    async (args, ctx): Promise<CallToolResult> => {
+      try {
+        // Request user input from client
+        const result = await ctx.mcpReq.send({
+          method: "elicitation/create",
+          params: {
+            message: args.message,
+            requestedSchema: {
+              type: "object",
+              properties: {
+                response: {
+                  type: "string",
+                  description: "User's response"
+                }
+              },
+              required: ["response"]
+            }
+          }
+        });
+
+        const elicitResult = result as { action?: string; content?: unknown };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `User response: action=${elicitResult.action}, content=${JSON.stringify(elicitResult.content || {})}`
+            }
+          ]
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Elicitation not supported or error: ${error instanceof Error ? error.message : String(error)}`
+            }
+          ]
+        };
+      }
+    }
+  );
+
+  // SEP-1034: Elicitation with default values for all primitive types
+  mcpServer.registerTool(
+    "test_elicitation_sep1034_defaults",
+    {
+      description: "Tests elicitation with default values per SEP-1034",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult> => {
+      try {
+        // Request user input with default values for all primitive types
+        const result = await ctx.mcpReq.send({
+          method: "elicitation/create",
+          params: {
+            message: "Please review and update the form fields with defaults",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                  description: "User name",
+                  default: "John Doe"
+                },
+                age: {
+                  type: "integer",
+                  description: "User age",
+                  default: 30
+                },
+                score: {
+                  type: "number",
+                  description: "User score",
+                  default: 95.5
+                },
+                status: {
+                  type: "string",
+                  description: "User status",
+                  enum: ["active", "inactive", "pending"],
+                  default: "active"
+                },
+                verified: {
+                  type: "boolean",
+                  description: "Verification status",
+                  default: true
+                }
+              },
+              required: []
+            }
+          }
+        });
+
+        const elicitResult = result as { action?: string; content?: unknown };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Elicitation completed: action=${elicitResult.action}, content=${JSON.stringify(elicitResult.content || {})}`
+            }
+          ]
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Elicitation not supported or error: ${error instanceof Error ? error.message : String(error)}`
+            }
+          ]
+        };
+      }
+    }
+  );
+
+  // SEP-1330: Elicitation with enum schema improvements
+  mcpServer.registerTool(
+    "test_elicitation_sep1330_enums",
+    {
+      description:
+        "Tests elicitation with enum schema improvements per SEP-1330",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult> => {
+      try {
+        // Request user input with all 5 enum schema variants
+        const result = await ctx.mcpReq.send({
+          method: "elicitation/create",
+          params: {
+            message: "Please select options from the enum fields",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                // Untitled single-select enum (basic)
+                untitledSingle: {
+                  type: "string",
+                  description: "Select one option",
+                  enum: ["option1", "option2", "option3"]
+                },
+                // Titled single-select enum (using oneOf with const/title)
+                titledSingle: {
+                  type: "string",
+                  description: "Select one option with titles",
+                  oneOf: [
+                    { const: "value1", title: "First Option" },
+                    { const: "value2", title: "Second Option" },
+                    { const: "value3", title: "Third Option" }
+                  ]
+                },
+                // Legacy titled enum (using enumNames - deprecated)
+                legacyEnum: {
+                  type: "string",
+                  description: "Select one option (legacy)",
+                  enum: ["opt1", "opt2", "opt3"],
+                  enumNames: ["Option One", "Option Two", "Option Three"]
+                },
+                // Untitled multi-select enum
+                untitledMulti: {
+                  type: "array",
+                  description: "Select multiple options",
+                  minItems: 1,
+                  maxItems: 3,
+                  items: {
+                    type: "string",
+                    enum: ["option1", "option2", "option3"]
+                  }
+                },
+                // Titled multi-select enum (using anyOf with const/title)
+                titledMulti: {
+                  type: "array",
+                  description: "Select multiple options with titles",
+                  minItems: 1,
+                  maxItems: 3,
+                  items: {
+                    anyOf: [
+                      { const: "value1", title: "First Choice" },
+                      { const: "value2", title: "Second Choice" },
+                      { const: "value3", title: "Third Choice" }
+                    ]
+                  }
+                }
+              },
+              required: []
+            }
+          }
+        });
+
+        const elicitResult = result as { action?: string; content?: unknown };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Elicitation completed: action=${elicitResult.action}, content=${JSON.stringify(elicitResult.content || {})}`
+            }
+          ]
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Elicitation not supported or error: ${error instanceof Error ? error.message : String(error)}`
+            }
+          ]
+        };
+      }
+    }
+  );
+
+  // SEP-1613 / SEP-2106: JSON Schema 2020-12 conformance test tool.
+  // The scenario verifies that $schema/$defs/additionalProperties (SEP-1613)
+  // and the broader 2020-12 vocabulary — $anchor, allOf/anyOf, if/then/else —
+  // (SEP-2106) survive tools/list verbatim. The schema is hand-authored JSON
+  // (via fromJsonSchema) so the keywords are advertised exactly as written;
+  // a Zod object would not emit them.
+  mcpServer.registerTool(
+    "json_schema_2020_12_tool",
+    {
+      description:
+        "Tool with JSON Schema 2020-12 features for conformance testing (SEP-1613, SEP-2106)",
+      inputSchema: fromJsonSchema({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        $defs: {
+          address: {
+            $anchor: "addressDef",
+            type: "object",
+            properties: {
+              street: { type: "string" },
+              city: { type: "string" }
+            }
+          }
+        },
+        properties: {
+          name: { type: "string" },
+          address: { $ref: "#/$defs/address" },
+          contactMethod: { type: "string", enum: ["phone", "email"] },
+          phone: { type: "string" },
+          email: { type: "string" }
+        },
+        allOf: [{ anyOf: [{ required: ["phone"] }, { required: ["email"] }] }],
+        if: {
+          properties: { contactMethod: { const: "phone" } },
+          required: ["contactMethod"]
+        },
+        // eslint-disable-next-line unicorn/no-thenable -- `then` is a JSON Schema 2020-12 keyword
+        then: { required: ["phone"] },
+        else: { required: ["email"] },
+        additionalProperties: false
+      })
+    },
+    async (args): Promise<CallToolResult> => {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `JSON Schema 2020-12 tool called with: ${JSON.stringify(args)}`
+          }
+        ]
+      };
+    }
+  );
+
+  // ===== MULTI-ROUND-TRIP TOOLS (SEP-2322, protocol revision 2026-07-28) =====
+  //
+  // Diagnostic tools for the input-required conformance scenarios. Each tool
+  // is written write-once style: it returns `inputRequired(...)` until the
+  // retried request carries the responses it needs (read from
+  // `ctx.mcpReq.inputResponses` / `ctx.mcpReq.requestState()`), then completes.
+  // The conformance scenarios drive them on 2026-07-28 requests; on a
+  // 2025-era session the default legacy shim would fulfil them by pushing
+  // real server→client requests instead.
+
+  // Basic elicitation round trip. Also exercised by the result-type,
+  // missing-input-response, ignore-extra-params and validate-input
+  // scenarios: anything that does not contain an accepted "user_name"
+  // response is answered with a fresh InputRequiredResult re-requesting it.
+  mcpServer.registerTool(
+    "test_input_required_result_elicitation",
+    {
+      description:
+        "MRTR (SEP-2322): asks for the caller name via an in-band elicitation request",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      const name = acceptedContent<{ name: string }>(
+        ctx.mcpReq.inputResponses,
+        "user_name"
+      )?.name;
+      if (typeof name !== "string") {
+        return inputRequired({
+          inputRequests: {
+            user_name: inputRequired.elicit({
+              message: "What is your name?",
+              requestedSchema: {
+                type: "object",
+                properties: { name: { type: "string" } },
+                required: ["name"]
+              }
+            })
+          }
+        });
+      }
+      return { content: [{ type: "text", text: `Hello, ${name}!` }] };
+    }
+  );
+
+  // Basic sampling round trip.
+  mcpServer.registerTool(
+    "test_input_required_result_sampling",
+    {
+      description:
+        "MRTR (SEP-2322): asks for an LLM completion via an in-band sampling request",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      const samplingResponse = ctx.mcpReq.inputResponses?.[
+        "capital_question"
+      ] as { content?: { type?: string; text?: string } } | undefined;
+      if (samplingResponse === undefined) {
+        return inputRequired({
+          inputRequests: {
+            capital_question: inputRequired.createMessage({
+              messages: [
+                {
+                  role: "user",
+                  content: {
+                    type: "text",
+                    text: "What is the capital of France?"
+                  }
+                }
+              ],
+              maxTokens: 100
+            })
+          }
+        });
+      }
+      const text =
+        typeof samplingResponse.content?.text === "string"
+          ? samplingResponse.content.text
+          : JSON.stringify(samplingResponse);
+      return {
+        content: [{ type: "text", text: `Sampling response: ${text}` }]
+      };
+    }
+  );
+
+  // Basic roots/list round trip.
+  mcpServer.registerTool(
+    "test_input_required_result_list_roots",
+    {
+      description:
+        "MRTR (SEP-2322): asks for the client roots via an in-band roots/list request",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      const rootsResponse = ctx.mcpReq.inputResponses?.["client_roots"] as
+        | { roots?: Array<{ uri?: string; name?: string }> }
+        | undefined;
+      if (!Array.isArray(rootsResponse?.roots)) {
+        return inputRequired({
+          inputRequests: { client_roots: inputRequired.listRoots() }
+        });
+      }
+      const uris = rootsResponse.roots.map((root) => root.uri).join(", ");
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Client exposed ${rootsResponse.roots.length} root(s): ${uris}`
+          }
+        ]
+      };
+    }
+  );
+
+  // requestState round trip: the state is integrity-protected when minted
+  // and verified on the retry (see the helpers above).
+  mcpServer.registerTool(
+    "test_input_required_result_request_state",
+    {
+      description:
+        "MRTR (SEP-2322): round-trips integrity-protected requestState alongside an elicitation request",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      const confirmation = acceptedContent<{ ok: boolean }>(
+        ctx.mcpReq.inputResponses,
+        "confirm"
+      );
+      if (confirmation === undefined) {
+        return inputRequired({
+          inputRequests: {
+            confirm: inputRequired.elicit({
+              message: "Please confirm",
+              requestedSchema: {
+                type: "object",
+                properties: { ok: { type: "boolean" } },
+                required: ["ok"]
+              }
+            })
+          },
+          requestState: await requestStateCodec.mint({
+            tool: "request_state",
+            nonce: crypto.randomUUID()
+          })
+        });
+      }
+      // The seam-level verify hook has already proven integrity AND
+      // decoded the payload by the time the handler runs — the typed
+      // accessor returns it directly.
+      const state = ctx.mcpReq.requestState<Record<string, unknown>>();
+      if (state === undefined) {
+        throw new ProtocolError(
+          ProtocolErrorCode.InvalidParams,
+          "Invalid requestState: missing or failed integrity verification"
+        );
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: "state-ok: requestState verified and confirmation received"
+          }
+        ]
+      };
+    }
+  );
+
+  // Multiple input requests of different kinds in one InputRequiredResult.
+  mcpServer.registerTool(
+    "test_input_required_result_multiple_inputs",
+    {
+      description:
+        "MRTR (SEP-2322): asks for elicitation, sampling and roots input in a single round",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      const responses = ctx.mcpReq.inputResponses;
+      const name = acceptedContent<{ name: string }>(
+        responses,
+        "user_name"
+      )?.name;
+      const greeting = (
+        responses?.["greeting"] as { content?: { text?: string } } | undefined
+      )?.content?.text;
+      const roots = (
+        responses?.["client_roots"] as { roots?: unknown[] } | undefined
+      )?.roots;
+      if (
+        typeof name !== "string" ||
+        typeof greeting !== "string" ||
+        !Array.isArray(roots)
+      ) {
+        return inputRequired({
+          inputRequests: {
+            user_name: inputRequired.elicit({
+              message: "What is your name?",
+              requestedSchema: {
+                type: "object",
+                properties: { name: { type: "string" } },
+                required: ["name"]
+              }
+            }),
+            greeting: inputRequired.createMessage({
+              messages: [
+                {
+                  role: "user",
+                  content: { type: "text", text: "Generate a greeting" }
+                }
+              ],
+              maxTokens: 50
+            }),
+            client_roots: inputRequired.listRoots()
+          },
+          requestState: await requestStateCodec.mint({
+            tool: "multiple_inputs",
+            nonce: crypto.randomUUID()
+          })
+        });
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${greeting} ${name} — ${roots.length} root(s) visible`
+          }
+        ]
+      };
+    }
+  );
+
+  // Multi-round flow: the round number lives in the integrity-protected
+  // requestState (the 2026-07-28 path keeps no per-session state), and the
+  // state changes between rounds.
+  mcpServer.registerTool(
+    "test_input_required_result_multi_round",
+    {
+      description:
+        "MRTR (SEP-2322): two elicitation rounds with evolving requestState before completing",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      const state = ctx.mcpReq.requestState<Record<string, unknown>>();
+      const round =
+        state?.tool === "multi_round" && typeof state.round === "number"
+          ? state.round
+          : 0;
+      if (round === 0) {
+        return inputRequired({
+          inputRequests: {
+            step1: inputRequired.elicit({
+              message: "Step 1: What is your name?",
+              requestedSchema: {
+                type: "object",
+                properties: { name: { type: "string" } },
+                required: ["name"]
+              }
+            })
+          },
+          requestState: await requestStateCodec.mint({
+            tool: "multi_round",
+            round: 1,
+            nonce: crypto.randomUUID()
+          })
+        });
+      }
+      if (round === 1) {
+        const name =
+          acceptedContent<{ name: string }>(ctx.mcpReq.inputResponses, "step1")
+            ?.name ?? "unknown";
+        return inputRequired({
+          inputRequests: {
+            step2: inputRequired.elicit({
+              message: "Step 2: What is your favorite color?",
+              requestedSchema: {
+                type: "object",
+                properties: { color: { type: "string" } },
+                required: ["color"]
+              }
+            })
+          },
+          requestState: await requestStateCodec.mint({
+            tool: "multi_round",
+            round: 2,
+            name,
+            nonce: crypto.randomUUID()
+          })
+        });
+      }
+      const color =
+        acceptedContent<{ color: string }>(ctx.mcpReq.inputResponses, "step2")
+          ?.color ?? "unknown";
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Multi-round complete: ${String(state?.name ?? "unknown")} likes ${color}`
+          }
+        ]
+      };
+    }
+  );
+
+  // Tampered-state rejection: the seam-level `requestState.verify` hook
+  // (the codec's `verify`, configured on the McpServer above) rejects a
+  // retry whose requestState fails HMAC before this handler runs, answering
+  // the wire-level -32602 the conformance scenario requires. The handler
+  // only sees verified state.
+  mcpServer.registerTool(
+    "test_input_required_result_tampered_state",
+    {
+      description:
+        "MRTR (SEP-2322): rejects retries whose requestState fails integrity verification",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      if (
+        ctx.mcpReq.requestState() !== undefined &&
+        acceptedContent(ctx.mcpReq.inputResponses, "confirm") !== undefined
+      ) {
+        return {
+          content: [
+            { type: "text", text: "integrity-ok: requestState verified" }
+          ]
+        };
+      }
+      return inputRequired({
+        inputRequests: {
+          confirm: inputRequired.elicit({
+            message: "Please confirm",
+            requestedSchema: {
+              type: "object",
+              properties: { ok: { type: "boolean" } },
+              required: ["ok"]
+            }
+          })
+        },
+        requestState: await requestStateCodec.mint({
+          tool: "tampered_state",
+          nonce: crypto.randomUUID()
+        })
+      });
+    }
+  );
+
+  // Capability-aware input requests: only ask for kinds the request's
+  // declared client capabilities cover (the server seam enforces the same
+  // rule with a -32021 error; the tool simply never trips it).
+  mcpServer.registerTool(
+    "test_input_required_result_capabilities",
+    {
+      description:
+        "MRTR (SEP-2322): only requests input kinds the declared client capabilities cover",
+      inputSchema: z.object({})
+    },
+    async (_args, ctx): Promise<CallToolResult | InputRequiredResult> => {
+      if (ctx.mcpReq.inputResponses !== undefined) {
+        return {
+          content: [
+            { type: "text", text: "Capability-aware input requests fulfilled" }
+          ]
+        };
+      }
+      // `sampling` and `roots` on ClientCapabilities are @deprecated as
+      // of protocol version 2026-07-28 (SEP-2577). This fixture reads
+      // them intentionally: the conformance scenario asserts that the
+      // server only emits input-request kinds the client declared, and
+      // the per-request envelope carries the declared capabilities in
+      // the (deprecated) wire vocabulary.
+      const declared = ctx.mcpReq.envelope?.[CLIENT_CAPABILITIES_META_KEY];
+      const inputRequests: InputRequests = {};
+      if (declared?.elicitation !== undefined) {
+        inputRequests.user_name = inputRequired.elicit({
+          message: "What is your name?",
+          requestedSchema: {
+            type: "object",
+            properties: { name: { type: "string" } },
+            required: ["name"]
+          }
+        });
+      }
+      if (declared?.sampling !== undefined) {
+        inputRequests.greeting = inputRequired.createMessage({
+          messages: [
+            {
+              role: "user",
+              content: { type: "text", text: "Generate a short greeting" }
+            }
+          ],
+          maxTokens: 50
+        });
+      }
+      if (declared?.roots !== undefined) {
+        inputRequests.client_roots = inputRequired.listRoots();
+      }
+      if (Object.keys(inputRequests).length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No declared client capability supports an in-band input request"
+            }
+          ]
+        };
+      }
+      return inputRequired({ inputRequests });
+    }
+  );
+
+  // ===== SUBSCRIPTION/LISTEN DIAGNOSTIC TRIGGERS (SEP-2575) =====
+  //
+  // The `server-stateless` conformance scenario opens a `subscriptions/listen`
+  // stream (served by `createMcpHandler`'s built-in listen router), then calls
+  // one of these triggers and asserts the corresponding `*/list_changed`
+  // notification arrives on the open stream. The trigger publishes the change
+  // event onto the handler's bus via the `handler.notify.*` sugar — the
+  // listen router stamps the subscription id and applies the per-stream
+  // filter, so the same trigger also exercises the ack-first and
+  // honors-notification-filter checks. The 2026-07-28 path is per-request
+  // (each call gets a fresh `McpServer`), so there is no list to mutate; the
+  // event itself is what the SHOULD requirement measures.
+
+  mcpServer.registerTool(
+    "test_trigger_tool_change",
+    {
+      description:
+        "Listen diagnostic (SEP-2575): publishes a tools/list_changed event onto the handler bus",
+      inputSchema: z.object({})
+    },
+    async (): Promise<CallToolResult> => {
+      options.notify.toolsChanged();
+      return {
+        content: [{ type: "text", text: "tools_list_changed published" }]
+      };
+    }
+  );
+
+  mcpServer.registerTool(
+    "test_trigger_prompt_change",
+    {
+      description:
+        "Listen diagnostic (SEP-2575): publishes a prompts/list_changed event onto the handler bus",
+      inputSchema: z.object({})
+    },
+    async (): Promise<CallToolResult> => {
+      options.notify.promptsChanged();
+      return {
+        content: [{ type: "text", text: "prompts_list_changed published" }]
+      };
+    }
+  );
+
+  // ===== RESOURCES =====
+
+  // Static text resource
+  mcpServer.registerResource(
+    "static-text",
+    "test://static-text",
+    {
+      title: "Static Text Resource",
+      description: "A static text resource for testing",
+      mimeType: "text/plain"
+    },
+    async (): Promise<ReadResourceResult> => {
+      return {
+        contents: [
+          {
+            uri: "test://static-text",
+            mimeType: "text/plain",
+            text: "This is the content of the static text resource."
+          }
+        ]
+      };
+    }
+  );
+
+  // Static binary resource
+  mcpServer.registerResource(
+    "static-binary",
+    "test://static-binary",
+    {
+      title: "Static Binary Resource",
+      description: "A static binary resource (image) for testing",
+      mimeType: "image/png"
+    },
+    async (): Promise<ReadResourceResult> => {
+      return {
+        contents: [
+          {
+            uri: "test://static-binary",
+            mimeType: "image/png",
+            blob: TEST_IMAGE_BASE64
+          }
+        ]
+      };
+    }
+  );
+
+  // Resource template
+  mcpServer.registerResource(
+    "template",
+    new ResourceTemplate("test://template/{id}/data", { list: undefined }),
+    {
+      title: "Resource Template",
+      description: "A resource template with parameter substitution",
+      mimeType: "application/json"
+    },
+    async (uri, variables): Promise<ReadResourceResult> => {
+      const id = variables.id;
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: "application/json",
+            text: JSON.stringify({
+              id,
+              templateTest: true,
+              data: `Data for ID: ${id}`
+            })
+          }
+        ]
+      };
+    }
+  );
+
+  // Watched resource
+  mcpServer.registerResource(
+    "watched-resource",
+    "test://watched-resource",
+    {
+      title: "Watched Resource",
+      description:
+        "Static resource registered for subscribe/unsubscribe testing",
+      mimeType: "text/plain"
+    },
+    async (): Promise<ReadResourceResult> => {
+      return {
+        contents: [
+          {
+            uri: "test://watched-resource",
+            mimeType: "text/plain",
+            text: watchedResourceContent
+          }
+        ]
+      };
+    }
+  );
+
+  // Subscribe/Unsubscribe handlers
+  mcpServer.server.setRequestHandler("resources/subscribe", async (request) => {
+    const uri = request.params.uri;
+    resourceSubscriptions.add(uri);
+    sendLog("info", `Subscribed to resource: ${uri}`);
+    return {};
+  });
+
+  mcpServer.server.setRequestHandler(
+    "resources/unsubscribe",
+    async (request) => {
+      const uri = request.params.uri;
+      resourceSubscriptions.delete(uri);
+      sendLog("info", `Unsubscribed from resource: ${uri}`);
+      return {};
+    }
+  );
+
+  // ===== PROMPTS =====
+
+  // Simple prompt
+  mcpServer.registerPrompt(
+    "test_simple_prompt",
+    {
+      title: "Simple Test Prompt",
+      description: "A simple prompt without arguments"
+    },
+    async (): Promise<GetPromptResult> => {
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: "This is a simple prompt for testing."
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt with arguments
+  mcpServer.registerPrompt(
+    "test_prompt_with_arguments",
+    {
+      title: "Prompt With Arguments",
+      description: "A prompt with required arguments",
+      argsSchema: z.object({
+        arg1: z.string().describe("First test argument"),
+        arg2: z.string().describe("Second test argument")
+      })
+    },
+    async (args): Promise<GetPromptResult> => {
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Prompt with arguments: arg1='${args.arg1}', arg2='${args.arg2}'`
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt with embedded resource
+  mcpServer.registerPrompt(
+    "test_prompt_with_embedded_resource",
+    {
+      title: "Prompt With Embedded Resource",
+      description: "A prompt that includes an embedded resource",
+      argsSchema: z.object({
+        resourceUri: z.string().describe("URI of the resource to embed")
+      })
+    },
+    async (args): Promise<GetPromptResult> => {
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "resource",
+              resource: {
+                uri: args.resourceUri,
+                mimeType: "text/plain",
+                text: "Embedded resource content for testing."
+              }
+            }
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: "Please process the embedded resource above."
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Multi-round-trip prompt (SEP-2322): prompts/get is one of the methods
+  // whose 2026-07-28 result vocabulary includes input_required, so a prompt
+  // can request elicitation input in-band before rendering.
+  mcpServer.registerPrompt(
+    "test_input_required_result_prompt",
+    {
+      title: "MRTR Prompt",
+      description:
+        "MRTR (SEP-2322): prompt that requires elicitation input before rendering"
+    },
+    async (ctx): Promise<GetPromptResult | InputRequiredResult> => {
+      // A prompt registered without argsSchema receives the request
+      // context as its only callback argument, but the registerPrompt
+      // overloads only model the (args, ctx) form — so the parameter
+      // arrives untyped and is narrowed here.
+      const promptCtx = ctx as ServerContext;
+      const promptContext = acceptedContent<{ context: string }>(
+        promptCtx.mcpReq.inputResponses,
+        "user_context"
+      )?.context;
+      if (typeof promptContext !== "string") {
+        return inputRequired({
+          inputRequests: {
+            user_context: inputRequired.elicit({
+              message: "What context should the prompt use?",
+              requestedSchema: {
+                type: "object",
+                properties: { context: { type: "string" } },
+                required: ["context"]
+              }
+            })
+          }
+        });
+      }
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Use the following context: ${promptContext}`
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt with image
+  mcpServer.registerPrompt(
+    "test_prompt_with_image",
+    {
+      title: "Prompt With Image",
+      description: "A prompt that includes image content"
+    },
+    async (): Promise<GetPromptResult> => {
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "image",
+              data: TEST_IMAGE_BASE64,
+              mimeType: "image/png"
+            }
+          },
+          {
+            role: "user",
+            content: { type: "text", text: "Please analyze the image above." }
+          }
+        ]
+      };
+    }
+  );
+
+  // ===== LOGGING =====
+
+  mcpServer.server.setRequestHandler("logging/setLevel", async (request) => {
+    const level = request.params.level;
+    sendLog("info", `Log level set to: ${level}`);
+    return {};
+  });
+
+  // ===== COMPLETION =====
+
+  mcpServer.server.setRequestHandler("completion/complete", async () => {
+    // Basic completion support - returns empty array for conformance
+    // Real implementations would provide contextual suggestions
+    return {
+      completion: {
+        values: [],
+        total: 0,
+        hasMore: false
+      }
+    };
+  });
+
+  return mcpServer;
+}

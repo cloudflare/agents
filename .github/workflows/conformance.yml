@@ -30,7 +30,11 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        variant: [mcp-agent, handler]
+        variant:
+          - mcp-agent
+          - handler
+          - handler:stateless-legacy
+          - handler:legacy
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install
