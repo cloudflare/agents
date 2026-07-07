@@ -16,6 +16,7 @@
  */
 
 import type {
+  ChatResponseResult,
   ToolCallResultContext,
   TurnContext,
   WorkspaceLike as ThinkWorkspaceLike
@@ -47,6 +48,7 @@ import {
   createReadTool,
   createWriteTool
 } from "./tools/fs/index";
+import { AGENT_THINK_MAX_STEPS, classifyTurnOutcome } from "./turn-outcome";
 
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
@@ -87,7 +89,7 @@ export class ThinkAgent extends ThinkBase {
   // eviction. Left at the default (enabled).
 
   /** repro/pr can be long: clone, install, deploy or fix, verify. */
-  override maxSteps = 60;
+  override maxSteps = AGENT_THINK_MAX_STEPS;
 
   /**
    * We expose our own `bash` tool (two exec backends); skip Think's
@@ -463,12 +465,22 @@ export class ThinkAgent extends ThinkBase {
     });
   }
 
-  override async onChatResponse(): Promise<void> {
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    const terminal = classifyTurnOutcome(result, this.maxSteps);
     this.#report((cc) =>
-      cc.recordTurn({ session: this.name, outcome: "done" })
+      cc.recordTurn({
+        session: this.name,
+        outcome: terminal.outcome,
+        error: terminal.error
+      })
     );
-    this.#log("turn:done", {
-      assistantChars: collectAssistantText(this.messages).length
+    this.#log(terminal.outcome === "done" ? "turn:done" : "turn:error", {
+      reason: terminal.reason,
+      steps: terminal.steps,
+      maxSteps: this.maxSteps,
+      assistantChars: terminal.assistantChars,
+      finalStepHasToolCall: terminal.finalStepHasToolCall,
+      ...(terminal.error ? { error: terminal.error.slice(0, 800) } : {})
     });
   }
 
@@ -679,25 +691,6 @@ function isEnoent(err: unknown): boolean {
   const e = err as { code?: string; message?: string };
   if (e.code === "ENOENT") return true;
   return typeof e.message === "string" && /ENOENT|no such/i.test(e.message);
-}
-
-function collectAssistantText(
-  messages: ReadonlyArray<{
-    role: string;
-    parts: Array<{ type: string; text?: string }>;
-  }>
-): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role !== "assistant") continue;
-    const text = m.parts
-      .filter((p) => p.type === "text" && typeof p.text === "string")
-      .map((p) => p.text as string)
-      .join("")
-      .trim();
-    if (text.length > 0) return text;
-  }
-  return "";
 }
 
 function shellQuote(value: string): string {

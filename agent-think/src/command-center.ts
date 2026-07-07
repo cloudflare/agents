@@ -39,7 +39,7 @@ export interface ThreadMeta {
   tools: number;
   /** Failed tool calls across all runs. */
   toolErrors: number;
-  /** Truncated message of the last turn error, if the last turn failed. */
+  /** Truncated terminal reason when the last turn did not complete. */
   lastError?: string;
 }
 
@@ -116,7 +116,12 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
     // One structured line per update so runs are reconstructable from the
     // observability logs (the registry itself has no other log output).
     console.log(
-      `command-center ${JSON.stringify({ session: meta.session, status: meta.status, tools: meta.tools })}`
+      `command-center ${JSON.stringify({
+        session: meta.session,
+        status: meta.status,
+        tools: meta.tools,
+        ...(meta.lastError ? { lastError: meta.lastError } : {})
+      })}`
     );
     this.setState({
       threads: { ...this.state.threads, [meta.session]: meta }
