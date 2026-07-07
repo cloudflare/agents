@@ -43,6 +43,24 @@ export function validateRunTarget(target: RunTarget): RunTarget {
  * system prompt: context blocks may change prompt assembly, but a submitted
  * user message is persisted with the turn and survives every continuation.
  */
+export function buildRunTelemetry(
+  target: RunTarget,
+  agentId: string,
+  agentName: string
+) {
+  validateRunTarget(target);
+  return {
+    metadata: {
+      agentId,
+      agentName,
+      conversationId: agentId,
+      repository: target.repo,
+      issueNumber: target.issueNumber,
+      ...(target.requestedBy ? { requestedBy: target.requestedBy.login } : {})
+    }
+  };
+}
+
 export function buildRunEnvelope(target: RunTarget): string {
   validateRunTarget(target);
   const envelope = {

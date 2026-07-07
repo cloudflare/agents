@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildRunEnvelope, validateRunTarget } from "../src/run-context";
+import {
+  buildRunEnvelope,
+  buildRunTelemetry,
+  validateRunTarget
+} from "../src/run-context";
 
 const target = {
   repo: "cloudflare/workers-oauth-provider",
@@ -16,6 +20,19 @@ describe("agent-think run context", () => {
     );
     expect(buildRunEnvelope(target)).toContain('"issue":209');
     expect(buildRunEnvelope(target)).toContain('"requested-by":"@mattzcarey"');
+  });
+
+  it("keeps identity on every inference and recovery continuation", () => {
+    expect(buildRunTelemetry(target, "session-209", "ThinkAgent")).toEqual({
+      metadata: {
+        agentId: "session-209",
+        agentName: "ThinkAgent",
+        conversationId: "session-209",
+        repository: "cloudflare/workers-oauth-provider",
+        issueNumber: 209,
+        requestedBy: "mattzcarey"
+      }
+    });
   });
 
   it("rejects substituted targets and unsafe requester mentions", () => {
