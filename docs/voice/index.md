@@ -173,6 +173,8 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
+Custom transcriber sessions can implement `waitUntilReady(): Promise<void>` when they open an upstream streaming connection asynchronously. `withVoice()` waits for this optional method before sending `listening` or running `onCallStart()`. Resolve it when the session can accept audio and emit transcripts; reject it when startup failed and the call should return to `idle`. Providers that are ready synchronously can omit the method.
+
 ### `onTurn(transcript, context)`
 
 **Required.** Called when the user finishes speaking and the transcript is ready.

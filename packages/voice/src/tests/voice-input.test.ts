@@ -235,15 +235,21 @@ describe("VoiceInput — continuous STT pipeline", () => {
 });
 
 describe("VoiceInput — beforeCallStart rejection", () => {
-  it("does not start call when beforeCallStart returns false", async () => {
+  it("returns an error and idle when beforeCallStart returns false", async () => {
     const { ws } = await connectWS(
       uniquePath("test-reject-call-voice-input-agent")
     );
     await waitForStatus(ws, "idle");
 
+    const errorPromise = waitForType(ws, "error");
+    const idlePromise = waitForStatus(ws, "idle");
     sendJSON(ws, { type: "start_call" });
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await errorPromise).toEqual({
+      type: "error",
+      message: "Voice call was rejected"
+    });
+    expect(await idlePromise).toEqual({ type: "status", status: "idle" });
 
     ws.close();
   });

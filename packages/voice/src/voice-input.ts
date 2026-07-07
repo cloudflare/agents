@@ -228,55 +228,89 @@ export function withVoiceInput<TBase extends AgentLike>(
 
       this.#cm.initConnection(connection.id);
 
-      const allowed = await this.beforeCallStart(connection);
-      if (!allowed) {
-        this.#cm.cleanup(connection.id);
-        return;
-      }
+      try {
+        const allowed = await this.beforeCallStart(connection);
+        if (!allowed) {
+          await this.#handleStartupFailure(
+            connection,
+            "Voice call was rejected",
+            undefined,
+            null
+          );
+          return;
+        }
 
-      const provider = this.createTranscriber(connection) ?? this.transcriber;
-      if (!provider) {
-        console.error(
-          "[VoiceInput] No transcriber configured. Set 'transcriber' on your VoiceInput subclass or override createTranscriber()."
-        );
+        const provider = this.createTranscriber(connection) ?? this.transcriber;
+        if (!provider) {
+          const message =
+            "No transcriber configured. Set 'transcriber' on your VoiceInput subclass or override createTranscriber().";
+          console.error(`[VoiceInput] ${message}`);
+          await this.#handleStartupFailure(
+            connection,
+            message,
+            undefined,
+            null
+          );
+          return;
+        }
+
+        const dispose = await this.keepAlive();
+        this.#keepAliveDispose.set(connection.id, dispose);
+
+        this.#cm.startTranscriberSession(connection.id, provider, {
+          onInterim: (text: string) => {
+            sendVoiceJSON(
+              connection,
+              { type: "transcript_interim", text },
+              "VoiceInput"
+            );
+          },
+          onUtterance: (transcript: string) => {
+            runBackground("emitTranscript", () =>
+              this.#emitTranscript(connection, transcript)
+            );
+          }
+        });
+
         sendVoiceJSON(
           connection,
-          {
-            type: "error",
-            message:
-              "No transcriber configured. Set 'transcriber' on your VoiceInput subclass or override createTranscriber()."
-          },
+          { type: "status", status: "listening" },
           "VoiceInput"
         );
-        this.#cm.cleanup(connection.id);
-        return;
+
+        await this.onCallStart(connection);
+      } catch (error) {
+        await this.#handleStartupFailure(
+          connection,
+          "Voice input failed to start",
+          error,
+          "[VoiceInput] Call startup failed:"
+        );
       }
+    }
 
-      const dispose = await this.keepAlive();
-      this.#keepAliveDispose.set(connection.id, dispose);
-
-      this.#cm.startTranscriberSession(connection.id, provider, {
-        onInterim: (text: string) => {
-          sendVoiceJSON(
-            connection,
-            { type: "transcript_interim", text },
-            "VoiceInput"
-          );
-        },
-        onUtterance: (transcript: string) => {
-          runBackground("emitTranscript", () =>
-            this.#emitTranscript(connection, transcript)
-          );
-        }
-      });
-
+    async #handleStartupFailure(
+      connection: Connection,
+      clientMessage: string,
+      error: unknown,
+      logPrefix: string | null = "[VoiceInput] Call startup failed:"
+    ): Promise<void> {
+      // The client starts local audio optimistically on start_call. Every
+      // terminal startup path must send error + idle so it tears that down.
+      if (logPrefix && error !== undefined) console.error(logPrefix, error);
       sendVoiceJSON(
         connection,
-        { type: "status", status: "listening" },
+        { type: "error", message: clientMessage },
         "VoiceInput"
       );
-
-      await this.onCallStart(connection);
+      this.#cm.cleanup(connection.id);
+      this.#releaseKeepAlive(connection.id);
+      sendVoiceJSON(
+        connection,
+        { type: "status", status: "idle" },
+        "VoiceInput"
+      );
+      await this.onCallEnd(connection);
     }
 
     #releaseKeepAlive(connectionId: string) {

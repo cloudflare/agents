@@ -100,6 +100,7 @@ async function setTranscriberMode(
   ws: WebSocket,
   value:
     | "default"
+    | "missing"
     | "pending_ready"
     | "pending_ready_no_close_settle"
     | "reject_ready"
@@ -412,6 +413,109 @@ describe("VoiceAgent — transcriber readiness", () => {
       expect(failedCounts.keepAliveReleased).toBe(0);
 
       await setBeforeCallStart(ws, true);
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      sendJSON(ws, { type: "_get_counts" });
+      const restartedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(restartedCounts.callStart).toBe(1);
+      expect(restartedCounts.callEnd).toBe(1);
+      expect(restartedCounts.keepAliveAcquired).toBe(1);
+      expect(restartedCounts.keepAliveReleased).toBe(0);
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("sends a visible error, returns idle, and cleans up when beforeCallStart rejects", async () => {
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setBeforeCallStart(ws, false);
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message: "Voice call was rejected"
+      });
+      expect(startupMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+
+      sendJSON(ws, { type: "_get_counts" });
+      const failedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(failedCounts.callStart).toBe(0);
+      expect(failedCounts.callEnd).toBe(1);
+      expect(failedCounts.keepAliveAcquired).toBe(0);
+      expect(failedCounts.keepAliveReleased).toBe(0);
+
+      await setBeforeCallStart(ws, true);
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      sendJSON(ws, { type: "_get_counts" });
+      const restartedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(restartedCounts.callStart).toBe(1);
+      expect(restartedCounts.callEnd).toBe(1);
+      expect(restartedCounts.keepAliveAcquired).toBe(1);
+      expect(restartedCounts.keepAliveReleased).toBe(0);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("sends a visible error, returns idle, and cleans up when no transcriber is configured", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setTranscriberMode(ws, "missing");
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message:
+          "No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber()."
+      });
+      expect(startupMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+
+      sendJSON(ws, { type: "_get_counts" });
+      const failedCounts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(failedCounts.callStart).toBe(0);
+      expect(failedCounts.callEnd).toBe(1);
+      expect(failedCounts.keepAliveAcquired).toBe(0);
+      expect(failedCounts.keepAliveReleased).toBe(0);
+
+      await setTranscriberMode(ws, "default");
       sendJSON(ws, { type: "start_call" });
       await waitForStatus(ws, "listening");
 

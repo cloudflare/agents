@@ -80,6 +80,7 @@ class TestTranscriber implements Transcriber {
 
 type TestTranscriberMode =
   | "default"
+  | "missing"
   | "pending_ready"
   | "pending_ready_no_close_settle"
   | "reject_ready"
@@ -88,6 +89,7 @@ type TestTranscriberMode =
 function isTestTranscriberMode(value: unknown): value is TestTranscriberMode {
   return (
     value === "default" ||
+    value === "missing" ||
     value === "pending_ready" ||
     value === "pending_ready_no_close_settle" ||
     value === "reject_ready" ||
@@ -351,7 +353,7 @@ const VoiceBase = withVoice(Agent);
 export class TestVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
-  transcriber = new TestTranscriber();
+  transcriber: Transcriber | undefined = new TestTranscriber();
   tts = new TestTTS();
 
   #callStartCount = 0;
@@ -385,6 +387,7 @@ export class TestVoiceAgent extends VoiceBase {
   createTranscriber(_connection: Connection): Transcriber | null {
     const mode = this.#transcriberMode;
     if (mode === "default") return null;
+    if (mode === "missing") return null;
     if (mode === "create_throw") {
       return {
         createSession(): TranscriberSession {
@@ -470,6 +473,8 @@ export class TestVoiceAgent extends VoiceBase {
           if (isTestTranscriberMode(parsed.value)) {
             this.#transcriberMode = parsed.value;
             this.#lastReadySession = null;
+            this.transcriber =
+              parsed.value === "missing" ? undefined : new TestTranscriber();
           }
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })

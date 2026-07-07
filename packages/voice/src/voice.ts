@@ -543,8 +543,13 @@ export function withVoice<TBase extends AgentLike>(
         const allowed = await this.beforeCallStart(connection);
         if (!this.#isCurrentStartup(connection.id, startupToken)) return;
         if (!allowed) {
-          this.#startupTokens.delete(connection.id);
-          this.#cm.cleanup(connection.id);
+          await this.#handleStartupFailure(
+            connection,
+            startupToken,
+            undefined,
+            "Voice call was rejected",
+            null
+          );
           return;
         }
 
@@ -553,12 +558,13 @@ export function withVoice<TBase extends AgentLike>(
           const message =
             "No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber().";
           console.error(`[VoiceAgent] ${message}`);
-          this.#sendJSON(connection, {
-            type: "error",
-            message
-          });
-          this.#startupTokens.delete(connection.id);
-          this.#cm.cleanup(connection.id);
+          await this.#handleStartupFailure(
+            connection,
+            startupToken,
+            undefined,
+            message,
+            null
+          );
           return;
         }
 
@@ -650,11 +656,13 @@ export function withVoice<TBase extends AgentLike>(
       startupToken: symbol,
       error: unknown,
       clientMessage: string,
-      logPrefix = "[VoiceAgent] Call startup failed:"
+      logPrefix: string | null = "[VoiceAgent] Call startup failed:"
     ): Promise<void> {
       if (!this.#isCurrentStartup(connection.id, startupToken)) return;
 
-      console.error(logPrefix, error);
+      // The client starts local audio optimistically on start_call. Every
+      // terminal startup path must send error + idle so it tears that down.
+      if (logPrefix && error !== undefined) console.error(logPrefix, error);
       this.#startupTokens.delete(connection.id);
       this.#sendJSON(connection, {
         type: "error",
