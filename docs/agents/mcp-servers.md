@@ -19,7 +19,7 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 The simplest way to create an MCP server. Install the server package directly, then import its constructor alongside the Agents handler:
 
 ```sh
-pnpm add agents @modelcontextprotocol/server zod
+pnpm add agents @modelcontextprotocol/sdk@1.29.0 @modelcontextprotocol/server@2.0.0-beta.2 zod
 ```
 
 ```typescript
@@ -47,22 +47,10 @@ function createServer() {
   return server;
 }
 
-export default {
-  fetch: async (request: Request, env: Env, ctx: ExecutionContext) => {
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
-  }
-};
+export default createMcpHandler(createServer);
 ```
 
-Request-scoped instances, as above, work naturally. For a module-scoped handler, pass a factory so concurrent Worker requests receive isolated servers:
-
-```typescript
-const handler = createMcpHandler(() => createServer());
-export default handler;
-```
-
-A supplied instance can be reused sequentially, but overlapping requests throw with guidance to use a factory.
+`createMcpHandler` requires a factory so concurrent Worker requests receive isolated server instances. A function input is always treated as an SDK v2 factory.
 
 ### `createMcpHandler` options
 
@@ -76,7 +64,7 @@ createMcpHandler(() => createServer(), {
 });
 ```
 
-All upstream SDK v2 handler options pass through. Legacy `transport`, storage, session, and event-store options apply only when the input is an SDK v1 server and are removed in the next major release.
+All upstream SDK v2 handler options pass through. Use `createLegacyMcpHandler` for WorkerTransport, storage, session, and event-store options.
 
 ### 2025 compatibility and elicitation
 
@@ -84,7 +72,17 @@ The default `legacy: "stateless"` lane supports ordinary 2025 tools, resources, 
 
 Applications that must keep push-style 2025 elicitation while adding modern multi-round-trip elicitation should route before `createMcpHandler`: send modern requests to a strict stateless v2 handler and legacy requests to their existing session-addressed Agent/transport. See [`examples/mcp-elicitation`](../../examples/mcp-elicitation/) for both paths on one endpoint.
 
-Passing an existing SDK v1 server directly to `createMcpHandler` still invokes the complete old handler temporarily and emits a migration warning. Change the server import to `@modelcontextprotocol/server` to opt into the current path.
+For an explicit 2025-era handler, use the retained legacy API:
+
+```typescript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createLegacyMcpHandler } from "agents/mcp";
+
+const server = new McpServer({ name: "legacy", version: "1.0.0" });
+export default createLegacyMcpHandler(server);
+```
+
+Passing an SDK v1 server directly to `createMcpHandler` still forwards to this API for compatibility, but that overload is deprecated, emits a migration warning, and is removed in the next major release. `createLegacyMcpHandler` and `WorkerTransport` themselves are not deprecated.
 
 ### Accessing Authenticated User Context
 
@@ -519,9 +517,9 @@ export default MyMCP.serve("/mcp");
 
 See the [`examples/mcp-elicitation`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation) example for a full working demo.
 
-## WorkerTransport (deprecated compatibility API)
+## WorkerTransport
 
-`WorkerTransport` belongs to the SDK v1 compatibility stack. Existing applications can continue using it for persistent 2025-era sessions while they migrate, but it receives no new MCP protocol features and is removed in the next major release. The SDK v2 handler uses its own per-request server transport; it does not use `WorkerTransport` internally.
+`WorkerTransport` is the Agents Workers transport for 2025-era MCP. Use it directly with `createLegacyMcpHandler` for persistent sessions, storage, event replay, and other explicit legacy configurations. The SDK v2 handler also uses a sessionless `WorkerTransport` internally for its stateless 2025 fallback; this does not emit a deprecation warning.
 
 ```typescript
 import { WorkerTransport, type TransportState } from "agents/mcp";

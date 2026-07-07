@@ -1,7 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 
 describe("legacy MCP handler warning", () => {
-  it("warns once for the compatibility stack plus once for the experimental alias", async () => {
+  it("does not warn for explicit legacy APIs", async () => {
+    vi.resetModules();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const [mcp, { McpServer }] = await Promise.all([
+      import("../../mcp"),
+      import("@modelcontextprotocol/sdk/server/mcp.js")
+    ]);
+
+    mcp.createLegacyMcpHandler(
+      new McpServer({ name: "explicit-legacy", version: "1.0.0" })
+    );
+    new mcp.WorkerTransport();
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("warns once for the SDK v1 overload plus once for the experimental alias", async () => {
     vi.resetModules();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const [{ McpServer }, handlerModule, transportModule] = await Promise.all([
@@ -21,7 +37,9 @@ describe("legacy MCP handler warning", () => {
     expect(warn.mock.calls.map(([message]) => String(message))).toEqual(
       expect.arrayContaining([
         expect.stringContaining("experimental_createMcpHandler is deprecated"),
-        expect.stringContaining("legacy MCP SDK v1 handler")
+        expect.stringContaining(
+          "Passing an MCP SDK v1 server to createMcpHandler is deprecated"
+        )
       ])
     );
   });

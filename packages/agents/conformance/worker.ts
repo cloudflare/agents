@@ -7,6 +7,7 @@ import {
 import { MCPConnectionState } from "../src/mcp/client-connection.ts";
 import { isUnauthorized, toErrorMessage } from "../src/mcp/errors.ts";
 import {
+  createLegacyMcpHandler,
   createMcpHandler,
   DurableObjectEventStore,
   McpAgent,
@@ -33,7 +34,7 @@ import { createEverythingServerV2 } from "./everything-server-v2.ts";
  *
  * Servers under test (`conformance server --url ...`):
  *  - /mcp-handler: SDK v2 stateless createMcpHandler
- *  - /mcp-handler-legacy: SDK v1 compatibility createMcpHandler + WorkerTransport
+ *  - /mcp-handler-legacy: explicit createLegacyMcpHandler + WorkerTransport
  *  - /mcp-agent: retained SDK v1 McpAgent
  *  Each generation has its own everything-server fixture.
  */
@@ -328,7 +329,7 @@ const everythingMcpAgentHandler = EverythingMcpAgent.serve("/mcp-agent", {
 const TRANSPORT_STATE_KEY = "mcp_transport_state";
 
 /**
- * SDK v1 createMcpHandler compatibility target inside an Agent (modeled on
+ * Explicit SDK v1 createLegacyMcpHandler target inside an Agent (modeled on
  * the mcp-elicitation example).
  */
 export class EverythingHandlerAgent extends Agent<Env> {
@@ -352,7 +353,7 @@ export class EverythingHandlerAgent extends Agent<Env> {
   });
 
   async onMcpRequest(request: Request) {
-    return createMcpHandler(this.server, {
+    return createLegacyMcpHandler(this.server, {
       route: "/mcp-handler-legacy",
       transport: this.transport
     })(request, this.env, {} as ExecutionContext);

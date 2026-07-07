@@ -1,13 +1,13 @@
-let didWarnAboutLegacyHandlerCompatibility = false;
+let didWarnAboutLegacyCreateMcpHandlerOverload = false;
 
-export function warnLegacyHandlerCompatibility(): void {
-  if (didWarnAboutLegacyHandlerCompatibility) return;
-  didWarnAboutLegacyHandlerCompatibility = true;
+export function warnLegacyCreateMcpHandlerOverload(): void {
+  if (didWarnAboutLegacyCreateMcpHandlerOverload) return;
+  didWarnAboutLegacyCreateMcpHandlerOverload = true;
   console.warn(
-    "[agents/mcp] This server is using the legacy MCP SDK v1 handler and " +
-      "WorkerTransport compatibility stack. It will not receive new MCP " +
-      "protocol features and will be removed in the next major version. " +
-      'Upgrade createMcpHandler from "agents/mcp" and import McpServer or ' +
-      'Server from "@modelcontextprotocol/server".'
+    "[agents/mcp] Passing an MCP SDK v1 server to createMcpHandler is " +
+      "deprecated and will be removed in the next major version. Use " +
+      "createLegacyMcpHandler for an explicit 2025-era WorkerTransport " +
+      "handler, or pass an @modelcontextprotocol/server factory to " +
+      "createMcpHandler for current protocol support."
   );
 }

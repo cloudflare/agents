@@ -1,4 +1,4 @@
-# Expected failures for the createMcpHandler + WorkerTransport server
+# Expected failures for the createLegacyMcpHandler + WorkerTransport server
 # conformance suite.
 # Each entry documents a known gap — remove entries as gaps are fixed.
 server:

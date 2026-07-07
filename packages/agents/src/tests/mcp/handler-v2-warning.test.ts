@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createMcpHandler } from "../../mcp/handler";
 
 describe("SDK v2 stateless fallback warning", () => {
-  it("does not warn for its internal WorkerTransport", async () => {
+  it("does not warn for a 2025 request", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const handler = createMcpHandler(
       () => new McpServer({ name: "modern", version: "1.0.0" })
@@ -34,10 +34,6 @@ describe("SDK v2 stateless fallback warning", () => {
     );
     await response.text();
 
-    expect(
-      warn.mock.calls.some(([message]) =>
-        String(message).includes("legacy MCP SDK v1 handler")
-      )
-    ).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

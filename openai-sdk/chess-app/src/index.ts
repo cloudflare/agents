@@ -1,4 +1,4 @@
-import { createMcpHandler } from "agents/mcp";
+import { createLegacyMcpHandler } from "agents/mcp";
 import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { env } from "cloudflare:workers";
@@ -55,7 +55,7 @@ server.registerTool(
 );
 
 // create the MCP handler to talk to our server
-const mcpHandler = createMcpHandler(server);
+const mcpHandler = createLegacyMcpHandler(server);
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {

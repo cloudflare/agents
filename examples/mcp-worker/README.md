@@ -4,8 +4,8 @@ The simplest way to run a stateless MCP server on Cloudflare Workers. Uses `crea
 
 ## What it demonstrates
 
-- **`createMcpHandler`** — the Agents SDK helper that wraps an `McpServer` into a Worker-compatible fetch handler
-- **Minimal setup** — define tools on an `McpServer`, pass it to `createMcpHandler`, done
+- **`createMcpHandler`** — the Agents SDK helper that turns an `McpServer` factory into a Worker-compatible fetch handler
+- **Minimal setup** — define tools in a factory, pass the factory to `createMcpHandler`, done
 - **Stateless** — no Durable Objects, no persistent state, each request is independent
 
 ## Running
@@ -39,12 +39,7 @@ function createServer() {
   return server;
 }
 
-export default {
-  fetch: async (request, env, ctx) => {
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
-  }
-};
+export default createMcpHandler(createServer);
 ```
 
 ## Related examples

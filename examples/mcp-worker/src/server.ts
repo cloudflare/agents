@@ -29,9 +29,4 @@ function createServer() {
   return server;
 }
 
-export default {
-  fetch: async (request: Request, env: Env, ctx: ExecutionContext) => {
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
-  }
-};
+export default createMcpHandler(createServer);

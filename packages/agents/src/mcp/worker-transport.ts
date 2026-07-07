@@ -42,19 +42,6 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CORSOptions } from "./types";
 import { KEEPALIVE_FRAME, KEEPALIVE_INTERVAL_MS } from "./sse-keepalive";
-import { warnLegacyHandlerCompatibility } from "./handler-warning";
-
-let suppressLegacyTransportWarning = 0;
-
-/** @internal Construct WorkerTransport for a v2 compatibility request without warning. */
-export function withoutLegacyTransportWarning<T>(create: () => T): T {
-  suppressLegacyTransportWarning++;
-  try {
-    return create();
-  } finally {
-    suppressLegacyTransportWarning--;
-  }
-}
 
 /** Sentinel id used when replaying the persisted initialize request. */
 const RESTORE_REQUEST_ID = "__worker_transport_restore__";
@@ -66,14 +53,12 @@ const RESTORE_REQUEST_ID = "__worker_transport_restore__";
  * A typical implementation reads/writes a single key on `this.ctx.storage`
  * inside a Durable Object or Agent.
  */
-/** @deprecated Legacy MCP SDK v1 compatibility; removed in the next major version. */
 export interface MCPStorageApi {
   get(): Promise<TransportState | undefined> | TransportState | undefined;
   set(state: TransportState): Promise<void> | void;
 }
 
 /** Shape of the persisted transport state. */
-/** @deprecated Legacy MCP SDK v1 compatibility; removed in the next major version. */
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
@@ -94,7 +79,6 @@ const DEFAULT_CORS_OPTIONS: Required<
   maxAge: 86400
 };
 
-/** @deprecated Legacy MCP SDK v1 compatibility; removed in the next major version. */
 export interface WorkerTransportOptions extends WebStandardStreamableHTTPServerTransportOptions {
   /**
    * CORS options applied to every response and to OPTIONS preflight.
@@ -110,10 +94,6 @@ export interface WorkerTransportOptions extends WebStandardStreamableHTTPServerT
   storage?: MCPStorageApi;
 }
 
-/**
- * @deprecated Legacy MCP SDK v1 compatibility. Use createMcpHandler with
- * McpServer or Server from "@modelcontextprotocol/server". Removed next major.
- */
 export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
   private readonly _corsOptions?: CORSOptions;
   private readonly _storage?: MCPStorageApi;
@@ -152,9 +132,6 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
   private readonly _closedRequestIds = new Set<RequestId>();
 
   constructor(options: WorkerTransportOptions = {}) {
-    if (suppressLegacyTransportWarning === 0) {
-      warnLegacyHandlerCompatibility();
-    }
     const { corsOptions, storage, onsessioninitialized, ...sdkOptions } =
       options;
 

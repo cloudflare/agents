@@ -35,12 +35,7 @@ The `OAuthProvider` wraps the entire Worker. It intercepts OAuth endpoints (`/au
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
 
-const apiHandler = {
-  async fetch(request, env, ctx) {
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
-  }
-};
+const apiHandler = createMcpHandler(createServer);
 
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",

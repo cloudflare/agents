@@ -1,28 +1,24 @@
 import { McpServer as LegacyMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Server as LegacyServer } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  McpServer,
-  Server,
-  type McpServerFactory
-} from "@modelcontextprotocol/server";
+import type { McpServerFactory } from "@modelcontextprotocol/server";
 import {
   createLegacyMcpHandler,
-  type CreateMcpHandlerOptions
+  type CreateLegacyMcpHandlerOptions,
+  type CreateMcpHandlerOptions,
+  type LegacyMcpHandler
 } from "./handler-legacy";
 import {
   createStatelessMcpHandler,
   type CreateStatelessMcpHandlerOptions,
   type StatelessMcpHandler
 } from "./handler-stateless";
-import { warnLegacyHandlerCompatibility } from "./handler-warning";
-
-export type LegacyMcpHandler = ReturnType<typeof createLegacyMcpHandler>;
+import { warnLegacyCreateMcpHandlerOverload } from "./handler-warning";
 
 /**
- * @deprecated This server comes from MCP SDK v1 and runs in legacy handler
- * compatibility mode. Import McpServer or Server from
- * "@modelcontextprotocol/server" to receive new MCP protocol features.
- * Removed in the next major version.
+ * @deprecated Passing an SDK v1 server to createMcpHandler is deprecated and
+ * removed in the next major version. Use createLegacyMcpHandler for an
+ * explicit WorkerTransport handler, or pass an SDK v2 factory to
+ * createMcpHandler.
  */
 export function createMcpHandler(
   server: LegacyMcpServer | LegacyServer,
@@ -30,17 +26,12 @@ export function createMcpHandler(
 ): LegacyMcpHandler;
 
 export function createMcpHandler(
-  serverOrFactory: McpServer | Server | McpServerFactory,
+  factory: McpServerFactory,
   options?: CreateStatelessMcpHandlerOptions
 ): StatelessMcpHandler;
 
 export function createMcpHandler(
-  serverOrFactory:
-    | LegacyMcpServer
-    | LegacyServer
-    | McpServer
-    | Server
-    | McpServerFactory,
+  serverOrFactory: LegacyMcpServer | LegacyServer | McpServerFactory,
   options: CreateMcpHandlerOptions | CreateStatelessMcpHandlerOptions = {}
 ): LegacyMcpHandler | StatelessMcpHandler {
   if (typeof serverOrFactory === "function") {
@@ -51,20 +42,10 @@ export function createMcpHandler(
   }
 
   if (
-    serverOrFactory instanceof McpServer ||
-    serverOrFactory instanceof Server
-  ) {
-    return createStatelessMcpHandler(
-      serverOrFactory,
-      options as CreateStatelessMcpHandlerOptions
-    );
-  }
-
-  if (
     serverOrFactory instanceof LegacyMcpServer ||
     serverOrFactory instanceof LegacyServer
   ) {
-    warnLegacyHandlerCompatibility();
+    warnLegacyCreateMcpHandlerOverload();
     return createLegacyMcpHandler(
       serverOrFactory,
       options as CreateMcpHandlerOptions
@@ -72,7 +53,7 @@ export function createMcpHandler(
   }
 
   throw new TypeError(
-    'createMcpHandler received an unsupported server. Import McpServer or Server from "@modelcontextprotocol/server", or pass an existing MCP SDK v1 server while compatibility mode is available.'
+    'createMcpHandler received an unsupported server. Pass a factory returning McpServer or Server from "@modelcontextprotocol/server", or use createLegacyMcpHandler with an MCP SDK v1 server.'
   );
 }
 
@@ -91,11 +72,13 @@ export function experimental_createMcpHandler(
       "experimental_createMcpHandler is deprecated, use createMcpHandler instead. experimental_createMcpHandler will be removed in the next major version."
     );
   }
-  return createMcpHandler(server, options);
+  return createLegacyMcpHandler(server, options);
 }
 
+export { createLegacyMcpHandler, type CreateLegacyMcpHandlerOptions };
 export type {
   CreateMcpHandlerOptions,
   CreateStatelessMcpHandlerOptions,
+  LegacyMcpHandler,
   StatelessMcpHandler
 };
