@@ -1,5 +1,5 @@
+import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { AuthHandler } from "./auth-handler";
@@ -36,7 +36,7 @@ function createServer() {
     {
       description: "Returns information about the authenticated user"
     },
-    async () => {
+    async (context) => {
       const auth = getMcpAuthContext();
 
       if (!auth) {
@@ -57,7 +57,9 @@ function createServer() {
               {
                 userId: auth.props?.userId,
                 username: auth.props?.username,
-                email: auth.props?.email
+                email: auth.props?.email,
+                clientId: context.http?.authInfo?.clientId,
+                scopes: context.http?.authInfo?.scopes
               },
               null,
               2

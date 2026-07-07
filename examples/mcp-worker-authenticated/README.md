@@ -6,7 +6,8 @@ An MCP server protected by OAuth 2.1, using `@cloudflare/workers-oauth-provider`
 
 - **OAuth 2.1 with MCP** — dynamic client registration, authorization code flow, and token exchange
 - **`OAuthProvider`** — wrapping `createMcpHandler` with `@cloudflare/workers-oauth-provider`
-- **`getMcpAuthContext()`** — accessing the authenticated user's identity inside tool handlers
+- **Standard MCP `AuthInfo`** — token metadata, client ID, scopes, expiry, resource, and `extra.props`
+- **`getMcpAuthContext()`** — continued access to the existing application `props` shape
 - **Custom authorization UI** — a Hono-based approval page for the OAuth flow
 
 ## Running
@@ -51,16 +52,27 @@ export default new OAuthProvider({
 });
 ```
 
-Inside tool handlers, access the authenticated user:
+Inside tool handlers, access standard token metadata and the existing application props. Do not log or return the raw access token:
 
 ```typescript
-server.registerTool("whoami", { description: "Who am I?" }, async () => {
+server.registerTool("whoami", { description: "Who am I?" }, async (context) => {
   const auth = getMcpAuthContext();
   return {
-    content: [{ type: "text", text: JSON.stringify(auth?.props) }]
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          clientId: context.http?.authInfo?.clientId,
+          scopes: context.http?.authInfo?.scopes,
+          props: auth?.props
+        })
+      }
+    ]
   };
 });
 ```
+
+The AuthInfo bridge is additive and version-independent: older `workers-oauth-provider` releases still provide `getMcpAuthContext()`, while a provider release containing the bridge automatically adds `context.http.authInfo` when both packages are upgraded.
 
 ## Related examples
 

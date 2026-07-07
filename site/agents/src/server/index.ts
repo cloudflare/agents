@@ -1,6 +1,6 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp";
+import { z } from "zod";
 import { fetchAndBuildIndex, formatResults } from "./utils";
 import { search } from "@orama/orama";
 import { Effect } from "effect";

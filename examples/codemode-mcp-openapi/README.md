@@ -2,6 +2,8 @@
 
 Demonstrates how to turn any OpenAPI spec into a pair of MCP tools (`search` + `execute`) using `openApiMcpServer`.
 
+> `@cloudflare/codemode` currently produces an MCP SDK v1 server, so this example intentionally remains on `createMcpHandler`'s deprecated compatibility lane until Codemode's in-memory MCP bridge migrates separately.
+
 ## What this shows
 
 `openApiMcpServer` takes a raw OpenAPI spec and creates two tools:

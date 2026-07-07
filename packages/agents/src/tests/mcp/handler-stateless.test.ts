@@ -1,0 +1,472 @@
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
+import { McpServer as LegacyMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  McpServer,
+  Server,
+  type CallToolResult
+} from "@modelcontextprotocol/server";
+import { createMcpHandler, getMcpAuthContext } from "../../mcp";
+import { describe, expect, it, vi } from "vitest";
+
+const VERIFIED_OAUTH_CONTEXT = Symbol.for(
+  "cloudflare.workers-oauth-provider.verified-context.v1"
+);
+
+function legacyInitializeRequest(id = 1) {
+  return new Request("http://example.com/mcp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream"
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0.0" }
+      }
+    })
+  });
+}
+
+function legacyToolRequest(name: string) {
+  return new Request("http://example.com/mcp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream"
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: {} }
+    })
+  });
+}
+
+function modernRequest(method: string, params: Record<string, unknown> = {}) {
+  const name = typeof params.name === "string" ? params.name : undefined;
+  return new Request("http://example.com/mcp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      "MCP-Protocol-Version": "2026-07-28",
+      "Mcp-Method": method,
+      ...(name && { "Mcp-Name": name })
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method,
+      params: {
+        ...params,
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": {
+            name: "test",
+            version: "1.0.0"
+          },
+          "io.modelcontextprotocol/clientCapabilities": {}
+        }
+      }
+    })
+  });
+}
+
+function createServer() {
+  return new McpServer({ name: "test", version: "1.0.0" });
+}
+
+describe("createMcpHandler SDK v2", () => {
+  it("serves the modern protocol from an upstream server", async () => {
+    const handler = createMcpHandler(createServer());
+
+    const response = await handler(
+      modernRequest("server/discover"),
+      env,
+      createExecutionContext()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      result: {
+        supportedVersions: ["2026-07-28"],
+        serverInfo: { name: "test", version: "1.0.0" }
+      }
+    });
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  });
+
+  it("preserves upstream stateless legacy serving by default", async () => {
+    const handler = createMcpHandler(() => createServer());
+
+    const response = await handler(
+      legacyInitializeRequest(),
+      env,
+      createExecutionContext()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('"protocolVersion":"2025-11-25"');
+  });
+
+  it("fails fast when stateless legacy code attempts a reverse request", async () => {
+    const handler = createMcpHandler(() => {
+      const server = createServer();
+      server.registerTool("push", { inputSchema: {} }, async (_args, ctx) => {
+        try {
+          await ctx.mcpReq.send({
+            method: "sampling/createMessage",
+            params: {
+              messages: [
+                {
+                  role: "user",
+                  content: { type: "text", text: "hello" }
+                }
+              ],
+              maxTokens: 10
+            }
+          });
+          return { content: [{ type: "text", text: "unexpected" }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: error instanceof Error ? error.message : String(error)
+              }
+            ]
+          };
+        }
+      });
+      return server;
+    });
+
+    const response = await handler(
+      legacyToolRequest("push"),
+      env,
+      createExecutionContext()
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain("Server-to-client requests are unavailable");
+    expect(body).toContain("sessionful transport");
+  });
+
+  it("supports strict modern-only serving", async () => {
+    const handler = createMcpHandler(() => createServer(), {
+      legacy: "reject"
+    });
+
+    const response = await handler(
+      legacyInitializeRequest(),
+      env,
+      createExecutionContext()
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("applies route and CORS behavior through callable and fetch faces", async () => {
+    const handler = createMcpHandler(() => createServer(), {
+      route: "/custom",
+      corsOptions: { origin: "https://client.example" }
+    });
+    const ctx = createExecutionContext();
+
+    const missing = await handler(
+      new Request("http://example.com/mcp", { method: "OPTIONS" }),
+      env,
+      ctx
+    );
+    const preflight = await handler.fetch(
+      new Request("http://example.com/custom", { method: "OPTIONS" }),
+      env,
+      ctx
+    );
+
+    expect(missing.status).toBe(404);
+    expect(preflight.status).toBe(200);
+    expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe(
+      "https://client.example"
+    );
+  });
+
+  it("exposes the upstream close, notify, and bus controls", () => {
+    const handler = createMcpHandler(() => createServer());
+
+    expect(typeof handler.close).toBe("function");
+    expect(typeof handler.notify.toolsChanged).toBe("function");
+    expect(typeof handler.bus.publish).toBe("function");
+  });
+
+  it("allows sequential instance reuse", async () => {
+    const handler = createMcpHandler(createServer());
+
+    const first = await handler(
+      legacyInitializeRequest(1),
+      env,
+      createExecutionContext()
+    );
+    await first.text();
+    const second = await handler(
+      legacyInitializeRequest(2),
+      env,
+      createExecutionContext()
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+  });
+
+  it("rejects overlapping use of one server instance", async () => {
+    let releaseTool: (() => void) | undefined;
+    const server = createServer();
+    server.registerTool(
+      "wait",
+      { inputSchema: {} },
+      () =>
+        new Promise<CallToolResult>((resolve) => {
+          releaseTool = () =>
+            resolve({ content: [{ type: "text", text: "done" }] });
+        })
+    );
+    const handler = createMcpHandler(server);
+
+    const firstPromise = handler(
+      modernRequest("tools/call", { name: "wait", arguments: {} }),
+      env,
+      createExecutionContext()
+    );
+    await vi.waitFor(() => expect(releaseTool).toBeTypeOf("function"));
+    await expect(
+      handler(modernRequest("server/discover"), env, createExecutionContext())
+    ).rejects.toThrow(
+      "createMcpHandler received concurrent requests for one McpServer instance"
+    );
+    releaseTool?.();
+    const first = await firstPromise;
+
+    expect(first.status).toBe(200);
+  });
+
+  it("constructs an isolated server for each factory request", async () => {
+    let calls = 0;
+    const handler = createMcpHandler(() => {
+      calls++;
+      return createServer();
+    });
+
+    const [first, second] = await Promise.all([
+      handler(modernRequest("server/discover"), env, createExecutionContext()),
+      handler(modernRequest("server/discover"), env, createExecutionContext())
+    ]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("passes explicit AuthInfo through the upstream fetch face", async () => {
+    let seenFactoryContext: unknown;
+    const handler = createMcpHandler((factoryContext) => {
+      seenFactoryContext = factoryContext;
+      return createServer();
+    });
+    const authInfo = {
+      token: "explicit-token",
+      clientId: "explicit-client",
+      scopes: ["read"]
+    };
+
+    const response = await handler.fetch(modernRequest("server/discover"), {
+      authInfo
+    });
+
+    expect(response.status).toBe(200);
+    expect(seenFactoryContext).toMatchObject({ authInfo });
+  });
+
+  it("maps verified provider metadata to AuthInfo and preserves props", async () => {
+    const props = { userId: "user-1" };
+    const ctx = createExecutionContext() as ExecutionContext &
+      Record<symbol, unknown>;
+    Object.defineProperty(ctx, "props", { value: props });
+    Object.defineProperty(ctx, VERIFIED_OAUTH_CONTEXT, {
+      value: {
+        version: 1,
+        token: "secret-token",
+        clientId: "client-1",
+        scopes: ["read"],
+        expiresAt: 1234567890,
+        resource: "https://example.com/mcp",
+        props
+      }
+    });
+    let seenFactoryContext: unknown;
+    let seenToolContext: unknown;
+    let seenAuthProps: unknown;
+    const handler = createMcpHandler((factoryContext) => {
+      seenFactoryContext = factoryContext;
+      const server = createServer();
+      server.registerTool(
+        "whoami",
+        { inputSchema: {} },
+        (_args, toolContext) => {
+          seenToolContext = toolContext;
+          seenAuthProps = getMcpAuthContext()?.props;
+          return { content: [{ type: "text", text: "ok" }] };
+        }
+      );
+      return server;
+    });
+
+    const response = await handler(
+      modernRequest("tools/call", { name: "whoami", arguments: {} }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    const expected = {
+      token: "secret-token",
+      clientId: "client-1",
+      scopes: ["read"],
+      expiresAt: 1234567890,
+      resource: new URL("https://example.com/mcp"),
+      extra: { props }
+    };
+    expect(seenFactoryContext).toMatchObject({ authInfo: expected });
+    expect(seenToolContext).toMatchObject({ http: { authInfo: expected } });
+    expect(seenAuthProps).toBe(props);
+  });
+
+  it("maps provider metadata through the v2 server's legacy fallback", async () => {
+    const props = { userId: "legacy-auth-user" };
+    const ctx = createExecutionContext() as ExecutionContext &
+      Record<symbol, unknown>;
+    Object.defineProperty(ctx, "props", { value: props });
+    Object.defineProperty(ctx, VERIFIED_OAUTH_CONTEXT, {
+      value: {
+        version: 1,
+        token: "legacy-auth-token",
+        clientId: "legacy-auth-client",
+        scopes: ["read"],
+        props
+      }
+    });
+    let seenFactoryContext: unknown;
+    let seenToolContext: unknown;
+    let seenAuthProps: unknown;
+    const handler = createMcpHandler((factoryContext) => {
+      seenFactoryContext = factoryContext;
+      const server = createServer();
+      server.registerTool(
+        "whoami",
+        { inputSchema: {} },
+        (_args, toolContext) => {
+          seenToolContext = toolContext;
+          seenAuthProps = getMcpAuthContext()?.props;
+          return { content: [{ type: "text", text: "ok" }] };
+        }
+      );
+      return server;
+    });
+
+    const response = await handler(legacyToolRequest("whoami"), env, ctx);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("ok");
+    expect(seenFactoryContext).toMatchObject({
+      era: "legacy",
+      authInfo: {
+        token: "legacy-auth-token",
+        clientId: "legacy-auth-client",
+        scopes: ["read"],
+        extra: { props }
+      }
+    });
+    expect(seenToolContext).toMatchObject({
+      http: {
+        authInfo: {
+          clientId: "legacy-auth-client",
+          extra: { props }
+        }
+      }
+    });
+    expect(seenAuthProps).toBe(props);
+  });
+
+  it("rejects v1-only options for a v2 server", () => {
+    expect(() =>
+      createMcpHandler(createServer(), {
+        transport: {}
+      } as never)
+    ).toThrow('option "transport" is only supported with an MCP SDK v1 server');
+  });
+
+  it("fails closed on malformed verified metadata", async () => {
+    const ctx = createExecutionContext() as ExecutionContext &
+      Record<symbol, unknown>;
+    Object.defineProperty(ctx, VERIFIED_OAUTH_CONTEXT, {
+      value: { version: 1, token: "secret-token" }
+    });
+    let factoryCalled = false;
+    const handler = createMcpHandler(() => {
+      factoryCalled = true;
+      return createServer();
+    });
+
+    const response = await handler(modernRequest("server/discover"), env, ctx);
+
+    expect(response.status).toBe(500);
+    expect(factoryCalled).toBe(false);
+    expect(await response.text()).not.toContain("secret-token");
+  });
+
+  it("keeps external-token props behavior when no verified record exists", async () => {
+    const props = { userId: "external-user" };
+    const ctx = createExecutionContext();
+    Object.defineProperty(ctx, "props", { value: props });
+    let seenFactoryContext: unknown;
+    let seenProps: unknown;
+    const handler = createMcpHandler((factoryContext) => {
+      seenFactoryContext = factoryContext;
+      seenProps = getMcpAuthContext()?.props;
+      return createServer();
+    });
+
+    const response = await handler(modernRequest("server/discover"), env, ctx);
+
+    expect(response.status).toBe(200);
+    expect(seenFactoryContext).not.toHaveProperty("authInfo");
+    expect(seenProps).toBe(props);
+  });
+});
+
+describe("createMcpHandler SDK v1 compatibility", () => {
+  it("keeps v1 server inputs on the legacy handler", async () => {
+    const server = new LegacyMcpServer({ name: "legacy", version: "1.0.0" });
+    const handler = createMcpHandler(server, { enableJsonResponse: true });
+
+    const response = await handler(
+      legacyInitializeRequest(),
+      env,
+      createExecutionContext()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+  });
+
+  it("rejects unsupported server lookalikes", () => {
+    expect(() => createMcpHandler({} as Server)).toThrow("unsupported server");
+  });
+});

@@ -12,7 +12,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
 | `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
-| `agents/mcp`                 | `src/mcp/index.ts`           | `McpAgent` base class for building MCP servers                               |
+| `agents/mcp`                 | `src/mcp/index.ts`           | Current stateless MCP handler plus retained legacy `McpAgent`/transport APIs |
 | `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |

@@ -4,23 +4,27 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 
 ## Choosing an Approach
 
-| Approach                                       | Stateful? | Requires Durable Objects? | Best for                                       |
-| ---------------------------------------------- | --------- | ------------------------- | ---------------------------------------------- |
-| `createMcpHandler()`                           | No        | No                        | Stateless tools, simplest setup                |
-| `McpAgent`                                     | Yes       | Yes                       | Stateful tools, per-session state, elicitation |
-| Raw `WebStandardStreamableHTTPServerTransport` | No        | No                        | Full control, no SDK dependency                |
+| Approach                                       | Stateful? | Requires Durable Objects? | Best for                                          |
+| ---------------------------------------------- | --------- | ------------------------- | ------------------------------------------------- |
+| `createMcpHandler()`                           | No        | No                        | New servers and the latest MCP protocol           |
+| `McpAgent` (deprecated legacy path)            | Yes       | Yes                       | Existing stateful SDK v1 deployments              |
+| Raw `WebStandardStreamableHTTPServerTransport` | No        | No                        | Low-level control without the Agents HTTP wrapper |
 
-- **`createMcpHandler()`** is the fastest way to get a stateless MCP server running. Use it when your tools do not need per-session state.
-- **`McpAgent`** gives you a Durable Object per session with built-in state management, elicitation support, and both SSE and Streamable HTTP transports.
-- **Raw transport** gives you full control if you want to use the `@modelcontextprotocol/sdk` directly without the Agents SDK helpers.
+- **`createMcpHandler()`** is the current server-development path. It serves MCP `2026-07-28` and supports stateless 2025 clients by default.
+- **`McpAgent`** is a retained, feature-frozen SDK v1 path for existing stateful deployments. New servers should use `createMcpHandler()`.
+- **Raw transport** gives you low-level control if the standard handler lifecycle is not suitable.
 
 ## Stateless MCP Server with `createMcpHandler()`
 
-The simplest way to create an MCP server. No Durable Objects or bindings required:
+The simplest way to create an MCP server. Install the server package directly, then import its constructor alongside the Agents handler:
+
+```sh
+pnpm add agents @modelcontextprotocol/server zod
+```
 
 ```typescript
+import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 function createServer() {
@@ -51,24 +55,40 @@ export default {
 };
 ```
 
-> **Important:** Create a new `McpServer` instance per request. The MCP SDK does not allow connecting an already-connected server to a new transport.
-
-### `createMcpHandler` Options
+Request-scoped instances, as above, work naturally. For a module-scoped handler, pass a factory so concurrent Worker requests receive isolated servers:
 
 ```typescript
-createMcpHandler(server, {
-  route: "/mcp",              // path to handle (default: "/mcp")
-  enableJsonResponse: true,   // use JSON responses instead of SSE streaming
-  sessionIdGenerator: () => crypto.randomUUID(),
-  corsOptions: { ... },       // CORS configuration
-  authContext: { props: {} },  // manually set auth context
-  transport: workerTransport   // provide your own WorkerTransport instance
+const handler = createMcpHandler(() => createServer());
+export default handler;
+```
+
+A supplied instance can be reused sequentially, but overlapping requests throw with guidance to use a factory.
+
+### `createMcpHandler` options
+
+```typescript
+createMcpHandler(() => createServer(), {
+  route: "/mcp",             // exact path to handle (default: "/mcp")
+  corsOptions: { ... },       // Agents CORS configuration; false disables it
+  authContext: { props: {} }, // optional application props override
+  legacy: "stateless",       // upstream default; use "reject" for modern-only
+  responseMode: "auto"       // upstream SDK response shaping
 });
 ```
 
+All upstream SDK v2 handler options pass through. Legacy `transport`, storage, session, and event-store options apply only when the input is an SDK v1 server and are removed in the next major release.
+
+### 2025 compatibility and elicitation
+
+The default `legacy: "stateless"` lane supports ordinary 2025 tools, resources, and prompts. It has no session return path for push-style server-to-client requests; attempts to sample, elicit, or list roots fail immediately with guidance to use a sessionful transport.
+
+Applications that must keep push-style 2025 elicitation while adding modern multi-round-trip elicitation should route before `createMcpHandler`: send modern requests to a strict stateless v2 handler and legacy requests to their existing session-addressed Agent/transport. See [`examples/mcp-elicitation`](../../examples/mcp-elicitation/) for both paths on one endpoint.
+
+Passing an existing SDK v1 server directly to `createMcpHandler` still invokes the complete old handler temporarily and emits a migration warning. Change the server import to `@modelcontextprotocol/server` to opt into the current path.
+
 ### Accessing Authenticated User Context
 
-When your MCP server is wrapped with `OAuthProvider` from `@cloudflare/workers-oauth-provider`, authenticated user information is available inside tools via `getMcpAuthContext()`:
+When your MCP server is wrapped with `OAuthProvider` from `@cloudflare/workers-oauth-provider`, provider-issued tokens are available through standard SDK v2 `AuthInfo`. The existing `getMcpAuthContext()` application-props helper remains supported:
 
 ```typescript
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
@@ -76,13 +96,17 @@ import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
 server.registerTool(
   "whoami",
   { description: "Returns the authenticated user" },
-  async () => {
+  async (context) => {
     const auth = getMcpAuthContext();
     return {
       content: [
         {
           type: "text",
-          text: auth ? JSON.stringify(auth.props) : "Not authenticated"
+          text: JSON.stringify({
+            clientId: context.http?.authInfo?.clientId,
+            scopes: context.http?.authInfo?.scopes,
+            props: auth?.props
+          })
         }
       ]
     };
@@ -90,11 +114,11 @@ server.registerTool(
 );
 ```
 
-The `OAuthProvider` sets `ctx.props` on the execution context, which `createMcpHandler` automatically picks up and makes available via `getMcpAuthContext()`.
+Do not log or return `context.http.authInfo.token`. External-token resolvers continue providing `getMcpAuthContext().props` but do not synthesize incomplete standard metadata.
 
-## Stateful MCP Server with `McpAgent`
+## Stateful MCP Server with `McpAgent` (legacy)
 
-`McpAgent` gives each client session its own Durable Object with persistent state. Use this when your tools need to track per-session data.
+`McpAgent` gives each client session its own Durable Object with persistent state. It remains available for existing SDK v1 deployments but is deprecated and feature-frozen; new servers should use the stateless handler or explicitly compose a separate legacy route where a session is required.
 
 ### Writing TinyMCP
 
@@ -495,9 +519,9 @@ export default MyMCP.serve("/mcp");
 
 See the [`examples/mcp-elicitation`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation) example for a full working demo.
 
-## WorkerTransport
+## WorkerTransport (deprecated compatibility API)
 
-`WorkerTransport` is a server-side transport for running MCP servers in stateless Workers while optionally persisting session state. It is used internally by `createMcpHandler()` but can also be used directly for advanced scenarios like stateful sessions without `McpAgent`.
+`WorkerTransport` belongs to the SDK v1 compatibility stack. Existing applications can continue using it for persistent 2025-era sessions while they migrate, but it receives no new MCP protocol features and is removed in the next major release. The SDK v2 handler uses its own per-request server transport; it does not use `WorkerTransport` internally.
 
 ```typescript
 import { WorkerTransport, type TransportState } from "agents/mcp";
