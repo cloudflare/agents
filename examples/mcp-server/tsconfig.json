@@ -1,3 +1,12 @@
 {
-  "extends": "agents/tsconfig"
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["src/**/*.ts", "env.d.ts"]
 }
