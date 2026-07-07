@@ -116,6 +116,7 @@ export async function createWorker(
   // Parse wrangler config for compatibility settings
   const wranglerConfig = parseWranglerConfig(fileSystem);
   const nodejsCompat = hasNodejsCompat(wranglerConfig);
+
   // Auto-install dependencies if package.json or pyproject.toml has dependencies
   const installWarnings: string[] = [];
   if (hasDependencies(fileSystem)) {
@@ -171,6 +172,7 @@ export async function createWorker(
       define,
       loader,
       conditions,
+      virtualModules,
       plugins
     });
 
