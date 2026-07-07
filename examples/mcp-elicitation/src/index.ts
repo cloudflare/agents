@@ -33,7 +33,7 @@ const AMOUNT_SCHEMA = {
   required: ["amount"]
 };
 
-function createModernServer(): McpServer {
+function createServer(): McpServer {
   const server = new McpServer({
     name: "elicitation-demo",
     version: "2.0.0"
@@ -97,11 +97,6 @@ function createModernServer(): McpServer {
 
   return server;
 }
-
-const modernHandler = createMcpHandler(createModernServer, {
-  route: "/mcp",
-  legacy: "reject"
-});
 
 interface State {
   counter: number;
@@ -234,6 +229,11 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
     return this.handler(request, this.env, {} as ExecutionContext);
   }
 }
+
+const modernHandler = createMcpHandler(createServer, {
+  route: "/mcp",
+  legacy: "reject"
+});
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
