@@ -49,6 +49,17 @@ function turnProgressed(messages: DebugMessage[]): boolean {
 }
 
 describe("E2E: agent-think dispatch → durable turn", () => {
+  it("keeps /workspace container-local instead of syncing it to the DO VFS", async () => {
+    const isolation = await fetch(
+      `${BASE_URL}/dev/workspace-isolation/${crypto.randomUUID()}`
+    );
+    expect(isolation.status).toBe(200);
+    expect(await isolation.json()).toEqual({
+      containerFileExists: true,
+      hostVfsContainsFile: false
+    });
+  }, 120_000);
+
   it("comes up, dispatches a real run, and the turn progresses", async () => {
     // 1. Worker up.
     const health = await fetch(`${BASE_URL}/`);
@@ -62,9 +73,9 @@ describe("E2E: agent-think dispatch → durable turn", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         repo: "cloudflare/agents",
-        issueNumber: 1854,
+        issueNumber: 1859,
         instruction:
-          "just clone the repo into /workspace/repo and run ls — do not deploy or comment",
+          "just clone the repo into /workspace/agents and run ls — do not deploy or comment",
         // Optional: a real GH token lets the clone succeed. Absent, the clone
         // may fail — but the turn should still visibly progress (tool calls /
         // assistant text), which is what we assert on.

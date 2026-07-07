@@ -3,26 +3,33 @@ name: open-pr
 description: Take a cloudflare/agents GitHub issue plus any repro findings and one-shot a fix PR — branch, change, test, push, and open the PR linked to the issue.
 ---
 
-You are given `issueNumber`, `repo`, and `context` in the arguments. Produce a focused fix PR, authored as **yourself** — the agent-think GitHub App. Do not impersonate any user.
+The agent system prompt gives you `issueNumber`, `repo`, and the user's
+instruction. Use those values directly; there is no separate arguments object.
+Produce a focused fix PR, authored as **yourself** — the agent-think GitHub App.
+Do not impersonate any user.
 
-`context` is any free-form text the user typed after the `@agent-think pr`
-command (it may be empty). Treat it as a direct instruction — e.g. constraints
+The instruction is the free-form text the user typed after `@agent-think` (it
+may be empty). Treat it as a direct instruction — e.g. constraints
 on the fix, a preferred approach, or a pointer to the suspect area — and weight
 it highly, but stay within the scope of the issue.
 
 All `gh`, `git`, `npm`, `curl`, and `wrangler` commands must run on the
 `container` backend (`bash({ command, backend: "container" })`) — the `shell`
 backend has no real binaries or network. `gh` is already authenticated as the
-app; use it directly (no token handling). Work only under `/workspace` (the
-shared filesystem); never use `/tmp`.
+app; use it directly (no token handling). Work under `/workspace`; use
+`/workspace/temp` for scratch files.
 
 ## 0. Clone the repo
 
-The workspace starts empty. Clone the target repo into `/workspace/repo`:
+Clone the target repo directly under `/workspace` using its repository name
+(`cloudflare/agents` → `/workspace/agents`):
 
 ```bash
-git clone https://github.com/<repo>.git /workspace/repo
-cd /workspace/repo
+REPO_DIR="/workspace/$(basename <repo>)"
+if [ ! -d "$REPO_DIR/.git" ]; then
+  git clone https://github.com/<repo>.git "$REPO_DIR"
+fi
+cd "$REPO_DIR"
 ```
 
 ## 1. Gather everything known
@@ -45,7 +52,7 @@ skipping it and what additional detail would help.
 
 ## 2. Locate the root cause
 
-With the repo cloned at `/workspace/repo`, read the relevant code in
+With the repo cloned at `$REPO_DIR`, read the relevant code in
 `packages/agents`, `packages/think`, etc. Confirm the hypothesis (or form your
 own) by reading the actual implementation. Identify the smallest change that
 fixes the reported behavior.
@@ -80,19 +87,19 @@ Install and run the affected package's checks (monorepo uses pnpm + Nx):
 # NOISY commands (installs, builds, test suites) MUST be redirected to a
 # container-local file and tailed — streaming megabytes of live output
 # through the session can kill it irrecoverably:
+mkdir -p /workspace/temp
 CI=1 pnpm install --frozen-lockfile --reporter=append-only \
-  > /tmp/install.log 2>&1 || (tail -40 /tmp/install.log; false)
-tail -20 /tmp/install.log
+  > /workspace/temp/install.log 2>&1 || (tail -40 /workspace/temp/install.log; false)
+tail -20 /workspace/temp/install.log
 # Prefer scoped/affected runs; fall back to package scripts.
 pnpm -w exec oxfmt --check . || pnpm -w exec oxfmt --write .
 pnpm -w exec oxlint . || true
 # Run the relevant package's typecheck + tests, redirected the same way:
-pnpm --filter <package> typecheck > /tmp/typecheck.log 2>&1; tail -30 /tmp/typecheck.log
-pnpm --filter <package> test > /tmp/test.log 2>&1; tail -40 /tmp/test.log
+pnpm --filter <package> typecheck > /workspace/temp/typecheck.log 2>&1; tail -30 /workspace/temp/typecheck.log
+pnpm --filter <package> test > /workspace/temp/test.log 2>&1; tail -40 /workspace/temp/test.log
 ```
 
-(`/tmp` is fine for LOG files — the never-use-/tmp rule is about files the
-read/write/edit tools need to see.)
+(`/workspace/temp` is container-local and never enters Agent DO storage.)
 
 Record whether tests passed in `testsPassed`. If you cannot make tests pass and
 the failure is your change's fault, fix it; if tests are unrelated/flaky, note
@@ -111,9 +118,9 @@ pnpm --filter <package> build
 ```
 
 2. Build a minimal demo app in `/workspace/demo-<issueNumber>` that exercises
-   the fixed path. Follow the **"Minimal frontend (required)"** recipe from the
-   reproduce skill (`/workspace/.agents/skills/reproduce/SKILL.md`) — same 7
-   files — but install the packed tarball so the demo runs YOUR fix:
+   the fixed path. Follow the activated reproduce skill's **"Minimal frontend
+   (required)"** recipe — same 7 files — but install the packed tarball so the
+   demo runs YOUR fix:
 
 ```bash
 npm install /workspace/<package>-x.y.z.tgz
@@ -140,6 +147,7 @@ deploying something meaningless.
 ## 7. Commit, push, open the PR
 
 ```bash
+git status --short
 git add -A
 git commit -m "fix: <concise description> (#<issueNumber>)"
 git push -u origin "$BRANCH"
@@ -148,10 +156,10 @@ gh pr create --repo <repo> \
   --base main \
   --head "$BRANCH" \
   --title "fix: <concise description> (#<issueNumber>)" \
-  --body-file pr-body.md
+  --body-file /workspace/temp/pr-body.md
 ```
 
-The PR body (`pr-body.md`) must include:
+Write the PR body outside the checkout at `/workspace/temp/pr-body.md`. It must include:
 
 - `Closes #<issueNumber>` so the issue auto-links.
 - **What was wrong** (root cause, citing the file/line).

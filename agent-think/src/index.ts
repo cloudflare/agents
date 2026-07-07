@@ -187,6 +187,16 @@ export default {
         );
         return Response.json(await agent.debugMessages());
       }
+      const isolation = url.pathname.match(
+        /^\/dev\/workspace-isolation\/([^/]+)$/
+      );
+      if (request.method === "GET" && isolation) {
+        const agent = await getAgentByName<Env, ThinkAgent>(
+          env.ThinkAgent,
+          decodeURIComponent(isolation[1])
+        );
+        return Response.json(await agent.debugWorkspaceIsolation());
+      }
     }
 
     // Read-only state snapshot for the command-center UI: instant hydration

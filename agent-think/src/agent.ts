@@ -1,17 +1,9 @@
 /**
  * ThinkAgent — one Think Durable Object per GitHub issue.
  *
- * Owns a `@cloudflare/workspace.Workspace` with two backends behind a
- * single `shell.exec`:
- *
- *   - "container" (default) CloudflareContainerBackend — wsd over
- *                 capnweb. Full Linux with a real toolchain and
- *                 network: `gh` + `git` (authenticated as the app),
- *                 `npm`, `node`, `curl`, `jq`, `wrangler`. All GitHub,
- *                 network, and build/deploy work happens here.
- *   - "shell"     WorkerBackend — just-bash in a Dynamic Worker.
- *                 Cold-start fast, but NO real binaries and no public
- *                 network. Only cheap text tooling (cat/grep/sed/jq).
+ * Owns a `@cloudflare/workspace.Workspace` whose container backend has sync
+ * disabled. The container's /workspace is authoritative: repos, .git,
+ * node_modules, builds, logs, and scratch data never enter the ThinkAgent DO.
  *
  * gh-app calls `dispatch()` (see index.ts) with the issue
  * coordinates, a free-form `instruction` ("reproduce this", "open a
@@ -19,27 +11,24 @@
  * `setContext` stores it; `start` authenticates `gh`/`git` in the
  * container with the token, then runs one agent turn.
  *
- * Skills are mounted read-only from R2 at /workspace/.agents/skills;
- * both `reproduce` and `open-pr` ship in the bucket, and the model
- * picks the matching one(s) from the instruction — there is no fixed
- * verb.
+ * Skills use Think's native R2 SkillSource and activation tools, independent
+ * of the coding Workspace filesystem.
  */
 
 import type {
   ToolCallResultContext,
+  TurnContext,
   WorkspaceLike as ThinkWorkspaceLike
 } from "@cloudflare/think";
-import { Think } from "@cloudflare/think";
+import { skills, Think } from "@cloudflare/think";
 import {
   type DurableObjectStorageLike,
-  R2Bucket,
   Workspace,
   WorkspaceProxy,
   WorkspaceServiceProxy,
   type WorkspaceStub
 } from "@cloudflare/workspace";
 import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
-import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { openai } from "workers-ai-provider/openai";
@@ -48,11 +37,15 @@ import type { CommandCenterAgent } from "./command-center";
 import { releaseContainer, resolveContainerId } from "./pool";
 import { createBashTool } from "./tools/bash";
 import {
+  ContainerFileStore,
+  ContainerLocalBackend,
+  quote,
+  repoDirectory
+} from "./container-workspace";
+import {
   createEditTool,
   createReadTool,
-  createWriteTool,
-  type WorkspaceLike as FsWorkspaceLike,
-  WorkspaceFileStore
+  createWriteTool
 } from "./tools/fs/index";
 
 export { WorkspaceProxy, WorkspaceServiceProxy };
@@ -61,7 +54,6 @@ const CONTEXT_KEY = "agent-think-context";
 // resetSession aborts the isolate AFTER its RPC response has been delivered;
 // this is the grace window for that ack, not a tuning knob.
 const RESET_ABORT_DELAY_MS = 100;
-const REPO_ROOT = "/workspace/repo";
 // GPT-5.5 (medium reasoning) through AI Gateway's model catalog — Unified
 // Billing over the AI binding, no provider key. `reasoning_effort` is a
 // first-class workers-ai-provider model setting forwarded into the request
@@ -135,21 +127,7 @@ export class ThinkAgent extends ThinkBase {
     });
     this.#workspaceFs = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [
-        new WorkerBackend({
-          id: "shell",
-          loader: env.LOADER,
-          workspace: workspaceRef,
-          ctx
-        }),
-        this.#containerBackend
-      ],
-      // Skills mounted read-only. R2 keys live under `.agents/`, e.g.
-      // `.agents/skills/reproduce/SKILL.md`; the prefix is stripped so
-      // the agent reads /workspace/.agents/skills/reproduce/SKILL.md.
-      mounts: {
-        "/workspace/.agents": R2Bucket(env.R2_SKILLS, { prefix: ".agents/" })
-      }
+      backends: [new ContainerLocalBackend(this.#containerBackend)]
     });
 
     this.workspace = adaptToThinkWorkspace(
@@ -254,9 +232,9 @@ export class ThinkAgent extends ThinkBase {
             {
               type: "text",
               text:
-                "Carry out the user's instruction for this issue now. Read the matching " +
-                "skill under /workspace/.agents/skills first and follow it end to end, " +
-                "then reply with the structured result that skill specifies."
+                "Carry out the user's instruction for this issue now. Activate the " +
+                "matching skill first and follow it end to end, then reply with the " +
+                "structured result that skill specifies."
             }
           ]
         }
@@ -327,9 +305,32 @@ export class ThinkAgent extends ThinkBase {
     this.#log("git-auth-exit", { exitCode: result.exitCode });
   }
 
-  async gitDiff(): Promise<string> {
-    await this.#workspaceFs.ready();
-    return this.#workspaceFs.git.diff({ dir: REPO_ROOT });
+  /** Dev/e2e proof that container files are not pulled into the host DO VFS. */
+  async debugWorkspaceIsolation(): Promise<{
+    containerFileExists: boolean;
+    hostVfsContainsFile: boolean;
+  }> {
+    const path = `/workspace/temp/isolation-${crypto.randomUUID()}/node_modules/probe.txt`;
+    const handle = await this.#workspaceFs.shell.exec(
+      `mkdir -p ${quote(path.slice(0, path.lastIndexOf("/")))} && printf container-only > ${quote(path)}`,
+      { encoding: "utf8", backend: "container" }
+    );
+    const result = await handle.result();
+    if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout);
+
+    const verify = await this.#workspaceFs.shell.exec(
+      `test -f ${quote(path)}`,
+      { encoding: "utf8", backend: "container" }
+    );
+    const containerFileExists = (await verify.result()).exitCode === 0;
+
+    let hostVfsContainsFile = true;
+    try {
+      await this.#workspaceFs.fs.stat(path);
+    } catch (error) {
+      hostVfsContainsFile = !isEnoent(error);
+    }
+    return { containerFileExists, hostVfsContainsFile };
   }
 
   /** Dev/e2e readback: the current message log for this session. */
@@ -395,7 +396,16 @@ export class ThinkAgent extends ThinkBase {
     } as Parameters<ReturnType<typeof createWorkersAI>>[1]);
   }
 
-  override async beforeTurn() {
+  override getSkills() {
+    return [
+      skills.r2(this.env.R2_SKILLS, {
+        prefix: ".agents/skills/",
+        refreshIntervalMs: 0
+      })
+    ];
+  }
+
+  override async beforeTurn(ctx: TurnContext) {
     // Container gh/git auth runs here — inside the durable turn — rather
     // than in start(), so dispatch stays fast and a slow container attach
     // can't be killed by the caller's cancellation (see start()).
@@ -407,8 +417,14 @@ export class ThinkAgent extends ThinkBase {
       // built-ins (list/find/grep/delete) unconditionally; this allowlist
       // makes the AI SDK drop their definitions from the provider request
       // entirely (~600 prompt tokens reclaimed per call). ls/grep/rm/find
-      // happen through `bash`.
-      activeTools: Object.keys(this.getTools())
+      // happen through `bash`. Keep Think's native skill activation tools when
+      // its R2 catalog is available.
+      activeTools: [
+        ...Object.keys(this.getTools()),
+        ...["activate_skill", "read_skill_resource"].filter(
+          (name) => name in ctx.tools
+        )
+      ]
     };
   }
 
@@ -490,66 +506,48 @@ export class ThinkAgent extends ThinkBase {
             ""
           ]
         : []),
-      "Two skills are available under /workspace/.agents/skills:",
-      "  - reproduce/SKILL.md — reproduce the issue in a minimal project,",
-      "    deploy it, verify the symptom, and report findings on the issue.",
-      "  - open-pr/SKILL.md   — locate the root cause, make the minimal fix,",
-      "    verify it, and open a PR that closes the issue.",
+      "Two skills are available through Think's skill catalog:",
+      "  - reproduce — reproduce and report an issue.",
+      "  - open-pr   — locate, fix, verify, and open a PR.",
       "",
-      "Decide from the instruction which skill(s) to follow (one, or reproduce",
-      "then open-pr if asked to fix what you repro). Read the matching SKILL.md",
-      "first and follow it exactly, including the structured result it specifies.",
+      "Decide which skill matches the instruction and activate it before acting.",
+      "Follow it exactly, including the structured result it specifies.",
       "",
       "Environment:",
-      `  - The repo should be worked on under ${REPO_ROOT}.`,
-      "  - `gh`, `git`, `curl`, `npm`, `node`, `wrangler` all live on the",
-      "    `container` backend, which is the only one with a real toolchain and",
-      "    network. `gh` and `git` are ALREADY AUTHENTICATED there as the app",
+      `  - Clone ${ctx?.repo ?? "the repo"} to ${repoDirectory(ctx?.repo)}.`,
+      "    Keep .git, node_modules, builds, and logs in their normal locations",
+      "    there. /workspace/temp is available for scratch data.",
+      "  - /workspace is container-local and is NEVER synchronized through the",
+      "    Agent Durable Object.",
+      "  - `gh`, `git`, `curl`, `npm`, `node`, and `wrangler` run in the",
+      "    container. `gh` and `git` are ALREADY AUTHENTICATED there as the app",
       "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
       "    re-configure the token.",
-      "  - IMPORTANT: run every `gh`, `git`, `npm`, `curl`, and `wrangler`",
-      '    command on the `container` backend — bash({ command, backend: "container" }).',
-      "    The `shell` backend has none of them and no network; it is only for",
-      "    cat/grep/sed/jq-style text work.",
-      "  - The dedicated read/write/edit tools operate on the same workspace",
-      "    files the container sees, so prefer them for file I/O.",
+      "  - The dedicated read/write/edit tools operate on the same container",
+      "    filesystem, so prefer them for file content operations.",
       "",
       "When done, reply with the structured summary the skill specifies."
     ].join("\n");
   }
 
   override getTools(): ToolSet {
-    const ctx = this.#context;
-    if (!ctx) return {} as ToolSet;
-    const store = new WorkspaceFileStore(adaptToFsWorkspace(this.#workspaceFs));
-    const ws = this.#workspaceFs;
+    if (!this.#context) return {} as ToolSet;
+    const store = new ContainerFileStore(this.#workspaceFs.shell);
     return {
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
       bash: createBashTool({
-        workspace: ws,
+        workspace: this.#workspaceFs,
         maxBytes: 32 * 1024,
         backends: {
-          shell: {
-            description:
-              "just-bash in a Dynamic Worker. Cold-start fast, no container, no " +
-              "public network, and NO real binaries. Only cat/grep/sed/awk/jq/" +
-              "find-style text tooling. It has NO `gh`, `git`, `npm`, `curl`, or " +
-              "`wrangler` — do not use it for those."
-          },
           container: {
             description:
               "Cloudflare Container (full Linux) with a real toolchain and public " +
-              "network: `gh` and `git` (already authenticated as the app), plus " +
-              "`npm`, `node`, `curl`, `jq`, `wrangler`. Use this for EVERYTHING " +
-              "that touches GitHub, the network, or a real binary — cloning, " +
-              "`gh issue`/`gh pr`, `npm install`, `wrangler deploy`, test runs."
+              "network. /workspace is container-local: .git, node_modules, build " +
+              "outputs, logs, and scratch data never enter the Agent DO."
           }
         },
-        // Default to the container: repro/pr work is almost entirely real
-        // toolchain + network, so the shell backend is the exception, not the
-        // rule. (It's still available for cheap text munging.)
         defaultBackend: "container"
       })
     };
@@ -557,10 +555,6 @@ export class ThinkAgent extends ThinkBase {
 }
 
 // ── Adapters (from examples/think) ─────────────────────────────────
-
-function adaptToFsWorkspace(ws: Workspace): FsWorkspaceLike {
-  return ws as unknown as FsWorkspaceLike;
-}
 
 function adaptToThinkWorkspace(ws: Workspace) {
   return {

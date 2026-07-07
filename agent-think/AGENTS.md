@@ -40,8 +40,8 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    ├─ AgentThink WorkerEntrypoint.dispatch  (src/index.ts)
    │     getAgentByName(env.ThinkAgent, session) → setContext → start()
    │     start() ONLY submits the durable turn — returns in ~1s
-   ├─ ThinkAgent DO  (src/agent.ts) — owns the Workspace (SQLite VFS) + the turn
-   │     gh/git auth runs INSIDE the turn (beforeTurn → #ensureGitAuth);
+   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + Workspace transport
+   │     /workspace is authoritative in the container (backend sync is disabled);
    │     container backend dials the warm pool per-connect:
    │        resolveContainerId(env, id) → env.Sandbox.get(idFromName(uuid))
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
@@ -67,8 +67,8 @@ verbs on one issue reuse the same DO/workspace/thread, and `submitMessages`
 uses idempotency key `repo#issue`, so webhook redeliveries and repeat mentions
 join the existing turn instead of forking a second one.
 
-Skills are mounted read-only from R2 at `/workspace/.agents/skills`; the model
-picks the skill(s) matching the free-form instruction — there is no fixed verb.
+Skills use Think's native R2 SkillSource and activation tools, independent of
+the container's coding filesystem.
 
 ## Rules we hold ourselves to
 
@@ -88,13 +88,12 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
 - **No Cloudflare Workflow.** An earlier shape wrapped the turn in a Workflow;
   its 10-min step timeout + retry-from-scratch was the main death mode. Think's
   native durable `submitMessages` is the durability layer.
-- **Compute is decoupled from state** (Aron's hackspace pattern:
-  github.com/aron/cloudflare-workspaces-prototype, `hackspace` branch). The
-  Agent DO owns the Workspace; containers are separate warm-pooled Sandbox DOs.
-  When container behavior surprises you, diff against that prototype first.
-- **Everything real runs on the `container` backend** (the only one with a
-  toolchain + network). The `shell` backend is a just-bash isolate for cheap
-  text ops. The skills + system prompt enforce this split.
+- **The container owns `/workspace`.** Workspace's transport still connects the
+  ThinkAgent to its warm-pooled Sandbox, but `sync: "none"` prevents repo data,
+  `.git`, `node_modules`, builds, and logs from entering DO SQLite. The DO owns
+  only durable turn/recovery state. Skills use Think's native R2 source.
+- **Everything runs on the `container` backend.** It provides the real Linux
+  filesystem, toolchain, and network used by bash and the file tools.
 - **Repros must be clickable.** The reproduce skill mandates a minimal
   Vite + React page (exact 7-file recipe in the skill) so maintainers see the
   failing behavior without cloning anything.
@@ -145,13 +144,10 @@ picks the skill(s) matching the free-form instruction — there is no fixed verb
   in `run_worker_first`. Symptom: the UI's HTTP calls work while every
   `wss://` connect fails. (This bit us on the command center; the repro-skill
   recipe carries the same rule.)
-- **Unbounded bash output can kill a session irrecoverably.** Command output
-  streams through the DO; a chatty command (full monorepo `pnpm install`)
-  OOMed the isolate, and the persisted backlog then CPU-death-looped every
-  wake before recovery could run (see PLANS/agents/agent-think-1845-rca.md).
-  Skills + the bash tool description mandate redirect-to-file + tail for
-  noisy commands. Operator escape hatch: `AgentThink.resetSession(session)`
-  RPC wipes the session clean.
+- **Never re-enable container Workspace sync.** Pulling a monorepo install
+  (roughly 1.9 GB / 158k entries) into the ThinkAgent DO causes a memory-reset
+  loop on every container `/ws` reconnect. Noisy output must still be redirected
+  to `/workspace/temp` and tailed so tool results stay bounded.
 - **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the
   new code; a running turn loses its container connection and burns minutes on
   Think's (working) recovery — it re-auths and resumes, but don't deploy while

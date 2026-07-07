@@ -33,21 +33,24 @@ import { z } from "zod";
  * Minimal subset of `@cloudflare/workspace.Workspace` we depend on:
  * the shell facade exposes `exec(command, { cwd, encoding, backend })`
  * and the returned handle resolves to a `{ exitCode, stdout, stderr }`
- * result. `kill` is present on local handles (it is missing from the
- * cross-RPC stub flavor), so it is feature-detected before use.
+ * result. Command timeouts are enforced by Workspace/wsd via `timeoutMs`.
  */
 export interface BashWorkspaceLike {
   shell: {
     exec(
       command: string,
-      options: { cwd?: string; encoding: "utf8"; backend?: string }
+      options: {
+        cwd?: string;
+        encoding: "utf8";
+        backend?: string;
+        timeoutMs?: number;
+      }
     ): Promise<{
       result(): Promise<{
         exitCode: number;
         stdout: string;
         stderr: string;
       }>;
-      kill?(signal?: string): Promise<void>;
     }>;
   };
 }
@@ -81,8 +84,6 @@ export interface BashToolOptions {
   headBytes?: number;
 }
 
-const TIMED_OUT: unique symbol = Symbol("bash-timeout");
-
 const DEFAULT_MAX_BYTES = 32 * 1024; // per stream
 const DEFAULT_HEAD_BYTES = 4 * 1024;
 /** Exit code reported when `timeout` expires — GNU timeout(1) convention. */
@@ -110,7 +111,7 @@ export function createBashTool(opts: BashToolOptions) {
     "",
     "IMPORTANT: redirect NOISY commands (installs, builds, test",
     "suites) to a container-local file and tail it, e.g.:",
-    "  CI=1 pnpm install --reporter=append-only > /tmp/install.log 2>&1; tail -30 /tmp/install.log",
+    "  mkdir -p /workspace/temp; CI=1 pnpm install --reporter=append-only > /workspace/temp/install.log 2>&1; tail -30 /workspace/temp/install.log",
     "Streaming megabytes of live output through the session can",
     "kill it irrecoverably.",
     "",
@@ -160,7 +161,8 @@ export function createBashTool(opts: BashToolOptions) {
       const handle = await opts.workspace.shell.exec(command, {
         cwd,
         encoding: "utf8",
-        backend
+        backend,
+        ...(timeout !== undefined ? { timeoutMs: timeout * 1000 } : {})
       });
 
       const meta = {
@@ -169,40 +171,18 @@ export function createBashTool(opts: BashToolOptions) {
         backend: backend ?? opts.defaultBackend
       };
 
-      const result =
-        timeout === undefined
-          ? await handle.result()
-          : await Promise.race([
-              handle.result(),
-              sleep(timeout * 1000).then((): typeof TIMED_OUT => TIMED_OUT)
-            ]);
-
-      if (result === TIMED_OUT) {
-        // Best-effort: local handles expose kill; cross-RPC stubs may not,
-        // in which case the process can outlive the timeout.
-        await handle.kill?.("SIGTERM").catch(() => {});
-        return {
-          ...meta,
-          exitCode: TIMEOUT_EXIT_CODE,
-          timedOut: true,
-          stdout: "",
-          stderr: `command timed out after ${timeout}s (SIGTERM sent)`
-        };
-      }
+      const result = await handle.result();
 
       return {
         ...meta,
         exitCode: result.exitCode,
-        timedOut: false,
+        timedOut:
+          timeout !== undefined && result.exitCode === TIMEOUT_EXIT_CODE,
         stdout: truncate(result.stdout, maxBytes, headBytes),
         stderr: truncate(result.stderr, maxBytes, headBytes)
       };
     }
   });
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
