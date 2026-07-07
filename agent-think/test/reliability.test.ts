@@ -2,7 +2,6 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
-import { ThinkAgent } from "../src/agent";
 import type { CommandCenterAgent } from "../src/command-center";
 import { WarmPool } from "../src/warm-pool";
 
@@ -41,14 +40,6 @@ describe("agent-think reliability", () => {
       const alarm = await state.storage.getAlarm();
       expect(alarm).not.toBeNull();
       expect(alarm as number).toBeLessThanOrEqual(before + 1_000);
-    });
-  });
-
-  it("does not externalize media without an attachment store", async () => {
-    const id = env.ThinkAgent.idFromName(`media-${crypto.randomUUID()}`);
-    const stub = env.ThinkAgent.get(id);
-    await runInDurableObject(stub, (agent: ThinkAgent) => {
-      expect(agent.mediaEviction).toEqual({ externalizeToWorkspace: false });
     });
   });
 });

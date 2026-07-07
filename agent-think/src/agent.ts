@@ -142,9 +142,6 @@ function agentThinkInstructions(ctx: RunContext | null): string | null {
 class ThinkBase extends Think<Env> {}
 
 export class ThinkAgent extends ThinkBase {
-  /** Agent-think has no media attachment store; drop aged inline media. */
-  override mediaEviction = { externalizeToWorkspace: false };
-
   // Think's own chat recovery is the durability layer. Its terminal hook must
   // also release agent-think's external resources and command-center status.
   override chatRecovery = {
