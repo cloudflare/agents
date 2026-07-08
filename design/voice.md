@@ -400,7 +400,3 @@ Both include tuning knobs (`silenceThreshold`, `silenceDurationMs`, `interruptTh
 - **TCP head-of-line blocking** — WebSocket over TCP, not WebRTC. On degraded networks, audio may stall. SFU option exists for critical use cases.
 - **MIN_SENTENCE_LENGTH = 10** — balances avoiding false splits on abbreviations ("Dr.", "U.S.") against latency for short responses ("Sure!"). May need tuning.
 - **No audio format auto-negotiation** — server always sends its configured format. `preferred_format` is advisory only.
-
-## History
-
-- [rfc-voice-transcriber-readiness.md](./rfc-voice-transcriber-readiness.md) — optional transcriber readiness for `withVoice()` and Flux startup sequencing.

@@ -101,10 +101,11 @@ describe("AudioConnectionManager — transcriber sessions", () => {
     cm.initConnection("c1");
     cm.startTranscriberSession("c1", transcriber, {});
 
-    cm.closeTranscriberSession("c1");
+    expect(cm.closeTranscriberSession("c1")).toBe(true);
 
     expect(transcriber.lastSession!.closed).toBe(true);
     expect(cm.hasTranscriberSession("c1")).toBe(false);
+    expect(cm.closeTranscriberSession("c1")).toBe(false);
   });
 
   it("closes the transcriber session on cleanup", () => {
