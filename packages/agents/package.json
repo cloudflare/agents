@@ -150,6 +150,11 @@
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./schedules": {
+      "types": "./dist/schedules/index.d.ts",
+      "import": "./dist/schedules/index.js",
+      "require": "./dist/schedules/index.js"
+    },
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js",

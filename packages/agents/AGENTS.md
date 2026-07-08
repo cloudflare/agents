@@ -16,7 +16,8 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
-| `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                             |
+| `agents/schedules`           | `src/schedules/`             | `AgentScheduler`, runtime schedule types, and parsing helpers                |
+| `agents/schedule`            | `src/schedule.ts`            | Deprecated compatibility path for natural-language schedule parsing          |
 | `agents/observability`       | `src/observability/index.ts` | Observability event types and emitters                                       |
 | `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
 | `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
@@ -40,7 +41,8 @@ src/
   sub-routing.ts        # Nested /sub/... routing helpers + getSubAgentByName
   email.ts              # Email routing utilities
   workflows.ts          # AgentWorkflow base class
-  schedule.ts           # Scheduling types and helpers
+  schedule.ts           # Deprecated compatibility barrel for schedule parsing
+  schedules/            # AgentScheduler, runtime types, schema, and parsing helpers
   serializable.ts       # RPC serialization types
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
@@ -218,7 +220,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - **State sync is bidirectional** — `this.setState()` on the server broadcasts to all connected clients; `agent.setState()` from the client sends to the server. Both directions use the same message format (`MessageType.CF_AGENT_STATE`).
 - **RPC is reflection-based** — public methods on Agent subclasses are automatically callable from clients via `agent.call("methodName", ...args)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
-- **Scheduling uses cron-schedule** — `this.schedule()` accepts delays, Dates, or cron strings. Schedules persist in SQLite and survive hibernation.
+- **Scheduling uses cron-schedule** — `this.schedule()` accepts delays, Dates, or cron strings. `AgentScheduler` owns schedule storage and execution while `Agent` retains the shared physical alarm arbitration. Schedules persist in SQLite and survive hibernation.
 - **MCP has two sides** — `McpAgent` (in `mcp/index.ts`) lets you _build_ an MCP server. `MCPClientManager` (in `mcp/client.ts`) lets an Agent _connect to_ external MCP servers.
 
 ## Boundaries

@@ -18,6 +18,7 @@ const entries = [
   "src/mcp/do-oauth-client-provider.ts",
   "src/mcp/x402.ts",
   "src/observability/index.ts",
+  "src/schedules/index.ts",
   "src/codemode/ai.ts",
   "src/experimental/memory/session/index.ts",
   "src/experimental/memory/utils/index.ts",

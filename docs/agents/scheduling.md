@@ -15,6 +15,40 @@ The scheduling system supports four modes:
 
 Under the hood, scheduling uses [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/) to wake the agent at the right time. Tasks are stored in a SQLite table and executed in order.
 
+## Scheduling capability
+
+Every `Agent` has an `AgentScheduler` at `this.schedules`. It owns schedule storage, queries, retries, callback execution, and cleanup. The existing `this.schedule()`, `this.scheduleEvery()`, `this.getScheduleById()`, `this.listSchedules()`, and `this.cancelSchedule()` methods delegate to it, so existing Agent code does not need to change.
+
+Import schedule types or the manager from the stable entry point:
+
+```typescript
+import {
+  AgentScheduler,
+  type Schedule,
+  type ScheduleCriteria
+} from "agents/schedules";
+```
+
+Most agents should continue to use the Agent methods. To extend scheduling policy, replace the component in a subclass:
+
+```typescript
+import { Agent } from "agents";
+import { AgentScheduler } from "agents/schedules";
+
+class TracingScheduler extends AgentScheduler {
+  override async cancelSchedule(id: string): Promise<boolean> {
+    console.log("Cancelling schedule", id);
+    return super.cancelSchedule(id);
+  }
+}
+
+export class MyAgent extends Agent<Env> {
+  override schedules = new TracingScheduler(this);
+}
+```
+
+The Agent still owns the single physical Durable Object alarm because schedules share it with keep-alive heartbeats, fiber recovery, facet runs, and timers. Replacing `schedules` changes schedule behavior without replacing that alarm arbitration.
+
 ## Quick Start
 
 ```typescript
@@ -642,14 +676,14 @@ class TimezoneAgent extends Agent {
 
 ## AI-Assisted Scheduling
 
-The SDK includes utilities for parsing natural language scheduling requests with AI.
+The SDK includes utilities for parsing natural language scheduling requests with AI. Import them from `agents/schedules`. The previous `agents/schedule` path remains available as a deprecated compatibility entry point.
 
 ### getSchedulePrompt()
 
 Returns a system prompt for parsing natural language into scheduling parameters:
 
 ```typescript
-import { getSchedulePrompt, scheduleSchema } from "agents";
+import { getSchedulePrompt, scheduleSchema } from "agents/schedules";
 import { generateObject } from "ai";
 import { openai } from "@ai-sdk/openai";
 
@@ -703,7 +737,7 @@ class SmartScheduler extends Agent {
 A Zod schema for validating parsed scheduling data:
 
 ```typescript
-import { scheduleSchema } from "agents";
+import { scheduleSchema } from "agents/schedules";
 
 // The schema uses a discriminated union on `when.type`:
 // {
