@@ -173,6 +173,8 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
+Custom transcriber sessions can implement `waitUntilReady(): Promise<void>` when they open an upstream streaming connection asynchronously. `withVoice()` waits for this optional method before sending `listening` or running `onCallStart()`. Resolve it when the session can accept audio and emit transcripts; reject it when startup failed and the call should return to `idle`. If `close()` abandons startup while readiness is pending, settle the readiness promise so server startup work does not wait forever. Providers that are ready synchronously can omit the method.
+
 ### `onTurn(transcript, context)`
 
 **Required.** Called when the user finishes speaking and the transcript is ready.
@@ -229,6 +231,8 @@ The `context` object provides:
 | `onCallStart(connection)`     | Called after a call is accepted             |
 | `onCallEnd(connection)`       | Called when a call ends                     |
 | `onInterrupt(connection)`     | Called when user interrupts during playback |
+
+If startup is rejected or fails, the server sends the client back to `idle` and calls `onCallEnd()` so cleanup logic can run.
 
 ### Pipeline Hooks
 
@@ -308,6 +312,8 @@ Called after each utterance is transcribed. Override this to process the transcr
 - `onCallStart(connection)`, `onCallEnd(connection)`, `onInterrupt(connection)`
 - `createTranscriber(connection)` — override for runtime model switching
 - `afterTranscribe(transcript, connection)` — filter or transform transcripts
+
+If startup is rejected or fails, the server sends the client back to `idle` and calls `onCallEnd()` so cleanup logic can run.
 
 It does **not** have TTS hooks (`beforeSynthesize`, `afterSynthesize`) or `onTurn`.
 

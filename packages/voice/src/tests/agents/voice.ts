@@ -78,6 +78,67 @@ class TestTranscriber implements Transcriber {
   }
 }
 
+type TestTranscriberMode =
+  | "default"
+  | "missing"
+  | "pending_ready"
+  | "pending_ready_no_close_settle"
+  | "reject_ready"
+  | "create_throw";
+
+function isTestTranscriberMode(value: unknown): value is TestTranscriberMode {
+  return (
+    value === "default" ||
+    value === "missing" ||
+    value === "pending_ready" ||
+    value === "pending_ready_no_close_settle" ||
+    value === "reject_ready" ||
+    value === "create_throw"
+  );
+}
+
+class ControlledReadyTranscriberSession extends TestTranscriberSession {
+  #ready: Promise<void>;
+  #resolveReady: (() => void) | null = null;
+  #rejectReady: ((reason: unknown) => void) | null = null;
+  #settleOnClose: boolean;
+
+  constructor(options?: TranscriberSessionOptions, settleOnClose = true) {
+    super(options);
+    this.#settleOnClose = settleOnClose;
+    this.#ready = new Promise<void>((resolve, reject) => {
+      this.#resolveReady = resolve;
+      this.#rejectReady = reject;
+    });
+    this.#ready.catch(() => {});
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.#ready;
+  }
+
+  resolveReady(): void {
+    const resolve = this.#resolveReady;
+    if (!resolve) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    resolve();
+  }
+
+  rejectReady(message = "readiness failed"): void {
+    const reject = this.#rejectReady;
+    if (!reject) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    reject(new Error(message));
+  }
+
+  close(): void {
+    super.close();
+    if (this.#settleOnClose) this.resolveReady();
+  }
+}
+
 const v3FinishReason = (unified: "stop" | "tool-calls") => ({
   unified,
   raw: undefined
@@ -292,14 +353,64 @@ const VoiceBase = withVoice(Agent);
 export class TestVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
-  transcriber = new TestTranscriber();
+  transcriber: Transcriber | undefined = new TestTranscriber();
   tts = new TestTTS();
 
   #callStartCount = 0;
   #callEndCount = 0;
   #interruptCount = 0;
-  #beforeCallStartResult = true;
+  #beforeCallStartResult: boolean | "throw" = true;
+  #keepAliveShouldThrow = false;
   #turnDelayMs = 0;
+  #transcriberMode: TestTranscriberMode = "default";
+  #lastReadySession: ControlledReadyTranscriberSession | null = null;
+  #readySessions: ControlledReadyTranscriberSession[] = [];
+  #keepAliveAcquiredCount = 0;
+  #keepAliveReleasedCount = 0;
+
+  async keepAlive(): Promise<() => void> {
+    if (this.#keepAliveShouldThrow) {
+      throw new Error("keepAlive failed");
+    }
+
+    const dispose = await super.keepAlive();
+    this.#keepAliveAcquiredCount++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#keepAliveReleasedCount++;
+      dispose();
+    };
+  }
+
+  createTranscriber(_connection: Connection): Transcriber | null {
+    const mode = this.#transcriberMode;
+    if (mode === "default") return null;
+    if (mode === "missing") return null;
+    if (mode === "create_throw") {
+      return {
+        createSession(): TranscriberSession {
+          throw new Error("create session failed");
+        }
+      };
+    }
+
+    return {
+      createSession: (options?: TranscriberSessionOptions) => {
+        const session = new ControlledReadyTranscriberSession(
+          options,
+          mode !== "pending_ready_no_close_settle"
+        );
+        this.#lastReadySession = session;
+        this.#readySessions.push(session);
+        if (mode === "reject_ready") {
+          session.rejectReady();
+        }
+        return session;
+      }
+    };
+  }
 
   async onTurn(
     transcript: string,
@@ -312,6 +423,10 @@ export class TestVoiceAgent extends VoiceBase {
   }
 
   beforeCallStart(_connection: Connection): boolean {
+    if (this.#beforeCallStartResult === "throw") {
+      throw new Error("beforeCallStart failed");
+    }
+
     return this.#beforeCallStartResult;
   }
 
@@ -333,7 +448,17 @@ export class TestVoiceAgent extends VoiceBase {
       const parsed = JSON.parse(message);
       switch (parsed.type) {
         case "_set_before_call_start":
-          this.#beforeCallStartResult = parsed.value;
+          if (parsed.value === true || parsed.value === false) {
+            this.#beforeCallStartResult = parsed.value;
+          } else if (parsed.value === "throw") {
+            this.#beforeCallStartResult = "throw";
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_set_keep_alive_throw":
+          this.#keepAliveShouldThrow = parsed.value === true;
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
@@ -344,13 +469,46 @@ export class TestVoiceAgent extends VoiceBase {
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
           break;
+        case "_set_transcriber_mode":
+          if (isTestTranscriberMode(parsed.value)) {
+            this.#transcriberMode = parsed.value;
+            this.#lastReadySession = null;
+            this.transcriber =
+              parsed.value === "missing" ? undefined : new TestTranscriber();
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_resolve_transcriber_ready":
+          this.#lastReadySession?.resolveReady();
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_reject_transcriber_ready":
+          this.#lastReadySession?.rejectReady();
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_reject_transcriber_ready_at":
+          if (typeof parsed.index === "number") {
+            this.#readySessions[parsed.index]?.rejectReady();
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
         case "_get_counts":
           connection.send(
             JSON.stringify({
               type: "_counts",
               callStart: this.#callStartCount,
               callEnd: this.#callEndCount,
-              interrupt: this.#interruptCount
+              interrupt: this.#interruptCount,
+              keepAliveAcquired: this.#keepAliveAcquiredCount,
+              keepAliveReleased: this.#keepAliveReleasedCount
             })
           );
           break;

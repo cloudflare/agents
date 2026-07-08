@@ -54,6 +54,17 @@ describe("AudioConnectionManager — transcriber sessions", () => {
     expect(transcriber.lastSession).not.toBeNull();
   });
 
+  it("returns the created transcriber session", () => {
+    const cm = new AudioConnectionManager("test");
+    const transcriber = new SpyTranscriber();
+    cm.initConnection("c1");
+
+    const session = cm.startTranscriberSession("c1", transcriber, {});
+
+    expect(session).toBeInstanceOf(SpySession);
+    expect(session).toBe(transcriber.lastSession);
+  });
+
   it("feeds audio to the transcriber session via bufferAudio", () => {
     const cm = new AudioConnectionManager("test");
     const transcriber = new SpyTranscriber();
@@ -69,16 +80,32 @@ describe("AudioConnectionManager — transcriber sessions", () => {
     expect(session.fed[1].byteLength).toBe(2000);
   });
 
+  it("replays audio buffered before the transcriber session starts", () => {
+    const cm = new AudioConnectionManager("test");
+    const transcriber = new SpyTranscriber();
+    const first = makeAudio(1000);
+    const second = makeAudio(2000);
+    cm.initConnection("c1");
+
+    cm.bufferAudio("c1", first);
+    cm.bufferAudio("c1", second);
+    cm.startTranscriberSession("c1", transcriber, {});
+
+    const session = transcriber.lastSession!;
+    expect(session.fed).toEqual([first, second]);
+  });
+
   it("closes the transcriber session on closeTranscriberSession", () => {
     const cm = new AudioConnectionManager("test");
     const transcriber = new SpyTranscriber();
     cm.initConnection("c1");
     cm.startTranscriberSession("c1", transcriber, {});
 
-    cm.closeTranscriberSession("c1");
+    expect(cm.closeTranscriberSession("c1")).toBe(true);
 
     expect(transcriber.lastSession!.closed).toBe(true);
     expect(cm.hasTranscriberSession("c1")).toBe(false);
+    expect(cm.closeTranscriberSession("c1")).toBe(false);
   });
 
   it("closes the transcriber session on cleanup", () => {
@@ -100,12 +127,14 @@ describe("AudioConnectionManager — transcriber sessions", () => {
 
     cm.startTranscriberSession("c1", transcriber, {});
     const first = transcriber.lastSession!;
+    cm.bufferAudio("c1", makeAudio(1000));
 
     cm.startTranscriberSession("c1", transcriber, {});
     const second = transcriber.lastSession!;
 
     expect(first.closed).toBe(true);
     expect(second.closed).toBe(false);
+    expect(second.fed).toHaveLength(0);
     expect(first).not.toBe(second);
   });
 
