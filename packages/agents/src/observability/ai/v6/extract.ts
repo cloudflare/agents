@@ -25,6 +25,7 @@ export function finishAttributesFromResult(
   return finishAttributes({
     finishReason: extractFinishReason(result),
     response: options.includeResponse ? extractResponseInfo(result) : undefined,
+    toolCallCount: extractToolCallCount(result),
     usage: extractAISDKv6TokenUsage(result)
   });
 }
@@ -104,6 +105,7 @@ export function extractAISDKv6TokenUsage(
 
   const inputTokens = readTokenCount(usage.inputTokens);
   const outputTokens = readTokenCount(usage.outputTokens);
+  const totalTokens = readNumber(usage.totalTokens);
   // The public result usage keeps details in inputTokenDetails/outputTokenDetails
   // (with deprecated flat fields); provider-level usage nests them on the token
   // counts themselves. Read all shapes.
@@ -122,6 +124,7 @@ export function extractAISDKv6TokenUsage(
   if (
     inputTokens === undefined &&
     outputTokens === undefined &&
+    totalTokens === undefined &&
     cacheReadInputTokens === undefined &&
     cacheCreationInputTokens === undefined &&
     reasoningTokens === undefined
@@ -136,8 +139,19 @@ export function extractAISDKv6TokenUsage(
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(reasoningTokens !== undefined ? { reasoningTokens } : {})
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {})
   };
+}
+
+function extractToolCallCount(value: unknown): number | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const toolCalls = (value as Record<string, unknown>).toolCalls;
+  return Array.isArray(toolCalls) && toolCalls.length > 0
+    ? toolCalls.length
+    : undefined;
 }
 
 /**

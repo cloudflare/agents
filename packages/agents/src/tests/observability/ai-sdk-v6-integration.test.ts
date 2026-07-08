@@ -66,6 +66,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     expect(rootSpan?.attributes).toMatchObject({
       "cloudflare.agents.integration.name": "ai-sdk",
       "cloudflare.agents.operation.name": "streamText",
+      "cloudflare.agents.usage.total_tokens": 12,
       "gen_ai.operation.name": "invoke_agent",
       "gen_ai.provider.name": "mock-provider",
       "gen_ai.request.model": "mock-model",
@@ -85,6 +86,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     );
     expect(chatSpan?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "doStream",
+      "cloudflare.agents.usage.total_tokens": 12,
       // Populated from the provider-level response-metadata stream part.
       "gen_ai.response.id": "resp-1",
       "gen_ai.response.model": "mock-model-served"

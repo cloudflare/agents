@@ -10,6 +10,7 @@ import {
 type StreamSummary = {
   readonly finishReason?: string;
   readonly response?: ResponseSummary;
+  readonly toolCallCount?: number;
   readonly timeToFirstChunkSeconds?: number;
   readonly usage?: TokenUsageSummary;
 };
@@ -49,6 +50,7 @@ function finishAttributesFromStreamSummary(
     finishReason: summary?.finishReason,
     response: includeResponse ? summary?.response : undefined,
     timeToFirstChunkSeconds: summary?.timeToFirstChunkSeconds,
+    toolCallCount: summary?.toolCallCount,
     usage: summary?.usage
   });
 }
@@ -299,6 +301,7 @@ function createStreamState(
 } {
   let closed = false;
   let finishReason: string | undefined;
+  let toolCallCount = 0;
   let usage: TokenUsageSummary | undefined;
   let response: ResponseSummary | undefined;
   let observedError: { readonly cause: unknown } | undefined;
@@ -357,6 +360,7 @@ function createStreamState(
             firstChunkAtMs === undefined || startedAtMs === undefined
               ? undefined
               : (firstChunkAtMs - startedAtMs) / 1000,
+          toolCallCount,
           usage
         })
       );
@@ -381,6 +385,9 @@ function createStreamState(
       }
       if (isAbortChunk(chunk)) {
         observedAbort = true;
+      }
+      if (isToolCallChunk(chunk)) {
+        toolCallCount += 1;
       }
       finishReason = extractFinishReason(chunk) ?? finishReason;
       usage = extractAISDKv6TokenUsage(chunk) ?? usage;
@@ -428,6 +435,7 @@ function streamSummaryFromParts(input: {
   readonly finishReason: string | undefined;
   readonly response: ResponseSummary | undefined;
   readonly timeToFirstChunkSeconds: number | undefined;
+  readonly toolCallCount: number;
   readonly usage: TokenUsageSummary | undefined;
 }): StreamSummary {
   return {
@@ -438,6 +446,7 @@ function streamSummaryFromParts(input: {
     ...(input.timeToFirstChunkSeconds !== undefined
       ? { timeToFirstChunkSeconds: input.timeToFirstChunkSeconds }
       : {}),
+    ...(input.toolCallCount > 0 ? { toolCallCount: input.toolCallCount } : {}),
     ...(input.usage ? { usage: input.usage } : {})
   };
 }
@@ -450,6 +459,14 @@ function isReadableStream(value: unknown): value is ReadableStream<unknown> {
     typeof value.pipeThrough === "function" &&
     "getReader" in value &&
     typeof value.getReader === "function"
+  );
+}
+
+function isToolCallChunk(chunk: unknown): boolean {
+  return (
+    typeof chunk === "object" &&
+    chunk !== null &&
+    (chunk as Record<string, unknown>).type === "tool-call"
   );
 }
 

@@ -69,6 +69,7 @@ describe("createAISDKV6Wrapper", () => {
       "cloudflare.agents.integration.name": "ai-sdk",
       "cloudflare.agents.operation.name": "generateText",
       "cloudflare.agents.response.finish_reason": "stop",
+      "cloudflare.agents.usage.total_tokens": 6,
       "gen_ai.agent.name": "fixture-agent",
       "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "invoke_agent",
@@ -91,6 +92,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(modelCall?.parent).toBe(tracing.rootSpans[0]);
     expect(modelCall?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "doGenerate",
+      "cloudflare.agents.usage.total_tokens": 6,
       "gen_ai.operation.name": "chat",
       "gen_ai.provider.name": "test-provider",
       "gen_ai.request.model": "test-model",
@@ -254,6 +256,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "streamText",
       "cloudflare.agents.response.finish_reason": "stop",
+      "cloudflare.agents.usage.total_tokens": 12,
       "gen_ai.operation.name": "invoke_agent",
       "gen_ai.provider.name": "test-provider",
       "gen_ai.request.model": "stream-model",
@@ -273,6 +276,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(modelCall?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "doStream",
       "cloudflare.agents.response.finish_reason": "stop",
+      "cloudflare.agents.usage.total_tokens": 12,
       "gen_ai.usage.input_tokens": 8,
       "gen_ai.usage.output_tokens": 4,
       "gen_ai.operation.name": "chat",
@@ -591,9 +595,9 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.tool.type": "function"
     });
     expect(toolSpan?.ended).toBe(true);
-    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
-      "cloudflare.agents.tool.count"
-    ]);
+    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "cloudflare.agents.tool.count": 1
+    });
   });
 
   it("wraps streamText tool execution without mutating the original tools", async () => {
@@ -1239,6 +1243,7 @@ describe("createAISDKV6Wrapper", () => {
     });
 
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "cloudflare.agents.usage.total_tokens": 16,
       "gen_ai.response.id": "resp-9",
       "gen_ai.response.model": "served-9",
       "gen_ai.usage.cache_creation.input_tokens": 2,

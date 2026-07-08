@@ -11,6 +11,7 @@ export type TokenUsageSummary = {
   readonly inputTokens?: number | undefined;
   readonly outputTokens?: number | undefined;
   readonly reasoningTokens?: number | undefined;
+  readonly totalTokens?: number | undefined;
 };
 
 /** Safe request settings that map to scalar GenAI semantic attributes. */
@@ -297,10 +298,13 @@ export function finishAttributes(input: {
   readonly finishReason: string | undefined;
   readonly response?: ResponseSummary | undefined;
   readonly timeToFirstChunkSeconds?: number | undefined;
+  readonly toolCallCount?: number | undefined;
   readonly usage: TokenUsageSummary | undefined;
 }): TraceAttributes {
   return {
     [TraceAttribute.Cloudflare.ResponseFinishReason]: input.finishReason,
+    [TraceAttribute.Cloudflare.ToolCount]: input.toolCallCount,
+    [TraceAttribute.Cloudflare.UsageTotalTokens]: totalTokens(input.usage),
     [TraceAttribute.GenAI.ResponseID]: input.response?.id,
     [TraceAttribute.GenAI.ResponseModel]: input.response?.model,
     [TraceAttribute.GenAI.ResponseTimeToFirstChunk]:
@@ -314,4 +318,13 @@ export function finishAttributes(input: {
     [TraceAttribute.GenAI.UsageReasoningOutputTokens]:
       input.usage?.reasoningTokens
   };
+}
+
+function totalTokens(usage: TokenUsageSummary | undefined): number | undefined {
+  if (usage?.totalTokens !== undefined) {
+    return usage.totalTokens;
+  }
+  return usage?.inputTokens !== undefined && usage.outputTokens !== undefined
+    ? usage.inputTokens + usage.outputTokens
+    : undefined;
 }

@@ -9,17 +9,18 @@
  */
 export const TraceAttribute = {
   Cloudflare: {
-    CallID: "cloudflare.agents.call.id",
     IntegrationName: "cloudflare.agents.integration.name",
     MetadataPrefix: "cloudflare.agents.metadata.",
     OperationName: "cloudflare.agents.operation.name",
     ResponseFinishReason: "cloudflare.agents.response.finish_reason",
+    ToolCount: "cloudflare.agents.tool.count",
     TurnAdmission: "cloudflare.agents.turn.admission",
     TurnChannel: "cloudflare.agents.turn.channel",
     TurnContinuation: "cloudflare.agents.turn.continuation",
     TurnGeneration: "cloudflare.agents.turn.generation",
     TurnRequestID: "cloudflare.agents.turn.request_id",
-    TurnTrigger: "cloudflare.agents.turn.trigger"
+    TurnTrigger: "cloudflare.agents.turn.trigger",
+    UsageTotalTokens: "cloudflare.agents.usage.total_tokens"
   },
   General: {
     UserID: "user.id"
