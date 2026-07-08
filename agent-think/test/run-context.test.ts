@@ -24,11 +24,14 @@ describe("agent-think run context", () => {
   });
 
   it("keeps identity on every inference and recovery continuation", () => {
-    expect(buildRunTelemetry(target, "session-209", "ThinkAgent")).toEqual({
+    expect(
+      buildRunTelemetry(target, "cloudflare-agents-209", "ThinkAgent")
+    ).toEqual({
       metadata: {
-        agentId: "session-209",
+        agentId: "cloudflare-agents-209",
         agentName: "ThinkAgent",
-        conversationId: "session-209",
+        conversationId: "cloudflare-agents-209",
+        doName: "cloudflare-agents-209",
         repository: "cloudflare/workers-oauth-provider",
         issueNumber: 209,
         requestedBy: "mattzcarey"
