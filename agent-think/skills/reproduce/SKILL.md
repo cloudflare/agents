@@ -69,10 +69,10 @@ matters.
 
 ## 3. Scaffold a minimal reproduction
 
-Work in a scratch dir under `/workspace`, never touch the checkout. Everything
-under `/workspace`, including dependencies and build output, is durable and
-visible to the shell and `read`/`write`/`edit` tools. Put long logs in `/temp`,
-which is outside the mounted VFS and only visible through container bash.
+Work in a scratch dir under `/workspace`, never touch the checkout. The
+read/write/edit tools use the Workspace VFS, and container bash uses its mounted
+view. Put long logs in `/temp`, which is outside the VFS mount and only visible
+through container bash.
 
 ```bash
 REPRO_DIR="/workspace/repro-<issueNumber>"

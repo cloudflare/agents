@@ -106,7 +106,7 @@ function transcriptText(items: DebugMessage[]): string {
 }
 
 describe("E2E: production graph with inference adapter", () => {
-  it("syncs the complete VFS, including node_modules", async () => {
+  it("syncs Workspace VFS files while keeping /temp container-local", async () => {
     const sync = await fetch(
       `${BASE_URL}/dev/workspace-sync/${crypto.randomUUID()}`
     );
@@ -114,11 +114,8 @@ describe("E2E: production graph with inference adapter", () => {
     expect(await sync.json()).toEqual({
       hostFileVisibleInContainer: true,
       sourceFileDurable: true,
-      nodeModulesFileVisibleInContainer: true,
-      nodeModulesFileDurable: true,
       localTempFileDurable: false,
       sourceFileRestoredAfterContainerReplacement: true,
-      nodeModulesFileRestoredAfterContainerReplacement: true,
       localTempFileRestoredAfterContainerReplacement: false
     });
   }, 120_000);

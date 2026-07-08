@@ -88,11 +88,11 @@ the container's coding filesystem.
 - **No Cloudflare Workflow.** An earlier shape wrapped the turn in a Workflow;
   its 10-min step timeout + retry-from-scratch was the main death mode. Think's
   native durable `submitMessages` is the durability layer.
-- **One Workspace owns `/workspace`.** Think internals, the read/write/edit tools,
-  the lightweight shell, and container commands share the same complete
-  `@cloudflare/workspace` VFS. No path under the mount is excluded, including
-  `.git`, dependencies, and build output. Paths outside `/workspace` remain
-  container-local by construction. Skills use Think's native R2 source.
+- **One Workspace owns `/workspace`.** Think internals and read/write/edit call
+  the durable VFS directly. The lightweight shell operates on the same VFS, and
+  the container backend runs against its mounted view. Workspace owns its sync
+  policy; agent-think adds no path router or ignore policy. Paths outside
+  `/workspace` remain container-local. Skills use Think's native R2 source.
 - **Run identity is durable input, not prompt configuration.** The first user
   message carries an `<agent-think-run>` JSON envelope (repo, issue,
   instruction, requester, triggering comment). Skills fail closed without it.
@@ -154,10 +154,9 @@ the container's coding filesystem.
   in `run_worker_first`. Symptom: the UI's HTTP calls work while every
   `wss://` connect fails. (This bit us on the command center; the repro-skill
   recipe carries the same rule.)
-- **The complete mounted VFS is synchronized deliberately.** `node_modules` and
-  build output under `/workspace` are durable and visible to file tools. Put long
-  logs in `/temp` outside the mount and tail them with container bash so neither
-  the VFS nor tool results absorb the full output.
+- **`/temp` is deliberately outside the VFS mount.** Put long logs there and
+  tail them with container bash so neither the VFS nor tool results absorb the
+  full output.
 - **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the
   new code; a running turn loses its container connection and burns minutes on
   Think's (working) recovery — it re-auths and resumes, but don't deploy while

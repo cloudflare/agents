@@ -2,7 +2,7 @@
  * ThinkAgent — one Think Durable Object per GitHub issue.
  *
  * Owns one `@cloudflare/workspace.Workspace` shared by Think internals, file
- * tools, and both bash backends. The complete VFS synchronizes with containers.
+ * tools, and both bash backends. Workspace owns synchronization semantics.
  *
  * gh-app calls `dispatch()` (see index.ts) with the issue
  * coordinates, a free-form `instruction` ("reproduce this", "open a
@@ -120,8 +120,8 @@ function agentThinkInstructions(ctx: RunContext | null): string | null {
     "",
     "Environment:",
     `  - Clone ${ctx.repo} to ${repoDirectory(ctx.repo)}.`,
-    "  - read/write/edit and both bash backends share the complete durable VFS",
-    "    mounted at /workspace, including .git, dependencies, and build output.",
+    "  - read/write/edit call the durable Workspace VFS directly. The lightweight",
+    "    shell also operates on that VFS; container bash uses the mounted tree.",
     "  - Paths outside /workspace are container-local. Put long logs in /temp and",
     "    inspect them with container bash so they do not enter the VFS.",
     "  - bash defaults to the lightweight shell backend. Select container for gh,",
@@ -384,18 +384,14 @@ export class ThinkAgent extends ThinkBase {
   async debugWorkspaceSync(): Promise<{
     hostFileVisibleInContainer: boolean;
     sourceFileDurable: boolean;
-    nodeModulesFileVisibleInContainer: boolean;
-    nodeModulesFileDurable: boolean;
     localTempFileDurable: boolean;
     sourceFileRestoredAfterContainerReplacement: boolean;
-    nodeModulesFileRestoredAfterContainerReplacement: boolean;
     localTempFileRestoredAfterContainerReplacement: boolean;
   }> {
     const id = crypto.randomUUID();
     const root = `/workspace/sync-${id}`;
     const hostPath = `${root}/host.txt`;
     const sourcePath = `${root}/src/source.txt`;
-    const nodeModulesPath = `${root}/node_modules/pkg/index.js`;
     const localTempPath = `/temp/sync-${id}.log`;
 
     await this.#workspace.fs.mkdir(root, { recursive: true });
@@ -404,9 +400,8 @@ export class ThinkAgent extends ThinkBase {
     const command = [
       "set -e",
       `test -f ${shellQuote(hostPath)}`,
-      `mkdir -p ${shellQuote(sourcePath.slice(0, sourcePath.lastIndexOf("/")))} ${shellQuote(nodeModulesPath.slice(0, nodeModulesPath.lastIndexOf("/")))}`,
+      `mkdir -p ${shellQuote(sourcePath.slice(0, sourcePath.lastIndexOf("/")))}`,
       `printf source > ${shellQuote(sourcePath)}`,
-      `printf dependency > ${shellQuote(nodeModulesPath)}`,
       `mkdir -p /temp && printf local > ${shellQuote(localTempPath)}`
     ].join("\n");
     const handle = await this.#workspace.shell.exec(command, {
@@ -421,12 +416,6 @@ export class ThinkAgent extends ThinkBase {
 
     const sourceFileDurable =
       (await this.#workspace.fs.readFile(sourcePath, "utf8")) === "source";
-    let nodeModulesFileDurable = true;
-    try {
-      await this.#workspace.fs.stat(nodeModulesPath);
-    } catch (error) {
-      nodeModulesFileDurable = !isEnoent(error);
-    }
     let localTempFileDurable = true;
     try {
       await this.#workspace.fs.stat(localTempPath);
@@ -434,25 +423,18 @@ export class ThinkAgent extends ThinkBase {
       localTempFileDurable = !isEnoent(error);
     }
 
-    const verify = await this.#workspace.shell.exec(
-      `test -f ${shellQuote(nodeModulesPath)}`,
-      { encoding: "utf8", backend: "container" }
-    );
-    const nodeModulesFileVisibleInContainer =
-      (await verify.result()).exitCode === 0;
-
     await this.#workspace.close();
     await releaseContainer(this.env, this.ctx.id.toString());
     const replacement = await this.#workspace.shell.exec(
-      `test -f ${shellQuote(sourcePath)}; source=$?; test -f ${shellQuote(nodeModulesPath)}; dependency=$?; test -f ${shellQuote(localTempPath)}; local=$?; printf '%s %s %s' "$source" "$dependency" "$local"`,
+      `test -f ${shellQuote(sourcePath)}; source=$?; test -f ${shellQuote(localTempPath)}; local=$?; printf '%s %s' "$source" "$local"`,
       { encoding: "utf8", backend: "container" }
     );
     const replacementResult = await replacement.result();
-    const [sourceStatus, dependencyStatus, localStatus] =
-      replacementResult.stdout.trim().split(/\s+/).map(Number);
+    const [sourceStatus, localStatus] = replacementResult.stdout
+      .trim()
+      .split(/\s+/)
+      .map(Number);
     const sourceFileRestoredAfterContainerReplacement = sourceStatus === 0;
-    const nodeModulesFileRestoredAfterContainerReplacement =
-      dependencyStatus === 0;
     const localTempFileRestoredAfterContainerReplacement = localStatus === 0;
 
     await this.#workspace.close();
@@ -461,11 +443,8 @@ export class ThinkAgent extends ThinkBase {
     return {
       hostFileVisibleInContainer,
       sourceFileDurable,
-      nodeModulesFileVisibleInContainer,
-      nodeModulesFileDurable,
       localTempFileDurable,
       sourceFileRestoredAfterContainerReplacement,
-      nodeModulesFileRestoredAfterContainerReplacement,
       localTempFileRestoredAfterContainerReplacement
     };
   }
