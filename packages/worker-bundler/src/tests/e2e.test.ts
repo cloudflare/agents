@@ -1003,8 +1003,11 @@ describe("createWorker with python main", () => {
     const worker = env.LOADER.get(id, () => ({
       mainModule: dynamic_worker.mainModule,
       modules: dynamic_worker.modules,
-      compatibilityDate: dynamic_worker.wranglerConfig.compatibilityDate,
-      compatibilityFlags: dynamic_worker.wranglerConfig.compatibilityFlags
+      compatibilityDate:
+        dynamic_worker.wranglerConfig?.compatibilityDate ?? "2026-01-01",
+      compatibilityFlags: dynamic_worker.wranglerConfig?.compatibilityFlags ?? [
+        "python_workers"
+      ]
     }));
 
     let response = await worker
@@ -1089,7 +1092,7 @@ describe("createWorker with pyproject.toml", () => {
       .getEntrypoint()
       .fetch(new Request("http://worker/"));
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as Record<string, string>;
     expect(body.typing_extensions).toBe("typing_extensions");
     expect(body.typing_inspection).toBe("typing_inspection");
   });

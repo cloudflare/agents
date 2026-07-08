@@ -377,7 +377,12 @@ async function installPythonPackage(
       const wheel = metadata.urls.find(
         (url) => url.packagetype === "bdist_wheel"
       );
-      const wheelUrl = wheel?.url;
+      if (!wheel) {
+        throw new Error(
+          `No wheel distribution found for ${name}@${version} on PyPI`
+        );
+      }
+      const wheelUrl = wheel.url;
 
       const response = await fetchWithTimeout(
         wheelUrl,
@@ -780,4 +785,5 @@ export function hasDependencies(files: FileSystem): boolean {
       return false;
     }
   }
+  return false;
 }
