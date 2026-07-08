@@ -8,7 +8,7 @@
 
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import type { CompactResult } from "../utils/compaction-helpers";
+import type { CompactResult } from "./utils/compaction-helpers";
 import type { WritableContextProvider } from "./context";
 import type { StoredCompaction } from "./provider";
 import type { SqlProvider } from "./providers/agent";

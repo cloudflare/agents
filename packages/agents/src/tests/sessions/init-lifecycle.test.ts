@@ -3,9 +3,9 @@ import {
   ContextBlocks,
   type ContextProvider,
   type WritableContextProvider
-} from "../../../../experimental/memory/session/context";
-import type { SkillProvider } from "../../../../experimental/memory/session/skills";
-import type { SearchProvider } from "../../../../experimental/memory/session/search";
+} from "../../sessions/context";
+import type { SkillProvider } from "../../sessions/skills";
+import type { SearchProvider } from "../../sessions/search";
 
 // ── Providers that track init calls ────────────────────────────
 

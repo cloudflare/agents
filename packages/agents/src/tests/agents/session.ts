@@ -8,7 +8,7 @@ import {
   type SessionMessage,
   type StoredCompaction,
   type ContextBlock
-} from "../../experimental/memory/session";
+} from "../../sessions";
 
 /**
  * Test Agent — full Session API

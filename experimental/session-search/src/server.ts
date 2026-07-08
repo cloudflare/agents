@@ -13,14 +13,8 @@ import {
   routeAgentRequest,
   type StreamingResponse
 } from "agents";
-import {
-  AgentSearchProvider,
-  Session
-} from "agents/experimental/memory/session";
-import {
-  createCompactFunction,
-  truncateOlderMessages
-} from "agents/experimental/memory/utils";
+import { AgentSearchProvider, Session } from "agents/sessions";
+import { createCompactFunction, truncateOlderMessages } from "agents/sessions";
 import type { UIMessage } from "ai";
 import {
   convertToModelMessages,

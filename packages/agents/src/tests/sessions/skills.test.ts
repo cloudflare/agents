@@ -3,11 +3,8 @@ import {
   ContextBlocks,
   type ContextProvider,
   type WritableContextProvider
-} from "../../../../experimental/memory/session/context";
-import {
-  R2SkillProvider,
-  type SkillProvider
-} from "../../../../experimental/memory/session/skills";
+} from "../../sessions/context";
+import { R2SkillProvider, type SkillProvider } from "../../sessions/skills";
 
 // ── In-memory providers for tests ──────────────────────────────
 

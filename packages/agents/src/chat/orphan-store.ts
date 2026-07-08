@@ -3,7 +3,7 @@
  * (steps (c)/(d) of the chat-recovery orphan path) goes through.
  *
  * It is the **write subset** of the `SessionProvider` interface
- * (`experimental/memory/session`): `getMessage` + `appendMessage` +
+ * (`sessions`): `getMessage` + `appendMessage` +
  * `updateMessage`. Target-id resolution (step (b)) stays a per-host hook, so
  * `getLatestLeaf` is intentionally omitted here.
  *

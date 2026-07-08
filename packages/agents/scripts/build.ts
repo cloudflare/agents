@@ -19,6 +19,7 @@ const entries = [
   "src/mcp/x402.ts",
   "src/observability/index.ts",
   "src/codemode/ai.ts",
+  "src/sessions/index.ts",
   "src/experimental/memory/session/index.ts",
   "src/experimental/memory/utils/index.ts",
   "src/browser/index.ts",

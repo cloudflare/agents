@@ -751,7 +751,7 @@ providers only when you need generic `load_context` / `unload_context`
 management instead of Think's skills workflow.
 
 ```ts
-import { R2SkillProvider } from "agents/experimental/memory/session";
+import { R2SkillProvider } from "agents/sessions";
 
 configureSession(session: Session) {
   return session

@@ -11,7 +11,7 @@ import {
   PostgresSessionProvider,
   PostgresContextProvider,
   PostgresSearchProvider
-} from "agents/experimental/memory/session";
+} from "agents/sessions";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages, stepCountIs } from "ai";

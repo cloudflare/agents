@@ -13,7 +13,7 @@ Think handles the entire chat lifecycle — streaming, tool calls, message persi
 ```typescript
 import { Think } from "@cloudflare/think";
 import type { Session } from "@cloudflare/think";
-import { R2SkillProvider } from "agents/experimental/memory/session";
+import { R2SkillProvider } from "agents/sessions";
 
 export class SkillsAgent extends Think<Env> {
   getModel() {

@@ -17,7 +17,7 @@
 
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import { estimateStringTokens } from "../utils/tokens";
+import { estimateStringTokens } from "./utils/tokens";
 import { isSearchProvider, type SearchProvider } from "./search";
 import { isSkillProvider, type SkillProvider } from "./skills";
 

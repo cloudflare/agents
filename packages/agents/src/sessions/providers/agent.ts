@@ -13,7 +13,7 @@ import type {
   HistoryRowStat,
   RecentHistoryResult
 } from "../provider";
-import { COMPACTION_PREFIX } from "../../utils/compaction-helpers";
+import { COMPACTION_PREFIX } from "../utils/compaction-helpers";
 
 export interface SqlProvider {
   sql<T = Record<string, string | number | boolean | null>>(

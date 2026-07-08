@@ -1,9 +1,5 @@
 import { Agent } from "../../index";
-import {
-  Session,
-  SessionManager,
-  AgentContextProvider
-} from "../../experimental/memory/session";
+import { Session, SessionManager, AgentContextProvider } from "../../sessions";
 
 /**
  * Test agent for multi-session isolation tests.

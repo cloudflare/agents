@@ -228,9 +228,9 @@ import type {
   ChatFiberSnapshot,
   OrphanPersistStore
 } from "agents/chat";
-import { Session } from "agents/experimental/memory/session";
-import type { SessionMessage } from "agents/experimental/memory/session";
-import { truncateOlderMessages } from "agents/experimental/memory/utils";
+import { Session } from "agents/sessions";
+import type { SessionMessage } from "agents/sessions";
+import { truncateOlderMessages } from "agents/sessions";
 import {
   evictLargeMediaFromMessage,
   resolveMediaEvictionConfig,
@@ -295,8 +295,8 @@ export type {
   ThinkChannels
 } from "./channels";
 export type { DeliveryKind, DeliveryTag } from "./messengers";
-export { Session } from "agents/experimental/memory/session";
-export type { SessionMessage } from "agents/experimental/memory/session";
+export { Session } from "agents/sessions";
+export type { SessionMessage } from "agents/sessions";
 export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export type { WorkspaceLike } from "./tools/workspace";

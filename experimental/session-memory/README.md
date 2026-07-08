@@ -13,11 +13,8 @@ import {
   routeAgentRequest,
   type StreamingResponse
 } from "agents";
-import { Session } from "agents/experimental/memory/session";
-import {
-  createCompactFunction,
-  truncateOlderMessages
-} from "agents/experimental/memory/utils";
+import { Session } from "agents/sessions";
+import { createCompactFunction, truncateOlderMessages } from "agents/sessions";
 import { generateText, streamText, convertToModelMessages } from "ai";
 
 export class ChatAgent extends Agent<Env> {
@@ -173,7 +170,7 @@ Compaction replaces older messages with a summary overlay, keeping the conversat
 Built-in compaction implementation. Returns a function compatible with `onCompaction()`.
 
 ```typescript
-import { createCompactFunction } from "agents/experimental/memory/utils";
+import { createCompactFunction } from "agents/sessions";
 
 createCompactFunction({
   // Required: LLM call for summarization
@@ -238,7 +235,7 @@ You can pass any function to `onCompaction()`. It receives the full message hist
 `truncateOlderMessages` truncates tool outputs and long text in older messages before sending to the LLM. Does not mutate the stored messages. Structured tool outputs keep their container shape, with large nested fields truncated in place.
 
 ```typescript
-import { truncateOlderMessages } from "agents/experimental/memory/utils";
+import { truncateOlderMessages } from "agents/sessions";
 
 const truncated = truncateOlderMessages(history, {
   keepRecent: 4, // recent messages left intact (default: 4)

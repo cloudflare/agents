@@ -61,7 +61,7 @@ configureSession(session: Session): Session | Promise<Session>
 
 ```typescript
 import { Think, Session } from "@cloudflare/think";
-import { createCompactFunction } from "agents/experimental/memory/utils/compaction-helpers";
+import { createCompactFunction } from "agents/sessions";
 import { generateText } from "ai";
 
 export class MyAgent extends Think<Env> {

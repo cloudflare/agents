@@ -155,6 +155,11 @@
       "import": "./dist/workflows.js",
       "require": "./dist/workflows.js"
     },
+    "./sessions": {
+      "types": "./dist/sessions/index.d.ts",
+      "import": "./dist/sessions/index.js",
+      "require": "./dist/sessions/index.js"
+    },
     "./experimental/memory/session": {
       "types": "./dist/experimental/memory/session/index.d.ts",
       "import": "./dist/experimental/memory/session/index.js",

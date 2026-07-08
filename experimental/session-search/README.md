@@ -35,10 +35,7 @@ All providers receive their block label via `init(label)` during setup — no ne
 `AgentSearchProvider` is the built-in implementation using Durable Object SQLite with FTS5 full-text search.
 
 ```typescript
-import {
-  Session,
-  AgentSearchProvider
-} from "agents/experimental/memory/session";
+import { Session, AgentSearchProvider } from "agents/sessions";
 
 Session.create(this)
   .withContext("soul", {
@@ -81,7 +78,7 @@ Content is stored in two SQLite tables within the Durable Object:
 For multi-chat agents, `SessionManager` can expose conversation history search across all sessions:
 
 ```typescript
-import { SessionManager } from "agents/experimental/memory/session";
+import { SessionManager } from "agents/sessions";
 
 SessionManager.create(this)
   .withContext("memory", { maxTokens: 1100 })

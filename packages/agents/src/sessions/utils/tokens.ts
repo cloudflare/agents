@@ -21,7 +21,7 @@
  * compaction triggers before context windows are actually exceeded.
  */
 
-import type { SessionMessage } from "../session/types";
+import type { SessionMessage } from "../types";
 
 /** Approximate characters per token for English text */
 export const CHARS_PER_TOKEN = 4;

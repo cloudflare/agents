@@ -1,26 +1,26 @@
 import { env } from "cloudflare:workers";
-import type { SessionMessage } from "../../../../experimental/memory/session/types";
+import type { SessionMessage } from "../../sessions/types";
 import { describe, expect, it, beforeEach } from "vitest";
-import { getAgentByName } from "../../../..";
-import { Session } from "../../../../experimental/memory/session/session";
+import { getAgentByName } from "../..";
+import { Session } from "../../sessions/session";
 import {
   ContextBlocks,
   type ContextProvider,
   type WritableContextProvider
-} from "../../../../experimental/memory/session/context";
-import type { SearchProvider } from "../../../../experimental/memory/session/search";
-import type { SkillProvider } from "../../../../experimental/memory/session/skills";
+} from "../../sessions/context";
+import type { SearchProvider } from "../../sessions/search";
+import type { SkillProvider } from "../../sessions/skills";
 import type {
   SessionProvider,
   SearchResult,
   StoredCompaction
-} from "../../../../experimental/memory/session/provider";
+} from "../../sessions/provider";
 import {
   COMPACTION_PREFIX,
   createCompactFunction,
   type CompactResult
-} from "../../../../experimental/memory/utils/compaction-helpers";
-import { estimateMessageTokens } from "../../../../experimental/memory/utils/tokens";
+} from "../../sessions/utils/compaction-helpers";
+import { estimateMessageTokens } from "../../sessions/utils/tokens";
 
 // ── Test helpers ────────────────────────────────────────────────
 

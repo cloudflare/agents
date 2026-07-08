@@ -51,7 +51,7 @@ import {
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
-import { Session } from "agents/experimental/memory/session";
+import { Session } from "agents/sessions";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────

@@ -25,9 +25,9 @@ import {
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
-import type { CompactResult } from "../utils/compaction-helpers";
-import { estimateMessageTokens, estimateStringTokens } from "../utils/tokens";
-import { MessageType } from "../../../types";
+import type { CompactResult } from "./utils/compaction-helpers";
+import { estimateMessageTokens, estimateStringTokens } from "./utils/tokens";
+import { MessageType } from "../types";
 
 export type SessionContextOptions = Omit<ContextConfig, "label">;
 

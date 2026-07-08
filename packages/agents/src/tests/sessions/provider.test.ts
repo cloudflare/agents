@@ -1,7 +1,7 @@
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, beforeEach } from "vitest";
-import { getAgentByName } from "../../../..";
+import { getAgentByName } from "../..";
 
 /**
  * Typed stub for TestSessionAgent (tree-structured Session API)

@@ -1,14 +1,12 @@
-# Sessions (Experimental)
+# Sessions
 
 The Session API provides persistent conversation storage for agents, with tree-structured messages, context blocks, compaction, full-text search, and AI-controllable tools. By default it uses Durable Object SQLite; external Postgres storage is also available for apps that need shared database access, analytics, or cross-DO queries.
-
-> **Experimental.** The Session API is under `agents/experimental/memory/session`. The API surface is stable but may evolve before graduating to the main package.
 
 ## Quick Start
 
 ```typescript
 import { Agent } from "agents";
-import { Session } from "agents/experimental/memory/session";
+import { Session } from "agents/sessions";
 
 class MyAgent extends Agent {
   session = Session.create(this)
@@ -53,10 +51,7 @@ const session = Session.create(this)
 **Direct constructor** — takes a `SessionProvider` and options directly. Used when you want full control over providers.
 
 ```typescript
-import {
-  AgentSessionProvider,
-  AgentContextProvider
-} from "agents/experimental/memory/session";
+import { AgentSessionProvider, AgentContextProvider } from "agents/sessions";
 
 const session = new Session(new AgentSessionProvider(this), {
   context: [
@@ -182,7 +177,7 @@ All providers also support an optional `init(label)` method, called before first
 **`AgentContextProvider`** — SQLite-backed writable context. This is what you get by default when using the builder without an explicit provider.
 
 ```typescript
-import { AgentContextProvider } from "agents/experimental/memory/session";
+import { AgentContextProvider } from "agents/sessions";
 
 // Explicit usage — key determines the SQLite row
 new AgentContextProvider(this, "memory");
@@ -191,7 +186,7 @@ new AgentContextProvider(this, "memory");
 **`R2SkillProvider`** — Cloudflare R2 bucket for on-demand document loading. Skills are listed in the system prompt as metadata; the model loads full content on demand via `load_context`.
 
 ```typescript
-import { R2SkillProvider } from "agents/experimental/memory/session";
+import { R2SkillProvider } from "agents/sessions";
 
 Session.create(this).withContext("skills", {
   provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
@@ -203,7 +198,7 @@ Descriptions are stored in R2 custom metadata (`description` key).
 **`AgentSearchProvider`** — SQLite FTS5 searchable context. Entries are indexed and searchable by the model via `search_context`.
 
 ```typescript
-import { AgentSearchProvider } from "agents/experimental/memory/session";
+import { AgentSearchProvider } from "agents/sessions";
 
 Session.create(this).withContext("knowledge", {
   description: "Searchable knowledge base",
@@ -363,7 +358,7 @@ Compaction summarizes older messages to keep conversations within token limits. 
 ### Setup
 
 ```typescript
-import { createCompactFunction } from "agents/experimental/memory/utils/compaction-helpers";
+import { createCompactFunction } from "agents/sessions";
 
 const session = Session.create(this)
   .withContext("memory", { maxTokens: 1100 })
@@ -451,7 +446,7 @@ const session = Session.create(this)
 ### Creating a SessionManager
 
 ```typescript
-import { SessionManager } from "agents/experimental/memory/session";
+import { SessionManager } from "agents/sessions";
 
 const manager = SessionManager.create(this)
   .withContext("soul", { provider: { get: async () => "You are helpful." } })
@@ -795,7 +790,7 @@ import {
   PostgresSessionProvider,
   PostgresContextProvider,
   PostgresSearchProvider
-} from "agents/experimental/memory/session";
+} from "agents/sessions";
 import { Client } from "pg";
 
 class MyAgent extends Agent<Env> {
@@ -884,15 +879,12 @@ The migration SQL above includes both tables with tsvector columns and GIN index
 
 ## Utilities
 
-Exported from `agents/experimental/memory/utils`:
+Exported from `agents/sessions`:
 
 ### Token Estimation
 
 ```typescript
-import {
-  estimateStringTokens,
-  estimateMessageTokens
-} from "agents/experimental/memory/utils/tokens";
+import { estimateStringTokens, estimateMessageTokens } from "agents/sessions";
 
 estimateStringTokens("Hello world"); // heuristic: max(chars/4, words*1.3)
 estimateMessageTokens(messages); // sum with 4 tokens per-message overhead
@@ -911,7 +903,7 @@ import {
   computeSummaryBudget,
   buildSummaryPrompt,
   COMPACTION_PREFIX
-} from "agents/experimental/memory/utils/compaction-helpers";
+} from "agents/sessions";
 ```
 
 - `createCompactFunction(options)` — Full compaction implementation. See [Compaction](#compaction).
@@ -926,7 +918,7 @@ import {
 
 ## Exports
 
-Everything is exported from `agents/experimental/memory/session`:
+Session APIs and compaction utilities are exported from `agents/sessions`. The previous `agents/experimental/memory/session` and `agents/experimental/memory/utils` paths remain as deprecated compatibility re-exports.
 
 ```typescript
 import {
@@ -966,10 +958,10 @@ import {
   type StoredCompaction,
   type SqlProvider,
   type PostgresConnection
-} from "agents/experimental/memory/session";
+} from "agents/sessions";
 ```
 
-Compaction utilities from `agents/experimental/memory/utils/compaction-helpers`:
+Compaction utilities from `agents/sessions`:
 
 ```typescript
 import {
@@ -979,16 +971,13 @@ import {
   COMPACTION_PREFIX,
   type CompactResult,
   type CompactOptions
-} from "agents/experimental/memory/utils/compaction-helpers";
+} from "agents/sessions";
 ```
 
-Token utilities from `agents/experimental/memory/utils/tokens`:
+Token utilities from `agents/sessions`:
 
 ```typescript
-import {
-  estimateStringTokens,
-  estimateMessageTokens
-} from "agents/experimental/memory/utils/tokens";
+import { estimateStringTokens, estimateMessageTokens } from "agents/sessions";
 ```
 
 ---

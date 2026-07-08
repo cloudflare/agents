@@ -17,6 +17,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
 | `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                             |
+| `agents/sessions`            | `src/sessions/index.ts`      | Conversation history, context, compaction, search, skills, and providers     |
 | `agents/observability`       | `src/observability/index.ts` | Observability event types and emitters                                       |
 | `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
 | `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
@@ -69,6 +70,8 @@ src/
     errors.ts
     auth-context.ts
     worker-transport.ts
+
+  sessions/             # Session history, context, compaction, search, providers
 
   observability/        # Observability event system
     index.ts

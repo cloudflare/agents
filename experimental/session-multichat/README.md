@@ -9,8 +9,8 @@ Demonstrates the experimental `SessionManager` API for managing multiple indepen
 `SessionManager` creates and manages multiple `Session` instances, each with isolated message history but shared context block configuration.
 
 ```typescript
-import { SessionManager } from "agents/experimental/memory/session";
-import { createCompactFunction } from "agents/experimental/memory/utils";
+import { SessionManager } from "agents/sessions";
+import { createCompactFunction } from "agents/sessions";
 
 export class MultiSessionAgent extends Agent<Env> {
   manager = SessionManager.create(this)

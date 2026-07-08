@@ -14,11 +14,8 @@ import {
   routeAgentRequest,
   type StreamingResponse
 } from "agents";
-import { Session } from "agents/experimental/memory/session";
-import {
-  truncateOlderMessages,
-  createCompactFunction
-} from "agents/experimental/memory/utils";
+import { Session } from "agents/sessions";
+import { truncateOlderMessages, createCompactFunction } from "agents/sessions";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import {

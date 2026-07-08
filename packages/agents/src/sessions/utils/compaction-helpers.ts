@@ -6,7 +6,7 @@
  * for custom CompactFunction implementations.
  */
 
-import type { CompactContext, SessionMessage } from "../session/types";
+import type { CompactContext, SessionMessage } from "../types";
 import { estimateMessageTokens } from "./tokens";
 
 export type CompactTokenCounter = (
@@ -461,7 +461,7 @@ export interface CompactOptions {
  *
  * @example
  * ```typescript
- * import { createCompactFunction } from "agents/experimental/memory/utils";
+ * import { createCompactFunction } from "agents/sessions";
  *
  * const session = new Session(provider, {
  *   compaction: {

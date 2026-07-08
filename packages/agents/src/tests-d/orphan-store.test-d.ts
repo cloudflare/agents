@@ -10,10 +10,7 @@
 
 import type { UIMessage } from "ai";
 import type { OrphanPersistStore } from "../chat/index";
-import type {
-  SessionMessage,
-  SessionProvider
-} from "../experimental/memory/session";
+import type { SessionMessage, SessionProvider } from "../sessions";
 
 // ── Subset claim ───────────────────────────────────────────────────
 

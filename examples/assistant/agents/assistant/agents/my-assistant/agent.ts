@@ -11,8 +11,8 @@ import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
-import { createCompactFunction } from "agents/experimental/memory/utils";
-import { AgentSearchProvider } from "agents/experimental/memory/session";
+import { createCompactFunction } from "agents/sessions";
+import { AgentSearchProvider } from "agents/sessions";
 import type {
   TurnContext,
   TurnConfig,

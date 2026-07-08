@@ -4,9 +4,9 @@ import {
   byteLength,
   enforceRowSizeLimit,
   ROW_MAX_BYTES
-} from "../../../../chat/sanitize";
-import { truncateOlderMessages } from "../../../../experimental/memory/utils/compaction";
-import type { SessionMessage } from "../../../../experimental/memory/session/types";
+} from "../../chat/sanitize";
+import { truncateOlderMessages } from "../../sessions/utils/compaction";
+import type { SessionMessage } from "../../sessions/types";
 
 function textMessage(id: string, text: string): SessionMessage {
   return {

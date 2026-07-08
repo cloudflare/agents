@@ -8,8 +8,8 @@
  */
 
 import { callable, routeAgentRequest } from "agents";
-import { R2SkillProvider } from "agents/experimental/memory/session";
-import { createCompactFunction } from "agents/experimental/memory/utils";
+import { R2SkillProvider } from "agents/sessions";
+import { createCompactFunction } from "agents/sessions";
 import { generateText } from "ai";
 import type { Session } from "@cloudflare/think";
 import { Think } from "@cloudflare/think";

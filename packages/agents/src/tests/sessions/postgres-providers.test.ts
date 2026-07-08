@@ -2,11 +2,11 @@ import { describe, expect, it, beforeEach } from "vitest";
 import {
   PostgresSessionProvider,
   type PostgresConnection
-} from "../../../../experimental/memory/session/providers/postgres";
-import { PostgresContextProvider } from "../../../../experimental/memory/session/providers/postgres-context";
-import { PostgresSearchProvider } from "../../../../experimental/memory/session/providers/postgres-search";
-import type { SessionMessage } from "../../../../experimental/memory/session/types";
-import { ContextBlocks } from "../../../../experimental/memory/session/context";
+} from "../../sessions/providers/postgres";
+import { PostgresContextProvider } from "../../sessions/providers/postgres-context";
+import { PostgresSearchProvider } from "../../sessions/providers/postgres-search";
+import type { SessionMessage } from "../../sessions/types";
+import { ContextBlocks } from "../../sessions/context";
 import { convertToModelMessages, type UIMessage } from "ai";
 
 // ── In-memory Postgres mock ─────────────────────────────────────
