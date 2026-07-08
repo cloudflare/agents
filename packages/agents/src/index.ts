@@ -81,7 +81,7 @@ import {
   genericObservability,
   type Observability,
   type ObservabilityEvent
-} from "./observability/events";
+} from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";

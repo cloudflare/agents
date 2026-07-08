@@ -316,18 +316,62 @@ await generateText({
 
 The adapters do not emit prompts, messages, system instructions, tool inputs, tool outputs, schemas, headers, provider options, raw model outputs, or raw error messages. Only scalar attributes are emitted.
 
-Runtime/tool context attributes are opt-in. For v6, pass allowlists to `wrapAISDK`:
+Runtime and tool context attributes are opt-in. Use them for low-cardinality
+correlation such as a request ID, tenant ID, execution backend, cache hit, or a
+tool's selected data source. Do not allowlist tokens, credentials, user input,
+or other secrets: an allowlisted scalar value is emitted as a span attribute.
+Objects and arrays are always dropped.
+
+For AI SDK v6, configure allowlists once when wrapping the namespace, then pass
+context through the SDK's existing call fields:
 
 ```ts
 const traced = wrapAISDK(ai, {
-  includeRuntimeContext: ["requestId"],
+  includeRuntimeContext: ["requestId", "tenantId"],
   includeToolsContext: {
-    weather: ["defaultUnit"]
+    weather: ["defaultUnit", "cacheHit"]
+  }
+});
+
+await traced.generateText({
+  model,
+  prompt: "Will I need an umbrella?",
+  experimental_context: {
+    requestId: "req-123",
+    tenantId: "tenant-42"
+  },
+  toolsContext: {
+    weather: {
+      defaultUnit: "celsius",
+      cacheHit: true
+    }
   }
 });
 ```
 
-For v7, use the AI SDK's per-call `telemetry.includeRuntimeContext` and `telemetry.includeToolsContext` options instead — the SDK filters `runtimeContext` / `toolsContext` before telemetry integrations receive events, and the adapter emits the scalar fields the SDK includes.
+This emits `cloudflare.agents.runtime_context.requestId`,
+`cloudflare.agents.runtime_context.tenantId`, and the corresponding
+`cloudflare.agents.tool_context.weather.*` attributes.
+
+For AI SDK v7, configure the allowlists per call through the SDK's native
+telemetry options. The SDK filters the context before the adapter receives it:
+
+```ts
+await generateText({
+  model,
+  prompt: "Will I need an umbrella?",
+  runtimeContext: { requestId: "req-123", tenantId: "tenant-42" },
+  toolsContext: {
+    weather: { defaultUnit: "celsius", cacheHit: true }
+  },
+  telemetry: {
+    includeRuntimeContext: ["requestId", "tenantId"],
+    includeToolsContext: {
+      weather: ["defaultUnit", "cacheHit"]
+    }
+  }
+});
+```
 
 ### Not instrumented
 

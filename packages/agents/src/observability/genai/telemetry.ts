@@ -29,8 +29,6 @@ export type RequestSummary = {
 
 /** Canonical output summary shape used by model adapters. */
 export type OutputSummary = {
-  readonly embeddingCount?: number | undefined;
-  readonly embeddingDimensions?: number | undefined;
   readonly hasObject?: boolean | undefined;
   readonly hasText?: boolean | undefined;
   readonly toolCallCount?: number | undefined;
@@ -303,10 +301,6 @@ export function finishAttributes(input: {
   return {
     [TraceAttribute.GenAI.ResponseTimeToFirstChunk]:
       input.timeToFirstChunkSeconds,
-    [TraceAttribute.Cloudflare.EmbeddingCount]:
-      input.outputSummary?.embeddingCount,
-    [TraceAttribute.GenAI.EmbeddingsDimensionCount]:
-      input.outputSummary?.embeddingDimensions,
     [TraceAttribute.Cloudflare.OutputHasObject]: input.outputSummary?.hasObject,
     [TraceAttribute.Cloudflare.OutputHasText]: input.outputSummary?.hasText,
     [TraceAttribute.Cloudflare.ResponseFinishReason]: input.finishReason,

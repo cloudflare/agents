@@ -21,14 +21,8 @@ export function wrapAISDK<T extends Record<string, unknown>>(
  * Creates an AI SDK v7 telemetry adapter for use with `registerTelemetry` or
  * per-call telemetry configuration.
  */
-export function createAISDKTelemetry(
-  options: AISDKInstrumentationOptions = {}
-): AISDKV7Telemetry {
-  return createAISDKV7Telemetry({
-    options,
-    tracer
-  });
+export function createAISDKTelemetry(): AISDKV7Telemetry {
+  return createAISDKV7Telemetry({ tracer });
 }
 
 export type { AISDKInstrumentationOptions } from "./options";
-export type { AISDKV7Telemetry } from "./v7/types";

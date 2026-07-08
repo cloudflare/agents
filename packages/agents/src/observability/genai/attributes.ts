@@ -10,7 +10,6 @@
 export const TraceAttribute = {
   Cloudflare: {
     CallID: "cloudflare.agents.call.id",
-    EmbeddingCount: "cloudflare.agents.embedding.count",
     IntegrationName: "cloudflare.agents.integration.name",
     MetadataPrefix: "cloudflare.agents.metadata.",
     OperationName: "cloudflare.agents.operation.name",
@@ -38,7 +37,6 @@ export const TraceAttribute = {
     AgentName: "gen_ai.agent.name",
     AgentVersion: "gen_ai.agent.version",
     ConversationID: "gen_ai.conversation.id",
-    EmbeddingsDimensionCount: "gen_ai.embeddings.dimension.count",
     OperationName: "gen_ai.operation.name",
     OperationNameValueChat: "chat",
     OperationNameValueExecuteTool: "execute_tool",

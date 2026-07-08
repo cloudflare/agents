@@ -1,8 +1,6 @@
 /** Common AI SDK v7 telemetry callback options this adapter reads. */
 export type AISDKV7TelemetryOptions = {
   readonly functionId?: string | undefined;
-  readonly recordInputs?: boolean | undefined;
-  readonly recordOutputs?: boolean | undefined;
 };
 
 /** AI SDK v7 operation lifecycle event shape consumed by this adapter. */
