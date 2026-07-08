@@ -48,11 +48,18 @@ export type SpanSpec = {
 
 /**
  * Builds a semconv-formula span name (`"{operation} {target}"`), falling back
- * to the bare operation when the target is unavailable. The stable query key
- * is always `gen_ai.operation.name`, never the span name.
+ * to the bare operation when the target is unavailable or the combined name
+ * exceeds the Workers Observability 64 UTF-8-byte budget. The full target
+ * remains available as an attribute; the stable query key is always
+ * `gen_ai.operation.name`, never the span name.
  */
 function spanName(operation: string, target: string | undefined): string {
-  return target ? `${operation} ${target}` : operation;
+  if (!target) {
+    return operation;
+  }
+
+  const name = `${operation} ${target}`;
+  return new TextEncoder().encode(name).length <= 64 ? name : operation;
 }
 
 /**

@@ -1030,7 +1030,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(tracing.rootSpans[0]?.ended).toBe(true);
   });
 
-  it("keeps long agent names in the semconv span-name formula", async () => {
+  it("falls back to the bare operation when the span name exceeds 64 bytes", async () => {
     const tracing = new RecordingTracer();
     const agentName = "a".repeat(65);
     const ai: AISDKV6Namespace = {
@@ -1042,7 +1042,7 @@ describe("createAISDKV6Wrapper", () => {
       prompt: "hello"
     });
 
-    expect(tracing.rootSpans[0]?.name).toBe(`invoke_agent ${agentName}`);
+    expect(tracing.rootSpans[0]?.name).toBe("invoke_agent");
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "gen_ai.agent.name": agentName,
       "gen_ai.operation.name": "invoke_agent"

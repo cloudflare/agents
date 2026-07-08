@@ -290,8 +290,10 @@ const { generateText, streamText } = wrapAISDK(ai);
 ```
 
 `wrapAISDK` instruments `generateText`, `streamText`, `generateObject`, and
-`streamObject`. A model object is wrapped with the SDK's `wrapLanguageModel`
-helper, so provider work is a `chat {model}` child of the operation span. Tool
+`streamObject`. Span names use `{operation} {target}` and fall back to the bare
+operation past 64 UTF-8 bytes; the full target remains on its semantic
+attribute. A model object is wrapped with the SDK's `wrapLanguageModel` helper,
+so provider work is a `chat {model}` child of the operation span. Tool
 execution is wrapped as `execute_tool {tool}`. Stream spans close on completion,
 cancellation, an in-band error, or early consumer return. Async-generator tools
 stay open until iteration ends.
