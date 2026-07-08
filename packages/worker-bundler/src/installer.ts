@@ -11,7 +11,6 @@ import type { FileSystem } from "./file-system";
 import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
-const PY_REGISTRY = "https://files.pythonhosted.org";
 const PYPI_JSON_API = "https://pypi.org/pypi";
 const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
@@ -58,7 +57,7 @@ interface PackageJson {
 
 // Deliberately keeping this minimal
 interface PyprojectToml {
-  project: {
+  project?: {
     name: string;
     version: string;
     dependencies?: string[];
@@ -208,7 +207,7 @@ export async function installDependencies(
           fileSystem,
           installedPackages,
           inProgress,
-          PY_REGISTRY
+          PYPI_JSON_API //hardcoding this for now to keep the implementation light
         )
       )
     );
@@ -328,8 +327,8 @@ async function installPythonPackage(
   result: InstallResult,
   fileSystem: FileSystem,
   installedPackages: Map<string, string>,
-  inProgress: Map<string, Promise<void>>
-  //registry: string //Use hardcoded registries for minimal implementation
+  inProgress: Map<string, Promise<void>>,
+  registry: string
 ): Promise<void> {
   // Skip if already installed in this run
   if (installedPackages.has(name)) {
@@ -353,7 +352,7 @@ async function installPythonPackage(
       // The JS impl. does the metadata part in another function, consider moving it if this gets too long
       // Fetch package metadata from PyPI JSON API
       const metadataResponse = await fetchWithTimeout(
-        `${PYPI_JSON_API}/${name}/json`
+        `${registry}/${name}/json`
       );
       if (!metadataResponse.ok) {
         const hint =
