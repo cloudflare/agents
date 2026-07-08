@@ -63,6 +63,13 @@ const SPEECH_MODEL = "universal-3-5-pro";
 
 const DEFAULT_BASE_URL = "wss://streaming.assemblyai.com/v3/ws";
 
+/**
+ * Integration attribution, in the format AssemblyAI's SDKs use
+ * (`AssemblyAI/1.0 (key=value …)`), so usage from this provider is
+ * identifiable server-side.
+ */
+const USER_AGENT = "AssemblyAI/1.0 (integration=Cloudflare-Agents)";
+
 /** Server-side cap on `prompt` and `agent_context` (characters). */
 const MAX_PROMPT_CHARS = 1750;
 
@@ -353,7 +360,8 @@ class AssemblyAISession implements TranscriberSession {
         headers: {
           Upgrade: "websocket",
           // AssemblyAI Streaming v3 takes the raw API key — no Bearer/Token prefix.
-          Authorization: this.#providerOpts.apiKey
+          Authorization: this.#providerOpts.apiKey,
+          "User-Agent": USER_AGENT
         }
       });
 

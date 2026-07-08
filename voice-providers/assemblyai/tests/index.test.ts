@@ -391,6 +391,10 @@ describe("AssemblyAISession — connect", () => {
     // Raw key — no Bearer or Token prefix.
     expect(headers?.Authorization).not.toMatch(/^Bearer /);
     expect(headers?.Authorization).not.toMatch(/^Token /);
+    // Integration attribution in AssemblyAI's user-agent format.
+    expect(headers?.["User-Agent"]).toBe(
+      "AssemblyAI/1.0 (integration=Cloudflare-Agents)"
+    );
 
     expect(ws.accept).toHaveBeenCalledTimes(1);
   });
