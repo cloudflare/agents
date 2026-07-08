@@ -1,13 +1,22 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { Agent } from "../../index";
 import { MCPClientManager } from "../../mcp/client";
 import {
+  registerMCPClientManagerHost,
+  type MCPClientManagerHost
+} from "../../mcp/client-host";
+import {
   MCPClientConnection,
-  type MCPConnectionState
+  MCPConnectionState
 } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
+import {
+  DurableObjectOAuthClientProvider,
+  type AgentMcpOAuthProvider
+} from "../../mcp/do-oauth-client-provider";
 import { nanoid } from "nanoid";
 
 function createMockStateStorage() {
@@ -27,6 +36,36 @@ function createMockStateStorage() {
       return `${nonce}.${serverId}`;
     }
   };
+}
+
+function createHostOwner(host: MCPClientManagerHost): Agent {
+  const owner = {};
+  registerMCPClientManagerHost(owner, host);
+  return owner as Agent;
+}
+
+function createManagerOwner(
+  storage: DurableObjectStorage,
+  createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider
+): Agent {
+  return createHostOwner({
+    storage,
+    getAgentClassName: () => "TestAgent",
+    getAgentInstanceName: () => "test-client",
+    getEnv: () => ({}),
+    getRequestContext: () => ({}),
+    getSendIdentityOnConnect: () => true,
+    createAuthProvider:
+      createAuthProvider ??
+      ((callbackUrl) =>
+        new DurableObjectOAuthClientProvider(
+          storage,
+          "test-client",
+          callbackUrl
+        )),
+    publishState: () => {},
+    emitObservability: () => {}
+  });
 }
 
 function createDeferred<T>() {
@@ -111,6 +150,254 @@ class TestMCPClientManager extends MCPClientManager {
     (this as unknown as HasTrackConnection)._trackConnection(serverId, promise);
   }
 }
+
+describe("MCPClientManager lifecycle construction", () => {
+  it("accepts an Agent host without reading lazy identity during construction", () => {
+    let identityReads = 0;
+    const storage = {
+      sql: {
+        exec() {
+          return [];
+        }
+      }
+    } as unknown as DurableObjectStorage;
+    const host: MCPClientManagerHost = {
+      storage,
+      getAgentClassName: () => "TestAgent",
+      getAgentInstanceName() {
+        identityReads += 1;
+        return "test-instance";
+      },
+      getEnv: () => ({}),
+      getRequestContext: () => ({}),
+      getSendIdentityOnConnect: () => true,
+      createAuthProvider: () => {
+        throw new Error("not used");
+      },
+      publishState: () => {},
+      emitObservability: () => {}
+    };
+    const owner = createHostOwner(host);
+
+    const manager = new MCPClientManager(owner, {
+      name: "test-client",
+      version: "1.0.0"
+    });
+
+    expect(manager).toBeInstanceOf(MCPClientManager);
+    expect(identityReads).toBe(0);
+  });
+
+  it("owns schema creation and connection restoration during startup", async () => {
+    const queries: string[] = [];
+    const storage = {
+      sql: {
+        exec(query: string) {
+          queries.push(query);
+          return [];
+        }
+      }
+    } as unknown as DurableObjectStorage;
+    const publishState = vi.fn();
+    const host: MCPClientManagerHost = {
+      storage,
+      getAgentClassName: () => "TestAgent",
+      getAgentInstanceName: () => "test-instance",
+      getEnv: () => ({}),
+      getRequestContext: () => ({}),
+      getSendIdentityOnConnect: () => true,
+      createAuthProvider: () => {
+        throw new Error("not used");
+      },
+      publishState,
+      emitObservability: () => {}
+    };
+    const manager = new MCPClientManager(createHostOwner(host), {
+      name: "test-client",
+      version: "1.0.0"
+    });
+    const restore = vi
+      .spyOn(manager, "restoreConnectionsFromStorage")
+      .mockResolvedValue(undefined);
+
+    await manager.onStart({ props: undefined });
+
+    expect(
+      queries.some((query) => query.includes("cf_agents_mcp_servers"))
+    ).toBe(true);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(publishState).toHaveBeenCalledWith(manager.getMcpServers());
+  });
+
+  it("handles OAuth callbacks before the Agent request handler", async () => {
+    const storage = {
+      sql: { exec: () => [] }
+    } as unknown as DurableObjectStorage;
+    const publishState = vi.fn();
+    const host: MCPClientManagerHost = {
+      storage,
+      getAgentClassName: () => "TestAgent",
+      getAgentInstanceName: () => "test-instance",
+      getEnv: () => ({}),
+      getRequestContext: () => ({}),
+      getSendIdentityOnConnect: () => true,
+      createAuthProvider: () => {
+        throw new Error("not used");
+      },
+      publishState,
+      emitObservability: () => {}
+    };
+    const manager = new MCPClientManager(createHostOwner(host), {
+      name: "test-client",
+      version: "1.0.0"
+    });
+    vi.spyOn(manager, "isCallbackRequest").mockReturnValue(true);
+    vi.spyOn(manager, "handleCallbackRequest").mockResolvedValue({
+      serverId: "server",
+      authSuccess: true
+    });
+    const establish = vi
+      .spyOn(manager, "establishConnection")
+      .mockResolvedValue(undefined);
+    const request = new Request("https://agent.example/callback?code=secret");
+
+    const response = await manager.onRequest({ request });
+
+    expect(response?.status).toBe(302);
+    expect(response?.headers.get("location")).toBe("https://agent.example/");
+    expect(establish).toHaveBeenCalledWith("server");
+    expect(publishState).toHaveBeenCalledWith(manager.getMcpServers());
+  });
+
+  it("owns HTTP server registration in host mode", async () => {
+    const storage = {
+      sql: { exec: () => [] }
+    } as unknown as DurableObjectStorage;
+    const host: MCPClientManagerHost = {
+      storage,
+      getAgentClassName: () => "TestAgent",
+      getAgentInstanceName: () => "test-instance",
+      getEnv: () => ({}),
+      getRequestContext: () => ({
+        request: new Request("https://agent.example/chat")
+      }),
+      getSendIdentityOnConnect: () => true,
+      createAuthProvider: () =>
+        createMockAuthProvider(createMockStateStorage()),
+      publishState: () => {},
+      emitObservability: () => {}
+    };
+    const manager = new MCPClientManager(createHostOwner(host), {
+      name: "test-client",
+      version: "1.0.0"
+    });
+    const register = vi
+      .spyOn(manager, "registerServer")
+      .mockResolvedValue("github");
+    vi.spyOn(manager, "connectToServer").mockResolvedValue({
+      state: MCPConnectionState.CONNECTED
+    });
+    vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+      success: true,
+      state: MCPConnectionState.READY
+    });
+
+    const result = await manager.addMcpServer(
+      "GitHub",
+      "https://mcp.example.com",
+      { id: "github" }
+    );
+
+    expect(result).toEqual({ id: "github", state: MCPConnectionState.READY });
+    expect(register).toHaveBeenCalledWith(
+      "github",
+      expect.objectContaining({
+        callbackUrl:
+          "https://agent.example/agents/test-agent/test-instance/callback",
+        name: "GitHub",
+        url: "https://mcp.example.com/"
+      })
+    );
+  });
+
+  it("closes lifecycle resources and removes its schema during explicit Agent destruction", async () => {
+    const queries: string[] = [];
+    const storage = {
+      sql: {
+        exec(query: string) {
+          queries.push(query);
+          return [];
+        }
+      }
+    } as unknown as DurableObjectStorage;
+    const host: MCPClientManagerHost = {
+      storage,
+      getAgentClassName: () => "TestAgent",
+      getAgentInstanceName: () => "test-instance",
+      getEnv: () => ({}),
+      getRequestContext: () => ({}),
+      getSendIdentityOnConnect: () => true,
+      createAuthProvider: () => {
+        throw new Error("not used");
+      },
+      publishState: () => {},
+      emitObservability: () => {}
+    };
+    const manager = new MCPClientManager(createHostOwner(host), {
+      name: "test-client",
+      version: "1.0.0"
+    });
+    const close = vi
+      .spyOn(manager, "closeAllConnections")
+      .mockResolvedValue(undefined);
+
+    await manager.onDestroy({});
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(
+      queries.some((query) =>
+        query.includes("DROP TABLE IF EXISTS cf_agents_mcp_servers")
+      )
+    ).toBe(true);
+  });
+
+  it("waits for requested readiness and contributes MCP tools to a turn", async () => {
+    const storage = {
+      sql: { exec: () => [] }
+    } as unknown as DurableObjectStorage;
+    const host: MCPClientManagerHost = {
+      storage,
+      getAgentClassName: () => "TestAgent",
+      getAgentInstanceName: () => "test-instance",
+      getEnv: () => ({}),
+      getRequestContext: () => ({}),
+      getSendIdentityOnConnect: () => true,
+      createAuthProvider: () => {
+        throw new Error("not used");
+      },
+      publishState: () => {},
+      emitObservability: () => {}
+    };
+    const manager = new MCPClientManager(createHostOwner(host), {
+      name: "test-client",
+      version: "1.0.0"
+    });
+    const tools = { tool_server_search: { execute: vi.fn() } };
+    const wait = vi
+      .spyOn(manager, "waitForConnections")
+      .mockResolvedValue(undefined);
+    vi.spyOn(manager, "getAITools").mockReturnValue(
+      tools as unknown as ReturnType<MCPClientManager["getAITools"]>
+    );
+
+    const contribution = await manager.onTurn({
+      readiness: { timeout: 1000 }
+    });
+
+    expect(wait).toHaveBeenCalledWith({ timeout: 1000 });
+    expect(contribution).toEqual({ tools });
+  });
+});
 
 describe("MCPClientManager OAuth Integration", () => {
   let manager: TestMCPClientManager;
@@ -209,8 +496,9 @@ describe("MCPClientManager OAuth Integration", () => {
       }
     } as unknown as DurableObjectStorage;
 
-    manager = new TestMCPClientManager("test-client", "1.0.0", {
-      storage: mockDOStorage
+    manager = new TestMCPClientManager(createManagerOwner(mockDOStorage), {
+      name: "test-client",
+      version: "1.0.0"
     });
   });
 
@@ -1620,7 +1908,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Spy on connectToServer - should NOT be called when auth_url is set
       const connectSpy = vi.spyOn(manager, "connectToServer");
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Verify connection was created but connectToServer was NOT called
       // (auth_url means OAuth flow is in progress, so we skip connection attempt)
@@ -1662,7 +1950,7 @@ describe("MCPClientManager OAuth Integration", () => {
         state: "connected"
       });
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Verify connection was registered and connected
       const connection = manager.mcpConnections[serverId];
@@ -1673,7 +1961,7 @@ describe("MCPClientManager OAuth Integration", () => {
     });
 
     it("should handle empty server list gracefully", async () => {
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Should not throw and should have no connections
       expect(Object.keys(manager.mcpConnections)).toHaveLength(0);
@@ -1719,7 +2007,7 @@ describe("MCPClientManager OAuth Integration", () => {
         return { state: "connected" };
       });
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Verify OAuth server is in authenticating state
       expect(manager.mcpConnections["oauth-server"]).toBeDefined();
@@ -3167,7 +3455,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const connectSpy = vi.spyOn(manager, "connectToServer");
 
       // Restore connections
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Verify connection was NOT recreated
       expect(manager.mcpConnections[serverId]).toBe(existingConnection);
@@ -3201,7 +3489,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       const connectSpy = vi.spyOn(manager, "connectToServer");
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Should not recreate - let existing flow complete
       expect(manager.mcpConnections[serverId]).toBe(existingConnection);
@@ -3235,7 +3523,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       const connectSpy = vi.spyOn(manager, "connectToServer");
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Should not recreate - OAuth flow in progress
       expect(manager.mcpConnections[serverId]).toBe(existingConnection);
@@ -3268,7 +3556,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       const connectSpy = vi.spyOn(manager, "connectToServer");
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       expect(manager.mcpConnections[serverId]).toBe(existingConnection);
       expect(connectSpy).not.toHaveBeenCalledWith(serverId);
@@ -3306,7 +3594,7 @@ describe("MCPClientManager OAuth Integration", () => {
         state: "connected"
       });
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Should have created a new connection (different object)
       // The old failed connection should have been replaced
@@ -3333,11 +3621,11 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       // First restoration
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
       const firstConnection = manager.mcpConnections[serverId];
 
       // Second restoration (should be no-op)
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
       const secondConnection = manager.mcpConnections[serverId];
 
       // Should be the same connection
@@ -3373,7 +3661,7 @@ describe("MCPClientManager OAuth Integration", () => {
         .spyOn(manager, "connectToServer")
         .mockResolvedValue({ state: "connected" });
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Verify connection was created and connectToServer was called
       const conn = manager.mcpConnections[serverId];
@@ -3399,7 +3687,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Spy on connectToServer - should NOT be called
       const connectSpy = vi.spyOn(manager, "connectToServer");
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       const conn = manager.mcpConnections[serverId];
       expect(conn).toBeDefined();
@@ -3429,16 +3717,16 @@ describe("MCPClientManager OAuth Integration", () => {
       const mockProvider = createMockAuthProvider(createMockStateStorage());
       const factory = vi.fn().mockReturnValue(mockProvider);
 
-      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
-        createAuthProvider: factory
-      });
+      const factoryManager = new TestMCPClientManager(
+        createManagerOwner(manager["_storage"], factory),
+        { name: "test-client", version: "1.0.0" }
+      );
 
       vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
         state: "connected"
       });
 
-      await factoryManager.restoreConnectionsFromStorage("test-agent");
+      await factoryManager.restoreConnectionsFromStorage();
 
       expect(factory).toHaveBeenCalledWith(callbackUrl);
       const conn = factoryManager.mcpConnections[serverId];
@@ -3464,16 +3752,16 @@ describe("MCPClientManager OAuth Integration", () => {
       const mockProvider = createMockAuthProvider(createMockStateStorage());
       const factory = vi.fn().mockReturnValue(mockProvider);
 
-      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
-        createAuthProvider: factory
-      });
+      const factoryManager = new TestMCPClientManager(
+        createManagerOwner(manager["_storage"], factory),
+        { name: "test-client", version: "1.0.0" }
+      );
 
       vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
         state: "connected"
       });
 
-      await factoryManager.restoreConnectionsFromStorage("test-agent");
+      await factoryManager.restoreConnectionsFromStorage();
 
       expect(mockProvider.serverId).toBe(serverId);
       expect(mockProvider.clientId).toBe(clientId);
@@ -3497,7 +3785,7 @@ describe("MCPClientManager OAuth Integration", () => {
         state: "connected"
       });
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       const conn = manager.mcpConnections[serverId];
       expect(conn).toBeDefined();
@@ -3523,12 +3811,12 @@ describe("MCPClientManager OAuth Integration", () => {
       const mockProvider = createMockAuthProvider(createMockStateStorage());
       const factory = vi.fn().mockReturnValue(mockProvider);
 
-      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
-        createAuthProvider: factory
-      });
+      const factoryManager = new TestMCPClientManager(
+        createManagerOwner(manager["_storage"], factory),
+        { name: "test-client", version: "1.0.0" }
+      );
 
-      await factoryManager.restoreConnectionsFromStorage("test-agent");
+      await factoryManager.restoreConnectionsFromStorage();
 
       expect(factory).toHaveBeenCalledWith(callbackUrl);
       const conn = factoryManager.mcpConnections[serverId];
@@ -3555,10 +3843,10 @@ describe("MCPClientManager OAuth Integration", () => {
       const mockProvider = createMockAuthProvider(createMockStateStorage());
       const factory = vi.fn().mockReturnValue(mockProvider);
 
-      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
-        createAuthProvider: factory
-      });
+      const factoryManager = new TestMCPClientManager(
+        createManagerOwner(manager["_storage"], factory),
+        { name: "test-client", version: "1.0.0" }
+      );
 
       // Pre-populate with a failed connection
       const failedConnection = new MCPClientConnection(
@@ -3574,7 +3862,7 @@ describe("MCPClientManager OAuth Integration", () => {
         state: "connected"
       });
 
-      await factoryManager.restoreConnectionsFromStorage("test-agent");
+      await factoryManager.restoreConnectionsFromStorage();
 
       expect(factory).toHaveBeenCalledWith(callbackUrl);
       expect(factoryManager.mcpConnections[serverId]).not.toBe(
@@ -3613,16 +3901,16 @@ describe("MCPClientManager OAuth Integration", () => {
         .mockReturnValueOnce(mockProvider1)
         .mockReturnValueOnce(mockProvider2);
 
-      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
-        createAuthProvider: factory
-      });
+      const factoryManager = new TestMCPClientManager(
+        createManagerOwner(manager["_storage"], factory),
+        { name: "test-client", version: "1.0.0" }
+      );
 
       vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
         state: "connected"
       });
 
-      await factoryManager.restoreConnectionsFromStorage("test-agent");
+      await factoryManager.restoreConnectionsFromStorage();
 
       expect(factory).toHaveBeenCalledTimes(2);
       expect(factory).toHaveBeenCalledWith(callbackUrl1);
@@ -3757,7 +4045,7 @@ describe("MCPClientManager OAuth Integration", () => {
         .mockResolvedValue({ state: "connected" });
 
       // Simulate DO restart - restore connections
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Verify connection exists and was connected
       const conn = manager.mcpConnections[serverId];
@@ -3785,7 +4073,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const connectSpy = vi.spyOn(manager, "connectToServer");
 
       // Restore connections
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       const conn = manager.mcpConnections[serverId];
       expect(conn).toBeDefined();
@@ -4480,7 +4768,7 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       // Restore — this fires _restoreServer in the background via _trackConnection
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // waitForConnections should resolve (the restore attempt will fail since
       // there's no real server, but _trackConnection captures the promise
@@ -4505,7 +4793,7 @@ describe("MCPClientManager OAuth Integration", () => {
         server_options: null
       });
 
-      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.restoreConnectionsFromStorage();
 
       // Should resolve immediately — auth_url servers are set to authenticating
       // and are NOT tracked as pending connections

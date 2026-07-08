@@ -1,4 +1,5 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
@@ -9,6 +10,7 @@ import type {
   ReadResourceRequest,
   Resource,
   ResourceTemplate,
+  ServerCapabilities,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
@@ -23,11 +25,25 @@ import {
   type MCPTransportOptions
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
+import { camelCaseToKebabCase } from "../utils";
 import { RPC_DO_PREFIX } from "./rpc";
 import type { TransportType } from "./types";
 import type { MCPServerRow } from "./client-storage";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
-import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
+import type {
+  AgentDestroyContext,
+  AgentLifecycle,
+  AgentRequestContext,
+  AgentStartContext,
+  AgentTurnContext,
+  AgentTurnContribution
+} from "../agent/lifecycle";
+import {
+  getMCPClientManagerHost,
+  type MCPClientManagerHost
+} from "./client-host";
+import type { Agent } from "../index";
+import type { McpAgent } from ".";
 
 const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
   jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
@@ -50,6 +66,41 @@ export type MCPAITool = {
  * `agents` declaration graph.
  */
 export type MCPAIToolSet = Record<string, MCPAITool>;
+
+export type MCPServer = {
+  name: string;
+  server_url: string;
+  auth_url: string | null;
+  state: MCPConnectionState;
+  /** May contain untrusted content from external OAuth providers. Escape appropriately for your output context. */
+  error: string | null;
+  instructions: string | null;
+  capabilities: ServerCapabilities | null;
+};
+
+export type MCPServersState = {
+  servers: Record<string, MCPServer>;
+  tools: (Tool & { serverId: string })[];
+  prompts: (Prompt & { serverId: string })[];
+  resources: (Resource & { serverId: string })[];
+};
+
+/** Maximum length for error strings exposed to clients. */
+const MAX_ERROR_STRING_LENGTH = 500;
+const CONTROL_CHAR_RE = new RegExp(
+  // oxlint-disable-next-line no-control-regex -- intentionally matching control characters
+  "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]",
+  "g"
+);
+
+function sanitizeErrorString(error: string | null): string | null {
+  if (error === null) return null;
+  let sanitized = error.replace(CONTROL_CHAR_RE, "");
+  if (sanitized.length > MAX_ERROR_STRING_LENGTH) {
+    sanitized = `${sanitized.substring(0, MAX_ERROR_STRING_LENGTH)}...`;
+  }
+  return sanitized;
+}
 
 /** Maximum length of a normalized MCP server id. */
 export const MCP_SERVER_ID_MAX_LENGTH = 64;
@@ -308,9 +359,30 @@ export type MCPClientOAuthResult =
       authError: string;
     };
 
+/** Options for an Agent-owned MCP client manager. */
 export type MCPClientManagerOptions = {
-  storage: DurableObjectStorage;
-  createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
+  name: string;
+  version: string;
+};
+
+/** Options for adding an HTTP MCP server. */
+export type AddMcpServerOptions = {
+  id?: string;
+  callbackHost?: string;
+  callbackPath?: string;
+  agentsPrefix?: string;
+  client?: ConstructorParameters<typeof Client>[1];
+  transport?: {
+    headers?: HeadersInit;
+    type?: TransportType;
+  };
+  retry?: RetryOptions;
+};
+
+/** Options for adding an MCP server backed by a Durable Object binding. */
+export type AddRpcMcpServerOptions = {
+  id?: string;
+  props?: Record<string, unknown>;
 };
 
 /**
@@ -329,15 +401,16 @@ export type MCPServerFilter = {
 /**
  * Utility class that aggregates multiple MCP clients into one
  */
-export class MCPClientManager {
+export class MCPClientManager implements AgentLifecycle {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
-  private _storage: DurableObjectStorage;
-  private _createAuthProviderFn?: (
-    callbackUrl: string
-  ) => AgentMcpOAuthProvider;
+  private _hostDisposables?: DisposableStore;
+  private readonly _storage: DurableObjectStorage;
+  private readonly _name: string;
+  private readonly _version: string;
+  private readonly _host: MCPClientManagerHost;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
 
@@ -355,23 +428,168 @@ export class MCPClientManager {
   public readonly onServerStateChanged: Event<void> =
     this._onServerStateChanged.event;
 
-  /**
-   * @param _name Name of the MCP client
-   * @param _version Version of the MCP Client
-   * @param options Storage adapter for persisting MCP server state
-   */
-  constructor(
-    private _name: string,
-    private _version: string,
-    options: MCPClientManagerOptions
-  ) {
-    if (!options.storage) {
-      throw new Error(
-        "MCPClientManager requires a valid DurableObjectStorage instance"
-      );
+  /** Construct an Agent lifecycle component. */
+  constructor(owner: Agent, options: MCPClientManagerOptions) {
+    const host = getMCPClientManagerHost(owner);
+    if (!host) {
+      throw new Error("MCPClientManager owner is not an Agent lifecycle host");
     }
-    this._storage = options.storage;
-    this._createAuthProviderFn = options.createAuthProvider;
+    this._host = host;
+    this._name = options.name;
+    this._version = options.version;
+    this._storage = host.storage;
+    this.ensureSchema();
+  }
+
+  async onStart(_context: AgentStartContext): Promise<void> {
+    const host = this._host;
+    this.ensureSchema();
+
+    this._hostDisposables?.dispose();
+    this._hostDisposables = new DisposableStore();
+    this._hostDisposables.add(
+      this.onServerStateChanged(() => {
+        host.publishState(this.getMcpServers());
+      })
+    );
+    this._hostDisposables.add(
+      this.onObservabilityEvent((event) => {
+        host.emitObservability(event);
+      })
+    );
+
+    await this.restoreConnectionsFromStorage();
+    await this.restoreRpcServers();
+    host.publishState(this.getMcpServers());
+  }
+
+  async onRequest(context: AgentRequestContext): Promise<Response | undefined> {
+    if (!this.isCallbackRequest(context.request)) return undefined;
+
+    const host = this._host;
+    const result = await this.handleCallbackRequest(context.request);
+    if (result.authSuccess) {
+      this.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
+          error
+        );
+      });
+    }
+    host.publishState(this.getMcpServers());
+    return this.oauthCallbackResponse(result, context.request);
+  }
+
+  async onTurn(context: AgentTurnContext): Promise<AgentTurnContribution> {
+    if (context.readiness) {
+      await this.waitForConnections(context.readiness);
+    }
+    return context.includeTools === false ? {} : { tools: this.getAITools() };
+  }
+
+  async onDestroy(_context: AgentDestroyContext): Promise<void> {
+    this._hostDisposables?.dispose();
+    this._hostDisposables = undefined;
+    await this.dispose();
+    this.sql("DROP TABLE IF EXISTS cf_agents_mcp_servers");
+  }
+
+  private oauthCallbackResponse(
+    result: MCPClientOAuthResult,
+    request: Request
+  ): Response {
+    const config = this.getOAuthCallbackConfig();
+    if (config?.customHandler) return config.customHandler(result);
+
+    const baseOrigin = new URL(request.url).origin;
+    if (config?.successRedirect && result.authSuccess) {
+      try {
+        return Response.redirect(
+          new URL(config.successRedirect, baseOrigin).href
+        );
+      } catch (error) {
+        console.error(
+          "Invalid successRedirect URL:",
+          config.successRedirect,
+          error
+        );
+        return Response.redirect(baseOrigin);
+      }
+    }
+
+    if (config?.errorRedirect && !result.authSuccess) {
+      try {
+        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
+          result.authError || "Unknown error"
+        )}`;
+        return Response.redirect(new URL(errorUrl, baseOrigin).href);
+      } catch (error) {
+        console.error(
+          "Invalid errorRedirect URL:",
+          config.errorRedirect,
+          error
+        );
+        return Response.redirect(baseOrigin);
+      }
+    }
+
+    return Response.redirect(baseOrigin);
+  }
+
+  private async restoreRpcServers(): Promise<void> {
+    const host = this._host;
+    const rpcServers = this.getRpcServersFromStorage();
+    for (const server of rpcServers) {
+      if (this.mcpConnections[server.id]) continue;
+
+      const options: { bindingName: string; props?: Record<string, unknown> } =
+        server.server_options ? JSON.parse(server.server_options) : {};
+      const namespace = host.getEnv()[options.bindingName] as
+        | DurableObjectNamespace
+        | undefined;
+      if (!namespace) {
+        console.warn(
+          `[Agent] Cannot restore RPC MCP server "${server.name}": binding "${options.bindingName}" not found in env`
+        );
+        continue;
+      }
+
+      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
+      try {
+        await this.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
+          reconnect: { id: server.id },
+          transport: {
+            type: "rpc",
+            namespace,
+            name: normalizedName,
+            props: options.props
+          } as MCPTransportOptions
+        });
+        const connection = this.mcpConnections[server.id];
+        if (connection?.connectionState === MCPConnectionState.CONNECTED) {
+          await this.discoverIfConnected(server.id);
+        }
+      } catch (error) {
+        console.error(
+          `[Agent] Error restoring RPC MCP server "${server.name}":`,
+          error
+        );
+      }
+    }
+  }
+
+  private ensureSchema(): void {
+    this.sql(`
+          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            server_url TEXT NOT NULL,
+            callback_url TEXT NOT NULL,
+            client_id TEXT,
+            auth_url TEXT,
+            server_options TEXT
+          )
+        `);
   }
 
   // SQL helper - runs a query and returns results as array
@@ -714,33 +932,6 @@ export class MCPClientManager {
   }
 
   /**
-   * Create an auth provider for a server
-   * @internal
-   */
-  private createAuthProvider(
-    serverId: string,
-    callbackUrl: string,
-    clientName: string,
-    clientId?: string
-  ): AgentMcpOAuthProvider {
-    if (!this._storage) {
-      throw new Error(
-        "Cannot create auth provider: storage is not initialized"
-      );
-    }
-    const authProvider = new DurableObjectOAuthClientProvider(
-      this._storage,
-      clientName,
-      callbackUrl
-    );
-    authProvider.serverId = serverId;
-    if (clientId) {
-      authProvider.clientId = clientId;
-    }
-    return authProvider;
-  }
-
-  /**
    * Get saved RPC servers from storage (servers with rpc:// URLs).
    * These are restored separately by the Agent class since they need env bindings.
    */
@@ -779,9 +970,8 @@ export class MCPClientManager {
    * RPC servers (rpc:// URLs) are skipped here -- they are restored by the Agent class
    * which has access to env bindings.
    *
-   * @param clientName Name to use for OAuth client (typically the agent instance name)
    */
-  async restoreConnectionsFromStorage(clientName: string): Promise<void> {
+  async restoreConnectionsFromStorage(): Promise<void> {
     if (this._isRestored) {
       return;
     }
@@ -840,14 +1030,7 @@ export class MCPClientManager {
 
       let authProvider: AgentMcpOAuthProvider | undefined;
       if (server.callback_url) {
-        authProvider = this._createAuthProviderFn
-          ? this._createAuthProviderFn(server.callback_url)
-          : this.createAuthProvider(
-              server.id,
-              server.callback_url,
-              clientName,
-              server.client_id ?? undefined
-            );
+        authProvider = this._host.createAuthProvider(server.callback_url);
         authProvider.serverId = server.id;
         if (server.client_id) {
           authProvider.clientId = server.client_id;
@@ -1782,6 +1965,285 @@ export class MCPClientManager {
     }
   }
 
+  async addMcpServer<T extends McpAgent>(
+    serverName: string,
+    binding: DurableObjectNamespace<T>,
+    options?: AddRpcMcpServerOptions
+  ): Promise<{ id: string; state: typeof MCPConnectionState.READY }>;
+  async addMcpServer(
+    serverName: string,
+    url: string,
+    callbackHostOrOptions?: string | AddMcpServerOptions,
+    agentsPrefix?: string,
+    options?: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport?: { headers?: HeadersInit; type?: TransportType };
+    }
+  ): Promise<
+    | {
+        id: string;
+        state: typeof MCPConnectionState.AUTHENTICATING;
+        authUrl: string;
+      }
+    | { id: string; state: typeof MCPConnectionState.READY }
+  >;
+  async addMcpServer<T extends McpAgent>(
+    serverName: string,
+    urlOrBinding: string | DurableObjectNamespace<T>,
+    callbackHostOrOptions?:
+      | string
+      | AddMcpServerOptions
+      | AddRpcMcpServerOptions,
+    agentsPrefix?: string,
+    legacyOptions?: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport?: { headers?: HeadersInit; type?: TransportType };
+    }
+  ): Promise<
+    | {
+        id: string;
+        state: typeof MCPConnectionState.AUTHENTICATING;
+        authUrl: string;
+      }
+    | {
+        id: string;
+        state: typeof MCPConnectionState.READY;
+        authUrl?: undefined;
+      }
+  > {
+    const host = this._host;
+    const isHttpTransport = typeof urlOrBinding === "string";
+    const normalizedUrl = isHttpTransport
+      ? new URL(urlOrBinding).href
+      : undefined;
+
+    let requestedId: string | undefined;
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null &&
+      typeof callbackHostOrOptions.id === "string"
+    ) {
+      requestedId = normalizeServerId(callbackHostOrOptions.id);
+    }
+
+    const allServers = this.listServers();
+    const existingServer = allServers.find(
+      (server) =>
+        server.name === serverName &&
+        (!isHttpTransport || new URL(server.server_url).href === normalizedUrl)
+    );
+
+    if (requestedId) {
+      const idConflict = allServers.find((server) => {
+        if (server.id !== requestedId) return false;
+        if (server.name !== serverName) return true;
+        return (
+          isHttpTransport && new URL(server.server_url).href !== normalizedUrl
+        );
+      });
+      if (idConflict) {
+        throw new Error(
+          `MCP server id "${requestedId}" is already in use by server "${idConflict.name}" (${idConflict.server_url}). ` +
+            "Stable ids must be unique per (name, url)."
+        );
+      }
+
+      if (existingServer && existingServer.id !== requestedId) {
+        await this.migrateServerId(
+          existingServer.id,
+          requestedId,
+          host.getAgentInstanceName()
+        );
+        existingServer.id = requestedId;
+      }
+    }
+
+    if (existingServer && this.mcpConnections[existingServer.id]) {
+      const connection = this.mcpConnections[existingServer.id];
+      if (
+        connection.connectionState === MCPConnectionState.AUTHENTICATING &&
+        connection.options.transport.authProvider?.authUrl
+      ) {
+        return {
+          id: existingServer.id,
+          state: MCPConnectionState.AUTHENTICATING,
+          authUrl: connection.options.transport.authProvider.authUrl
+        };
+      }
+      if (connection.connectionState === MCPConnectionState.FAILED) {
+        throw new Error(
+          `MCP server "${serverName}" is in failed state: ${connection.connectionError}`
+        );
+      }
+      return { id: existingServer.id, state: MCPConnectionState.READY };
+    }
+
+    if (typeof urlOrBinding !== "string") {
+      const rpcOptions = callbackHostOrOptions as
+        | AddRpcMcpServerOptions
+        | undefined;
+      const normalizedName = serverName.toLowerCase().replace(/\s+/g, "-");
+      const reconnectId = requestedId ?? existingServer?.id;
+      const { id } = await this.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
+        reconnect: reconnectId ? { id: reconnectId } : undefined,
+        transport: {
+          type: "rpc",
+          namespace:
+            urlOrBinding as unknown as DurableObjectNamespace<McpAgent>,
+          name: normalizedName,
+          props: rpcOptions?.props
+        }
+      });
+
+      const connection = this.mcpConnections[id];
+      if (connection?.connectionState === MCPConnectionState.CONNECTED) {
+        const discovery = await this.discoverIfConnected(id);
+        if (discovery && !discovery.success) {
+          throw new Error(
+            `Failed to discover MCP server capabilities: ${discovery.error}`
+          );
+        }
+      } else if (connection?.connectionState === MCPConnectionState.FAILED) {
+        throw new Error(
+          `Failed to connect to MCP server "${serverName}" via RPC: ${connection.connectionError}`
+        );
+      }
+
+      const bindingName = this.findBindingNameForNamespace(urlOrBinding);
+      if (bindingName) {
+        this.saveRpcServerToStorage(
+          id,
+          serverName,
+          normalizedName,
+          bindingName,
+          rpcOptions?.props
+        );
+      }
+      return { id, state: MCPConnectionState.READY };
+    }
+
+    const httpOptions = callbackHostOrOptions as
+      | string
+      | AddMcpServerOptions
+      | undefined;
+    let callbackHost: string | undefined;
+    let callbackPath: string | undefined;
+    let resolvedAgentsPrefix: string;
+    let options:
+      | {
+          client?: ConstructorParameters<typeof Client>[1];
+          transport?: { headers?: HeadersInit; type?: TransportType };
+          retry?: RetryOptions;
+        }
+      | undefined;
+
+    if (typeof httpOptions === "object" && httpOptions !== null) {
+      callbackHost = httpOptions.callbackHost;
+      callbackPath = httpOptions.callbackPath;
+      resolvedAgentsPrefix = httpOptions.agentsPrefix ?? "agents";
+      options = {
+        client: httpOptions.client,
+        transport: httpOptions.transport,
+        retry: httpOptions.retry
+      };
+    } else {
+      callbackHost = httpOptions;
+      resolvedAgentsPrefix = agentsPrefix ?? "agents";
+      options = legacyOptions;
+    }
+
+    if (!host.getSendIdentityOnConnect() && callbackHost && !callbackPath) {
+      throw new Error(
+        "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false — " +
+          "the default callback URL would expose the instance name. " +
+          "Provide a callbackPath and route the callback request to this agent via getAgentByName."
+      );
+    }
+
+    if (!callbackHost) {
+      const context = host.getRequestContext();
+      const contextUrl = context.request?.url ?? context.connectionUri;
+      if (contextUrl) {
+        const url = new URL(contextUrl);
+        callbackHost = `${url.protocol}//${url.host}`;
+      }
+    }
+
+    let callbackUrl: string | undefined;
+    if (callbackHost) {
+      const normalizedHost = callbackHost.replace(/\/$/, "");
+      callbackUrl = callbackPath
+        ? `${normalizedHost}/${callbackPath.replace(/^\//, "")}`
+        : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(host.getAgentClassName())}/${host.getAgentInstanceName()}/callback`;
+    }
+
+    const id = requestedId ?? nanoid(8);
+    let authProvider: AgentMcpOAuthProvider | undefined;
+    if (callbackUrl) {
+      authProvider = this._host.createAuthProvider(callbackUrl);
+      authProvider.serverId = id;
+    }
+
+    const transportType: TransportType = options?.transport?.type ?? "auto";
+    let headerTransportOptions: SSEClientTransportOptions = {};
+    if (options?.transport?.headers) {
+      const headers = options.transport.headers;
+      headerTransportOptions = {
+        eventSourceInit: {
+          fetch: (url, init) => fetch(url, { ...init, headers })
+        },
+        requestInit: { headers }
+      };
+    }
+
+    await this.registerServer(id, {
+      url: normalizedUrl as string,
+      name: serverName,
+      callbackUrl,
+      client: options?.client,
+      transport: {
+        ...headerTransportOptions,
+        authProvider,
+        type: transportType
+      },
+      retry: options?.retry
+    });
+
+    const result = await this.connectToServer(id);
+    if (result.state === MCPConnectionState.FAILED) {
+      throw new Error(
+        `Failed to connect to MCP server at ${normalizedUrl}: ${result.error}`
+      );
+    }
+    if (result.state === MCPConnectionState.AUTHENTICATING) {
+      if (!callbackUrl) {
+        throw new Error(
+          "This MCP server requires OAuth authentication. " +
+            "Provide callbackHost in addMcpServer options to enable the OAuth flow."
+        );
+      }
+      return { id, state: result.state, authUrl: result.authUrl };
+    }
+
+    const discovery = await this.discoverIfConnected(id);
+    if (discovery && !discovery.success) {
+      throw new Error(
+        `Failed to discover MCP server capabilities: ${discovery.error}`
+      );
+    }
+    return { id, state: MCPConnectionState.READY };
+  }
+
+  private findBindingNameForNamespace(
+    namespace: DurableObjectNamespace
+  ): string | undefined {
+    const env = this._host.getEnv();
+    for (const [name, value] of Object.entries(env)) {
+      if (value === namespace) return name;
+    }
+    return undefined;
+  }
+
   /**
    * Remove an MCP server - closes connection if active and removes from storage.
    */
@@ -1802,6 +2264,33 @@ export class MCPClientManager {
    */
   listServers(): MCPServerRow[] {
     return this.getServersFromStorage();
+  }
+
+  /** Snapshot registered servers and discovered capabilities for Agent clients. */
+  getMcpServers(): MCPServersState {
+    const state: MCPServersState = {
+      prompts: this.listPrompts(),
+      resources: this.listResources(),
+      servers: {},
+      tools: this.listTools()
+    };
+
+    for (const server of this.listServers()) {
+      const connection = this.mcpConnections[server.id];
+      const defaultState: "authenticating" | "not-connected" =
+        !connection && server.auth_url ? "authenticating" : "not-connected";
+      state.servers[server.id] = {
+        auth_url: server.auth_url,
+        capabilities: connection?.serverCapabilities ?? null,
+        error: sanitizeErrorString(connection?.connectionError ?? null),
+        instructions: connection?.instructions ?? null,
+        name: server.name,
+        server_url: server.server_url,
+        state: connection?.connectionState ?? defaultState
+      };
+    }
+
+    return state;
   }
 
   /**

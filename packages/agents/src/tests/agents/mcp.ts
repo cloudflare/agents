@@ -569,10 +569,8 @@ export class TestRpcMcpClientAgent extends Agent {
 
       const toolsDuring = this.mcp.listTools().map((t) => t.name);
 
-      // Restore (this is what onStart calls internally)
-      await this.mcp.restoreConnectionsFromStorage(this.name);
-      // @ts-expect-error - accessing private method for testing
-      await this._restoreRpcMcpServers();
+      // Restore through the same component lifecycle Agent startup uses.
+      await this.mcp.onStart({ props: undefined });
 
       const toolsAfter = this.mcp.listTools().map((t) => t.name);
       const connectionCountAfter = Object.keys(this.mcp.mcpConnections).length;

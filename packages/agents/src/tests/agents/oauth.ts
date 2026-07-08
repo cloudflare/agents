@@ -788,7 +788,7 @@ export class TestCustomOAuthAgent extends Agent {
     delete this.mcp.mcpConnections[serverId];
 
     this._customProviderCallbackUrl = undefined;
-    await this.mcp.restoreConnectionsFromStorage(this.name);
+    await this.mcp.restoreConnectionsFromStorage();
 
     const conn = this.mcp.mcpConnections[serverId];
     return {

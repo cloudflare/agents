@@ -1008,17 +1008,17 @@ export class AIChatAgent<
                   }
                 }
 
-                // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
-                // so that getAITools() returns the full set of tools in onChatMessage
-                if (this.waitForMcpConnections) {
-                  const timeout =
-                    typeof this.waitForMcpConnections === "object"
-                      ? this.waitForMcpConnections.timeout
-                      : undefined;
-                  await this.mcp.waitForConnections(
-                    timeout != null ? { timeout } : undefined
-                  );
-                }
+                // Run component turn preparation at the same pre-inference
+                // boundary. AIChatAgent owns inference, so it asks components
+                // only for readiness and leaves tool selection to onChatMessage.
+                await this._runLifecycleTurn(
+                  this.waitForMcpConnections
+                    ? typeof this.waitForMcpConnections === "object"
+                      ? { timeout: this.waitForMcpConnections.timeout }
+                      : {}
+                    : undefined,
+                  { includeTools: false }
+                );
 
                 this._setRequestContext(requestClientTools, requestBody);
 

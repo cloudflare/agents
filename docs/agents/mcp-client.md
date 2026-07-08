@@ -40,6 +40,28 @@ export class MyAgent extends Agent {
 }
 ```
 
+## Configuring the client manager
+
+Every `Agent` has an `MCPClientManager` at `this.mcp`. The default manager owns its SQLite schema and automatically restores connections, handles OAuth callback requests, contributes tools to Think turns, publishes connection state, and closes connections during explicit Agent destruction.
+
+Most agents do not need to configure it. To set the MCP client identity or subclass the manager, replace the field in your Agent:
+
+```typescript
+import { Agent } from "agents";
+import { MCPClientManager } from "agents/mcp/client";
+
+export class MyAgent extends Agent<Env> {
+  override mcp = new MCPClientManager(this, {
+    name: "my-agent",
+    version: "1.0.0"
+  });
+}
+```
+
+The manager is resolved when Agent startup begins, after subclass field initializers run. Replacing `mcp` therefore replaces the default component rather than registering both.
+
+`MCPClientManager` no longer has a standalone storage-only constructor. It must be attached to an `Agent` through the host-first form above so startup, OAuth callbacks, turn tools, protocol updates, observability, and destruction all use the same lifecycle.
+
 ## Adding MCP Servers
 
 Use `addMcpServer()` to connect to an MCP server:
@@ -436,11 +458,11 @@ if (connectResult.state === "connected") {
 // Listen for state changes (onServerStateChanged is an Event<void>)
 const disposable = this.mcp.onServerStateChanged(() => {
   console.log("MCP server state changed");
-  this.broadcastMcpServers(); // Notify connected clients
 });
 
-// Clean up the subscription when no longer needed
-// disposable.dispose();
+// Agent's lifecycle already publishes each change to connected clients.
+// Dispose only your own extra listener when it is no longer needed.
+disposable.dispose();
 ```
 
 ### Waiting for Connections

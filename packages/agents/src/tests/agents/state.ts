@@ -124,7 +124,8 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     return rows[0].cnt > 0;
   }
 
-  dropInternalTablesForDestroyTest(): string[] {
+  async dropInternalTablesForDestroyTest(): Promise<string[]> {
+    await this.mcp.onDestroy({});
     this._dropInternalTablesForDestroy();
     const rows = this.ctx.storage.sql
       .exec(

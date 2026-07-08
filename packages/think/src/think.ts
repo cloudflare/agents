@@ -5080,13 +5080,16 @@ export class Think<
       this._approvedActionInputsFromTranscript();
     // Reset the proactive-compaction cap for this streamText run.
     this._proactiveCompactionsThisRun = 0;
-    if (this.waitForMcpConnections) {
-      const timeout =
-        typeof this.waitForMcpConnections === "object"
-          ? this.waitForMcpConnections.timeout
-          : 10_000;
-      await this.mcp.waitForConnections({ timeout });
-    }
+    const lifecycle = await this._runLifecycleTurn(
+      this.waitForMcpConnections
+        ? {
+            timeout:
+              typeof this.waitForMcpConnections === "object"
+                ? this.waitForMcpConnections.timeout
+                : 10_000
+          }
+        : undefined
+    );
 
     const workspaceTools = createWorkspaceTools(this.workspace, {
       bash: this.workspaceBash
@@ -5125,7 +5128,7 @@ export class Think<
       ...extensionTools,
       ...contextTools,
       ...skillTools,
-      ...(this.mcp?.getAITools?.() ?? {}),
+      ...(lifecycle.tools as ToolSet),
       ...clientToolSet
     };
 

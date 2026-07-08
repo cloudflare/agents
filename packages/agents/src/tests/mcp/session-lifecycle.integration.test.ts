@@ -2,8 +2,11 @@ import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../worker";
+import type { Agent } from "../../index";
 import { MCPClientManager } from "../../mcp/client";
+import { registerMCPClientManagerHost } from "../../mcp/client-host";
 import type { MCPServerRow } from "../../mcp/client-storage";
+import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
 
 type RecordedRequest = {
   method: string;
@@ -88,6 +91,26 @@ function createManagerStorage() {
   return { rows, storage };
 }
 
+function createManager(storage: DurableObjectStorage): MCPClientManager {
+  const owner = {};
+  registerMCPClientManagerHost(owner, {
+    storage,
+    getAgentClassName: () => "TestAgent",
+    getAgentInstanceName: () => "test-client",
+    getEnv: () => ({}),
+    getRequestContext: () => ({}),
+    getSendIdentityOnConnect: () => true,
+    createAuthProvider: (callbackUrl) =>
+      new DurableObjectOAuthClientProvider(storage, "test-client", callbackUrl),
+    publishState: () => {},
+    emitObservability: () => {}
+  });
+  return new MCPClientManager(owner as Agent, {
+    name: "test-client",
+    version: "1.0.0"
+  });
+}
+
 function createRecordedFetch(): {
   fetch: typeof globalThis.fetch;
   requests: RecordedRequest[];
@@ -117,9 +140,7 @@ afterEach(() => {
 describe("MCP streamable-http session lifecycle integration", () => {
   it("persists a real session id, opens the background SSE GET, and sends DELETE on close", async () => {
     const { rows, storage } = createManagerStorage();
-    const manager = new MCPClientManager("test-client", "1.0.0", {
-      storage
-    });
+    const manager = createManager(storage);
     const { fetch, requests } = createRecordedFetch();
     const serverId = "integration-session-close";
 
@@ -176,9 +197,7 @@ describe("MCP streamable-http session lifecycle integration", () => {
 
   it("terminates every real streamable-http session during closeAllConnections", async () => {
     const { rows, storage } = createManagerStorage();
-    const manager = new MCPClientManager("test-client", "1.0.0", {
-      storage
-    });
+    const manager = createManager(storage);
     const { fetch, requests } = createRecordedFetch();
     const serverIds = ["integration-close-all-1", "integration-close-all-2"];
 
@@ -227,9 +246,7 @@ describe("MCP streamable-http session lifecycle integration", () => {
 
   it("reuses a persisted real session id during restore and discovers tools without reinitializing", async () => {
     const { rows, storage } = createManagerStorage();
-    const manager1 = new MCPClientManager("test-client", "1.0.0", {
-      storage
-    });
+    const manager1 = createManager(storage);
     const initialFetch = createRecordedFetch();
     const serverId = "integration-session-restore";
     let manager2: MCPClientManager | undefined;
@@ -263,13 +280,11 @@ describe("MCP streamable-http session lifecycle integration", () => {
       await manager1.mcpConnections[serverId].client.close();
       delete manager1.mcpConnections[serverId];
 
-      manager2 = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      manager2 = createManager(storage);
       const restoredFetch = createRecordedFetch();
       vi.stubGlobal("fetch", restoredFetch.fetch);
 
-      await manager2.restoreConnectionsFromStorage("test-client");
+      await manager2.restoreConnectionsFromStorage();
       await manager2.waitForConnections({ timeout: 5000 });
 
       const restoredConnection = manager2.mcpConnections[serverId];
