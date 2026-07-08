@@ -6,8 +6,8 @@ import {
 } from "agents";
 import {
   withVoice,
-  WorkersAITTS,
   type Transcriber,
+  type TTSProvider,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
@@ -57,6 +57,75 @@ const MENU_HIGHLIGHTS = [
   { dish: "tiramisu", note: "made to order, twenty minutes" }
 ];
 
+/**
+ * Cartesia Sonic text-to-speech — a natural, low-latency voice for the host.
+ *
+ * There's no dedicated voice-provider package for Cartesia, so this small
+ * adapter shows how to bring any TTS vendor to the pipeline: implement
+ * `TTSProvider.synthesize()` and return audio bytes (MP3 here). The voice
+ * pipeline chunks LLM output by sentence, so each call synthesizes one
+ * sentence and barge-in keeps working.
+ */
+class CartesiaTTS implements TTSProvider {
+  #apiKey: string;
+  #voiceId: string;
+  // The pipeline synthesizes sentences concurrently, but Cartesia plans cap
+  // concurrent requests (2 on the starter tier) — exceeding it 429s and would
+  // silently drop a sentence mid-reply. Serialize requests through a queue;
+  // synthesis (~sub-second per sentence) still overlaps with playback.
+  #queue: Promise<unknown> = Promise.resolve();
+
+  constructor(apiKey: string, options?: { voiceId?: string }) {
+    this.#apiKey = apiKey;
+    // "Katie" — a warm en-US voice from Cartesia's voice-agent picks.
+    this.#voiceId = options?.voiceId ?? "f786b574-daa5-4673-aa0c-cbe3e8534c02";
+  }
+
+  synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null> {
+    const result = this.#queue.then(() => this.#request(text, signal));
+    this.#queue = result.catch(() => {});
+    return result;
+  }
+
+  async #request(
+    text: string,
+    signal?: AbortSignal,
+    retried = false
+  ): Promise<ArrayBuffer | null> {
+    if (signal?.aborted) return null;
+    const resp = await fetch("https://api.cartesia.ai/tts/bytes", {
+      method: "POST",
+      signal,
+      headers: {
+        Authorization: `Bearer ${this.#apiKey}`,
+        "Cartesia-Version": "2026-03-01",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model_id: "sonic-3.5",
+        transcript: text,
+        voice: { mode: "id", id: this.#voiceId },
+        language: "en",
+        output_format: {
+          container: "mp3",
+          sample_rate: 44100,
+          bit_rate: 128000
+        }
+      })
+    });
+    if (resp.status === 429 && !retried) {
+      await new Promise((r) => setTimeout(r, 300));
+      return this.#request(text, signal, true);
+    }
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      console.error(`[CartesiaTTS] HTTP ${resp.status}: ${body.slice(0, 200)}`);
+      return null;
+    }
+    return await resp.arrayBuffer();
+  }
+}
+
 function systemPrompt(): string {
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "long",
@@ -85,7 +154,7 @@ Reservation flow:
  */
 export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
   transcriber = this.#observableTranscriber();
-  tts = new WorkersAITTS(this.env.AI);
+  tts = new CartesiaTTS(this.env.CARTESIA_API_KEY);
 
   // --- "Under the hood" events for the demo UI ---
   //

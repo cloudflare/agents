@@ -10,19 +10,19 @@ The reservation flow is deliberately the hard case for conversational STT: terse
 The stack:
 
 - **STT**: AssemblyAI `universal-3-5-pro` via [`@cloudflare/voice-assemblyai`](../../voice-providers/assemblyai) — turn detection + barge-in server-side
-- **TTS**: Workers AI (`@cf/deepgram/aura-1` via the built-in `WorkersAITTS`) — runs on the AI binding, no extra API key
+- **TTS**: Cartesia `sonic-3.5` via a small in-example `TTSProvider` adapter (see `CartesiaTTS` in `src/server.ts` for the bring-your-own-vendor pattern)
 - **LLM**: OpenAI `gpt-4.1-mini` via the AI SDK, with reservation tools: `check_availability`, `create_reservation`, `find_reservation`, `cancel_reservation`, `get_menu_highlights`
 - **Storage**: reservations live in the Durable Object's SQLite — call back later and the agent greets you as a returning caller
 - **Transport**: plain WebSocket (browser mic → 16 kHz PCM frames) via the `useVoiceAgent` React hook — no SFU/WebRTC credentials needed
 
 ## Run it
 
-You need an [AssemblyAI API key](https://www.assemblyai.com/app/api-keys) for STT and an [OpenAI API key](https://platform.openai.com/api-keys) for the LLM. TTS runs on the Workers AI binding, so no additional key is needed there.
+You need an [AssemblyAI API key](https://www.assemblyai.com/app/api-keys) for STT, an [OpenAI API key](https://platform.openai.com/api-keys) for the LLM, and a [Cartesia API key](https://play.cartesia.ai/keys) for TTS. No Cloudflare login is needed for local dev — the example uses no remote bindings.
 
 ```bash
 # from the repo root
 cp examples/assemblyai-voice-agent/.dev.vars.example examples/assemblyai-voice-agent/.dev.vars
-# edit .dev.vars and set ASSEMBLYAI_API_KEY=... and OPENAI_API_KEY=...
+# edit .dev.vars and set ASSEMBLYAI_API_KEY, OPENAI_API_KEY, and CARTESIA_API_KEY
 
 npm install
 npm start --workspace examples/assemblyai-voice-agent
@@ -52,7 +52,7 @@ Browser                          Durable Object (AssemblyAIVoiceAgent)
 │          │   JSON: transcript    │   ↓                      │
 │          │ ◄──────────────────── │ LLM (gpt-4.1-mini, tools)│
 │          │   binary: audio       │   ↓ (sentence chunking)  │
-│ Speaker  │ ◄──────────────────── │ TTS (Aura 1, per-sent.)  │
+│ Speaker  │ ◄──────────────────── │ TTS (Cartesia, per-sent.)│
 └──────────┘                       └──────────────────────────┘
               single WebSocket connection
 ```

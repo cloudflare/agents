@@ -5,3 +5,6 @@ ASSEMBLYAI_API_KEY=
 
 # OpenAI API key — used for the reservation LLM (gpt-4.1-mini).
 OPENAI_API_KEY=
+
+# Cartesia API key — used for text-to-speech (sonic-3.5).
+CARTESIA_API_KEY=
