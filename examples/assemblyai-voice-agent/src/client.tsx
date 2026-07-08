@@ -3,12 +3,14 @@ import { useEffect, useRef, useState } from "react";
 import { useVoiceAgent, type VoiceStatus } from "@cloudflare/voice/react";
 import { Button, Surface, Text, PoweredByCloudflare } from "@cloudflare/kumo";
 import {
+  ArrowBendUpRightIcon,
   MicrophoneIcon,
   MicrophoneSlashIcon,
   PhoneIcon,
   PhoneXIcon,
   PaperPlaneRightIcon,
   WaveformIcon,
+  WrenchIcon,
   MoonIcon,
   SunIcon
 } from "@phosphor-icons/react";
@@ -31,6 +33,74 @@ const STATUS_LABEL: Record<VoiceStatus, string> = {
   thinking: "Thinking",
   speaking: "Speaking"
 };
+
+/** Server-sent "under the hood" event: agent_context updates + tool activity. */
+interface DebugEvent {
+  type: "debug_event";
+  t: number;
+  kind: "agent_context" | "tool_call" | "tool_result";
+  text?: string;
+  tool?: string;
+  input?: unknown;
+  output?: unknown;
+}
+
+function isDebugEvent(msg: unknown): msg is DebugEvent {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    (msg as { type?: string }).type === "debug_event"
+  );
+}
+
+function DebugEventRow({ event }: { event: DebugEvent }) {
+  const time = new Date(event.t).toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+
+  if (event.kind === "agent_context") {
+    return (
+      <div className="flex gap-2 items-start">
+        <span className="text-kumo-subtle shrink-0">{time}</span>
+        <ArrowBendUpRightIcon
+          size={14}
+          weight="bold"
+          className="text-kumo-brand shrink-0 mt-0.5"
+        />
+        <span>
+          <span className="text-kumo-brand">agent_context → AssemblyAI </span>
+          <span className="text-kumo-subtle">“{event.text}”</span>
+        </span>
+      </div>
+    );
+  }
+
+  const isCall = event.kind === "tool_call";
+  const payload = isCall ? event.input : event.output;
+  return (
+    <div className="flex gap-2 items-start">
+      <span className="text-kumo-subtle shrink-0">{time}</span>
+      <WrenchIcon
+        size={14}
+        weight="bold"
+        className={`shrink-0 mt-0.5 ${isCall ? "text-amber-500" : "text-emerald-500"}`}
+      />
+      <span className="break-all">
+        <span className={isCall ? "text-amber-500" : "text-emerald-500"}>
+          {event.tool}
+          {isCall ? "(" : " → "}
+        </span>
+        <span className="text-kumo-subtle">
+          {JSON.stringify(payload)}
+          {isCall ? ")" : ""}
+        </span>
+      </span>
+    </div>
+  );
+}
 
 function AudioLevelBar({ level }: { level: number }) {
   return (
@@ -95,7 +165,8 @@ function App() {
     startCall,
     endCall,
     toggleMute,
-    sendText
+    sendText,
+    lastCustomMessage
   } = useVoiceAgent({
     agent: "AssemblyAIVoiceAgent",
     name: sessionId
@@ -103,11 +174,24 @@ function App() {
 
   const inCall = status !== "idle";
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const debugEndRef = useRef<HTMLDivElement>(null);
   const [textInput, setTextInput] = useState("");
+  const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([]);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript, interimTranscript]);
+
+  // Collect "under the hood" events broadcast by the agent.
+  useEffect(() => {
+    if (isDebugEvent(lastCustomMessage)) {
+      setDebugEvents((prev) => [...prev.slice(-99), lastCustomMessage]);
+    }
+  }, [lastCustomMessage]);
+
+  useEffect(() => {
+    debugEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [debugEvents]);
 
   const handleSend = () => {
     const text = textInput.trim();
@@ -251,6 +335,34 @@ function App() {
             <Text size="xs">{error}</Text>
           </Surface>
         )}
+
+        {/* Under the hood: agent_context updates + tool activity */}
+        <Surface className="rounded-xl ring ring-kumo-line">
+          <div className="px-4 pt-3 pb-1 flex items-center justify-between">
+            <Text size="xs" bold>
+              Under the hood
+            </Text>
+            <Text size="xs">
+              <span className="text-kumo-subtle">
+                agent_context → AssemblyAI · tool calls · tool results
+              </span>
+            </Text>
+          </div>
+          <div className="px-4 pb-3 max-h-44 overflow-y-auto font-mono text-[11px] leading-5">
+            {debugEvents.length === 0 ? (
+              <span className="text-kumo-subtle italic">
+                Start a call — you'll see the agent's spoken replies primed into
+                AssemblyAI as context, and the LLM's reservation tools firing
+                against the Durable Object's database.
+              </span>
+            ) : (
+              debugEvents.map((e, i) => (
+                <DebugEventRow key={`${e.t}-${i}`} event={e} />
+              ))
+            )}
+            <div ref={debugEndRef} />
+          </div>
+        </Surface>
       </main>
 
       {/* Footer */}

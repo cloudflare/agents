@@ -7,6 +7,7 @@ import {
 import {
   withVoice,
   WorkersAITTS,
+  type Transcriber,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
@@ -83,15 +84,55 @@ Reservation flow:
  * — call back and it remembers you.
  */
 export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new AssemblyAISTT({
-    apiKey: this.env.ASSEMBLYAI_API_KEY,
-    // Natural-language context about the audio (who is calling and why).
-    prompt:
-      "Phone reservations for Luna Rossa, an Italian restaurant. Callers give dates, times, party sizes, names, and phone numbers, and ask about menu dishes.",
-    // Boost the venue's unusual vocabulary.
-    keyterms: ["Luna Rossa", "cacio e pepe", "burrata", "branzino", "tiramisu"]
-  });
+  transcriber = this.#observableTranscriber();
   tts = new WorkersAITTS(this.env.AI);
+
+  // --- "Under the hood" events for the demo UI ---
+  //
+  // The client renders these in a debug panel so you can watch the machinery:
+  // agent_context updates flowing to AssemblyAI, and tool calls/results
+  // flowing between the LLM and the reservation database.
+
+  #debugEvent(event: Record<string, unknown>) {
+    this.broadcast(
+      JSON.stringify({ type: "debug_event", t: Date.now(), ...event })
+    );
+  }
+
+  /**
+   * The real AssemblyAI transcriber, wrapped so the exact `agent_context`
+   * values the pipeline sends (via `UpdateConfiguration`) are also surfaced
+   * to the UI at the moment they go out.
+   */
+  #observableTranscriber(): Transcriber {
+    const stt = new AssemblyAISTT({
+      apiKey: this.env.ASSEMBLYAI_API_KEY,
+      // Natural-language context about the audio (who is calling and why).
+      prompt:
+        "Phone reservations for Luna Rossa, an Italian restaurant. Callers give dates, times, party sizes, names, and phone numbers, and ask about menu dishes.",
+      // Boost the venue's unusual vocabulary.
+      keyterms: [
+        "Luna Rossa",
+        "cacio e pepe",
+        "burrata",
+        "branzino",
+        "tiramisu"
+      ]
+    });
+    return {
+      createSession: (opts) => {
+        const session = stt.createSession(opts);
+        const send = session.updateAgentContext?.bind(session);
+        if (send) {
+          session.updateAgentContext = (text: string) => {
+            this.#debugEvent({ kind: "agent_context", text });
+            send(text);
+          };
+        }
+        return session;
+      }
+    };
+  }
 
   // --- Reservation storage (Durable Object SQLite) ---
 
@@ -302,7 +343,23 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
       onFinish: ({ finishReason, text, reasoningText }) =>
         console.log(
           `[VoiceAgent] LLM finish: reason=${finishReason} textLen=${text.length} reasoningLen=${reasoningText?.length ?? 0}`
-        )
+        ),
+      onStepFinish: ({ toolCalls, toolResults }) => {
+        for (const call of toolCalls) {
+          this.#debugEvent({
+            kind: "tool_call",
+            tool: call.toolName,
+            input: call.input
+          });
+        }
+        for (const result of toolResults) {
+          this.#debugEvent({
+            kind: "tool_result",
+            tool: result.toolName,
+            output: result.output
+          });
+        }
+      }
     });
 
     return result.fullStream;
