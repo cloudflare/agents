@@ -151,6 +151,9 @@ export default {
           issueNumber?: number;
           instruction?: string;
           installationToken?: string;
+          commentId?: number;
+          issueTitle?: string;
+          requestedBy?: { login: string; avatarUrl?: string };
         };
         if (!body.repo || typeof body.issueNumber !== "number") {
           return Response.json(
@@ -163,7 +166,10 @@ export default {
             repo: body.repo,
             issueNumber: body.issueNumber,
             instruction: body.instruction ?? "reproduce this issue",
-            installationToken: body.installationToken ?? ""
+            installationToken: body.installationToken ?? "",
+            commentId: body.commentId,
+            issueTitle: body.issueTitle,
+            requestedBy: body.requestedBy
           });
           return Response.json(result, { status: 202 });
         } catch (error) {
@@ -187,15 +193,15 @@ export default {
         );
         return Response.json(await agent.debugMessages());
       }
-      const isolation = url.pathname.match(
-        /^\/dev\/workspace-isolation\/([^/]+)$/
+      const workspaceSync = url.pathname.match(
+        /^\/dev\/workspace-sync\/([^/]+)$/
       );
-      if (request.method === "GET" && isolation) {
+      if (request.method === "GET" && workspaceSync) {
         const agent = await getAgentByName<Env, ThinkAgent>(
           env.ThinkAgent,
-          decodeURIComponent(isolation[1])
+          decodeURIComponent(workspaceSync[1])
         );
-        return Response.json(await agent.debugWorkspaceIsolation());
+        return Response.json(await agent.debugWorkspaceSync());
       }
     }
 
@@ -234,9 +240,7 @@ export default {
     return new Response("not found", { status: 404 });
   },
 
-  // Cron: keep the warm pool primed. `primePool` pushes the current config
-  // (WARM_POOL_TARGET etc.) to the WarmPool DO and kicks its alarm loop, which
-  // pre-starts containers up to the target so the first dial skips boot cost.
+  // Cron: ensure the fixed one-container warm pool is ready.
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(
       primePool(env).catch((err) =>

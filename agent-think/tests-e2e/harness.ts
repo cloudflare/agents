@@ -6,10 +6,11 @@
  *
  * Tests talk to it over HTTP as gh-app would over the service binding, so the
  * whole stack (ThinkAgent DO, container-backed Workspace, real gh/git/npm) is
- * exercised end-to-end. No mocks — this is how we reproduce locally why a run
- * silently wedges.
+ * exercised end-to-end. Only model inference is replaced by the test Worker;
+ * this is how we reproduce locally why a run silently wedges.
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -17,6 +18,11 @@ const PORT = Number(process.env.E2E_PORT ?? 8799);
 export const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 let proc: ChildProcess | null = null;
+const output: string[] = [];
+
+export function wranglerOutput(): string {
+  return output.join("");
+}
 
 /** Spawn wrangler dev with .env loaded. Resolves when the server is reachable. */
 export async function startWrangler(): Promise<void> {
@@ -41,22 +47,26 @@ export async function startWrangler(): Promise<void> {
     }
   }
 
-  // LOCAL_DEV=1 unlocks the /dev/dispatch + /dev/messages HTTP surface that
-  // production never exposes (see the LOCAL_DEV gate in src/index.ts).
-  env.LOCAL_DEV = "1";
+  // Build assets and seed the real local R2 binding before workerd starts.
+  execFileSync("pnpm", ["build:client"], {
+    cwd: resolve(process.cwd()),
+    env,
+    stdio: "pipe"
+  });
+  seedLocalSkills(env);
 
   const args = [
     "wrangler",
     "dev",
+    "--config",
+    "tests-e2e/wrangler.jsonc",
     "--local",
     "--port",
     String(PORT),
     "--ip",
     "127.0.0.1",
     "--inspector-port",
-    "0",
-    "--var",
-    "LOCAL_DEV:1"
+    "0"
   ];
   proc = spawn("npx", args, {
     env,
@@ -65,20 +75,22 @@ export async function startWrangler(): Promise<void> {
     detached: true // own process group so we can SIGKILL the whole tree
   });
 
-  const logs: string[] = [];
-  proc.stdout?.on("data", (chunk) => logs.push(chunk.toString()));
-  proc.stderr?.on("data", (chunk) => logs.push(chunk.toString()));
+  output.length = 0;
+  proc.stdout?.on("data", (chunk) => output.push(chunk.toString()));
+  proc.stderr?.on("data", (chunk) => output.push(chunk.toString()));
 
   const deadline = Date.now() + 180_000; // cold docker build can take a while
   while (Date.now() < deadline) {
     if (!proc || proc.exitCode !== null) {
-      throw new Error("wrangler exited during startup:\n" + logs.join(""));
+      throw new Error("wrangler exited during startup:\n" + wranglerOutput());
     }
     if (await isUp()) return;
     await sleep(1000);
   }
   await stopWrangler();
-  throw new Error("wrangler dev failed to come up in time\n" + logs.join(""));
+  throw new Error(
+    "wrangler dev failed to come up in time\n" + wranglerOutput()
+  );
 }
 
 export async function stopWrangler(): Promise<void> {
@@ -114,6 +126,33 @@ async function isUp(): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+function seedLocalSkills(env: NodeJS.ProcessEnv): void {
+  const root = resolve(process.cwd());
+  for (const entry of readdirSync(resolve(root, "skills"), {
+    withFileTypes: true
+  })) {
+    if (!entry.isDirectory()) continue;
+    const file = resolve(root, "skills", entry.name, "SKILL.md");
+    execFileSync(
+      "pnpm",
+      [
+        "exec",
+        "wrangler",
+        "r2",
+        "object",
+        "put",
+        `agent-think-skills/.agents/skills/${entry.name}/SKILL.md`,
+        "--file",
+        file,
+        "--local",
+        "--config",
+        "tests-e2e/wrangler.jsonc"
+      ],
+      { cwd: root, env, stdio: "pipe" }
+    );
   }
 }
 

@@ -1,8 +1,8 @@
 # Sandbox container image for the think agent.
 #
-# Pulls the prebuilt wsd SEA binary out of the public GHCR image
-# published by github.com/cloudflare/workspace, pinned in lockstep
-# with the `@cloudflare/workspace` npm dependency (see package.json).
+# Pulls the prebuilt wsd SEA binary out of the public GHCR image published by
+# github.com/cloudflare/workspace. The image is pinned separately from the host
+# package and only needs to move when the workspace RPC / wsd wire changes.
 # wsd runs as PID 1 and serves the workspace RPC + FUSE mount.
 #
 # Layered on top: a Node.js + Bun toolchain (node, npm, bun, esbuild,

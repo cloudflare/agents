@@ -328,7 +328,9 @@ function CommandCenterView({
                   {t.repo}#{t.issueNumber}
                 </span>
                 <span className="run__instruction">
-                  {t.issueTitle ?? t.instruction}
+                  {t.status === "error" && t.lastError
+                    ? t.lastError
+                    : (t.issueTitle ?? t.instruction)}
                 </span>
                 <RequesterAvatar thread={t} />
                 <span className="run__meta">
@@ -454,7 +456,9 @@ function App() {
                 </span>
               </span>
               <span className="sidebar__item-snippet">
-                {t.issueTitle ?? t.instruction}
+                {t.status === "error" && t.lastError
+                  ? t.lastError
+                  : (t.issueTitle ?? t.instruction)}
               </span>
             </button>
           ))}

@@ -1,9 +1,8 @@
 /**
  * ThinkAgent — one Think Durable Object per GitHub issue.
  *
- * Owns a `@cloudflare/workspace.Workspace` whose container backend has sync
- * disabled. The container's /workspace is authoritative: repos, .git,
- * node_modules, builds, logs, and scratch data never enter the ThinkAgent DO.
+ * Owns one `@cloudflare/workspace.Workspace` shared by Think internals, file
+ * tools, and both bash backends. Workspace owns synchronization semantics.
  *
  * gh-app calls `dispatch()` (see index.ts) with the issue
  * coordinates, a free-form `instruction` ("reproduce this", "open a
@@ -16,6 +15,9 @@
  */
 
 import type {
+  ChatRecoveryExhaustedContext,
+  ChatResponseResult,
+  Session,
   ToolCallResultContext,
   TurnContext,
   WorkspaceLike as ThinkWorkspaceLike
@@ -24,12 +26,14 @@ import { skills, Think } from "@cloudflare/think";
 import {
   type DurableObjectStorageLike,
   Workspace,
+  type WorkspaceBackend,
   WorkspaceProxy,
   WorkspaceServiceProxy,
   type WorkspaceStub
 } from "@cloudflare/workspace";
 import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
-import { type ToolSet } from "ai";
+import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
+import type { LanguageModel, ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { openai } from "workers-ai-provider/openai";
 import { getAgentByName } from "agents";
@@ -37,16 +41,18 @@ import type { CommandCenterAgent } from "./command-center";
 import { releaseContainer, resolveContainerId } from "./pool";
 import { createBashTool } from "./tools/bash";
 import {
-  ContainerFileStore,
-  ContainerLocalBackend,
-  quote,
-  repoDirectory
-} from "./container-workspace";
-import {
   createEditTool,
   createReadTool,
-  createWriteTool
+  createWriteTool,
+  WorkspaceFileStore
 } from "./tools/fs/index";
+import {
+  buildRunEnvelope,
+  buildRunTelemetry,
+  repoDirectory,
+  type RunTarget
+} from "./run-context";
+import { AGENT_THINK_MAX_STEPS, classifyTurnOutcome } from "./turn-outcome";
 
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
@@ -64,41 +70,95 @@ const MODEL_ID = "openai/gpt-5.5";
 const REASONING_EFFORT = "medium";
 
 /** Per-issue run context, set by `dispatch` before the turn is submitted. */
-export interface RunContext {
-  repo: string;
-  issueNumber: number;
-  /** Free-form instruction the user typed after `@agent-think`. */
-  instruction: string;
+export interface RunContext extends RunTarget {
   /** Short-lived GitHub App installation token. */
   installationToken: string;
-  /** Triggering comment id — see DispatchInput.commentId. */
-  commentId?: number;
-  /** GitHub issue title, forwarded to the command center. */
-  issueTitle?: string;
-  /** Who mentioned @agent-think, forwarded to the command center. */
-  requestedBy?: { login: string; avatarUrl?: string };
+}
+
+/**
+ * Register agent-think's identity and operating contract as durable, read-only
+ * Session context. Unlike getSystemPrompt(), this block remains present when
+ * Think adds its own skills catalog context.
+ */
+export function configureAgentThinkSession(
+  session: Session,
+  getContext: () => RunContext | null
+): Session {
+  return session.withContext("agent-think", {
+    description: "Run identity, user instruction, and operating contract.",
+    provider: {
+      get: async () => agentThinkInstructions(getContext())
+    }
+  });
+}
+
+function agentThinkInstructions(ctx: RunContext | null): string | null {
+  if (!ctx) return null;
+  return [
+    "You are agent-think, acting as the agent-think GitHub App (not any user).",
+    `You are working on issue #${ctx.issueNumber} in ${ctx.repo}.`,
+    "",
+    "The user invoked you with this instruction:",
+    `  ${ctx.instruction || "(no instruction — default to reproducing the issue)"}`,
+    "",
+    ...(ctx.commentId
+      ? [
+          "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
+          "comment that triggered you, then continue with the task:",
+          `  bash({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
+          "(👀 was added when your trigger was seen; your 🚀 tells the",
+          "humans the agent itself is running.)",
+          ""
+        ]
+      : []),
+    "Two skills are available through Think's skill catalog:",
+    "  - reproduce — reproduce and report an issue.",
+    "  - open-pr   — locate, fix, verify, and open a PR.",
+    "",
+    "Decide which skill matches the instruction and activate it before acting.",
+    "Follow it exactly, including the structured result it specifies.",
+    "",
+    "Environment:",
+    `  - Clone ${ctx.repo} to ${repoDirectory(ctx.repo)}.`,
+    "  - read/write/edit call the durable Workspace VFS directly. The lightweight",
+    "    shell also operates on that VFS; container bash uses the mounted tree.",
+    "  - Paths outside /workspace are container-local. Put long logs in /temp and",
+    "    inspect them with container bash so they do not enter the VFS.",
+    "  - bash defaults to the lightweight shell backend. Select container for gh,",
+    "    npm, node, network access, native binaries, builds, tests, and deploys.",
+    "  - `gh`, `git`, `curl`, `npm`, `node`, and `wrangler` run in the",
+    "    container. `gh` and `git` are ALREADY AUTHENTICATED there as the app",
+    "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
+    "    re-configure the token.",
+    "  - Prefer the dedicated read/write/edit tools for file content operations.",
+    "",
+    "When done, reply with the structured summary the skill specifies."
+  ].join("\n");
 }
 
 class ThinkBase extends Think<Env> {}
 
 export class ThinkAgent extends ThinkBase {
-  // Think's own chat recovery IS the durability layer now (no Workflow):
-  // submitMessages persists the turn and Think resumes it across a DO
-  // eviction. Left at the default (enabled).
+  // Think's own chat recovery is the durability layer. Its terminal hook must
+  // also release agent-think's external resources and command-center status.
+  override chatRecovery = {
+    onExhausted: (ctx: ChatRecoveryExhaustedContext) =>
+      this.#finishRun("error", `Recovery exhausted: ${ctx.reason}`)
+  };
 
   /** repro/pr can be long: clone, install, deploy or fix, verify. */
-  override maxSteps = 60;
+  override maxSteps = AGENT_THINK_MAX_STEPS;
 
   /**
-   * We expose our own `bash` tool (two exec backends); skip Think's
-   * built-in just-bash. Note: even if this flag is ever flipped back,
+   * We expose our own container-backed `bash` tool; skip Think's built-in
+   * just-bash. Note: even if this flag is ever flipped back,
    * getTools() spreads after the workspace tools, so our `bash` would
    * silently shadow Think's — desired, but worth knowing.
    */
   override workspaceBash = false;
 
   readonly #containerBackend: CloudflareContainerBackend;
-  readonly #workspaceFs: Workspace;
+  readonly #workspace: Workspace;
   #context: RunContext | null = null;
   /**
    * The installation token the container's `gh`/`git` is currently
@@ -108,6 +168,8 @@ export class ThinkAgent extends ThinkBase {
    * issue (new short-lived token) re-authenticates automatically.
    */
   #authedToken: string | null = null;
+  #cleanupPromise: Promise<void> | null = null;
+  #reportTail: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -125,13 +187,25 @@ export class ThinkAgent extends ThinkBase {
       },
       workspace: workspaceRef
     });
-    this.#workspaceFs = new Workspace({
+    const backends: WorkspaceBackend[] = [];
+    if (env.LOADER) {
+      backends.push(
+        new WorkerBackend({
+          id: "shell",
+          loader: env.LOADER,
+          workspace: workspaceRef,
+          ctx
+        })
+      );
+    }
+    backends.push(this.#containerBackend);
+    this.#workspace = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [new ContainerLocalBackend(this.#containerBackend)]
+      backends
     });
 
     this.workspace = adaptToThinkWorkspace(
-      this.#workspaceFs
+      this.#workspace
     ) as unknown as ThinkWorkspaceLike;
 
     this.ctx.blockConcurrencyWhile(async () => {
@@ -154,8 +228,8 @@ export class ThinkAgent extends ThinkBase {
   }
 
   async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspaceFs.ready();
-    return this.#workspaceFs.stub();
+    await this.#workspace.ready();
+    return this.#workspace.stub();
   }
 
   // ── Control surface (called from index.ts dispatch) ────────────
@@ -163,6 +237,9 @@ export class ThinkAgent extends ThinkBase {
   async setContext(context: RunContext): Promise<void> {
     this.#context = context;
     await this.ctx.storage.put(CONTEXT_KEY, context);
+    // The context block provider reads #context. Re-freeze it for every
+    // dispatch so a re-mention on the same issue sees the latest instruction.
+    await this.session.refreshSystemPrompt();
   }
 
   async getContext(): Promise<RunContext | null> {
@@ -180,6 +257,7 @@ export class ThinkAgent extends ThinkBase {
    */
   async resetSession(): Promise<void> {
     this.#log("session-reset", {});
+    await this.#workspace.close();
     await releaseContainer(this.env, this.ctx.id.toString());
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
@@ -213,8 +291,8 @@ export class ThinkAgent extends ThinkBase {
       issue: ctx.issueNumber,
       instruction: ctx.instruction
     });
-    this.#report((cc) =>
-      cc.recordDispatch({
+    this.#report((commandCenter) =>
+      commandCenter.recordDispatch({
         session: this.name,
         repo: ctx.repo,
         issueNumber: ctx.issueNumber,
@@ -231,10 +309,7 @@ export class ThinkAgent extends ThinkBase {
           parts: [
             {
               type: "text",
-              text:
-                "Carry out the user's instruction for this issue now. Activate the " +
-                "matching skill first and follow it end to end, then reply with the " +
-                "structured result that skill specifies."
+              text: buildRunEnvelope(ctx)
             }
           ]
         }
@@ -290,7 +365,7 @@ export class ThinkAgent extends ThinkBase {
     // Wrap in the SDK-native retry (jittered exponential backoff, 3 attempts):
     // container cold-start + first network call is the flakiest step.
     const result = await this.retry(async () => {
-      const handle = await this.#workspaceFs.shell.exec(script, {
+      const handle = await this.#workspace.shell.exec(script, {
         encoding: "utf8",
         backend: "container"
       });
@@ -305,32 +380,73 @@ export class ThinkAgent extends ThinkBase {
     this.#log("git-auth-exit", { exitCode: result.exitCode });
   }
 
-  /** Dev/e2e proof that container files are not pulled into the host DO VFS. */
-  async debugWorkspaceIsolation(): Promise<{
-    containerFileExists: boolean;
-    hostVfsContainsFile: boolean;
+  /** Dev/e2e proof of bidirectional sync with generated-path filtering. */
+  async debugWorkspaceSync(): Promise<{
+    hostFileVisibleInContainer: boolean;
+    sourceFileDurable: boolean;
+    localTempFileDurable: boolean;
+    sourceFileRestoredAfterContainerReplacement: boolean;
+    localTempFileRestoredAfterContainerReplacement: boolean;
   }> {
-    const path = `/workspace/temp/isolation-${crypto.randomUUID()}/node_modules/probe.txt`;
-    const handle = await this.#workspaceFs.shell.exec(
-      `mkdir -p ${quote(path.slice(0, path.lastIndexOf("/")))} && printf container-only > ${quote(path)}`,
-      { encoding: "utf8", backend: "container" }
-    );
+    const id = crypto.randomUUID();
+    const root = `/workspace/sync-${id}`;
+    const hostPath = `${root}/host.txt`;
+    const sourcePath = `${root}/src/source.txt`;
+    const localTempPath = `/temp/sync-${id}.log`;
+
+    await this.#workspace.fs.mkdir(root, { recursive: true });
+    await this.#workspace.fs.writeFile(hostPath, "host");
+
+    const command = [
+      "set -e",
+      `test -f ${shellQuote(hostPath)}`,
+      `mkdir -p ${shellQuote(sourcePath.slice(0, sourcePath.lastIndexOf("/")))}`,
+      `printf source > ${shellQuote(sourcePath)}`,
+      `mkdir -p /temp && printf local > ${shellQuote(localTempPath)}`
+    ].join("\n");
+    const handle = await this.#workspace.shell.exec(command, {
+      encoding: "utf8",
+      backend: "container"
+    });
     const result = await handle.result();
-    if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout);
+    const hostFileVisibleInContainer = result.exitCode === 0;
+    if (!hostFileVisibleInContainer) {
+      throw new Error(result.stderr || result.stdout);
+    }
 
-    const verify = await this.#workspaceFs.shell.exec(
-      `test -f ${quote(path)}`,
+    const sourceFileDurable =
+      (await this.#workspace.fs.readFile(sourcePath, "utf8")) === "source";
+    let localTempFileDurable = true;
+    try {
+      await this.#workspace.fs.stat(localTempPath);
+    } catch (error) {
+      localTempFileDurable = !isEnoent(error);
+    }
+
+    await this.#workspace.close();
+    await releaseContainer(this.env, this.ctx.id.toString());
+    const replacement = await this.#workspace.shell.exec(
+      `test -f ${shellQuote(sourcePath)}; source=$?; test -f ${shellQuote(localTempPath)}; local=$?; printf '%s %s' "$source" "$local"`,
       { encoding: "utf8", backend: "container" }
     );
-    const containerFileExists = (await verify.result()).exitCode === 0;
+    const replacementResult = await replacement.result();
+    const [sourceStatus, localStatus] = replacementResult.stdout
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+    const sourceFileRestoredAfterContainerReplacement = sourceStatus === 0;
+    const localTempFileRestoredAfterContainerReplacement = localStatus === 0;
 
-    let hostVfsContainsFile = true;
-    try {
-      await this.#workspaceFs.fs.stat(path);
-    } catch (error) {
-      hostVfsContainsFile = !isEnoent(error);
-    }
-    return { containerFileExists, hostVfsContainsFile };
+    await this.#workspace.close();
+    await releaseContainer(this.env, this.ctx.id.toString());
+
+    return {
+      hostFileVisibleInContainer,
+      sourceFileDurable,
+      localTempFileDurable,
+      sourceFileRestoredAfterContainerReplacement,
+      localTempFileRestoredAfterContainerReplacement
+    };
   }
 
   /** Dev/e2e readback: the current message log for this session. */
@@ -366,20 +482,28 @@ export class ThinkAgent extends ThinkBase {
       cc: Awaited<ReturnType<typeof getAgentByName<Env, CommandCenterAgent>>>
     ) => Promise<unknown>
   ): void {
-    this.ctx.waitUntil(
-      getAgentByName<Env, CommandCenterAgent>(this.env.CommandCenter, "main")
-        .then(fn)
-        .catch((err) =>
-          // Log-only: reporting must never break the run, but a silent
-          // failure here made the command center undebuggable.
-          this.#log("report-error", { error: String(err).slice(0, 200) })
-        )
-    );
+    // Serialize observer updates without awaiting them on the run path. This
+    // preserves dispatch → tools → terminal ordering for fast turns while a
+    // slow/broken Command Center can never block or fail the actual run.
+    this.#reportTail = this.#reportTail
+      .then(() =>
+        getAgentByName<Env, CommandCenterAgent>(this.env.CommandCenter, "main")
+      )
+      .then(fn)
+      .then(() => undefined)
+      .catch((err) =>
+        this.#log("report-error", { error: String(err).slice(0, 200) })
+      );
+    this.ctx.waitUntil(this.#reportTail);
   }
 
   // ── Think hooks ────────────────────────────────────────────────
 
-  override getModel() {
+  override configureSession(session: Session): Session {
+    return configureAgentThinkSession(session, () => this.#context);
+  }
+
+  override getModel(): LanguageModel {
     // Route through the account's default AI Gateway so model calls get
     // Gateway-side retries, caching, and observability. The `openai` provider
     // plugin lets the `openai/...` catalog slug dispatch through the gateway
@@ -406,12 +530,25 @@ export class ThinkAgent extends ThinkBase {
   }
 
   override async beforeTurn(ctx: TurnContext) {
-    // Container gh/git auth runs here — inside the durable turn — rather
-    // than in start(), so dispatch stays fast and a slow container attach
-    // can't be killed by the caller's cancellation (see start()).
+    // A recovery may start after terminal cleanup released the previous
+    // container. Wait for that cleanup, then reconnect and authenticate the
+    // container chosen for this continuation.
+    if (this.#cleanupPromise) {
+      await this.#cleanupPromise;
+      this.#cleanupPromise = null;
+    }
     await this.#ensureGitAuth();
     return {
       maxOutputTokens: 16384,
+      ...(this.#context
+        ? {
+            experimental_telemetry: buildRunTelemetry(
+              this.#context,
+              this.name,
+              this.constructor.name
+            )
+          }
+        : {}),
       // Only our four tools reach the model (read/write/edit/bash — pi's
       // codingTools shape, Claude Code's names). Think merges its workspace
       // built-ins (list/find/grep/delete) unconditionally; this allowlist
@@ -439,10 +576,51 @@ export class ThinkAgent extends ThinkBase {
     const ctx = this.#context;
     if (!ctx?.installationToken || this.#authedToken === ctx.installationToken)
       return;
-    await this.#workspaceFs.ready();
     await this.#authenticateGit(ctx.installationToken);
     this.#authedToken = ctx.installationToken;
     this.#log("git-auth-ok", {});
+  }
+
+  #finishRun(outcome: "done" | "error", error?: string): Promise<void> {
+    if (this.#cleanupPromise) return this.#cleanupPromise;
+
+    const cleanup = this.#cleanupTurn(outcome, error).finally(() => {
+      this.#authedToken = null;
+    });
+    this.#cleanupPromise = cleanup;
+    return cleanup;
+  }
+
+  async #cleanupTurn(outcome: "done" | "error", error?: string): Promise<void> {
+    const cleanupErrors: unknown[] = [];
+    try {
+      await this.#workspace.close();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      await releaseContainer(this.env, this.ctx.id.toString());
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+
+    this.#report((commandCenter) =>
+      commandCenter.recordTurn({
+        session: this.name,
+        outcome,
+        ...(outcome === "error"
+          ? { error: (error ?? "Agent run failed").slice(0, 300) }
+          : {})
+      })
+    );
+
+    if (cleanupErrors.length > 0) {
+      this.#log("turn-cleanup-error", {
+        errors: cleanupErrors.map((cleanupError) =>
+          String(cleanupError).slice(0, 300)
+        )
+      });
+    }
   }
 
   // ── Lifecycle logging: reconstruct a run from the deployed logs ──
@@ -463,92 +641,67 @@ export class ThinkAgent extends ThinkBase {
     });
   }
 
-  override async onChatResponse(): Promise<void> {
-    this.#report((cc) =>
-      cc.recordTurn({ session: this.name, outcome: "done" })
-    );
-    this.#log("turn:done", {
-      assistantChars: collectAssistantText(this.messages).length
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    const terminal = classifyTurnOutcome(result, this.maxSteps);
+    await this.#finishRun(terminal.outcome, terminal.error);
+    this.#log(terminal.outcome === "done" ? "turn:done" : "turn:error", {
+      reason: terminal.reason,
+      steps: terminal.steps,
+      maxSteps: this.maxSteps,
+      assistantChars: terminal.assistantChars,
+      finalStepHasToolCall: terminal.finalStepHasToolCall,
+      ...(terminal.error ? { error: terminal.error.slice(0, 800) } : {})
     });
   }
 
   override onChatError(error: unknown, ctx?: { stage?: string }): unknown {
-    this.#report((cc) =>
-      cc.recordTurn({
-        session: this.name,
-        outcome: "error",
-        error: String(error).slice(0, 300)
-      })
+    const message = String(error);
+    // Some setup failures never reach onChatResponse. Cleanup immediately;
+    // a later durable recovery may claim a fresh container and overwrite the
+    // command-center status with success.
+    this.ctx.waitUntil(
+      this.#finishRun("error", message).catch((cleanupError) =>
+        this.#log("turn-cleanup-error", {
+          error: String(cleanupError).slice(0, 300)
+        })
+      )
     );
     this.#log("turn:error", {
       stage: ctx?.stage,
-      error: String(error).slice(0, 800)
+      error: message.slice(0, 800)
     });
     return error;
   }
 
-  override getSystemPrompt(): string {
-    const ctx = this.#context;
-    return [
-      `You are agent-think, acting as the agent-think GitHub App (not any user).`,
-      `You are working on issue #${ctx?.issueNumber} in ${ctx?.repo}.`,
-      "",
-      "The user invoked you with this instruction:",
-      `  ${ctx?.instruction || "(no instruction — default to reproducing the issue)"}`,
-      "",
-      ...(ctx?.commentId
-        ? [
-            "FIRST ACTION — prove you are alive: add a 🚀 reaction to the",
-            "comment that triggered you, then continue with the task:",
-            `  bash({ command: "gh api repos/${ctx.repo}/issues/comments/${ctx.commentId}/reactions -f content=rocket", backend: "container" })`,
-            "(👀 was added when your trigger was seen; your 🚀 tells the",
-            "humans the agent itself is running.)",
-            ""
-          ]
-        : []),
-      "Two skills are available through Think's skill catalog:",
-      "  - reproduce — reproduce and report an issue.",
-      "  - open-pr   — locate, fix, verify, and open a PR.",
-      "",
-      "Decide which skill matches the instruction and activate it before acting.",
-      "Follow it exactly, including the structured result it specifies.",
-      "",
-      "Environment:",
-      `  - Clone ${ctx?.repo ?? "the repo"} to ${repoDirectory(ctx?.repo)}.`,
-      "    Keep .git, node_modules, builds, and logs in their normal locations",
-      "    there. /workspace/temp is available for scratch data.",
-      "  - /workspace is container-local and is NEVER synchronized through the",
-      "    Agent Durable Object.",
-      "  - `gh`, `git`, `curl`, `npm`, `node`, and `wrangler` run in the",
-      "    container. `gh` and `git` are ALREADY AUTHENTICATED there as the app",
-      "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
-      "    re-configure the token.",
-      "  - The dedicated read/write/edit tools operate on the same container",
-      "    filesystem, so prefer them for file content operations.",
-      "",
-      "When done, reply with the structured summary the skill specifies."
-    ].join("\n");
-  }
-
   override getTools(): ToolSet {
     if (!this.#context) return {} as ToolSet;
-    const store = new ContainerFileStore(this.#workspaceFs.shell);
+    const store = new WorkspaceFileStore(this.#workspace);
+    const hasShell = Boolean(this.env.LOADER);
+    const backends = {
+      ...(hasShell
+        ? {
+            shell: {
+              description:
+                "Lightweight /workspace VFS shell for text and file operations. " +
+                "Use it for ls, find, grep, cat, sed, and other built-ins."
+            }
+          }
+        : {}),
+      container: {
+        description:
+          "Cloudflare Container with full Linux, gh, npm, node, native binaries, " +
+          "network access, builds, tests, deploy tooling, and local /temp."
+      }
+    };
     return {
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
       bash: createBashTool({
-        workspace: this.#workspaceFs,
+        workspace: this.#workspace,
         maxBytes: 32 * 1024,
-        backends: {
-          container: {
-            description:
-              "Cloudflare Container (full Linux) with a real toolchain and public " +
-              "network. /workspace is container-local: .git, node_modules, build " +
-              "outputs, logs, and scratch data never enter the Agent DO."
-          }
-        },
-        defaultBackend: "container"
+        backends,
+        defaultBackend: hasShell ? "shell" : "container"
       })
     };
   }
@@ -679,25 +832,6 @@ function isEnoent(err: unknown): boolean {
   const e = err as { code?: string; message?: string };
   if (e.code === "ENOENT") return true;
   return typeof e.message === "string" && /ENOENT|no such/i.test(e.message);
-}
-
-function collectAssistantText(
-  messages: ReadonlyArray<{
-    role: string;
-    parts: Array<{ type: string; text?: string }>;
-  }>
-): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role !== "assistant") continue;
-    const text = m.parts
-      .filter((p) => p.type === "text" && typeof p.text === "string")
-      .map((p) => p.text as string)
-      .join("")
-      .trim();
-    if (text.length > 0) return text;
-  }
-  return "";
 }
 
 function shellQuote(value: string): string {

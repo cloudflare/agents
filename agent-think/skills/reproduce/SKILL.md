@@ -3,8 +3,20 @@ name: reproduce
 description: Reproduce a cloudflare/agents GitHub issue by scaffolding a minimal Agents/Worker project and deploying it to a temporary Cloudflare account, then report findings back on the issue.
 ---
 
-The agent system prompt gives you `issueNumber`, `repo`, and the user's
-instruction. Use those values directly; there is no separate arguments object.
+The current user message contains an `<agent-think-run>` envelope with
+`repository`, `issue`, `instruction`, `requested-by`, and (when available)
+`trigger-comment-id`.
+Use those values exactly. Never infer or substitute another target from examples,
+workspace contents, GitHub searches, or concurrent issues. If the envelope or a
+required field is absent, stop without cloning/editing/posting and return a
+structured skipped result. When `trigger-comment-id` is present, your first
+container action is the liveness reaction:
+
+```bash
+gh api repos/<repository>/issues/comments/<trigger-comment-id>/reactions \
+  -f content=rocket
+```
+
 Reproduce the bug end-to-end and post your findings as an issue comment.
 
 The instruction is the free-form text the user typed after `@agent-think` (it
@@ -45,7 +57,8 @@ Read it carefully. Extract:
 **Decide if it is reproducible at all.** If it is a feature request, a question,
 a pure-docs issue, or has no concrete runnable behavior, stop here: return
 `skipped: true`, `reproduced: false`, and a `summary` explaining why. Still post
-a short, polite comment saying the repro-agent skipped it and why.
+a short, polite comment saying the repro-agent skipped it and why; begin it with
+`Requested by @<requestedBy>` when the run envelope has a requester.
 
 ## 2. Understand the relevant code
 
@@ -56,9 +69,10 @@ matters.
 
 ## 3. Scaffold a minimal reproduction
 
-Work in a scratch dir under `/workspace`, never touch the checkout. The entire
-workspace is container-local; `/workspace/temp` is available for logs and other
-scratch files. The shell and `read`/`write`/`edit` tools see the same files.
+Work in a scratch dir under `/workspace`, never touch the checkout. The
+read/write/edit tools use the Workspace VFS, and container bash uses its mounted
+view. Put long logs in `/temp`, which is outside the VFS mount and only visible
+through container bash.
 
 ```bash
 REPRO_DIR="/workspace/repro-<issueNumber>"
@@ -86,7 +100,7 @@ Every repro deploy MUST ship a minimal Vite + React page at the Worker's root UR
 **Steps**
 
 1. In `$REPRO_DIR`, create the 7 files below.
-2. `mkdir -p /workspace/temp && npm install > /workspace/temp/install.log 2>&1; tail -15 /workspace/temp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local file like this — streaming megabytes of live output through the session can kill it.
+2. `mkdir -p /temp && npm install > /temp/install.log 2>&1; tail -15 /temp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local `/temp` file like this — streaming megabytes of live output through the session can kill it.
 3. Sanity-check the build before deploying: `npx vite build` (catches config errors cheaply; do NOT run `vite dev` — it blocks waiting for a browser).
 4. Deploy per the **Deploy** step below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
 5. After deploy, confirm the root URL serves the page (the **Verify** step) and include the URL + click instructions in your report (the **Report back** step).
@@ -307,6 +321,8 @@ gh issue comment <issueNumber> --repo <repo> --body-file comment.md
 
 The comment should contain:
 
+- `Requested by @<requestedBy>` near the top, using the exact sanitized
+  `requested-by` mention from the run envelope (omit only when it is `unknown`).
 - **Verdict**: reproduced / could not reproduce / skipped, with one-line reason.
 - **Live URL** plus one line of click instructions ("open it, press _Trigger
   bug_, watch the log") — the page is the demo. Phrase it exactly like:
