@@ -163,8 +163,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/think
       '@cloudflare/workspace':
-        specifier: 0.0.0-alpha.11
-        version: 0.0.0-alpha.11(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)
+        specifier: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@15
+        version: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@15(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)
       '@platformatic/vfs':
         specifier: ^0.4.0
         version: 0.4.0
@@ -5554,8 +5554,9 @@ packages:
   '@cloudflare/workers-types@4.20260629.1':
     resolution: {integrity: sha512-5vq2ErIFVRSQ8Dcw5YOeEoBdZBudqBjHFKTWD3SBGiJR5hD1+/86aRUV/DTpEK9sXXCGOTGgpWBGlPSlW7djVg==}
 
-  '@cloudflare/workspace@0.0.0-alpha.11':
-    resolution: {integrity: sha512-L6lsiHZBz7X5eTpbgBvpA3VeVIRpcGUp3KXfaFZOy6LL9JF4vWDuZPN86/bDEa7hklNPx4UQK/n88gCRAToAFA==}
+  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@15':
+    resolution: {integrity: sha512-sd1j/R0OHy9OYpmwcHCHikgO2cKTiOEhmKP60OMhEC+KeV3UnYRUMoOSPW0OwSOgJr6t4nXCQjYz64VCYWBqtA==, tarball: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@15}
+    version: 0.0.0-alpha.11
     peerDependencies:
       '@platformatic/vfs': '*'
       diff: ^9.0.0
@@ -13220,7 +13221,7 @@ snapshots:
 
   '@cloudflare/workers-types@4.20260629.1': {}
 
-  '@cloudflare/workspace@0.0.0-alpha.11(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
+  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@15(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
     dependencies:
       capnweb: 0.8.0
       just-bash: 3.0.2

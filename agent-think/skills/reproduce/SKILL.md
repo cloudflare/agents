@@ -69,9 +69,10 @@ matters.
 
 ## 3. Scaffold a minimal reproduction
 
-Work in a scratch dir under `/workspace`, never touch the checkout. The entire
-workspace is container-local; `/workspace/temp` is available for logs and other
-scratch files. The shell and `read`/`write`/`edit` tools see the same files.
+Work in a scratch dir under `/workspace`, never touch the checkout. Source files
+sync through the durable Workspace; `/workspace/temp` stays backend-local for
+logs and other scratch files. The shell and `read`/`write`/`edit` tools share
+source files. Use the shell for `/workspace/temp`, dependencies, and build output.
 
 ```bash
 REPRO_DIR="/workspace/repro-<issueNumber>"

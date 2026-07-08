@@ -112,7 +112,7 @@ pnpm --filter <package> typecheck > /workspace/temp/typecheck.log 2>&1; tail -30
 pnpm --filter <package> test > /workspace/temp/test.log 2>&1; tail -40 /workspace/temp/test.log
 ```
 
-(`/workspace/temp` is container-local and never enters Agent DO storage.)
+(`/workspace/temp` is backend-local and never enters Agent DO storage.)
 
 Record whether tests passed in `testsPassed`. If you cannot make tests pass and
 the failure is your change's fault, fix it; if tests are unrelated/flaky, note

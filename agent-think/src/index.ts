@@ -193,15 +193,15 @@ export default {
         );
         return Response.json(await agent.debugMessages());
       }
-      const isolation = url.pathname.match(
-        /^\/dev\/workspace-isolation\/([^/]+)$/
+      const workspaceSync = url.pathname.match(
+        /^\/dev\/workspace-sync\/([^/]+)$/
       );
-      if (request.method === "GET" && isolation) {
+      if (request.method === "GET" && workspaceSync) {
         const agent = await getAgentByName<Env, ThinkAgent>(
           env.ThinkAgent,
-          decodeURIComponent(isolation[1])
+          decodeURIComponent(workspaceSync[1])
         );
-        return Response.json(await agent.debugWorkspaceIsolation());
+        return Response.json(await agent.debugWorkspaceSync());
       }
     }
 

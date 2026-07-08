@@ -99,14 +99,18 @@ function transcriptText(items: DebugMessage[]): string {
 }
 
 describe("E2E: production graph with inference adapter", () => {
-  it("keeps /workspace container-local instead of syncing it to the DO VFS", async () => {
-    const isolation = await fetch(
-      `${BASE_URL}/dev/workspace-isolation/${crypto.randomUUID()}`
+  it("syncs source files while keeping generated paths backend-local", async () => {
+    const sync = await fetch(
+      `${BASE_URL}/dev/workspace-sync/${crypto.randomUUID()}`
     );
-    expect(isolation.status).toBe(200);
-    expect(await isolation.json()).toEqual({
-      containerFileExists: true,
-      hostVfsContainsFile: false
+    expect(sync.status).toBe(200);
+    expect(await sync.json()).toEqual({
+      hostFileVisibleInContainer: true,
+      sourceFileDurable: true,
+      generatedFileVisibleInContainer: true,
+      generatedFileDurable: false,
+      sourceFileRestoredAfterContainerReplacement: true,
+      generatedFileRestoredAfterContainerReplacement: false
     });
   }, 120_000);
 
