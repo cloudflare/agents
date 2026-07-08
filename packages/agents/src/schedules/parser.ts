@@ -1,0 +1,140 @@
+import { z } from "zod";
+
+/**
+ * Get the schedule prompt for a given event
+ * @param event - The event to get the schedule prompt for
+ * @returns The schedule prompt
+ */
+export function getSchedulePrompt(event: { date: Date }) {
+  return `
+[Schedule Parser Component]
+
+Current time: ${event.date.toUTCString()}
+
+This component parses natural language scheduling requests into a structured format. It extracts:
+1. A clean task description (without timing information)
+2. Scheduling details in one of these formats:
+   - scheduled: Specific date/time events
+   - delayed: Relative time delays (in seconds)
+   - cron: Recurring patterns
+   - no-schedule: Tasks without timing
+
+Rules:
+- Task descriptions should be clean and focused on the action
+- Use numbers (0-6) for days in cron patterns (0=Sunday)
+- For recurring tasks, use standard cron syntax
+- For relative times, convert to seconds
+- For specific dates, use the current time as reference
+
+Example outputs:
+{
+  "description": "meeting with team",
+  "when": {
+    "type": "scheduled",
+    "date": "tomorrow at 14:00"
+  }
+}
+
+{
+  "description": "backup database",
+  "when": {
+    "type": "cron",
+    "cron": "0 0 * * *"
+  }
+}
+
+{
+  "description": "send report",
+  "when": {
+    "type": "delayed",
+    "delayInSeconds": 1800
+  }
+}
+
+[End Schedule Parser Component]
+`;
+}
+
+let didWarnAboutUnstableGetSchedulePrompt = false;
+
+/**
+ * @deprecated this has been renamed to getSchedulePrompt, and unstable_getSchedulePrompt will be removed in the next major version
+ * @param event - The event to get the schedule prompt for
+ * @returns The schedule prompt
+ */
+export function unstable_getSchedulePrompt(event: { date: Date }) {
+  if (!didWarnAboutUnstableGetSchedulePrompt) {
+    didWarnAboutUnstableGetSchedulePrompt = true;
+    console.warn(
+      "unstable_getSchedulePrompt is deprecated, use getSchedulePrompt instead. unstable_getSchedulePrompt will be removed in the next major version."
+    );
+  }
+  return getSchedulePrompt(event);
+}
+
+/**
+ * The schema for parsing natural language scheduling requests.
+ *
+ * @example
+ * ```typescript
+ * import { generateObject } from "ai";
+ * import { scheduleSchema, getSchedulePrompt } from "agents/schedules";
+ *
+ * const result = await generateObject({
+ *   model,
+ *   prompt: `${getSchedulePrompt({ date: new Date() })} Input: "${userInput}"`,
+ *   schema: scheduleSchema,
+ *   // Required for OpenAI to avoid strict JSON schema validation errors
+ *   providerOptions: {
+ *     openai: { strictJsonSchema: false }
+ *   }
+ * });
+ * ```
+ *
+ * @remarks
+ * When using this schema with OpenAI models via the AI SDK, you must pass
+ * `providerOptions: { openai: { strictJsonSchema: false } }` to `generateObject`.
+ * This is because the schema uses a discriminated union which is not compatible
+ * with OpenAI's strict structured outputs mode.
+ */
+export const scheduleSchema = z.object({
+  description: z.string().describe("A description of the task"),
+  when: z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("scheduled"),
+      date: z
+        .string()
+        .describe(
+          "Execute task at the specified date and time in ISO 8601 format"
+        )
+    }),
+    z.object({
+      type: z.literal("delayed"),
+      delayInSeconds: z
+        .number()
+        .describe("Execute task after a delay in seconds")
+    }),
+    z.object({
+      type: z.literal("cron"),
+      cron: z
+        .string()
+        .describe(
+          "Execute task on a recurring interval specified as cron syntax"
+        )
+    }),
+    z.object({
+      type: z.literal("no-schedule")
+    })
+  ])
+});
+
+/**
+ * The type for the schedule prompt
+ */
+export type ParsedSchedule = z.infer<typeof scheduleSchema>;
+
+/**
+ * @deprecated this has been renamed to scheduleSchema, and unstable_scheduleSchema will be removed in the next major version
+ * @returns The schedule schema
+ */
+export const unstable_scheduleSchema = scheduleSchema;
