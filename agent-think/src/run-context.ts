@@ -44,22 +44,18 @@ export function validateRunTarget(target: RunTarget): RunTarget {
   return target;
 }
 
-/**
- * Stable trace identity applied to every inference, including recovery.
- * `doName` is the named Agent Durable Object instance (`this.name`).
- */
+/** Stable trace identity applied to every inference, including recovery. */
 export function buildRunTelemetry(
   target: RunTarget,
-  doName: string,
+  agentId: string,
   agentName: string
 ) {
   validateRunTarget(target);
   return {
     metadata: {
-      agentId: doName,
+      agentId,
       agentName,
-      conversationId: doName,
-      doName,
+      conversationId: agentId,
       repository: target.repo,
       issueNumber: target.issueNumber,
       ...(target.requestedBy ? { requestedBy: target.requestedBy.login } : {})
