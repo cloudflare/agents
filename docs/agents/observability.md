@@ -466,9 +466,3 @@ await generateText({
 
 Do not include tokens, credentials, user input, or other secrets. Context
 filtering reduces accidental exposure; it is not a security boundary.
-
-### Not instrumented
-
-`embed` / `embedMany`, `rerank`, `Agent` / `ToolLoopAgent`, automatic loader
-hooks, and prompt/message/tool-definition content capture are intentionally out
-of scope.
