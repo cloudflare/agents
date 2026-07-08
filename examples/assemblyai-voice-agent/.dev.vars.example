@@ -2,3 +2,6 @@
 # Get one at https://www.assemblyai.com/app/api-keys
 # Copy this file to `.dev.vars` and fill in your key before running `npm start`.
 ASSEMBLYAI_API_KEY=
+
+# OpenAI API key — used for the reservation LLM (gpt-4.1-mini).
+OPENAI_API_KEY=

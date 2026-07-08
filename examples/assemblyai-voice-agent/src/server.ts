@@ -11,34 +11,118 @@ import {
 } from "@cloudflare/voice";
 import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
 import { streamText, tool, stepCountIs } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
+import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
 
 const VoiceAgent = withVoice(Agent);
 
-const SYSTEM_PROMPT = `You are a helpful voice assistant running on Cloudflare Workers, transcribed by AssemblyAI Universal 3.5 Pro Realtime. Keep your responses concise and conversational — you're being spoken aloud, not read. Aim for 1-3 sentences unless the user asks for more detail. Be warm and natural.
+/**
+ * Luna Rossa — a phone reservation desk for a (fictional) Italian restaurant.
+ *
+ * This is the kind of call flow conversational STT is hardest on: the agent
+ * asks a question and the caller answers tersely — "four", "Friday", "seven
+ * thirty", a spelled-out name. Two things in this example help AssemblyAI get
+ * those right:
+ *
+ * - `agent_context` carryover: after each spoken reply, `withVoice` feeds the
+ *   agent's words back to AssemblyAI automatically, so the model knows the
+ *   question the caller is answering ("table for four at seven", not "for
+ *   Four at Seven").
+ * - `prompt` + `keyterms`: connection-time hints about the call domain and
+ *   the venue's unusual vocabulary (menu items), boosting their recognition.
+ */
 
-You have tools available:
-- get_current_time: Tell the user the current date and time
-- set_reminder: Set a spoken reminder after a delay (e.g. "remind me in 5 minutes to check the oven")
-- get_weather: Check the weather for a location
+// --- Restaurant configuration ---
 
-Use tools when the user's request matches. After calling a tool, incorporate the result naturally into your spoken response.`;
+const SEATINGS = [
+  "17:00",
+  "17:30",
+  "18:00",
+  "18:30",
+  "19:00",
+  "19:30",
+  "20:00",
+  "20:30",
+  "21:00",
+  "21:30"
+];
+const TABLES_PER_SEATING = 4;
+const MAX_PARTY_SIZE = 8;
+
+const MENU_HIGHLIGHTS = [
+  { dish: "cacio e pepe", note: "tonnarelli, pecorino, black pepper" },
+  { dish: "burrata", note: "with datterini tomatoes and basil" },
+  { dish: "branzino al forno", note: "whole roasted sea bass" },
+  { dish: "tiramisu", note: "made to order, twenty minutes" }
+];
+
+function systemPrompt(): string {
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  });
+  return `You are the host at Luna Rossa, a cozy Italian restaurant, taking reservations over the phone. Today is ${today}.
+
+You are being spoken aloud, so keep replies to one or two short, warm sentences.
+
+Reservation flow:
+- Collect: date, time, party size, and a name. Ask for ONE missing detail at a time — never several in one breath.
+- Seatings run five to nine-thirty in the evening, every half hour. Always check availability before promising a table; if a slot is full, offer the alternatives you are given.
+- Read the full reservation back (date, time, party size, name) and get a yes before booking.
+- After booking, give the confirmation code clearly, reading the letters and digits one by one.
+- You can also share tonight's menu highlights, look up a caller's reservation by name, or cancel one by confirmation code.
+- If a caller asks for something outside reservations or the menu, politely steer back.`;
+}
 
 /**
- * Real-time voice agent: browser mic → WebSocket → AssemblyAI STT → LLM →
- * Workers AI TTS, all inside one Durable Object.
- *
- * STT is AssemblyAI Universal 3.5 Pro Realtime (`universal-3-5-pro`), which
- * handles turn detection and barge-in (`SpeechStarted`) server-side. After each
- * reply, `withVoice` feeds the agent's spoken text back to AssemblyAI as
- * `agent_context`, so the model knows the question the user is answering.
- * The only external credential needed is `ASSEMBLYAI_API_KEY`; the LLM and TTS
- * run on the Workers AI binding.
+ * Real-time voice reservation desk: browser mic → WebSocket → AssemblyAI STT
+ * → LLM with reservation tools → Workers AI TTS, all inside one Durable
+ * Object. Reservations live in the DO's SQLite, so they survive across calls
+ * — call back and it remembers you.
  */
 export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new AssemblyAISTT({ apiKey: this.env.ASSEMBLYAI_API_KEY });
+  transcriber = new AssemblyAISTT({
+    apiKey: this.env.ASSEMBLYAI_API_KEY,
+    // Natural-language context about the audio (who is calling and why).
+    prompt:
+      "Phone reservations for Luna Rossa, an Italian restaurant. Callers give dates, times, party sizes, names, and phone numbers, and ask about menu dishes.",
+    // Boost the venue's unusual vocabulary.
+    keyterms: ["Luna Rossa", "cacio e pepe", "burrata", "branzino", "tiramisu"]
+  });
   tts = new WorkersAITTS(this.env.AI);
+
+  // --- Reservation storage (Durable Object SQLite) ---
+
+  #tableReady = false;
+
+  #ensureTable() {
+    if (this.#tableReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS reservations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        date TEXT NOT NULL,
+        time TEXT NOT NULL,
+        party_size INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        phone TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+    this.#tableReady = true;
+  }
+
+  #bookedCount(date: string, time: string): number {
+    this.#ensureTable();
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) as count FROM reservations
+        WHERE date = ${date} AND time = ${time}
+      `[0]?.count ?? 0
+    );
+  }
 
   // --- Single-speaker enforcement ---
   //
@@ -77,13 +161,11 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
     console.log("[VoiceAgent] onTurn:", transcript);
-    const workersAi = createWorkersAI({ binding: this.env.AI });
+    const openai = createOpenAI({ apiKey: this.env.OPENAI_API_KEY });
 
     const result = streamText({
-      model: workersAi("@cf/meta/llama-4-scout-17b-16e-instruct", {
-        sessionAffinity: this.sessionAffinity
-      }),
-      system: SYSTEM_PROMPT,
+      model: openai("gpt-4.1-mini"),
+      system: systemPrompt(),
       messages: [
         ...context.messages.map((m) => ({
           role: m.role as "user" | "assistant",
@@ -92,81 +174,121 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
         { role: "user" as const, content: transcript }
       ],
       tools: {
-        get_current_time: tool({
+        check_availability: tool({
           description:
-            "Get the current date and time. Use when the user asks what time it is.",
+            "Check whether a table is free for a given date, time, and party size. Returns alternatives when the slot is full.",
+          inputSchema: z.object({
+            date: z.string().describe("Reservation date as YYYY-MM-DD"),
+            time: z.string().describe("Seating time as HH:MM, 24-hour"),
+            party_size: z.number().describe("Number of guests")
+          }),
+          execute: async ({ date, time, party_size }) => {
+            if (party_size < 1 || party_size > MAX_PARTY_SIZE) {
+              return {
+                available: false,
+                reason: `We seat parties of 1 to ${MAX_PARTY_SIZE}. For larger groups, suggest calling during the day to arrange a private event.`
+              };
+            }
+            if (!SEATINGS.includes(time)) {
+              return {
+                available: false,
+                reason: "Not a seating time",
+                seatings: SEATINGS
+              };
+            }
+            if (this.#bookedCount(date, time) < TABLES_PER_SEATING) {
+              return { available: true, date, time, party_size };
+            }
+            const alternatives = SEATINGS.filter(
+              (t) =>
+                t !== time && this.#bookedCount(date, t) < TABLES_PER_SEATING
+            ).slice(0, 3);
+            return { available: false, reason: "Slot is full", alternatives };
+          }
+        }),
+
+        create_reservation: tool({
+          description:
+            "Create the reservation once the caller has confirmed date, time, party size, and name. Returns a confirmation code.",
+          inputSchema: z.object({
+            date: z.string().describe("Reservation date as YYYY-MM-DD"),
+            time: z.string().describe("Seating time as HH:MM, 24-hour"),
+            party_size: z.number(),
+            name: z.string().describe("Name for the reservation"),
+            phone: z
+              .string()
+              .optional()
+              .describe("Contact phone number, if the caller offered one")
+          }),
+          execute: async ({ date, time, party_size, name, phone }) => {
+            this.#ensureTable();
+            if (
+              !SEATINGS.includes(time) ||
+              this.#bookedCount(date, time) >= TABLES_PER_SEATING
+            ) {
+              return {
+                created: false,
+                reason: "Slot no longer available — re-check availability."
+              };
+            }
+            const row = this.sql<{ id: number }>`
+              INSERT INTO reservations (code, date, time, party_size, name, phone, created_at)
+              VALUES ('pending', ${date}, ${time}, ${party_size}, ${name}, ${phone ?? null}, ${Date.now()})
+              RETURNING id
+            `[0];
+            const code = `LR-${1000 + (row?.id ?? 0)}`;
+            this
+              .sql`UPDATE reservations SET code = ${code} WHERE id = ${row?.id ?? -1}`;
+            return { created: true, confirmation_code: code };
+          }
+        }),
+
+        find_reservation: tool({
+          description:
+            "Look up existing reservations, optionally filtered by the caller's name.",
+          inputSchema: z.object({
+            name: z.string().optional().describe("Name on the reservation")
+          }),
+          execute: async ({ name }) => {
+            this.#ensureTable();
+            const rows = name
+              ? this.sql<Record<string, unknown>>`
+                  SELECT code, date, time, party_size, name FROM reservations
+                  WHERE lower(name) LIKE ${`%${name.toLowerCase()}%`}
+                  ORDER BY date, time LIMIT 5
+                `
+              : this.sql<Record<string, unknown>>`
+                  SELECT code, date, time, party_size, name FROM reservations
+                  ORDER BY created_at DESC LIMIT 5
+                `;
+            return { reservations: rows };
+          }
+        }),
+
+        cancel_reservation: tool({
+          description: "Cancel a reservation by its confirmation code.",
+          inputSchema: z.object({
+            confirmation_code: z.string().describe("Code like LR-1042")
+          }),
+          execute: async ({ confirmation_code }) => {
+            this.#ensureTable();
+            const code = confirmation_code.toUpperCase().replace(/\s+/g, "");
+            const existing = this.sql<{ id: number }>`
+              SELECT id FROM reservations WHERE code = ${code}
+            `;
+            if (existing.length === 0) {
+              return { cancelled: false, reason: "No reservation found" };
+            }
+            this.sql`DELETE FROM reservations WHERE code = ${code}`;
+            return { cancelled: true, confirmation_code: code };
+          }
+        }),
+
+        get_menu_highlights: tool({
+          description:
+            "Tonight's menu highlights, for callers who ask what to expect.",
           inputSchema: z.object({}),
-          execute: async () => {
-            const now = new Date();
-            return {
-              time: now.toLocaleTimeString("en-US", {
-                hour: "2-digit",
-                minute: "2-digit",
-                timeZoneName: "short"
-              }),
-              date: now.toLocaleDateString("en-US", {
-                weekday: "long",
-                year: "numeric",
-                month: "long",
-                day: "numeric"
-              })
-            };
-          }
-        }),
-
-        set_reminder: tool({
-          description:
-            "Set a reminder that will be spoken aloud after a delay.",
-          inputSchema: z.object({
-            message: z
-              .string()
-              .describe("The reminder message to speak to the user"),
-            delay_seconds: z
-              .number()
-              .describe("How many seconds from now to trigger the reminder")
-          }),
-          execute: async ({
-            message,
-            delay_seconds
-          }: {
-            message: string;
-            delay_seconds: number;
-          }) => {
-            await this.schedule(delay_seconds, "speakReminder", { message });
-            const minutes = Math.round(delay_seconds / 60);
-            const timeLabel =
-              minutes >= 1
-                ? `${minutes} minute${minutes > 1 ? "s" : ""}`
-                : `${delay_seconds} seconds`;
-            return { confirmed: true, message, delay: timeLabel };
-          }
-        }),
-
-        get_weather: tool({
-          description:
-            "Get the current weather for a location. Use when the user asks about the weather.",
-          inputSchema: z.object({
-            location: z
-              .string()
-              .describe("The city or location to check weather for")
-          }),
-          execute: async ({ location }: { location: string }) => {
-            const conditions = [
-              "sunny",
-              "partly cloudy",
-              "overcast",
-              "light rain"
-            ];
-            const condition =
-              conditions[Math.floor(Math.random() * conditions.length)];
-            const temp = Math.floor(55 + Math.random() * 35);
-            return {
-              location,
-              temperature: `${temp}°F`,
-              condition,
-              note: "Mock data — connect a weather MCP server for real forecasts."
-            };
-          }
+          execute: async () => ({ highlights: MENU_HIGHLIGHTS })
         })
       },
       stopWhen: stepCountIs(3),
@@ -187,20 +309,18 @@ export class AssemblyAIVoiceAgent extends VoiceAgent<Env> {
   }
 
   async onCallStart(connection: Connection) {
-    // getConversationHistory() (not raw SQL) — it creates the messages table
-    // on first use, so this works on a brand-new agent instance.
-    const messageCount = this.getConversationHistory().length;
+    this.#ensureTable();
+    const upcoming =
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) as count FROM reservations
+      `[0]?.count ?? 0;
 
     const greeting =
-      messageCount > 0
-        ? "Welcome back! How can I help you today?"
-        : "Hi there! I'm your voice assistant. I can answer questions, set reminders, or check the weather. What can I do for you?";
+      upcoming > 0
+        ? "Luna Rossa, welcome back! Are you calling about your reservation, or to book a new table?"
+        : "Thank you for calling Luna Rossa! Would you like to book a table?";
 
     await this.speak(connection, greeting);
-  }
-
-  async speakReminder(payload: { message: string }) {
-    await this.speakAll(`Reminder: ${payload.message}`);
   }
 }
 

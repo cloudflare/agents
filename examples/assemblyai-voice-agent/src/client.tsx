@@ -124,7 +124,7 @@ function App() {
           <WaveformIcon size={20} weight="bold" className="text-kumo-brand" />
           <span>
             <Text size="sm" bold>
-              AssemblyAI Voice Agent
+              Luna Rossa Reservations — AssemblyAI Voice Agent
             </Text>
           </span>
         </div>
@@ -141,8 +141,8 @@ function App() {
             {transcript.length === 0 && !interimTranscript ? (
               <span className="text-kumo-subtle text-sm italic m-auto text-center">
                 {inCall
-                  ? "Listening… start speaking."
-                  : "Press “Start call”, allow the mic, and say hello."}
+                  ? "Listening… try “I’d like a table for four this Friday at seven.”"
+                  : "Press “Start call”, allow the mic, and book a table."}
               </span>
             ) : (
               <>

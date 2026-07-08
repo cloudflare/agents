@@ -10,6 +10,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.70",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/voice": "*",
     "@cloudflare/voice-assemblyai": "*",
@@ -18,7 +19,6 @@
     "ai": "^6.0.202",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "workers-ai-provider": "^3.2.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
