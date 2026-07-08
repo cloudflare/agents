@@ -11,7 +11,6 @@ export type TokenUsageSummary = {
   readonly inputTokens?: number | undefined;
   readonly outputTokens?: number | undefined;
   readonly reasoningTokens?: number | undefined;
-  readonly totalTokens?: number | undefined;
 };
 
 /** Safe request settings that map to scalar GenAI semantic attributes. */
@@ -25,13 +24,6 @@ export type RequestSummary = {
   readonly temperature?: number | undefined;
   readonly topK?: number | undefined;
   readonly topP?: number | undefined;
-};
-
-/** Canonical output summary shape used by model adapters. */
-export type OutputSummary = {
-  readonly hasObject?: boolean | undefined;
-  readonly hasText?: boolean | undefined;
-  readonly toolCallCount?: number | undefined;
 };
 
 /** Safe response metadata that maps to scalar GenAI semantic attributes. */
@@ -56,18 +48,11 @@ export type SpanSpec = {
 
 /**
  * Builds a semconv-formula span name (`"{operation} {target}"`), falling back
- * to the bare operation when the target is missing or the combined name
- * exceeds 64 UTF-8 bytes (Workers Observability name budget; semconv itself
- * sanctions the bare-operation fallback). The stable query key is always
- * `gen_ai.operation.name`, never the span name.
+ * to the bare operation when the target is unavailable. The stable query key
+ * is always `gen_ai.operation.name`, never the span name.
  */
 function spanName(operation: string, target: string | undefined): string {
-  if (!target) {
-    return operation;
-  }
-
-  const name = `${operation} ${target}`;
-  return new TextEncoder().encode(name).length <= 64 ? name : operation;
+  return target ? `${operation} ${target}` : operation;
 }
 
 /**
@@ -83,31 +68,37 @@ function normalizeProviderName(
     return undefined;
   }
 
-  const base = provider.split(".")[0] ?? provider;
-  switch (base) {
-    case "amazon-bedrock":
-      return "aws.bedrock";
-    case "google":
-      return provider.startsWith("google.vertex")
-        ? "gcp.vertex_ai"
-        : "gcp.gemini";
-    case "mistral":
-      return "mistral_ai";
-    case "xai":
-      return "x_ai";
-    case "azure":
-      return "azure.ai.openai";
-    case "deepseek":
-      return "deepseek";
-    case "openai":
-    case "anthropic":
-    case "cohere":
-    case "groq":
-    case "perplexity":
-      return base;
-    default:
-      return provider;
+  const lower = provider.toLowerCase();
+  const mappings: ReadonlyArray<readonly [prefix: string, value: string]> = [
+    ["google.vertex", "gcp.vertex_ai"],
+    ["google.generative-ai", "gcp.gemini"],
+    ["google-vertex", "gcp.vertex_ai"],
+    ["amazon-bedrock", "aws.bedrock"],
+    ["azure-openai", "azure.ai.openai"],
+    ["anthropic", "anthropic"],
+    ["openai", "openai"],
+    ["azure", "azure.ai.inference"],
+    ["google", "gcp.gemini"],
+    ["mistral", "mistral_ai"],
+    ["cohere", "cohere"],
+    ["bedrock", "aws.bedrock"],
+    ["groq", "groq"],
+    ["deepseek", "deepseek"],
+    ["perplexity", "perplexity"],
+    ["xai", "x_ai"]
+  ];
+
+  for (const [prefix, value] of mappings) {
+    if (
+      lower === prefix ||
+      lower.startsWith(`${prefix}.`) ||
+      lower.startsWith(`${prefix}-`)
+    ) {
+      return value;
+    }
   }
+
+  return provider;
 }
 
 /**
@@ -117,17 +108,19 @@ function normalizeProviderName(
  * SemanticContext extraction and never passed through.
  */
 const RESERVED_METADATA_ATTRIBUTES: Readonly<Record<string, string>> = {
-  admission: TraceAttribute.Cloudflare.TurnAdmission,
-  attempt: TraceAttribute.Cloudflare.TurnAttempt,
-  channel: TraceAttribute.Cloudflare.TurnChannel,
-  continuation: TraceAttribute.Cloudflare.TurnContinuation,
-  generation: TraceAttribute.Cloudflare.TurnGeneration,
-  queueWaitMs: TraceAttribute.Cloudflare.TurnQueueWaitMs,
-  requestId: TraceAttribute.Cloudflare.TurnRequestID,
-  submissionId: TraceAttribute.Cloudflare.TurnSubmissionID,
-  submissionWaitMs: TraceAttribute.Cloudflare.TurnSubmissionWaitMs,
-  trigger: TraceAttribute.Cloudflare.TurnTrigger,
-  userId: TraceAttribute.General.UserID
+  [TraceAttribute.Cloudflare.TurnAdmission]:
+    TraceAttribute.Cloudflare.TurnAdmission,
+  [TraceAttribute.Cloudflare.TurnChannel]:
+    TraceAttribute.Cloudflare.TurnChannel,
+  [TraceAttribute.Cloudflare.TurnContinuation]:
+    TraceAttribute.Cloudflare.TurnContinuation,
+  [TraceAttribute.Cloudflare.TurnGeneration]:
+    TraceAttribute.Cloudflare.TurnGeneration,
+  [TraceAttribute.Cloudflare.TurnRequestID]:
+    TraceAttribute.Cloudflare.TurnRequestID,
+  [TraceAttribute.Cloudflare.TurnTrigger]:
+    TraceAttribute.Cloudflare.TurnTrigger,
+  [TraceAttribute.General.UserID]: TraceAttribute.General.UserID
 };
 
 const CONSUMED_METADATA_KEYS = new Set([
@@ -167,7 +160,9 @@ export function metadataAttributes(
       continue;
     }
 
-    const reserved = RESERVED_METADATA_ATTRIBUTES[key];
+    const reserved = Object.hasOwn(RESERVED_METADATA_ATTRIBUTES, key)
+      ? RESERVED_METADATA_ATTRIBUTES[key]
+      : undefined;
     attributes[
       reserved ?? `${TraceAttribute.Cloudflare.MetadataPrefix}${key}`
     ] = value;
@@ -293,24 +288,16 @@ export function toolCallSpan(input: {
 /** Projects a completed model operation into canonical finish attributes. */
 export function finishAttributes(input: {
   readonly finishReason: string | undefined;
-  readonly outputSummary: OutputSummary | undefined;
   readonly response?: ResponseSummary | undefined;
   readonly timeToFirstChunkSeconds?: number | undefined;
   readonly usage: TokenUsageSummary | undefined;
 }): TraceAttributes {
   return {
-    [TraceAttribute.GenAI.ResponseTimeToFirstChunk]:
-      input.timeToFirstChunkSeconds,
-    [TraceAttribute.Cloudflare.OutputHasObject]: input.outputSummary?.hasObject,
-    [TraceAttribute.Cloudflare.OutputHasText]: input.outputSummary?.hasText,
     [TraceAttribute.Cloudflare.ResponseFinishReason]: input.finishReason,
-    [TraceAttribute.Cloudflare.ToolCount]: input.outputSummary?.toolCallCount,
-    [TraceAttribute.Cloudflare.UsageTotalTokens]: input.usage?.totalTokens,
-    [TraceAttribute.GenAI.ResponseFinishReasons]: finishReasonsAttribute(
-      input.finishReason
-    ),
     [TraceAttribute.GenAI.ResponseID]: input.response?.id,
     [TraceAttribute.GenAI.ResponseModel]: input.response?.model,
+    [TraceAttribute.GenAI.ResponseTimeToFirstChunk]:
+      input.timeToFirstChunkSeconds,
     [TraceAttribute.GenAI.UsageCacheCreationInputTokens]:
       input.usage?.cacheCreationInputTokens,
     [TraceAttribute.GenAI.UsageCacheReadInputTokens]:
@@ -320,15 +307,4 @@ export function finishAttributes(input: {
     [TraceAttribute.GenAI.UsageReasoningOutputTokens]:
       input.usage?.reasoningTokens
   };
-}
-
-function finishReasonsAttribute(
-  finishReason: string | undefined
-): string | undefined {
-  // OTel GenAI defines gen_ai.response.finish_reasons as string[], but the
-  // Cloudflare span attribute seam only accepts scalar values, so encode the
-  // single-reason array as JSON.
-  return finishReason === undefined
-    ? undefined
-    : JSON.stringify([finishReason]);
 }

@@ -60,7 +60,7 @@ export type AgentSpan = {
   /** Records the optional finish attributes and ends the span. Idempotent. */
   finish(attributes?: TraceAttributes): void;
   /**
-   * Ends the span as not-successful. Genuine failures record `error`/`error.type`;
+   * Ends the span as not-successful. Genuine failures record `error.type`;
    * recognized cancellations (an `AbortError`) record `canceled` instead so aborts
    * are not counted as errors. The cause message is never recorded. Idempotent.
    */
@@ -168,11 +168,10 @@ class ManagedSpan implements AgentSpan {
       // operations do not inflate error rates. The vendor marker is additive.
       setAttributes(this.span, { "cloudflare.agents.canceled": true });
     } else {
-      // The native span API has no status codes; `otel.status_code` is the
-      // spec-defined attribute encoding for status-less backends, so a future
-      // OTel-native tracer maps it 1:1 to setStatus({ code: ERROR }).
+      // Workers' custom Span API does not currently expose setStatus(). Do not
+      // invent an `otel.status_code` attribute: status is span state in OTel,
+      // not an attribute. error.type remains the standard queryable marker.
       setAttributes(this.span, {
-        "otel.status_code": "ERROR",
         "error.type":
           cause instanceof Error ? cause.name || "Error" : typeof cause
       });

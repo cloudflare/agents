@@ -13,21 +13,13 @@ export const TraceAttribute = {
     IntegrationName: "cloudflare.agents.integration.name",
     MetadataPrefix: "cloudflare.agents.metadata.",
     OperationName: "cloudflare.agents.operation.name",
-    OutputHasObject: "cloudflare.agents.output.has_object",
-    OutputHasText: "cloudflare.agents.output.has_text",
     ResponseFinishReason: "cloudflare.agents.response.finish_reason",
-    ToolCount: "cloudflare.agents.tool.count",
     TurnAdmission: "cloudflare.agents.turn.admission",
-    TurnAttempt: "cloudflare.agents.turn.attempt",
     TurnChannel: "cloudflare.agents.turn.channel",
     TurnContinuation: "cloudflare.agents.turn.continuation",
     TurnGeneration: "cloudflare.agents.turn.generation",
-    TurnQueueWaitMs: "cloudflare.agents.turn.queue_wait_ms",
     TurnRequestID: "cloudflare.agents.turn.request_id",
-    TurnSubmissionID: "cloudflare.agents.turn.submission_id",
-    TurnSubmissionWaitMs: "cloudflare.agents.turn.submission_wait_ms",
-    TurnTrigger: "cloudflare.agents.turn.trigger",
-    UsageTotalTokens: "cloudflare.agents.usage.total_tokens"
+    TurnTrigger: "cloudflare.agents.turn.trigger"
   },
   General: {
     UserID: "user.id"
@@ -52,7 +44,6 @@ export const TraceAttribute = {
     RequestTemperature: "gen_ai.request.temperature",
     RequestTopK: "gen_ai.request.top_k",
     RequestTopP: "gen_ai.request.top_p",
-    ResponseFinishReasons: "gen_ai.response.finish_reasons",
     ResponseID: "gen_ai.response.id",
     ResponseModel: "gen_ai.response.model",
     ResponseTimeToFirstChunk: "gen_ai.response.time_to_first_chunk",

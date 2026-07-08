@@ -36,8 +36,7 @@ describe("createTracer", () => {
       ).toThrow(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        "error.type": "TypeError",
-        "otel.status_code": "ERROR"
+        "error.type": "TypeError"
       });
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
         "cloudflare.agents.canceled"
@@ -58,8 +57,7 @@ describe("createTracer", () => {
       ).rejects.toBe(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        "error.type": "Error",
-        "otel.status_code": "ERROR"
+        "error.type": "Error"
       });
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
         "error.message"
@@ -141,8 +139,7 @@ describe("createTracer", () => {
       ).toThrow(cause);
 
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-        "error.type": "Error",
-        "otel.status_code": "ERROR"
+        "error.type": "Error"
       });
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });

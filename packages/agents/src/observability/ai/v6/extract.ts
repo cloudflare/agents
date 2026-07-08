@@ -1,6 +1,5 @@
 import { finishAttributes } from "../../genai/telemetry";
 import type {
-  OutputSummary,
   RequestSummary,
   ResponseSummary,
   TokenUsageSummary
@@ -19,13 +18,15 @@ export type ModelInfo = {
   readonly provider: string | undefined;
 };
 
-export function finishAttributesFromResult(result: unknown): TraceAttributes {
-  const finishReason = extractFinishReason(result);
-  const outputSummary = summarizeOutput(result);
-  const response = extractResponseInfo(result);
-  const usage = extractAISDKv6TokenUsage(result);
-
-  return finishAttributes({ finishReason, outputSummary, response, usage });
+export function finishAttributesFromResult(
+  result: unknown,
+  options: { readonly includeResponse?: boolean } = {}
+): TraceAttributes {
+  return finishAttributes({
+    finishReason: extractFinishReason(result),
+    response: options.includeResponse ? extractResponseInfo(result) : undefined,
+    usage: extractAISDKv6TokenUsage(result)
+  });
 }
 
 export function extractRequestSummary(
@@ -103,8 +104,6 @@ export function extractAISDKv6TokenUsage(
 
   const inputTokens = readTokenCount(usage.inputTokens);
   const outputTokens = readTokenCount(usage.outputTokens);
-  const totalTokens =
-    typeof usage.totalTokens === "number" ? usage.totalTokens : undefined;
   // The public result usage keeps details in inputTokenDetails/outputTokenDetails
   // (with deprecated flat fields); provider-level usage nests them on the token
   // counts themselves. Read all shapes.
@@ -123,7 +122,6 @@ export function extractAISDKv6TokenUsage(
   if (
     inputTokens === undefined &&
     outputTokens === undefined &&
-    totalTokens === undefined &&
     cacheReadInputTokens === undefined &&
     cacheCreationInputTokens === undefined &&
     reasoningTokens === undefined
@@ -138,30 +136,8 @@ export function extractAISDKv6TokenUsage(
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
-    ...(totalTokens !== undefined ? { totalTokens } : {})
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {})
   };
-}
-
-function summarizeOutput(value: unknown): OutputSummary | undefined {
-  if (typeof value !== "object" || value === null) {
-    return undefined;
-  }
-
-  // SAFETY: AI SDK result objects are records with optional text/object/toolCalls fields.
-  const record = value as Record<string, unknown>;
-
-  const summary: OutputSummary = {
-    ...(typeof record.text === "string"
-      ? { hasText: record.text.length > 0 }
-      : {}),
-    ...(record.object !== undefined ? { hasObject: true } : {}),
-    ...(Array.isArray(record.toolCalls)
-      ? { toolCallCount: record.toolCalls.length }
-      : {})
-  };
-
-  return Object.keys(summary).length > 0 ? summary : undefined;
 }
 
 /**

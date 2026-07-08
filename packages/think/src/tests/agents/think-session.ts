@@ -848,22 +848,44 @@ export class ThinkTestAgent extends Think {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
   }
 
+  async setDefaultTurnTelemetryCapture(): Promise<void> {
+    this._telemetryEvents = [];
+    this._turnConfigOverride = {
+      experimental_telemetry: {
+        isEnabled: true,
+        integrations: {
+          onStart: (event) => {
+            this._telemetryEvents.push(this._telemetryIdentity("start", event));
+          },
+          onFinish: (event) => {
+            this._telemetryEvents.push(
+              this._telemetryIdentity("finish", event)
+            );
+          }
+        }
+      }
+    };
+  }
+
   async setTurnConfigTelemetry(): Promise<void> {
     this._telemetryEvents = [];
     this._turnConfigOverride = {
       experimental_telemetry: {
         isEnabled: true,
-        functionId: "think-test-turn",
-        metadata: { source: "think-test" },
+        functionId: "caller-function",
+        metadata: {
+          agentId: "caller-agent-id",
+          agentName: "CallerAgent",
+          conversationId: "caller-conversation",
+          source: "think-test"
+        },
         integrations: {
           onStart: (event) => {
-            this._telemetryEvents.push(
-              `start:${event.functionId}:${event.metadata?.source ?? ""}`
-            );
+            this._telemetryEvents.push(this._telemetryIdentity("start", event));
           },
           onFinish: (event) => {
             this._telemetryEvents.push(
-              `finish:${event.functionId}:${event.metadata?.source ?? ""}`
+              this._telemetryIdentity("finish", event)
             );
           }
         }
@@ -974,6 +996,23 @@ export class ThinkTestAgent extends Think {
 
   async getTelemetryEvents(): Promise<string[]> {
     return this._telemetryEvents;
+  }
+
+  private _telemetryIdentity(
+    phase: string,
+    event: {
+      functionId?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): string {
+    return [
+      phase,
+      event.functionId ?? "",
+      event.metadata?.source ?? "",
+      event.metadata?.agentName ?? "",
+      event.metadata?.agentId ?? "",
+      event.metadata?.conversationId === this.ctx.id.toString()
+    ].join(":");
   }
 
   async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {

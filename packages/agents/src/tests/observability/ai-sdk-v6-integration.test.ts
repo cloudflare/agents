@@ -66,24 +66,18 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     expect(rootSpan?.attributes).toMatchObject({
       "cloudflare.agents.integration.name": "ai-sdk",
       "cloudflare.agents.operation.name": "streamText",
-      "cloudflare.agents.output.has_text": true,
-      "cloudflare.agents.usage.total_tokens": 12,
       "gen_ai.operation.name": "invoke_agent",
       "gen_ai.provider.name": "mock-provider",
       "gen_ai.request.model": "mock-model",
       "gen_ai.request.stream": true,
-      "gen_ai.response.finish_reasons": '["stop"]',
-      "gen_ai.response.id": "resp-1",
-      "gen_ai.response.model": "mock-model-served",
       "gen_ai.usage.cache_read.input_tokens": 1,
       "gen_ai.usage.input_tokens": 8,
       "gen_ai.usage.output_tokens": 4,
       "gen_ai.usage.reasoning.output_tokens": 2
     });
-    const timeToFirstChunk =
-      rootSpan?.attributes["gen_ai.response.time_to_first_chunk"];
-    expect(typeof timeToFirstChunk).toBe("number");
-    expect(timeToFirstChunk).toBeGreaterThanOrEqual(0);
+    expect(rootSpan?.attributes).not.toHaveProperty([
+      "gen_ai.response.time_to_first_chunk"
+    ]);
     expect(rootSpan?.ended).toBe(true);
 
     const chatSpan = tracing.spans.find(
@@ -95,6 +89,10 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
       "gen_ai.response.id": "resp-1",
       "gen_ai.response.model": "mock-model-served"
     });
+    const timeToFirstChunk =
+      chatSpan?.attributes["gen_ai.response.time_to_first_chunk"];
+    expect(typeof timeToFirstChunk).toBe("number");
+    expect(timeToFirstChunk).toBeGreaterThanOrEqual(0);
     expect(chatSpan?.ended).toBe(true);
   });
 
@@ -225,8 +223,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
     const rootSpan = tracing.rootSpans[0];
     expect(rootSpan?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
     expect(rootSpan?.attributes).not.toHaveProperty([
       "cloudflare.agents.canceled"

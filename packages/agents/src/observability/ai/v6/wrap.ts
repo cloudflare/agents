@@ -149,6 +149,7 @@ function createOperationWrapper(
           );
           writeSpanAttributes(operationSpan, span.attributes);
 
+          const startedAtMs = Date.now();
           const result = operation(
             operationParamsForCall(
               params,
@@ -158,8 +159,12 @@ function createOperationWrapper(
             ),
             ...args
           );
+          const hasModelSpan = canWrapModel(wrapLanguageModel, params.model);
 
-          return finishWhenStreamCompletes(result, operationSpan);
+          return finishWhenStreamCompletes(result, operationSpan, {
+            includeResponse: !hasModelSpan,
+            startedAtMs: hasModelSpan ? undefined : startedAtMs
+          });
         }
       );
     };
@@ -192,7 +197,11 @@ function createOperationWrapper(
           ...args
         );
 
-        operationSpan.finish(finishAttributesFromResult(result));
+        operationSpan.finish(
+          finishAttributesFromResult(result, {
+            includeResponse: !canWrapModel(wrapLanguageModel, params.model)
+          })
+        );
         return result;
       }
     );
@@ -201,7 +210,8 @@ function createOperationWrapper(
 
 /**
  * Reads only the agent name (metadata.agentName / gen_ai.agent.name /
- * functionId) for the span name — direct property reads, no enumeration.
+ * functionId) for the span name. `functionId` is the AI SDK's canonical
+ * projection to `gen_ai.agent.name`; an explicit metadata name takes priority.
  */
 function agentNameForCall(params: AISDKV6CallParams): string | undefined {
   const telemetry =
@@ -242,6 +252,17 @@ function operationParamsForCall(
         }
       : {})
   };
+}
+
+function canWrapModel(
+  wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
+  model: unknown
+): boolean {
+  return (
+    wrapLanguageModel !== undefined &&
+    typeof model === "object" &&
+    model !== null
+  );
 }
 
 function isStreamOperation(operationName: AISDKV6OperationName): boolean {
@@ -300,10 +321,9 @@ function telemetryMetadata(
 
 /**
  * Reads agent/conversation semantic context from the AI SDK's own
- * `experimental_telemetry` fields — `metadata` (per-call custom attributes)
- * and `functionId` (a natural fallback for agent name). There is no
- * package-level default; callers who want these attributes set them per
- * call through the SDK's native telemetry option.
+ * `experimental_telemetry` fields. The AI SDK maps `functionId` to
+ * `gen_ai.agent.name`; explicit `metadata.agentName` / `gen_ai.agent.name`
+ * takes priority. Other semantic fields come only from metadata.
  */
 function semanticContext(params: AISDKV6CallParams): SemanticContext {
   const telemetry =
@@ -359,29 +379,6 @@ function contextAttributes(
     const value = runtimeContext?.[key];
     if (isScalarAttributeValue(value)) {
       attributes[`cloudflare.agents.runtime_context.${key}`] = value;
-    }
-  }
-
-  const toolsContext =
-    typeof params.toolsContext === "object" && params.toolsContext !== null
-      ? // SAFETY: AI SDK toolsContext is a user-provided record of per-tool context records.
-        (params.toolsContext as Record<string, unknown>)
-      : undefined;
-
-  for (const [toolName, keys] of Object.entries(
-    options?.includeToolsContext ?? {}
-  )) {
-    const toolContextValue = toolsContext?.[toolName];
-    const toolContext =
-      typeof toolContextValue === "object" && toolContextValue !== null
-        ? // SAFETY: Each tool's context is a record of scalar values.
-          (toolContextValue as Record<string, unknown>)
-        : undefined;
-    for (const key of keys) {
-      const value = toolContext?.[key];
-      if (isScalarAttributeValue(value)) {
-        attributes[`cloudflare.agents.tool_context.${toolName}.${key}`] = value;
-      }
     }
   }
 

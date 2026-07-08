@@ -262,15 +262,25 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 
 ## AI SDK tracing
 
-`agents/observability/ai` instruments the Vercel AI SDK using the Workers
-runtime's native tracing support. Spans follow the
-[OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
-and flow to Workers Observability or your tail worker. On runtimes without
-native tracing, instrumentation is a no-op.
+`agents/observability/ai` instruments the Vercel AI SDK with Workers' native
+custom spans. It projects the scalar subset supported by the Workers `Span` API
+onto the current
+[OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai).
+Spans flow to Workers Observability and configured OTLP destinations. The
+integration is a no-op when the runtime has no native tracing capability.
 
-**Think agents are traced out of the box** — no configuration. Every turn's inference call becomes an `invoke_agent {agent class}` root span carrying the agent/conversation identity plus turn attributes (`cloudflare.agents.turn.request_id`, `.trigger`, `.admission`, `.channel`, …), with `chat {model}` and `execute_tool {tool}` children. Enable `observability: { traces: { enabled: true } }` in `wrangler.jsonc` to see them. Per-call `experimental_telemetry.metadata` from `beforeTurn` is merged in (caller values win): reserved keys map to their dedicated attributes, `userId` maps to `user.id`, and any other scalar entry lands as `cloudflare.agents.metadata.{key}`.
+**Think agents are traced out of the box.** Enable
+`observability.traces.enabled` in `wrangler.jsonc`; no Think option is required.
+A turn gets an `invoke_agent {agent class}` operation span, `chat {model}` model
+spans, and `execute_tool {tool}` spans. Think always supplies its durable
+identity: `gen_ai.agent.name` is the class name, `gen_ai.agent.id` is the named
+instance, and `gen_ai.conversation.id` is the opaque Durable Object ID. These
+are defaults; `beforeTurn` can override `functionId` or the corresponding
+metadata fields for applications with a different identity model.
 
-For AI SDK v6, wrap the SDK namespace:
+### AI SDK v6
+
+Wrap the SDK namespace:
 
 ```ts
 import * as ai from "ai";
@@ -279,9 +289,16 @@ import { wrapAISDK } from "agents/observability/ai";
 const { generateText, streamText } = wrapAISDK(ai);
 ```
 
-The wrapper instruments `generateText`, `streamText`, `generateObject`, and `streamObject`. Span names follow the GenAI semconv formula, falling back to the bare operation when the combined name would exceed 64 bytes: each operation gets a root `invoke_agent {agent name}` span (`gen_ai.operation.name: "invoke_agent"` — query on the attribute, not the name); when `wrapLanguageModel` is available, provider `doGenerate` / `doStream` calls get child `chat {model}` spans, and `tools.*.execute` calls get `execute_tool {tool}` spans carrying `gen_ai.tool.call.id`. Stream spans stay open until the returned stream is consumed, cancelled, errors, or is returned early, and record `gen_ai.response.time_to_first_chunk` (seconds). Streaming tools (async-generator `execute`) keep their tool span open until the iterable is consumed.
+`wrapAISDK` instruments `generateText`, `streamText`, `generateObject`, and
+`streamObject`. A model object is wrapped with the SDK's `wrapLanguageModel`
+helper, so provider work is a `chat {model}` child of the operation span. Tool
+execution is wrapped as `execute_tool {tool}`. Stream spans close on completion,
+cancellation, an in-band error, or early consumer return. Async-generator tools
+stay open until iteration ends.
 
-For AI SDK v7, register the telemetry lifecycle adapter instead:
+### AI SDK v7
+
+Register the telemetry lifecycle adapter:
 
 ```ts
 import { registerTelemetry } from "ai";
@@ -290,21 +307,39 @@ import { createAISDKTelemetry } from "agents/observability/ai";
 registerTelemetry(createAISDKTelemetry());
 ```
 
-The v7 adapter creates the same operation, language-model, and tool-execution spans through AI SDK telemetry callbacks, correlated with `cloudflare.agents.call.id` / `gen_ai.tool.call.id` attributes.
+The v7 adapter uses `cloudflare.agents.call.id` to correlate operation, model,
+and tool spans. Its execution hooks keep provider work under the `chat` span and
+nested work performed by a tool under the `execute_tool` span. It handles both
+`onEnd` and `onAbort` terminal paths.
 
-### Agent and conversation attributes
+### Identity
 
-`gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.agent.version`, and `gen_ai.conversation.id` are read from the AI SDK's own `experimental_telemetry` option, per call:
+The AI SDK's canonical OpenTelemetry integration maps `functionId` to
+`gen_ai.agent.name`. For direct `wrapAISDK` calls, `functionId` should therefore
+be a low-cardinality logical agent name, not a request, user, session, or
+Durable Object identifier. In v6, the other identity values are read from
+`experimental_telemetry.metadata`; an explicit `agentName` takes precedence
+over `functionId`.
+
+Think sets all three fields automatically on every inference:
+
+```text
+gen_ai.agent.name      = this.constructor.name
+gen_ai.agent.id        = this.name
+gen_ai.conversation.id = this.ctx.id.toString()
+```
+
+For direct v6 wrapper calls, supply identity explicitly:
 
 ```ts
 await generateText({
   model,
   prompt: "...",
   experimental_telemetry: {
-    // Falls back to gen_ai.agent.name when metadata.agentName is absent.
-    functionId: "support-agent",
+    functionId: "booking-agent",
     metadata: {
-      agentId: "agent-123",
+      // Stable agent resource/instance identifier.
+      agentId: "asst_123",
       agentVersion: "2026-07-01",
       conversationId: "conversation-123"
     }
@@ -312,25 +347,83 @@ await generateText({
 });
 ```
 
-### Safety defaults
+AI SDK v7 has no telemetry metadata bag. Put additional identity in
+`runtimeContext` and explicitly include those fields:
 
-The adapters do not emit prompts, messages, system instructions, tool inputs, tool outputs, schemas, headers, provider options, raw model outputs, or raw error messages. Only scalar attributes are emitted.
+```ts
+await generateText({
+  model,
+  prompt: "...",
+  runtimeContext: {
+    conversationId: "conversation-123"
+  },
+  telemetry: {
+    functionId: "booking-agent",
+    includeRuntimeContext: {
+      conversationId: true
+    }
+  }
+});
+```
 
-Runtime and tool context attributes are opt-in. Use them for low-cardinality
-correlation such as a request ID, tenant ID, execution backend, cache hit, or a
-tool's selected data source. Do not allowlist tokens, credentials, user input,
-or other secrets: an allowlisted scalar value is emitted as a span attribute.
-Objects and arrays are always dropped.
+### Emitted data
 
-For AI SDK v6, configure allowlists once when wrapping the namespace, then pass
-context through the SDK's existing call fields:
+| Standard attributes                                                                | Source and scope                                                                             |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `gen_ai.operation.name`                                                            | `invoke_agent`, `chat`, or `execute_tool` on every span                                      |
+| `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.agent.version`                     | Explicit operation identity; Think defaults ID and name, but not version                     |
+| `gen_ai.conversation.id`                                                           | Explicit operation conversation; Think defaults to its opaque Durable Object ID              |
+| `gen_ai.provider.name`                                                             | Normalized provider on operation/model spans when known                                      |
+| `gen_ai.output.type`                                                               | Requested `text` or `json` output on operation/model spans                                   |
+| `gen_ai.request.model`                                                             | Requested model when known                                                                   |
+| `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`              | Numeric request settings when supplied                                                       |
+| `gen_ai.request.max_tokens`, `gen_ai.request.seed`, `gen_ai.request.top_k`         | Integer request settings when supplied                                                       |
+| `gen_ai.request.stream`                                                            | `true` on streaming operations; omitted otherwise                                            |
+| `gen_ai.request.temperature`, `gen_ai.request.top_p`                               | Numeric request settings when supplied                                                       |
+| `gen_ai.response.id`, `gen_ai.response.model`                                      | Model-call response metadata when actually reported; never inferred from the requested model |
+| `gen_ai.response.time_to_first_chunk`                                              | Model-call streaming latency in seconds                                                      |
+| `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`                          | Aggregate usage on operations and per-call usage on model spans                              |
+| `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.cache_read.input_tokens` | Provider cache usage when reported                                                           |
+| `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
+| `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID only when available                                                   |
+| `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
+| `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
+
+The adapter also emits a small vendor namespace where no standard equivalent
+exists:
+
+| Attribute                                                                               | Meaning                                                                 |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `cloudflare.agents.integration.name`                                                    | Instrumentation source (`ai-sdk`)                                       |
+| `cloudflare.agents.operation.name`                                                      | Original SDK operation (`streamText`, `doStream`, `tool.execute`, etc.) |
+| `cloudflare.agents.call.id`                                                             | AI SDK v7 callback correlation ID                                       |
+| `cloudflare.agents.response.finish_reason`                                              | One finish reason as a scalar                                           |
+| `cloudflare.agents.runtime_context.{key}`                                               | Explicitly included scalar runtime context                              |
+| `cloudflare.agents.tool_context.{tool}.{key}`                                           | Explicitly included scalar context on the executed tool span            |
+| `cloudflare.agents.metadata.{key}`                                                      | Other scalar v6 telemetry metadata                                      |
+| `cloudflare.agents.turn.{request_id,trigger,admission,channel,continuation,generation}` | Think turn context                                                      |
+| `cloudflare.agents.canceled`                                                            | Recognized cancellation, not a failure                                  |
+
+`gen_ai.response.finish_reasons` and `gen_ai.request.stop_sequences` are arrays
+in OTel. Workers' custom `Span.setAttribute` currently accepts only a string,
+number, or boolean, so the adapter omits those attributes rather than placing
+JSON text under an array-typed key. Similarly, span status is state rather than
+an attribute: failures emit `error.type`, but the adapter does not invent an
+`otel.status_code` attribute when Workers exposes no custom-span status setter.
+
+### Context and safety
+
+The adapters never emit prompts, messages, system instructions, tool inputs,
+tool outputs, schemas, headers, provider options, raw model output, or raw error
+messages. Metadata and context values must be scalar; objects and arrays are
+dropped.
+
+For v6, only `experimental_context` exists. Configure its allowlist on the
+wrapper:
 
 ```ts
 const traced = wrapAISDK(ai, {
-  includeRuntimeContext: ["requestId", "tenantId"],
-  includeToolsContext: {
-    weather: ["defaultUnit", "cacheHit"]
-  }
+  includeRuntimeContext: ["requestId", "tenantId"]
 });
 
 await traced.generateText({
@@ -339,22 +432,12 @@ await traced.generateText({
   experimental_context: {
     requestId: "req-123",
     tenantId: "tenant-42"
-  },
-  toolsContext: {
-    weather: {
-      defaultUnit: "celsius",
-      cacheHit: true
-    }
   }
 });
 ```
 
-This emits `cloudflare.agents.runtime_context.requestId`,
-`cloudflare.agents.runtime_context.tenantId`, and the corresponding
-`cloudflare.agents.tool_context.weather.*` attributes.
-
-For AI SDK v7, configure the allowlists per call through the SDK's native
-telemetry options. The SDK filters the context before the adapter receives it:
+For v7, the AI SDK filters runtime and per-tool context before the adapter sees
+it. Its allowlists are boolean maps, not arrays:
 
 ```ts
 await generateText({
@@ -365,14 +448,25 @@ await generateText({
     weather: { defaultUnit: "celsius", cacheHit: true }
   },
   telemetry: {
-    includeRuntimeContext: ["requestId", "tenantId"],
+    includeRuntimeContext: {
+      requestId: true,
+      tenantId: true
+    },
     includeToolsContext: {
-      weather: ["defaultUnit", "cacheHit"]
+      weather: {
+        defaultUnit: true,
+        cacheHit: true
+      }
     }
   }
 });
 ```
 
+Do not include tokens, credentials, user input, or other secrets. Context
+filtering reduces accidental exposure; it is not a security boundary.
+
 ### Not instrumented
 
-`embed` / `embedMany`, `rerank`, `Agent` / `ToolLoopAgent`, automatic instrumentation or loader hooks, and prompt/message/tool-definition content capture are intentionally out of scope. Use the adapters as explicit compatibility wrappers.
+`embed` / `embedMany`, `rerank`, `Agent` / `ToolLoopAgent`, automatic loader
+hooks, and prompt/message/tool-definition content capture are intentionally out
+of scope.

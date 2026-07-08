@@ -5165,19 +5165,6 @@ export class Think<
   }
 
   /**
-   * The single convergence point for all chat turn entry paths.
-   * Merges tools, assembles context, fires lifecycle hooks, wraps tools
-   * for interception, and calls streamText.
-   */
-  /**
-   * Merges Think's identity and current-turn metadata into the AI SDK
-   * telemetry options so the tracing wrapper can attribute the turn's
-   * `invoke_agent` root span (agent/conversation identity plus
-   * `cloudflare.agents.turn.*` attributes). Caller-provided metadata wins on
-   * key collisions. Inert for the AI SDK's own OpenTelemetry telemetry unless
-   * the caller enables it.
-   */
-  /**
    * Finalizes the traced inference stream after a drain loop exits: drains the
    * abandoned tee branch so the operation span closes even on early exits.
    * Idempotent (the finalizer is removed before it runs); the drain rides
@@ -5202,35 +5189,52 @@ export class Think<
     }
   }
 
+  /**
+   * Adds default identity and current-turn metadata to the AI SDK telemetry
+   * options. The class identifies the logical agent implementation, the named
+   * instance identifies the agent resource, and the opaque Durable Object id
+   * identifies its one persisted conversation. Caller values override defaults.
+   */
   private _turnTelemetry(
     base: Parameters<typeof streamText>[0]["experimental_telemetry"]
   ): Parameters<typeof streamText>[0]["experimental_telemetry"] {
     const turn = admittedTurnContext.getStore();
     return {
       ...base,
+      // AI SDK maps functionId to gen_ai.agent.name. Use the class name by
+      // default while preserving an explicit caller label.
+      functionId: base?.functionId ?? this.constructor.name,
       metadata: {
         agentId: this.name,
-        agentName: this.constructor.name,
-        conversationId: this.name,
+        conversationId: this.ctx.id.toString(),
         ...(turn?.agent === this
           ? {
-              requestId: turn.requestId,
-              trigger: turn.trigger,
-              admission: turn.admission,
-              ...(turn.channel !== undefined && { channel: turn.channel }),
+              "cloudflare.agents.turn.request_id": turn.requestId,
+              "cloudflare.agents.turn.trigger": turn.trigger,
+              "cloudflare.agents.turn.admission": turn.admission,
+              ...(turn.channel !== undefined && {
+                "cloudflare.agents.turn.channel": turn.channel
+              }),
               ...(turn.continuation !== undefined && {
-                continuation: turn.continuation
+                "cloudflare.agents.turn.continuation": turn.continuation
               }),
               ...(turn.generation !== undefined && {
-                generation: turn.generation
+                "cloudflare.agents.turn.generation": turn.generation
               })
             }
           : {}),
+        // beforeTurn remains authoritative. metadata.agentName, when supplied,
+        // also takes precedence over functionId in the tracing adapter.
         ...base?.metadata
       }
     };
   }
 
+  /**
+   * The single convergence point for all chat turn entry paths.
+   * Merges tools, assembles context, fires lifecycle hooks, wraps tools
+   * for interception, and calls streamText.
+   */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.

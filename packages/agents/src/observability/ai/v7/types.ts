@@ -10,7 +10,6 @@ export type AISDKV7OperationEvent = AISDKV7TelemetryOptions & {
   readonly frequencyPenalty?: unknown;
   readonly maxOutputTokens?: unknown;
   readonly maxTokens?: unknown;
-  readonly metadata?: unknown;
   readonly messages?: unknown;
   readonly modelId?: string | undefined;
   readonly object?: unknown;
@@ -41,6 +40,7 @@ export type AISDKV7LanguageModelCallEvent = AISDKV7TelemetryOptions & {
   readonly maxOutputTokens?: unknown;
   readonly maxTokens?: unknown;
   readonly modelId?: string | undefined;
+  readonly performance?: unknown;
   readonly presencePenalty?: unknown;
   readonly provider?: string | undefined;
   readonly response?: unknown;
@@ -76,6 +76,18 @@ export type AISDKV7ToolExecutionEvent = AISDKV7TelemetryOptions & {
   readonly toolOutput?: AISDKV7ToolOutput | undefined;
 };
 
+/** AI SDK v7 abort event shape consumed by this adapter. */
+export type AISDKV7AbortEvent = {
+  readonly callId: string;
+  readonly reason?: unknown;
+};
+
+/** AI SDK v7 model-call execution hook shape consumed by this adapter. */
+export type AISDKV7ExecuteLanguageModelOptions<T> = {
+  readonly callId: string;
+  readonly execute: () => PromiseLike<T>;
+};
+
 /** AI SDK v7 tool execution hook shape consumed by this adapter. */
 export type AISDKV7ExecuteToolOptions<T> = {
   readonly callId: string;
@@ -85,14 +97,15 @@ export type AISDKV7ExecuteToolOptions<T> = {
 
 /** Structural AI SDK v7 telemetry object returned by this package. */
 export type AISDKV7Telemetry = {
+  readonly executeLanguageModelCall?: <T>(
+    options: AISDKV7ExecuteLanguageModelOptions<T>
+  ) => PromiseLike<T>;
   readonly executeTool?: <T>(
     options: AISDKV7ExecuteToolOptions<T>
   ) => PromiseLike<T>;
+  readonly onAbort?: (event: AISDKV7AbortEvent) => void | PromiseLike<void>;
   readonly onEnd?: (event: AISDKV7OperationEvent) => void | PromiseLike<void>;
   readonly onError?: (event: unknown) => void | PromiseLike<void>;
-  readonly onFinish?: (
-    event: AISDKV7OperationEvent
-  ) => void | PromiseLike<void>;
   readonly onLanguageModelCallEnd?: (
     event: AISDKV7LanguageModelCallEvent
   ) => void | PromiseLike<void>;

@@ -68,9 +68,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "cloudflare.agents.integration.name": "ai-sdk",
       "cloudflare.agents.operation.name": "generateText",
-      "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
-      "cloudflare.agents.usage.total_tokens": 6,
       "gen_ai.agent.name": "fixture-agent",
       "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "invoke_agent",
@@ -78,9 +76,6 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.request.max_tokens": 20,
       "gen_ai.request.model": "test-model",
       "gen_ai.request.temperature": 0.2,
-      "gen_ai.response.finish_reasons": '["stop"]',
-      "gen_ai.response.id": "response-1",
-      "gen_ai.response.model": "served-model",
       "gen_ai.usage.input_tokens": 4,
       "gen_ai.usage.output_tokens": 2
     });
@@ -98,10 +93,35 @@ describe("createAISDKV6Wrapper", () => {
       "cloudflare.agents.operation.name": "doGenerate",
       "gen_ai.operation.name": "chat",
       "gen_ai.provider.name": "test-provider",
-      "gen_ai.request.model": "test-model"
+      "gen_ai.request.model": "test-model",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.response.model": "served-model"
     });
     expect(modelCall?.attributes).not.toHaveProperty(["gen_ai.request.stream"]);
     expect(modelCall?.ended).toBe(true);
+  });
+
+  it.each([
+    ["azure", "azure.ai.inference"],
+    ["azure-openai.chat", "azure.ai.openai"],
+    ["google-vertex.chat", "gcp.vertex_ai"],
+    ["google.generative-ai", "gcp.gemini"],
+    ["bedrock.converse", "aws.bedrock"],
+    ["custom-provider", "custom-provider"]
+  ])("maps provider %s to %s", async (provider, expected) => {
+    const tracing = new RecordingTracer();
+    const ai: AISDKV6Namespace = {
+      generateText: async () => ({ text: "ok" })
+    };
+
+    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      model: { modelId: "model", provider },
+      prompt: "hello"
+    });
+
+    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "gen_ai.provider.name": expected
+    });
   });
 
   it("marks both operation and child model span when doGenerate fails", async () => {
@@ -141,15 +161,13 @@ describe("createAISDKV6Wrapper", () => {
     ).rejects.toThrow(cause);
 
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
     expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
       "error.message"
     ]);
     expect(tracing.rootSpans[0]?.children[0]?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
     expect(tracing.rootSpans[0]?.children[0]?.attributes).not.toHaveProperty([
       "error.message"
@@ -235,17 +253,14 @@ describe("createAISDKV6Wrapper", () => {
     expect(tracing.rootSpans[0]?.name).toBe("invoke_agent");
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "streamText",
-      "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
       "gen_ai.operation.name": "invoke_agent",
       "gen_ai.provider.name": "test-provider",
       "gen_ai.request.model": "stream-model",
       "gen_ai.request.stream": true,
-      "gen_ai.response.finish_reasons": '["stop"]',
       "gen_ai.usage.cache_read.input_tokens": 1,
       "gen_ai.usage.input_tokens": 8,
       "gen_ai.usage.output_tokens": 4,
-      "cloudflare.agents.usage.total_tokens": 12,
       "gen_ai.usage.reasoning.output_tokens": 2
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
@@ -257,13 +272,11 @@ describe("createAISDKV6Wrapper", () => {
     expect(modelCall?.parent).toBe(tracing.rootSpans[0]);
     expect(modelCall?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "doStream",
-      "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
       "gen_ai.usage.input_tokens": 8,
       "gen_ai.usage.output_tokens": 4,
       "gen_ai.operation.name": "chat",
-      "gen_ai.request.stream": true,
-      "gen_ai.response.finish_reasons": '["stop"]'
+      "gen_ai.request.stream": true
     });
     expect(modelCall?.ended).toBe(true);
   });
@@ -330,15 +343,13 @@ describe("createAISDKV6Wrapper", () => {
     }
 
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
     expect(tracing.rootSpans[0]?.ended).toBe(true);
 
     const modelCall = tracing.rootSpans[0]?.children[0];
     expect(modelCall?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
     expect(modelCall?.ended).toBe(true);
   });
@@ -538,8 +549,6 @@ describe("createAISDKV6Wrapper", () => {
     await readAll(responseStream);
 
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.output.has_text": true,
-      "cloudflare.agents.usage.total_tokens": 5,
       "gen_ai.usage.input_tokens": 3,
       "gen_ai.usage.output_tokens": 2
     });
@@ -582,9 +591,9 @@ describe("createAISDKV6Wrapper", () => {
       "gen_ai.tool.type": "function"
     });
     expect(toolSpan?.ended).toBe(true);
-    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.tool.count": 1
-    });
+    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+      "cloudflare.agents.tool.count"
+    ]);
   });
 
   it("wraps streamText tool execution without mutating the original tools", async () => {
@@ -669,7 +678,6 @@ describe("createAISDKV6Wrapper", () => {
     expect(result).toMatchObject({ object: { answer: "Paris" } });
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "generateObject",
-      "cloudflare.agents.output.has_object": true,
       "gen_ai.output.type": "json"
     });
     expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
@@ -723,52 +731,31 @@ describe("createAISDKV6Wrapper", () => {
     await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
       experimental_context: {
         requestId: "req-1"
-      },
-      toolsContext: {
-        weather: {
-          defaultUnit: "fahrenheit"
-        }
       }
     });
 
     expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
       "cloudflare.agents.runtime_context.requestId"
     ]);
-    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
-      "cloudflare.agents.tool_context.weather.defaultUnit"
-    ]);
 
     const configuredTracing = new RecordingTracer();
     await createAISDKV6Wrapper(ai, {
       options: {
-        includeRuntimeContext: ["requestId", "privateObject"],
-        includeToolsContext: {
-          weather: ["defaultUnit", "token"]
-        }
+        includeRuntimeContext: ["requestId", "privateObject"]
       },
       tracer: configuredTracing
     }).generateText({
       experimental_context: {
         privateObject: { secret: true },
         requestId: "req-1"
-      },
-      toolsContext: {
-        weather: {
-          defaultUnit: "fahrenheit",
-          token: { secret: true }
-        }
       }
     });
 
     expect(configuredTracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.runtime_context.requestId": "req-1",
-      "cloudflare.agents.tool_context.weather.defaultUnit": "fahrenheit"
+      "cloudflare.agents.runtime_context.requestId": "req-1"
     });
     expect(configuredTracing.rootSpans[0]?.attributes).not.toHaveProperty([
       "cloudflare.agents.runtime_context.privateObject"
-    ]);
-    expect(configuredTracing.rootSpans[0]?.attributes).not.toHaveProperty([
-      "cloudflare.agents.tool_context.weather.token"
     ]);
   });
 
@@ -1043,7 +1030,7 @@ describe("createAISDKV6Wrapper", () => {
     expect(tracing.rootSpans[0]?.ended).toBe(true);
   });
 
-  it("falls back to the bare invoke_agent name for agent names over 64 bytes", async () => {
+  it("keeps long agent names in the semconv span-name formula", async () => {
     const tracing = new RecordingTracer();
     const agentName = "a".repeat(65);
     const ai: AISDKV6Namespace = {
@@ -1055,10 +1042,30 @@ describe("createAISDKV6Wrapper", () => {
       prompt: "hello"
     });
 
-    expect(tracing.rootSpans[0]?.name).toBe("invoke_agent");
+    expect(tracing.rootSpans[0]?.name).toBe(`invoke_agent ${agentName}`);
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
       "gen_ai.agent.name": agentName,
       "gen_ai.operation.name": "invoke_agent"
+    });
+  });
+
+  it("lets explicit metadata agentName override functionId", async () => {
+    const tracing = new RecordingTracer();
+    const ai: AISDKV6Namespace = {
+      generateText: async () => ({ text: "ok" })
+    };
+
+    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      experimental_telemetry: {
+        functionId: "function-agent",
+        metadata: { agentName: "explicit-agent" }
+      },
+      prompt: "hello"
+    });
+
+    expect(tracing.rootSpans[0]?.name).toBe("invoke_agent explicit-agent");
+    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "gen_ai.agent.name": "explicit-agent"
     });
   });
 
@@ -1072,13 +1079,12 @@ describe("createAISDKV6Wrapper", () => {
       await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
           metadata: {
-            admission: "queue",
-            channel: "web",
-            continuation: true,
-            generation: 2,
-            queueWaitMs: 12,
-            requestId: "req-1",
-            trigger: "ws-chat"
+            "cloudflare.agents.turn.admission": "queue",
+            "cloudflare.agents.turn.channel": "web",
+            "cloudflare.agents.turn.continuation": true,
+            "cloudflare.agents.turn.generation": 2,
+            "cloudflare.agents.turn.request_id": "req-1",
+            "cloudflare.agents.turn.trigger": "ws-chat"
           }
         },
         prompt: "hello"
@@ -1089,17 +1095,16 @@ describe("createAISDKV6Wrapper", () => {
         "cloudflare.agents.turn.channel": "web",
         "cloudflare.agents.turn.continuation": true,
         "cloudflare.agents.turn.generation": 2,
-        "cloudflare.agents.turn.queue_wait_ms": 12,
         "cloudflare.agents.turn.request_id": "req-1",
         "cloudflare.agents.turn.trigger": "ws-chat"
       });
       // Reserved keys do not also pass through under the metadata prefix.
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
-        "cloudflare.agents.metadata.requestId"
+        "cloudflare.agents.metadata.cloudflare.agents.turn.request_id"
       ]);
     });
 
-    it("maps userId to the semconv user.id attribute", async () => {
+    it("preserves an explicit user.id semantic attribute", async () => {
       const tracing = new RecordingTracer();
       const ai: AISDKV6Namespace = {
         generateText: async () => ({ text: "ok" })
@@ -1107,7 +1112,7 @@ describe("createAISDKV6Wrapper", () => {
 
       await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
-          metadata: { userId: "user-7" }
+          metadata: { "user.id": "user-7" }
         },
         prompt: "hello"
       });
@@ -1116,7 +1121,7 @@ describe("createAISDKV6Wrapper", () => {
         "user.id": "user-7"
       });
       expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
-        "cloudflare.agents.metadata.userId"
+        "cloudflare.agents.metadata.user.id"
       ]);
     });
 
@@ -1128,7 +1133,13 @@ describe("createAISDKV6Wrapper", () => {
 
       await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
-          metadata: { beta: true, priority: 3, workspaceId: "ws-9" }
+          metadata: {
+            beta: true,
+            priority: 3,
+            requestId: "customer-request",
+            toString: "safe-own-key",
+            workspaceId: "ws-9"
+          }
         },
         prompt: "hello"
       });
@@ -1136,6 +1147,8 @@ describe("createAISDKV6Wrapper", () => {
       expect(tracing.rootSpans[0]?.attributes).toMatchObject({
         "cloudflare.agents.metadata.beta": true,
         "cloudflare.agents.metadata.priority": 3,
+        "cloudflare.agents.metadata.requestId": "customer-request",
+        "cloudflare.agents.metadata.toString": "safe-own-key",
         "cloudflare.agents.metadata.workspaceId": "ws-9"
       });
     });
@@ -1226,7 +1239,6 @@ describe("createAISDKV6Wrapper", () => {
     });
 
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.usage.total_tokens": 16,
       "gen_ai.response.id": "resp-9",
       "gen_ai.response.model": "served-9",
       "gen_ai.usage.cache_creation.input_tokens": 2,

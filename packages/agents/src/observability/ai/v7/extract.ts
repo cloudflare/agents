@@ -1,7 +1,6 @@
 import { TraceAttribute } from "../../genai/attributes";
 import { finishAttributes } from "../../genai/telemetry";
 import type {
-  OutputSummary,
   RequestSummary,
   ResponseSummary,
   SemanticContext,
@@ -25,26 +24,31 @@ export function operationNameFromId(operationId: unknown): string {
   return value.startsWith("ai.") ? value.slice("ai.".length) : value;
 }
 
-/** Extracts safe GenAI semantic context from an AI SDK v7 event. */
+/**
+ * Extracts safe GenAI semantic context from an AI SDK v7 event. The AI SDK's
+ * canonical OpenTelemetry projection maps `functionId` to agent name. v7 has
+ * no telemetry metadata bag, so other identity fields come from the SDK-
+ * filtered runtime context only when the caller explicitly includes them.
+ */
 export function semanticContextFromEvent(event: object): SemanticContext {
   const record = eventRecord(event);
-  const metadata =
-    typeof record.metadata === "object" && record.metadata !== null
-      ? (record.metadata as Record<string, unknown>)
+  const runtimeContext =
+    typeof record.runtimeContext === "object" && record.runtimeContext !== null
+      ? (record.runtimeContext as Record<string, unknown>)
       : undefined;
 
   return {
-    agentId: metadataValue(metadata, "agentId", "gen_ai.agent.id"),
+    agentId: metadataValue(runtimeContext, "agentId", "gen_ai.agent.id"),
     agentName:
-      metadataValue(metadata, "agentName", "gen_ai.agent.name") ??
+      metadataValue(runtimeContext, "agentName", "gen_ai.agent.name") ??
       readString(record.functionId),
     agentVersion: metadataValue(
-      metadata,
+      runtimeContext,
       "agentVersion",
       "gen_ai.agent.version"
     ),
     conversationId: metadataValue(
-      metadata,
+      runtimeContext,
       "conversationId",
       "gen_ai.conversation.id"
     )
@@ -74,12 +78,22 @@ export function requestSummaryFromEvent(
 }
 
 /** Extracts safe finish attributes from an AI SDK v7 result-like event. */
-export function finishAttributesFromEvent(event: object): TraceAttributes {
+export function finishAttributesFromEvent(
+  event: object,
+  options: {
+    readonly includePerformance?: boolean;
+    readonly includeResponse?: boolean;
+  } = {}
+): TraceAttributes {
   const record = eventRecord(event);
   return finishAttributes({
     finishReason: extractFinishReason(record),
-    outputSummary: outputSummaryFromEvent(record),
-    response: responseSummaryFromEvent(record),
+    response: options.includeResponse
+      ? responseSummaryFromEvent(record)
+      : undefined,
+    timeToFirstChunkSeconds: options.includePerformance
+      ? timeToFirstChunkSeconds(record)
+      : undefined,
     usage: tokenUsageFromEvent(record)
   });
 }
@@ -122,21 +136,6 @@ function extractFinishReason(
   return undefined;
 }
 
-function outputSummaryFromEvent(
-  event: Record<string, unknown>
-): OutputSummary | undefined {
-  const text = readString(event.text);
-  const summary: OutputSummary = {
-    ...(text !== undefined ? { hasText: text.length > 0 } : {}),
-    ...(event.object !== undefined ? { hasObject: true } : {}),
-    ...(Array.isArray(event.toolCalls)
-      ? { toolCallCount: event.toolCalls.length }
-      : {})
-  };
-
-  return Object.keys(summary).length > 0 ? summary : undefined;
-}
-
 function responseSummaryFromEvent(
   event: Record<string, unknown>
 ): ResponseSummary | undefined {
@@ -145,10 +144,10 @@ function responseSummaryFromEvent(
       ? (event.response as Record<string, unknown>)
       : undefined;
   const id = readString(event.responseId ?? response?.id);
-  // Prefer the served model (nested response metadata) over the requested
-  // model id carried on the event itself.
+  // Never fall back to event.modelId: v7 carries the requested model there,
+  // not the model that actually served the response.
   const model = readString(
-    event.responseModel ?? response?.modelId ?? response?.model ?? event.modelId
+    event.responseModel ?? response?.modelId ?? response?.model
   );
 
   if (id === undefined && model === undefined) {
@@ -172,7 +171,6 @@ function tokenUsageFromEvent(
   const usage = raw as Record<string, unknown>;
   const inputTokens = readTokenCount(usage.inputTokens);
   const outputTokens = readTokenCount(usage.outputTokens);
-  const totalTokens = readNumber(usage.totalTokens);
   // Mirror the v6 extractor: public result shapes keep details in
   // inputTokenDetails/outputTokenDetails (with deprecated flat fields);
   // provider-level usage nests them on the token counts themselves.
@@ -191,7 +189,6 @@ function tokenUsageFromEvent(
   if (
     inputTokens === undefined &&
     outputTokens === undefined &&
-    totalTokens === undefined &&
     cacheReadInputTokens === undefined &&
     cacheCreationInputTokens === undefined &&
     reasoningTokens === undefined
@@ -206,7 +203,17 @@ function tokenUsageFromEvent(
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
-    ...(totalTokens !== undefined ? { totalTokens } : {})
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {})
   };
+}
+
+function timeToFirstChunkSeconds(
+  event: Record<string, unknown>
+): number | undefined {
+  const performance =
+    typeof event.performance === "object" && event.performance !== null
+      ? (event.performance as Record<string, unknown>)
+      : undefined;
+  const milliseconds = readNumber(performance?.timeToFirstOutputMs);
+  return milliseconds === undefined ? undefined : milliseconds / 1000;
 }

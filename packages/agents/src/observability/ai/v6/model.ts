@@ -41,7 +41,9 @@ export function wrapModel(
           span.attributes,
           async (modelCall) => {
             const result = await doGenerate();
-            modelCall.finish(finishAttributesFromResult(result));
+            modelCall.finish(
+              finishAttributesFromResult(result, { includeResponse: true })
+            );
             return result;
           }
         );
@@ -61,8 +63,12 @@ export function wrapModel(
           span.attributes,
           async (modelCall) => {
             try {
+              const startedAtMs = Date.now();
               const result = await doStream();
-              return finishWhenStreamCompletes(result, modelCall);
+              return finishWhenStreamCompletes(result, modelCall, {
+                includeResponse: true,
+                startedAtMs
+              });
             } catch (cause: unknown) {
               modelCall.fail(cause);
               throw cause;

@@ -1,9 +1,5 @@
 import { finishAttributes } from "../../genai/telemetry";
-import type {
-  OutputSummary,
-  ResponseSummary,
-  TokenUsageSummary
-} from "../../genai/telemetry";
+import type { ResponseSummary, TokenUsageSummary } from "../../genai/telemetry";
 import type { TraceAttributes, AgentSpan } from "../../tracing/tracer";
 import {
   extractAISDKv6TokenUsage,
@@ -13,7 +9,6 @@ import {
 
 type StreamSummary = {
   readonly finishReason?: string;
-  readonly outputSummary?: OutputSummary;
   readonly response?: ResponseSummary;
   readonly timeToFirstChunkSeconds?: number;
   readonly usage?: TokenUsageSummary;
@@ -21,25 +16,38 @@ type StreamSummary = {
 
 export function finishWhenStreamCompletes(
   result: unknown,
-  span: AgentSpan
+  span: AgentSpan,
+  options: {
+    readonly includeResponse?: boolean;
+    readonly startedAtMs?: number;
+  } = {}
 ): unknown {
-  return patchStreamFields(result, {
-    onComplete: (summary) => {
-      span.finish(finishAttributesFromStreamSummary(summary));
+  return patchStreamFields(
+    result,
+    {
+      onComplete: (summary) => {
+        span.finish(
+          finishAttributesFromStreamSummary(
+            summary,
+            options.includeResponse === true
+          )
+        );
+      },
+      onError: (cause) => {
+        span.fail(cause);
+      }
     },
-    onError: (cause) => {
-      span.fail(cause);
-    }
-  });
+    options.startedAtMs
+  );
 }
 
 function finishAttributesFromStreamSummary(
-  summary: StreamSummary | undefined
+  summary: StreamSummary | undefined,
+  includeResponse: boolean
 ): TraceAttributes {
   return finishAttributes({
     finishReason: summary?.finishReason,
-    outputSummary: summary?.outputSummary,
-    response: summary?.response,
+    response: includeResponse ? summary?.response : undefined,
     timeToFirstChunkSeconds: summary?.timeToFirstChunkSeconds,
     usage: summary?.usage
   });
@@ -50,7 +58,8 @@ function patchStreamFields(
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
-  }
+  },
+  startedAtMs: number | undefined
 ): unknown {
   if (typeof result !== "object" || result === null) {
     hooks.onComplete(undefined);
@@ -87,10 +96,14 @@ function patchStreamFields(
       Object.defineProperty(record, "baseStream", {
         configurable: true,
         enumerable: true,
-        value: wrapReadableStream(record.baseStream, {
-          onComplete: completeOnce,
-          onError: errorOnce
-        }),
+        value: wrapReadableStream(
+          record.baseStream,
+          {
+            onComplete: completeOnce,
+            onError: errorOnce
+          },
+          startedAtMs
+        ),
         writable: true
       });
       return result;
@@ -109,14 +122,22 @@ function patchStreamFields(
         enumerable: true,
         value:
           streamField.kind === "readable"
-            ? wrapReadableStream(streamField.stream, {
-                onComplete: completeOnce,
-                onError: errorOnce
-              })
-            : wrapAsyncIterable(streamField.stream, {
-                onComplete: completeOnce,
-                onError: errorOnce
-              }),
+            ? wrapReadableStream(
+                streamField.stream,
+                {
+                  onComplete: completeOnce,
+                  onError: errorOnce
+                },
+                startedAtMs
+              )
+            : wrapAsyncIterable(
+                streamField.stream,
+                {
+                  onComplete: completeOnce,
+                  onError: errorOnce
+                },
+                startedAtMs
+              ),
         writable: true
       });
       patchedAny = true;
@@ -170,10 +191,11 @@ function wrapReadableStream(
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
-  }
+  },
+  startedAtMs: number | undefined
 ): ReadableStream<unknown> {
   let reader: ReadableStreamDefaultReader<unknown> | undefined;
-  const state = createStreamState(hooks);
+  const state = createStreamState(hooks, startedAtMs);
 
   return new ReadableStream<unknown>({
     async pull(controller) {
@@ -239,11 +261,12 @@ function wrapAsyncIterable(
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
-  }
+  },
+  startedAtMs: number | undefined
 ): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
-      const state = createStreamState(hooks);
+      const state = createStreamState(hooks, startedAtMs);
       try {
         for await (const chunk of stream) {
           state.observeChunk(chunk);
@@ -261,10 +284,13 @@ function wrapAsyncIterable(
   };
 }
 
-function createStreamState(hooks: {
-  readonly onComplete: (summary: StreamSummary | undefined) => void;
-  readonly onError: (cause: unknown) => void;
-}): {
+function createStreamState(
+  hooks: {
+    readonly onComplete: (summary: StreamSummary | undefined) => void;
+    readonly onError: (cause: unknown) => void;
+  },
+  startedAtMs: number | undefined
+): {
   readonly closed: boolean;
   cancel(): void;
   complete(): void;
@@ -273,14 +299,11 @@ function createStreamState(hooks: {
 } {
   let closed = false;
   let finishReason: string | undefined;
-  let hasText = false;
-  let toolCallCount = 0;
   let usage: TokenUsageSummary | undefined;
   let response: ResponseSummary | undefined;
   let observedError: { readonly cause: unknown } | undefined;
   let observedAbort = false;
   let firstChunkAtMs: number | undefined;
-  const startedAtMs = Date.now();
 
   const settleObserved = (): boolean => {
     if (observedError) {
@@ -329,13 +352,11 @@ function createStreamState(hooks: {
       hooks.onComplete(
         streamSummaryFromParts({
           finishReason,
-          hasText,
           response,
           timeToFirstChunkSeconds:
-            firstChunkAtMs === undefined
+            firstChunkAtMs === undefined || startedAtMs === undefined
               ? undefined
               : (firstChunkAtMs - startedAtMs) / 1000,
-          toolCallCount,
           usage
         })
       );
@@ -360,12 +381,6 @@ function createStreamState(hooks: {
       }
       if (isAbortChunk(chunk)) {
         observedAbort = true;
-      }
-      if (isContentChunk(chunk)) {
-        hasText = true;
-      }
-      if (isToolCallChunk(chunk)) {
-        toolCallCount += 1;
       }
       finishReason = extractFinishReason(chunk) ?? finishReason;
       usage = extractAISDKv6TokenUsage(chunk) ?? usage;
@@ -411,20 +426,14 @@ function isAbortChunk(chunk: unknown): boolean {
 
 function streamSummaryFromParts(input: {
   readonly finishReason: string | undefined;
-  readonly hasText: boolean;
   readonly response: ResponseSummary | undefined;
   readonly timeToFirstChunkSeconds: number | undefined;
-  readonly toolCallCount: number;
   readonly usage: TokenUsageSummary | undefined;
 }): StreamSummary {
   return {
     ...(input.finishReason !== undefined
       ? { finishReason: input.finishReason }
       : {}),
-    outputSummary: {
-      ...(input.hasText ? { hasText: true } : {}),
-      ...(input.toolCallCount > 0 ? { toolCallCount: input.toolCallCount } : {})
-    },
     ...(input.response ? { response: input.response } : {}),
     ...(input.timeToFirstChunkSeconds !== undefined
       ? { timeToFirstChunkSeconds: input.timeToFirstChunkSeconds }
@@ -450,36 +459,5 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
     value !== null &&
     Symbol.asyncIterator in value &&
     typeof value[Symbol.asyncIterator] === "function"
-  );
-}
-
-function isContentChunk(chunk: unknown): boolean {
-  if (typeof chunk === "string") {
-    return chunk.length > 0;
-  }
-
-  if (typeof chunk !== "object" || chunk === null) {
-    return false;
-  }
-
-  // SAFETY: AI SDK stream chunks are records with a type discriminator.
-  const record = chunk as Record<string, unknown>;
-
-  if (record.type === "text-delta") {
-    return (
-      (typeof record.delta === "string" && record.delta.length > 0) ||
-      (typeof record.textDelta === "string" && record.textDelta.length > 0) ||
-      (typeof record.text === "string" && record.text.length > 0)
-    );
-  }
-
-  return record.type === "text" && typeof record.text === "string";
-}
-
-function isToolCallChunk(chunk: unknown): boolean {
-  return (
-    typeof chunk === "object" &&
-    chunk !== null &&
-    (chunk as Record<string, unknown>).type === "tool-call"
   );
 }

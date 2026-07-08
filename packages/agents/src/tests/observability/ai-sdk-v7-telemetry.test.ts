@@ -11,13 +11,11 @@ describe("createAISDKV7Telemetry", () => {
       callId: "call-1",
       functionId: "fixture-agent",
       maxOutputTokens: 20,
-      metadata: {
-        conversationId: "conversation-1"
-      },
       modelId: "test-model",
       operationId: "ai.generateText",
       provider: "test-provider",
       runtimeContext: {
+        conversationId: "conversation-1",
         privateObject: { secret: true },
         requestId: "req-1"
       },
@@ -31,7 +29,8 @@ describe("createAISDKV7Telemetry", () => {
     telemetry.onLanguageModelCallEnd?.({
       callId: "call-1",
       finishReason: "stop",
-      modelId: "served-model",
+      modelId: "test-model",
+      performance: { timeToFirstOutputMs: 125 },
       responseId: "response-1",
       usage: {
         inputTokens: 4,
@@ -58,10 +57,8 @@ describe("createAISDKV7Telemetry", () => {
       "cloudflare.agents.call.id": "call-1",
       "cloudflare.agents.integration.name": "ai-sdk",
       "cloudflare.agents.operation.name": "generateText",
-      "cloudflare.agents.output.has_text": true,
       "cloudflare.agents.response.finish_reason": "stop",
       "cloudflare.agents.runtime_context.requestId": "req-1",
-      "cloudflare.agents.usage.total_tokens": 6,
       "gen_ai.agent.name": "fixture-agent",
       "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "invoke_agent",
@@ -69,8 +66,6 @@ describe("createAISDKV7Telemetry", () => {
       "gen_ai.request.max_tokens": 20,
       "gen_ai.request.model": "test-model",
       "gen_ai.request.temperature": 0.2,
-      "gen_ai.response.finish_reasons": '["stop"]',
-      "gen_ai.response.model": "served-model",
       "gen_ai.usage.input_tokens": 4,
       "gen_ai.usage.output_tokens": 2
     });
@@ -87,12 +82,44 @@ describe("createAISDKV7Telemetry", () => {
       "cloudflare.agents.call.id": "call-1",
       "cloudflare.agents.operation.name": "doGenerate",
       "gen_ai.operation.name": "chat",
-      "gen_ai.response.id": "response-1"
+      "gen_ai.response.id": "response-1",
+      "gen_ai.response.time_to_first_chunk": 0.125
     });
     expect(tracing.spans[1]?.attributes).not.toHaveProperty([
       "gen_ai.request.stream"
     ]);
     expect(tracing.spans[1]?.ended).toBe(true);
+  });
+
+  it("runs provider work under the v7 model-call span", async () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({ tracer: tracing });
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onLanguageModelCallStart?.({
+      callId: "call-1",
+      modelId: "test-model",
+      provider: "openai"
+    });
+
+    const result = await telemetry.executeLanguageModelCall?.({
+      callId: "call-1",
+      execute: async () => {
+        await tracing.withSpan("provider.fetch", {}, (span) => {
+          span.finish();
+        });
+        return "ok";
+      }
+    });
+    telemetry.onLanguageModelCallEnd?.({ callId: "call-1" });
+    telemetry.onEnd?.({ callId: "call-1", operationId: "ai.generateText" });
+
+    expect(result).toBe("ok");
+    const modelSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(modelSpan?.children[0]?.name).toBe("provider.fetch");
+    expect(modelSpan?.ended).toBe(true);
   });
 
   it("runs executeTool under the tool span and records only safe tool metadata", async () => {
@@ -202,17 +229,36 @@ describe("createAISDKV7Telemetry", () => {
       expect(span.attributes).not.toHaveProperty(["error.message"]);
     }
     expect(tracing.spans[0]?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
     expect(tracing.spans[1]?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
     expect(tracing.spans[2]?.attributes).toMatchObject({
-      "error.type": "Error",
-      "otel.status_code": "ERROR"
+      "error.type": "Error"
     });
+  });
+
+  it("closes open spans as canceled when v7 reports an abort", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({ tracer: tracing });
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.streamText" });
+    telemetry.onLanguageModelCallStart?.({ callId: "call-1" });
+    telemetry.onToolExecutionStart?.({
+      callId: "call-1",
+      toolCall: { toolCallId: "tool-1", toolName: "slowTool" }
+    });
+    telemetry.onAbort?.({ callId: "call-1", reason: "user canceled" });
+
+    expect(tracing.spans).toHaveLength(3);
+    for (const span of tracing.spans) {
+      expect(span.ended).toBe(true);
+      expect(span.attributes).toMatchObject({
+        "cloudflare.agents.canceled": true
+      });
+      expect(span.attributes).not.toHaveProperty(["error.type"]);
+    }
   });
 
   it("does not record raw prompt, tool input, tool output, or error content", () => {
@@ -264,18 +310,19 @@ describe("createAISDKV7Telemetry", () => {
     }
   });
 
-  it("passes telemetry metadata through to root span attributes", () => {
+  it("projects only scalar SDK-filtered v7 runtime context", () => {
     const tracing = new RecordingTracer();
     const telemetry = createAISDKV7Telemetry({ tracer: tracing });
 
     telemetry.onStart?.({
       callId: "call-1",
-      metadata: {
+      operationId: "ai.generateText",
+      runtimeContext: {
+        conversationId: "conversation-1",
         nested: { a: 1 },
         requestId: "req-1",
         workspaceId: "ws-9"
-      },
-      operationId: "ai.generateText"
+      }
     });
     telemetry.onEnd?.({
       callId: "call-1",
@@ -283,14 +330,15 @@ describe("createAISDKV7Telemetry", () => {
     });
 
     expect(tracing.spans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.metadata.workspaceId": "ws-9",
-      "cloudflare.agents.turn.request_id": "req-1"
+      "cloudflare.agents.runtime_context.requestId": "req-1",
+      "cloudflare.agents.runtime_context.workspaceId": "ws-9",
+      "gen_ai.conversation.id": "conversation-1"
     });
     expect(tracing.spans[0]?.attributes).not.toHaveProperty([
-      "cloudflare.agents.metadata.nested"
+      "cloudflare.agents.runtime_context.nested"
     ]);
     expect(tracing.spans[0]?.attributes).not.toHaveProperty([
-      "cloudflare.agents.metadata.requestId"
+      "cloudflare.agents.runtime_context.conversationId"
     ]);
     expect(tracing.spans[0]?.ended).toBe(true);
   });
@@ -381,7 +429,6 @@ describe("createAISDKV7Telemetry", () => {
     });
 
     expect(tracing.spans[0]?.attributes).toMatchObject({
-      "cloudflare.agents.usage.total_tokens": 16,
       "gen_ai.usage.cache_creation.input_tokens": 2,
       "gen_ai.usage.cache_read.input_tokens": 3,
       "gen_ai.usage.input_tokens": 10,
@@ -416,21 +463,30 @@ describe("createAISDKV7Telemetry", () => {
     });
   });
 
-  it("prefers the nested response.modelId over the event modelId", () => {
+  it("does not present the requested model as the response model", () => {
     const tracing = new RecordingTracer();
     const telemetry = createAISDKV7Telemetry({ tracer: tracing });
 
     telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
-    telemetry.onEnd?.({
+    telemetry.onLanguageModelCallStart?.({
+      callId: "call-1",
+      modelId: "requested-model"
+    });
+    telemetry.onLanguageModelCallEnd?.({
       callId: "call-1",
       modelId: "requested-model",
-      operationId: "ai.generateText",
-      response: { id: "resp-1", modelId: "served-model" }
+      responseId: "resp-1"
     });
+    telemetry.onEnd?.({ callId: "call-1", operationId: "ai.generateText" });
 
-    expect(tracing.spans[0]?.attributes).toMatchObject({
-      "gen_ai.response.id": "resp-1",
-      "gen_ai.response.model": "served-model"
+    expect(tracing.spans[1]?.attributes).toMatchObject({
+      "gen_ai.response.id": "resp-1"
     });
+    expect(tracing.spans[1]?.attributes).not.toHaveProperty([
+      "gen_ai.response.model"
+    ]);
+    expect(tracing.spans[0]?.attributes).not.toHaveProperty([
+      "gen_ai.response.id"
+    ]);
   });
 });
