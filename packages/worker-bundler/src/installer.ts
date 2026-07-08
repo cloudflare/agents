@@ -375,8 +375,6 @@ async function installPythonPackage(
       };
 
       const version = metadata.info.version;
-      let sourceUrl = `${registry}/packages/source/${name[0]}/${name}/${name}-${version}.tar.gz`;
-
       const wheel = metadata.urls.find(
         (url) => url.packagetype === "bdist_wheel"
       );
