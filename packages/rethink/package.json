@@ -1,0 +1,54 @@
+{
+  "name": "@cloudflare/rethink",
+  "version": "0.0.0",
+  "description": "Composable primitives for building Cloudflare Think-style agents",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "think",
+    "ai",
+    "sdk"
+  ],
+  "type": "module",
+  "repository": {
+    "directory": "packages/rethink",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "types:test": "wrangler types tests/env.d.ts --config tests/wrangler.jsonc --include-runtime false && oxfmt --write tests/env.d.ts",
+    "test": "pnpm run test:unit && pnpm run test:workers",
+    "test:unit": "vitest --run --dir src",
+    "test:workers": "vitest --run -c tests/vitest.config.ts"
+  },
+  "nx": {
+    "targets": {
+      "build": {
+        "inputs": [
+          "production",
+          "^production"
+        ],
+        "outputs": [
+          "{projectRoot}/dist"
+        ]
+      }
+    }
+  }
+}

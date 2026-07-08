@@ -3939,6 +3939,8 @@ importers:
         specifier: ^4.12.27
         version: 4.12.27
 
+  packages/rethink: {}
+
   packages/shell:
     dependencies:
       '@cloudflare/codemode':
