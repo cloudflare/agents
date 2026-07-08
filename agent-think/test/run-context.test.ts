@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildRunEnvelope,
   buildRunTelemetry,
+  repoDirectory,
   validateRunTarget
 } from "../src/run-context";
 
@@ -33,6 +34,11 @@ describe("agent-think run context", () => {
         requestedBy: "mattzcarey"
       }
     });
+  });
+
+  it("uses the repository name directly under /workspace", () => {
+    expect(repoDirectory("cloudflare/agents")).toBe("/workspace/agents");
+    expect(repoDirectory("owner/my repo")).toBe("/workspace/my-repo");
   });
 
   it("rejects substituted targets and unsafe requester mentions", () => {

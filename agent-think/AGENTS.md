@@ -40,12 +40,12 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    ├─ AgentThink WorkerEntrypoint.dispatch  (src/index.ts)
    │     getAgentByName(env.ThinkAgent, session) → setContext → start()
    │     start() ONLY submits the durable turn — returns in ~1s
-   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + Workspace VFS
-   │     source files sync with the container; generated paths stay backend-local;
-   │     container backend dials the warm pool per-connect:
+   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + complete Workspace VFS
+   │     file tools and both bash backends share the same synchronized tree;
+   │     container backend claims from the warm pool per turn:
    │        resolveContainerId(env, id) → env.Sandbox.get(idFromName(uuid))
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
-   ├─ WarmPool DO (src/warm-pool.ts) — keeps WARM_POOL_TARGET(=1) containers warm
+   ├─ WarmPool DO (src/warm-pool.ts) — keeps exactly one unassigned container warm
    ├─ CommandCenterAgent DO (src/command-center.ts) — singleton ("main")
    │     registry of every thread + per-thread counters; ThinkAgent reports
    │     lifecycle events fire-and-forget (observing must never break a run)
@@ -89,22 +89,21 @@ the container's coding filesystem.
   its 10-min step timeout + retry-from-scratch was the main death mode. Think's
   native durable `submitMessages` is the durability layer.
 - **One Workspace owns `/workspace`.** Think internals, the read/write/edit tools,
-  and container commands share the same `@cloudflare/workspace` instance. Source
-  files and `.git` are durable in the ThinkAgent VFS. Pull filtering keeps
-  `node_modules`, `.pnpm-store`, `dist`, `build`, and `temp` on the backend that
-  created them. Skills use Think's native R2 source.
+  the lightweight shell, and container commands share the same complete
+  `@cloudflare/workspace` VFS. No path under the mount is excluded, including
+  `.git`, dependencies, and build output. Paths outside `/workspace` remain
+  container-local by construction. Skills use Think's native R2 source.
 - **Run identity is durable input, not prompt configuration.** The first user
   message carries an `<agent-think-run>` JSON envelope (repo, issue,
   instruction, requester, triggering comment). Skills fail closed without it.
   This survives context-block prompt assembly, eviction, and continuation.
-- **Container transport is scoped.** Container auth and `bash` run through
-  `RunLifecycle.withWorkspace`; the last concurrent user closes the RPC/WebSocket
-  handle. Durable file tools use the local VFS and do not boot a container. A
-  bounded, renewable WarmPool lease protects the assigned container while the
-  durable turn is active, then idle eviction owns cleanup after terminal completion.
-- **Shell commands run on the `container` backend.** It provides the real Linux
-  toolchain and network. File tools use the durable Workspace VFS; automatic
-  push/pull around each command keeps both views synchronized.
+- **Container ownership follows the turn.** The first container use claims a warm
+  container. The Workspace keeps that connection for the turn. Terminal cleanup
+  closes it, stops and drops the used container, and restores the one-container
+  warm slot. There are no renewable leases, sticky idle assignments, or TTL policy.
+- **Bash has two backends.** The lightweight VFS-backed `shell` is the default for
+  text and file commands. Select `container` for gh, npm, node, native binaries,
+  network access, builds, tests, and deploys. File tools call the VFS directly.
 - **Repros must be clickable.** The reproduce skill mandates a minimal
   Vite + React page (exact 7-file recipe in the skill) so maintainers see the
   failing behavior without cloning anything.
@@ -155,11 +154,10 @@ the container's coding filesystem.
   in `run_worker_first`. Symptom: the UI's HTTP calls work while every
   `wss://` connect fails. (This bit us on the command center; the repro-skill
   recipe carries the same rule.)
-- **Never remove the Workspace pull-ignore policy.** Pulling a monorepo install
-  (roughly 1.9 GB / 158k entries) into the ThinkAgent DO causes a memory-reset
-  loop on every container `/ws` reconnect. Source sync is safe only because
-  dependency, build, and scratch segments stay backend-local. Noisy output must
-  still be redirected to `/workspace/temp` and tailed so tool results stay bounded.
+- **The complete mounted VFS is synchronized deliberately.** `node_modules` and
+  build output under `/workspace` are durable and visible to file tools. Put long
+  logs in `/temp` outside the mount and tail them with container bash so neither
+  the VFS nor tool results absorb the full output.
 - **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the
   new code; a running turn loses its container connection and burns minutes on
   Think's (working) recovery — it re-auths and resumes, but don't deploy while

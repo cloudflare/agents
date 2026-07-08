@@ -15,6 +15,12 @@ export interface RunTarget {
   requestedBy?: RequestedBy;
 }
 
+export function repoDirectory(repo: string | undefined): string {
+  const name = repo?.split("/").filter(Boolean).at(-1) ?? "repo";
+  const safe = name.replace(/[^a-zA-Z0-9._-]+/g, "-") || "repo";
+  return `/workspace/${safe}`;
+}
+
 export function validateRunTarget(target: RunTarget): RunTarget {
   if (
     !CLOUDFLARE_REPO.test(target.repo) ||

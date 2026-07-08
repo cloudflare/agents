@@ -2,8 +2,7 @@
  * ThinkAgent — one Think Durable Object per GitHub issue.
  *
  * Owns one `@cloudflare/workspace.Workspace` shared by Think internals, file
- * tools, and container commands. Source files sync through the durable VFS;
- * generated dependency, build, and scratch paths remain backend-local.
+ * tools, and both bash backends. The complete VFS synchronizes with containers.
  *
  * gh-app calls `dispatch()` (see index.ts) with the issue
  * coordinates, a free-form `instruction` ("reproduce this", "open a
@@ -27,11 +26,13 @@ import { skills, Think } from "@cloudflare/think";
 import {
   type DurableObjectStorageLike,
   Workspace,
+  type WorkspaceBackend,
   WorkspaceProxy,
   WorkspaceServiceProxy,
   type WorkspaceStub
 } from "@cloudflare/workspace";
 import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
+import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import type { LanguageModel, ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { openai } from "workers-ai-provider/openai";
@@ -45,13 +46,12 @@ import {
   createWriteTool,
   WorkspaceFileStore
 } from "./tools/fs/index";
-import { repoDirectory, WORKSPACE_PULL_IGNORE } from "./workspace-policy";
 import {
   buildRunEnvelope,
   buildRunTelemetry,
+  repoDirectory,
   type RunTarget
 } from "./run-context";
-import { RunLifecycle, type RunOutcome } from "./run-lifecycle";
 import { AGENT_THINK_MAX_STEPS, classifyTurnOutcome } from "./turn-outcome";
 
 export { WorkspaceProxy, WorkspaceServiceProxy };
@@ -120,11 +120,12 @@ function agentThinkInstructions(ctx: RunContext | null): string | null {
     "",
     "Environment:",
     `  - Clone ${ctx.repo} to ${repoDirectory(ctx.repo)}.`,
-    "  - The read/write/edit tools and container shell share synchronized source",
-    "    files. Source files and .git are durable across container replacement.",
-    `  - Container-created path segments (${WORKSPACE_PULL_IGNORE.join(", ")}) stay`,
-    "    backend-local. Use bash, not file tools, for /workspace/temp and generated",
-    "    files. Keep logs and scratch data under /workspace/temp.",
+    "  - read/write/edit and both bash backends share the complete durable VFS",
+    "    mounted at /workspace, including .git, dependencies, and build output.",
+    "  - Paths outside /workspace are container-local. Put long logs in /temp and",
+    "    inspect them with container bash so they do not enter the VFS.",
+    "  - bash defaults to the lightweight shell backend. Select container for gh,",
+    "    npm, node, network access, native binaries, builds, tests, and deploys.",
     "  - `gh`, `git`, `curl`, `npm`, `node`, and `wrangler` run in the",
     "    container. `gh` and `git` are ALREADY AUTHENTICATED there as the app",
     "    (via `gh auth login` + `gh auth setup-git`). Do NOT print, echo, or",
@@ -158,7 +159,6 @@ export class ThinkAgent extends ThinkBase {
 
   readonly #containerBackend: CloudflareContainerBackend;
   readonly #workspace: Workspace;
-  readonly #runLifecycle: RunLifecycle;
   #context: RunContext | null = null;
   /**
    * The installation token the container's `gh`/`git` is currently
@@ -168,6 +168,7 @@ export class ThinkAgent extends ThinkBase {
    * issue (new short-lived token) re-authenticates automatically.
    */
   #authedToken: string | null = null;
+  #cleanupPromise: Promise<void> | null = null;
   #reportTail: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -186,23 +187,26 @@ export class ThinkAgent extends ThinkBase {
       },
       workspace: workspaceRef
     });
+    const backends: WorkspaceBackend[] = [];
+    if (env.LOADER) {
+      backends.push(
+        new WorkerBackend({
+          id: "shell",
+          loader: env.LOADER,
+          workspace: workspaceRef,
+          ctx
+        })
+      );
+    }
+    backends.push(this.#containerBackend);
     this.#workspace = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [this.#containerBackend],
-      ignore: [...WORKSPACE_PULL_IGNORE]
+      backends
     });
 
     this.workspace = adaptToThinkWorkspace(
       this.#workspace
     ) as unknown as ThinkWorkspaceLike;
-    this.#runLifecycle = new RunLifecycle({
-      env,
-      sessionId: ctx.id.toString(),
-      workspace: this.#workspace,
-      reportTerminal: (outcome) => this.#recordTerminal(outcome),
-      log: (event, data) => this.#log(event, data),
-      fork: (effect) => this.ctx.waitUntil(effect)
-    });
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context =
@@ -380,15 +384,19 @@ export class ThinkAgent extends ThinkBase {
   async debugWorkspaceSync(): Promise<{
     hostFileVisibleInContainer: boolean;
     sourceFileDurable: boolean;
-    generatedFileVisibleInContainer: boolean;
-    generatedFileDurable: boolean;
+    nodeModulesFileVisibleInContainer: boolean;
+    nodeModulesFileDurable: boolean;
+    localTempFileDurable: boolean;
     sourceFileRestoredAfterContainerReplacement: boolean;
-    generatedFileRestoredAfterContainerReplacement: boolean;
+    nodeModulesFileRestoredAfterContainerReplacement: boolean;
+    localTempFileRestoredAfterContainerReplacement: boolean;
   }> {
-    const root = `/workspace/sync-${crypto.randomUUID()}`;
+    const id = crypto.randomUUID();
+    const root = `/workspace/sync-${id}`;
     const hostPath = `${root}/host.txt`;
     const sourcePath = `${root}/src/source.txt`;
-    const generatedPath = `${root}/node_modules/generated.txt`;
+    const nodeModulesPath = `${root}/node_modules/pkg/index.js`;
+    const localTempPath = `/temp/sync-${id}.log`;
 
     await this.#workspace.fs.mkdir(root, { recursive: true });
     await this.#workspace.fs.writeFile(hostPath, "host");
@@ -396,9 +404,10 @@ export class ThinkAgent extends ThinkBase {
     const command = [
       "set -e",
       `test -f ${shellQuote(hostPath)}`,
-      `mkdir -p ${shellQuote(sourcePath.slice(0, sourcePath.lastIndexOf("/")))} ${shellQuote(generatedPath.slice(0, generatedPath.lastIndexOf("/")))}`,
+      `mkdir -p ${shellQuote(sourcePath.slice(0, sourcePath.lastIndexOf("/")))} ${shellQuote(nodeModulesPath.slice(0, nodeModulesPath.lastIndexOf("/")))}`,
       `printf source > ${shellQuote(sourcePath)}`,
-      `printf generated > ${shellQuote(generatedPath)}`
+      `printf dependency > ${shellQuote(nodeModulesPath)}`,
+      `mkdir -p /temp && printf local > ${shellQuote(localTempPath)}`
     ].join("\n");
     const handle = await this.#workspace.shell.exec(command, {
       encoding: "utf8",
@@ -412,34 +421,39 @@ export class ThinkAgent extends ThinkBase {
 
     const sourceFileDurable =
       (await this.#workspace.fs.readFile(sourcePath, "utf8")) === "source";
-    let generatedFileDurable = true;
+    let nodeModulesFileDurable = true;
     try {
-      await this.#workspace.fs.stat(generatedPath);
+      await this.#workspace.fs.stat(nodeModulesPath);
     } catch (error) {
-      generatedFileDurable = !isEnoent(error);
+      nodeModulesFileDurable = !isEnoent(error);
+    }
+    let localTempFileDurable = true;
+    try {
+      await this.#workspace.fs.stat(localTempPath);
+    } catch (error) {
+      localTempFileDurable = !isEnoent(error);
     }
 
     const verify = await this.#workspace.shell.exec(
-      `test -f ${shellQuote(generatedPath)}`,
+      `test -f ${shellQuote(nodeModulesPath)}`,
       { encoding: "utf8", backend: "container" }
     );
-    const generatedFileVisibleInContainer =
+    const nodeModulesFileVisibleInContainer =
       (await verify.result()).exitCode === 0;
 
     await this.#workspace.close();
     await releaseContainer(this.env, this.ctx.id.toString());
     const replacement = await this.#workspace.shell.exec(
-      `test -f ${shellQuote(sourcePath)}; source=$?; test -f ${shellQuote(generatedPath)}; generated=$?; printf '%s %s' "$source" "$generated"`,
+      `test -f ${shellQuote(sourcePath)}; source=$?; test -f ${shellQuote(nodeModulesPath)}; dependency=$?; test -f ${shellQuote(localTempPath)}; local=$?; printf '%s %s %s' "$source" "$dependency" "$local"`,
       { encoding: "utf8", backend: "container" }
     );
     const replacementResult = await replacement.result();
-    const [sourceStatus, generatedStatus] = replacementResult.stdout
-      .trim()
-      .split(/\s+/)
-      .map(Number);
+    const [sourceStatus, dependencyStatus, localStatus] =
+      replacementResult.stdout.trim().split(/\s+/).map(Number);
     const sourceFileRestoredAfterContainerReplacement = sourceStatus === 0;
-    const generatedFileRestoredAfterContainerReplacement =
-      generatedStatus === 0;
+    const nodeModulesFileRestoredAfterContainerReplacement =
+      dependencyStatus === 0;
+    const localTempFileRestoredAfterContainerReplacement = localStatus === 0;
 
     await this.#workspace.close();
     await releaseContainer(this.env, this.ctx.id.toString());
@@ -447,10 +461,12 @@ export class ThinkAgent extends ThinkBase {
     return {
       hostFileVisibleInContainer,
       sourceFileDurable,
-      generatedFileVisibleInContainer,
-      generatedFileDurable,
+      nodeModulesFileVisibleInContainer,
+      nodeModulesFileDurable,
+      localTempFileDurable,
       sourceFileRestoredAfterContainerReplacement,
-      generatedFileRestoredAfterContainerReplacement
+      nodeModulesFileRestoredAfterContainerReplacement,
+      localTempFileRestoredAfterContainerReplacement
     };
   }
 
@@ -535,9 +551,14 @@ export class ThinkAgent extends ThinkBase {
   }
 
   override async beforeTurn(ctx: TurnContext) {
-    // Container auth is scoped: no Workspace transport remains open while the
-    // model is thinking, so infrastructure /ws cannot become the turn root.
-    await this.#runLifecycle.withWorkspace(() => this.#ensureGitAuth());
+    // A recovery may start after terminal cleanup released the previous
+    // container. Wait for that cleanup, then reconnect and authenticate the
+    // container chosen for this continuation.
+    if (this.#cleanupPromise) {
+      await this.#cleanupPromise;
+      this.#cleanupPromise = null;
+    }
+    await this.#ensureGitAuth();
     return {
       maxOutputTokens: 16384,
       ...(this.#context
@@ -576,30 +597,51 @@ export class ThinkAgent extends ThinkBase {
     const ctx = this.#context;
     if (!ctx?.installationToken || this.#authedToken === ctx.installationToken)
       return;
-    await this.#workspace.ready();
     await this.#authenticateGit(ctx.installationToken);
     this.#authedToken = ctx.installationToken;
     this.#log("git-auth-ok", {});
   }
 
-  async #finishRun(outcome: "done" | "error", error?: string): Promise<void> {
-    await this.#runLifecycle.finish(
-      outcome === "done"
-        ? { status: "done" }
-        : { status: "error", error: error ?? "Agent run failed" }
-    );
+  #finishRun(outcome: "done" | "error", error?: string): Promise<void> {
+    if (this.#cleanupPromise) return this.#cleanupPromise;
+
+    const cleanup = this.#cleanupTurn(outcome, error).finally(() => {
+      this.#authedToken = null;
+    });
+    this.#cleanupPromise = cleanup;
+    return cleanup;
   }
 
-  async #recordTerminal(outcome: RunOutcome): Promise<void> {
+  async #cleanupTurn(outcome: "done" | "error", error?: string): Promise<void> {
+    const cleanupErrors: unknown[] = [];
+    try {
+      await this.#workspace.close();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      await releaseContainer(this.env, this.ctx.id.toString());
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+
     this.#report((commandCenter) =>
       commandCenter.recordTurn({
         session: this.name,
-        outcome: outcome.status,
-        ...(outcome.status === "error"
-          ? { error: outcome.error.slice(0, 300) }
+        outcome,
+        ...(outcome === "error"
+          ? { error: (error ?? "Agent run failed").slice(0, 300) }
           : {})
       })
     );
+
+    if (cleanupErrors.length > 0) {
+      this.#log("turn-cleanup-error", {
+        errors: cleanupErrors.map((cleanupError) =>
+          String(cleanupError).slice(0, 300)
+        )
+      });
+    }
   }
 
   // ── Lifecycle logging: reconstruct a run from the deployed logs ──
@@ -636,7 +678,7 @@ export class ThinkAgent extends ThinkBase {
   override onChatError(error: unknown, ctx?: { stage?: string }): unknown {
     const message = String(error);
     // Some setup failures never reach onChatResponse. Cleanup immediately;
-    // a later durable recovery begins a fresh lease and may overwrite the
+    // a later durable recovery may claim a fresh container and overwrite the
     // command-center status with success.
     this.ctx.waitUntil(
       this.#finishRun("error", message).catch((cleanupError) =>
@@ -655,25 +697,33 @@ export class ThinkAgent extends ThinkBase {
   override getTools(): ToolSet {
     if (!this.#context) return {} as ToolSet;
     const store = new WorkspaceFileStore(this.#workspace);
-    const bash = createBashTool({
-      workspace: this.#workspace,
-      maxBytes: 32 * 1024,
-      backends: {
-        container: {
-          description:
-            "Cloudflare Container (full Linux) with a real toolchain and public " +
-            "network. Source files synchronize with the durable Workspace after " +
-            "each command; dependency, build, and scratch paths stay backend-local."
-        }
-      },
-      defaultBackend: "container"
-    });
-    const scopedBash = this.#runLifecycle.scopeTools({ bash }).bash;
+    const hasShell = Boolean(this.env.LOADER);
+    const backends = {
+      ...(hasShell
+        ? {
+            shell: {
+              description:
+                "Lightweight /workspace VFS shell for text and file operations. " +
+                "Use it for ls, find, grep, cat, sed, and other built-ins."
+            }
+          }
+        : {}),
+      container: {
+        description:
+          "Cloudflare Container with full Linux, gh, npm, node, native binaries, " +
+          "network access, builds, tests, deploy tooling, and local /temp."
+      }
+    };
     return {
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
-      bash: scopedBash
+      bash: createBashTool({
+        workspace: this.#workspace,
+        maxBytes: 32 * 1024,
+        backends,
+        defaultBackend: hasShell ? "shell" : "container"
+      })
     };
   }
 }

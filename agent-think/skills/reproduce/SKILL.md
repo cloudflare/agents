@@ -69,10 +69,10 @@ matters.
 
 ## 3. Scaffold a minimal reproduction
 
-Work in a scratch dir under `/workspace`, never touch the checkout. Source files
-sync through the durable Workspace; `/workspace/temp` stays backend-local for
-logs and other scratch files. The shell and `read`/`write`/`edit` tools share
-source files. Use the shell for `/workspace/temp`, dependencies, and build output.
+Work in a scratch dir under `/workspace`, never touch the checkout. Everything
+under `/workspace`, including dependencies and build output, is durable and
+visible to the shell and `read`/`write`/`edit` tools. Put long logs in `/temp`,
+which is outside the mounted VFS and only visible through container bash.
 
 ```bash
 REPRO_DIR="/workspace/repro-<issueNumber>"
@@ -100,7 +100,7 @@ Every repro deploy MUST ship a minimal Vite + React page at the Worker's root UR
 **Steps**
 
 1. In `$REPRO_DIR`, create the 7 files below.
-2. `mkdir -p /workspace/temp && npm install > /workspace/temp/install.log 2>&1; tail -15 /workspace/temp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local file like this — streaming megabytes of live output through the session can kill it.
+2. `mkdir -p /temp && npm install > /temp/install.log 2>&1; tail -15 /temp/install.log` (pin `agents` to the exact version under test if the bug is version-specific). Always redirect noisy commands to a container-local `/temp` file like this — streaming megabytes of live output through the session can kill it.
 3. Sanity-check the build before deploying: `npx vite build` (catches config errors cheaply; do NOT run `vite dev` — it blocks waiting for a browser).
 4. Deploy per the **Deploy** step below (`vite build` first is mandatory; the build writes `dist/` plus a `.wrangler/deploy/config.json` redirect that `wrangler deploy` follows).
 5. After deploy, confirm the root URL serves the page (the **Verify** step) and include the URL + click instructions in your report (the **Report back** step).

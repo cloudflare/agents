@@ -240,9 +240,7 @@ export default {
     return new Response("not found", { status: 404 });
   },
 
-  // Cron: keep the warm pool primed. `primePool` pushes the current config
-  // (WARM_POOL_TARGET etc.) to the WarmPool DO and kicks its alarm loop, which
-  // pre-starts containers up to the target so the first dial skips boot cost.
+  // Cron: ensure the fixed one-container warm pool is ready.
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(
       primePool(env).catch((err) =>

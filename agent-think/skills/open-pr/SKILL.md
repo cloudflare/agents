@@ -28,8 +28,8 @@ it highly, but stay within the scope of the issue.
 All `gh`, `git`, `npm`, `curl`, and `wrangler` commands must run on the
 `container` backend (`bash({ command, backend: "container" })`) — the `shell`
 backend has no real binaries or network. `gh` is already authenticated as the
-app; use it directly (no token handling). Work under `/workspace`; use
-`/workspace/temp` for scratch files.
+app; use it directly (no token handling). Work under `/workspace`; put long
+logs and disposable scratch files in container-local `/temp`.
 
 ## 0. Clone the repo
 
@@ -98,21 +98,21 @@ Install and run the affected package's checks (monorepo uses pnpm + Nx):
 
 ```bash
 # NOISY commands (installs, builds, test suites) MUST be redirected to a
-# container-local file and tailed — streaming megabytes of live output
+# container-local /temp file and tailed — streaming megabytes of live output
 # through the session can kill it irrecoverably:
-mkdir -p /workspace/temp
+mkdir -p /temp
 CI=1 pnpm install --frozen-lockfile --reporter=append-only \
-  > /workspace/temp/install.log 2>&1 || (tail -40 /workspace/temp/install.log; false)
-tail -20 /workspace/temp/install.log
+  > /temp/install.log 2>&1 || (tail -40 /temp/install.log; false)
+tail -20 /temp/install.log
 # Prefer scoped/affected runs; fall back to package scripts.
 pnpm -w exec oxfmt --check . || pnpm -w exec oxfmt --write .
 pnpm -w exec oxlint . || true
 # Run the relevant package's typecheck + tests, redirected the same way:
-pnpm --filter <package> typecheck > /workspace/temp/typecheck.log 2>&1; tail -30 /workspace/temp/typecheck.log
-pnpm --filter <package> test > /workspace/temp/test.log 2>&1; tail -40 /workspace/temp/test.log
+pnpm --filter <package> typecheck > /temp/typecheck.log 2>&1; tail -30 /temp/typecheck.log
+pnpm --filter <package> test > /temp/test.log 2>&1; tail -40 /temp/test.log
 ```
 
-(`/workspace/temp` is backend-local and never enters Agent DO storage.)
+(`/temp` is outside the `/workspace` mount and is not synchronized.)
 
 Record whether tests passed in `testsPassed`. If you cannot make tests pass and
 the failure is your change's fault, fix it; if tests are unrelated/flaky, note
@@ -169,10 +169,10 @@ gh pr create --repo <repo> \
   --base main \
   --head "$BRANCH" \
   --title "fix: <concise description> (#<issueNumber>)" \
-  --body-file /workspace/temp/pr-body.md
+  --body-file /temp/pr-body.md
 ```
 
-Write the PR body outside the checkout at `/workspace/temp/pr-body.md`. It must include:
+Write the PR body outside the checkout at `/temp/pr-body.md`. It must include:
 
 - `Requested by @<requestedBy>` near the top, using the exact sanitized
   `requested-by` mention from the run envelope (omit only when it is `unknown`).

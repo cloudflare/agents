@@ -9,7 +9,7 @@
 //   - the `triggers.crons` warm-pool prime (its alarm tries to start a container)
 //
 // The container path is covered by the e2e suite (wrangler dev --local), not
-// here. WARM_POOL_TARGET is 0 so the pool stays idle even if reached.
+// here.
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "agent-think",
@@ -48,8 +48,7 @@
   },
 
   "vars": {
-    "PUBLIC_BASE_URL": "https://agent-think.test",
-    "WARM_POOL_TARGET": "0"
+    "PUBLIC_BASE_URL": "https://agent-think.test"
   },
 
   "migrations": [

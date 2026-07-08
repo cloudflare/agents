@@ -40,18 +40,25 @@ async function messages(session: string): Promise<DebugMessage[]> {
   return response.json() as Promise<DebugMessage[]>;
 }
 
-async function poolStats(): Promise<{ assigned: number }> {
-  const response = await fetch(`${BASE_URL}/__test/pool-stats`);
-  expect(response.status).toBe(200);
-  return response.json() as Promise<{ assigned: number }>;
+interface PoolStats {
+  warm: number;
+  assigned: number;
+  total: number;
+  target: number;
 }
 
-async function runPoolAlarm(): Promise<{ assigned: number }> {
+async function poolStats(): Promise<PoolStats> {
+  const response = await fetch(`${BASE_URL}/__test/pool-stats`);
+  expect(response.status).toBe(200);
+  return response.json() as Promise<PoolStats>;
+}
+
+async function runPoolAlarm(): Promise<PoolStats> {
   const response = await fetch(`${BASE_URL}/__test/pool-alarm`, {
     method: "POST"
   });
   expect(response.status).toBe(200);
-  return response.json() as Promise<{ assigned: number }>;
+  return response.json() as Promise<PoolStats>;
 }
 
 async function thread(session: string): Promise<ThreadMeta | undefined> {
@@ -99,7 +106,7 @@ function transcriptText(items: DebugMessage[]): string {
 }
 
 describe("E2E: production graph with inference adapter", () => {
-  it("syncs source files while keeping generated paths backend-local", async () => {
+  it("syncs the complete VFS, including node_modules", async () => {
     const sync = await fetch(
       `${BASE_URL}/dev/workspace-sync/${crypto.randomUUID()}`
     );
@@ -107,11 +114,22 @@ describe("E2E: production graph with inference adapter", () => {
     expect(await sync.json()).toEqual({
       hostFileVisibleInContainer: true,
       sourceFileDurable: true,
-      generatedFileVisibleInContainer: true,
-      generatedFileDurable: false,
+      nodeModulesFileVisibleInContainer: true,
+      nodeModulesFileDurable: true,
+      localTempFileDurable: false,
       sourceFileRestoredAfterContainerReplacement: true,
-      generatedFileRestoredAfterContainerReplacement: false
+      nodeModulesFileRestoredAfterContainerReplacement: true,
+      localTempFileRestoredAfterContainerReplacement: false
     });
+  }, 120_000);
+
+  it("uses the lightweight VFS shell when backend is omitted", async () => {
+    const { session } = await dispatch(
+      "TEST: use default shell",
+      issueBase + 3
+    );
+    await waitForThread(session, "done");
+    expect(transcriptText(await messages(session))).toContain("shell-ok");
   }, 120_000);
 
   it("persists the immutable target even when skills register context", async () => {
@@ -133,31 +151,38 @@ describe("E2E: production graph with inference adapter", () => {
     expect(text).not.toContain("cloudflare/agents#1871");
   }, 120_000);
 
-  it("holds the lease during a real command, closes RPC streams, and reconnects", async () => {
-    const issueNumber = issueBase + 1;
-    const { session } = await dispatch(
-      "TEST: hold active container lease",
-      issueNumber
-    );
-    await vi.waitUntil(async () => (await poolStats()).assigned === 1, {
-      timeout: 30_000,
-      interval: 100
+  it("claims a warm container for the turn and drops it at terminal", async () => {
+    expect(await runPoolAlarm()).toMatchObject({
+      warm: 1,
+      assigned: 0,
+      target: 1
     });
 
-    // TTL is one second; an explicit real alarm during the two-second command
-    // must preserve the actively leased assignment.
-    await new Promise((resolve) => setTimeout(resolve, 1_100));
-    expect((await runPoolAlarm()).assigned).toBe(1);
+    const issueNumber = issueBase + 1;
+    const { session } = await dispatch(
+      "TEST: hold container turn",
+      issueNumber
+    );
+    await vi.waitUntil(
+      async () => {
+        const stats = await poolStats();
+        return stats.assigned === 1 && stats.warm === 1;
+      },
+      { timeout: 30_000, interval: 100 }
+    );
 
     await waitForThread(session, "done");
     expect(transcriptText(await messages(session))).toContain("lifecycle-ok");
+    await vi.waitUntil(
+      async () => {
+        const stats = await poolStats();
+        return stats.assigned === 0 && stats.warm === 1;
+      },
+      { timeout: 30_000, interval: 100 }
+    );
 
-    // Once terminal cleanup ends the lease, the same alarm must evict it.
-    await new Promise((resolve) => setTimeout(resolve, 1_100));
-    expect((await runPoolAlarm()).assigned).toBe(0);
-
-    // The same durable agent session then reconnects to a fresh container.
-    await dispatch("TEST: hold active container lease", issueNumber);
+    // The same durable session claims a fresh container for its next turn.
+    await dispatch("TEST: hold container turn", issueNumber);
     await waitForThread(session, "done");
     expect(transcriptText(await messages(session))).toContain("lifecycle-ok");
     expect(wranglerOutput()).not.toContain(

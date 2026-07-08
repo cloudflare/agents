@@ -24,7 +24,7 @@ function finishText(text: string) {
   };
 }
 
-function callBash(command: string) {
+function callBash(command: string, backend: "container" | null = "container") {
   return {
     stream: simulateReadableStream({
       chunks: [
@@ -33,7 +33,11 @@ function callBash(command: string) {
           type: "tool-call" as const,
           toolCallId: crypto.randomUUID(),
           toolName: "bash",
-          input: JSON.stringify({ command, backend: "container", timeout: 30 })
+          input: JSON.stringify({
+            command,
+            ...(backend ? { backend } : {}),
+            timeout: 30
+          })
         },
         {
           type: "finish" as const,
@@ -54,12 +58,12 @@ export function mockInference(): LanguageModel {
       if (serialized.includes("TEST: exhaust step budget")) {
         return callBash("true");
       }
-      if (
-        serialized.includes("TEST: hold active container lease") &&
-        !hasToolResult
-      ) {
+      if (serialized.includes("TEST: use default shell") && !hasToolResult) {
+        return callBash("printf shell-ok", null);
+      }
+      if (serialized.includes("TEST: hold container turn") && !hasToolResult) {
         return callBash(
-          "mkdir -p /workspace/temp; sleep 2; printf lifecycle-ok > /workspace/temp/lifecycle-marker"
+          "mkdir -p /temp; sleep 2; printf lifecycle-ok > /temp/lifecycle-marker"
         );
       }
       return finishText(`captured-run-context: ${serialized}`);

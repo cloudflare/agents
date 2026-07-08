@@ -38,10 +38,7 @@
 
   "vars": {
     "LOCAL_DEV": "1",
-    "PUBLIC_BASE_URL": "http://127.0.0.1:8799",
-    "WARM_POOL_TARGET": "0",
-    "WARM_POOL_REFRESH_INTERVAL": "100",
-    "WARM_POOL_ASSIGNMENT_IDLE_TTL_MS": "1000"
+    "PUBLIC_BASE_URL": "http://127.0.0.1:8799"
   },
 
   "migrations": [
