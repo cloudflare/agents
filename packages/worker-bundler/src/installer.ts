@@ -328,8 +328,8 @@ async function installPythonPackage(
   result: InstallResult,
   fileSystem: FileSystem,
   installedPackages: Map<string, string>,
-  inProgress: Map<string, Promise<void>>,
-  registry: string
+  inProgress: Map<string, Promise<void>>
+  //registry: string //Use hardcoded registries for minimal implementation
 ): Promise<void> {
   // Skip if already installed in this run
   if (installedPackages.has(name)) {

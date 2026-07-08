@@ -8,7 +8,7 @@ import { bundleWithEsbuild, bundlerOnlyOptionsWarning } from "./bundler";
 import { hasNodejsCompat, parseWranglerConfig } from "./config";
 import { hasDependencies, installDependencies } from "./installer";
 import { transformAndResolve } from "./transformer";
-import type { CreateWorkerOptions, CreateWorkerResult } from "./types";
+import type { CreateWorkerOptions, CreateWorkerResult, Modules } from "./types";
 import {
   DEFAULT_ENTRY_POINTS,
   detectEntryPoint,
@@ -144,17 +144,26 @@ export async function createWorker(
   }
 
   if (entryPoint.endsWith(".py")) {
-    let result = {
-      mainModule: entryPoint,
-      modules: Object.fromEntries(fileSystem.files),
-      compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-01-01",
-      compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
-        "python_workers"
-      ]
-    };
+    const modules: Modules = {};
+    for (const path of fileSystem.list()) {
+      if (path !== "pyproject.toml") {
+        const content = fileSystem.read(path);
+        if (content !== null) {
+          modules[path] = content;
+        }
+      }
+    }
 
-    delete result.modules["pyproject.toml"]; //This doesn't need to persist to the worker
-    return result;
+    return {
+      mainModule: entryPoint,
+      modules,
+      wranglerConfig: {
+        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-01-01",
+        compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
+          "python_workers"
+        ]
+      }
+    };
   }
 
   if (bundle) {
