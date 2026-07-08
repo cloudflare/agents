@@ -962,6 +962,74 @@ describe("AssemblyAISession — server Error/Warning messages", () => {
   });
 });
 
+describe("AssemblyAISession — pre-connect buffer cap", () => {
+  it("stops buffering audio once the cap is reached and logs once", async () => {
+    // Fetch never resolves — the session stays unconnected.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {}))
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+
+    // Cap is 960000 bytes = exactly 300 chunks of 3200 bytes.
+    for (let i = 0; i < 310; i++) session.feed(pcm(3200));
+
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("dropping"));
+    errSpy.mockRestore();
+  });
+
+  it("flushes at most the capped amount on connect", async () => {
+    let resolveFetch: (resp: unknown) => void = () => {};
+    const fetchPromise = new Promise((r) => {
+      resolveFetch = r;
+    });
+    const ws = new MockWebSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => fetchPromise)
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    for (let i = 0; i < 310; i++) session.feed(pcm(3200));
+
+    resolveFetch({ webSocket: ws });
+    await flush();
+
+    // 300 buffered chunks pass through 1:1 (each ≥ the 50ms minimum).
+    expect(ws.send).toHaveBeenCalledTimes(300);
+    errSpy.mockRestore();
+  });
+});
+
+describe("AssemblyAISession — send failure isolation", () => {
+  it("does not throw out of feed() when the socket rejects the send", async () => {
+    const { ws } = setupMockFetch();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    ws.send.mockImplementation(() => {
+      throw new Error("socket is closing");
+    });
+
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    expect(() => session.feed(pcm(3200))).not.toThrow();
+    expect(() =>
+      session.updateAgentContext!("What date would you like?")
+    ).not.toThrow();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("send failed"),
+      expect.anything()
+    );
+    errSpy.mockRestore();
+  });
+});
+
 describe("AssemblyAISession — robustness", () => {
   it("ignores non-JSON messages without throwing", async () => {
     const { ws } = setupMockFetch();

@@ -74,6 +74,13 @@ const MAX_PROMPT_CHARS = 1750;
  */
 const MIN_CHUNK_BYTES = 1600;
 
+/**
+ * Cap on audio buffered while the socket is still connecting (~30s at 16 kHz
+ * mono s16le). If the connection never establishes (e.g. a bad API key), this
+ * keeps a dead session from buffering microphone audio unboundedly.
+ */
+const MAX_PENDING_BYTES = 960_000;
+
 export interface AssemblyAISTTOptions {
   /** AssemblyAI API key. Sent as the `Authorization` header (raw key, no prefix). */
   apiKey: string;
@@ -316,6 +323,8 @@ class AssemblyAISession implements TranscriberSession {
   #connected = false;
   #closed = false;
   #pendingChunks: ArrayBuffer[] = [];
+  #pendingBytes = 0;
+  #pendingOverflowLogged = false;
   // Sub-50ms audio accumulating toward MIN_CHUNK_BYTES (see #sendAudio).
   #coalesceChunks: Uint8Array[] = [];
   #coalesceBytes = 0;
@@ -399,6 +408,7 @@ class AssemblyAISession implements TranscriberSession {
       }
       for (const chunk of this.#pendingChunks) this.#sendAudio(chunk);
       this.#pendingChunks = [];
+      this.#pendingBytes = 0;
     } catch (err) {
       console.error("[AssemblyAISTT] Connection error:", err);
     }
@@ -408,9 +418,19 @@ class AssemblyAISession implements TranscriberSession {
     if (this.#closed) return;
     if (this.#connected && this.#ws) {
       this.#sendAudio(chunk);
-    } else {
-      this.#pendingChunks.push(chunk);
+      return;
     }
+    if (this.#pendingBytes + chunk.byteLength > MAX_PENDING_BYTES) {
+      if (!this.#pendingOverflowLogged) {
+        this.#pendingOverflowLogged = true;
+        console.error(
+          "[AssemblyAISTT] Pending audio buffer full — dropping audio until the socket connects."
+        );
+      }
+      return;
+    }
+    this.#pendingBytes += chunk.byteLength;
+    this.#pendingChunks.push(chunk);
   }
 
   /**
@@ -423,7 +443,7 @@ class AssemblyAISession implements TranscriberSession {
   #sendAudio(chunk: ArrayBuffer): void {
     if (!this.#ws) return;
     if (this.#coalesceBytes === 0 && chunk.byteLength >= MIN_CHUNK_BYTES) {
-      this.#ws.send(chunk);
+      this.#wsSend(chunk);
       return;
     }
     this.#coalesceChunks.push(new Uint8Array(chunk));
@@ -438,7 +458,22 @@ class AssemblyAISession implements TranscriberSession {
     }
     this.#coalesceChunks = [];
     this.#coalesceBytes = 0;
-    this.#ws.send(merged.buffer);
+    this.#wsSend(merged.buffer);
+  }
+
+  /**
+   * `WebSocket.send()` throws once the socket is closing — reachable in the
+   * gap between the server closing and our `close` event firing. Swallow and
+   * log instead of letting the exception escape into the audio pipeline.
+   */
+  #wsSend(data: ArrayBuffer | string): void {
+    try {
+      this.#ws?.send(data);
+    } catch (err) {
+      if (!this.#closed) {
+        console.error("[AssemblyAISTT] WebSocket send failed:", err);
+      }
+    }
   }
 
   /**
@@ -470,7 +505,7 @@ class AssemblyAISession implements TranscriberSession {
 
   #sendAgentContext(agentContext: string): void {
     if (!this.#ws) return;
-    this.#ws.send(
+    this.#wsSend(
       JSON.stringify({
         type: "UpdateConfiguration",
         agent_context: agentContext
@@ -482,6 +517,7 @@ class AssemblyAISession implements TranscriberSession {
     if (this.#closed) return;
     this.#closed = true;
     this.#pendingChunks = [];
+    this.#pendingBytes = 0;
     this.#coalesceChunks = [];
     this.#coalesceBytes = 0;
     this.#pendingAgentContext = null;
