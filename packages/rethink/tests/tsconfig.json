@@ -1,0 +1,10 @@
+{
+  "extends": "../../agents/agents.tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types"
+    ]
+  },
+  "include": ["./**/*.ts", "./**/*.d.ts", "../src/**/*.ts"]
+}
