@@ -1403,9 +1403,16 @@ const { streamText: tracedStreamText } = wrapAISDK({
 // Drains the underlying model stream when a drain loop exits early (in-stream
 // error break, stall abort, user abort). The AI SDK tees its base stream, so
 // an abandoned tee branch would otherwise leave the tracing wrapper's
-// operation span open forever. Entries are deleted before invocation so
-// repeated finalization cannot start additional tee consumers.
-const inferenceStreamFinalizers = new WeakMap<object, () => Promise<void>>();
+// operation span open forever. One registration is associated with both the
+// stable pre-transform result and any wrapper returned by the test seam.
+type InferenceStreamFinalizer = {
+  started: boolean;
+  run: () => Promise<void>;
+};
+const inferenceStreamFinalizers = new WeakMap<
+  object,
+  InferenceStreamFinalizer
+>();
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -5177,15 +5184,16 @@ export class Think<
    * `ctx.waitUntil` so it survives turn completion without blocking it.
    */
   private _drainInferenceStream(result: object): void {
-    const finalize = inferenceStreamFinalizers.get(result);
-    if (!finalize) {
+    const finalizer = inferenceStreamFinalizers.get(result);
+    inferenceStreamFinalizers.delete(result);
+    if (!finalizer || finalizer.started) {
       return;
     }
 
-    inferenceStreamFinalizers.delete(result);
+    finalizer.started = true;
     // Invoke exactly once: start the drain, then try to extend its lifetime.
     // A missing/throwing waitUntil must not start a second tee consumer.
-    const completion = finalize();
+    const completion = finalizer.run();
     try {
       this.ctx.waitUntil(completion);
     } catch {
@@ -5623,12 +5631,19 @@ export class Think<
       output: outputPromise
     } satisfies StreamableResult;
 
+    const finalizer: InferenceStreamFinalizer = {
+      started: false,
+      run: () =>
+        // consumeStream never rejects (onError swallows) and is a no-op when
+        // the stream already ran to completion.
+        Promise.resolve(result.consumeStream({ onError: () => {} }))
+    };
+    inferenceStreamFinalizers.set(streamResult, finalizer);
+
     const finalized = this._transformInferenceResult(streamResult);
-    inferenceStreamFinalizers.set(finalized, () =>
-      // consumeStream never rejects (onError swallows) and is a no-op when the
-      // stream already ran to completion.
-      Promise.resolve(result.consumeStream({ onError: () => {} }))
-    );
+    if (finalized !== streamResult) {
+      inferenceStreamFinalizers.set(finalized, finalizer);
+    }
     return finalized;
   }
 

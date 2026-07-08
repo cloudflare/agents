@@ -260,25 +260,13 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `email:receive` | `{ from, to, subject? }` | An email is received  |
 | `email:reply`   | `{ from, to, subject? }` | A reply email is sent |
 
-## Tracing
+## AI SDK tracing
 
-Alongside diagnostics-channel events, `agents/observability` exports a tracer built on the Workers runtime's native `tracing` API (`cloudflare:workers`). Spans follow the [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) and flow to your tail worker or observability pipeline like any other Workers spans. On runtimes without the `tracing` API, the tracer is a no-op.
-
-```ts
-import { tracer } from "agents/observability";
-
-const result = tracer.withSpan("my-operation", { "app.step": "ingest" }, () =>
-  doWork()
-);
-```
-
-`tracer.withSpan` owns the span lifetime — it finishes when the callback returns or its promise settles. For work that outlives a callback (streams, event-driven telemetry), `tracer.openSpan` hands you the span and you must call `span.finish()` or `span.fail(cause)`.
-
-Failed spans carry `otel.status_code: "ERROR"` and `error.type` (the OpenTelemetry status encoding for status-less backends). Cancellations (an `AbortError`) are not errors: they carry `cloudflare.agents.canceled: true` and leave the status untouched, matching OTel semantics.
-
-### AI SDK tracing
-
-`agents/observability/ai` instruments the Vercel AI SDK's text/object generation path.
+`agents/observability/ai` instruments the Vercel AI SDK using the Workers
+runtime's native tracing support. Spans follow the
+[OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+and flow to Workers Observability or your tail worker. On runtimes without
+native tracing, instrumentation is a no-op.
 
 **Think agents are traced out of the box** — no configuration. Every turn's inference call becomes an `invoke_agent {agent class}` root span carrying the agent/conversation identity plus turn attributes (`cloudflare.agents.turn.request_id`, `.trigger`, `.admission`, `.channel`, …), with `chat {model}` and `execute_tool {tool}` children. Enable `observability: { traces: { enabled: true } }` in `wrangler.jsonc` to see them. Per-call `experimental_telemetry.metadata` from `beforeTurn` is merged in (caller values win): reserved keys map to their dedicated attributes, `userId` maps to `user.id`, and any other scalar entry lands as `cloudflare.agents.metadata.{key}`.
 
