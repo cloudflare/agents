@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { MCPClientManager } from "../../mcp/client";
 import {
   MCPClientConnection,
@@ -302,6 +303,109 @@ describe("MCPClientManager OAuth Integration", () => {
         "test-auth-code"
       );
       expect(authProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Worker-safe JSON Schema validator defaults", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("connect() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const { id } = await manager.connect("http://example.com", {
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("connect() preserves a caller-supplied jsonSchemaValidator", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      const { id } = await manager.connect("http://example.com", {
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBe(customValidator);
+    });
+
+    it("registerServer() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      await manager.registerServer("validator-default-id", {
+        url: "http://example.com",
+        name: "validator-default",
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections["validator-default-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("registerServer() does not persist a caller-supplied jsonSchemaValidator", async () => {
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      await manager.registerServer("validator-persist-id", {
+        url: "http://example.com",
+        name: "validator-persist",
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      // The live connection keeps the caller's validator...
+      expect(
+        manager.mcpConnections["validator-persist-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBe(customValidator);
+
+      // ...but a validator instance cannot survive JSON serialization, so it
+      // must not be written to storage at all.
+      const row = mockStorageData.get("validator-persist-id");
+      const persisted = JSON.parse(row?.server_options ?? "{}");
+      expect(persisted.client).not.toHaveProperty("jsonSchemaValidator");
+    });
+
+    it("restore falls back to the Worker-safe default when persisted options contain a serialization-degraded validator", async () => {
+      // Simulate a row written by a caller that passed a custom validator:
+      // JSON.stringify degrades the instance to a plain object.
+      saveServerToMock({
+        id: "restored-degraded-validator",
+        name: "Degraded Validator Server",
+        server_url: "http://example.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: "https://auth.example.com/authorize",
+        server_options: JSON.stringify({
+          transport: { type: "auto" },
+          client: { jsonSchemaValidator: {} }
+        })
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      expect(
+        manager.mcpConnections["restored-degraded-validator"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
     });
   });
 
