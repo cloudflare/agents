@@ -141,6 +141,8 @@ A call is logged `executing` the moment the runtime decides to run it, and only 
 
 The log lives in the facet's SQLite database — one row per entry, so recording a call appends a row instead of rewriting the whole execution.
 
+The tool's output echoes the log on every outcome as `calls?: ToolLogEntry[]` (see [Tool output](./approvals.md#tool-output)), so a UI can render the run's audit trail directly from the tool result; `runtime.executions()` remains the durable source for past runs.
+
 ### Ephemeral entries
 
 A tool can opt out of result recording with [`replay: "reexecute"`](./connectors.md#replay-policy). Its calls are still logged (for sequencing and divergence detection) but the result is never stored: a replay **re-executes** the call instead of replaying a recorded value. Use it for idempotent reads with large results — file contents, directory listings — that would otherwise bloat the durable log.
