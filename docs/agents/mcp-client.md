@@ -111,6 +111,35 @@ await this.addMcpServer("github", "https://mcp.github.com/mcp", {
 
 These options are persisted and used when reconnecting after hibernation or after OAuth completion. Default: 3 attempts, 500ms base delay, 5s max delay. See [Retries](./retries.md) for more details.
 
+### Elicitation
+
+MCP servers can request input from the client during a tool call (`elicitation/create`). To respond, override `onElicitRequest` on your agent:
+
+```typescript
+class MyAgent extends Agent<Env> {
+  async onElicitRequest(request: ElicitRequest, serverId: string) {
+    // e.g. deliver a url-mode elicitation link out-of-band
+    return { action: "accept" as const, content: {} };
+  }
+}
+```
+
+Because it is a class method, the handler survives Durable Object hibernation and applies to connections restored from storage. Without an override, elicitation requests are rejected with an error.
+
+Overriding `onElicitRequest` is all you need: when a handler is present, connections automatically advertise both form- and url-mode elicitation (MCP spec 2025-11-25 — url-mode is used for sensitive flows like OAuth URLs) at the `initialize` handshake. Without a handler, only form-mode is advertised, matching previous behavior.
+
+To narrow the advertised modes, declare them explicitly — an explicit declaration always wins and is persisted with the server options, surviving hibernation:
+
+```typescript
+await this.addMcpServer("portal", "https://portal.example.com/mcp", {
+  client: {
+    capabilities: {
+      elicitation: { form: {} } // form-mode only, even with a handler
+    }
+  }
+});
+```
+
 ### URL Security
 
 MCP server URLs are validated before connection to prevent Server-Side Request Forgery (SSRF). The following URL targets are blocked:

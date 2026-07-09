@@ -111,6 +111,15 @@ export type MCPDiscoveryResult = {
   error?: string;
 };
 
+/**
+ * Handler for server-initiated `elicitation/create` requests.
+ * Held in memory only — never persisted — so it must be re-supplied when a
+ * connection is recreated (e.g. after Durable Object hibernation).
+ */
+export type MCPElicitationHandler = (
+  request: ElicitRequest
+) => Promise<ElicitResult>;
+
 export class MCPClientConnection {
   client: Client;
   connectionState: MCPConnectionState = MCPConnectionState.CONNECTING;
@@ -155,6 +164,7 @@ export class MCPClientConnection {
     public options: {
       transport: MCPTransportOptions;
       client: McpClientOptions;
+      elicitationHandler?: MCPElicitationHandler;
     } = { client: {}, transport: {} }
   ) {
     this.options = {
@@ -162,11 +172,18 @@ export class MCPClientConnection {
       client: { ...defaultClientOptions, ...options.client }
     };
 
+    // Advertise elicitation modes based on what can actually be handled:
+    // with a handler configured, default to both form and url mode (MCP spec
+    // 2025-11-25); without one, keep the legacy form-mode-only `{}`. An
+    // explicit caller-declared `capabilities.elicitation` wins wholesale so
+    // callers can narrow (or widen) the advertised modes.
     const clientOptions = {
       ...this.options.client,
       capabilities: {
         ...this.options.client?.capabilities,
-        elicitation: {}
+        elicitation:
+          this.options.client?.capabilities?.elicitation ??
+          (options.elicitationHandler ? { form: {}, url: {} } : {})
       } as ClientCapabilities
     };
 
@@ -673,16 +690,23 @@ export class MCPClientConnection {
   }
 
   /**
-   * Handle elicitation request from server
-   * Automatically uses the Agent's built-in elicitation handling if available
+   * Handle elicitation request from server.
+   *
+   * Delegates to the `elicitationHandler` connection option when provided.
+   *
+   * @deprecated Overriding or instance-patching this method directly is
+   * deprecated — pass the `elicitationHandler` connection option instead
+   * (agents: override `Agent.onElicitRequest`).
    */
   async handleElicitationRequest(
-    _request: ElicitRequest
+    request: ElicitRequest
   ): Promise<ElicitResult> {
-    // Elicitation handling must be implemented by the platform
-    // For MCP servers, this should be handled by McpAgent.elicitInput()
+    const handler = this.options.elicitationHandler;
+    if (handler) {
+      return handler(request);
+    }
     throw new Error(
-      "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
+      "Elicitation handler must be implemented for your platform. Provide the elicitationHandler connection option (agents: override onElicitRequest)."
     );
   }
 

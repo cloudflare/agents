@@ -4,6 +4,8 @@ import type {
   CallToolRequest,
   CallToolResultSchema,
   CompatibilityCallToolResultSchema,
+  ElicitRequest,
+  ElicitResult,
   GetPromptRequest,
   Prompt,
   ReadResourceRequest,
@@ -19,6 +21,7 @@ import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
   MCPClientConnection,
   MCPConnectionState,
+  type MCPElicitationHandler,
   type MCPTransportOptions
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
@@ -306,6 +309,17 @@ export type MCPClientOAuthResult =
 export type MCPClientManagerOptions = {
   storage: DurableObjectStorage;
   createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
+  /**
+   * Handler for server-initiated `elicitation/create` requests, applied to
+   * every connection this manager creates — including connections restored
+   * from storage after Durable Object hibernation. Held in memory only
+   * (never persisted), which is why it lives here rather than in the
+   * per-server persisted options.
+   */
+  elicitationHandler?: (
+    request: ElicitRequest,
+    serverId: string
+  ) => Promise<ElicitResult>;
 };
 
 /**
@@ -335,6 +349,7 @@ export class MCPClientManager {
   ) => AgentMcpOAuthProvider;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
+  private _elicitationHandler?: MCPClientManagerOptions["elicitationHandler"];
 
   /** @internal Protected for testing purposes. */
   protected readonly _onObservabilityEvent =
@@ -367,6 +382,20 @@ export class MCPClientManager {
     }
     this._storage = options.storage;
     this._createAuthProviderFn = options.createAuthProvider;
+    this._elicitationHandler = options.elicitationHandler;
+  }
+
+  /**
+   * Scope the manager-level elicitation handler to a single connection.
+   * Returns undefined when no handler is configured so the connection keeps
+   * its default throwing behavior.
+   */
+  private scopedElicitationHandler(
+    serverId: string
+  ): MCPElicitationHandler | undefined {
+    const handler = this._elicitationHandler;
+    if (!handler) return undefined;
+    return (request) => handler(request, serverId);
   }
 
   // SQL helper - runs a query and returns results as array
@@ -494,6 +523,11 @@ export class MCPClientManager {
       const authProvider = conn.options.transport.authProvider;
       if (authProvider) {
         authProvider.serverId = newId;
+      }
+      // The elicitation handler closes over the server id it was created
+      // with — rescope it so elicitation requests report the new id.
+      if (conn.options.elicitationHandler) {
+        conn.options.elicitationHandler = this.scopedElicitationHandler(newId);
       }
     }
 
@@ -1125,7 +1159,8 @@ export class MCPClientManager {
       },
       {
         client: options.client ?? {},
-        transport: normalizedTransport
+        transport: normalizedTransport,
+        elicitationHandler: this.scopedElicitationHandler(id)
       }
     );
 
