@@ -2639,6 +2639,14 @@ export class Agent<
           }
 
           await this._tryCatch(async () => {
+            // Restore MCP connections before fiber/chat recovery so recovered
+            // turns see MCP tools. Restored connections re-advertise the
+            // capabilities persisted from the previous session; the handlers
+            // behind them attach when onStart() configures them.
+            await this.mcp.restoreConnectionsFromStorage(this.name);
+            await this._restoreRpcMcpServers();
+            this.broadcastMcpServers();
+
             this._checkOrphanedWorkflows();
             await this._checkRunFibers();
             const startupAgentToolRunIds = this._agentToolRunRecoveryRunIds();
@@ -2689,10 +2697,6 @@ export class Agent<
                   "as a class field or in the constructor instead."
               );
             }
-
-            await this.mcp.restoreConnectionsFromStorage(this.name);
-            await this._restoreRpcMcpServers();
-            this.broadcastMcpServers();
 
             this._scheduleAgentToolRunRecovery({
               runIds: startupAgentToolRunIds

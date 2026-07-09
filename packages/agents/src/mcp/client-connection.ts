@@ -125,9 +125,11 @@ export type MCPElicitationHandlers = {
   url?: MCPElicitationHandler;
 };
 
-function elicitationCapabilitiesFromHandlers(
-  handlers?: MCPElicitationHandlers
-): ClientCapabilities["elicitation"] | undefined {
+/** Derive the elicitation capability to advertise from the handler keys. */
+export function elicitationCapabilitiesFromHandlers(handlers?: {
+  form?: unknown;
+  url?: unknown;
+}): ClientCapabilities["elicitation"] | undefined {
   if (!handlers) return undefined;
 
   const elicitation: NonNullable<ClientCapabilities["elicitation"]> = {};
@@ -194,6 +196,13 @@ export class MCPClientConnection {
       transport: MCPTransportOptions;
       client: McpClientOptions;
       elicitationHandlers?: MCPElicitationHandlers;
+      /**
+       * Client capabilities persisted from a previous session, advertised
+       * until handlers are reconfigured after a hibernation restore. Cleared
+       * by {@link configureElicitationHandler} — reconfigured handlers are
+       * the source of truth. Explicit `client.capabilities` win per key.
+       */
+      capabilitySeed?: ClientCapabilities;
     } = { client: {}, transport: {} }
   ) {
     this.options = {
@@ -210,14 +219,18 @@ export class MCPClientConnection {
     // form only, a url-only handler advertises url only, and no handlers means
     // no elicitation capability. An explicit caller-declared
     // `capabilities.elicitation` wins wholesale so callers can narrow (or
-    // widen) the advertised modes.
+    // widen) the advertised modes. The restore seed applies last, covering
+    // the window before handlers are reconfigured after hibernation.
+    const seed = this.options.capabilitySeed;
     const elicitation =
       this.options.client?.capabilities?.elicitation ??
-      elicitationCapabilitiesFromHandlers(this.options.elicitationHandlers);
+      elicitationCapabilitiesFromHandlers(this.options.elicitationHandlers) ??
+      seed?.elicitation;
     this._elicitationEnabled = elicitation !== undefined;
     const clientOptions = {
       ...this.options.client,
       capabilities: {
+        ...seed,
         ...this.options.client?.capabilities,
         ...(elicitation ? { elicitation } : {})
       } as ClientCapabilities
@@ -238,6 +251,9 @@ export class MCPClientConnection {
    */
   configureElicitationHandler(handlers?: MCPElicitationHandlers): void {
     this.options.elicitationHandlers = handlers;
+    // Handlers are now the source of truth — drop the restore seed so
+    // clearing the handlers un-advertises the capability on rebuild.
+    this.options.capabilitySeed = undefined;
 
     if (!this.client.transport) {
       this.client = this.createClient();
@@ -259,7 +275,9 @@ export class MCPClientConnection {
     // init() can be re-entered after a mid-session 401 → OAuth → reconnect
     // cycle (e.g. scope step-up, token revocation). The SDK client refuses
     // to connect while a previous transport is still attached, so detach it
-    // first.
+    // first. Rebuild the client so the new handshake advertises the current
+    // handler-derived capabilities — reconnects are documented as the point
+    // where handler changes on a live connection take effect.
     if (this.client.transport) {
       this._transport = undefined;
       try {
@@ -267,6 +285,7 @@ export class MCPClientConnection {
       } catch {
         // Closing a transport that just failed auth is best-effort.
       }
+      this.client = this.createClient();
     }
 
     const res = await this.tryConnect(transportType);

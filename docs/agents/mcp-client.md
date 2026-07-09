@@ -134,7 +134,7 @@ class MyAgent extends Agent<Env> {
 }
 ```
 
-The Agent lifecycle runs `onStart()` before automatic MCP connection restore, so handlers configured there apply to connections restored from storage. Configuring a handler after an MCP connection is already active updates the in-memory handler, but the server only sees new advertised elicitation modes after that connection reconnects.
+The advertised modes are persisted with each MCP server, so a connection restored from storage after hibernation re-advertises the same modes at the handshake; the handlers themselves re-attach when `onStart()` runs. Configuring a handler after an MCP connection is already active updates the in-memory handler, but the server only sees new advertised elicitation modes after that connection reconnects.
 
 Connections advertise only the elicitation modes with configured handlers at the `initialize` handshake: configure `form` to advertise form-mode elicitation, `url` to advertise url-mode elicitation (MCP spec 2025-11-25 — url mode is used for sensitive flows like OAuth URLs), or both to advertise both modes. Without handlers, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
 

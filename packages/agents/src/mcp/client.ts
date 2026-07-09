@@ -3,6 +3,7 @@ import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.j
 import type {
   CallToolRequest,
   CallToolResultSchema,
+  ClientCapabilities,
   CompatibilityCallToolResultSchema,
   ElicitRequest,
   ElicitResult,
@@ -19,6 +20,7 @@ import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
+  elicitationCapabilitiesFromHandlers,
   MCPClientConnection,
   MCPConnectionState,
   type MCPElicitationHandlers,
@@ -237,6 +239,12 @@ export type MCPServerOptions = {
   };
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
+  /**
+   * Client capabilities advertised from configured handlers (currently the
+   * elicitation modes). Handlers are functions and cannot be persisted, so
+   * this records what they advertised for restores after hibernation.
+   */
+  capabilities?: ClientCapabilities;
 };
 
 /**
@@ -392,7 +400,7 @@ export class MCPClientManager {
     serverId: string
   ): MCPElicitationHandlers | undefined {
     const handlers = this._elicitationHandlers;
-    if (!handlers || (!handlers.form && !handlers.url)) return undefined;
+    if (!handlers) return undefined;
 
     const form = handlers.form;
     const url = handlers.url;
@@ -529,8 +537,13 @@ export class MCPClientManager {
         authProvider.serverId = newId;
       }
       // The elicitation handler closes over the server id it was created
-      // with — rescope it so elicitation requests report the new id.
-      conn.configureElicitationHandler(this.scopedElicitationHandlers(newId));
+      // with — rescope it so elicitation requests report the new id. With no
+      // handlers there is nothing to rescope, and configuring would wipe the
+      // connection's restored capability seed.
+      const scoped = this.scopedElicitationHandlers(newId);
+      if (scoped) {
+        conn.configureElicitationHandler(scoped);
+      }
     }
 
     const disposables = this._connectionDisposables.get(oldId);
@@ -588,16 +601,51 @@ export class MCPClientManager {
   }
 
   /**
-   * Get the retry options for a server from stored server_options
+   * Get the parsed server_options for a stored server, if any.
    */
-  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
+  private getStoredServerOptions(
+    serverId: string
+  ): MCPServerOptions | undefined {
     const rows = this.sql<MCPServerRow>(
       "SELECT server_options FROM cf_agents_mcp_servers WHERE id = ?",
       serverId
     );
     if (!rows.length || !rows[0].server_options) return undefined;
-    const parsed: MCPServerOptions = JSON.parse(rows[0].server_options);
-    return parsed.retry;
+    return JSON.parse(rows[0].server_options);
+  }
+
+  /**
+   * Read and clear the capabilities persisted on a stored server row. The
+   * stamp is valid for one restore: sessions that configure handlers re-stamp
+   * every row, so a deploy that stops configuring them stops advertising
+   * stale modes after its first wake instead of forever.
+   */
+  private consumeStoredCapabilities(
+    serverId: string
+  ): ClientCapabilities | undefined {
+    const rows = this.sql<MCPServerRow>(
+      "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers WHERE id = ?",
+      serverId
+    );
+    const row = rows[0];
+    if (!row?.server_options) return undefined;
+    const options: MCPServerOptions = JSON.parse(row.server_options);
+    const capabilities = options.capabilities;
+    if (capabilities) {
+      options.capabilities = undefined;
+      this.saveServerToStorage({
+        ...row,
+        server_options: JSON.stringify(options)
+      });
+    }
+    return capabilities;
+  }
+
+  /**
+   * Get the retry options for a server from stored server_options
+   */
+  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
+    return this.getStoredServerOptions(serverId)?.retry;
   }
 
   private clearServerAuthUrl(serverId: string): void {
@@ -800,7 +848,11 @@ export class MCPClientManager {
       client_id: null,
       auth_url: null,
       callback_url: "",
-      server_options: JSON.stringify({ bindingName, props })
+      server_options: JSON.stringify({
+        bindingName,
+        props,
+        capabilities: this.advertisedHandlerCapabilities()
+      })
     });
   }
 
@@ -1162,7 +1214,11 @@ export class MCPClientManager {
       {
         client: options.client ?? {},
         transport: normalizedTransport,
-        elicitationHandlers: this.scopedElicitationHandlers(id)
+        elicitationHandlers: this.scopedElicitationHandlers(id),
+        // Stored servers re-advertise the capabilities persisted on their
+        // row (see MCPServerOptions.capabilities); fresh registrations have
+        // no row yet and rely on the handlers above.
+        capabilitySeed: this.consumeStoredCapabilities(id)
       }
     );
 
@@ -1224,7 +1280,8 @@ export class MCPClientManager {
       server_options: JSON.stringify({
         client: serializableClient,
         transport: transportWithoutAuth,
-        retry: options.retry
+        retry: options.retry,
+        capabilities: this.advertisedHandlerCapabilities()
       })
     });
 
@@ -1626,10 +1683,15 @@ export class MCPClientManager {
    * Configure handling for server-initiated `elicitation/create` requests.
    *
    * The handler is held in memory only and applied to every MCP connection
-   * created or restored by this manager. Call this before registering or
-   * restoring connections when you want the initial MCP handshake to advertise
+   * created or restored by this manager. Call this before registering
+   * connections when you want the initial MCP handshake to advertise
    * handler-driven form- and url-mode elicitation. Existing active connections
    * keep their negotiated capabilities until they reconnect.
+   *
+   * The advertised modes are persisted with each stored server, so
+   * connections restored after hibernation re-advertise them at the handshake
+   * even when this is called later in the wake-up (e.g. from onStart) — the
+   * handlers attach to the live connections as soon as this runs.
    *
    * Pass undefined to clear the handler.
    *
@@ -1638,10 +1700,43 @@ export class MCPClientManager {
   configureElicitationHandler(handlers?: MCPClientElicitationHandlers): void {
     this._elicitationHandlers =
       handlers && (handlers.form || handlers.url) ? handlers : undefined;
+    this.persistAdvertisedCapabilities();
     for (const [id, connection] of Object.entries(this.mcpConnections)) {
       connection.configureElicitationHandler(
         this.scopedElicitationHandlers(id)
       );
+    }
+  }
+
+  /** Client capabilities advertised from the currently configured handlers. */
+  private advertisedHandlerCapabilities(): ClientCapabilities | undefined {
+    const elicitation = elicitationCapabilitiesFromHandlers(
+      this._elicitationHandlers
+    );
+    return elicitation ? { elicitation } : undefined;
+  }
+
+  /**
+   * Record the handler-derived capabilities on every stored server row so a
+   * restore after hibernation re-advertises them before the handlers
+   * themselves are reconfigured.
+   */
+  private persistAdvertisedCapabilities(): void {
+    const capabilities = this.advertisedHandlerCapabilities();
+    for (const server of this.getServersFromStorage()) {
+      const options: MCPServerOptions = server.server_options
+        ? JSON.parse(server.server_options)
+        : {};
+      if (
+        JSON.stringify(options.capabilities) === JSON.stringify(capabilities)
+      ) {
+        continue;
+      }
+      options.capabilities = capabilities;
+      this.saveServerToStorage({
+        ...server,
+        server_options: JSON.stringify(options)
+      });
     }
   }
 

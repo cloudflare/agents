@@ -5,10 +5,10 @@
 MCP client: url-mode elicitation support with a real elicitation handler
 
 - Agents can now respond to server-initiated `elicitation/create` requests by
-  calling `this.mcp.configureElicitationHandler({ form, url })` before MCP
-  connections are registered or restored. Agent `onStart()` now runs before
-  automatic MCP restore, so onStart configuration survives Durable Object
-  hibernation and applies to restored connections.
+  calling `this.mcp.configureElicitationHandler({ form, url })`, typically in
+  `onStart()`. The advertised modes are persisted with each MCP server, so
+  connections restored after Durable Object hibernation re-advertise them at
+  the handshake and the handlers re-attach when onStart runs.
   `MCPClientConnection` also accepts `elicitationHandlers` callbacks for
   lower-level non-Agent usage.
 - Connections advertise elicitation modes based on what can actually be
