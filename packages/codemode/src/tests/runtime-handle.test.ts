@@ -198,7 +198,8 @@ describe("createCodemodeRuntime", () => {
       status: "completed",
       executionId: "exec_1",
       result: "approved",
-      logs: undefined
+      logs: undefined,
+      calls: []
     });
 
     expect(runtimeStub.resume).toHaveBeenCalledWith("exec_1");
