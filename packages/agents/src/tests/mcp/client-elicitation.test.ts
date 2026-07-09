@@ -19,6 +19,15 @@ const elicitRequest: ElicitRequest = {
   }
 };
 
+const urlElicitRequest: ElicitRequest = {
+  method: "elicitation/create",
+  params: {
+    mode: "url",
+    message: "Connect your account",
+    url: "https://example.com/authorize"
+  }
+};
+
 function advertisedCapabilities(
   connection: MCPClientConnection
 ): ClientCapabilities {
@@ -38,19 +47,20 @@ describe("MCP client elicitation options (#1875)", () => {
       expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
     });
 
-    it("defaults to form- and url-mode elicitation with a handler", () => {
+    it("advertises only the modes with configured handlers", () => {
       const connection = new MCPClientConnection(
         new URL("http://example.com/mcp"),
         { name: "test-client", version: "1.0.0" },
         {
           transport: { type: "streamable-http" },
           client: {},
-          elicitationHandler: async () => ({ action: "cancel", content: {} })
+          elicitationHandlers: {
+            url: async () => ({ action: "cancel", content: {} })
+          }
         }
       );
 
       expect(advertisedCapabilities(connection).elicitation).toEqual({
-        form: {},
         url: {}
       });
     });
@@ -62,7 +72,10 @@ describe("MCP client elicitation options (#1875)", () => {
         {
           transport: { type: "streamable-http" },
           client: { capabilities: { elicitation: { form: {} } } },
-          elicitationHandler: async () => ({ action: "cancel", content: {} })
+          elicitationHandlers: {
+            form: async () => ({ action: "cancel", content: {} }),
+            url: async () => ({ action: "cancel", content: {} })
+          }
         }
       );
 
@@ -103,7 +116,7 @@ describe("MCP client elicitation options (#1875)", () => {
         {
           transport: { type: "streamable-http" },
           client: {},
-          elicitationHandler: handler
+          elicitationHandlers: { form: handler }
         }
       );
 
@@ -133,10 +146,12 @@ describe("MCP client elicitation options (#1875)", () => {
         {
           transport: { type: "rpc", namespace: env.MCP_OBJECT, name },
           client: {},
-          elicitationHandler: async () => ({
-            action: "accept",
-            content: { name: "Alice" }
-          })
+          elicitationHandlers: {
+            form: async () => ({
+              action: "accept",
+              content: { name: "Alice" }
+            })
+          }
         }
       );
       await connection.init();
@@ -216,7 +231,7 @@ describe("MCP client elicitation options (#1875)", () => {
         storage
       });
 
-      manager.configureElicitationHandler(handler);
+      manager.configureElicitationHandler({ form: handler, url: handler });
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
         name: "example"
@@ -253,7 +268,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const connection = manager.mcpConnections["srv-1"];
       expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
 
-      manager.configureElicitationHandler(handler);
+      manager.configureElicitationHandler({ form: handler, url: handler });
 
       expect(advertisedCapabilities(connection).elicitation).toEqual({
         form: {},
@@ -270,10 +285,12 @@ describe("MCP client elicitation options (#1875)", () => {
         storage
       });
 
-      manager.configureElicitationHandler(async () => ({
-        action: "accept",
-        content: {}
-      }));
+      manager.configureElicitationHandler({
+        form: async () => ({
+          action: "accept",
+          content: {}
+        })
+      });
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
         name: "example"
@@ -281,8 +298,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
       const connection = manager.mcpConnections["srv-1"];
       expect(advertisedCapabilities(connection).elicitation).toEqual({
-        form: {},
-        url: {}
+        form: {}
       });
 
       manager.configureElicitationHandler(undefined);
@@ -301,7 +317,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const manager = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      manager.configureElicitationHandler(handler);
+      manager.configureElicitationHandler({ form: handler, url: handler });
 
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
@@ -323,7 +339,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const manager = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      manager.configureElicitationHandler(handler);
+      manager.configureElicitationHandler({ form: handler, url: handler });
 
       await manager.registerServer("old-id", {
         url: "http://example.com/mcp",
@@ -343,7 +359,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const managerA = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      managerA.configureElicitationHandler(handlerA);
+      managerA.configureElicitationHandler({ form: handlerA, url: handlerA });
 
       await managerA.registerServer("srv-1", {
         url: "http://example.com/mcp",
@@ -365,7 +381,7 @@ describe("MCP client elicitation options (#1875)", () => {
         createAuthProvider: () =>
           ({ serverId: undefined, clientId: undefined }) as never
       });
-      managerB.configureElicitationHandler(handlerB);
+      managerB.configureElicitationHandler({ form: handlerB, url: handlerB });
       await managerB.restoreConnectionsFromStorage("test-client");
 
       const restored = managerB.mcpConnections["srv-1"];
@@ -380,6 +396,80 @@ describe("MCP client elicitation options (#1875)", () => {
       const result = await restored.handleElicitationRequest(elicitRequest);
       expect(result).toEqual({ action: "cancel", content: {} });
       expect(handlerB).toHaveBeenCalledWith(elicitRequest, "srv-1");
+    });
+
+    it("dispatches form and url elicitations to their configured handlers", async () => {
+      const { storage } = createMockStorage();
+      const formHandler = vi
+        .fn()
+        .mockResolvedValue({ action: "accept", content: { name: "Alice" } });
+      const urlHandler = vi
+        .fn()
+        .mockResolvedValue({ action: "accept", content: {} });
+      const manager = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+
+      manager.configureElicitationHandler({
+        form: formHandler,
+        url: urlHandler
+      });
+      await manager.registerServer("srv-1", {
+        url: "http://example.com/mcp",
+        name: "example"
+      });
+
+      const connection = manager.mcpConnections["srv-1"];
+      expect(advertisedCapabilities(connection).elicitation).toEqual({
+        form: {},
+        url: {}
+      });
+
+      await expect(
+        connection.handleElicitationRequest(elicitRequest)
+      ).resolves.toEqual({
+        action: "accept",
+        content: { name: "Alice" }
+      });
+      await expect(
+        connection.handleElicitationRequest(urlElicitRequest)
+      ).resolves.toEqual({
+        action: "accept",
+        content: {}
+      });
+      expect(formHandler).toHaveBeenCalledWith(elicitRequest, "srv-1");
+      expect(urlHandler).toHaveBeenCalledWith(urlElicitRequest, "srv-1");
+    });
+
+    it("advertises only configured modes and fails loudly without a matching handler", async () => {
+      const { storage } = createMockStorage();
+      const urlHandler = vi
+        .fn()
+        .mockResolvedValue({ action: "accept", content: {} });
+      const manager = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+
+      manager.configureElicitationHandler({ url: urlHandler });
+      await manager.registerServer("srv-1", {
+        url: "http://example.com/mcp",
+        name: "example"
+      });
+
+      const connection = manager.mcpConnections["srv-1"];
+      expect(advertisedCapabilities(connection).elicitation).toEqual({
+        url: {}
+      });
+
+      await expect(
+        connection.handleElicitationRequest(elicitRequest)
+      ).rejects.toThrow("No MCP form-mode elicitation handler configured");
+      await expect(
+        connection.handleElicitationRequest(urlElicitRequest)
+      ).resolves.toEqual({
+        action: "accept",
+        content: {}
+      });
     });
   });
 });

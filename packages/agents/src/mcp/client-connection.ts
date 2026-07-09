@@ -120,6 +120,27 @@ export type MCPElicitationHandler = (
   request: ElicitRequest
 ) => Promise<ElicitResult>;
 
+export type MCPElicitationHandlers = {
+  form?: MCPElicitationHandler;
+  url?: MCPElicitationHandler;
+};
+
+function elicitationCapabilitiesFromHandlers(
+  handlers?: MCPElicitationHandlers
+): ClientCapabilities["elicitation"] | undefined {
+  if (!handlers) return undefined;
+
+  const elicitation: NonNullable<ClientCapabilities["elicitation"]> = {};
+  if (handlers.form) {
+    elicitation.form = {};
+  }
+  if (handlers.url) {
+    elicitation.url = {};
+  }
+
+  return elicitation.form || elicitation.url ? elicitation : undefined;
+}
+
 export class MCPClientConnection {
   client: Client;
   connectionState: MCPConnectionState = MCPConnectionState.CONNECTING;
@@ -172,7 +193,7 @@ export class MCPClientConnection {
     public options: {
       transport: MCPTransportOptions;
       client: McpClientOptions;
-      elicitationHandler?: MCPElicitationHandler;
+      elicitationHandlers?: MCPElicitationHandlers;
     } = { client: {}, transport: {} }
   ) {
     this.options = {
@@ -184,16 +205,15 @@ export class MCPClientConnection {
   }
 
   private createClient(): Client {
-    // Advertise elicitation only when it can actually be handled: with a
-    // handler configured, default to both form and url mode (MCP spec
-    // 2025-11-25); without one, advertise no elicitation capability so
-    // spec-compliant servers use their non-elicitation fallbacks instead of
-    // sending requests that would only be rejected. An explicit
-    // caller-declared `capabilities.elicitation` wins wholesale so callers
-    // can narrow (or widen) the advertised modes.
+    // Advertise elicitation only when it can actually be handled. Handler
+    // keys map directly to advertised modes, so a form-only handler advertises
+    // form only, a url-only handler advertises url only, and no handlers means
+    // no elicitation capability. An explicit caller-declared
+    // `capabilities.elicitation` wins wholesale so callers can narrow (or
+    // widen) the advertised modes.
     const elicitation =
       this.options.client?.capabilities?.elicitation ??
-      (this.options.elicitationHandler ? { form: {}, url: {} } : undefined);
+      elicitationCapabilitiesFromHandlers(this.options.elicitationHandlers);
     this._elicitationEnabled = elicitation !== undefined;
     const clientOptions = {
       ...this.options.client,
@@ -214,8 +234,8 @@ export class MCPClientConnection {
    * handshake. Active connections keep their negotiated capabilities until
    * they reconnect.
    */
-  configureElicitationHandler(handler?: MCPElicitationHandler): void {
-    this.options.elicitationHandler = handler;
+  configureElicitationHandler(handlers?: MCPElicitationHandlers): void {
+    this.options.elicitationHandlers = handlers;
 
     if (!this.client.transport) {
       this.client = this.createClient();
@@ -728,20 +748,26 @@ export class MCPClientConnection {
   /**
    * Handle elicitation request from server.
    *
-   * Delegates to the `elicitationHandler` connection option when provided.
+   * Delegates to the `elicitationHandlers` connection option when provided.
    *
    * @deprecated Overriding or instance-patching this method directly is
-   * deprecated — pass the `elicitationHandler` connection option instead.
+   * deprecated — pass the `elicitationHandlers` connection option instead.
    */
   async handleElicitationRequest(
     request: ElicitRequest
   ): Promise<ElicitResult> {
-    const handler = this.options.elicitationHandler;
+    const mode = request.params.mode === "url" ? "url" : "form";
+    const handler = this.options.elicitationHandlers?.[mode];
     if (handler) {
       return handler(request);
     }
+    if (this.options.elicitationHandlers) {
+      throw new Error(
+        `No MCP ${mode}-mode elicitation handler configured for this connection.`
+      );
+    }
     throw new Error(
-      "Elicitation handler must be implemented for your platform. Provide the elicitationHandler connection option or configure this.mcp.configureElicitationHandler(...)."
+      "Elicitation handler must be implemented for your platform. Provide the MCPClientConnection elicitationHandlers option, or register handlers through the MCP client manager before connecting."
     );
   }
 

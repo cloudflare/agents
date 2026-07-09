@@ -641,12 +641,16 @@ export type {
   MCPClientOAuthResult,
   MCPClientOAuthCallbackConfig,
   MCPClientElicitationHandler,
+  MCPClientElicitationHandlers,
   MCPServerOptions,
   MCPConnectionResult,
   MCPDiscoverResult
 } from "./client";
 
-export type { MCPElicitationHandler } from "./client-connection";
+export type {
+  MCPElicitationHandler,
+  MCPElicitationHandlers
+} from "./client-connection";
 
 export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./client";
 

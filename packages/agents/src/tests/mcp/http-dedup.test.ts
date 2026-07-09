@@ -55,12 +55,18 @@ describe("addMcpServer HTTP dedup (name + URL)", () => {
     );
     const result =
       (await agentStub.testStoredHttpServerWithoutConnectionReusesId()) as unknown as {
+        connectionError: string | null;
         returnedId: string | null;
         storedIds: string[];
+        threwExpectedConnectionError: boolean;
       };
 
     expect(result.returnedId).toBe("stored-without-connection");
     expect(result.storedIds).toEqual(["stored-without-connection"]);
+    expect(result.threwExpectedConnectionError).toBe(true);
+    expect(result.connectionError).toContain(
+      "Failed to connect to MCP server at https://mcp.example.com/stored:"
+    );
   });
 
   it("should NOT dedup when URL matches but name differs", async () => {

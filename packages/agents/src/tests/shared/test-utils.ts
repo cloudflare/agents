@@ -150,12 +150,12 @@ export async function initializeMCPClientConnection(
 /**
  * Helper to create RPC connection to TestMcpAgent.
  *
- * Pass `elicitationHandler` when the test exercises elicitation — without a
- * handler the connection advertises no elicitation capability, so the server
+ * Pass `elicitationHandlers` when the test exercises elicitation — without
+ * handlers the connection advertises no elicitation capability, so the server
  * refuses to elicit.
  */
 export async function establishRPCConnection(
-  elicitationHandler?: MCPClientConnection["options"]["elicitationHandler"]
+  elicitationHandlers?: MCPClientConnection["options"]["elicitationHandlers"]
 ): Promise<{
   connection: MCPClientConnection;
   sessionId: string;
@@ -168,7 +168,7 @@ export async function establishRPCConnection(
     {
       transport: { type: "rpc", namespace: env.MCP_OBJECT, name },
       client: {},
-      elicitationHandler
+      elicitationHandlers
     }
   );
 

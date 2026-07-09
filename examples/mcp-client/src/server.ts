@@ -27,9 +27,12 @@ export class MyAgent extends Agent {
   >();
 
   onStart() {
-    this.mcp.configureElicitationHandler((request, serverId) =>
-      this.handleElicitationRequest(request, serverId)
-    );
+    this.mcp.configureElicitationHandler({
+      form: (request, serverId) =>
+        this.forwardElicitationToBrowser(request, serverId),
+      url: (request, serverId) =>
+        this.forwardElicitationToBrowser(request, serverId)
+    });
 
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
@@ -53,7 +56,7 @@ export class MyAgent extends Agent {
    * browser clients and waits for one of them to answer via
    * `respondToElicitation`.
    */
-  private async handleElicitationRequest(
+  private async forwardElicitationToBrowser(
     request: ElicitRequest,
     serverId: string
   ): Promise<ElicitResult> {

@@ -21,7 +21,7 @@ import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
   MCPClientConnection,
   MCPConnectionState,
-  type MCPElicitationHandler,
+  type MCPElicitationHandlers,
   type MCPTransportOptions
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
@@ -311,6 +311,11 @@ export type MCPClientElicitationHandler = (
   serverId: string
 ) => Promise<ElicitResult>;
 
+export type MCPClientElicitationHandlers = {
+  form?: MCPClientElicitationHandler;
+  url?: MCPClientElicitationHandler;
+};
+
 export type MCPClientManagerOptions = {
   storage: DurableObjectStorage;
   createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
@@ -343,7 +348,7 @@ export class MCPClientManager {
   ) => AgentMcpOAuthProvider;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
-  private _elicitationHandler?: MCPClientElicitationHandler;
+  private _elicitationHandlers?: MCPClientElicitationHandlers;
 
   /** @internal Protected for testing purposes. */
   protected readonly _onObservabilityEvent =
@@ -383,12 +388,18 @@ export class MCPClientManager {
    * Returns undefined when no handler is configured so the connection keeps
    * its default throwing behavior.
    */
-  private scopedElicitationHandler(
+  private scopedElicitationHandlers(
     serverId: string
-  ): MCPElicitationHandler | undefined {
-    const handler = this._elicitationHandler;
-    if (!handler) return undefined;
-    return (request) => handler(request, serverId);
+  ): MCPElicitationHandlers | undefined {
+    const handlers = this._elicitationHandlers;
+    if (!handlers || (!handlers.form && !handlers.url)) return undefined;
+
+    const form = handlers.form;
+    const url = handlers.url;
+    return {
+      form: form ? (request) => form(request, serverId) : undefined,
+      url: url ? (request) => url(request, serverId) : undefined
+    };
   }
 
   // SQL helper - runs a query and returns results as array
@@ -519,9 +530,7 @@ export class MCPClientManager {
       }
       // The elicitation handler closes over the server id it was created
       // with — rescope it so elicitation requests report the new id.
-      if (conn.options.elicitationHandler) {
-        conn.configureElicitationHandler(this.scopedElicitationHandler(newId));
-      }
+      conn.configureElicitationHandler(this.scopedElicitationHandlers(newId));
     }
 
     const disposables = this._connectionDisposables.get(oldId);
@@ -1153,7 +1162,7 @@ export class MCPClientManager {
       {
         client: options.client ?? {},
         transport: normalizedTransport,
-        elicitationHandler: this.scopedElicitationHandler(id)
+        elicitationHandlers: this.scopedElicitationHandlers(id)
       }
     );
 
@@ -1624,13 +1633,15 @@ export class MCPClientManager {
    *
    * Pass undefined to clear the handler.
    *
-   * @param handler Elicitation handler, scoped with the server id that sent the request
+   * @param handlers Elicitation handlers keyed by mode, each scoped with the server id that sent the request
    */
-  configureElicitationHandler(handler?: MCPClientElicitationHandler): void {
-    this._elicitationHandler = handler;
-
+  configureElicitationHandler(handlers?: MCPClientElicitationHandlers): void {
+    this._elicitationHandlers =
+      handlers && (handlers.form || handlers.url) ? handlers : undefined;
     for (const [id, connection] of Object.entries(this.mcpConnections)) {
-      connection.configureElicitationHandler(this.scopedElicitationHandler(id));
+      connection.configureElicitationHandler(
+        this.scopedElicitationHandlers(id)
+      );
     }
   }
 

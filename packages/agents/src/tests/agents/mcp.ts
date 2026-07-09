@@ -1126,10 +1126,18 @@ export class TestHttpMcpDedupAgent extends Agent {
     delete this.mcp.mcpConnections[id];
 
     let returnedId: string | null = null;
+    let threwExpectedConnectionError = false;
+    let connectionError: string | null = null;
     try {
       const result = await this.addMcpServer("stored-server", url);
       returnedId = result.id;
-    } catch (_err) {
+    } catch (error) {
+      connectionError = error instanceof Error ? error.message : String(error);
+      const expectedPrefix = `Failed to connect to MCP server at ${new URL(url).href}:`;
+      if (!connectionError.startsWith(expectedPrefix)) {
+        throw error;
+      }
+      threwExpectedConnectionError = true;
       returnedId =
         this.mcp.listServers().find((s) => s.name === "stored-server")?.id ??
         null;
@@ -1141,8 +1149,10 @@ export class TestHttpMcpDedupAgent extends Agent {
       .map((s) => s.id);
 
     return {
+      connectionError,
       returnedId,
-      storedIds
+      storedIds,
+      threwExpectedConnectionError
     };
   }
 
