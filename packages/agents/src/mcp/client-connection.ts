@@ -164,11 +164,11 @@ export class MCPClientConnection {
    * the capability was not declared, so handler registration is gated on
    * this.
    */
-  private readonly _elicitationEnabled: boolean;
+  private _elicitationEnabled = false;
 
   constructor(
     public url: URL,
-    info: ConstructorParameters<typeof Client>[0],
+    private readonly _info: ConstructorParameters<typeof Client>[0],
     public options: {
       transport: MCPTransportOptions;
       client: McpClientOptions;
@@ -180,6 +180,10 @@ export class MCPClientConnection {
       client: { ...defaultClientOptions, ...options.client }
     };
 
+    this.client = this.createClient();
+  }
+
+  private createClient(): Client {
     // Advertise elicitation only when it can actually be handled: with a
     // handler configured, default to both form and url mode (MCP spec
     // 2025-11-25); without one, advertise no elicitation capability so
@@ -189,7 +193,7 @@ export class MCPClientConnection {
     // can narrow (or widen) the advertised modes.
     const elicitation =
       this.options.client?.capabilities?.elicitation ??
-      (options.elicitationHandler ? { form: {}, url: {} } : undefined);
+      (this.options.elicitationHandler ? { form: {}, url: {} } : undefined);
     this._elicitationEnabled = elicitation !== undefined;
     const clientOptions = {
       ...this.options.client,
@@ -199,7 +203,23 @@ export class MCPClientConnection {
       } as ClientCapabilities
     };
 
-    this.client = new Client(info, clientOptions);
+    return new Client(this._info, clientOptions);
+  }
+
+  /**
+   * Configure the handler used for server-initiated elicitation requests.
+   *
+   * If the connection has not been initialized yet, rebuild the SDK client so
+   * handler-driven elicitation capabilities are reflected in the initial
+   * handshake. Active connections keep their negotiated capabilities until
+   * they reconnect.
+   */
+  configureElicitationHandler(handler?: MCPElicitationHandler): void {
+    this.options.elicitationHandler = handler;
+
+    if (!this.client.transport) {
+      this.client = this.createClient();
+    }
   }
 
   /**
@@ -711,8 +731,7 @@ export class MCPClientConnection {
    * Delegates to the `elicitationHandler` connection option when provided.
    *
    * @deprecated Overriding or instance-patching this method directly is
-   * deprecated — pass the `elicitationHandler` connection option instead
-   * (agents: override `Agent.onElicitRequest`).
+   * deprecated — pass the `elicitationHandler` connection option instead.
    */
   async handleElicitationRequest(
     request: ElicitRequest
@@ -722,7 +741,7 @@ export class MCPClientConnection {
       return handler(request);
     }
     throw new Error(
-      "Elicitation handler must be implemented for your platform. Provide the elicitationHandler connection option (agents: override onElicitRequest)."
+      "Elicitation handler must be implemented for your platform. Provide the elicitationHandler connection option or configure this.mcp.configureElicitationHandler(...)."
     );
   }
 

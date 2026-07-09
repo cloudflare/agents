@@ -9,7 +9,6 @@ import { isUnauthorized, toErrorMessage } from "../src/mcp/errors.ts";
 import {
   createMcpHandler,
   DurableObjectEventStore,
-  type ElicitResult,
   McpAgent,
   type TransportState,
   WorkerTransport
@@ -54,17 +53,14 @@ type RunResult =
 export class ConformanceHost extends Agent<Env> {
   private _serverId: string | undefined;
 
-  /**
-   * Accept elicitation requests. Form-mode defaults are applied by the SDK
-   * client because the connection advertises `form.applyDefaults`
-   * (SEP-1034); overriding this method is also what makes connections
-   * advertise elicitation capabilities in the first place.
-   */
-  async onElicitRequest(): Promise<ElicitResult> {
-    return { action: "accept", content: {} };
-  }
-
   onStart() {
+    // Accept elicitation requests. Form-mode defaults are applied by the SDK
+    // client because the connection advertises `form.applyDefaults` (SEP-1034).
+    this.mcp.configureElicitationHandler(async () => ({
+      action: "accept",
+      content: {}
+    }));
+
     // Respond to OAuth callbacks with an explicit status the driver can
     // assert on, instead of the default redirect-to-origin.
     this.mcp.configureOAuthCallback({

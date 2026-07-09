@@ -640,6 +640,7 @@ export {
 export type {
   MCPClientOAuthResult,
   MCPClientOAuthCallbackConfig,
+  MCPClientElicitationHandler,
   MCPServerOptions,
   MCPConnectionResult,
   MCPDiscoverResult

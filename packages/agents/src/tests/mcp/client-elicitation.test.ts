@@ -207,15 +207,101 @@ describe("MCP client elicitation options (#1875)", () => {
       return { storage, rows };
     }
 
+    it("configureElicitationHandler applies to future connections", async () => {
+      const { storage } = createMockStorage();
+      const handler = vi
+        .fn()
+        .mockResolvedValue({ action: "accept", content: { name: "Alice" } });
+      const manager = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+
+      manager.configureElicitationHandler(handler);
+      await manager.registerServer("srv-1", {
+        url: "http://example.com/mcp",
+        name: "example"
+      });
+
+      const connection = manager.mcpConnections["srv-1"];
+      expect(advertisedCapabilities(connection).elicitation).toEqual({
+        form: {},
+        url: {}
+      });
+
+      const result = await connection.handleElicitationRequest(elicitRequest);
+
+      expect(result).toEqual({
+        action: "accept",
+        content: { name: "Alice" }
+      });
+      expect(handler).toHaveBeenCalledWith(elicitRequest, "srv-1");
+    });
+
+    it("configureElicitationHandler updates existing uninitialized connections", async () => {
+      const { storage } = createMockStorage();
+      const handler = vi
+        .fn()
+        .mockResolvedValue({ action: "decline", content: {} });
+      const manager = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+
+      await manager.registerServer("srv-1", {
+        url: "http://example.com/mcp",
+        name: "example"
+      });
+      const connection = manager.mcpConnections["srv-1"];
+      expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
+
+      manager.configureElicitationHandler(handler);
+
+      expect(advertisedCapabilities(connection).elicitation).toEqual({
+        form: {},
+        url: {}
+      });
+      const result = await connection.handleElicitationRequest(elicitRequest);
+      expect(result).toEqual({ action: "decline", content: {} });
+      expect(handler).toHaveBeenCalledWith(elicitRequest, "srv-1");
+    });
+
+    it("configureElicitationHandler can clear an uninitialized connection handler", async () => {
+      const { storage } = createMockStorage();
+      const manager = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+
+      manager.configureElicitationHandler(async () => ({
+        action: "accept",
+        content: {}
+      }));
+      await manager.registerServer("srv-1", {
+        url: "http://example.com/mcp",
+        name: "example"
+      });
+
+      const connection = manager.mcpConnections["srv-1"];
+      expect(advertisedCapabilities(connection).elicitation).toEqual({
+        form: {},
+        url: {}
+      });
+
+      manager.configureElicitationHandler(undefined);
+
+      expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
+      await expect(
+        connection.handleElicitationRequest(elicitRequest)
+      ).rejects.toThrow("Elicitation handler must be implemented");
+    });
+
     it("scopes the manager-level handler to each connection with its server id", async () => {
       const { storage } = createMockStorage();
       const handler = vi
         .fn()
         .mockResolvedValue({ action: "decline", content: {} });
       const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage,
-        elicitationHandler: handler
+        storage
       });
+      manager.configureElicitationHandler(handler);
 
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
@@ -235,9 +321,9 @@ describe("MCP client elicitation options (#1875)", () => {
         .fn()
         .mockResolvedValue({ action: "accept", content: {} });
       const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage,
-        elicitationHandler: handler
+        storage
       });
+      manager.configureElicitationHandler(handler);
 
       await manager.registerServer("old-id", {
         url: "http://example.com/mcp",
@@ -255,9 +341,9 @@ describe("MCP client elicitation options (#1875)", () => {
       const { storage } = createMockStorage();
       const handlerA = vi.fn();
       const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage,
-        elicitationHandler: handlerA
+        storage
       });
+      managerA.configureElicitationHandler(handlerA);
 
       await managerA.registerServer("srv-1", {
         url: "http://example.com/mcp",
@@ -277,9 +363,9 @@ describe("MCP client elicitation options (#1875)", () => {
       const managerB = new MCPClientManager("test-client", "1.0.0", {
         storage,
         createAuthProvider: () =>
-          ({ serverId: undefined, clientId: undefined }) as never,
-        elicitationHandler: handlerB
+          ({ serverId: undefined, clientId: undefined }) as never
       });
+      managerB.configureElicitationHandler(handlerB);
       await managerB.restoreConnectionsFromStorage("test-client");
 
       const restored = managerB.mcpConnections["srv-1"];

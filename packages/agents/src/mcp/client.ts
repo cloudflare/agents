@@ -306,20 +306,14 @@ export type MCPClientOAuthResult =
       authError: string;
     };
 
+export type MCPClientElicitationHandler = (
+  request: ElicitRequest,
+  serverId: string
+) => Promise<ElicitResult>;
+
 export type MCPClientManagerOptions = {
   storage: DurableObjectStorage;
   createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
-  /**
-   * Handler for server-initiated `elicitation/create` requests, applied to
-   * every connection this manager creates — including connections restored
-   * from storage after Durable Object hibernation. Held in memory only
-   * (never persisted), which is why it lives here rather than in the
-   * per-server persisted options.
-   */
-  elicitationHandler?: (
-    request: ElicitRequest,
-    serverId: string
-  ) => Promise<ElicitResult>;
 };
 
 /**
@@ -349,7 +343,7 @@ export class MCPClientManager {
   ) => AgentMcpOAuthProvider;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
-  private _elicitationHandler?: MCPClientManagerOptions["elicitationHandler"];
+  private _elicitationHandler?: MCPClientElicitationHandler;
 
   /** @internal Protected for testing purposes. */
   protected readonly _onObservabilityEvent =
@@ -382,7 +376,6 @@ export class MCPClientManager {
     }
     this._storage = options.storage;
     this._createAuthProviderFn = options.createAuthProvider;
-    this._elicitationHandler = options.elicitationHandler;
   }
 
   /**
@@ -527,7 +520,7 @@ export class MCPClientManager {
       // The elicitation handler closes over the server id it was created
       // with — rescope it so elicitation requests report the new id.
       if (conn.options.elicitationHandler) {
-        conn.options.elicitationHandler = this.scopedElicitationHandler(newId);
+        conn.configureElicitationHandler(this.scopedElicitationHandler(newId));
       }
     }
 
@@ -1618,6 +1611,27 @@ export class MCPClientManager {
    */
   configureOAuthCallback(config: MCPClientOAuthCallbackConfig): void {
     this._oauthCallbackConfig = config;
+  }
+
+  /**
+   * Configure handling for server-initiated `elicitation/create` requests.
+   *
+   * The handler is held in memory only and applied to every MCP connection
+   * created or restored by this manager. Call this before registering or
+   * restoring connections when you want the initial MCP handshake to advertise
+   * handler-driven form- and url-mode elicitation. Existing active connections
+   * keep their negotiated capabilities until they reconnect.
+   *
+   * Pass undefined to clear the handler.
+   *
+   * @param handler Elicitation handler, scoped with the server id that sent the request
+   */
+  configureElicitationHandler(handler?: MCPClientElicitationHandler): void {
+    this._elicitationHandler = handler;
+
+    for (const [id, connection] of Object.entries(this.mcpConnections)) {
+      connection.configureElicitationHandler(this.scopedElicitationHandler(id));
+    }
   }
 
   /**

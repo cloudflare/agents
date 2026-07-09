@@ -113,20 +113,24 @@ These options are persisted and used when reconnecting after hibernation or afte
 
 ### Elicitation
 
-MCP servers can request input from the client during a tool call (`elicitation/create`). To respond, override `onElicitRequest` on your agent:
+MCP servers can request input from the client during a tool call (`elicitation/create`). To respond, configure an elicitation handler before MCP connections are registered or restored:
 
 ```typescript
+import { Agent } from "agents";
+
 class MyAgent extends Agent<Env> {
-  async onElicitRequest(request: ElicitRequest, serverId: string) {
-    // e.g. deliver a url-mode elicitation link out-of-band
-    return { action: "accept" as const, content: {} };
+  onStart() {
+    this.mcp.configureElicitationHandler(async (request, serverId) => {
+      // e.g. deliver a url-mode elicitation link out-of-band
+      return { action: "accept" as const, content: {} };
+    });
   }
 }
 ```
 
-Because it is a class method, the handler survives Durable Object hibernation and applies to connections restored from storage.
+The Agent lifecycle runs `onStart()` before automatic MCP connection restore, so handlers configured there apply to connections restored from storage. Configuring a handler after an MCP connection is already active updates the in-memory handler, but the server only sees new advertised elicitation modes after that connection reconnects.
 
-Overriding `onElicitRequest` is all you need: when a handler is present, connections automatically advertise both form- and url-mode elicitation (MCP spec 2025-11-25 — url-mode is used for sensitive flows like OAuth URLs) at the `initialize` handshake. Without a handler, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
+When a handler is present, connections automatically advertise both form- and url-mode elicitation (MCP spec 2025-11-25 — url-mode is used for sensitive flows like OAuth URLs) at the `initialize` handshake. Without a handler, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
 
 To narrow the advertised modes, declare them explicitly — an explicit declaration always wins and is persisted with the server options, surviving hibernation:
 

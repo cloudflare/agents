@@ -6,7 +6,7 @@ An Agent that acts as an MCP **client** — dynamically connects to remote MCP s
 
 - **`addMcpServer` / `removeMcpServer`** — managing MCP server connections from an Agent
 - **`onMcpUpdate`** — real-time state updates pushed to the React frontend via WebSocket
-- **`onElicitRequest`** — when a server requests input mid-tool-call (elicitation), the Agent broadcasts it to the browser, which renders a form from the request's schema (or a link for url-mode); the human's answer resolves the pending tool call via a `@callable` method
+- **`this.mcp.configureElicitationHandler`** — when a server requests input mid-tool-call (elicitation), the Agent broadcasts it to the browser, which renders a form from the request's schema (or a link for url-mode); the human's answer resolves the pending tool call via a `@callable` method
 - **OAuth popup flow** — `configureOAuthCallback` with a custom handler that closes the popup after auth
 - **`agentFetch`** — making HTTP requests to the Agent's custom endpoints from the client
 
