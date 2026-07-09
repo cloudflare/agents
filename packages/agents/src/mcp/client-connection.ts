@@ -158,6 +158,14 @@ export class MCPClientConnection {
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
     this._onObservabilityEvent.event;
 
+  /**
+   * Whether the connection advertised the elicitation capability. The SDK
+   * client refuses to register an `elicitation/create` request handler when
+   * the capability was not declared, so handler registration is gated on
+   * this.
+   */
+  private readonly _elicitationEnabled: boolean;
+
   constructor(
     public url: URL,
     info: ConstructorParameters<typeof Client>[0],
@@ -172,18 +180,22 @@ export class MCPClientConnection {
       client: { ...defaultClientOptions, ...options.client }
     };
 
-    // Advertise elicitation modes based on what can actually be handled:
-    // with a handler configured, default to both form and url mode (MCP spec
-    // 2025-11-25); without one, keep the legacy form-mode-only `{}`. An
-    // explicit caller-declared `capabilities.elicitation` wins wholesale so
-    // callers can narrow (or widen) the advertised modes.
+    // Advertise elicitation only when it can actually be handled: with a
+    // handler configured, default to both form and url mode (MCP spec
+    // 2025-11-25); without one, advertise no elicitation capability so
+    // spec-compliant servers use their non-elicitation fallbacks instead of
+    // sending requests that would only be rejected. An explicit
+    // caller-declared `capabilities.elicitation` wins wholesale so callers
+    // can narrow (or widen) the advertised modes.
+    const elicitation =
+      this.options.client?.capabilities?.elicitation ??
+      (options.elicitationHandler ? { form: {}, url: {} } : undefined);
+    this._elicitationEnabled = elicitation !== undefined;
     const clientOptions = {
       ...this.options.client,
       capabilities: {
         ...this.options.client?.capabilities,
-        elicitation:
-          this.options.client?.capabilities?.elicitation ??
-          (options.elicitationHandler ? { form: {}, url: {} } : {})
+        ...(elicitation ? { elicitation } : {})
       } as ClientCapabilities
     };
 
@@ -222,13 +234,17 @@ export class MCPClientConnection {
 
     // Handle the result and emit appropriate events
     if (res.state === MCPConnectionState.CONNECTED && res.transport) {
-      // Set up elicitation request handler after successful connection
-      this.client.setRequestHandler(
-        ElicitRequestSchema,
-        async (request: ElicitRequest) => {
-          return await this.handleElicitationRequest(request);
-        }
-      );
+      // Set up the elicitation request handler after a successful
+      // connection. Only when the capability was advertised — the SDK
+      // client throws on registering a handler for an undeclared capability.
+      if (this._elicitationEnabled) {
+        this.client.setRequestHandler(
+          ElicitRequestSchema,
+          async (request: ElicitRequest) => {
+            return await this.handleElicitationRequest(request);
+          }
+        );
+      }
 
       this.lastConnectedTransport = res.transport;
 
