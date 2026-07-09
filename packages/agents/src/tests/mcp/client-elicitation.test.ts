@@ -24,7 +24,8 @@ const urlElicitRequest: ElicitRequest = {
   params: {
     mode: "url",
     message: "Connect your account",
-    url: "https://example.com/authorize"
+    url: "https://example.com/authorize",
+    elicitationId: "elicit-1"
   }
 };
 
