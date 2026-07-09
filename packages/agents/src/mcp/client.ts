@@ -1021,7 +1021,7 @@ export class MCPClientManager {
           version: this._version
         },
         {
-          client: options.client ?? {},
+          client: { ...defaultClientOptions, ...options.client },
           transport: normalizedTransport
         }
       );

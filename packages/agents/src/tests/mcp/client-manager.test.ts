@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { MCPClientManager } from "../../mcp/client";
 import {
   MCPClientConnection,
@@ -302,6 +303,63 @@ describe("MCPClientManager OAuth Integration", () => {
         "test-auth-code"
       );
       expect(authProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Worker-safe JSON Schema validator defaults", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("connect() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const { id } = await manager.connect("http://example.com", {
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("connect() preserves a caller-supplied jsonSchemaValidator", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      const { id } = await manager.connect("http://example.com", {
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBe(customValidator);
+    });
+
+    it("registerServer() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      await manager.registerServer("validator-default-id", {
+        url: "http://example.com",
+        name: "validator-default",
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections["validator-default-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
     });
   });
 
