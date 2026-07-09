@@ -361,6 +361,52 @@ describe("MCPClientManager OAuth Integration", () => {
           ?.jsonSchemaValidator
       ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
     });
+
+    it("registerServer() does not persist a caller-supplied jsonSchemaValidator", async () => {
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      await manager.registerServer("validator-persist-id", {
+        url: "http://example.com",
+        name: "validator-persist",
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      // The live connection keeps the caller's validator...
+      expect(
+        manager.mcpConnections["validator-persist-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBe(customValidator);
+
+      // ...but a validator instance cannot survive JSON serialization, so it
+      // must not be written to storage at all.
+      const row = mockStorageData.get("validator-persist-id");
+      const persisted = JSON.parse(row?.server_options ?? "{}");
+      expect(persisted.client).not.toHaveProperty("jsonSchemaValidator");
+    });
+
+    it("restore falls back to the Worker-safe default when persisted options contain a serialization-degraded validator", async () => {
+      // Simulate a row written by a caller that passed a custom validator:
+      // JSON.stringify degrades the instance to a plain object.
+      saveServerToMock({
+        id: "restored-degraded-validator",
+        name: "Degraded Validator Server",
+        server_url: "http://example.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: "https://auth.example.com/authorize",
+        server_options: JSON.stringify({
+          transport: { type: "auto" },
+          client: { jsonSchemaValidator: {} }
+        })
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      expect(
+        manager.mcpConnections["restored-degraded-validator"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
   });
 
   describe("Callback URL Management", () => {

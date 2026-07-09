@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import {
   SSEClientTransport,
   type SSEClientTransportOptions
@@ -43,6 +44,14 @@ import type {
   TransportType,
   McpClientOptions
 } from "./types";
+
+// Workers disallows runtime code generation, so the MCP SDK's default AJV
+// validator (which compiles schemas with `new Function`) cannot run there.
+// Every connection defaults to the Worker-safe validator unless the caller
+// supplies their own.
+const defaultClientOptions: McpClientOptions = {
+  jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
+};
 
 /**
  * Connection state machine for MCP client connections.
@@ -148,10 +157,15 @@ export class MCPClientConnection {
       client: McpClientOptions;
     } = { client: {}, transport: {} }
   ) {
+    this.options = {
+      ...options,
+      client: { ...defaultClientOptions, ...options.client }
+    };
+
     const clientOptions = {
-      ...options.client,
+      ...this.options.client,
       capabilities: {
-        ...options.client?.capabilities,
+        ...this.options.client?.capabilities,
         elicitation: {}
       } as ClientCapabilities
     };

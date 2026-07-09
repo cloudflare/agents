@@ -11,7 +11,6 @@ import type {
   ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { type RetryOptions, tryN } from "../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";
@@ -28,10 +27,6 @@ import type { TransportType } from "./types";
 import type { MCPServerRow } from "./client-storage";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
-
-const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
-  jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
-};
 
 export type MCPAITool = {
   description?: string;
@@ -837,6 +832,12 @@ export class MCPClientManager {
       const parsedOptions: MCPServerOptions | null = server.server_options
         ? JSON.parse(server.server_options)
         : null;
+      // A caller-supplied jsonSchemaValidator is a live instance that can't
+      // survive JSON serialization; drop whatever degraded value an older row
+      // may hold so the connection falls back to the Worker-safe default.
+      if (parsedOptions?.client) {
+        delete parsedOptions.client.jsonSchemaValidator;
+      }
 
       let authProvider: AgentMcpOAuthProvider | undefined;
       if (server.callback_url) {
@@ -1007,37 +1008,14 @@ export class MCPClientManager {
       );
     }
 
-    // During OAuth reconnect, reuse existing connection to preserve state
+    // During OAuth reconnect, reuse existing connection to preserve state;
+    // otherwise drop any existing connection and rebuild it.
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
-      const normalizedTransport = {
-        ...options.transport,
-        type: options.transport?.type ?? ("auto" as TransportType)
-      };
-
-      this.mcpConnections[id] = new MCPClientConnection(
-        new URL(url),
-        {
-          name: this._name,
-          version: this._version
-        },
-        {
-          client: { ...defaultClientOptions, ...options.client },
-          transport: normalizedTransport
-        }
-      );
-
-      // Pipe connection-level observability events to the manager-level emitter
-      // and track the subscription for cleanup.
-      const store = new DisposableStore();
-      // If we somehow already had disposables for this id, clear them first
-      const existing = this._connectionDisposables.get(id);
-      if (existing) existing.dispose();
-      this._connectionDisposables.set(id, store);
-      store.add(
-        this.mcpConnections[id].onObservabilityEvent((event) => {
-          this._onObservabilityEvent.fire(event);
-        })
-      );
+      delete this.mcpConnections[id];
+      this.createConnection(id, url, {
+        client: options.client,
+        transport: options.transport ?? {}
+      });
     }
 
     // Initialize connection first. this will try connect
@@ -1146,7 +1124,7 @@ export class MCPClientManager {
         version: this._version
       },
       {
-        client: { ...defaultClientOptions, ...options.client },
+        client: options.client ?? {},
         transport: normalizedTransport
       }
     );
@@ -1192,9 +1170,13 @@ export class MCPClientManager {
       }
     });
 
-    // Save to storage (exclude authProvider since it's recreated during restore)
+    // Save to storage, excluding live instances that can't survive JSON
+    // serialization: authProvider is recreated during restore, and
+    // jsonSchemaValidator falls back to the Worker-safe default.
     const { authProvider: _, ...transportWithoutAuth } =
       options.transport ?? {};
+    const { jsonSchemaValidator: _validator, ...serializableClient } =
+      options.client ?? {};
     this.saveServerToStorage({
       id,
       name: options.name,
@@ -1203,7 +1185,7 @@ export class MCPClientManager {
       client_id: options.clientId ?? null,
       auth_url: options.authUrl ?? null,
       server_options: JSON.stringify({
-        client: options.client,
+        client: serializableClient,
         transport: transportWithoutAuth,
         retry: options.retry
       })
