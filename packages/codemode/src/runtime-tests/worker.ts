@@ -100,6 +100,17 @@ class ItemsConnector extends CodemodeConnector<Env> {
           this.deleted.push(result);
         }
       },
+      ask_user: {
+        // Client-resolved: calling it pauses the run; only resolve() with a
+        // host-supplied result can satisfy it. The execute is a safety net
+        // that must never run.
+        description: "Ask the user a question (answered client-side).",
+        requiresApproval: true,
+        resolution: "client",
+        execute: () => {
+          throw new Error("client-resolved tool cannot execute server-side");
+        }
+      },
       boom: {
         // Always throws — exercises the host→sandbox error path: the binding
         // must return an error marker (never reject across RPC) so the run ends
@@ -212,6 +223,14 @@ export class CodemodeTestHost extends DurableObject<Env> {
 
   reject(seq: number, executionId: string): Promise<boolean> {
     return this.#runtime().reject({ seq, executionId });
+  }
+
+  resolve(
+    executionId: string,
+    seq: number,
+    result: unknown
+  ): Promise<ProxyToolOutput> {
+    return this.#runtime().resolve({ executionId, seq, result });
   }
 
   rollback(executionId: string): Promise<void> {

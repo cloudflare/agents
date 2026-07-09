@@ -7,6 +7,7 @@ import {
   getCodemodeRuntime,
   pendingCodemode,
   rejectCodemode,
+  resolveCodemode,
   resumeCodemode,
   rollbackCodemode,
   validateConnectorNames,
@@ -60,6 +61,14 @@ export type CodemodeApproveOptions = {
   executionId: string;
 };
 
+export type CodemodeResolveOptions = {
+  /** Execution the pending client-resolved action belongs to. Get it from `pending()`. */
+  executionId: string;
+  seq: number;
+  /** The result the client produced — recorded as the call's return value. */
+  result: unknown;
+};
+
 export type CodemodeRejectOptions = {
   seq: number;
   /** Execution to reject within. Get it from `pending()`. */
@@ -89,6 +98,13 @@ export interface CodemodeRuntimeHandle {
    * was NOT rejected and the action may have executed.
    */
   reject(options: CodemodeRejectOptions): Promise<boolean>;
+  /**
+   * Supply the result of a pending client-resolved action (`resolution:
+   * "client"`) and continue the run — the code sees the client's value as the
+   * call's return. Returns an error outcome (not a throw) when the action is
+   * no longer pending.
+   */
+  resolve(options: CodemodeResolveOptions): Promise<ProxyToolOutput>;
   rollback(options: CodemodeRollbackOptions): Promise<void>;
   pending(executionId?: string): Promise<PendingAction[]>;
   /**
@@ -147,6 +163,20 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       connectors: this.#options.connectors,
       name: this.#options.name,
       executionId: options.executionId,
+      maxExecutions: this.#options.maxExecutions,
+      transformResult: this.#options.transformResult
+    });
+  }
+
+  resolve(options: CodemodeResolveOptions): Promise<ProxyToolOutput> {
+    return resolveCodemode({
+      ctx: this.#options.ctx,
+      executor: this.#options.executor,
+      connectors: this.#options.connectors,
+      name: this.#options.name,
+      executionId: options.executionId,
+      seq: options.seq,
+      result: options.result,
       maxExecutions: this.#options.maxExecutions,
       transformResult: this.#options.transformResult
     });
