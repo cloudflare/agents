@@ -124,9 +124,9 @@ class MyAgent extends Agent<Env> {
 }
 ```
 
-Because it is a class method, the handler survives Durable Object hibernation and applies to connections restored from storage. Without an override, elicitation requests are rejected with an error.
+Because it is a class method, the handler survives Durable Object hibernation and applies to connections restored from storage.
 
-Overriding `onElicitRequest` is all you need: when a handler is present, connections automatically advertise both form- and url-mode elicitation (MCP spec 2025-11-25 — url-mode is used for sensitive flows like OAuth URLs) at the `initialize` handshake. Without a handler, only form-mode is advertised, matching previous behavior.
+Overriding `onElicitRequest` is all you need: when a handler is present, connections automatically advertise both form- and url-mode elicitation (MCP spec 2025-11-25 — url-mode is used for sensitive flows like OAuth URLs) at the `initialize` handshake. Without a handler, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
 
 To narrow the advertised modes, declare them explicitly — an explicit declaration always wins and is persisted with the server options, surviving hibernation:
 

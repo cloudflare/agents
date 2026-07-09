@@ -28,14 +28,14 @@ function advertisedCapabilities(
 
 describe("MCP client elicitation options (#1875)", () => {
   describe("capability negotiation", () => {
-    it("defaults to form-mode-only elicitation without a handler", () => {
+    it("advertises no elicitation capability without a handler", () => {
       const connection = new MCPClientConnection(
         new URL("http://example.com/mcp"),
         { name: "test-client", version: "1.0.0" },
         { transport: { type: "streamable-http" }, client: {} }
       );
 
-      expect(advertisedCapabilities(connection).elicitation).toEqual({});
+      expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
     });
 
     it("defaults to form- and url-mode elicitation with a handler", () => {
