@@ -307,7 +307,9 @@ function ToolCard({
           <SchemaFields
             properties={properties}
             values={values}
-            onChange={(key, value) => setValues((v) => ({ ...v, [key]: value }))}
+            onChange={(key, value) =>
+              setValues((v) => ({ ...v, [key]: value }))
+            }
           />
         </div>
       )}
@@ -316,7 +318,9 @@ function ToolCard({
       </pre>
       {result !== null && (
         <pre className="text-xs mt-2 p-2 rounded-lg bg-kumo-elevated whitespace-pre-wrap break-words text-kumo-default font-mono">
-          {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+          {typeof result === "string"
+            ? result
+            : JSON.stringify(result, null, 2)}
         </pre>
       )}
     </Surface>
