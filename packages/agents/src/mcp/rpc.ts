@@ -13,7 +13,6 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { getServerByName } from "partyserver";
 import type { McpAgent } from ".";
-import type { AgentProps } from "../types";
 
 export const RPC_DO_PREFIX = "rpc:";
 
@@ -34,22 +33,16 @@ function validateBatch(batch: JSONRPCMessage[]): void {
   }
 }
 
-export interface RPCClientTransportOptions<
-  T extends McpAgent<Cloudflare.Env, unknown, AgentProps> = McpAgent<
-    Cloudflare.Env,
-    unknown,
-    AgentProps
-  >
-> {
+export interface RPCClientTransportOptions<T extends McpAgent = McpAgent> {
   namespace: DurableObjectNamespace<T>;
   name: string;
-  props?: AgentProps;
+  props?: Record<string, unknown>;
 }
 
 export class RPCClientTransport implements Transport {
   private _namespace: DurableObjectNamespace<McpAgent>;
   private _name: string;
-  private _props?: AgentProps;
+  private _props?: Record<string, unknown>;
   private _stub?: DurableObjectStub<McpAgent>;
   private _started = false;
   private _protocolVersion?: string;

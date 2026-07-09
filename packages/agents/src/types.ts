@@ -1,19 +1,4 @@
 /**
- * Constraint for agent `Props` type parameters and prop-bag options.
- *
- * Interfaces do not get implicit index signatures in TypeScript, so a
- * `Record<string, unknown>` bound rejects user-defined interfaces with
- * "Index signature for type 'string' is missing". An index signature over
- * `any` is the one record shape every interface satisfies, so props can be
- * typed with plain interfaces. Use this alias for every props bound and
- * user-facing prop-bag option; keep generic *defaults* at
- * `Record<string, unknown>` so untyped usage still reads props values as
- * `unknown`.
- */
-// oxlint-disable-next-line typescript/no-explicit-any
-export type AgentProps = Record<string, any>;
-
-/**
  * Enum for message types to improve type safety and maintainability
  */
 export enum MessageType {

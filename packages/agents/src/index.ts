@@ -82,7 +82,7 @@ import {
   type ObservabilityEvent
 } from "./observability";
 import { DisposableStore } from "./core/events";
-import { MessageType, type AgentProps } from "./types";
+import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import type { McpAgent } from "./mcp";
 export {
@@ -146,7 +146,7 @@ export type {
   RoutingRetryOptions,
   WSMessage
 } from "partyserver";
-export { MessageType, type AgentProps } from "./types";
+export { MessageType } from "./types";
 
 /**
  * Structural type for Cloudflare's `send_email` binding.
@@ -955,8 +955,11 @@ export type AddMcpServerOptions = {
 
 /**
  * Options for adding an MCP server via RPC (Durable Object binding)
+ * @template Props Props type of the target McpAgent (see {@link McpAgentProps})
  */
-export type AddRpcMcpServerOptions = {
+export type AddRpcMcpServerOptions<
+  Props extends object = Record<string, unknown>
+> = {
   /**
    * Optional caller-supplied stable server id. When provided, this id is used
    * for storage, restore, and tool-name namespacing instead of a generated
@@ -967,8 +970,16 @@ export type AddRpcMcpServerOptions = {
    */
   id?: string;
   /** Props to pass to the McpAgent instance */
-  props?: AgentProps;
+  props?: Props;
 };
+
+/**
+ * Extracts the Props type declared by a target McpAgent (read off its
+ * `props` field), so RPC options can type-check `props` against the agent
+ * actually being connected to.
+ */
+export type McpAgentProps<T extends McpAgent<Cloudflare.Env, unknown, object>> =
+  NonNullable<T["props"]>;
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
@@ -1570,12 +1581,18 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
+ * @template Props Initial-props type delivered to `onStart()`. Bounded by
+ * `object` rather than `Record<string, unknown>` so user-defined interfaces
+ * qualify — interfaces have no implicit index signature (#1886).
  */
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends AgentProps = Record<string, unknown>
-> extends Server<Env, Props> {
+  Props extends object = Record<string, unknown>
+  // partyserver bounds its Props at Record<string, unknown>, which
+  // interfaces can't satisfy; the intersection bridges the bound and is
+  // erased at runtime (props is a JSON bag).
+> extends Server<Env, Props & Record<string, unknown>> {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
@@ -2601,7 +2618,7 @@ export class Agent<
     };
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async (props?: Props) => {
+    this.onStart = async (props?: Props & Record<string, unknown>) => {
       return agentContext.run(
         {
           agent: this,
@@ -12137,10 +12154,10 @@ export class Agent<
    * await this.addMcpServer("counter", env.MY_MCP);
    * await this.addMcpServer("counter", env.MY_MCP, { props: { userId: "123" } });
    */
-  async addMcpServer<T extends McpAgent<Cloudflare.Env, unknown, AgentProps>>(
+  async addMcpServer<T extends McpAgent<Cloudflare.Env, unknown, object>>(
     serverName: string,
     binding: DurableObjectNamespace<T>,
-    options?: AddRpcMcpServerOptions
+    options?: AddRpcMcpServerOptions<McpAgentProps<T>>
   ): Promise<{ id: string; state: typeof MCPConnectionState.READY }>;
 
   /**
@@ -12169,7 +12186,7 @@ export class Agent<
     | { id: string; state: typeof MCPConnectionState.READY }
   >;
 
-  async addMcpServer<T extends McpAgent<Cloudflare.Env, unknown, AgentProps>>(
+  async addMcpServer<T extends McpAgent<Cloudflare.Env, unknown, object>>(
     serverName: string,
     urlOrBinding: string | DurableObjectNamespace<T>,
     callbackHostOrOptions?:
@@ -12726,7 +12743,7 @@ export type AgentOptions<Env> = PartyServerOptions<Env>;
 
 export type AgentGetOptions<
   Env,
-  Props extends AgentProps = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > = Pick<
   PartyServerOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
@@ -12925,13 +12942,24 @@ export async function routeAgentEmail<
 export async function getAgentByName<
   Env extends Cloudflare.Env = Cloudflare.Env,
   T extends Agent<Env> = Agent<Env>,
-  Props extends AgentProps = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 >(
   namespace: DurableObjectNamespace<T>,
   name: string,
   options?: AgentGetOptions<Env, Props>
 ) {
-  return getServerByName<Env, T>(namespace, name, options);
+  return getServerByName<Env, T, Props & Record<string, unknown>>(
+    namespace,
+    name,
+    {
+      ...options,
+      // partyserver bounds props at Record<string, unknown>, which
+      // interfaces can't satisfy (no implicit index signature). Props is
+      // constrained to `object` and delivered as a JSON bag at runtime, so
+      // widening to the intersection is safe.
+      props: options?.props as (Props & Record<string, unknown>) | undefined
+    }
+  );
 }
 
 /**

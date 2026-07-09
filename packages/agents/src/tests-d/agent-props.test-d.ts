@@ -8,9 +8,14 @@
  * non-object props.
  */
 import type { env } from "cloudflare:workers";
-import { Agent, getAgentByName, type AgentGetOptions } from "..";
+import {
+  Agent,
+  getAgentByName,
+  type AgentGetOptions,
+  type AddRpcMcpServerOptions,
+  type McpAgentProps
+} from "..";
 import { McpAgent } from "../mcp";
-import type { RPCClientTransportOptions } from "../mcp/rpc";
 
 // A well-defined interface with NO index signature — the shape from #1886.
 interface AuthProps {
@@ -50,15 +55,18 @@ declare class AuthMcpAgent extends McpAgent<typeof env, unknown, AuthProps> {
 declare const authMcpAgent: AuthMcpAgent;
 authMcpAgent.props satisfies AuthProps | undefined;
 
-// addMcpServer's RPC options must accept interface-typed props.
+// addMcpServer's RPC options must accept interface-typed props, and the
+// props type is derived from the target McpAgent's declared Props.
 declare const mcpNamespace: DurableObjectNamespace<AuthMcpAgent>;
 declare const authAgent: AuthAgent;
 authAgent.addMcpServer("internal-tools", mcpNamespace, { props: authProps });
 
-// The direct mcp.connect transport options must accept an interface-Props
-// McpAgent namespace.
-declare const rpcTransportOptions: RPCClientTransportOptions<AuthMcpAgent>;
-rpcTransportOptions.namespace satisfies DurableObjectNamespace<AuthMcpAgent>;
+declare const derivedProps: McpAgentProps<AuthMcpAgent>;
+derivedProps satisfies AuthProps;
+
+// AddRpcMcpServerOptions must be instantiable with an interface.
+declare const rpcServerOptions: AddRpcMcpServerOptions<AuthProps>;
+rpcServerOptions.props satisfies AuthProps | undefined;
 
 // ============================================
 // NEGATIVE TESTS - non-object props stay rejected
@@ -70,6 +78,11 @@ declare class BadPropsAgent extends Agent<typeof env, unknown, string> {}
 getAgentByName(agentNamespace, "instance", {
   // @ts-expect-error — a primitive is not a props bag
   props: "not-an-object"
+});
+
+// @ts-expect-error — props must match the target McpAgent's declared Props
+authAgent.addMcpServer("internal-tools", mcpNamespace, {
+  props: { wrong: true }
 });
 
 // Silence unused-declaration noise; this file only exists to typecheck.

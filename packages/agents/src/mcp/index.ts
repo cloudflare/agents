@@ -14,7 +14,6 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, ConnectionContext } from "../";
 import { Agent } from "../index";
-import type { AgentProps } from "../types";
 import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
 import {
   createAutoHandler,
@@ -33,7 +32,7 @@ import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 export abstract class McpAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends AgentProps = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   private _transport?: Transport;
   private _pendingElicitations = new Map<
