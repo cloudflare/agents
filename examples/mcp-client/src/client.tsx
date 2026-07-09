@@ -49,6 +49,69 @@ type SchemaProperty = {
   default?: unknown;
 };
 
+/** Form fields generated from a JSON Schema `properties` map. */
+function SchemaFields({
+  properties,
+  values,
+  onChange
+}: {
+  properties: Record<string, SchemaProperty>;
+  values: Record<string, unknown>;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {Object.entries(properties).map(([key, prop]) => (
+        <label key={key} className="block text-xs text-kumo-subtle">
+          {prop.title ?? key}
+          {prop.type === "boolean" ? (
+            <input
+              type="checkbox"
+              className="ml-2 align-middle"
+              checked={Boolean(values[key] ?? prop.default ?? false)}
+              onChange={(e) => onChange(key, e.target.checked)}
+            />
+          ) : prop.enum ? (
+            <select
+              className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default"
+              value={String(values[key] ?? prop.default ?? "")}
+              onChange={(e) => onChange(key, e.target.value)}
+            >
+              <option value="" disabled>
+                Select…
+              </option>
+              {prop.enum.map((option) => (
+                <option key={String(option)} value={String(option)}>
+                  {String(option)}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type={
+                prop.type === "number" || prop.type === "integer"
+                  ? "number"
+                  : "text"
+              }
+              placeholder={prop.description ?? String(prop.default ?? "")}
+              className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent"
+              value={String(values[key] ?? "")}
+              onChange={(e) =>
+                onChange(
+                  key,
+                  prop.type === "number" || prop.type === "integer"
+                    ? e.target.valueAsNumber
+                    : e.target.value
+                )
+              }
+            />
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Renders one pending elicitation: a form generated from the request's
  * `requestedSchema` (form mode) or a link to open (url mode), with
@@ -109,54 +172,12 @@ function ElicitationCard({
           </Button>
         </div>
       ) : (
-        <div className="mt-3 space-y-2">
-          {Object.entries(properties).map(([key, prop]) => (
-            <label key={key} className="block text-xs text-kumo-subtle">
-              {prop.title ?? key}
-              {prop.type === "boolean" ? (
-                <input
-                  type="checkbox"
-                  className="ml-2 align-middle"
-                  checked={Boolean(values[key] ?? prop.default ?? false)}
-                  onChange={(e) => setValue(key, e.target.checked)}
-                />
-              ) : prop.enum ? (
-                <select
-                  className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default"
-                  value={String(values[key] ?? prop.default ?? "")}
-                  onChange={(e) => setValue(key, e.target.value)}
-                >
-                  <option value="" disabled>
-                    Select…
-                  </option>
-                  {prop.enum.map((option) => (
-                    <option key={String(option)} value={String(option)}>
-                      {String(option)}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  type={
-                    prop.type === "number" || prop.type === "integer"
-                      ? "number"
-                      : "text"
-                  }
-                  placeholder={prop.description ?? String(prop.default ?? "")}
-                  className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent"
-                  value={String(values[key] ?? "")}
-                  onChange={(e) =>
-                    setValue(
-                      key,
-                      prop.type === "number" || prop.type === "integer"
-                        ? e.target.valueAsNumber
-                        : e.target.value
-                    )
-                  }
-                />
-              )}
-            </label>
-          ))}
+        <div className="mt-3">
+          <SchemaFields
+            properties={properties}
+            values={values}
+            onChange={setValue}
+          />
         </div>
       )}
 
@@ -236,6 +257,72 @@ function ModeToggle() {
   );
 }
 
+/** One tool: schema dump, an args form generated from its inputSchema, Run. */
+function ToolCard({
+  tool,
+  onRun
+}: {
+  tool: { name: string; serverId: string; inputSchema?: unknown };
+  onRun: (
+    serverId: string,
+    name: string,
+    args: Record<string, unknown>
+  ) => Promise<unknown>;
+}) {
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const [result, setResult] = useState<unknown>(null);
+  const properties = ((
+    tool.inputSchema as { properties?: Record<string, SchemaProperty> }
+  )?.properties ?? {}) as Record<string, SchemaProperty>;
+
+  const run = async () => {
+    setResult("Running…");
+    try {
+      setResult(await onRun(tool.serverId, tool.name, values));
+    } catch (error) {
+      setResult(String(error));
+    }
+  };
+
+  return (
+    <Surface className="p-3 rounded-xl ring ring-kumo-line">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Text size="sm" bold>
+            {tool.name}
+          </Text>
+          <Badge variant="secondary">{tool.serverId}</Badge>
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<PlayIcon size={14} />}
+          onClick={run}
+        >
+          Run
+        </Button>
+      </div>
+      {Object.keys(properties).length > 0 && (
+        <div className="mt-2">
+          <SchemaFields
+            properties={properties}
+            values={values}
+            onChange={(key, value) => setValues((v) => ({ ...v, [key]: value }))}
+          />
+        </div>
+      )}
+      <pre className="text-xs mt-1 whitespace-pre-wrap break-words text-kumo-subtle font-mono">
+        {JSON.stringify(tool, null, 2)}
+      </pre>
+      {result !== null && (
+        <pre className="text-xs mt-2 p-2 rounded-lg bg-kumo-elevated whitespace-pre-wrap break-words text-kumo-default font-mono">
+          {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+        </pre>
+      )}
+    </Surface>
+  );
+}
+
 function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
@@ -248,10 +335,6 @@ function App() {
     tools: []
   });
   const [elicitations, setElicitations] = useState<PendingElicitation[]>([]);
-  const [toolResult, setToolResult] = useState<{
-    name: string;
-    result: unknown;
-  } | null>(null);
 
   const agent = useAgent({
     agent: "my-agent",
@@ -280,15 +363,11 @@ function App() {
     await agent.call("respondToElicitation", [id, result]);
   };
 
-  const runTool = async (serverId: string, name: string) => {
-    setToolResult({ name, result: "Running…" });
-    try {
-      const result = await agent.call("callTool", [serverId, name, {}]);
-      setToolResult({ name, result });
-    } catch (error) {
-      setToolResult({ name, result: String(error) });
-    }
-  };
+  const runTool = (
+    serverId: string,
+    name: string,
+    args: Record<string, unknown>
+  ) => agent.call("callTool", [serverId, name, args]);
 
   function openPopup(authUrl: string) {
     window.open(
@@ -409,19 +488,6 @@ function App() {
             </form>
           </Surface>
 
-          {/* Pending Elicitations */}
-          {elicitations.length > 0 && (
-            <section className="space-y-2">
-              {elicitations.map((elicitation) => (
-                <ElicitationCard
-                  key={elicitation.id}
-                  elicitation={elicitation}
-                  onRespond={respondToElicitation}
-                />
-              ))}
-            </section>
-          )}
-
           {/* Connected Servers */}
           <section>
             <div className="flex items-center gap-2 mb-3">
@@ -517,37 +583,11 @@ function App() {
               </div>
               <div className="space-y-2">
                 {mcpState.tools.map((tool) => (
-                  <Surface
+                  <ToolCard
                     key={`${tool.name}-${tool.serverId}`}
-                    className="p-3 rounded-xl ring ring-kumo-line"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Text size="sm" bold>
-                          {tool.name}
-                        </Text>
-                        <Badge variant="secondary">{tool.serverId}</Badge>
-                      </div>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        icon={<PlayIcon size={14} />}
-                        onClick={() => runTool(tool.serverId, tool.name)}
-                      >
-                        Run
-                      </Button>
-                    </div>
-                    <pre className="text-xs mt-1 whitespace-pre-wrap break-words text-kumo-subtle font-mono">
-                      {JSON.stringify(tool, null, 2)}
-                    </pre>
-                    {toolResult?.name === tool.name && (
-                      <pre className="text-xs mt-2 p-2 rounded-lg bg-kumo-elevated whitespace-pre-wrap break-words text-kumo-default font-mono">
-                        {typeof toolResult.result === "string"
-                          ? toolResult.result
-                          : JSON.stringify(toolResult.result, null, 2)}
-                      </pre>
-                    )}
-                  </Surface>
+                    tool={tool}
+                    onRun={runTool}
+                  />
                 ))}
               </div>
             </section>
@@ -616,6 +656,20 @@ function App() {
           )}
         </div>
       </main>
+
+      {/* Pending elicitations — fixed overlay so they're visible no matter
+          where on the page the tool was run from */}
+      {elicitations.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-50 w-96 max-h-[80vh] overflow-auto space-y-2 shadow-lg">
+          {elicitations.map((elicitation) => (
+            <ElicitationCard
+              key={elicitation.id}
+              elicitation={elicitation}
+              onRespond={respondToElicitation}
+            />
+          ))}
+        </div>
+      )}
 
       <footer className="border-t border-kumo-line py-3">
         <div className="flex justify-center">
