@@ -19,7 +19,7 @@ npm run dev
 
 The UI lets you add MCP server URLs, see their connection state, browse their tools, prompts, and resources, and run tools. If a tool call triggers an elicitation, a card appears asking for your input.
 
-To test with an authenticated server, run the [`mcp-worker-authenticated`](../mcp-worker-authenticated/) example alongside this one and add its URL. To test elicitation, run the [`mcp-elicitation`](../mcp-elicitation/) example's server and run its `elicitName` tool from this UI.
+To test with an authenticated server, run the [`mcp-worker-authenticated`](../mcp-worker-authenticated/) example alongside this one and add its URL. To test elicitation, run the [`mcp-elicitation`](../mcp-elicitation/) example's server, add it here (the MCP endpoint is at `/mcp`, e.g. `http://localhost:8787/mcp`), and run its `increase-counter` (form-mode) or `connect-account` (url-mode) tool from this UI.
 
 ## Environment variables
 
