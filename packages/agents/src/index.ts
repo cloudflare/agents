@@ -20,8 +20,6 @@ import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client
 import { signAgentHeaders } from "./email";
 
 import type {
-  ElicitRequest,
-  ElicitResult,
   Prompt,
   Resource,
   ServerCapabilities,
@@ -2252,20 +2250,10 @@ export class Agent<
     this._ensureSchema();
 
     // Initialize MCPClientManager AFTER tables are created
-    // Wire elicitation only when the subclass actually overrides
-    // onElicitRequest: connections advertise url-mode elicitation exactly
-    // when a handler exists, so wiring the throwing base implementation
-    // would advertise modes nothing can handle.
-    const handlesElicitation =
-      this.onElicitRequest !== Agent.prototype.onElicitRequest;
-
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
       storage: this.ctx.storage,
       createAuthProvider: (callbackUrl) =>
-        this.createMcpOAuthProvider(callbackUrl),
-      elicitationHandler: handlesElicitation
-        ? (request, serverId) => this.onElicitRequest(request, serverId)
-        : undefined
+        this.createMcpOAuthProvider(callbackUrl)
     });
 
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
@@ -2651,6 +2639,10 @@ export class Agent<
           }
 
           await this._tryCatch(async () => {
+            // Restore MCP connections before fiber/chat recovery so recovered
+            // turns see MCP tools. Restored connections re-advertise the
+            // capabilities persisted from the previous session; the handlers
+            // behind them attach when onStart() configures them.
             await this.mcp.restoreConnectionsFromStorage(this.name);
             await this._restoreRpcMcpServers();
             this.broadcastMcpServers();
@@ -3166,35 +3158,6 @@ export class Agent<
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   onStateUpdate(_state: State | undefined, _source: Connection | "server") {
     // override this to handle state updates (deprecated — use onStateChanged)
-  }
-
-  /**
-   * Called when an MCP server this agent is connected to (via
-   * {@link addMcpServer}) sends an `elicitation/create` request.
-   *
-   * Override this to respond to elicitation — e.g. deliver a url-mode
-   * elicitation link out-of-band and return `{ action: "accept" }`. Being a
-   * class method, the override survives Durable Object hibernation and
-   * applies to connections restored from storage, unlike a callback passed
-   * at connect time.
-   *
-   * When overridden, MCP client connections automatically advertise both
-   * form- and url-mode elicitation (MCP spec 2025-11-25) at the `initialize`
-   * handshake; without an override they advertise form-mode only. To narrow
-   * the advertised modes, declare `client.capabilities.elicitation`
-   * explicitly on `addMcpServer` — an explicit declaration always wins.
-   *
-   * @param _request The elicitation request from the server
-   * @param _serverId Id of the MCP server connection that sent the request
-   */
-  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  async onElicitRequest(
-    _request: ElicitRequest,
-    _serverId: string
-  ): Promise<ElicitResult> {
-    throw new Error(
-      "Elicitation is not handled by this agent. Override onElicitRequest(request, serverId) to respond to MCP elicitation requests."
-    );
   }
 
   /**
@@ -12479,7 +12442,7 @@ export class Agent<
         : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
     }
 
-    const id = requestedId ?? nanoid(8);
+    const id = requestedId ?? existingServer?.id ?? nanoid(8);
 
     // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
     let authProvider:

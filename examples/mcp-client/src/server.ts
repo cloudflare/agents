@@ -27,6 +27,13 @@ export class MyAgent extends Agent {
   >();
 
   onStart() {
+    this.mcp.configureElicitationHandler({
+      form: (request, serverId) =>
+        this.forwardElicitationToBrowser(request, serverId),
+      url: (request, serverId) =>
+        this.forwardElicitationToBrowser(request, serverId)
+    });
+
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {
@@ -45,14 +52,11 @@ export class MyAgent extends Agent {
   }
 
   /**
-   * Called when a connected MCP server sends an `elicitation/create`
-   * request during a tool call. Forwards it to connected browser clients
-   * and waits for one of them to answer via `respondToElicitation`.
-   *
-   * Overriding this method is also what makes connections advertise
-   * elicitation support (form and url mode) to servers.
+   * Forwards a connected MCP server's `elicitation/create` request to
+   * browser clients and waits for one of them to answer via
+   * `respondToElicitation`.
    */
-  async onElicitRequest(
+  private async forwardElicitationToBrowser(
     request: ElicitRequest,
     serverId: string
   ): Promise<ElicitResult> {

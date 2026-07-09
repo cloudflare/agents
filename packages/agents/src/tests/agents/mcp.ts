@@ -1115,6 +1115,47 @@ export class TestHttpMcpDedupAgent extends Agent {
     };
   }
 
+  async testStoredHttpServerWithoutConnectionReusesId() {
+    const id = "stored-without-connection";
+    const url = "https://mcp.example.com/stored";
+    await this.mcp.registerServer(id, {
+      url,
+      name: "stored-server",
+      transport: { type: "auto" as const }
+    });
+    delete this.mcp.mcpConnections[id];
+
+    let returnedId: string | null = null;
+    let threwExpectedConnectionError = false;
+    let connectionError: string | null = null;
+    try {
+      const result = await this.addMcpServer("stored-server", url);
+      returnedId = result.id;
+    } catch (error) {
+      connectionError = error instanceof Error ? error.message : String(error);
+      const expectedPrefix = `Failed to connect to MCP server at ${new URL(url).href}:`;
+      if (!connectionError.startsWith(expectedPrefix)) {
+        throw error;
+      }
+      threwExpectedConnectionError = true;
+      returnedId =
+        this.mcp.listServers().find((s) => s.name === "stored-server")?.id ??
+        null;
+    }
+
+    const storedIds = this.mcp
+      .listServers()
+      .filter((s) => s.name === "stored-server")
+      .map((s) => s.id);
+
+    return {
+      connectionError,
+      returnedId,
+      storedIds,
+      threwExpectedConnectionError
+    };
+  }
+
   // Test: a server first registered without `id` (under a nanoid) gets
   // migrated in place when the caller adds `{ id }` on the next call.
   async testHttpSuppliedIdMigratesNanoid() {

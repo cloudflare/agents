@@ -113,28 +113,38 @@ These options are persisted and used when reconnecting after hibernation or afte
 
 ### Elicitation
 
-MCP servers can request input from the client during a tool call (`elicitation/create`). To respond, override `onElicitRequest` on your agent:
+MCP servers can request input from the client during a tool call (`elicitation/create`). To respond, configure an elicitation handler before MCP connections are registered or restored:
 
 ```typescript
+import { Agent } from "agents";
+
 class MyAgent extends Agent<Env> {
-  async onElicitRequest(request: ElicitRequest, serverId: string) {
-    // e.g. deliver a url-mode elicitation link out-of-band
-    return { action: "accept" as const, content: {} };
+  onStart() {
+    this.mcp.configureElicitationHandler({
+      url: async (request, serverId) => {
+        // Deliver a url-mode elicitation link out-of-band
+        return { action: "accept" as const, content: {} };
+      },
+      form: async (request, serverId) => {
+        // Collect values matching request.params.requestedSchema
+        return { action: "accept" as const, content: {} };
+      }
+    });
   }
 }
 ```
 
-Because it is a class method, the handler survives Durable Object hibernation and applies to connections restored from storage.
+The advertised modes are persisted with each MCP server, so a connection restored from storage after hibernation re-advertises the same modes at the handshake; the handlers themselves re-attach when `onStart()` runs. Configuring a handler after an MCP connection is already active updates the in-memory handler, but the server only sees new advertised elicitation modes after that connection reconnects.
 
-Overriding `onElicitRequest` is all you need: when a handler is present, connections automatically advertise both form- and url-mode elicitation (MCP spec 2025-11-25 — url-mode is used for sensitive flows like OAuth URLs) at the `initialize` handshake. Without a handler, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
+Connections advertise only the elicitation modes with configured handlers at the `initialize` handshake: configure `form` to advertise form-mode elicitation, `url` to advertise url-mode elicitation (MCP spec 2025-11-25 — url mode is used for sensitive flows like OAuth URLs), or both to advertise both modes. Without handlers, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
 
-To narrow the advertised modes, declare them explicitly — an explicit declaration always wins and is persisted with the server options, surviving hibernation:
+To override the advertised modes, declare them explicitly — an explicit declaration always wins and is persisted with the server options, surviving hibernation:
 
 ```typescript
 await this.addMcpServer("portal", "https://portal.example.com/mcp", {
   client: {
     capabilities: {
-      elicitation: { form: {} } // form-mode only, even with a handler
+      elicitation: { form: {} } // form-mode only, even with both handlers configured
     }
   }
 });
