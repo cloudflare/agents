@@ -231,8 +231,10 @@ export class MCPClientConnection {
    *
    * If the connection has not been initialized yet, rebuild the SDK client so
    * handler-driven elicitation capabilities are reflected in the initial
-   * handshake. Active connections keep their negotiated capabilities until
-   * they reconnect.
+   * handshake. A rebuild (rather than `Client.registerCapabilities`) is
+   * required because SDK capability registration is merge-only — it cannot
+   * un-advertise a mode when handlers are cleared before connecting. Active
+   * connections keep their negotiated capabilities until they reconnect.
    */
   configureElicitationHandler(handlers?: MCPElicitationHandlers): void {
     this.options.elicitationHandlers = handlers;
