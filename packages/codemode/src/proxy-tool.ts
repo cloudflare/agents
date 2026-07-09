@@ -104,11 +104,13 @@ export type ProxyToolOutput =
       executionId: string;
       result: unknown;
       logs?: string[];
+      calls?: ToolLogEntry[];
     }
   | {
       status: "paused";
       executionId: string;
       pending: PendingAction[];
+      calls?: ToolLogEntry[];
     }
   // Execution errors (a thrown sandbox error or a replay divergence) are
   // returned, not thrown: the model sees the failure as a tool result it can
@@ -119,6 +121,7 @@ export type ProxyToolOutput =
       executionId: string;
       error: string;
       logs?: string[];
+      calls?: ToolLogEntry[];
     };
 
 /**
@@ -650,6 +653,11 @@ async function runPass(
     // PAUSE_SENTINEL only stops the sandbox; it is never the deciding signal
     // here.
     const execution = await runtime.getExecution(executionId);
+    // The durable log as it stands at the end of this pass — every connector
+    // call and step, with args, results and approval state. Echoed on the
+    // output so UIs can render an audit trail without a separate
+    // getExecution round trip.
+    const calls = execution?.log;
     if (execution?.status === "paused") {
       // Not terminal — the run may resume, so per-execution connector
       // resources stay open. Per-pass resources are still released.
@@ -657,7 +665,8 @@ async function runPass(
       return {
         status: "paused",
         executionId,
-        pending: await runtime.listPending(executionId)
+        pending: await runtime.listPending(executionId),
+        calls
       };
     }
     if (execution?.status === "error") {
@@ -667,7 +676,8 @@ async function runPass(
       return {
         status: "error",
         executionId,
-        error: execution.error ?? "Codemode execution failed"
+        error: execution.error ?? "Codemode execution failed",
+        calls
       };
     }
 
@@ -676,7 +686,7 @@ async function runPass(
       const message = withGlobalsHint(raw, setup);
       await runtime.fail(executionId, message);
       await endPass("error");
-      return { status: "error", executionId, error: message };
+      return { status: "error", executionId, error: message, calls };
     }
 
     const result = output?.result;
@@ -686,7 +696,8 @@ async function runPass(
       status: "completed",
       executionId,
       result: await applyTransform(transformResult, result),
-      logs: output?.logs
+      logs: output?.logs,
+      calls
     };
   } finally {
     if (!ended) {
