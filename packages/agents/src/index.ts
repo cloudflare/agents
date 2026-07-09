@@ -12259,15 +12259,51 @@ export class Agent<
 
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
-      if (
-        conn.connectionState === MCPConnectionState.AUTHENTICATING &&
-        conn.options.transport.authProvider?.authUrl
-      ) {
-        return {
-          id: existingServer.id,
-          state: MCPConnectionState.AUTHENTICATING,
-          authUrl: conn.options.transport.authProvider.authUrl
-        };
+      if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
+        const liveAuthUrl = conn.options.transport.authProvider?.authUrl;
+        const authUrl =
+          liveAuthUrl ||
+          (this._isAbsoluteHttpUrl(existingServer.auth_url)
+            ? existingServer.auth_url
+            : undefined);
+        if (authUrl) {
+          return {
+            id: existingServer.id,
+            state: MCPConnectionState.AUTHENTICATING,
+            authUrl
+          };
+        }
+
+        const reconnectResult = await this.mcp.connectToServer(
+          existingServer.id
+        );
+        if (reconnectResult.state === MCPConnectionState.AUTHENTICATING) {
+          if (!reconnectResult.authUrl) {
+            throw new Error("OAuth configuration incomplete: missing authUrl");
+          }
+          return {
+            id: existingServer.id,
+            state: reconnectResult.state,
+            authUrl: reconnectResult.authUrl
+          };
+        }
+        if (reconnectResult.state === MCPConnectionState.CONNECTED) {
+          const discoverResult = await this.mcp.discoverIfConnected(
+            existingServer.id
+          );
+          if (!discoverResult?.success) {
+            throw new Error(
+              `Failed to discover MCP server capabilities: ${discoverResult?.error ?? "connection not found"}`
+            );
+          }
+          return {
+            id: existingServer.id,
+            state: MCPConnectionState.READY
+          };
+        }
+        throw new Error(
+          `Failed to connect to MCP server at ${normalizedUrl}: ${reconnectResult.error}`
+        );
       }
       if (conn.connectionState === MCPConnectionState.FAILED) {
         throw new Error(
@@ -12479,6 +12515,18 @@ export class Agent<
     }
 
     return { id, state: MCPConnectionState.READY };
+  }
+
+  private _isAbsoluteHttpUrl(
+    value: string | null | undefined
+  ): value is string {
+    if (!value) return false;
+    try {
+      const url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+      return false;
+    }
   }
 
   async removeMcpServer(id: string) {
