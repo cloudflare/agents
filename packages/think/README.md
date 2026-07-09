@@ -128,14 +128,15 @@ contract from their own subpaths.
 
 Common messenger options:
 
-| Option               | Default                         | Description                                                                     |
-| -------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
-| `path`               | `/messengers/{id}/webhook`      | Webhook path handled before user `onRequest`                                    |
-| `respondTo`          | `["direct-message", "mention"]` | Event kinds that should start a Think reply                                     |
-| `subscribeOnMention` | `true`                          | Subscribe Chat SDK threads after a new mention                                  |
-| `conversation`       | `"thread"`                      | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent |
-| `verifyWebhook`      | required                        | Verification function, or `false` to opt out explicitly                         |
-| `delivery`           | provider defaults               | Streaming limits, text splitting, and safe user-facing failure messages         |
+| Option                | Default                              | Description                                                                                                                              |
+| --------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`                | `/messengers/{id}/webhook`           | Webhook path handled before user `onRequest`                                                                                             |
+| `respondTo`           | `["direct-message", "mention"]`      | Event kinds that should start a Think reply                                                                                              |
+| `subscribeOnMention`  | `true`                               | Subscribe Chat SDK threads after a new mention                                                                                           |
+| `conversation`        | `"thread"`                           | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent                                                          |
+| `channelSpeakerLabel` | `fullName \|\| userName \|\| userId` | Channel (non-DM) messages are rendered as `SpeakerName: text`. Pass a formatter to customize or suppress labels. DMs never get a prefix. |
+| `verifyWebhook`       | required                             | Verification function, or `false` to opt out explicitly                                                                                  |
+| `delivery`            | provider defaults                    | Streaming limits, text splitting, and safe user-facing failure messages                                                                  |
 
 ## Agent tools
 

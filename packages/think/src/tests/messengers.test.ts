@@ -290,6 +290,99 @@ describe("think messengers core", () => {
     ]);
   });
 
+  it("prefixes channel messages with the default fullName cascade", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        text: "hello channel"
+      },
+      thread: { ...baseEvent.thread, isDirectMessage: false }
+    };
+
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      { type: "text", text: "Ada Lovelace: hello channel" }
+    ]);
+  });
+
+  it("falls back through fullName || userName || userId for the default label", () => {
+    const noFullName: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: { userId: "telegram:user", userName: "ada" },
+        text: "hello"
+      }
+    };
+    expect(toMessengerUserMessage(noFullName).parts).toEqual([
+      { type: "text", text: "ada: hello" }
+    ]);
+
+    const idOnly: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: { userId: "telegram:user" },
+        text: "hello"
+      }
+    };
+    expect(toMessengerUserMessage(idOnly).parts).toEqual([
+      { type: "text", text: "telegram:user: hello" }
+    ]);
+  });
+
+  it("accepts a custom channelSpeakerLabel formatter", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        text: "hello"
+      }
+    };
+
+    expect(
+      toMessengerUserMessage(event, (author) => `@${author.userName}`).parts
+    ).toEqual([{ type: "text", text: "@ada: hello" }]);
+
+    // Returning null/empty suppresses the prefix for that author.
+    expect(toMessengerUserMessage(event, () => null).parts).toEqual([
+      { type: "text", text: "hello" }
+    ]);
+  });
+
+  it("never prefixes direct messages regardless of channelSpeakerLabel", () => {
+    const dmEvent: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        text: "hello dm"
+      },
+      thread: { ...baseEvent.thread, isDirectMessage: true }
+    };
+
+    expect(toMessengerUserMessage(dmEvent).parts).toEqual([
+      { type: "text", text: "hello dm" }
+    ]);
+    expect(
+      toMessengerUserMessage(dmEvent, (author) => author.fullName ?? null).parts
+    ).toEqual([{ type: "text", text: "hello dm" }]);
+  });
+
   it("converts messenger actions to Think user messages", () => {
     const event = defaultChatSdkEvent(
       normalizeMessengers({

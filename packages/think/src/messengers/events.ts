@@ -143,11 +143,40 @@ export function serializableMessengerEvent(
   };
 }
 
-export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
+/**
+ * Customizes how channel (non-DM) speaker names are prefixed onto model-facing
+ * text. By default, speaker labels use `fullName || userName || userId`.
+ * Direct messages never get a speaker prefix, regardless of this setting.
+ * Return `null`/empty to suppress the prefix for that author.
+ */
+export type ChannelSpeakerLabel = (
+  author: MessengerAuthor
+) => string | null | undefined;
+
+export function resolveChannelSpeakerLabel(
+  author: MessengerAuthor | undefined,
+  channelSpeakerLabel?: ChannelSpeakerLabel
+): string | undefined {
+  if (!author) {
+    return undefined;
+  }
+
+  if (channelSpeakerLabel) {
+    const label = channelSpeakerLabel(author);
+    return label ? label : undefined;
+  }
+
+  return author.fullName || author.userName || author.userId || undefined;
+}
+
+export function toMessengerUserMessage(
+  event: MessengerEvent,
+  channelSpeakerLabel?: ChannelSpeakerLabel
+): UIMessage {
   const message = event.message;
   if (event.action) {
     const user = event.action.user;
-    const displayName = user?.fullName || user?.userName || user?.userId;
+    const displayName = resolveChannelSpeakerLabel(user, channelSpeakerLabel);
     const details = [
       `Action selected: ${event.action.actionId}`,
       event.action.value ? `Value: ${event.action.value}` : undefined,
@@ -155,6 +184,8 @@ export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
         ? `Source message: ${event.action.messageId}`
         : undefined
     ].filter(Boolean);
+    // Actions always include a speaker label when available (including in DMs)
+    // so the model can attribute interactive button presses.
     const text = displayName
       ? `${displayName}: ${details.join("\n")}`
       : details.join("\n");
@@ -182,8 +213,10 @@ export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
   }
 
   const text = message.text.trim();
-  const displayName =
-    message.author.fullName || message.author.userName || message.author.userId;
+  const displayName = resolveChannelSpeakerLabel(
+    message.author,
+    channelSpeakerLabel
+  );
   const content =
     event.thread.isDirectMessage || !displayName
       ? text
