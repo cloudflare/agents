@@ -345,6 +345,10 @@ function isJsonValue(value: unknown): boolean {
 // --- Test agents ---
 
 const VoiceBase = withVoice(Agent);
+const Pcm24kVoiceBase = withVoice(Agent, {
+  audioFormat: "pcm16",
+  sampleRate: 24000
+});
 
 /**
  * Test VoiceAgent with continuous transcriber.
@@ -682,5 +686,23 @@ export class TestAiSdkTextStreamVoiceAgent extends VoiceBase {
     } catch {
       // ignore
     }
+  }
+}
+
+/**
+ * Test VoiceAgent configured for native 24kHz pcm16 payloads
+ * (e.g. Gemini TTS). Verifies sampleRate is declared in audio_config.
+ */
+export class TestPcm24kVoiceAgent extends Pcm24kVoiceBase {
+  static options = { hibernate: false };
+
+  transcriber = new TestTranscriber();
+  tts = new TestTTS();
+
+  async onTurn(
+    transcript: string,
+    _context: VoiceTurnContext
+  ): Promise<string> {
+    return `Echo: ${transcript}`;
   }
 }
