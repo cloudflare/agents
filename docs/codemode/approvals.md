@@ -61,9 +61,21 @@ type ProxyToolOutput =
       executionId: string;
       result: unknown;
       logs?: string[];
+      calls?: ToolLogEntry[];
     }
-  | { status: "paused"; executionId: string; pending: PendingAction[] }
-  | { status: "error"; executionId: string; error: string; logs?: string[] };
+  | {
+      status: "paused";
+      executionId: string;
+      pending: PendingAction[];
+      calls?: ToolLogEntry[];
+    }
+  | {
+      status: "error";
+      executionId: string;
+      error: string;
+      logs?: string[];
+      calls?: ToolLogEntry[];
+    };
 
 type PendingAction = {
   executionId: string;
@@ -73,6 +85,8 @@ type PendingAction = {
   args: unknown;
 };
 ```
+
+Every outcome also carries `calls` — the execution's [tool-call log](./runtime.md#the-tool-call-log) as it stands at the end of the pass: each connector call and `codemode.step`, with args, recorded result, approval requirement, and state. Render it to show the user what a run actually did (and what is still pending) without a separate `executions()` round trip.
 
 ## Resolving approvals
 
