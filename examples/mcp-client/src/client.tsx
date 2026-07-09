@@ -19,11 +19,13 @@ import {
   TrashIcon,
   SignInIcon,
   InfoIcon,
+  PlayIcon,
   MoonIcon,
   SunIcon
 } from "@phosphor-icons/react";
 import type { MCPServersState } from "agents";
 import { nanoid } from "nanoid";
+import type { PendingElicitation } from "./server";
 import "./styles.css";
 
 let sessionId = localStorage.getItem("sessionId");
@@ -33,6 +35,157 @@ if (!sessionId) {
 }
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
+
+type ElicitResponse = {
+  action: "accept" | "decline" | "cancel";
+  content: Record<string, unknown>;
+};
+
+type SchemaProperty = {
+  type?: string;
+  title?: string;
+  description?: string;
+  enum?: unknown[];
+  default?: unknown;
+};
+
+/**
+ * Renders one pending elicitation: a form generated from the request's
+ * `requestedSchema` (form mode) or a link to open (url mode), with
+ * accept / decline buttons that answer back to the agent.
+ */
+function ElicitationCard({
+  elicitation,
+  onRespond
+}: {
+  elicitation: PendingElicitation;
+  onRespond: (id: string, result: ElicitResponse) => void;
+}) {
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const params = elicitation.params as PendingElicitation["params"] & {
+    mode?: string;
+    url?: string;
+  };
+  const isUrlMode = params.mode === "url";
+  const properties: Record<string, SchemaProperty> = isUrlMode
+    ? {}
+    : ((params.requestedSchema?.properties ?? {}) as Record<
+        string,
+        SchemaProperty
+      >);
+
+  const setValue = (key: string, value: unknown) =>
+    setValues((v) => ({ ...v, [key]: value }));
+
+  return (
+    <Surface className="p-4 rounded-xl ring ring-kumo-accent">
+      <div className="flex items-center gap-2">
+        <Text size="sm" bold>
+          Server needs your input
+        </Text>
+        <Badge variant="secondary">{elicitation.serverId}</Badge>
+      </div>
+      <span className="mt-1 block">
+        <Text size="xs" variant="secondary">
+          {params.message}
+        </Text>
+      </span>
+
+      {isUrlMode ? (
+        <div className="mt-3 flex items-center gap-2">
+          <span className="font-mono truncate">
+            <Text size="xs" variant="secondary">
+              {params.url}
+            </Text>
+          </span>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() =>
+              window.open(params.url, "_blank", "noopener,noreferrer")
+            }
+          >
+            Open
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {Object.entries(properties).map(([key, prop]) => (
+            <label key={key} className="block text-xs text-kumo-subtle">
+              {prop.title ?? key}
+              {prop.type === "boolean" ? (
+                <input
+                  type="checkbox"
+                  className="ml-2 align-middle"
+                  checked={Boolean(values[key] ?? prop.default ?? false)}
+                  onChange={(e) => setValue(key, e.target.checked)}
+                />
+              ) : prop.enum ? (
+                <select
+                  className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default"
+                  value={String(values[key] ?? prop.default ?? "")}
+                  onChange={(e) => setValue(key, e.target.value)}
+                >
+                  <option value="" disabled>
+                    Select…
+                  </option>
+                  {prop.enum.map((option) => (
+                    <option key={String(option)} value={String(option)}>
+                      {String(option)}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type={
+                    prop.type === "number" || prop.type === "integer"
+                      ? "number"
+                      : "text"
+                  }
+                  placeholder={prop.description ?? String(prop.default ?? "")}
+                  className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent"
+                  value={String(values[key] ?? "")}
+                  onChange={(e) =>
+                    setValue(
+                      key,
+                      prop.type === "number" || prop.type === "integer"
+                        ? e.target.valueAsNumber
+                        : e.target.value
+                    )
+                  }
+                />
+              )}
+            </label>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-3 flex gap-2">
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() =>
+            onRespond(elicitation.id, {
+              action: "accept",
+              content: isUrlMode ? {} : values
+            })
+          }
+        >
+          {isUrlMode ? "Done" : "Submit"}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() =>
+            onRespond(elicitation.id, { action: "decline", content: {} })
+          }
+        >
+          Decline
+        </Button>
+      </div>
+    </Surface>
+  );
+}
 
 function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
   const dot =
@@ -94,6 +247,11 @@ function App() {
     servers: {},
     tools: []
   });
+  const [elicitations, setElicitations] = useState<PendingElicitation[]>([]);
+  const [toolResult, setToolResult] = useState<{
+    name: string;
+    result: unknown;
+  } | null>(null);
 
   const agent = useAgent({
     agent: "my-agent",
@@ -102,8 +260,35 @@ function App() {
     onMcpUpdate: useCallback((mcpServers: MCPServersState) => {
       setMcpState(mcpServers);
     }, []),
+    onMessage: useCallback((event: MessageEvent) => {
+      if (typeof event.data !== "string") return;
+      let message: PendingElicitation;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (message.type === "mcp-elicitation") {
+        setElicitations((current) => [...current, message]);
+      }
+    }, []),
     onOpen: useCallback(() => setConnectionStatus("connected"), [])
   });
+
+  const respondToElicitation = async (id: string, result: ElicitResponse) => {
+    setElicitations((current) => current.filter((e) => e.id !== id));
+    await agent.call("respondToElicitation", [id, result]);
+  };
+
+  const runTool = async (serverId: string, name: string) => {
+    setToolResult({ name, result: "Running…" });
+    try {
+      const result = await agent.call("callTool", [serverId, name, {}]);
+      setToolResult({ name, result });
+    } catch (error) {
+      setToolResult({ name, result: String(error) });
+    }
+  };
 
   function openPopup(authUrl: string) {
     window.open(
@@ -224,6 +409,19 @@ function App() {
             </form>
           </Surface>
 
+          {/* Pending Elicitations */}
+          {elicitations.length > 0 && (
+            <section className="space-y-2">
+              {elicitations.map((elicitation) => (
+                <ElicitationCard
+                  key={elicitation.id}
+                  elicitation={elicitation}
+                  onRespond={respondToElicitation}
+                />
+              ))}
+            </section>
+          )}
+
           {/* Connected Servers */}
           <section>
             <div className="flex items-center gap-2 mb-3">
@@ -323,15 +521,32 @@ function App() {
                     key={`${tool.name}-${tool.serverId}`}
                     className="p-3 rounded-xl ring ring-kumo-line"
                   >
-                    <div className="flex items-center gap-2">
-                      <Text size="sm" bold>
-                        {tool.name}
-                      </Text>
-                      <Badge variant="secondary">{tool.serverId}</Badge>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Text size="sm" bold>
+                          {tool.name}
+                        </Text>
+                        <Badge variant="secondary">{tool.serverId}</Badge>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon={<PlayIcon size={14} />}
+                        onClick={() => runTool(tool.serverId, tool.name)}
+                      >
+                        Run
+                      </Button>
                     </div>
                     <pre className="text-xs mt-1 whitespace-pre-wrap break-words text-kumo-subtle font-mono">
                       {JSON.stringify(tool, null, 2)}
                     </pre>
+                    {toolResult?.name === tool.name && (
+                      <pre className="text-xs mt-2 p-2 rounded-lg bg-kumo-elevated whitespace-pre-wrap break-words text-kumo-default font-mono">
+                        {typeof toolResult.result === "string"
+                          ? toolResult.result
+                          : JSON.stringify(toolResult.result, null, 2)}
+                      </pre>
+                    )}
                   </Surface>
                 ))}
               </div>
