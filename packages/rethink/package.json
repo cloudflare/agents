@@ -31,6 +31,10 @@
     "dist",
     "README.md"
   ],
+  "dependencies": {
+    "agents": "workspace:*",
+    "ai": "^6.0.202"
+  },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "types:test": "wrangler types tests/env.d.ts --config tests/wrangler.jsonc --include-runtime false && oxfmt --write tests/env.d.ts",

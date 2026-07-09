@@ -3939,7 +3939,14 @@ importers:
         specifier: ^4.12.27
         version: 4.12.27
 
-  packages/rethink: {}
+  packages/rethink:
+    dependencies:
+      agents:
+        specifier: workspace:*
+        version: link:../agents
+      ai:
+        specifier: ^6.0.202
+        version: 6.0.208(zod@4.4.3)
 
   packages/shell:
     dependencies:
