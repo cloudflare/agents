@@ -82,7 +82,7 @@ import {
   type ObservabilityEvent
 } from "./observability";
 import { DisposableStore } from "./core/events";
-import { MessageType } from "./types";
+import { MessageType, type AgentProps } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import type { McpAgent } from "./mcp";
 export {
@@ -146,7 +146,7 @@ export type {
   RoutingRetryOptions,
   WSMessage
 } from "partyserver";
-export { MessageType } from "./types";
+export { MessageType, type AgentProps } from "./types";
 
 /**
  * Structural type for Cloudflare's `send_email` binding.
@@ -967,7 +967,7 @@ export type AddRpcMcpServerOptions = {
    */
   id?: string;
   /** Props to pass to the McpAgent instance */
-  props?: Record<string, unknown>;
+  props?: AgentProps;
 };
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
@@ -1574,7 +1574,7 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends AgentProps = Record<string, unknown>
 > extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
@@ -12137,7 +12137,7 @@ export class Agent<
    * await this.addMcpServer("counter", env.MY_MCP);
    * await this.addMcpServer("counter", env.MY_MCP, { props: { userId: "123" } });
    */
-  async addMcpServer<T extends McpAgent>(
+  async addMcpServer<T extends McpAgent<Cloudflare.Env, unknown, AgentProps>>(
     serverName: string,
     binding: DurableObjectNamespace<T>,
     options?: AddRpcMcpServerOptions
@@ -12169,7 +12169,7 @@ export class Agent<
     | { id: string; state: typeof MCPConnectionState.READY }
   >;
 
-  async addMcpServer<T extends McpAgent>(
+  async addMcpServer<T extends McpAgent<Cloudflare.Env, unknown, AgentProps>>(
     serverName: string,
     urlOrBinding: string | DurableObjectNamespace<T>,
     callbackHostOrOptions?:
@@ -12726,7 +12726,7 @@ export type AgentOptions<Env> = PartyServerOptions<Env>;
 
 export type AgentGetOptions<
   Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends AgentProps = Record<string, unknown>
 > = Pick<
   PartyServerOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
@@ -12925,7 +12925,7 @@ export async function routeAgentEmail<
 export async function getAgentByName<
   Env extends Cloudflare.Env = Cloudflare.Env,
   T extends Agent<Env> = Agent<Env>,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends AgentProps = Record<string, unknown>
 >(
   namespace: DurableObjectNamespace<T>,
   name: string,
