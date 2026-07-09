@@ -40,12 +40,12 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    ├─ AgentThink WorkerEntrypoint.dispatch  (src/index.ts)
    │     getAgentByName(env.ThinkAgent, session) → setContext → start()
    │     start() ONLY submits the durable turn — returns in ~1s
-   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + Workspace transport
-   │     /workspace is authoritative in the container (backend sync is disabled);
-   │     container backend dials the warm pool per-connect:
+   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + complete Workspace VFS
+   │     file tools and both bash backends share the same synchronized tree;
+   │     container backend claims from the warm pool per turn:
    │        resolveContainerId(env, id) → env.Sandbox.get(idFromName(uuid))
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
-   ├─ WarmPool DO (src/warm-pool.ts) — keeps WARM_POOL_TARGET(=1) containers warm
+   ├─ WarmPool DO (src/warm-pool.ts) — keeps exactly one unassigned container warm
    ├─ CommandCenterAgent DO (src/command-center.ts) — singleton ("main")
    │     registry of every thread + per-thread counters; ThinkAgent reports
    │     lifecycle events fire-and-forget (observing must never break a run)
@@ -88,12 +88,22 @@ the container's coding filesystem.
 - **No Cloudflare Workflow.** An earlier shape wrapped the turn in a Workflow;
   its 10-min step timeout + retry-from-scratch was the main death mode. Think's
   native durable `submitMessages` is the durability layer.
-- **The container owns `/workspace`.** Workspace's transport still connects the
-  ThinkAgent to its warm-pooled Sandbox, but `sync: "none"` prevents repo data,
-  `.git`, `node_modules`, builds, and logs from entering DO SQLite. The DO owns
-  only durable turn/recovery state. Skills use Think's native R2 source.
-- **Everything runs on the `container` backend.** It provides the real Linux
-  filesystem, toolchain, and network used by bash and the file tools.
+- **One Workspace owns `/workspace`.** Think internals and read/write/edit call
+  the durable VFS directly. The lightweight shell operates on the same VFS, and
+  the container backend runs against its mounted view. Workspace owns its sync
+  policy; agent-think adds no path router or ignore policy. Paths outside
+  `/workspace` remain container-local. Skills use Think's native R2 source.
+- **Run identity is durable input, not prompt configuration.** The first user
+  message carries an `<agent-think-run>` JSON envelope (repo, issue,
+  instruction, requester, triggering comment). Skills fail closed without it.
+  This survives context-block prompt assembly, eviction, and continuation.
+- **Container ownership follows the turn.** The first container use claims a warm
+  container. The Workspace keeps that connection for the turn. Terminal cleanup
+  closes it, stops and drops the used container, and restores the one-container
+  warm slot. There are no renewable leases, sticky idle assignments, or TTL policy.
+- **Bash has two backends.** The lightweight VFS-backed `shell` is the default for
+  text and file commands. Select `container` for gh, npm, node, native binaries,
+  network access, builds, tests, and deploys. File tools call the VFS directly.
 - **Repros must be clickable.** The reproduce skill mandates a minimal
   Vite + React page (exact 7-file recipe in the skill) so maintainers see the
   failing behavior without cloning anything.
@@ -144,10 +154,9 @@ the container's coding filesystem.
   in `run_worker_first`. Symptom: the UI's HTTP calls work while every
   `wss://` connect fails. (This bit us on the command center; the repro-skill
   recipe carries the same rule.)
-- **Never re-enable container Workspace sync.** Pulling a monorepo install
-  (roughly 1.9 GB / 158k entries) into the ThinkAgent DO causes a memory-reset
-  loop on every container `/ws` reconnect. Noisy output must still be redirected
-  to `/workspace/temp` and tailed so tool results stay bounded.
+- **`/temp` is deliberately outside the VFS mount.** Put long logs there and
+  tail them with container bash so neither the VFS nor tool results absorb the
+  full output.
 - **Deploys reset in-flight turns.** A deploy lazily resets every DO onto the
   new code; a running turn loses its container connection and burns minutes on
   Think's (working) recovery — it re-auths and resumes, but don't deploy while
@@ -165,9 +174,10 @@ pnpm run deploy  # vite build (thread UI) + wrangler deploy (worker + image)
 npm run seed:r2  # push skills/** to the R2 bucket (add -- --local for dev)
 ```
 
-- Vitest configs live next to their suites: `test/vitest.config.ts` (unit) and
-  `tests-e2e/vitest.config.ts` (e2e). `vite.config.ts` at the root builds only
-  the thread UI into `dist/client`.
+- Vitest configs live next to their suites: `test/vitest.config.ts` (Workers
+  runtime module/DO tests) and `tests-e2e/vitest.config.ts` (real Wrangler +
+  Docker infrastructure, with only inference replaced by a test subclass).
+  `vite.config.ts` at the root builds only the thread UI into `dist/client`.
 - Local-only HTTP surface (gated on `LOCAL_DEV=1`, set automatically by the
   e2e harness): `POST /dev/dispatch` and `GET /dev/messages/:session` — drive
   the full agent path without gh-app or webhooks.

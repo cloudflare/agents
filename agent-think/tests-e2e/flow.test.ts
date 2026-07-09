@@ -1,115 +1,201 @@
-/**
- * End-to-end flow against a live `wrangler dev --local`.
- *
- * REQUIRES docker + wrangler dev. SLOW: a cold container build plus a real
- * model turn takes minutes. This is intentionally kept separate from the fast
- * unit tests (`npm test`) — run it with the e2e config when you need to
- * reproduce locally *why a run dies* (the silent wedge we chase).
- *
- * The flow mirrors what gh-app does over the service binding, but through the
- * LOCAL_DEV-gated HTTP surface:
- *
- *   1. GET  /                          → worker is up (health banner)
- *   2. POST /dev/dispatch              → 202, resolves the per-issue ThinkAgent
- *                                        DO, sets context, starts a durable turn
- *   3. GET  /dev/messages/:session     → poll the DO message log until the turn
- *                                        visibly progresses (assistant text or a
- *                                        recorded tool call). No progress inside
- *                                        the window IS the failure we want to
- *                                        catch — on timeout we dump every
- *                                        collected message so a human can see
- *                                        exactly where it wedged.
- *
- * Everything runs against real bindings: ThinkAgent DO, container-backed
- * Workspace (real gh/git/npm/node), R2-mounted skills. No mocks.
- */
-import { describe, it, expect } from "vitest";
-import { BASE_URL } from "./harness";
+import { describe, expect, it, vi } from "vitest";
+import { BASE_URL, wranglerOutput } from "./harness";
 
-/** One message in the DO log, as returned by ThinkAgent.debugMessages(). */
 interface DebugMessage {
   role: string;
-  parts: Array<{ type: string; text?: string }>;
+  parts: Array<{ type: string; text?: string; output?: unknown }>;
 }
 
-/**
- * The turn "progressed" once the model produced anything real: a non-empty
- * assistant text part, OR any tool-call part (static `tool-<name>` or the
- * dynamic-tool shape). That is the signal a silent wedge would starve.
- */
-function turnProgressed(messages: DebugMessage[]): boolean {
-  for (const m of messages) {
-    if (m.role !== "assistant") continue;
-    for (const p of m.parts) {
-      if (p.type === "text" && (p.text ?? "").trim().length > 0) return true;
-      if (p.type === "dynamic-tool" || p.type.startsWith("tool-")) return true;
-    }
-  }
-  return false;
+interface ThreadMeta {
+  status: "running" | "done" | "error";
+  lastError?: string;
 }
 
-describe("E2E: agent-think dispatch → durable turn", () => {
-  it("keeps /workspace container-local instead of syncing it to the DO VFS", async () => {
-    const isolation = await fetch(
-      `${BASE_URL}/dev/workspace-isolation/${crypto.randomUUID()}`
+const issueBase = 10_000 + Math.floor(Math.random() * 900_000);
+let commentSequence = 1;
+
+async function dispatch(instruction: string, issueNumber: number) {
+  const response = await fetch(`${BASE_URL}/dev/dispatch`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      repo: "cloudflare/workers-oauth-provider",
+      issueNumber,
+      instruction,
+      installationToken: "",
+      commentId: issueNumber * 1000 + commentSequence++,
+      issueTitle: "E2E lifecycle fixture",
+      requestedBy: { login: "mattzcarey" }
+    })
+  });
+  expect(response.status).toBe(202);
+  return (await response.json()) as { session: string };
+}
+
+async function messages(session: string): Promise<DebugMessage[]> {
+  const response = await fetch(
+    `${BASE_URL}/dev/messages/${encodeURIComponent(session)}`
+  );
+  expect(response.status).toBe(200);
+  return response.json() as Promise<DebugMessage[]>;
+}
+
+interface PoolStats {
+  warm: number;
+  assigned: number;
+  total: number;
+  target: number;
+}
+
+async function poolStats(): Promise<PoolStats> {
+  const response = await fetch(`${BASE_URL}/__test/pool-stats`);
+  expect(response.status).toBe(200);
+  return response.json() as Promise<PoolStats>;
+}
+
+async function runPoolAlarm(): Promise<PoolStats> {
+  const response = await fetch(`${BASE_URL}/__test/pool-alarm`, {
+    method: "POST"
+  });
+  expect(response.status).toBe(200);
+  return response.json() as Promise<PoolStats>;
+}
+
+async function thread(session: string): Promise<ThreadMeta | undefined> {
+  const response = await fetch(`${BASE_URL}/api/command-center`);
+  const state = (await response.json()) as {
+    threads: Record<string, ThreadMeta>;
+  };
+  return state.threads[session];
+}
+
+async function waitForThread(
+  session: string,
+  status: ThreadMeta["status"]
+): Promise<ThreadMeta> {
+  let current: ThreadMeta | undefined;
+  try {
+    await vi.waitUntil(
+      async () => {
+        current = await thread(session);
+        return current?.status === status;
+      },
+      { timeout: 60_000, interval: 200 }
     );
-    expect(isolation.status).toBe(200);
-    expect(await isolation.json()).toEqual({
-      containerFileExists: true,
-      hostVfsContainsFile: false
+    return current as ThreadMeta;
+  } catch (error) {
+    const transcript = await messages(session).catch(() => []);
+    throw new Error(
+      `Timed out waiting for ${session}=${status}; current=${JSON.stringify(current)}\n` +
+        `transcript=${JSON.stringify(transcript, null, 2)}\n` +
+        `wrangler=${wranglerOutput().slice(-20_000)}`,
+      { cause: error }
+    );
+  }
+}
+
+function transcriptText(items: DebugMessage[]): string {
+  return items
+    .flatMap((message) =>
+      message.parts.flatMap((part) => [
+        part.text ?? "",
+        JSON.stringify(part.output)
+      ])
+    )
+    .join("\n");
+}
+
+describe("E2E: production graph with inference adapter", () => {
+  it("syncs Workspace VFS files while keeping /temp container-local", async () => {
+    const sync = await fetch(
+      `${BASE_URL}/dev/workspace-sync/${crypto.randomUUID()}`
+    );
+    expect(sync.status).toBe(200);
+    expect(await sync.json()).toEqual({
+      hostFileVisibleInContainer: true,
+      sourceFileDurable: true,
+      localTempFileDurable: false,
+      sourceFileRestoredAfterContainerReplacement: true,
+      localTempFileRestoredAfterContainerReplacement: false
     });
   }, 120_000);
 
-  it("comes up, dispatches a real run, and the turn progresses", async () => {
-    // 1. Worker up.
-    const health = await fetch(`${BASE_URL}/`);
-    expect(health.status).toBe(200);
-
-    // 2. Dispatch a real run. A deliberately tiny instruction so the container
-    //    does real network work (clone) without deploying or commenting — we
-    //    only need proof the turn moves, not a full repro.
-    const dispatch = await fetch(`${BASE_URL}/dev/dispatch`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        repo: "cloudflare/agents",
-        issueNumber: 1859,
-        instruction:
-          "just clone the repo into /workspace/agents and run ls — do not deploy or comment",
-        // Optional: a real GH token lets the clone succeed. Absent, the clone
-        // may fail — but the turn should still visibly progress (tool calls /
-        // assistant text), which is what we assert on.
-        installationToken: process.env.GH_TOKEN ?? ""
-      })
-    });
-    expect(dispatch.status).toBe(202);
-    const { session } = (await dispatch.json()) as { session: string };
-    expect(session).toBeTruthy();
-
-    // 3. Poll the DO message log until the turn progresses. Real model +
-    //    container are slow, so we give it ~4 minutes and check every 5s.
-    const deadline = Date.now() + 240_000;
-    let messages: DebugMessage[] = [];
-    while (Date.now() < deadline) {
-      const res = await fetch(
-        `${BASE_URL}/dev/messages/${encodeURIComponent(session)}`
-      );
-      if (res.ok) {
-        messages = (await res.json()) as DebugMessage[];
-        if (turnProgressed(messages)) {
-          expect(turnProgressed(messages)).toBe(true);
-          return; // success — the turn moved
-        }
-      }
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-
-    // Timed out with no progress: this is the silent-wedge failure. Dump the
-    // full message log so a human can see where it died.
-    throw new Error(
-      `turn never progressed within 4 min for session "${session}".\n` +
-        `Collected ${messages.length} message(s):\n` +
-        JSON.stringify(messages, null, 2)
+  it("uses the lightweight VFS shell when backend is omitted", async () => {
+    const { session } = await dispatch(
+      "TEST: use default shell",
+      issueBase + 3
     );
-  }, 300_000); // outrun the 4-min poll + boot slack
+    await waitForThread(session, "done");
+    expect(transcriptText(await messages(session))).toContain("shell-ok");
+  }, 120_000);
+
+  it("persists the immutable target even when skills register context", async () => {
+    const issueNumber = issueBase;
+    const { session } = await dispatch(
+      "TEST: echo immutable run envelope",
+      issueNumber
+    );
+    await waitForThread(session, "done");
+
+    const text = transcriptText(await messages(session));
+    expect(text).toContain("<agent-think-run>");
+    expect(text).toContain(
+      '\\"repository\\":\\"cloudflare/workers-oauth-provider\\"'
+    );
+    expect(text).toContain(`\\"issue\\":${issueNumber}`);
+    expect(text).toContain('\\"requested-by\\":\\"@mattzcarey\\"');
+    expect(text).toContain("captured-run-context:");
+    expect(text).not.toContain("cloudflare/agents#1871");
+  }, 120_000);
+
+  it("claims a warm container for the turn and drops it at terminal", async () => {
+    expect(await runPoolAlarm()).toMatchObject({
+      warm: 1,
+      assigned: 0,
+      target: 1
+    });
+
+    const issueNumber = issueBase + 1;
+    const { session } = await dispatch(
+      "TEST: hold container turn",
+      issueNumber
+    );
+    await vi.waitUntil(
+      async () => {
+        const stats = await poolStats();
+        return stats.assigned === 1 && stats.warm === 1;
+      },
+      { timeout: 30_000, interval: 100 }
+    );
+
+    await waitForThread(session, "done");
+    expect(transcriptText(await messages(session))).toContain("lifecycle-ok");
+    await vi.waitUntil(
+      async () => {
+        const stats = await poolStats();
+        return stats.assigned === 0 && stats.warm === 1;
+      },
+      { timeout: 30_000, interval: 100 }
+    );
+
+    // The same durable session claims a fresh container for its next turn.
+    await dispatch("TEST: hold container turn", issueNumber);
+    await waitForThread(session, "done");
+    expect(transcriptText(await messages(session))).toContain("lifecycle-ok");
+    expect(wranglerOutput()).not.toContain(
+      "WritableStream RPC stub was disposed without calling close()"
+    );
+    expect(wranglerOutput()).not.toContain(
+      "An RPC stub was not disposed properly"
+    );
+  }, 180_000);
+
+  it("marks a tool-only step-budget exhaustion as error, not done", async () => {
+    const { session } = await dispatch(
+      "TEST: exhaust step budget",
+      issueBase + 2
+    );
+    const terminal = await waitForThread(session, "error");
+    expect(terminal.lastError).toContain("step safety limit after a tool call");
+  }, 120_000);
 });

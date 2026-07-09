@@ -172,8 +172,8 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
   }
 
   /**
-   * Stop the running container. Pool calls this for idle eviction
-   * and slot recycling. `ctx.container.destroy()` tears down the
+   * Stop the running container. The pool calls this when a turn releases its
+   * claim or maintenance removes a stopped slot. `ctx.container.destroy()` tears down the
    * VM; the next `start()` rebuilds it from the image.
    *
    * Best-effort: a double-stop or an already-exited container

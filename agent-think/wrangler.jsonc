@@ -73,13 +73,10 @@
   // worker can't reliably know its own external hostname (custom domains), so
   // this is configured, not derived.
   "vars": {
-    "PUBLIC_BASE_URL": "https://agent-think.agents-b8a.workers.dev",
-    // Keep exactly one container pre-warmed. Bump to scale out; 0 disables
-    // pre-warming (containers boot lazily on first dial).
-    "WARM_POOL_TARGET": "1"
+    "PUBLIC_BASE_URL": "https://agent-think.agents-b8a.workers.dev"
   },
 
-  // Prime the warm pool every minute so a pre-warmed container is ready.
+  // Prime the fixed one-container warm pool every minute.
   "triggers": { "crons": ["* * * * *"] },
 
   "observability": {

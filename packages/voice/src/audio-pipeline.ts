@@ -137,18 +137,28 @@ export class AudioConnectionManager {
     connectionId: string,
     transcriber: Transcriber,
     options: TranscriberSessionOptions
-  ): void {
-    this.closeTranscriberSession(connectionId);
+  ): TranscriberSession {
+    const hadSession = this.closeTranscriberSession(connectionId);
     const session = transcriber.createSession(options);
     this.#transcriberSessions.set(connectionId, session);
+
+    // Replay audio that arrived before the first transcriber session was ready.
+    const buffer = this.#audioBuffers.get(connectionId);
+    if (!hadSession && buffer) {
+      for (const chunk of buffer) {
+        session.feed(chunk);
+      }
+    }
+
+    return session;
   }
 
-  closeTranscriberSession(connectionId: string): void {
+  closeTranscriberSession(connectionId: string): boolean {
     const session = this.#transcriberSessions.get(connectionId);
-    if (session) {
-      session.close();
-      this.#transcriberSessions.delete(connectionId);
-    }
+    if (!session) return false;
+    session.close();
+    this.#transcriberSessions.delete(connectionId);
+    return true;
   }
 
   // --- Pipeline abort ---

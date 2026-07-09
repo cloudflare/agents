@@ -272,6 +272,8 @@ export class VoiceClient {
   #interimTranscript: string | null = null;
   #serverProtocolVersion: number | null = null;
   #inCall = false;
+  #callGeneration = 0;
+  #serverCallAcknowledged = false;
 
   // Options (with defaults applied)
   #silenceThreshold: number;
@@ -449,6 +451,7 @@ export class VoiceClient {
       // still running (not stopped on disconnect), so audio resumes
       // flowing as soon as the server processes start_call.
       if (this.#inCall) {
+        this.#serverCallAcknowledged = false;
         transport.sendJSON({ type: "start_call" });
       }
     };
@@ -497,7 +500,11 @@ export class VoiceClient {
       this.#emit("error", this.#error);
       return;
     }
+    if (this.#inCall) return;
+
+    const callGeneration = ++this.#callGeneration;
     this.#inCall = true;
+    this.#serverCallAcknowledged = false;
     this.#error = null;
     this.#metrics = null;
     this.#emit("error", null);
@@ -508,7 +515,9 @@ export class VoiceClient {
     }
     this.#transport.sendJSON(startMsg);
     const ctx = await this.#getAudioContext();
+    if (this.#abortStaleCallStartup(callGeneration)) return;
     await this.#getPlaybackDestination(ctx);
+    if (this.#abortStaleCallStartup(callGeneration)) return;
     if (this.#options.audioInput) {
       this.#options.audioInput.onAudioLevel = (rms) =>
         this.#processAudioLevel(rms);
@@ -521,13 +530,32 @@ export class VoiceClient {
     } else {
       await this.#startMic();
     }
+    this.#abortStaleCallStartup(callGeneration);
   }
 
   endCall(): void {
+    this.#callGeneration++;
     this.#inCall = false;
+    this.#serverCallAcknowledged = false;
     if (this.#transport?.connected) {
       this.#transport.sendJSON({ type: "end_call" });
     }
+    this.#stopLocalCall();
+    this.#status = "idle";
+    this.#emit("statuschange", "idle");
+  }
+
+  #isCurrentCallStartup(callGeneration: number): boolean {
+    return this.#inCall && this.#callGeneration === callGeneration;
+  }
+
+  #abortStaleCallStartup(callGeneration: number): boolean {
+    if (this.#isCurrentCallStartup(callGeneration)) return false;
+    if (!this.#inCall) this.#stopLocalCall();
+    return true;
+  }
+
+  #stopLocalCall(): void {
     if (this.#options.audioInput) {
       this.#options.audioInput.stop();
       this.#options.audioInput.onAudioLevel = null;
@@ -538,8 +566,6 @@ export class VoiceClient {
     this.#stopPlayback();
     this.#closeAudioContext();
     this.#resetDetection();
-    this.#status = "idle";
-    this.#emit("statuschange", "idle");
   }
 
   toggleMute(): void {
@@ -639,13 +665,29 @@ export class VoiceClient {
         }
         break;
       case "audio_config":
+        this.#serverCallAcknowledged = true;
         this.#audioFormat = msg.format as VoiceAudioFormat;
         break;
       case "status":
         this.#status = msg.status as VoiceStatus;
-        if (msg.status === "listening" || msg.status === "idle") {
+        if (msg.status === "idle" && this.#inCall) {
+          const shouldEndLocalCall =
+            this.#serverCallAcknowledged || this.#error !== null;
+          if (!shouldEndLocalCall) {
+            this.#emit("statuschange", this.#status);
+            break;
+          }
+          this.#callGeneration++;
+          this.#inCall = false;
+          this.#serverCallAcknowledged = false;
+          this.#stopLocalCall();
+        }
+        if (msg.status === "listening") {
+          this.#serverCallAcknowledged = true;
           this.#error = null;
           this.#emit("error", null);
+        } else if (msg.status === "thinking" || msg.status === "speaking") {
+          this.#serverCallAcknowledged = true;
         }
         this.#emit("statuschange", this.#status);
         break;

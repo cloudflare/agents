@@ -151,6 +151,12 @@ export interface TranscriberSession {
   feed(chunk: ArrayBuffer): void;
 
   /**
+   * Resolves when the session is ready to accept audio and emit transcripts.
+   * Optional so existing custom transcribers can start synchronously.
+   */
+  waitUntilReady?(): Promise<void>;
+
+  /**
    * Close the session and release resources.
    * Called at end_call or disconnect — not on interrupt.
    */
