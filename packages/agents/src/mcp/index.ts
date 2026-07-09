@@ -645,6 +645,8 @@ export type {
   MCPDiscoverResult
 } from "./client";
 
+export type { MCPElicitationHandler } from "./client-connection";
+
 export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./client";
 
 export type { McpClientOptions } from "./types";
