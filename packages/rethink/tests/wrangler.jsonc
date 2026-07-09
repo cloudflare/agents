@@ -15,10 +15,21 @@
       {
         "name": "GREETING_DO",
         "class_name": "GreetingDurableObject"
+      },
+      {
+        "name": "TRACER_BULLET_DO",
+        "class_name": "TracerBulletDurableObject"
       }
     ]
   },
+  "kv_namespaces": [
+    {
+      "binding": "SENT_EMAILS",
+      "id": "sent-emails"
+    }
+  ],
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["GreetingDurableObject"] }
+    { "tag": "v1", "new_sqlite_classes": ["GreetingDurableObject"] },
+    { "tag": "v2", "new_sqlite_classes": ["TracerBulletDurableObject"] }
   ]
 }
