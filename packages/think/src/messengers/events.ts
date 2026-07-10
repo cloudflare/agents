@@ -176,7 +176,9 @@ export function toMessengerUserMessage(
   const message = event.message;
   if (event.action) {
     const user = event.action.user;
-    const displayName = resolveChannelSpeakerLabel(user, channelSpeakerLabel);
+    const displayName = event.thread.isDirectMessage
+      ? undefined
+      : resolveChannelSpeakerLabel(user, channelSpeakerLabel);
     const details = [
       `Action selected: ${event.action.actionId}`,
       event.action.value ? `Value: ${event.action.value}` : undefined,
@@ -184,8 +186,6 @@ export function toMessengerUserMessage(
         ? `Source message: ${event.action.messageId}`
         : undefined
     ].filter(Boolean);
-    // Actions always include a speaker label when available (including in DMs)
-    // so the model can attribute interactive button presses.
     const text = displayName
       ? `${displayName}: ${details.join("\n")}`
       : details.join("\n");

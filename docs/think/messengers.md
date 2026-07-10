@@ -123,10 +123,10 @@ telegramMessenger({
 });
 ```
 
-Action events (button presses) still include a speaker label when one resolves,
-including in DMs, so the model can attribute interactive clicks. Returning
-`null` or an empty string from `channelSpeakerLabel` suppresses those labels as
-well.
+Action events (button presses) are labelled the same way as regular messages:
+they get a speaker prefix in channels so the model can attribute interactive
+clicks, and no prefix in DMs. Returning `null` or an empty string from
+`channelSpeakerLabel` suppresses the channel label as well.
 
 ## Conversation Targets
 
