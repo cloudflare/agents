@@ -120,7 +120,7 @@ import { Agent } from "agents";
 
 class MyAgent extends Agent<Env> {
   onStart() {
-    this.mcp.configureElicitationHandler({
+    this.mcp.configureElicitationHandlers({
       url: async (request, serverId) => {
         // Deliver a url-mode elicitation link out-of-band
         return { action: "accept" as const, content: {} };

@@ -56,7 +56,7 @@ export class ConformanceHost extends Agent<Env> {
   onStart() {
     // Accept elicitation requests. Form-mode defaults are applied by the SDK
     // client because the connection advertises `form.applyDefaults` (SEP-1034).
-    this.mcp.configureElicitationHandler({
+    this.mcp.configureElicitationHandlers({
       form: async () => ({
         action: "accept",
         content: {}

@@ -112,14 +112,14 @@ describe("MCP client elicitation options (#1875)", () => {
         }
       );
 
-      connection.configureElicitationHandler({
+      connection.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
       expect(advertisedCapabilities(connection).elicitation).toEqual({
         form: {}
       });
 
-      connection.configureElicitationHandler(undefined);
+      connection.configureElicitationHandlers(undefined);
       expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
     });
 
@@ -213,7 +213,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // Widening handlers on a live connection takes effect on reconnect —
       // init() re-entry rebuilds the client for the new handshake
-      connection.configureElicitationHandler({
+      connection.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} }),
         url: async () => ({ action: "accept", content: {} })
       });
@@ -312,7 +312,7 @@ describe("MCP client elicitation options (#1875)", () => {
       return { storage, rows };
     }
 
-    it("configureElicitationHandler applies to future connections", async () => {
+    it("configureElicitationHandlers applies to future connections", async () => {
       const { storage } = createMockStorage();
       const handler = vi
         .fn()
@@ -321,7 +321,7 @@ describe("MCP client elicitation options (#1875)", () => {
         storage
       });
 
-      manager.configureElicitationHandler({ form: handler, url: handler });
+      manager.configureElicitationHandlers({ form: handler, url: handler });
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
         name: "example"
@@ -342,7 +342,7 @@ describe("MCP client elicitation options (#1875)", () => {
       expect(handler).toHaveBeenCalledWith(elicitRequest, "srv-1");
     });
 
-    it("configureElicitationHandler updates existing uninitialized connections", async () => {
+    it("configureElicitationHandlers updates existing uninitialized connections", async () => {
       const { storage } = createMockStorage();
       const handler = vi
         .fn()
@@ -358,7 +358,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const connection = manager.mcpConnections["srv-1"];
       expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
 
-      manager.configureElicitationHandler({ form: handler, url: handler });
+      manager.configureElicitationHandlers({ form: handler, url: handler });
 
       expect(advertisedCapabilities(connection).elicitation).toEqual({
         form: {},
@@ -369,13 +369,13 @@ describe("MCP client elicitation options (#1875)", () => {
       expect(handler).toHaveBeenCalledWith(elicitRequest, "srv-1");
     });
 
-    it("configureElicitationHandler can clear an uninitialized connection handler", async () => {
+    it("configureElicitationHandlers can clear an uninitialized connection handler", async () => {
       const { storage } = createMockStorage();
       const manager = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
 
-      manager.configureElicitationHandler({
+      manager.configureElicitationHandlers({
         form: async () => ({
           action: "accept",
           content: {}
@@ -391,7 +391,7 @@ describe("MCP client elicitation options (#1875)", () => {
         form: {}
       });
 
-      manager.configureElicitationHandler(undefined);
+      manager.configureElicitationHandlers(undefined);
 
       expect(advertisedCapabilities(connection).elicitation).toBeUndefined();
       await expect(
@@ -407,7 +407,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const manager = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      manager.configureElicitationHandler({ form: handler, url: handler });
+      manager.configureElicitationHandlers({ form: handler, url: handler });
 
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
@@ -429,7 +429,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const manager = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      manager.configureElicitationHandler({ form: handler, url: handler });
+      manager.configureElicitationHandlers({ form: handler, url: handler });
 
       await manager.registerServer("old-id", {
         url: "http://example.com/mcp",
@@ -449,7 +449,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const managerA = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      managerA.configureElicitationHandler({ form: handlerA, url: handlerA });
+      managerA.configureElicitationHandlers({ form: handlerA, url: handlerA });
 
       await managerA.registerServer("srv-1", {
         url: "http://example.com/mcp",
@@ -471,7 +471,7 @@ describe("MCP client elicitation options (#1875)", () => {
         createAuthProvider: () =>
           ({ serverId: undefined, clientId: undefined }) as never
       });
-      managerB.configureElicitationHandler({ form: handlerB, url: handlerB });
+      managerB.configureElicitationHandlers({ form: handlerB, url: handlerB });
       await managerB.restoreConnectionsFromStorage("test-client");
 
       const restored = managerB.mcpConnections["srv-1"];
@@ -500,7 +500,7 @@ describe("MCP client elicitation options (#1875)", () => {
         storage
       });
 
-      manager.configureElicitationHandler({
+      manager.configureElicitationHandlers({
         form: formHandler,
         url: urlHandler
       });
@@ -536,7 +536,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const managerA = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      managerA.configureElicitationHandler({
+      managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} }),
         url: async () => ({ action: "accept", content: {} })
       });
@@ -571,7 +571,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const handler = vi
         .fn()
         .mockResolvedValue({ action: "accept", content: { name: "Alice" } });
-      managerB.configureElicitationHandler({ form: handler, url: handler });
+      managerB.configureElicitationHandlers({ form: handler, url: handler });
 
       await expect(
         restored.handleElicitationRequest(elicitRequest)
@@ -584,7 +584,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // A session that only handles form narrows the advertised modes and
       // updates the stored row for the next wake
-      managerB.configureElicitationHandler({ form: handler });
+      managerB.configureElicitationHandlers({ form: handler });
       expect(advertisedCapabilities(restored).elicitation).toEqual({
         form: {}
       });
@@ -597,7 +597,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const managerA = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      managerA.configureElicitationHandler({
+      managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
       await managerA.registerServer("srv-1", {
@@ -637,7 +637,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const managerA = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      managerA.configureElicitationHandler({
+      managerA.configureElicitationHandlers({
         url: async () => ({ action: "accept", content: {} })
       });
       await managerA.registerServer("old-id", {
@@ -675,12 +675,12 @@ describe("MCP client elicitation options (#1875)", () => {
       });
       expect(parse().capabilities).toBeUndefined();
 
-      manager.configureElicitationHandler({
+      manager.configureElicitationHandlers({
         url: async () => ({ action: "cancel", content: {} })
       });
       expect(parse().capabilities).toEqual({ elicitation: { url: {} } });
 
-      manager.configureElicitationHandler(undefined);
+      manager.configureElicitationHandlers(undefined);
       expect(parse().capabilities).toBeUndefined();
     });
 
@@ -689,7 +689,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const manager = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      manager.configureElicitationHandler({
+      manager.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
 
@@ -713,7 +713,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const managerA = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
-      managerA.configureElicitationHandler({
+      managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
       managerA.saveRpcServerToStorage("srv-rpc", "rpc-server", name, "MCP");
@@ -732,7 +732,7 @@ describe("MCP client elicitation options (#1875)", () => {
       expect(advertisedCapabilities(conn).elicitation).toEqual({ form: {} });
 
       // Handlers attach to the already-connected client — no rebuild
-      managerB.configureElicitationHandler({
+      managerB.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: { name: "Alice" } })
       });
       expect(advertisedCapabilities(conn).elicitation).toEqual({ form: {} });
@@ -755,7 +755,7 @@ describe("MCP client elicitation options (#1875)", () => {
         storage
       });
 
-      manager.configureElicitationHandler({ url: urlHandler });
+      manager.configureElicitationHandlers({ url: urlHandler });
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
         name: "example"

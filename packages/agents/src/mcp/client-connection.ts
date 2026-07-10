@@ -199,7 +199,7 @@ export class MCPClientConnection {
       /**
        * Client capabilities persisted from a previous session, advertised
        * until handlers are reconfigured after a hibernation restore. Cleared
-       * by {@link configureElicitationHandler} — reconfigured handlers are
+       * by {@link configureElicitationHandlers} — reconfigured handlers are
        * the source of truth. Explicit `client.capabilities` win per key.
        */
       capabilitySeed?: ClientCapabilities;
@@ -249,7 +249,7 @@ export class MCPClientConnection {
    * un-advertise a mode when handlers are cleared before connecting. Active
    * connections keep their negotiated capabilities until they reconnect.
    */
-  configureElicitationHandler(handlers?: MCPElicitationHandlers): void {
+  configureElicitationHandlers(handlers?: MCPElicitationHandlers): void {
     this.options.elicitationHandlers = handlers;
     // Handlers are now the source of truth — drop the restore seed so
     // clearing the handlers un-advertises the capability on rebuild.
