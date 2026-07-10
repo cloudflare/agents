@@ -1007,8 +1007,8 @@ describe("createWorker with python main", () => {
     const worker = env.LOADER.get(id, () => ({
       mainModule: dynamic_worker.mainModule,
       modules: dynamic_worker.modules,
-      compatibilityDate: dynamic_worker.wranglerConfig?.compatibilityDate,
-      compatibilityFlags: dynamic_worker.wranglerConfig?.compatibilityFlags
+      compatibilityDate: dynamic_worker.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: dynamic_worker.wranglerConfig!.compatibilityFlags!
     }));
 
     let response = await worker
