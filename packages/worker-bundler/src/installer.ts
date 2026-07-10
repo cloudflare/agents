@@ -172,20 +172,10 @@ export async function installDependencies(
     // Collect dependencies to install
     const depsToInstall: Record<string, string> = {};
     for (const dep of pyprojectToml.project?.dependencies ?? []) {
-      const trimmed = dep.trim();
-      if (!trimmed) continue;
+      const name = dep.trim();
+      if (!name) continue;
 
-      // once base functionality is working, test this against more elaborate version strings
-      const match = trimmed.match(/^([A-Za-z0-9._-]+)(.*)$/);
-      if (!match) {
-        result.warnings.push(
-          `Skipping invalid pyproject.toml dependency: ${dep}`
-        );
-        continue;
-      }
-      // At present, versionSpec comes out including the leading comparison operator; this is being left in as it will likely be desirable to keep these together
-      const [, name, versionSpec] = match;
-      depsToInstall[name] = versionSpec.trim() || "*"; // the '*' default was done by kimi, reassess if it's not a good pattern
+      depsToInstall[name] = "*"; // in the future this should be a version specifier, if one was set
     }
 
     if (Object.keys(depsToInstall).length === 0) {
