@@ -397,7 +397,7 @@ async function installPythonPackage(
 
       // Add files to python_modules
       for (const [filePath, content] of Object.entries(packageFilesWheel)) {
-        fileSystem.write(`python_modules/${name}/${filePath}`, content);
+        fileSystem.write(`python_modules/${filePath}`, content);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -430,18 +430,8 @@ function stripWheelToPackage(
     if (path.includes(".dist-info/") || path.includes(".data/")) {
       continue;
     }
-
-    const slashIndex = path.indexOf("/");
-    if (slashIndex === -1) {
-      // Top-level file (e.g., a single .py module)
-      result[path] = content;
-      continue;
-    }
-
-    const newPath = path.slice(slashIndex + 1);
-    if (newPath) {
-      result[newPath] = content;
-    }
+    // We'll expect that any remaining directories in the wheel are importable packages
+    result[path] = content;
   }
   return result;
 }

@@ -1065,11 +1065,14 @@ describe("createWorker with pyproject.toml", () => {
           "from workers import Response, WorkerEntrypoint",
           "import typing_extensions",
           "import typing_inspection",
+          "import attrs, attr", // `attrs` supplies two importables, attr and attrs. If it's installed properly, both will be available
           "class Default(WorkerEntrypoint):",
           "  async def fetch(self, request):",
           "    return Response.json({",
           '      "typing_extensions": typing_extensions.__name__,',
-          '      "typing_inspection": typing_inspection.__name__',
+          '      "typing_inspection": typing_inspection.__name__,',
+          '      "attrs": attrs.__name__,',
+          '      "attr": attr.__name__,',
           "    })"
         ].join("\n"),
         "pyproject.toml": [
@@ -1077,7 +1080,8 @@ describe("createWorker with pyproject.toml", () => {
           'name = "dummy"',
           'version = "0.0.0"',
           // typing_extensions has zero dependencies. typing_inspection depends on typing_extensions
-          'dependencies = ["typing_extensions", "typing_inspection"]'
+          // `attrs` has zero dependencies
+          'dependencies = ["typing_extensions", "typing_inspection", "attrs"]'
         ].join("\n")
       }
     });
@@ -1095,5 +1099,7 @@ describe("createWorker with pyproject.toml", () => {
     const body = (await response.json()) as Record<string, string>;
     expect(body.typing_extensions).toBe("typing_extensions");
     expect(body.typing_inspection).toBe("typing_inspection");
+    expect(body.attrs).toBe("attrs");
+    expect(body.attr).toBe("attr");
   });
 }, 20000);
