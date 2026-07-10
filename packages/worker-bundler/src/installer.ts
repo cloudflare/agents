@@ -161,48 +161,58 @@ export async function installDependencies(
   }
 
   if (pyprojectTomlContent) {
-    let pyprojectToml: PyprojectToml;
-    try {
-      pyprojectToml = parseToml(pyprojectTomlContent) as PyprojectToml;
-    } catch {
-      result.warnings.push("Failed to parse pyproject.toml");
-      return result;
-    }
-
-    // Collect dependencies to install
-    const depsToInstall: Record<string, string> = {};
-    for (const dep of pyprojectToml.project?.dependencies ?? []) {
-      const name = dep.trim();
-      if (!name) continue;
-
-      depsToInstall[name] = "*"; // in the future this should be a version specifier, if one was set
-    }
-
-    if (Object.keys(depsToInstall).length === 0) {
-      return result; // No dependencies to install
-    }
-
-    // Track installed packages to avoid duplicates
-    const installedPackages = new Map<string, string>(); // name -> version
-    // Track in-progress installations to avoid duplicate work
-    const inProgress = new Map<string, Promise<void>>();
-
-    // Install all dependencies in parallel
-    await Promise.all(
-      Object.entries(depsToInstall).map(([depName, depVersion]) =>
-        installPythonPackage(
-          depName,
-          // depVersion, // see relevant comment in installPythonPackage argument list
-          result,
-          fileSystem,
-          installedPackages,
-          inProgress,
-          PYPI_JSON_API // hardcoding this for now to keep the implementation light
-        )
-      )
-    );
+    await installDependnciesPython(pyprojectTomlContent, result, fileSystem);
   }
   return result;
+}
+
+/**
+ * Install Python dependencies declared in a pyproject.toml file.
+ */
+async function installDependnciesPython(
+  pyprojectTomlContent: string,
+  result: InstallResult,
+  fileSystem: FileSystem
+): Promise<void> {
+  let pyprojectToml: PyprojectToml;
+  try {
+    pyprojectToml = parseToml(pyprojectTomlContent) as PyprojectToml;
+  } catch {
+    result.warnings.push("Failed to parse pyproject.toml");
+    return;
+  }
+
+  // Collect dependencies to install
+  const depsToInstall: Record<string, string> = {};
+  for (const dep of pyprojectToml.project?.dependencies ?? []) {
+    const name = dep.trim();
+    if (!name) continue;
+
+    depsToInstall[name] = "*"; // in the future this should be a version specifier, if one was set
+  }
+
+  if (Object.keys(depsToInstall).length === 0) {
+    return; // No dependencies to install
+  }
+
+  // Track installed packages to avoid duplicates
+  const installedPackages = new Map<string, string>(); // name -> version
+  // Track in-progress installations to avoid duplicate work
+  const inProgress = new Map<string, Promise<void>>();
+
+  // Install all dependencies in parallel
+  await Promise.all(
+    Object.entries(depsToInstall).map(([depName]) =>
+      installPythonPackage(
+        depName,
+        result,
+        fileSystem,
+        installedPackages,
+        inProgress,
+        PYPI_JSON_API // hardcoding this for now to keep the implementation light
+      )
+    )
+  );
 }
 
 /**
