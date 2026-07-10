@@ -592,8 +592,119 @@ describe("MCP client elicitation options (#1875)", () => {
       expect(options.capabilities).toEqual({ elicitation: { form: {} } });
     });
 
-    it("the persisted capability survives one restore, then requires reconfiguration", async () => {
-      const { storage } = createMockStorage();
+    it("the persisted capability survives one seeded handshake, then requires reconfiguration", async () => {
+      // The stamp is consumed at first use (a completed handshake), not at
+      // restore-time read, so the wake must actually connect — done here
+      // over RPC.
+      const { storage, rows } = createMockStorage();
+      const name = crypto.randomUUID();
+
+      const managerA = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+      managerA.configureElicitationHandlers({
+        form: async () => ({ action: "accept", content: {} })
+      });
+      managerA.saveRpcServerToStorage("srv-rpc", "rpc-server", name, "MCP");
+
+      // First connected wake after the deploy stopped configuring handlers:
+      // the stamp still seeds the handshake once
+      const managerB = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+      await managerB.connect(`rpc://${name}`, {
+        reconnect: { id: "srv-rpc" },
+        transport: { type: "rpc", namespace: env.MCP_OBJECT, name }
+      });
+      expect(
+        advertisedCapabilities(managerB.mcpConnections["srv-rpc"]).elicitation
+      ).toEqual({ form: {} });
+
+      // The completed seeded handshake consumed the stamp
+      const options = JSON.parse(rows.get("srv-rpc")?.server_options ?? "{}");
+      expect(options.capabilities).toBeUndefined();
+
+      // Next wake with no configure call in between: the stale mode is no
+      // longer advertised, so servers use their non-elicitation fallbacks
+      const managerC = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+      await managerC.connect(`rpc://${name}`, {
+        reconnect: { id: "srv-rpc" },
+        transport: { type: "rpc", namespace: env.MCP_OBJECT, name }
+      });
+      expect(
+        advertisedCapabilities(managerC.mcpConnections["srv-rpc"]).elicitation
+      ).toBeUndefined();
+    });
+
+    it("a stable-id re-add in a configuring session keeps the row stamped for the next wake", async () => {
+      const { storage, rows } = createMockStorage();
+      const name = crypto.randomUUID();
+
+      // Previous session stamped the row under a stable id
+      const managerA = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+      managerA.configureElicitationHandlers({
+        form: async () => ({ action: "accept", content: {} })
+      });
+      managerA.saveRpcServerToStorage("srv-rpc", "rpc-server", name, "MCP");
+
+      // New session configures before the connection object exists, then
+      // re-adds the same stable id: createConnection reads the row stamp as
+      // a seed and registerServer writes a fresh one before the handshake
+      const managerB = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+      managerB.configureElicitationHandlers({
+        form: async () => ({ action: "accept", content: {} })
+      });
+      await managerB.registerServer("srv-rpc", {
+        url: `rpc://${name}`,
+        name: "rpc-server",
+        transport: { type: "rpc", namespace: env.MCP_OBJECT, name }
+      });
+      const result = await managerB.connectToServer("srv-rpc");
+      expect(result.state).toBe("connected");
+
+      // The session configures handlers every wake, so the completed
+      // handshake must not burn the fresh stamp meant for the next wake
+      const options = JSON.parse(rows.get("srv-rpc")?.server_options ?? "{}");
+      expect(options.capabilities).toEqual({ elicitation: { form: {} } });
+    });
+
+    it("re-adding a closed server in a configuring session keeps the row stamped", async () => {
+      const { storage, rows } = createMockStorage();
+      const name = crypto.randomUUID();
+      const manager = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+      manager.configureElicitationHandlers({
+        url: async () => ({ action: "accept", content: {} })
+      });
+      const register = () =>
+        manager.registerServer("srv-rpc", {
+          url: `rpc://${name}`,
+          name: "rpc-server",
+          transport: { type: "rpc", namespace: env.MCP_OBJECT, name }
+        });
+      await register();
+      await manager.connectToServer("srv-rpc");
+      // The row (and its stamp) survives the close; only removeServer deletes it
+      await manager.closeConnection("srv-rpc");
+
+      // Re-add: createConnection reads the stamped row as a seed before
+      // registerServer re-stamps it and the handshake completes
+      await register();
+      await manager.connectToServer("srv-rpc");
+
+      const options = JSON.parse(rows.get("srv-rpc")?.server_options ?? "{}");
+      expect(options.capabilities).toEqual({ elicitation: { url: {} } });
+    });
+
+    it("an OAuth-pending restore keeps the capability seed for the wake that connects", async () => {
+      const { storage, rows } = createMockStorage();
       const managerA = new MCPClientManager("test-client", "1.0.0", {
         storage
       });
@@ -607,20 +718,21 @@ describe("MCP client elicitation options (#1875)", () => {
         authUrl: "http://example.com/authorize"
       });
 
-      // First wake after the deploy stopped configuring handlers: the stamp
-      // still seeds the connection once
+      // Wake 1: OAuth is still pending, so restore parks the connection in
+      // AUTHENTICATING and never handshakes — the stamp must not be burned
       const managerB = new MCPClientManager("test-client", "1.0.0", {
         storage,
         createAuthProvider: () =>
           ({ serverId: undefined, clientId: undefined }) as never
       });
       await managerB.restoreConnectionsFromStorage("test-client");
-      expect(
-        advertisedCapabilities(managerB.mcpConnections["srv-1"]).elicitation
-      ).toEqual({ form: {} });
+      expect(managerB.mcpConnections["srv-1"].connectionState).toBe(
+        "authenticating"
+      );
+      const options = JSON.parse(rows.get("srv-1")?.server_options ?? "{}");
+      expect(options.capabilities).toEqual({ elicitation: { form: {} } });
 
-      // Second wake with no configure call in between: the stale mode is no
-      // longer advertised, so servers use their non-elicitation fallbacks
+      // Wake 2: the seed still covers the handshake
       const managerC = new MCPClientManager("test-client", "1.0.0", {
         storage,
         createAuthProvider: () =>
@@ -629,7 +741,49 @@ describe("MCP client elicitation options (#1875)", () => {
       await managerC.restoreConnectionsFromStorage("test-client");
       expect(
         advertisedCapabilities(managerC.mcpConnections["srv-1"]).elicitation
-      ).toBeUndefined();
+      ).toEqual({ form: {} });
+    });
+
+    it("a wake interrupted before the handshake does not burn the capability seed", async () => {
+      const { storage, rows } = createMockStorage();
+      const managerA = new MCPClientManager("test-client", "1.0.0", {
+        storage
+      });
+      managerA.configureElicitationHandlers({
+        url: async () => ({ action: "accept", content: {} })
+      });
+      await managerA.registerServer("srv-1", {
+        url: "http://example.com/mcp",
+        name: "example"
+      });
+
+      // Wake 1 is interrupted between restore and the handshake (deploy
+      // reset, OOM, a throw before onStart re-stamps): init never connects
+      const initSpy = vi
+        .spyOn(MCPClientConnection.prototype, "init")
+        .mockResolvedValue(undefined);
+      try {
+        const managerB = new MCPClientManager("test-client", "1.0.0", {
+          storage
+        });
+        await managerB.restoreConnectionsFromStorage("test-client");
+        await managerB.waitForConnections();
+
+        const options = JSON.parse(rows.get("srv-1")?.server_options ?? "{}");
+        expect(options.capabilities).toEqual({ elicitation: { url: {} } });
+
+        // Wake 2 still seeds the handshake with the stamped capability
+        const managerC = new MCPClientManager("test-client", "1.0.0", {
+          storage
+        });
+        await managerC.restoreConnectionsFromStorage("test-client");
+        await managerC.waitForConnections();
+        expect(
+          advertisedCapabilities(managerC.mcpConnections["srv-1"]).elicitation
+        ).toEqual({ url: {} });
+      } finally {
+        initSpy.mockRestore();
+      }
     });
 
     it("a server id migration preserves the restored capability seed", async () => {
