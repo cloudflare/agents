@@ -277,6 +277,7 @@ Pass options to `withVoice()` as the second argument:
 const VoiceAgent = withVoice(Agent, {
   historyLimit: 20, // Max messages loaded for context (default: 20)
   audioFormat: "mp3", // Audio format sent to client (default: "mp3")
+  sampleRate: 16000, // Sample rate (Hz) for raw pcm16 payloads (default: 16000)
   maxMessageCount: 1000 // Max messages in SQLite (default: 1000)
 });
 ```
