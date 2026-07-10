@@ -339,29 +339,7 @@ async function installPythonPackage(
 
   const installPromise = (async () => {
     try {
-      // The JS impl. does the metadata part in another function, consider moving it if this gets too long
-      // Fetch package metadata from PyPI JSON API
-      const metadataResponse = await fetchWithTimeout(
-        `${registry}/${name}/json`
-      );
-      if (!metadataResponse.ok) {
-        const hint =
-          metadataResponse.status === 404
-            ? " (package not found — check the name in pyproject.toml)"
-            : "";
-        throw new Error(
-          `PyPI returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
-        );
-      }
-      const metadata = (await metadataResponse.json()) as {
-        info: { version: string };
-
-        urls: Array<{
-          filename: string;
-          url: string;
-          packagetype: string;
-        }>;
-      };
+      const metadata = await fetchPythonPackageMetadata(name, registry);
 
       const version = metadata.info.version;
       const wheel = metadata.urls.find(
@@ -470,6 +448,30 @@ async function fetchPackageMetadata(
   }
 
   return (await response.json()) as NpmPackageMetadata;
+}
+
+async function fetchPythonPackageMetadata(name: string, registry: string) {
+  // Fetch package metadata from PyPI JSON API
+  const metadataResponse = await fetchWithTimeout(`${registry}/${name}/json`);
+  if (!metadataResponse.ok) {
+    const hint =
+      metadataResponse.status === 404
+        ? " (package not found — check the name in pyproject.toml)"
+        : "";
+    throw new Error(
+      `PyPI returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
+    );
+  }
+  const metadata = (await metadataResponse.json()) as {
+    info: { version: string };
+
+    urls: Array<{
+      filename: string;
+      url: string;
+      packagetype: string;
+    }>;
+  };
+  return metadata;
 }
 
 /**
