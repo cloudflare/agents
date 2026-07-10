@@ -1000,14 +1000,15 @@ describe("createWorker with python main", () => {
     });
     const id = "test-worker-" + testId++;
 
+    // These should both have defaults from createWorker
+    expect(dynamic_worker.wranglerConfig?.compatibilityDate).not.toBeNull();
+    expect(dynamic_worker.wranglerConfig?.compatibilityFlags).not.toBeNull();
+
     const worker = env.LOADER.get(id, () => ({
       mainModule: dynamic_worker.mainModule,
       modules: dynamic_worker.modules,
-      compatibilityDate:
-        dynamic_worker.wranglerConfig?.compatibilityDate ?? "2026-01-01",
-      compatibilityFlags: dynamic_worker.wranglerConfig?.compatibilityFlags ?? [
-        "python_workers"
-      ]
+      compatibilityDate: dynamic_worker.wranglerConfig?.compatibilityDate,
+      compatibilityFlags: dynamic_worker.wranglerConfig?.compatibilityFlags
     }));
 
     let response = await worker
