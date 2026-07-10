@@ -542,7 +542,7 @@ export class MCPClientManager {
       // connection's restored capability seed.
       const scoped = this.scopedElicitationHandlers(newId);
       if (scoped) {
-        conn.configureElicitationHandler(scoped);
+        conn.configureElicitationHandlers(scoped);
       }
     }
 
@@ -1697,12 +1697,12 @@ export class MCPClientManager {
    *
    * @param handlers Elicitation handlers keyed by mode, each scoped with the server id that sent the request
    */
-  configureElicitationHandler(handlers?: MCPClientElicitationHandlers): void {
+  configureElicitationHandlers(handlers?: MCPClientElicitationHandlers): void {
     this._elicitationHandlers =
       handlers && (handlers.form || handlers.url) ? handlers : undefined;
     this.persistAdvertisedCapabilities();
     for (const [id, connection] of Object.entries(this.mcpConnections)) {
-      connection.configureElicitationHandler(
+      connection.configureElicitationHandlers(
         this.scopedElicitationHandlers(id)
       );
     }

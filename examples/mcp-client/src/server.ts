@@ -27,7 +27,7 @@ export class MyAgent extends Agent {
   >();
 
   onStart() {
-    this.mcp.configureElicitationHandler({
+    this.mcp.configureElicitationHandlers({
       form: (request, serverId) =>
         this.forwardElicitationToBrowser(request, serverId),
       url: (request, serverId) =>
