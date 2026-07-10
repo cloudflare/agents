@@ -5,7 +5,7 @@ import {
   convertToModelMessages,
   pruneMessages,
   tool,
-  stepCountIs
+  isStepCount
 } from "ai";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
@@ -72,7 +72,7 @@ export class CodemodeAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a helpful assistant with access to a codemode tool. " +
         "When asked to perform operations, use the codemode tool to write JavaScript code " +
         "that calls the available functions on the `codemode` object. " +
@@ -83,7 +83,7 @@ export class CodemodeAgent extends AIChatAgent<Env> {
         reasoning: "before-last-message"
       }),
       tools: { codemode },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     return result.toUIMessageStreamResponse();

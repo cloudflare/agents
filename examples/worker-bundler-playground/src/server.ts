@@ -12,7 +12,7 @@ import {
   convertToModelMessages,
   pruneMessages,
   tool,
-  stepCountIs
+  isStepCount
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -335,7 +335,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: [
+      instructions: [
         "You are a full-stack app generator for Cloudflare Workers with persistent storage.",
         "The user describes what they want and you generate a complete app with server code and static assets.",
         "When the user asks you to build something, use the generateApp tool to produce source files and assets.",
@@ -423,7 +423,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
             this.testApp(method, path, body, headers)
         })
       },
-      stopWhen: stepCountIs(8)
+      stopWhen: isStepCount(8)
     });
 
     return result.toUIMessageStreamResponse();

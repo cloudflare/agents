@@ -10,9 +10,9 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.83",
-    "@ai-sdk/openai": "^3.0.70",
-    "ai": "^6.0.202",
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
+    "ai": "^7.0.0",
     "zod": "^4.4.3"
   }
 }

@@ -47,7 +47,10 @@ export function createBrowserTools(
 
   const execute = toolDefinition({
     name: "browser_execute" as const,
-    description: executeTool.description ?? "",
+    description:
+      typeof executeTool.description === "function"
+        ? ""
+        : (executeTool.description ?? ""),
     inputSchema: z.object({
       code: z.string().meta({
         description:
@@ -58,10 +61,11 @@ export function createBrowserTools(
     if (!executeTool.execute) {
       throw new Error("browser_execute tool is not executable");
     }
-    const result = (await executeTool.execute(
-      { code },
-      { toolCallId: crypto.randomUUID(), messages: [] }
-    )) as ProxyToolOutput;
+    const result = (await executeTool.execute({ code }, {
+      toolCallId: crypto.randomUUID(),
+      messages: [],
+      context: {}
+    } as never)) as ProxyToolOutput;
     return result;
   });
 

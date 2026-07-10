@@ -379,9 +379,10 @@ describe("Think — core", () => {
     const result = await agent.testChat("Trace this turn");
 
     expect(result.done).toBe(true);
+    // AI SDK v7 removed TelemetryOptions.metadata; functionId remains.
     await expect(agent.getTelemetryEvents()).resolves.toEqual([
-      "start:think-test-turn:think-test",
-      "finish:think-test-turn:think-test"
+      "start:think-test-turn",
+      "finish:think-test-turn"
     ]);
   });
 

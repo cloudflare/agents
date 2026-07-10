@@ -197,7 +197,7 @@ async function parseText(events: string[], fromEvent: number): Promise<string> {
   );
   const result = streamText({ model, prompt: "x" });
   let text = "";
-  for await (const part of result.fullStream) {
+  for await (const part of result.stream) {
     if (part.type === "text-delta") {
       text += (part as unknown as { text?: string }).text ?? "";
     }

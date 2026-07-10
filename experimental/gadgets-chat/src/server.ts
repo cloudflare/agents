@@ -22,7 +22,7 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, getCurrentAgent, routeAgentRequest, callable } from "agents";
 import type { Connection } from "agents";
-import { streamText, tool, stepCountIs } from "ai";
+import { streamText, tool, isStepCount } from "ai";
 import { RpcTarget } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -124,7 +124,7 @@ export class ChatRoom extends Agent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a helpful assistant. Each chat room has its own independent " +
         "conversation history. Be concise and helpful. " +
         "You have access to tools — use them when appropriate.",
@@ -149,7 +149,7 @@ export class ChatRoom extends Agent<Env> {
           })
         })
       },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     // Iterate over typed UIMessageChunk objects from the AI SDK.

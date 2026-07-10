@@ -13,11 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgent, useAgentToolEvents } from "agents/react";
 import { useAgentChat } from "@cloudflare/think/react";
-import {
-  getToolOrDynamicToolName,
-  isToolOrDynamicToolUIPart,
-  type UIMessage
-} from "ai";
+import { getToolOrDynamicToolName, isToolUIPart, type UIMessage } from "ai";
 import type { AgentToolRunState } from "agents/chat";
 import {
   Badge,
@@ -197,7 +193,7 @@ function RunPartRenderer({ part }: { part: RunParts[number] }) {
     );
   }
 
-  if (isToolOrDynamicToolUIPart(part)) {
+  if (isToolUIPart(part)) {
     const toolName = getToolOrDynamicToolName(part);
     const input = "input" in part ? part.input : undefined;
     const output = "output" in part ? part.output : undefined;
@@ -315,7 +311,7 @@ function ToolPart({
   part: RunParts[number];
   delegates: DelegateState[];
 }) {
-  if (!isToolOrDynamicToolUIPart(part)) return null;
+  if (!isToolUIPart(part)) return null;
   const toolName = getToolOrDynamicToolName(part);
   const input = "input" in part ? part.input : undefined;
   const output = "output" in part ? part.output : undefined;
@@ -417,7 +413,7 @@ function MessageParts({
           );
         }
 
-        if (isToolOrDynamicToolUIPart(part)) {
+        if (isToolUIPart(part)) {
           const toolCallId = part.toolCallId ?? "";
           return (
             <ToolPart

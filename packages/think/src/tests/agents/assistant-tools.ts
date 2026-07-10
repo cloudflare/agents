@@ -51,7 +51,8 @@ export class TestAssistantToolsAgent extends Agent {
       {
         toolCallId: "test",
         messages: [],
-        abortSignal: new AbortController().signal
+        abortSignal: new AbortController().signal,
+        context: {}
       }
     );
   }
@@ -69,7 +70,8 @@ export class TestAssistantToolsAgent extends Agent {
     const output = (await tools.read.execute!(input, {
       toolCallId: "test",
       messages: [],
-      abortSignal: new AbortController().signal
+      abortSignal: new AbortController().signal,
+      context: {}
     })) as ReadModelOutputOptions["output"];
 
     return tools.read.toModelOutput?.({
@@ -86,7 +88,8 @@ export class TestAssistantToolsAgent extends Agent {
       {
         toolCallId: "test",
         messages: [],
-        abortSignal: new AbortController().signal
+        abortSignal: new AbortController().signal,
+        context: {}
       }
     );
   }
@@ -102,7 +105,8 @@ export class TestAssistantToolsAgent extends Agent {
       {
         toolCallId: "test",
         messages: [],
-        abortSignal: new AbortController().signal
+        abortSignal: new AbortController().signal,
+        context: {}
       }
     );
   }
@@ -118,7 +122,8 @@ export class TestAssistantToolsAgent extends Agent {
       {
         toolCallId: "test",
         messages: [],
-        abortSignal: new AbortController().signal
+        abortSignal: new AbortController().signal,
+        context: {}
       }
     );
   }
@@ -130,7 +135,8 @@ export class TestAssistantToolsAgent extends Agent {
       {
         toolCallId: "test",
         messages: [],
-        abortSignal: new AbortController().signal
+        abortSignal: new AbortController().signal,
+        context: {}
       }
     );
   }
@@ -148,7 +154,8 @@ export class TestAssistantToolsAgent extends Agent {
       {
         toolCallId: "test",
         messages: [],
-        abortSignal: new AbortController().signal
+        abortSignal: new AbortController().signal,
+        context: {}
       }
     );
   }
@@ -168,7 +175,8 @@ export class TestAssistantToolsAgent extends Agent {
       {
         toolCallId: "test",
         messages: [],
-        abortSignal: new AbortController().signal
+        abortSignal: new AbortController().signal,
+        context: {}
       }
     );
   }

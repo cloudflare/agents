@@ -52,14 +52,7 @@ export function buildRunTelemetry(
 ) {
   validateRunTarget(target);
   return {
-    metadata: {
-      agentId,
-      agentName,
-      conversationId: agentId,
-      repository: target.repo,
-      issueNumber: target.issueNumber,
-      ...(target.requestedBy ? { requestedBy: target.requestedBy.login } : {})
-    }
+    functionId: `${agentName}:${target.repo}#${target.issueNumber}:${agentId}`
   };
 }
 

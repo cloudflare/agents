@@ -93,8 +93,8 @@ import type {
   PrepareStepFunction,
   PrepareStepResult,
   StreamTextOnChunkCallback,
-  StreamTextOnStepFinishCallback,
-  StreamTextOnToolCallFinishCallback,
+  GenerateTextOnStepFinishCallback,
+  OnToolExecutionEndCallback,
   StopCondition,
   ToolSet,
   TypedToolCall,
@@ -104,7 +104,7 @@ import {
   convertToModelMessages,
   hasToolCall,
   jsonSchema,
-  stepCountIs,
+  isStepCount,
   streamText,
   tool
 } from "ai";
@@ -1973,10 +1973,13 @@ export interface TurnConfig {
   headers?: Parameters<typeof streamText>[0]["headers"];
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
-  /** Optional AI SDK telemetry configuration for this turn. */
-  experimental_telemetry?: Parameters<
-    typeof streamText
-  >[0]["experimental_telemetry"];
+  /**
+   * Optional AI SDK telemetry configuration for this turn.
+   * Accepts the v7 `telemetry` option (v6 `experimental_telemetry` alias still works on streamText).
+   */
+  experimental_telemetry?: Parameters<typeof streamText>[0]["telemetry"];
+  /** @deprecated Prefer `experimental_telemetry` (forwarded to AI SDK `telemetry`). */
+  telemetry?: Parameters<typeof streamText>[0]["telemetry"];
   /**
    * Optional AI SDK stream transform(s) for this turn (`experimental_transform`).
    * Forwarded to `streamText` so callers can inspect/rewrite the stream — e.g.
@@ -2358,7 +2361,7 @@ type ToolCallOutcome<O> =
  * Pass an explicit `TOOLS` generic for typed `toolCalls`/`toolResults`.
  */
 export type StepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
-  StreamTextOnStepFinishCallback<TOOLS>
+  GenerateTextOnStepFinishCallback<TOOLS>
 >[0];
 
 /**
@@ -2398,7 +2401,8 @@ type ToolDecisionOptions = {
   toolCallId: string;
   messages: ModelMessage[];
   abortSignal?: AbortSignal;
-  experimental_context?: unknown;
+  context?: unknown;
+  experimental_context?: unknown; // v6 alias kept for local wrappers if present
 };
 
 /**
@@ -5283,7 +5287,7 @@ export class Think<
           : { type: "tool" as const, toolName: finalAnswerToolName }))
       : config.toolChoice;
     const finalStopWhen = [
-      stepCountIs(finalMaxSteps),
+      isStepCount(finalMaxSteps),
       // Stop as soon as the model calls `final_answer` so the structured turn
       // terminates at the answer instead of continuing to stream more steps.
       ...(wantsStructuredOutput ? [hasToolCall(finalAnswerToolName)] : []),
@@ -5296,7 +5300,7 @@ export class Think<
 
     const result = streamText({
       model: finalModel,
-      system: turnSystem,
+      instructions: turnSystem,
       messages: finalMessages,
       tools: finalTools,
       // Keep the synthetic final-answer tool callable even when a caller
@@ -5322,7 +5326,7 @@ export class Think<
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
-      experimental_telemetry: config.experimental_telemetry,
+      telemetry: config.telemetry ?? config.experimental_telemetry,
       // Forward the per-turn stream transform(s) from TurnConfig so callers
       // can inspect/rewrite the stream (e.g. emit `source` parts derived from
       // tool results) without owning the stream pipeline themselves.
@@ -5395,7 +5399,7 @@ export class Think<
         await this.onChunk(event);
         await this._pipelineExtensionChunk(event);
       },
-      onStepFinish: async (event) => {
+      onStepEnd: async (event) => {
         // Pass the full StepResult through — gives users access to
         // reasoning, sources, files, providerMetadata (cache tokens),
         // request/response, warnings, and the full LanguageModelUsage
@@ -5409,25 +5413,54 @@ export class Think<
       // the AI SDK's `experimental_onToolCallFinish` callback so we get
       // accurate `durationMs` and the discriminated `success`/`error`
       // outcome — including failures that propagate out of `execute`.
-      experimental_onToolCallFinish: (async (event) => {
+      onToolExecutionEnd: (async (event) => {
         // The synthetic final-answer tool is internal plumbing for structured
         // workflow turns — do not surface it to user `afterToolCall` hooks or
         // extensions.
-        if (event.toolCall.toolName === finalAnswerToolName) return;
+        //
+        // AI SDK v7 renamed experimental_onToolCallFinish -> onToolExecutionEnd
+        // and reshaped the event:
+        //   - success/output/error -> toolOutput (type: tool-result | tool-error)
+        //   - durationMs -> toolExecutionMs
+        //   - stepNumber is no longer on this event (undefined)
+        const e = event as unknown as {
+          toolCall: TypedToolCall<ToolSet>;
+          messages: ModelMessage[];
+          toolExecutionMs: number;
+          toolOutput:
+            | { type: "tool-result"; output: unknown }
+            | { type: "tool-error"; error: unknown }
+            | { type: string; output?: unknown; error?: unknown };
+        };
+        if (e.toolCall.toolName === finalAnswerToolName) return;
+        const success = e.toolOutput?.type === "tool-result";
+        const output =
+          e.toolOutput?.type === "tool-result"
+            ? e.toolOutput.output
+            : undefined;
+        const error =
+          e.toolOutput?.type === "tool-error" ? e.toolOutput.error : undefined;
         const base = {
-          ...event.toolCall,
-          stepNumber: event.stepNumber,
-          messages: event.messages,
-          durationMs: event.durationMs
+          ...e.toolCall,
+          stepNumber: undefined as number | undefined,
+          messages: e.messages,
+          durationMs: e.toolExecutionMs
         };
         const ctx = (
-          event.success
-            ? { ...base, success: true as const, output: event.output }
-            : { ...base, success: false as const, error: event.error }
+          success
+            ? { ...base, success: true as const, output }
+            : { ...base, success: false as const, error }
         ) as ToolCallResultContext;
         await this.afterToolCall(ctx);
-        await this._pipelineExtensionToolCallFinish(event);
-      }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
+        await this._pipelineExtensionToolCallFinish({
+          toolCall: e.toolCall,
+          stepNumber: undefined,
+          durationMs: e.toolExecutionMs,
+          success,
+          output,
+          error
+        });
+      }) as OnToolExecutionEndCallback<ToolSet>
     });
 
     const outputPromise = wantsStructuredOutput

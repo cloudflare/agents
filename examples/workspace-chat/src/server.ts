@@ -6,7 +6,7 @@ import {
   convertToModelMessages,
   pruneMessages,
   tool,
-  stepCountIs
+  isStepCount
 } from "ai";
 import { z } from "zod";
 import {
@@ -49,7 +49,7 @@ export class WorkspaceChatAgent extends AIChatAgent {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: [
+      instructions: [
         "You are a helpful coding assistant with access to a persistent virtual filesystem and git.",
         "You have direct tools for simple file operations (readFile, writeFile, listDirectory, deleteFile, mkdir, glob).",
         "You have direct tools for git operations (gitInit, gitStatus, gitAdd, gitCommit, gitLog, gitDiff).",
@@ -248,7 +248,7 @@ export class WorkspaceChatAgent extends AIChatAgent {
           }
         })
       },
-      stopWhen: stepCountIs(10)
+      stopWhen: isStepCount(10)
     });
 
     return result.toUIMessageStreamResponse();

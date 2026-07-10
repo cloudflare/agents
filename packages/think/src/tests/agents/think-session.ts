@@ -815,20 +815,17 @@ export class ThinkTestAgent extends Think {
   async setTurnConfigTelemetry(): Promise<void> {
     this._telemetryEvents = [];
     this._turnConfigOverride = {
-      experimental_telemetry: {
+      // AI SDK v7: `experimental_telemetry` renamed to `telemetry`;
+      // `metadata` was removed from TelemetryOptions. functionId remains.
+      telemetry: {
         isEnabled: true,
         functionId: "think-test-turn",
-        metadata: { source: "think-test" },
         integrations: {
           onStart: (event) => {
-            this._telemetryEvents.push(
-              `start:${event.functionId}:${event.metadata?.source ?? ""}`
-            );
+            this._telemetryEvents.push(`start:${event.functionId ?? ""}`);
           },
-          onFinish: (event) => {
-            this._telemetryEvents.push(
-              `finish:${event.functionId}:${event.metadata?.source ?? ""}`
-            );
+          onEnd: (event) => {
+            this._telemetryEvents.push(`finish:${event.functionId ?? ""}`);
           }
         }
       }

@@ -18,14 +18,14 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@playwright/test": "^1.61.1",
     "@tanstack/ai": "0.38.0",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "vitest": "4.1.9",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",
     "@tanstack/ai": ">=0.8.0 <1.0.0",
-    "ai": "^6.0.0",
+    "ai": "^7.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {

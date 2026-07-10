@@ -12,7 +12,7 @@
   "dependencies": {
     "@cloudflare/think": "*",
     "agents": "*",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

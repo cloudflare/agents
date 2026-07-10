@@ -23,7 +23,7 @@
 
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
-import { streamText, tool, stepCountIs, type LanguageModel } from "ai";
+import { streamText, tool, isStepCount, type LanguageModel } from "ai";
 import { z } from "zod";
 
 type RunBinding = {
@@ -162,7 +162,7 @@ export async function passthroughProbe(
       prompt: opts.withTools
         ? `${prompt}\n\nAlso, what is the weather in Tokyo? Use the get_weather tool.`
         : prompt,
-      ...(tools ? { tools, stopWhen: stepCountIs(3) } : {})
+      ...(tools ? { tools, stopWhen: isStepCount(3) } : {})
     });
 
     const partTypes: Record<string, number> = {};
@@ -171,7 +171,7 @@ export async function passthroughProbe(
     let collected = "";
     let streamError: string | undefined;
 
-    for await (const part of result.fullStream) {
+    for await (const part of result.stream) {
       partTypes[part.type] = (partTypes[part.type] ?? 0) + 1;
       if (part.type === "text-delta") {
         // v6 uses `.text`; tolerate `.textDelta` from older shapes.

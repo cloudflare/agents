@@ -12,7 +12,7 @@ import {
   type VoiceTurnContext,
   type Transcriber
 } from "@cloudflare/voice";
-import { streamText, tool, stepCountIs } from "ai";
+import { streamText, tool, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
@@ -141,7 +141,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       model: workersAi(llmModel as Parameters<typeof workersAi>[0], {
         sessionAffinity: this.sessionAffinity
       }),
-      system: SYSTEM_PROMPT,
+      instructions: SYSTEM_PROMPT,
       messages: [
         ...context.messages.map((m) => ({
           role: m.role as "user" | "assistant",
@@ -227,11 +227,11 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
           }
         })
       },
-      stopWhen: stepCountIs(3),
+      stopWhen: isStepCount(3),
       abortSignal: context.signal
     });
 
-    return result.fullStream;
+    return result.stream;
   }
 
   async onCallStart(connection: Connection) {
