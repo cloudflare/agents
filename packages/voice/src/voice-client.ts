@@ -269,6 +269,8 @@ export class VoiceClient {
   #outputDeviceError: string | null = null;
   #lastCustomMessage: unknown = null;
   #audioFormat: VoiceAudioFormat | null = null;
+  /** Sample rate for raw pcm16 payloads; set from server `audio_config`. */
+  #sampleRate = 16000;
   #interimTranscript: string | null = null;
   #serverProtocolVersion: number | null = null;
   #inCall = false;
@@ -644,6 +646,14 @@ export class VoiceClient {
     return this.#audioFormat;
   }
 
+  /**
+   * The sample rate (Hz) the server declared for raw pcm16 payloads.
+   * Set when the server sends `audio_config` at call start. Defaults to 16000.
+   */
+  get sampleRate(): number {
+    return this.#sampleRate;
+  }
+
   // --- Voice protocol handler ---
 
   #handleJSONMessage(data: string): void {
@@ -667,6 +677,10 @@ export class VoiceClient {
       case "audio_config":
         this.#serverCallAcknowledged = true;
         this.#audioFormat = msg.format as VoiceAudioFormat;
+        this.#sampleRate =
+          typeof msg.sampleRate === "number" && msg.sampleRate > 0
+            ? msg.sampleRate
+            : 16000;
         break;
       case "status":
         this.#status = msg.status as VoiceStatus;
@@ -938,9 +952,9 @@ export class VoiceClient {
 
       let audioBuffer: AudioBuffer;
       if (this.#audioFormat === "pcm16") {
-        // Raw 16-bit LE mono PCM at 16kHz — manually construct AudioBuffer
+        // Raw 16-bit LE mono PCM — sample rate comes from server audio_config
         const int16 = new Int16Array(audioData);
-        audioBuffer = ctx.createBuffer(1, int16.length, 16000);
+        audioBuffer = ctx.createBuffer(1, int16.length, this.#sampleRate);
         const channel = audioBuffer.getChannelData(0);
         for (let i = 0; i < int16.length; i++) {
           channel[i] = int16[i] / 32768;

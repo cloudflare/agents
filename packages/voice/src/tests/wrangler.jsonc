@@ -28,6 +28,10 @@
         "name": "TestAiSdkTextStreamVoiceAgent"
       },
       {
+        "class_name": "TestPcm24kVoiceAgent",
+        "name": "TestPcm24kVoiceAgent"
+      },
+      {
         "class_name": "TestVoiceInputAgent",
         "name": "TestVoiceInputAgent"
       },
@@ -45,6 +49,7 @@
         "TestEmptyResponseVoiceAgent",
         "TestAiSdkFullStreamVoiceAgent",
         "TestAiSdkTextStreamVoiceAgent",
+        "TestPcm24kVoiceAgent",
         "TestVoiceInputAgent",
         "TestRejectCallVoiceInputAgent"
       ],

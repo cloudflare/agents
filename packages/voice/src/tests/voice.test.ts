@@ -247,6 +247,23 @@ describe("VoiceAgent — protocol", () => {
       unknown
     >;
     expect(config.format).toBe("mp3");
+    expect(config.sampleRate).toBe(16000);
+    ws.close();
+  });
+
+  it("sends configured sampleRate in audio_config", async () => {
+    const { ws } = await connectWS(
+      `/agents/test-pcm24k-voice-agent/voice-test-${++instanceCounter}`
+    );
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    const config = (await waitForType(ws, "audio_config")) as Record<
+      string,
+      unknown
+    >;
+    expect(config.format).toBe("pcm16");
+    expect(config.sampleRate).toBe(24000);
     ws.close();
   });
 });

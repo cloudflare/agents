@@ -63,6 +63,7 @@ class FakeAudioContext {
   currentTime = 0;
   source: FakeAudioBufferSourceNode | null = null;
   sources: FakeAudioBufferSourceNode[] = [];
+  createdBuffers: Array<{ length: number; sampleRate: number }> = [];
   deferDecode = false;
   pendingDecode: (() => void) | null = null;
   destination = {};
@@ -86,6 +87,7 @@ class FakeAudioContext {
     length: number,
     sampleRate: number
   ): AudioBuffer {
+    this.createdBuffers.push({ length, sampleRate });
     return {
       duration: length / sampleRate,
       getChannelData: () => new Float32Array(length)
@@ -819,15 +821,48 @@ describe("VoiceClient gapless playback", () => {
     return new ArrayBuffer(1600 * 2);
   }
 
-  function startPcm16Call(): { transport: MockTransport; client: VoiceClient } {
+  function startPcm16Call(sampleRate?: number): {
+    transport: MockTransport;
+    client: VoiceClient;
+  } {
     const transport = new MockTransport();
     const client = new VoiceClient({ agent: "test-agent", transport });
     client.connect();
     transport.receive(
-      JSON.stringify({ type: "audio_config", format: "pcm16" })
+      JSON.stringify({
+        type: "audio_config",
+        format: "pcm16",
+        ...(sampleRate !== undefined ? { sampleRate } : {})
+      })
     );
     return { transport, client };
   }
+
+  it("uses the sampleRate from audio_config when playing pcm16", async () => {
+    const { transport, client } = startPcm16Call(24000);
+    expect(client.sampleRate).toBe(24000);
+
+    // 2400 samples at 24kHz = 0.1s
+    transport.receive(new ArrayBuffer(2400 * 2));
+    await waitForSourceCount(1);
+
+    expect(audioContext.createdBuffers).toEqual([
+      { length: 2400, sampleRate: 24000 }
+    ]);
+    expect(audioContext.sources[0]?.startedAt).toBe(0);
+  });
+
+  it("defaults pcm16 sampleRate to 16000 when audio_config omits it", async () => {
+    const { transport, client } = startPcm16Call();
+    expect(client.sampleRate).toBe(16000);
+
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(1);
+
+    expect(audioContext.createdBuffers).toEqual([
+      { length: 1600, sampleRate: 16000 }
+    ]);
+  });
 
   it("schedules consecutive chunks back-to-back instead of waiting for ended", async () => {
     const { transport } = startPcm16Call();

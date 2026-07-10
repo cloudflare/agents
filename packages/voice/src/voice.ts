@@ -121,6 +121,14 @@ export interface VoiceAgentOptions {
   historyLimit?: number;
   /** Audio format used for binary audio payloads sent to the client. @default "mp3" */
   audioFormat?: VoiceAudioFormat;
+  /**
+   * Sample rate (Hz) of raw PCM audio payloads sent to the client.
+   * Declared in the `audio_config` message so the client can play `pcm16`
+   * at the provider's native rate (e.g. 24000 for Gemini TTS).
+   * Encoded formats (mp3/wav/opus) carry their own rate and ignore this.
+   * @default 16000
+   */
+  sampleRate?: number;
   /** Max conversation messages to keep in SQLite. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
 }
@@ -129,6 +137,7 @@ export interface VoiceAgentOptions {
 
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
+const DEFAULT_SAMPLE_RATE = 16000;
 
 // --- Mixin ---
 
@@ -576,9 +585,11 @@ export function withVoice<TBase extends AgentLike>(
         this.#keepAliveDispose.set(connection.id, dispose);
 
         const configuredFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
+        const configuredSampleRate = opt("sampleRate", DEFAULT_SAMPLE_RATE);
         this.#sendJSON(connection, {
           type: "audio_config",
-          format: configuredFormat
+          format: configuredFormat,
+          sampleRate: configuredSampleRate
         });
       } catch (error) {
         await this.#handleStartupFailure(
