@@ -677,9 +677,10 @@ export class VoiceClient {
       case "audio_config":
         this.#serverCallAcknowledged = true;
         this.#audioFormat = msg.format as VoiceAudioFormat;
-        if (typeof msg.sampleRate === "number" && msg.sampleRate > 0) {
-          this.#sampleRate = msg.sampleRate;
-        }
+        this.#sampleRate =
+          typeof msg.sampleRate === "number" && msg.sampleRate > 0
+            ? msg.sampleRate
+            : 16000;
         break;
       case "status":
         this.#status = msg.status as VoiceStatus;
