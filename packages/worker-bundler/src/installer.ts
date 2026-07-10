@@ -175,7 +175,7 @@ export async function installDependencies(
       const trimmed = dep.trim();
       if (!trimmed) continue;
 
-      //once base functionality is working, test this against more elaborate version strings
+      // once base functionality is working, test this against more elaborate version strings
       const match = trimmed.match(/^([A-Za-z0-9._-]+)(.*)$/);
       if (!match) {
         result.warnings.push(
@@ -183,9 +183,9 @@ export async function installDependencies(
         );
         continue;
       }
-      //At present, versionSpec comes out including the leading comparison operator; this is being left in as it will likely be desirable to keep these together
+      // At present, versionSpec comes out including the leading comparison operator; this is being left in as it will likely be desirable to keep these together
       const [, name, versionSpec] = match;
-      depsToInstall[name] = versionSpec.trim() || "*"; //the '*' default was done by kimi, reassess if it's not a good pattern
+      depsToInstall[name] = versionSpec.trim() || "*"; // the '*' default was done by kimi, reassess if it's not a good pattern
     }
 
     if (Object.keys(depsToInstall).length === 0) {
@@ -207,7 +207,7 @@ export async function installDependencies(
           fileSystem,
           installedPackages,
           inProgress,
-          PYPI_JSON_API //hardcoding this for now to keep the implementation light
+          PYPI_JSON_API // hardcoding this for now to keep the implementation light
         )
       )
     );

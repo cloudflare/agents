@@ -146,11 +146,12 @@ export async function createWorker(
   if (entryPoint.endsWith(".py")) {
     const modules: Modules = {};
     for (const path of fileSystem.list()) {
-      if (path !== "pyproject.toml") {
-        const content = fileSystem.read(path);
-        if (content !== null) {
-          modules[path] = content;
-        }
+      if (path === "pyproject.toml") {
+        continue;
+      }
+      const content = fileSystem.read(path);
+      if (content !== null) {
+        modules[path] = content;
       }
     }
 
