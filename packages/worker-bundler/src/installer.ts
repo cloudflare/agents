@@ -192,7 +192,7 @@ export async function installDependencies(
       Object.entries(depsToInstall).map(([depName, depVersion]) =>
         installPythonPackage(
           depName,
-          depVersion,
+          // depVersion, // see relevant comment in installPythonPackage argument list
           result,
           fileSystem,
           installedPackages,
@@ -313,7 +313,7 @@ async function installPackage(
  */
 async function installPythonPackage(
   name: string,
-  _versionRange: string,
+  // _versionRange: string, // remove fully if package resolver impl. ends up not going through this path
   result: InstallResult,
   fileSystem: FileSystem,
   installedPackages: Map<string, string>,
