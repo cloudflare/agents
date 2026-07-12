@@ -1,0 +1,20 @@
+{
+  "name": "@cloudflare/agents-rebuild",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Clean-room rebuild of Think and the Agent base class with a ports-and-adapters architecture",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
