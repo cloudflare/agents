@@ -4292,8 +4292,25 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     // Resolved zero-RTT via `_rootAlarmOwner`; initialize before sweeping
-    // schedule/facet-run storage.
+    // schedule/facet-run storage. Local callers (`deleteSubAgent`,
+    // `_cf_dispatchScheduledCallback`, `_cf_destroyDescendantFacet`) reach the
+    // work via `_cleanupFacetPrefixImpl` directly so they never re-enter init —
+    // `deleteSubAgent()` can run inside `onStart()`, where re-triggering init
+    // would nest `blockConcurrencyWhile()`.
     await this.__unsafe_ensureInitialized();
+    return this._cleanupFacetPrefixImpl(ownerPath);
+  }
+
+  /**
+   * Body of {@link _cf_cleanupFacetPrefix} without the init guard, so local
+   * `this.` callers on an already-resolved instance don't re-trigger
+   * framework init (which would deadlock or nest `blockConcurrencyWhile()`
+   * when invoked mid-`onStart()`).
+   * @internal
+   */
+  private async _cleanupFacetPrefixImpl(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<void> {
     const rows = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
       WHERE owner_path IS NOT NULL
@@ -6086,7 +6103,7 @@ export class Agent<
         const root = await this._rootAlarmOwner();
         await root._cf_cleanupFacetPrefix(stalePath);
       } else {
-        await this._cf_cleanupFacetPrefix(stalePath);
+        await this._cleanupFacetPrefixImpl(stalePath);
       }
       return false;
     }
@@ -6205,7 +6222,7 @@ export class Agent<
     // upfront so we don't have to make an extra round trip back from
     // each intermediate hop.
     if (this._parentPath.length === 0) {
-      await this._cf_cleanupFacetPrefix(targetPath);
+      await this._cleanupFacetPrefixImpl(targetPath);
     }
 
     if (selfPath.length === targetPath.length - 1) {
@@ -10755,7 +10772,7 @@ export class Agent<
       const root = await this._rootAlarmOwner();
       await root._cf_cleanupFacetPrefix(childPath);
     } else {
-      await this._cf_cleanupFacetPrefix(childPath);
+      await this._cleanupFacetPrefixImpl(childPath);
     }
 
     // Idempotent: make `ctx.facets.delete` tolerant of missing keys.

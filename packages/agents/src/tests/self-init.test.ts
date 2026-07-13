@@ -18,6 +18,60 @@ function coldStub<T extends Rpc.DurableObjectBranded | undefined>(
   return namespace.get(namespace.idFromName(name));
 }
 
+type AgentPathStep = { className: string; name: string };
+
+// The internal facet RPC surfaces (`_cf_*`). These are NOT auto-wrapped by
+// `withAgentContext` (the wrapper skips every `_`-prefixed / base-class
+// method), so each carries its own `await this.__unsafe_ensureInitialized()`
+// guard. A cold stub that reaches one of these must still observe a fully
+// initialized agent.
+interface InternalFacetSurface {
+  _cf_scheduleForFacet(
+    ownerPath: AgentPathStep[],
+    when: number,
+    callback: string
+  ): Promise<unknown>;
+  _cf_dispatchScheduledCallback(
+    ownerPath: AgentPathStep[],
+    row: unknown
+  ): Promise<boolean>;
+  _cf_broadcastToSubAgent(
+    ownerPath: AgentPathStep[],
+    message: string
+  ): Promise<void>;
+}
+
+// Read the `name` row `onStart()` writes into the `self_init_probe` table,
+// directly from durable SQL. `runInDurableObject` hands back the raw
+// instance WITHOUT running an RPC entry surface, so — unlike `stub.probe()`
+// — it does NOT itself trigger `onStart()` (verified: on a never-addressed
+// cold instance it reads `onStartCount === 0` and no probe table). That
+// makes this a faithful observer of whether the *internal* call under test
+// ran init: with the guard the row is present, without it the table never
+// exists and this returns null.
+async function readSelfInitProbeName(
+  stub: DurableObjectStub<SelfInitAgent>
+): Promise<string | null> {
+  return runInDurableObject(stub, (instance) => {
+    const { sql } = (
+      instance as unknown as {
+        ctx: {
+          storage: { sql: { exec: (q: string) => Iterable<{ v: string }> } };
+        };
+      }
+    ).ctx.storage;
+    try {
+      const rows = [
+        ...sql.exec("SELECT v FROM self_init_probe WHERE k = 'name'")
+      ];
+      return rows.at(0)?.v ?? null;
+    } catch {
+      // Table absent — `onStart()` never ran, so the guard did not fire.
+      return null;
+    }
+  });
+}
+
 describe("RPC entry self-initialization", () => {
   it("initializes a cold stub before running a user-defined RPC method", async () => {
     const name = `self-init-user-${crypto.randomUUID()}`;
@@ -45,12 +99,24 @@ describe("RPC entry self-initialization", () => {
     expect(result.reentrantResult).toBe(83);
   });
 
-  it("initializes exactly once under two concurrent cold RPCs", async () => {
+  it("initializes exactly once across two overlapping cold RPCs", async () => {
     const name = `self-init-concurrent-${crypto.randomUUID()}`;
     const stub = coldStub(env.SelfInitAgent, name);
 
     const [a, b] = await Promise.all([stub.probe(), stub.probe()]);
 
+    // This asserts the observable exactly-once contract (idempotence), NOT the
+    // `_selfInitPromise` memo directly: the memo still passes this test if
+    // removed. The first cold entry runs `__unsafe_ensureInitialized()`, whose
+    // `blockConcurrencyWhile` holds the DO input gate shut until onStart
+    // resolves; the second RPC therefore cannot begin executing until init is
+    // already complete, at which point it takes the warm fast path. So true
+    // concurrent cold entry — two calls in the wrapper's cold path before init
+    // finishes — cannot be reproduced in-isolate here. The memo is
+    // defense-in-depth for a genuine interleaving (partyserver's
+    // `#ensureInitialized` re-runs onStart under a second entry — its
+    // top-of-function status check is not re-evaluated inside
+    // `blockConcurrencyWhile`), which is not what this test drives.
     expect(a.onStartCount).toBe(1);
     expect(b.onStartCount).toBe(1);
   });
@@ -135,5 +201,90 @@ describe("RPC entry self-initialization", () => {
 
     expect(probe.onStartCount).toBe(1);
     expect(probe.storedFrom).toBe("cold@example.com");
+  });
+
+  it("allows deleteSubAgent() from inside onStart() on a non-facet agent", async () => {
+    // Regression: on a top-level (non-facet) agent, `deleteSubAgent()` runs
+    // `_cf_cleanupFacetPrefix`'s work locally. Once that method
+    // self-initialized on RPC entry, calling it during onStart re-entered
+    // framework init and threw "blockConcurrencyWhile() calls are nested too
+    // deeply", aborting init. The local path now routes to the unguarded
+    // `_cleanupFacetPrefixImpl`, so onStart completes.
+    const name = `self-init-delete-onstart-${crypto.randomUUID()}`;
+    const stub = coldStub(env.SelfInitDeleteInOnStartAgent, name);
+
+    // A cold probe forces onStart; if the regression returns, onStart rejects
+    // and this call rejects with it.
+    const result = await stub.probe();
+
+    expect(result.onStartCount).toBe(1);
+    expect(result.completed).toBe("yes");
+  });
+});
+
+// The bulk of the self-init work is ~22 internal `_cf_*` facet RPC surfaces,
+// each guarded by its own `await this.__unsafe_ensureInitialized()`. The
+// warm sub-agent / schedule suites only ever reach these once the DO is
+// already initialized (the parent addresses the facet first), so a dropped
+// guard is invisible there. These tests exercise the real cold flow: the
+// first-ever contact with the DO is one of these internal surfaces. Each
+// asserts that `onStart()`'s durable side effect (the `self_init_probe`
+// row) exists afterwards — which only holds if the surface ran init.
+describe("RPC entry self-initialization (internal facet surfaces)", () => {
+  it("initializes a cold stub before a facet-schedule write (_cf_scheduleForFacet)", async () => {
+    const name = `self-init-cf-schedule-${crypto.randomUUID()}`;
+    const stub = coldStub(env.SelfInitAgent, name);
+    const selfPath: AgentPathStep[] = [{ className: "SelfInitAgent", name }];
+
+    // First-ever contact is the internal schedule-write RPC. Its target
+    // table (`cf_agents_schedules`) is created in the constructor, not
+    // `onStart()`, so the insert would succeed even with the guard dropped —
+    // the guard is proven only by the onStart-created probe row below.
+    // A number `when` is a delay in seconds; 1 hour keeps the alarm from
+    // firing inside the test window.
+    await (stub as unknown as InternalFacetSurface)._cf_scheduleForFacet(
+      selfPath,
+      3600,
+      "noop"
+    );
+
+    expect(await readSelfInitProbeName(stub)).toBe(name);
+  });
+
+  it("initializes a cold stub before a dispatched callback (_cf_dispatchScheduledCallback)", async () => {
+    const name = `self-init-cf-dispatch-${crypto.randomUUID()}`;
+    const stub = coldStub(env.SelfInitAgent, name);
+    // A path one level below self, addressing a sub-agent that was never
+    // spawned: the dispatch walks one step, finds no such child, and prunes
+    // the stale prefix (returns false) — reaching the branch WITHOUT needing
+    // a real callback row. `selfPath` is only correct once `onStart()` has
+    // hydrated the agent, so a dropped guard breaks this path.
+    const ownerPath: AgentPathStep[] = [
+      { className: "SelfInitAgent", name },
+      { className: "NoSuchChild", name: "absent" }
+    ];
+
+    const executed = await (
+      stub as unknown as InternalFacetSurface
+    )._cf_dispatchScheduledCallback(ownerPath, {});
+
+    expect(executed).toBe(false);
+    expect(await readSelfInitProbeName(stub)).toBe(name);
+  });
+
+  it("initializes a cold stub before a sub-agent broadcast (_cf_broadcastToSubAgent)", async () => {
+    const name = `self-init-cf-broadcast-${crypto.randomUUID()}`;
+    const stub = coldStub(env.SelfInitAgent, name);
+    const selfPath: AgentPathStep[] = [{ className: "SelfInitAgent", name }];
+
+    // No connections exist, so the broadcast is a no-op — but reaching it at
+    // all depends on `_isFacet`/connection state that only `onStart()`
+    // hydrates, and the surface must self-initialize first.
+    await (stub as unknown as InternalFacetSurface)._cf_broadcastToSubAgent(
+      selfPath,
+      "hello"
+    );
+
+    expect(await readSelfInitProbeName(stub)).toBe(name);
   });
 });

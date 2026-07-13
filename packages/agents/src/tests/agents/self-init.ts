@@ -101,3 +101,44 @@ export class SelfInitEmailAgent extends Agent<Cloudflare.Env> {
     throw error;
   }
 }
+
+// Facet-only child referenced by name only — never spawned, so it needs no
+// binding. `deleteSubAgent` uses it solely for `cls.name`.
+class SelfInitDeleteChild extends Agent<Cloudflare.Env> {}
+
+/**
+ * Regression fixture for `deleteSubAgent()` called from inside `onStart()` on
+ * a non-facet (top-level) agent. That path runs `this._cf_cleanupFacetPrefix`
+ * locally; once `_cf_cleanupFacetPrefix` self-initialized on RPC entry, a
+ * local call mid-`onStart()` re-entered framework init and threw
+ * "blockConcurrencyWhile() calls are nested too deeply", aborting init. The
+ * fix routes local callers to the unguarded `_cleanupFacetPrefixImpl`. If the
+ * regression returns, `onStart()` rejects and a cold `probe()` call rejects
+ * with it.
+ */
+export class SelfInitDeleteInOnStartAgent extends Agent<Cloudflare.Env> {
+  onStartCount = 0;
+
+  async onStart() {
+    this.onStartCount++;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS self_init_delete_probe (k TEXT PRIMARY KEY, v TEXT)`;
+    // The load-bearing call: deleting a never-spawned sub-agent during
+    // onStart must not re-trigger init.
+    await this.deleteSubAgent(SelfInitDeleteChild, "never-spawned");
+    // Only reached if the delete above did not throw.
+    this
+      .sql`INSERT OR REPLACE INTO self_init_delete_probe (k, v) VALUES ('completed', 'yes')`;
+  }
+
+  probe(): { onStartCount: number; completed: string | undefined } {
+    const rows = this.sql<{
+      v: string;
+    }>`SELECT v FROM self_init_delete_probe WHERE k = 'completed'`;
+    return { onStartCount: this.onStartCount, completed: rows.at(0)?.v };
+  }
+
+  override onError(error: unknown): void {
+    throw error;
+  }
+}

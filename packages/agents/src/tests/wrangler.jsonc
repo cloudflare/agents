@@ -273,6 +273,10 @@
       {
         "class_name": "SelfInitEmailAgent",
         "name": "SelfInitEmailAgent"
+      },
+      {
+        "class_name": "SelfInitDeleteInOnStartAgent",
+        "name": "SelfInitDeleteInOnStartAgent"
       }
     ]
   },
@@ -381,7 +385,8 @@
         "TestUnboundParentAgent",
         "TestMinifiedNameParentAgent",
         "SelfInitAgent",
-        "SelfInitEmailAgent"
+        "SelfInitEmailAgent",
+        "SelfInitDeleteInOnStartAgent"
       ],
       "tag": "v1"
     }
