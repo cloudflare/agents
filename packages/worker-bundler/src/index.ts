@@ -159,7 +159,7 @@ export async function createWorker(
       mainModule: entryPoint,
       modules,
       wranglerConfig: {
-        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-01-01",
+        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-07-02",
         compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
           "python_workers"
         ]
