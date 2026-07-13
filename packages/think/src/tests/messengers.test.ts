@@ -11,6 +11,7 @@ import {
   chatSdkMessenger,
   defaultChatSdkEvent,
   defaultConversationName,
+  resolveSelfMention,
   deliverMessengerReply,
   EMPTY_MESSENGER_RESPONSE,
   ERROR_MESSENGER_RESPONSE,
@@ -337,6 +338,60 @@ describe("think messengers core", () => {
           "Source message: source-message"
         ].join("\n")
       }
+    ]);
+  });
+
+  it("rewrites the bot's own self-mention to the bot handle", () => {
+    expect(
+      resolveSelfMention("@U0BD9EYL52S hi friend", "U0BD9EYL52S", "think_bot")
+    ).toBe("@think_bot hi friend");
+    expect(
+      resolveSelfMention("hey <@U0BD9EYL52S> there", "U0BD9EYL52S", "think_bot")
+    ).toBe("hey @think_bot there");
+    expect(
+      resolveSelfMention(
+        "hey <@!U0BD9EYL52S> there",
+        "U0BD9EYL52S",
+        "think_bot"
+      )
+    ).toBe("hey @think_bot there");
+  });
+
+  it("leaves other users' resolved mentions untouched", () => {
+    expect(
+      resolveSelfMention(
+        "@U0BD9EYL52S ask @Ada about it",
+        "U0BD9EYL52S",
+        "think_bot"
+      )
+    ).toBe("@think_bot ask @Ada about it");
+  });
+
+  it("is a no-op when the adapter exposes no botUserId", () => {
+    expect(resolveSelfMention("@U0BD9EYL52S hi", undefined, "think_bot")).toBe(
+      "@U0BD9EYL52S hi"
+    );
+  });
+
+  it("resolves the self-mention in default events using the bot handle", () => {
+    const [definition] = normalizeMessengers({
+      slack: chatSdkMessenger({
+        adapter: fakeAdapter({ botUserId: "U0BD9EYL52S" }),
+        provider: "slack",
+        userName: "think_bot",
+        verifyWebhook: false
+      })
+    });
+
+    const event = defaultChatSdkEvent(definition!, {
+      eventKind: "mention",
+      message: fakeMessage("@U0BD9EYL52S hi friend"),
+      thread: fakeThread("slack:C123")
+    });
+
+    expect(event.message?.text).toBe("@think_bot hi friend");
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      { type: "text", text: "Ada Lovelace: @think_bot hi friend" }
     ]);
   });
 
@@ -958,6 +1013,24 @@ function fakeAdapter(overrides: Partial<Adapter> = {}): Adapter {
     userName: "fake_bot",
     ...overrides
   } as Adapter;
+}
+
+function fakeMessage(text: string) {
+  return {
+    attachments: [],
+    author: {
+      fullName: "Ada Lovelace",
+      isBot: false,
+      isMe: false,
+      userId: "slack:user",
+      userName: "ada"
+    },
+    id: "message-1",
+    isMention: true,
+    metadata: { dateSent: new Date(0), edited: false },
+    raw: {},
+    text
+  } as never;
 }
 
 function fakeThread(id: string) {

@@ -682,16 +682,56 @@ export function defaultChatSdkEvent(
   definition: NormalizedMessengerDefinition,
   input: ChatSdkMessengerEventInput
 ): MessengerEvent {
+  const message = input.message && toMessengerMessage(input.message);
+  if (message) {
+    message.text = resolveSelfMention(
+      message.text,
+      definition.adapter.botUserId,
+      definition.userName
+    );
+  }
   return {
     capabilities: definition.capabilities ?? {},
     action: input.action && toMessengerAction(input.action),
     kind: input.eventKind,
-    message: input.message && toMessengerMessage(input.message),
+    message,
     messengerId: definition.id,
     provider: definition.provider,
     raw: input.raw ?? input.message?.raw,
     thread: toMessengerThread(input.thread)
   };
+}
+
+/**
+ * Rewrite the bot's own unresolved self-mention to `@<userName>`.
+ *
+ * Adapters resolve every user's `<@id>` mention to a readable `@DisplayName`
+ * except the bot's own, which is deliberately left as a raw id token so mention
+ * detection can still find it. That raw id is therefore the only unresolved
+ * mention that can survive in the text, so once it has served its purpose we
+ * replace it with the bot's configured handle before the model sees it —
+ * reconstructing the readable `@handle` the sender originally typed. Handles
+ * both the angle-bracket form (`<@U123>` / `<@!U123>`, Slack/Discord) and the
+ * bare `@U123` form some adapters normalize to. No-op when the adapter does not
+ * expose a `botUserId`.
+ */
+export function resolveSelfMention(
+  text: string,
+  botUserId: string | undefined,
+  userName: string
+): string {
+  if (!botUserId) {
+    return text;
+  }
+  const id = escapeRegExp(botUserId);
+  const replacement = `@${userName}`;
+  return text
+    .replace(new RegExp(`<@!?${id}>`, "g"), replacement)
+    .replace(new RegExp(`@${id}\\b`, "g"), replacement);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function toMessengerAction(action: ChatActionEvent): MessengerAction {

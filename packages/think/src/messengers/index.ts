@@ -4,6 +4,7 @@ export {
   defaultConversationName,
   idempotencyKeyForEvent,
   normalizeMessengers,
+  resolveSelfMention,
   ThinkMessengerRuntime,
   ThinkMessengerStateAgent,
   toMessengerAttachment,
