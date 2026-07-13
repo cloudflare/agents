@@ -158,9 +158,7 @@ export async function installDependencies(
         )
       )
     );
-  }
-
-  if (pyprojectTomlContent) {
+  } else if (pyprojectTomlContent) {
     await installDependnciesPython(pyprojectTomlContent, result, fileSystem);
   }
   return result;
