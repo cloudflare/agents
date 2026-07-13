@@ -1,5 +1,30 @@
 # @cloudflare/think
 
+## 0.13.0
+
+### Minor Changes
+
+- [#1907](https://github.com/cloudflare/agents/pull/1907) [`38bf87a`](https://github.com/cloudflare/agents/commit/38bf87a3e887de328f22b1f8fe26d53de1c5e72d) Thanks [@cjol](https://github.com/cjol)! - feat(think): add channelSpeakerLabel option to MessengerDefinition for configurable channel speaker prefixing
+
+  Channel (non-DM) messages and action events are prefixed with the speaker label
+  so the model can attribute multi-user traffic; direct messages never get a
+  prefix. Previously action events were labelled even in DMs — they now follow the
+  same channel-only rule as regular messages.
+
+- [#1921](https://github.com/cloudflare/agents/pull/1921) [`7e0c069`](https://github.com/cloudflare/agents/commit/7e0c069226f0c953a58de22481fd6cec2608e75b) Thanks [@cjol](https://github.com/cjol)! - Add `ChatOptions.metadata` — a per-turn, recovery-safe metadata carrier.
+
+  Server-side callers of `chat()` / `chatWithMessengerContext()` can now attach immutable per-turn metadata (e.g. "which authenticated principal initiated this turn"). It is stamped onto the turn's user message alongside `channel` (as `metadata.turnMetadata`) so a recovered/continued turn re-resolves it from durable history, and is readable turn-scoped via the new `Think.activeTurnMetadata` getter.
+
+  The trust model mirrors the channel stamp: the reserved metadata keys `channel` and `turnMetadata` are now stripped from client-supplied messages at intake, so a client can never forge server-written turn context (this also closes the prior gap where a client message could carry a forged `metadata.channel`). This lets messenger/RPC entry points carry correct multi-user identity without either mutable agent-wide state (a last-writer-wins race) or the submission path (which loses incremental streaming).
+
+### Patch Changes
+
+- [#1920](https://github.com/cloudflare/agents/pull/1920) [`0235fc9`](https://github.com/cloudflare/agents/commit/0235fc926f6b8ebdd2f7922dc9c5fa025c0a8c9a) Thanks [@cjol](https://github.com/cjol)! - Rewrite the bot's own unresolved self-mention in messenger events to its readable handle before the model sees it.
+
+  When a user @-mentions a Think messenger bot, the triggering message leads with the bot's own mention. Adapters resolve every other user's mention to `@DisplayName` but leave the bot's own as a raw user-id token (for example, Slack's `@U0BD9EYL52S`), which small models can misread as a third party the sender was trying to reach. Think now rewrites that surviving self-mention to `@<userName>` (the bot handle already required on every messenger) in `defaultChatSdkEvent`, reconstructing the `@handle` the sender originally typed.
+
+  Adds the exported `resolveSelfMention` helper. Rewriting only applies when the adapter exposes a `botUserId`, so handle-based adapters (for example, Telegram) are unaffected. No new configuration is required.
+
 ## 0.12.1
 
 ### Patch Changes
