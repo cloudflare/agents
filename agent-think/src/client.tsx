@@ -6,8 +6,8 @@
  * left sidebar lists every thread in reverse-chronological order (ChatGPT
  * style); picking one routes to `/thread/:session`, which connects to that
  * ThinkAgent Durable Object over the agents WebSocket and renders the live
- * message stream. It is a viewer: there is no input box, because runs are
- * driven by the GitHub `@agent-think` command, not the browser.
+ * message stream. New tasks are driven by the GitHub `@agent-think` command;
+ * the command center can continue a failed durable run in place.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -248,11 +248,15 @@ function aggregateRepos(threads: ThreadMeta[]): RepoAgg[] {
 function CommandCenterView({
   threads,
   status,
-  onOpen
+  onOpen,
+  onContinue,
+  continuing
 }: {
   threads: ThreadMeta[];
   status: ConnectionStatus;
   onOpen: (session: string) => void;
+  onContinue: (thread: ThreadMeta) => void;
+  continuing: string | null;
 }) {
   const running = threads.filter((t) => t.status === "running").length;
   const errored = threads.filter((t) => t.status === "error").length;
@@ -318,27 +322,34 @@ function CommandCenterView({
         ) : (
           <div className="runs">
             {threads.map((t) => (
-              <button
-                key={t.session}
-                className="run"
-                onClick={() => onOpen(t.session)}
-              >
-                <span className={`run__dot run__dot--${t.status}`} />
-                <span className="run__title">
-                  {t.repo}#{t.issueNumber}
-                </span>
-                <span className="run__instruction">
-                  {t.status === "error" && t.lastError
-                    ? t.lastError
-                    : (t.issueTitle ?? t.instruction)}
-                </span>
-                <RequesterAvatar thread={t} />
-                <span className="run__meta">
-                  {t.tools} tools
-                  {t.toolErrors > 0 ? ` · ${t.toolErrors} err` : ""} ·{" "}
-                  {threadStatusLabel(t)} · {relativeTime(t.updatedAt)}
-                </span>
-              </button>
+              <div key={t.session} className="run">
+                <button className="run__open" onClick={() => onOpen(t.session)}>
+                  <span className={`run__dot run__dot--${t.status}`} />
+                  <span className="run__title">
+                    {t.repo}#{t.issueNumber}
+                  </span>
+                  <span className="run__instruction">
+                    {t.status === "error" && t.lastError
+                      ? t.lastError
+                      : (t.issueTitle ?? t.instruction)}
+                  </span>
+                  <RequesterAvatar thread={t} />
+                  <span className="run__meta">
+                    {t.tools} tools
+                    {t.toolErrors > 0 ? ` · ${t.toolErrors} err` : ""} ·{" "}
+                    {threadStatusLabel(t)} · {relativeTime(t.updatedAt)}
+                  </span>
+                </button>
+                {t.status === "error" && (
+                  <button
+                    className="run__continue"
+                    disabled={continuing === t.session}
+                    onClick={() => onContinue(t)}
+                  >
+                    {continuing === t.session ? "Continuing…" : "Continue"}
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -358,6 +369,7 @@ function App() {
   const [ccStatus, setCcStatus] = useState<ConnectionStatus>("connecting");
   const [cc, setCc] = useState<CommandCenterState>({ threads: {} });
   const [query, setQuery] = useState("");
+  const [continuing, setContinuing] = useState<string | null>(null);
 
   useAgent<CommandCenterState>({
     // Kebab-case of the DO binding `CommandCenter`; one shared instance.
@@ -400,6 +412,27 @@ function App() {
   const navigate = (to: string) => {
     window.history.pushState(null, "", to);
     setPath(to);
+  };
+
+  const continueThread = async (thread: ThreadMeta) => {
+    const accepted = window.confirm(
+      "Continue this failed run using its existing transcript and workspace? " +
+        "Older runs may still need a fresh GitHub mention if their installation token has expired."
+    );
+    if (!accepted) return;
+    setContinuing(thread.session);
+    try {
+      const response = await fetch(
+        `/api/command-center/continue/${encodeURIComponent(thread.session)}`,
+        { method: "POST" }
+      );
+      const result = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Continuation failed");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setContinuing(null);
+    }
   };
 
   const session = sessionFromPath(path);
@@ -476,6 +509,8 @@ function App() {
           threads={threads}
           status={ccStatus}
           onOpen={(s) => navigate(`/thread/${s}`)}
+          onContinue={(thread) => void continueThread(thread)}
+          continuing={continuing}
         />
       )}
     </div>

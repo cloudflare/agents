@@ -34,10 +34,9 @@ import {
 import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import type { LanguageModel, ToolSet } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
-import { openai } from "workers-ai-provider/openai";
 import { getAgentByName } from "agents";
 import type { CommandCenterAgent } from "./command-center";
+import { createAgentThinkModel } from "./model";
 import { releaseContainer, resolveContainerId } from "./pool";
 import { createBashTool } from "./tools/bash";
 import {
@@ -60,14 +59,6 @@ const CONTEXT_KEY = "agent-think-context";
 // resetSession aborts the isolate AFTER its RPC response has been delivered;
 // this is the grace window for that ack, not a tuning knob.
 const RESET_ABORT_DELAY_MS = 100;
-// GPT-5.5 (medium reasoning) through AI Gateway's model catalog — Unified
-// Billing over the AI binding, no provider key. `reasoning_effort` is a
-// first-class workers-ai-provider model setting forwarded into the request
-// (verified live: completion_tokens_details.reasoning_tokens > 0).
-// Fallback if unified-billing credits run dry (gateway 402s):
-// MODEL_ID = "@cf/moonshotai/kimi-k2.7-code" bills via Workers AI instead.
-const MODEL_ID = "openai/gpt-5.5";
-const REASONING_EFFORT = "medium";
 
 /** Per-issue run context, set by `dispatch` before the turn is submitted. */
 export interface RunContext extends RunTarget {
@@ -136,7 +127,11 @@ function agentThinkInstructions(ctx: RunContext | null): string | null {
   ].join("\n");
 }
 
-class ThinkBase extends Think<Env> {}
+interface AgentThinkEnv extends Env {
+  CLOUDFLARE_AIG_TOKEN?: string;
+}
+
+class ThinkBase extends Think<AgentThinkEnv> {}
 
 export class ThinkAgent extends ThinkBase {
   // Think's own chat recovery is the durability layer. Its terminal hook must
@@ -171,7 +166,7 @@ export class ThinkAgent extends ThinkBase {
   #cleanupPromise: Promise<void> | null = null;
   #reportTail: Promise<void> = Promise.resolve();
 
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: AgentThinkEnv) {
     super(ctx, env);
     // This Agent DO OWNS the Workspace (SQLite VFS state); the container is a
     // SEPARATE `Sandbox` DO handed out by the warm pool. The backend's
@@ -283,6 +278,35 @@ export class ThinkAgent extends ThinkBase {
    *
    * Returns the submission id so the caller can correlate logs.
    */
+  async continueRun(): Promise<string> {
+    const context = this.#context;
+    if (!context) {
+      throw new Error("Run context is unavailable for this session");
+    }
+    const submission = await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [
+            {
+              type: "text",
+              text:
+                "Continue the interrupted run from the existing transcript and workspace. " +
+                "Inspect the last completed tool result before taking another action."
+            }
+          ]
+        }
+      ],
+      {
+        idempotencyKey: crypto.randomUUID(),
+        metadata: { source: "command-center", instruction: "continue" }
+      }
+    );
+    this.#log("continued", { submissionId: submission.submissionId });
+    return submission.submissionId;
+  }
+
   async start(): Promise<string> {
     const ctx = this.#context;
     if (!ctx) throw new Error("setContext() must be called before start()");
@@ -504,20 +528,7 @@ export class ThinkAgent extends ThinkBase {
   }
 
   override getModel(): LanguageModel {
-    // Route through the account's default AI Gateway so model calls get
-    // Gateway-side retries, caching, and observability. The `openai` provider
-    // plugin lets the `openai/...` catalog slug dispatch through the gateway
-    // delegate (OpenAI wire format over the AI binding, Unified Billing).
-    return createWorkersAI({
-      binding: this.env.AI,
-      gateway: { id: "default" },
-      providers: [openai]
-      // DelegateCallOptions' typing lags the runtime: the model reads
-      // settings.reasoning_effort and forwards it into the request (verified
-      // live — completion_tokens_details.reasoning_tokens > 0 at "medium").
-    })(MODEL_ID, {
-      reasoning_effort: REASONING_EFFORT
-    } as Parameters<ReturnType<typeof createWorkersAI>>[1]);
+    return createAgentThinkModel(this.env.CLOUDFLARE_AIG_TOKEN);
   }
 
   override getSkills() {
