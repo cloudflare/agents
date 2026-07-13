@@ -20,29 +20,29 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 - [x] domain/stream/chunks (audit 07)
 
 ## Wave 3
-- [ ] domain/scheduling/scheduler + keep-alive (audit 05)
-- [ ] domain/queue (audit 04)
+- [x] domain/scheduling/scheduler + keep-alive (audit 05)
+- [x] domain/queue (audit 04)
 - [ ] domain/fibers (audit 06)
 - [x] domain/stream/resumable (audit 07)
-- [ ] domain/tools/registry (audit 08)
-- [ ] domain/turn/admission (audit 09)
-- [ ] domain/session (audit 10)
+- [x] domain/tools/registry (audit 08)
+- [x] domain/turn/admission (audit 09)
+- [x] domain/session (audit 10)
 - [x] domain/workspace (audit 15)
-- [ ] domain/fetch (audit 16)
+- [x] domain/fetch (audit 16)
 - [x] domain/rpc/callable (audit 21)
 
 ## Wave 4
 - [ ] domain/turn/loop (audit 09)
-- [ ] domain/session/compaction (audit 10)
-- [ ] domain/submissions (audit 11)
+- [x] domain/session/compaction (audit 10)
+- [x] domain/submissions (audit 11)
 - [ ] domain/actions (audit 12)
 - [ ] domain/scheduled-tasks (audit 13)
 - [ ] domain/recovery + overflow (audit 14)
-- [ ] domain/workspace/tools (audit 15)
-- [ ] domain/skills (audit 17)
-- [ ] domain/channels (audit 18)
+- [x] domain/workspace/tools (audit 15)
+- [x] domain/skills (audit 17)
+- [x] domain/channels (audit 18)
 - [ ] domain/delegation (audit 19)
-- [ ] domain/workflows (audit 20)
+- [x] domain/workflows (audit 20)
 
 ## Wave 5–6
 - [ ] app/agent (audit 22)
@@ -50,5 +50,6 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 - [ ] e2e scenarios (audit 24)
 
 ## Log
+- 2026-07-13: wave 3 done (680 tests): scheduler/keep-alive, queue, admission, tool registry, session+compaction, workspace tools, fetch, skills, channels, workflows, submissions.
 - 2026-07-13: wave 2 + workspace/callable/resumable done (357 tests). Tool types module added at domain/tools/types.ts.
 - 2026-07-12: audit complete (docs 00–24), package scaffolded.
