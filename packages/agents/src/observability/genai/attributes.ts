@@ -9,6 +9,7 @@
  */
 export const TraceAttribute = {
   Cloudflare: {
+    CallID: "cloudflare.agents.call.id",
     IntegrationName: "cloudflare.agents.integration.name",
     MetadataPrefix: "cloudflare.agents.metadata.",
     OperationName: "cloudflare.agents.operation.name",

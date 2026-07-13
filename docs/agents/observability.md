@@ -310,12 +310,46 @@ execution is wrapped as `execute_tool {tool}`. Stream spans close on completion,
 cancellation, an in-band error, or early consumer return. Async-generator tools
 stay open until iteration ends.
 
+### AI SDK v7
+
+AI SDK v7 ships a first-class telemetry lifecycle. Register the adapter once and
+every `generateText`, `streamText`, `generateObject`, and `streamObject` call is
+instrumented:
+
+```ts
+import { registerTelemetry } from "ai";
+import { createAISDKTelemetry } from "agents/observability/ai";
+
+registerTelemetry(createAISDKTelemetry());
+```
+
+Or scope it to a single call through `experimental_telemetry`:
+
+```ts
+import { createAISDKTelemetry } from "agents/observability/ai";
+
+await generateText({
+  model,
+  prompt: "...",
+  experimental_telemetry: {
+    integrations: [createAISDKTelemetry()]
+  }
+});
+```
+
+The v7 adapter uses `cloudflare.agents.call.id` to correlate operation, model,
+and tool spans. Its execution hooks keep provider work under the `chat` span and
+nested work performed by a tool under the `execute_tool` span. It handles both
+`onEnd` and `onAbort` terminal paths. `wrapAISDK` and `createAISDKTelemetry`
+project into the same span schema, so the two SDK versions are dashboard-
+compatible.
+
 ### Identity
 
 The AI SDK's canonical OpenTelemetry integration maps `functionId` to
 `gen_ai.agent.name`. For direct `wrapAISDK` calls, `functionId` should therefore
 be a low-cardinality logical agent name, not a request, user, session, or
-Durable Object identifier. The other identity values are read from
+Durable Object identifier. In v6, the other identity values are read from
 `experimental_telemetry.metadata`; an explicit `agentName` takes precedence
 over `functionId`.
 
@@ -345,6 +379,25 @@ await generateText({
 });
 ```
 
+AI SDK v7 has no telemetry metadata bag. Put additional identity in
+`runtimeContext` and explicitly include those fields:
+
+```ts
+await generateText({
+  model,
+  prompt: "...",
+  runtimeContext: {
+    conversationId: "conversation-123"
+  },
+  telemetry: {
+    functionId: "booking-agent",
+    includeRuntimeContext: {
+      conversationId: true
+    }
+  }
+});
+```
+
 ### Emitted data
 
 | Standard attributes                                                                | Source and scope                                                                             |
@@ -365,7 +418,7 @@ await generateText({
 | `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.cache_read.input_tokens` | Provider cache usage when reported                                                           |
 | `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
 | `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID only when available                                                   |
-| `user.id`                                                                          | Explicit metadata key `user.id`                                                              |
+| `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
 | `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
 
 The adapter also emits a small vendor namespace where no standard equivalent
@@ -375,11 +428,13 @@ exists:
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `cloudflare.agents.integration.name`                                                    | Instrumentation source (`ai-sdk`)                                       |
 | `cloudflare.agents.operation.name`                                                      | Original SDK operation (`streamText`, `doStream`, `tool.execute`, etc.) |
+| `cloudflare.agents.call.id`                                                             | AI SDK v7 callback correlation ID                                       |
 | `cloudflare.agents.response.finish_reason`                                              | One finish reason as a scalar                                           |
 | `cloudflare.agents.tool.count`                                                          | Precomputed tool-call count for dashboards                              |
 | `cloudflare.agents.usage.total_tokens`                                                  | Provider total, or input plus output when both are known                |
 | `cloudflare.agents.runtime_context.{key}`                                               | Explicitly included scalar runtime context                              |
-| `cloudflare.agents.metadata.{key}`                                                      | Other scalar telemetry metadata                                         |
+| `cloudflare.agents.tool_context.{tool}.{key}`                                           | Explicitly included scalar context on the executed tool span            |
+| `cloudflare.agents.metadata.{key}`                                                      | Other scalar v6 telemetry metadata                                      |
 | `cloudflare.agents.turn.{request_id,trigger,admission,channel,continuation,generation}` | Think turn context                                                      |
 | `cloudflare.agents.canceled`                                                            | Recognized cancellation, not a failure                                  |
 
@@ -392,12 +447,13 @@ an attribute: failures emit `error.type`, but the adapter does not invent an
 
 ### Context and safety
 
-The wrapper never emits prompts, messages, system instructions, tool inputs,
+The adapters never emit prompts, messages, system instructions, tool inputs,
 tool outputs, schemas, headers, provider options, raw model output, or raw error
 messages. Metadata and context values must be scalar; objects and arrays are
 dropped.
 
-AI SDK v6 exposes `experimental_context`. Configure its allowlist on the wrapper:
+For v6, only `experimental_context` exists. Configure its allowlist on the
+wrapper:
 
 ```ts
 const traced = wrapAISDK(ai, {
@@ -410,6 +466,32 @@ await traced.generateText({
   experimental_context: {
     requestId: "req-123",
     tenantId: "tenant-42"
+  }
+});
+```
+
+For v7, the AI SDK filters runtime and per-tool context before the adapter sees
+it. Its allowlists are boolean maps, not arrays:
+
+```ts
+await generateText({
+  model,
+  prompt: "Will I need an umbrella?",
+  runtimeContext: { requestId: "req-123", tenantId: "tenant-42" },
+  toolsContext: {
+    weather: { defaultUnit: "celsius", cacheHit: true }
+  },
+  telemetry: {
+    includeRuntimeContext: {
+      requestId: true,
+      tenantId: true
+    },
+    includeToolsContext: {
+      weather: {
+        defaultUnit: true,
+        cacheHit: true
+      }
+    }
   }
 });
 ```
