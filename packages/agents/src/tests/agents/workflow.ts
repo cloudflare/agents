@@ -349,7 +349,56 @@ export class TestWorkflowAgent extends Agent {
       INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
       VALUES (${id}, ${workflowId}, ${workflowName}, ${status}, ${metadata ? JSON.stringify(metadata) : null})
     `;
+    await this._rearmWorkflowCleanup();
     return id;
+  }
+
+  async getWorkflowCleanupState(workflowId: string): Promise<{
+    successRetentionSeconds: number;
+    errorRetentionSeconds: number;
+    completedAt: number | null;
+    expiresAt: number | null;
+    alarm: number | null;
+  } | null> {
+    const rows = this.sql<{
+      success_retention_seconds: number;
+      error_retention_seconds: number;
+      completed_at: number | null;
+      expires_at: number | null;
+    }>`
+      SELECT success_retention_seconds, error_retention_seconds,
+             completed_at, expires_at
+      FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      successRetentionSeconds: row.success_retention_seconds,
+      errorRetentionSeconds: row.error_retention_seconds,
+      completedAt: row.completed_at,
+      expiresAt: row.expires_at,
+      alarm: await this.ctx.storage.getAlarm()
+    };
+  }
+
+  async expireWorkflowForTest(workflowId: string): Promise<void> {
+    const past = Math.floor(Date.now() / 1000) - 1;
+    this.sql`
+      UPDATE cf_agents_workflows SET expires_at = ${past}
+      WHERE workflow_id = ${workflowId}
+    `;
+  }
+
+  async runWorkflowCleanupForTest(): Promise<void> {
+    await this._cleanupWorkflowTracking();
+    await this._rearmWorkflowCleanup();
+  }
+
+  async setWorkflowTerminalForTest(
+    workflowId: string,
+    status: "complete" | "errored" | "terminated"
+  ): Promise<void> {
+    await this._updateWorkflowTracking(workflowId, { status });
   }
 
   // Expose getWorkflow for testing

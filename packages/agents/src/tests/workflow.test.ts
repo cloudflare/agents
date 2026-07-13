@@ -56,6 +56,61 @@ describe("workflow operations", () => {
       expect(workflow).toBeNull();
     });
 
+    it("arms bounded cleanup with 30-day default retention", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-defaults");
+      await agentStub.insertTestWorkflow(
+        "wf-cleanup-defaults",
+        "TEST_WORKFLOW",
+        "queued"
+      );
+
+      const state = await agentStub.getWorkflowCleanupState(
+        "wf-cleanup-defaults"
+      );
+      expect(state?.successRetentionSeconds).toBe(30 * 24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(30 * 24 * 60 * 60);
+      expect(state?.expiresAt).toBeNull();
+      expect(state?.alarm).not.toBeNull();
+    });
+
+    it.each([
+      ["complete", "successRetentionSeconds"],
+      ["errored", "errorRetentionSeconds"],
+      ["terminated", "errorRetentionSeconds"]
+    ] as const)(
+      "uses the terminal-outcome retention for %s workflows",
+      async (status, retentionKey) => {
+        const agentStub = await getTestAgent(`workflow-cleanup-${status}`);
+        const workflowId = `wf-cleanup-${status}`;
+        await agentStub.insertTestWorkflow(
+          workflowId,
+          "TEST_WORKFLOW",
+          "queued"
+        );
+
+        await agentStub.setWorkflowTerminalForTest(workflowId, status);
+        const state = await agentStub.getWorkflowCleanupState(workflowId);
+        expect(state?.completedAt).not.toBeNull();
+        expect(state?.expiresAt).toBe(
+          (state?.completedAt ?? 0) + (state?.[retentionKey] ?? 0)
+        );
+      }
+    );
+
+    it("deletes only expired local tracking rows and stops cleanup", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-expired");
+      await agentStub.insertTestWorkflow(
+        "wf-cleanup-expired",
+        "TEST_WORKFLOW",
+        "complete"
+      );
+      await agentStub.expireWorkflowForTest("wf-cleanup-expired");
+
+      await agentStub.runWorkflowCleanupForTest();
+
+      expect(await agentStub.getWorkflowById("wf-cleanup-expired")).toBeNull();
+    });
+
     it("should query workflows by status", async () => {
       const agentStub = await getTestAgent("workflow-query-test-1");
 

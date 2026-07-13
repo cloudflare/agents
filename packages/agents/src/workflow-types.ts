@@ -218,6 +218,12 @@ export type WorkflowTrackingRow = {
   updated_at: number;
   /** Unix timestamp when workflow completed (null if not complete) */
   completed_at: number | null;
+  /** Successful-instance retention in seconds */
+  success_retention_seconds: number;
+  /** Errored/terminated-instance retention in seconds */
+  error_retention_seconds: number;
+  /** Unix timestamp after which the local tracking row may be deleted */
+  expires_at: number | null;
 };
 
 /**
