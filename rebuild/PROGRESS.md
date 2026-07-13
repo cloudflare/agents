@@ -46,10 +46,11 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 
 ## Wave 5–6
 - [x] app/agent (audit 22)
-- [ ] app/think (audit 23)
+- [x] app/think (audit 23)
 - [ ] e2e scenarios (audit 24)
 
 ## Log
+- 2026-07-13: Think composition root done (919 tests). Known gaps noted in agent report: deep interruption recovery + full delegation flow deferred to e2e; MessageStore row-size guard not wired (session owns persistence).
 - 2026-07-13: wave 5 done (901 tests): chat recovery + overflow guard, Agent composition root over memory host.
 - 2026-07-13: wave 4 done (826 tests): turn loop, fibers, actions, scheduled-tasks, delegation. (Wave interrupted once by session usage limit; all five agents resumed and completed.)
 - 2026-07-13: wave 3 done (680 tests): scheduler/keep-alive, queue, admission, tool registry, session+compaction, workspace tools, fetch, skills, channels, workflows, submissions.
