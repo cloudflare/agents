@@ -459,8 +459,8 @@ export class Think<State = unknown> extends Agent<State> {
       conversation: {
         lastRequestId: () => this.getLastRequestId(),
         partialAssistant: (requestId) => this.partialAssistantFor(requestId),
-        scheduleRetry: async (input, incident) => this.scheduleRecoveryRun(input.requestId, incident),
-        scheduleContinuation: async (incident) => this.scheduleRecoveryRun(incident.requestId, incident),
+        scheduleRetry: async (input, incident) => this.scheduleRecoveryRetry(input.requestId, incident),
+        scheduleContinuation: async (incident) => this.scheduleRecoveryContinuation(incident),
         terminalize: (incident, message) => this.terminalizeRecovery(incident, message),
       },
     });
@@ -477,6 +477,9 @@ export class Think<State = unknown> extends Agent<State> {
 
   protected override async onStart(): Promise<void> {
     this.ensureRuntime();
+    // Audit 13: declared scheduled tasks reconcile on startup. Invalid
+    // declarations throw here, before any schedule rows are persisted.
+    await this.reconcileScheduledTasks();
   }
 
   // --- facades bridging other domain services onto Agent's own (private)
@@ -545,6 +548,13 @@ export class Think<State = unknown> extends Agent<State> {
     if (configured.baseMaxTokens !== undefined) baseBlock.maxTokens = configured.baseMaxTokens;
 
     const config: SessionConfig = {
+      // Fixed, not `this.ids.newId("session")`: a Think instance has exactly
+      // one conversation over its store, and audit 10 documents the session
+      // (frozen prompt included) as surviving recreation over the same KV —
+      // which a per-instance-random id would silently break, orphaning all
+      // prior history (and the chat-recovery machinery built on top of it)
+      // the moment a fresh instance is constructed over the same store.
+      sessionId: "main",
       blocks: [baseBlock, ...configured.extraBlocks],
       onStatus: (s) => this.broadcastSessionStatus(s),
       onCompactionError: (e) => this.events.emit("chat:context:compaction_error", { error: toErrorValue(e) }),
@@ -883,10 +893,21 @@ export class Think<State = unknown> extends Agent<State> {
   // Recovery conversation callbacks
   // ==========================================================================
 
-  private scheduleRecoveryRun(requestId: string, incident: Incident): void {
+  private notifyChatRecovery(requestId: string, incident: Incident): void {
     if (this.onChatRecovery) {
       void this.onChatRecovery({ requestId, incidentId: incident.incidentId, attempt: incident.attempt });
     }
+  }
+
+  /**
+   * Retry recovery (audit 14 §1 step 4, "retry" kind): no assistant output
+   * existed yet for this requestId, so re-running the turn from the
+   * already-persisted history (the user's message was appended durably
+   * *before* the fiber-wrapped model call, so it survives the interruption
+   * on its own) is a faithful replay. No new messages to add.
+   */
+  private scheduleRecoveryRetry(requestId: string, incident: Incident): void {
+    this.notifyChatRecovery(requestId, incident);
     void this.executeTurn({
       requestId,
       trigger: "continuation",
@@ -895,6 +916,55 @@ export class Think<State = unknown> extends Agent<State> {
     }).catch((err: unknown) => {
       this.events.emit("chat:recovery:run_failed", { requestId, incidentId: incident.incidentId, error: toErrorValue(err) });
     });
+  }
+
+  /**
+   * Continuation recovery (audit 14 §1 step 4, "continue" kind): a partial
+   * assistant message was already streamed to clients when the turn was
+   * interrupted, but — unlike a turn that suspends normally (client tool /
+   * approval), which reaches `finalizeOutcome`'s `session.appendMessage` —
+   * an eviction or stall abort happens *inside* the fiber-wrapped model call,
+   * before `finalizeOutcome` ever runs. The only durable trace of that partial
+   * output is the `think:reqmsg:` bookkeeping blob (`partialAssistantFor`),
+   * which is not part of session history. Without committing it first here,
+   * this "continuation" would be indistinguishable from a retry — the next
+   * turn would simply re-run over the pre-turn history, discarding whatever
+   * was already said (and, for a partial tool call, risking the model
+   * re-issuing it). Commit the repaired partial (healing any dangling tool
+   * part exactly as `onConnect`'s live-transcript repair does) before
+   * re-running, so the continuation turn actually continues from it.
+   */
+  private scheduleRecoveryContinuation(incident: Incident): void {
+    this.notifyChatRecovery(incident.requestId, incident);
+    void this.commitInterruptedPartial(incident.requestId)
+      .then(() =>
+        this.executeTurn({
+          requestId: incident.requestId,
+          trigger: "continuation",
+          continuation: true,
+          newMessages: [],
+        }),
+      )
+      .catch((err: unknown) => {
+        this.events.emit("chat:recovery:run_failed", {
+          requestId: incident.requestId,
+          incidentId: incident.incidentId,
+          error: toErrorValue(err),
+        });
+      });
+  }
+
+  private async commitInterruptedPartial(requestId: string): Promise<void> {
+    const partial = this.partialAssistantFor(requestId);
+    if (!partial || partial.parts.length === 0) return;
+    const already = await this.findMessage(partial.id);
+    if (already) return; // already part of history (e.g. a normal suspension already committed it)
+    const repairOpts = this.repairInterruptedToolPart ? { repairPart: this.repairInterruptedToolPart } : undefined;
+    const [repaired] = repairTranscript([partial], repairOpts).messages;
+    const session = await this.ensureSession();
+    await session.appendMessage(repaired!);
+    this.recordPartial(requestId, repaired!);
+    this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message: repaired }));
   }
 
   private async terminalizeRecovery(incident: Incident, message: string): Promise<void> {
@@ -972,6 +1042,26 @@ export class Think<State = unknown> extends Agent<State> {
   ): Promise<SubmissionRecord & { accepted: boolean }> {
     this.ensureRuntime();
     return this.submissionService.submit(messages, opts);
+  }
+
+  inspectSubmission(submissionId: string): SubmissionRecord | null {
+    this.ensureRuntime();
+    return this.submissionService.inspect(submissionId);
+  }
+
+  listSubmissions(options?: Parameters<SubmissionService["list"]>[0]): SubmissionRecord[] {
+    this.ensureRuntime();
+    return this.submissionService.list(options);
+  }
+
+  async cancelSubmission(submissionId: string, reason?: string): Promise<boolean> {
+    this.ensureRuntime();
+    return this.submissionService.cancel(submissionId, reason);
+  }
+
+  deleteSubmissions(options?: Parameters<SubmissionService["deleteSubmissions"]>[0]): number {
+    this.ensureRuntime();
+    return this.submissionService.deleteSubmissions(options);
   }
 
   private async runSubmissionTurn(

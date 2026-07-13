@@ -133,12 +133,19 @@ export function createAgentToolRunService(deps: {
     }
   }
 
-  /** Concatenation of the string `text` fields across the run's event log. */
+  /**
+   * Concatenation of the run's streamed text: `delta` fields of relayed
+   * `text-delta` UiChunks, plus bare string `text` fields for custom events.
+   */
   function summarize(rid: string): string {
     let text = "";
     for (const { event } of readEventLog(rid)) {
-      if (event !== null && typeof event === "object" && typeof (event as { text?: unknown }).text === "string") {
-        text += (event as { text: string }).text;
+      if (event === null || typeof event !== "object") continue;
+      const e = event as { type?: unknown; delta?: unknown; text?: unknown };
+      if (e.type === "text-delta" && typeof e.delta === "string") {
+        text += e.delta;
+      } else if (typeof e.text === "string") {
+        text += e.text;
       }
     }
     return text;
