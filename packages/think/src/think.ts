@@ -106,6 +106,7 @@ import {
   jsonSchema,
   isStepCount,
   streamText,
+  toUIMessageStream,
   tool
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -387,6 +388,21 @@ function streamErrorToString(error: unknown): string {
     return JSON.stringify(error);
   } catch {
     return String(error);
+  }
+}
+
+async function* readableStreamToAsyncIterable<T>(
+  stream: ReadableStream<T>
+): AsyncIterable<T> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -1917,7 +1933,9 @@ export interface TurnConfig {
    * as {@link Think.getModel}) or a `LanguageModel`.
    */
   model?: ThinkModel;
-  /** Override the assembled system prompt. */
+  /** Override the assembled instructions prompt. */
+  instructions?: string;
+  /** @deprecated Prefer `instructions`. */
   system?: string;
   /** Override the assembled messages. */
   messages?: ModelMessage[];
@@ -1973,13 +1991,10 @@ export interface TurnConfig {
   headers?: Parameters<typeof streamText>[0]["headers"];
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
-  /**
-   * Optional AI SDK telemetry configuration for this turn.
-   * Accepts the v7 `telemetry` option (v6 `experimental_telemetry` alias still works on streamText).
-   */
-  experimental_telemetry?: Parameters<typeof streamText>[0]["telemetry"];
-  /** @deprecated Prefer `experimental_telemetry` (forwarded to AI SDK `telemetry`). */
+  /** Optional AI SDK telemetry configuration for this turn. */
   telemetry?: Parameters<typeof streamText>[0]["telemetry"];
+  /** @deprecated Prefer `telemetry`. */
+  experimental_telemetry?: Parameters<typeof streamText>[0]["telemetry"];
   /**
    * Optional AI SDK stream transform(s) for this turn (`experimental_transform`).
    * Forwarded to `streamText` so callers can inspect/rewrite the stream — e.g.
@@ -2183,8 +2198,9 @@ export type PrepareStepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
  * Configuration returned by `beforeStep` to override defaults for the
  * current AI SDK step. This is the AI SDK's `PrepareStepResult<TOOLS>` —
  * return only the fields you want to override (`model`, `toolChoice`,
- * `activeTools`, `system`, `messages`, `experimental_context`,
- * `providerOptions`).
+ * `activeTools`, `instructions`, `messages`, `experimental_context`,
+ * `providerOptions`). The previous `system` field remains available as a
+ * deprecated alias.
  *
  * `model` is widened to {@link ThinkModel}: like {@link Think.getModel}, you
  * can return a model id string (resolved via the built-in provider) instead of
@@ -2288,15 +2304,16 @@ export type ToolCallDecision =
 /**
  * Context passed to the `afterToolCall` hook after a tool executes.
  *
- * Backed by the AI SDK's `OnToolCallFinishEvent` (the parameter of
- * `experimental_onToolCallFinish`). The full `TypedToolCall<TOOLS>`
- * fields (`toolName`, `toolCallId`, `input`, …) are spread at the top
- * level, plus the per-call event extras:
+ * Backed by the AI SDK's `OnToolExecutionEndEvent`. The full
+ * `TypedToolCall<TOOLS>` fields (`toolName`, `toolCallId`, `input`, …) are
+ * spread at the top level, plus the per-call event extras:
  *
  * - `stepNumber`  — index of the current step
  * - `messages`    — conversation messages visible at tool execution time
- * - `durationMs`  — wall-clock execution time in milliseconds
- * - `success`/`output`/`error` — discriminated outcome:
+ * - `toolExecutionMs` — wall-clock execution time in milliseconds
+ * - `durationMs`  — deprecated alias for `toolExecutionMs`
+ * - `toolOutput` — AI SDK v7 discriminated outcome
+ * - `success`/`output`/`error` — deprecated normalized outcome aliases:
  *   - on success: `success: true`, `output` typed per tool
  *   - on failure: `success: false`, `error: unknown`
  *
@@ -2329,6 +2346,8 @@ type ToolCallResultBase = {
   readonly stepNumber: number | undefined;
   readonly messages: ReadonlyArray<ModelMessage>;
   /** Wall-clock execution time in milliseconds. */
+  readonly toolExecutionMs: number;
+  /** @deprecated Prefer `toolExecutionMs`. */
   readonly durationMs: number;
 };
 
@@ -2338,13 +2357,19 @@ type ToolCallResultBase = {
  */
 type ToolCallOutcome<O> =
   | {
+      readonly toolOutput: { type: "tool-result"; output: O };
+      /** @deprecated Prefer `toolOutput.type === "tool-result"`. */
       readonly success: true;
+      /** @deprecated Prefer `toolOutput.output`. */
       readonly output: O;
       readonly error?: never;
     }
   | {
+      readonly toolOutput: { type: "tool-error"; error: unknown };
+      /** @deprecated Prefer `toolOutput.type === "tool-error"`. */
       readonly success: false;
       readonly output?: never;
+      /** @deprecated Prefer `toolOutput.error`. */
       readonly error: unknown;
     };
 
@@ -4714,6 +4739,15 @@ export class Think<
    * Called after each step completes (initial, continue, tool-result).
    * Override for step-level logging or analytics.
    */
+  onStepEnd(ctx: StepContext): void | Promise<void> {
+    return this.onStepFinish(ctx);
+  }
+
+  /**
+   * Called after each step completes (initial, continue, tool-result).
+   * Override for step-level logging or analytics.
+   * @deprecated Prefer `onStepEnd`.
+   */
   onStepFinish(_ctx: StepContext): void | Promise<void> {}
 
   /**
@@ -5192,6 +5226,7 @@ export class Think<
     const finalModel =
       config.model != null ? this.resolveModel(config.model) : model;
     const finalSystem =
+      config.instructions ??
       config.system ??
       this._systemPromptForTurn(
         baseSystem,
@@ -5404,7 +5439,7 @@ export class Think<
         // reasoning, sources, files, providerMetadata (cache tokens),
         // request/response, warnings, and the full LanguageModelUsage
         // that the AI SDK provides.
-        await this.onStepFinish(event);
+        await this.onStepEnd(event);
         await this._pipelineExtensionStepFinish(event);
       },
       // `beforeToolCall` is dispatched from the wrapped `execute` (see
@@ -5444,13 +5479,22 @@ export class Think<
           ...e.toolCall,
           stepNumber: undefined as number | undefined,
           messages: e.messages,
+          toolExecutionMs: e.toolExecutionMs,
           durationMs: e.toolExecutionMs
         };
-        const ctx = (
-          success
-            ? { ...base, success: true as const, output }
-            : { ...base, success: false as const, error }
-        ) as ToolCallResultContext;
+        const ctx = (success
+          ? {
+              ...base,
+              toolOutput: { type: "tool-result" as const, output },
+              success: true as const,
+              output
+            }
+          : {
+              ...base,
+              toolOutput: { type: "tool-error" as const, error },
+              success: false as const,
+              error
+            }) as unknown as ToolCallResultContext;
         await this.afterToolCall(ctx);
         await this._pipelineExtensionToolCallFinish({
           toolCall: e.toolCall,
@@ -5492,10 +5536,13 @@ export class Think<
 
     const streamResult = {
       toUIMessageStream: (options) =>
-        result.toUIMessageStream({
-          sendReasoning: options?.sendReasoning ?? finalSendReasoning,
-          onError: options?.onError ?? streamErrorToString
-        }),
+        readableStreamToAsyncIterable(
+          toUIMessageStream({
+            stream: result.stream,
+            sendReasoning: options?.sendReasoning ?? finalSendReasoning,
+            onError: options?.onError ?? streamErrorToString
+          })
+        ),
       output: outputPromise
     } satisfies StreamableResult;
 

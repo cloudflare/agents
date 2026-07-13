@@ -467,7 +467,7 @@ describe("Think — agentic loop", () => {
 
       // The mock rejects doStream rather than emitting a `{ type: "error" }`
       // part. Recovery only watches in-stream error parts, so this passing
-      // proves the AI SDK re-enqueues a top-level rejection as a fullStream
+      // proves the AI SDK re-enqueues a top-level rejection as a stream
       // error part our seam catches — the changeset's central assumption.
       const result = await agent.testChatThrowingOverflow("trigger overflow");
 

@@ -218,7 +218,7 @@ describe("Think — beforeStep hook", () => {
 
 // ── onStepFinish ────────────────────────────────────────────────
 
-describe("Think — onStepFinish hook", () => {
+describe("Think — onStepEnd hook", () => {
   it("fires after step completes with correct data", async () => {
     const agent = await freshAgent("hook-sf-1");
     await agent.testChat("Hello");
@@ -284,6 +284,12 @@ describe("Think — tool-call hooks expose typed input/output", () => {
     expect(JSON.parse(log[0].inputJson)).toEqual({ message: "ping" });
     // Mock tool returns "pong: ping"
     expect(JSON.parse(log[0].outputJson)).toBe("pong: ping");
+    expect(JSON.parse(log[0].toolOutputJson)).toEqual({
+      type: "tool-result",
+      output: "pong: ping"
+    });
+    expect(typeof log[0].toolExecutionMs).toBe("number");
+    expect(log[0].durationMs).toBe(log[0].toolExecutionMs);
   });
 });
 
@@ -1779,6 +1785,14 @@ describe("Think — beforeTurn config overrides", () => {
     const log = await agent.getBeforeTurnLog();
     expect(log[0].system).toContain("You are a careful, capable assistant");
     expect(log[0].system).toContain("You are running inside a Think agent.");
+  });
+
+  it("accepts instructions as the preferred TurnConfig system prompt name", async () => {
+    const agent = await freshAgent("bt-instructions");
+    await agent.setTurnConfigOverride({ instructions: "You are a pirate." });
+    const result = await agent.testChat("With instructions override");
+
+    expect(result.done).toBe(true);
   });
 
   it("activeTools override limits tool availability", async () => {

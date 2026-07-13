@@ -557,15 +557,15 @@ errors of Anthropic, OpenAI, Google, Bedrock, and others).
 
 The AI SDK-derived contexts spread the SDK's own types at the top level — no information is dropped:
 
-| Context                        | Backed by                                                                                                                             |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `PrepareStepContext<TOOLS>`    | `Parameters<PrepareStepFunction<TOOLS>>[0]` (`steps`, `stepNumber`, `model`, `messages`, `experimental_context`)                      |
-| `ToolCallContext<TOOLS>`       | `TypedToolCall<TOOLS>` + per-call extras from `OnToolCallStartEvent` (`stepNumber`, `messages`, `abortSignal`)                        |
-| `ToolCallResultContext<TOOLS>` | `TypedToolCall<TOOLS>` + per-call extras (`durationMs`, `messages`, `stepNumber`) + discriminated `success`/`output`/`error` outcome  |
-| `StepContext<TOOLS>`           | `StepResult<TOOLS>` (full step incl. `reasoning`, `sources`, `files`, `usage`, `providerMetadata`, `request`, `response`, `warnings`) |
-| `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                    |
+| Context                        | Backed by                                                                                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PrepareStepContext<TOOLS>`    | `Parameters<PrepareStepFunction<TOOLS>>[0]` (`steps`, `stepNumber`, `model`, `messages`, `experimental_context`)                                                         |
+| `ToolCallContext<TOOLS>`       | `TypedToolCall<TOOLS>` + per-call extras from `OnToolCallStartEvent` (`stepNumber`, `messages`, `abortSignal`)                                                           |
+| `ToolCallResultContext<TOOLS>` | `TypedToolCall<TOOLS>` + per-call extras (`toolExecutionMs`, `messages`, `stepNumber`) + `toolOutput`; deprecated `durationMs`/`success`/`output`/`error` aliases remain |
+| `StepContext<TOOLS>`           | `StepResult<TOOLS>` (full step incl. `reasoning`, `sources`, `files`, `usage`, `providerMetadata`, `request`, `response`, `warnings`)                                    |
+| `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                                                       |
 
-`beforeStep` is wired to the AI SDK's `prepareStep` callback. Return a `StepConfig` to override `model`, `toolChoice`, `activeTools`, `system`, `messages`, `experimental_context`, or `providerOptions` for the current step. The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig` (returned from `beforeTurn`). `beforeStep` is subclass-only; it is not dispatched to extensions because the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
+`beforeStep` is wired to the AI SDK's `prepareStep` callback. Return a `StepConfig` to override `model`, `toolChoice`, `activeTools`, `instructions`, `messages`, `experimental_context`, or `providerOptions` for the current step. The previous `system` name remains as a deprecated alias. The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig` (returned from `beforeTurn`). `beforeStep` is subclass-only; it is not dispatched to extensions because the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
 
 `TurnConfig` also accepts `sendReasoning` to override whether reasoning chunks are emitted for the current UI message stream. The instance-level `sendReasoning` property defaults to `true`; return `{ sendReasoning: false }` from `beforeTurn` to hide reasoning for a single turn, for example on internal continuation turns.
 
@@ -573,9 +573,9 @@ The AI SDK-derived contexts spread the SDK's own types at the top level — no i
 
 `TurnConfig.stopWhen` accepts AI SDK stop conditions such as `hasToolCall("finalAnswer")` for ending a turn early. Think composes these with its own `maxSteps` bound, so a custom condition can stop before the cap without removing the safety limit. Because stop conditions are functions, return `stopWhen` from a Think subclass's `beforeTurn`; sandboxed extension hooks cannot provide it over RPC.
 
-`TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `experimental_telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; consider disabling `recordInputs` or `recordOutputs` if prompts or outputs may contain sensitive data.
+`TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; consider disabling `recordInputs` or `recordOutputs` if prompts or outputs may contain sensitive data. The previous `experimental_telemetry` name remains as a deprecated alias.
 
-Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `experimental_onToolCallFinish`) with `durationMs` and a discriminated outcome. `beforeToolCall` can return a `ToolCallDecision` to:
+Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `onToolExecutionEnd`) with `toolExecutionMs` and `toolOutput`. Deprecated `durationMs` and `success`/`output`/`error` aliases remain for compatibility. `beforeToolCall` can return a `ToolCallDecision` to:
 
 - `{ action: "allow", input? }` — run the original `execute`, optionally with a substituted `input`.
 - `{ action: "block", reason? }` — skip `execute`; the model sees `reason` as the tool's output.
@@ -614,14 +614,14 @@ beforeToolCall(ctx: ToolCallContext<typeof tools>) {
 }
 
 afterToolCall(ctx: ToolCallResultContext<typeof tools>) {
-  if (ctx.success) {
-    console.log(`${ctx.toolName} ok in ${ctx.durationMs}ms`, ctx.output);
+  if (ctx.toolOutput.type === "tool-result") {
+    console.log(`${ctx.toolName} ok in ${ctx.toolExecutionMs}ms`, ctx.toolOutput.output);
   } else {
-    console.error(`${ctx.toolName} failed:`, ctx.error);
+    console.error(`${ctx.toolName} failed:`, ctx.toolOutput.error);
   }
 }
 
-onStepFinish(ctx: StepContext<typeof tools>) {
+onStepEnd(ctx: StepContext<typeof tools>) {
   // Provider-specific cache accounting (Anthropic example)
   const anthropic = ctx.providerMetadata?.anthropic as
     | { cacheCreationInputTokens?: number; cacheReadInputTokens?: number }
@@ -630,7 +630,7 @@ onStepFinish(ctx: StepContext<typeof tools>) {
 }
 ```
 
-> Field rename note: the per-tool contexts use the AI SDK's `input`/`output` (formerly `args`/`result` in earlier Think versions). Migrate by renaming references in your hooks. `afterToolCall` is now a discriminated union — read `output` only when `ctx.success === true`.
+> Field rename note: the per-tool contexts use the AI SDK's `input` and `toolOutput` (formerly `args`/`result` in earlier Think versions). Deprecated `success`/`output`/`error` aliases remain, but prefer narrowing on `ctx.toolOutput.type`.
 
 ### Extension hook subscriptions
 
@@ -682,7 +682,9 @@ export class MyAgent extends Think<Env> {
 ```ts
 interface TurnConfig {
   model?: LanguageModel; // override model
-  system?: string; // override system prompt
+  instructions?: string; // override instructions prompt
+  /** @deprecated Prefer instructions. */
+  system?: string;
   messages?: ModelMessage[]; // override assembled messages
   tools?: ToolSet; // extra tools to merge (additive)
   activeTools?: string[]; // limit which tools the model can call
@@ -702,6 +704,8 @@ interface TurnConfig {
   timeout?: TimeoutConfiguration;
   headers?: Record<string, string | undefined>;
   providerOptions?: Record<string, unknown>;
+  telemetry?: TelemetrySettings;
+  /** @deprecated Prefer telemetry. */
   experimental_telemetry?: TelemetrySettings;
 }
 ```

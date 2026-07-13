@@ -4,7 +4,7 @@
  *
  *   - A plain `string`
  *   - An `AsyncIterable<string>` (deprecated for AI SDK `textStream`)
- *   - An `AsyncIterable` of AI SDK `fullStream` parts
+ *   - An `AsyncIterable` of AI SDK `stream` parts
  *   - A `ReadableStream<Uint8Array>` (e.g. a raw `fetch` response body
  *     containing newline-delimited JSON / SSE)
  *   - A `ReadableStream<string>`
@@ -68,7 +68,7 @@ export async function* iterateTextEvents(
   }
 
   // --- Custom AsyncIterable ---
-  // AI SDK textStream/fullStream are ReadableStreams with custom async
+  // AI SDK textStream/stream are ReadableStreams with custom async
   // iterators. Prefer those custom iterators before the generic ReadableStream
   // parser, while still letting native ReadableStream async iteration fall
   // through to the stream-specific branches below.
@@ -225,7 +225,7 @@ function warnDeprecatedTextStream(source?: object): void {
   warnedTextStreamSources.add(source);
 
   console.warn(
-    "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.fullStream from onTurn() instead."
+    "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.stream from onTurn() instead."
   );
 }
 

@@ -60,7 +60,7 @@ const codemode = createCodeTool({ tools, executor });
 // 4. Use it with streamText — the LLM writes code that calls your tools
 const result = streamText({
   model,
-  system: "You are a helpful assistant.",
+  instructions: "You are a helpful assistant.",
   messages,
   tools: { codemode }
 });
@@ -575,7 +575,7 @@ export class MyAgent extends Agent<Env, State> {
 
     const result = streamText({
       model,
-      system: "You are a helpful assistant.",
+      instructions: "You are a helpful assistant.",
       messages: await convertToModelMessages(this.state.messages),
       tools: { codemode },
       stopWhen: isStepCount(10)

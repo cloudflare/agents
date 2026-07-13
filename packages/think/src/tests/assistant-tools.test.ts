@@ -87,13 +87,19 @@ describe("assistant tools — read", () => {
 
     const modelOutput = (await agent.toolReadModelOutput("/screenshot")) as {
       type: string;
-      value: Array<{ type: string; data?: string; mediaType?: string }>;
+      value: Array<{
+        type: string;
+        data?: unknown;
+        mediaType?: string;
+        filename?: string;
+      }>;
     };
     expect(modelOutput.type).toBe("content");
     expect(modelOutput.value).toContainEqual({
-      type: "image-data",
-      data: "iVBORw0KGgo=",
-      mediaType: "image/png"
+      type: "file",
+      data: { type: "data", data: "iVBORw0KGgo=" },
+      mediaType: "image/png",
+      filename: "screenshot"
     });
   });
 
@@ -139,15 +145,15 @@ describe("assistant tools — read", () => {
       type: string;
       value: Array<{
         type: string;
-        data?: string;
+        data?: unknown;
         mediaType?: string;
         filename?: string;
       }>;
     };
     expect(modelOutput.type).toBe("content");
     expect(modelOutput.value).toContainEqual({
-      type: "file-data",
-      data: "JVBERi0xLjQK",
+      type: "file",
+      data: { type: "data", data: "JVBERi0xLjQK" },
       mediaType: "application/pdf",
       filename: "doc"
     });

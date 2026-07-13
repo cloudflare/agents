@@ -20,15 +20,15 @@ async function collectEvents(
   return events;
 }
 
-describe("fullStream text boundaries", () => {
+describe("stream text boundaries", () => {
   it("treats non-tool metadata as a text boundary", async () => {
-    async function* fullStream() {
+    async function* stream() {
       yield { type: "text-delta", id: "a", text: "New" };
       yield { type: "source", sourceId: "s1", url: "https://example.com" };
       yield { type: "text-delta", id: "a", text: "York" };
     }
 
-    const events = await collectEvents(iterateTextEvents(fullStream()));
+    const events = await collectEvents(iterateTextEvents(stream()));
     expect(events).toEqual([
       { type: "text", text: "New" },
       { type: "boundary" },
@@ -59,7 +59,7 @@ describe("fullStream text boundaries", () => {
   });
 
   it("collapses repeated boundary events before the next text delta", async () => {
-    async function* fullStream() {
+    async function* stream() {
       yield { type: "text-delta", id: "a", text: "Hello" };
       yield { type: "tool-call", toolName: "first" };
       yield { type: "tool-result", toolName: "first" };
@@ -67,7 +67,7 @@ describe("fullStream text boundaries", () => {
       yield { type: "text-delta", id: "b", text: "world" };
     }
 
-    const events = await collectEvents(iterateTextEvents(fullStream()));
+    const events = await collectEvents(iterateTextEvents(stream()));
     expect(events).toEqual([
       { type: "text", text: "Hello" },
       { type: "boundary" },
@@ -77,7 +77,7 @@ describe("fullStream text boundaries", () => {
   });
 
   it("inserts spaces across multiple separated tool transitions", async () => {
-    async function* fullStream() {
+    async function* stream() {
       yield { type: "text-delta", id: "a", text: "One" };
       yield { type: "tool-call", toolName: "first" };
       yield { type: "text-delta", id: "b", text: "two" };
@@ -85,7 +85,7 @@ describe("fullStream text boundaries", () => {
       yield { type: "text-delta", id: "c", text: "three" };
     }
 
-    const chunks = await collectText(iterateText(fullStream()));
+    const chunks = await collectText(iterateText(stream()));
     expect(chunks).toEqual(["One", " ", "two", " ", "three"]);
   });
 
@@ -110,19 +110,19 @@ describe("fullStream text boundaries", () => {
 
   it("flushes text before preserving stream errors", async () => {
     const error = new Error("provider failed");
-    async function* fullStream() {
+    async function* stream() {
       yield { type: "text-delta", id: "a", text: "Partial response." };
       yield { type: "error", error };
       yield { type: "text-delta", id: "b", text: "ignored" };
     }
 
-    const events = await collectEvents(iterateTextEvents(fullStream()));
+    const events = await collectEvents(iterateTextEvents(stream()));
     expect(events).toEqual([
       { type: "text", text: "Partial response." },
       { type: "boundary" },
       { type: "error", error }
     ]);
-    await expect(collectText(iterateText(fullStream()))).rejects.toThrow(
+    await expect(collectText(iterateText(stream()))).rejects.toThrow(
       "provider failed"
     );
   });

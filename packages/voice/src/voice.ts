@@ -13,7 +13,7 @@
  *
  *     async onTurn(transcript, context) {
  *       const result = streamText({ ... });
- *       return result.fullStream;
+ *       return result.stream;
  *     }
  *   }
  *
@@ -369,7 +369,7 @@ export function withVoice<TBase extends AgentLike>(
       _context: VoiceTurnContext
     ): Promise<TextSource> {
       throw new Error(
-        "VoiceAgent subclass must implement onTurn(). Return a string, AI SDK fullStream, AsyncIterable<string>, or ReadableStream."
+        "VoiceAgent subclass must implement onTurn(). Return a string, AI SDK stream, AsyncIterable<string>, or ReadableStream."
       );
     }
 

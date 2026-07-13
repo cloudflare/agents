@@ -56,7 +56,7 @@ function uniquePath() {
   return `/agents/test-voice-agent/voice-test-${++instanceCounter}`;
 }
 
-function uniqueAISDKFullStreamPath() {
+function uniqueAISDKStreamPath() {
   return `/agents/test-ai-sdk-full-stream-voice-agent/voice-test-${++instanceCounter}`;
 }
 
@@ -885,8 +885,8 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     ws.close();
   });
 
-  it("handles AI SDK fullStream responses that include tool calls", async () => {
-    const { ws } = await connectWS(uniqueAISDKFullStreamPath());
+  it("handles AI SDK stream responses that include tool calls", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
     await waitForStatus(ws, "idle");
 
     const mockResponse = [
@@ -930,8 +930,8 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     ws.close();
   });
 
-  it("speaks fullStream text before delayed tool results complete", async () => {
-    const { ws } = await connectWS(uniqueAISDKFullStreamPath());
+  it("speaks stream text before delayed tool results complete", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
     await waitForStatus(ws, "idle");
 
     const mockResponse = [
@@ -980,9 +980,9 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     ws.close();
   });
 
-  it("flushes partial fullStream speech before reporting stream errors", async () => {
+  it("flushes partial stream speech before reporting stream errors", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { ws } = await connectWS(uniqueAISDKFullStreamPath());
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
     try {
       await waitForStatus(ws, "idle");
 

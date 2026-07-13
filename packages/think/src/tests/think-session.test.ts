@@ -1673,7 +1673,12 @@ describe("Think — model message conversion", () => {
       content?: Array<{
         output?: {
           type: string;
-          value?: Array<{ type: string; data?: string; mediaType?: string }>;
+          value?: Array<{
+            type: string;
+            data?: unknown;
+            mediaType?: string;
+            filename?: string;
+          }>;
         };
       }>;
     }>;
@@ -1682,9 +1687,10 @@ describe("Think — model message conversion", () => {
       ?.content?.find((part) => part.output?.type === "content")?.output;
 
     expect(toolResult?.value).toContainEqual({
-      type: "image-data",
-      data: "iVBORw0KGgo=",
-      mediaType: "image/png"
+      type: "file",
+      data: { type: "data", data: "iVBORw0KGgo=" },
+      mediaType: "image/png",
+      filename: "screenshot"
     });
   });
 });

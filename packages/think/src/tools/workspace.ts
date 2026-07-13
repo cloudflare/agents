@@ -412,23 +412,13 @@ export function createReadTool(options: ReadToolOptions): Tool {
       const data = uint8ArrayToBase64(bytes);
       const note = `Read ${replayOutput.path} (${replayOutput.mediaType}, ${formatSize(bytes.byteLength)}).`;
 
-      if (replayOutput.kind === "image") {
-        return {
-          type: "content",
-          value: [
-            { type: "text", text: note },
-            { type: "image-data", data, mediaType: replayOutput.mediaType }
-          ]
-        };
-      }
-
       return {
         type: "content",
         value: [
           { type: "text", text: note },
           {
-            type: "file-data",
-            data,
+            type: "file",
+            data: { type: "data", data },
             mediaType: replayOutput.mediaType,
             filename: replayOutput.name
           }
