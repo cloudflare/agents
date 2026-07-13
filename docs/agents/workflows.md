@@ -246,7 +246,11 @@ const instanceId = await this.runWorkflow(
   {
     id: "custom-id", // optional - auto-generated if not provided
     metadata: { userId: "user-456", priority: "high" }, // optional - for querying
-    agentBinding: "MyAgent" // optional - auto-detected from class name if not provided
+    agentBinding: "MyAgent", // optional - auto-detected from class name if not provided
+    retention: {
+      successRetention: "1 day",
+      errorRetention: "7 days"
+    }
   }
 );
 ```
@@ -258,6 +262,20 @@ const instanceId = await this.runWorkflow(
 - `options.id` - Custom workflow ID (auto-generated if not provided)
 - `options.metadata` - Optional metadata stored for querying (not passed to workflow)
 - `options.agentBinding` - Agent binding name (auto-detected from class name if not provided). When called from a sub-agent, this is the root Agent binding name.
+- `options.retention` - Passed unchanged to the underlying
+  [`Workflow.create()`](https://developers.cloudflare.com/workflows/build/workers-api/#workflowinstancecreateoptions).
+  `successRetention` applies after successful completion. `errorRetention`
+  applies after an error or manual termination.
+
+Workflow platform state and Agent tracking are separate. The platform applies
+`retention` to Workflow instance state and logs. The Agent stores the same
+normalized outcome policy in SQLite, then derives one indexed `expires_at`
+value when the terminal status is known. Its cleanup alarm deletes only the
+local tracking row. If `retention` is omitted, the platform uses the account
+maximum (3 days on Workers Free or 30 days on Workers Paid), while Agent
+tracking uses a bounded 30-day fallback because the SDK cannot detect the
+account plan. A Free-plan tracking row can therefore temporarily outlive its
+underlying Workflow state.
 
 **Returns:** Workflow instance ID
 
@@ -530,18 +548,21 @@ Workflows started with `runWorkflow()` are automatically tracked in the originat
 
 ### `cf_agents_workflows` Table
 
-| Column          | Type    | Description                     |
-| --------------- | ------- | ------------------------------- |
-| `id`            | TEXT    | Internal row ID                 |
-| `workflow_id`   | TEXT    | Cloudflare workflow instance ID |
-| `workflow_name` | TEXT    | Workflow binding name           |
-| `status`        | TEXT    | Current status                  |
-| `metadata`      | TEXT    | JSON metadata (for querying)    |
-| `error_name`    | TEXT    | Error name (if failed)          |
-| `error_message` | TEXT    | Error message (if failed)       |
-| `created_at`    | INTEGER | Unix timestamp                  |
-| `updated_at`    | INTEGER | Unix timestamp                  |
-| `completed_at`  | INTEGER | Unix timestamp (when done)      |
+| Column                      | Type    | Description                       |
+| --------------------------- | ------- | --------------------------------- |
+| `id`                        | TEXT    | Internal row ID                   |
+| `workflow_id`               | TEXT    | Cloudflare workflow instance ID   |
+| `workflow_name`             | TEXT    | Workflow binding name             |
+| `status`                    | TEXT    | Current status                    |
+| `metadata`                  | TEXT    | JSON metadata (for querying)      |
+| `error_name`                | TEXT    | Error name (if failed)            |
+| `error_message`             | TEXT    | Error message (if failed)         |
+| `created_at`                | INTEGER | Unix timestamp                    |
+| `updated_at`                | INTEGER | Unix timestamp                    |
+| `completed_at`              | INTEGER | Unix timestamp (when done)        |
+| `success_retention_seconds` | INTEGER | Local success retention           |
+| `error_retention_seconds`   | INTEGER | Local error/termination retention |
+| `expires_at`                | INTEGER | Indexed local cleanup timestamp   |
 
 Note: Workflow params and output are not stored by default. Use `metadata` to store queryable information, and store large payloads in your own tables if needed.
 

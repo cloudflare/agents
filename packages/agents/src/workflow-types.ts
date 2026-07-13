@@ -236,6 +236,11 @@ export type RunWorkflowOptions = {
   metadata?: Record<string, unknown>;
   /** Agent binding name (auto-detected from class name if not provided) */
   agentBinding?: string;
+  /**
+   * Retention for the underlying Workflow instance. The Agent also uses this
+   * policy to expire its local SQLite tracking row after the terminal outcome.
+   */
+  retention?: WorkflowInstanceCreateOptions["retention"];
 };
 
 /**
