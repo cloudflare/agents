@@ -540,10 +540,14 @@ export class TestVoiceAgent extends VoiceBase {
           );
           break;
         case "_get_agent_context":
+          const contexts =
+            this.transcriber instanceof TestTranscriber
+              ? (this.transcriber.lastSession?.agentContexts ?? [])
+              : [];
           connection.send(
             JSON.stringify({
               type: "_agent_context",
-              contexts: this.transcriber.lastSession?.agentContexts ?? []
+              contexts
             })
           );
           break;

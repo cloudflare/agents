@@ -27,8 +27,8 @@ export type AssemblyAIMode = "min_latency" | "balanced" | "max_accuracy";
 export type AssemblyAIVoiceFocus = "near-field" | "far-field";
 
 /**
- * Languages biased by `language_code` on `universal-3-5-pro`. Set when the
- * session is known to be monolingual for better accuracy; omit to keep default
+ * Languages biased by `language_codes` on `universal-3-5-pro`. Set when the
+ * expected languages are known for better accuracy; omit to keep default
  * multilingual code-switching. The `string & {}` arm keeps autocomplete while
  * allowing forward-compat values.
  */
@@ -127,10 +127,11 @@ export interface AssemblyAISTTOptions {
    */
   previousContextNTurns?: number;
   /**
-   * Bias the model toward a single language → `language_code`. Set when the
-   * session is monolingual; omit to keep default multilingual code-switching.
+   * Bias the model toward expected languages → `language_codes`. Set a
+   * single-element array for monolingual sessions; omit to keep default
+   * multilingual code-switching.
    */
-  languageCode?: AssemblyAILanguageCode;
+  languageCodes?: AssemblyAILanguageCode[];
   /**
    * Voice Focus noise suppression → `voice_focus`. Isolates the primary voice
    * and suppresses background noise before audio reaches the model. Omit to
@@ -202,8 +203,8 @@ export function _buildConnectionUrl(opts: AssemblyAISTTOptions): string {
   if (opts.previousContextNTurns !== undefined) {
     params.set("previous_context_n_turns", String(opts.previousContextNTurns));
   }
-  if (opts.languageCode !== undefined) {
-    params.set("language_code", opts.languageCode);
+  if (opts.languageCodes !== undefined) {
+    params.set("language_codes", JSON.stringify(opts.languageCodes));
   }
   if (opts.voiceFocus !== undefined) {
     params.set("voice_focus", opts.voiceFocus);
@@ -311,9 +312,8 @@ export class AssemblyAISTT implements Transcriber {
   }
 
   createSession(options?: TranscriberSessionOptions): TranscriberSession {
-    // `options.language` is intentionally ignored: steer language via the
-    // `languageCode` provider option (`language_code`) instead, which
-    // universal-3-5-pro biases toward when the session is monolingual.
+    // `options.language` is intentionally ignored: steer languages via the
+    // `languageCodes` provider option (`language_codes`) instead.
     return new AssemblyAISession(this.#options, options);
   }
 }

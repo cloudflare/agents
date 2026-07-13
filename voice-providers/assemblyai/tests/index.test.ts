@@ -102,7 +102,7 @@ describe("_buildConnectionUrl — conditional params (only when set)", () => {
       "mode",
       "agent_context",
       "previous_context_n_turns",
-      "language_code",
+      "language_codes",
       "voice_focus",
       "voice_focus_threshold"
     ]) {
@@ -200,9 +200,11 @@ describe("_buildConnectionUrl — conditional params (only when set)", () => {
     ).toBe("0");
   });
 
-  it("forwards languageCode", () => {
-    const p = parse(_buildConnectionUrl({ apiKey: "k", languageCode: "es" }));
-    expect(p.get("language_code")).toBe("es");
+  it("JSON-encodes languageCodes into language_codes", () => {
+    const p = parse(
+      _buildConnectionUrl({ apiKey: "k", languageCodes: ["en", "es"] })
+    );
+    expect(p.get("language_codes")).toBe('["en","es"]');
   });
 
   it("forwards voiceFocus and voiceFocusThreshold", () => {
@@ -313,7 +315,7 @@ describe("AssemblyAISTT — construction validation", () => {
           prompt: "The caller is booking a hotel.",
           agentContext: "What date would you like to check in?",
           previousContextNTurns: 5,
-          languageCode: "en",
+          languageCodes: ["en"],
           voiceFocus: "near-field",
           voiceFocusThreshold: 0.7,
           minTurnSilence: 400,
