@@ -291,6 +291,182 @@ describe("think messengers core", () => {
     ]);
   });
 
+  it("prefixes channel messages with the default fullName cascade", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        text: "hello channel"
+      },
+      thread: { ...baseEvent.thread, isDirectMessage: false }
+    };
+
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      { type: "text", text: "Ada Lovelace: hello channel" }
+    ]);
+  });
+
+  it("falls back through fullName || userName || userId for the default label", () => {
+    const noFullName: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: { userId: "telegram:user", userName: "ada" },
+        text: "hello"
+      }
+    };
+    expect(toMessengerUserMessage(noFullName).parts).toEqual([
+      { type: "text", text: "ada: hello" }
+    ]);
+
+    const idOnly: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: { userId: "telegram:user" },
+        text: "hello"
+      }
+    };
+    expect(toMessengerUserMessage(idOnly).parts).toEqual([
+      { type: "text", text: "telegram:user: hello" }
+    ]);
+  });
+
+  it("accepts a custom channelSpeakerLabel formatter", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        text: "hello"
+      }
+    };
+
+    expect(
+      toMessengerUserMessage(event, (author) => `@${author.userName}`).parts
+    ).toEqual([{ type: "text", text: "@ada: hello" }]);
+
+    // Returning null/empty suppresses the prefix for that author.
+    expect(toMessengerUserMessage(event, () => null).parts).toEqual([
+      { type: "text", text: "hello" }
+    ]);
+  });
+
+  it("never prefixes direct messages regardless of channelSpeakerLabel", () => {
+    const dmEvent: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        text: "hello dm"
+      },
+      thread: { ...baseEvent.thread, isDirectMessage: true }
+    };
+
+    expect(toMessengerUserMessage(dmEvent).parts).toEqual([
+      { type: "text", text: "hello dm" }
+    ]);
+    expect(
+      toMessengerUserMessage(dmEvent, (author) => author.fullName ?? null).parts
+    ).toEqual([{ type: "text", text: "hello dm" }]);
+  });
+
+  it("prefixes channel actions with the resolved speaker label", () => {
+    const channelActionEvent: MessengerEvent = {
+      ...baseEvent,
+      action: {
+        actionId: "approve",
+        messageId: "source-message",
+        user: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        value: "ship-it"
+      },
+      kind: "action",
+      message: undefined,
+      thread: { ...baseEvent.thread, isDirectMessage: false }
+    };
+
+    expect(toMessengerUserMessage(channelActionEvent).parts).toEqual([
+      {
+        type: "text",
+        text: [
+          "Ada Lovelace: Action selected: approve",
+          "Value: ship-it",
+          "Source message: source-message"
+        ].join("\n")
+      }
+    ]);
+
+    expect(
+      toMessengerUserMessage(
+        channelActionEvent,
+        (author) => `@${author.userName}`
+      ).parts
+    ).toEqual([
+      {
+        type: "text",
+        text: [
+          "@ada: Action selected: approve",
+          "Value: ship-it",
+          "Source message: source-message"
+        ].join("\n")
+      }
+    ]);
+  });
+
+  it("never prefixes direct message actions", () => {
+    const dmActionEvent: MessengerEvent = {
+      ...baseEvent,
+      action: {
+        actionId: "approve",
+        messageId: "source-message",
+        user: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        value: "ship-it"
+      },
+      kind: "action",
+      message: undefined,
+      thread: { ...baseEvent.thread, isDirectMessage: true }
+    };
+
+    const expected = [
+      {
+        type: "text",
+        text: [
+          "Action selected: approve",
+          "Value: ship-it",
+          "Source message: source-message"
+        ].join("\n")
+      }
+    ];
+
+    expect(toMessengerUserMessage(dmActionEvent).parts).toEqual(expected);
+    // A custom label cannot re-introduce a prefix in DMs.
+    expect(
+      toMessengerUserMessage(dmActionEvent, (author) => author.fullName ?? null)
+        .parts
+    ).toEqual(expected);
+  });
+
   it("converts messenger actions to Think user messages", () => {
     const event = defaultChatSdkEvent(
       normalizeMessengers({

@@ -32,7 +32,11 @@ import type {
   MessengerMessage,
   MessengerThread
 } from "./events";
-import { serializableMessengerEvent, toMessengerUserMessage } from "./events";
+import {
+  serializableMessengerEvent,
+  toMessengerUserMessage,
+  type ChannelSpeakerLabel
+} from "./events";
 import {
   deliverMessengerReply,
   MESSENGER_REPLY_FIBER_NAME,
@@ -70,6 +74,14 @@ export interface MessengerDefinition {
   adapter: Adapter;
   adapterName: string;
   capabilities?: MessengerCapabilities;
+  /**
+   * Customizes how non-DM channel messages are labelled for the model.
+   *
+   * Channel (group) messages use `fullName || userName || userId` by default and
+   * are rendered as `SpeakerName: text` so the model can attribute multi-user
+   * traffic. Direct messages never get a prefix.
+   */
+  channelSpeakerLabel?: ChannelSpeakerLabel;
   conversation?: MessengerConversationMode | MessengerConversationResolver;
   delivery?: MessengerDeliveryPolicy;
   keyShard?: ChatSdkStateAdapterOptions["keyShard"];
@@ -463,7 +475,7 @@ export class ThinkMessengerRuntime {
       snapshotThread: thread.toJSON(),
       surface: thread satisfies MessengerDeliverySurface,
       target,
-      userMessage: toMessengerUserMessage(event)
+      userMessage: toMessengerUserMessage(event, definition.channelSpeakerLabel)
     });
   }
 
