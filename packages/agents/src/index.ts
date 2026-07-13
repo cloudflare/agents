@@ -676,6 +676,11 @@ type RootFacetRpcSurface = {
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<{ schedule: Schedule<T>; created: boolean }>;
+  _cf_rearmWorkflowCleanupForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    nextCleanupAt: number | null,
+    fired?: boolean
+  ): Promise<void>;
   _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
