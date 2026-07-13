@@ -8,28 +8,28 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 `todo` → `in-progress` → `done` (tests green + typecheck clean)
 
 ## Wave 0–1 (foundations)
-- [ ] kernel/ids, kernel/errors, kernel/json, kernel/events (audit 01)
-- [ ] ports/* (audit 02)
-- [ ] adapters/memory/* incl. FakeModel (audit 02)
-- [ ] domain/messages/model (audit 03)
+- [x] kernel/ids, kernel/errors, kernel/json, kernel/events (audit 01)
+- [x] ports/* (audit 02)
+- [x] adapters/memory/* incl. FakeModel (audit 02)
+- [x] domain/messages/model (audit 03)
 
 ## Wave 2
-- [ ] domain/messages/repair + store (audit 03)
-- [ ] domain/state (audit 04)
-- [ ] domain/scheduling/dsl + cron (audit 05)
-- [ ] domain/stream/chunks (audit 07)
+- [x] domain/messages/repair + store (audit 03)
+- [x] domain/state (audit 04)
+- [x] domain/scheduling/dsl + cron (audit 05)
+- [x] domain/stream/chunks (audit 07)
 
 ## Wave 3
 - [ ] domain/scheduling/scheduler + keep-alive (audit 05)
 - [ ] domain/queue (audit 04)
 - [ ] domain/fibers (audit 06)
-- [ ] domain/stream/resumable (audit 07)
+- [x] domain/stream/resumable (audit 07)
 - [ ] domain/tools/registry (audit 08)
 - [ ] domain/turn/admission (audit 09)
 - [ ] domain/session (audit 10)
-- [ ] domain/workspace (audit 15)
+- [x] domain/workspace (audit 15)
 - [ ] domain/fetch (audit 16)
-- [ ] domain/rpc/callable (audit 21)
+- [x] domain/rpc/callable (audit 21)
 
 ## Wave 4
 - [ ] domain/turn/loop (audit 09)
@@ -50,4 +50,5 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 - [ ] e2e scenarios (audit 24)
 
 ## Log
+- 2026-07-13: wave 2 + workspace/callable/resumable done (357 tests). Tool types module added at domain/tools/types.ts.
 - 2026-07-12: audit complete (docs 00–24), package scaffolded.
