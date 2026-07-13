@@ -14,6 +14,7 @@
  */
 
 import { Agent } from "agents";
+import { STALE_RUN_MS } from "./run-status";
 
 export type ThreadStatus = "running" | "done" | "error";
 
@@ -116,11 +117,16 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
     session: string
   ): Promise<
     | { ok: true; thread: ThreadMeta }
-    | { ok: false; reason: "not_found" | "not_failed" }
+    | { ok: false; reason: "not_found" | "not_recoverable" }
   > {
     const thread = this.state.threads[session];
     if (!thread) return { ok: false, reason: "not_found" };
-    if (thread.status !== "error") return { ok: false, reason: "not_failed" };
+    const staleRunning =
+      thread.status === "running" &&
+      Date.now() - thread.updatedAt >= STALE_RUN_MS;
+    if (thread.status !== "error" && !staleRunning) {
+      return { ok: false, reason: "not_recoverable" };
+    }
     this.#put({
       ...thread,
       status: "running",

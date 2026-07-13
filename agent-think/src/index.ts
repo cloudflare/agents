@@ -233,7 +233,7 @@ export default {
         return claim.reason === "not_found"
           ? Response.json({ error: "thread not found" }, { status: 404 })
           : Response.json(
-              { error: "only failed runs can be continued" },
+              { error: "only failed or stale runs can be continued" },
               { status: 409 }
             );
       }
