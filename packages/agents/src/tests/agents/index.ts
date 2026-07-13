@@ -38,6 +38,7 @@ export {
   TestAgentToolReplayAgent,
   TestAgentToolStubChild
 } from "./agent-tool-replay";
+export { SelfInitAgent, SelfInitEmailAgent } from "./self-init";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { TestReadonlyAgent } from "./readonly";
 export { TestProtocolMessagesAgent } from "./protocol-messages";

@@ -1,3 +1,42 @@
+import type { Server } from "partyserver";
+
+/**
+ * Resolve a Durable Object stub directly by name, skipping the
+ * `getServerByName` → `setName` init round-trip. Mirrors
+ * `getServerByName`'s namespace option handling (`jurisdiction`,
+ * `locationHint`) but issues zero RPCs at resolution time: the target
+ * self-initializes on its own RPC entry surface before running. Every
+ * internal Agent RPC surface awaits `__unsafe_ensureInitialized()`, and
+ * the auto-wrapped user-method path cold-initializes on first call, so a
+ * stub resolved this way is safe to invoke without a prior `setName`.
+ *
+ * Never delivers `props`; callers that need props must keep the sync
+ * round-trip (`getAgentByName` / `getServerByName`). Internal call sites
+ * only.
+ *
+ * @internal
+ */
+export function getAgentStubByName<
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  T extends Server<Env> = Server<Env>
+>(
+  namespace: DurableObjectNamespace<T>,
+  name: string,
+  options?: {
+    jurisdiction?: DurableObjectJurisdiction;
+    locationHint?: DurableObjectLocationHint;
+  }
+): DurableObjectStub<T> {
+  const resolvedNamespace = options?.jurisdiction
+    ? namespace.jurisdiction(options.jurisdiction)
+    : namespace;
+  const id = resolvedNamespace.idFromName(name);
+  return resolvedNamespace.get(
+    id,
+    options?.locationHint ? { locationHint: options.locationHint } : undefined
+  );
+}
+
 /**
  * Property keys that JavaScript runtimes and test frameworks probe
  * on arbitrary objects (serialization, thenable check, inspection,

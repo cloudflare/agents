@@ -38,7 +38,11 @@ import {
   getServerByName,
   routePartykitRequest
 } from "partyserver";
-import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+import {
+  camelCaseToKebabCase,
+  getAgentStubByName,
+  isInternalJsStubProp
+} from "./utils";
 export { camelCaseToKebabCase } from "./utils";
 import {
   type RetryOptions,
@@ -1532,22 +1536,73 @@ function withAgentContext<T extends (...args: any[]) => any>(
     const { agent } = getCurrentAgent();
 
     if (agent === this) {
-      // already wrapped, so we can just call the method
+      // Re-entrant / nested call inside this agent's own context — either
+      // `onStart()` is running (framework init in-flight) or init already
+      // completed and one wrapped method is calling another locally. Never
+      // trigger init here: awaiting it during `onStart()` would deadlock the
+      // in-flight init, and it would also re-run `onStart()`. Running the
+      // method directly also preserves synchronous return values.
       return method.apply(this, args);
     }
-    // Crossing to a different Agent must not carry native I/O handles
-    // from the previous request/WebSocket/email turn into the new DO.
-    return agentContext.run(
-      {
-        agent: this,
-        connection: undefined,
-        request: undefined,
-        email: undefined
-      },
-      () => {
-        return method.apply(this, args);
+
+    // Entry into this agent's context from outside it: a cold or warm RPC, or
+    // a crossing from a different agent. Crossing must not carry native I/O
+    // handles from the previous request/WebSocket/email turn into the new DO.
+    const runInContext = (): ReturnType<T> =>
+      agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        () => {
+          return method.apply(this, args);
+        }
+      );
+
+    // Ensure framework init (`onStart()`) has completed before the user
+    // method runs, so callers that resolve the stub without the
+    // `getServerByName` → `setName` round-trip still observe a fully
+    // initialized agent.
+    const self = this as unknown as {
+      _selfInitCompleted: boolean;
+      _selfInitPromise?: Promise<void>;
+      ctx: { id: { name?: string } };
+      __unsafe_ensureInitialized(): Promise<void>;
+    };
+
+    // Warm fast path: already initialized. No await — synchronous returns are
+    // preserved and post-init calls stay zero-overhead.
+    if (self._selfInitCompleted) {
+      return runInContext();
+    }
+
+    // Only self-initialize when the agent is addressed by name. A raw-id DO
+    // (`newUniqueId()` / `idFromString()` with no `setName()` bootstrap) has
+    // no resolvable name, so `onStart()`'s name-dependent framework setup
+    // cannot run — this is the unsupported addressing partyserver's `name`
+    // getter throws on. Preserve the historical behavior of invoking the
+    // method without forcing init in that case. `ctx.id.name` is `undefined`
+    // for such DOs and, unlike the `name` getter, never throws.
+    if (self.ctx.id.name === undefined) {
+      return runInContext();
+    }
+
+    // Cold path: block on framework init exactly once. The memo makes two
+    // concurrent cold RPCs share a single `onStart()` run. This path is
+    // inherently async — a cold entry only happens across an RPC boundary,
+    // which is already asynchronous.
+    self._selfInitPromise ??= self.__unsafe_ensureInitialized();
+    return self._selfInitPromise.then(
+      () => runInContext(),
+      (error: unknown) => {
+        // Init failed: clear the memo so the next call retries instead of
+        // replaying the rejection, then surface the error to the caller.
+        self._selfInitPromise = undefined;
+        throw error;
       }
-    );
+    ) as ReturnType<T>;
   };
 }
 
@@ -1629,6 +1684,29 @@ export class Agent<
 
   /** True while user's onStart() is executing. Used to warn about non-idempotent schedule() calls. */
   private _insideOnStart = false;
+
+  /**
+   * True once the framework `onStart()` has run to completion for this
+   * in-memory instance. Read synchronously by the auto-wrapped user-method
+   * path (see {@link withAgentContext}) to skip the init round-trip once
+   * warm, which preserves synchronous return values for local calls. Reset
+   * on eviction/hibernation because it is in-memory only — a cold instance
+   * re-initializes, which is correct.
+   * @internal
+   */
+  private _selfInitCompleted = false;
+
+  /**
+   * Memoized in-flight framework-init promise, set while a cold RPC entry
+   * awaits `onStart()`. Ensures two concurrent cold RPCs trigger a single
+   * `onStart()` run (the wrapper must not double-trigger init). Never read
+   * during `onStart()` itself: re-entrant local calls take the synchronous
+   * agent-context fast path and never reach the memo. Cleared on init
+   * failure so the next call retries instead of replaying the rejection.
+   * In-memory only (reset on hibernation), mirroring partyserver's status.
+   * @internal
+   */
+  private _selfInitPromise?: Promise<void>;
 
   /** Tracks callbacks already warned about during this onStart() to avoid log spam. */
   private _warnedScheduleInOnStart = new Set<string>();
@@ -2602,7 +2680,7 @@ export class Agent<
 
     const _onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
-      return agentContext.run(
+      const result = await agentContext.run(
         {
           agent: this,
           connection: undefined,
@@ -2705,6 +2783,12 @@ export class Agent<
           });
         }
       );
+      // Framework init finished for this in-memory instance. Mirrors
+      // partyserver marking its status "started" once `onStart()` resolves —
+      // if the body above threw (e.g. storage hydration failed), the `await`
+      // rethrows and this flag stays false, so the next entry retries.
+      this._selfInitCompleted = true;
+      return result;
     };
   }
 
@@ -3192,6 +3276,11 @@ export class Agent<
     _secureRouted?: boolean;
     _bridge: EmailBridge;
   }) {
+    // Self-initialize before dispatching: email routing resolves this stub
+    // without the `getServerByName` → `setName` round-trip, so `onStart()`
+    // must run here rather than at resolution time.
+    await this.__unsafe_ensureInitialized();
+
     // nb: we use this roundabout way of getting to onEmail
     // because of https://github.com/cloudflare/workerd/issues/4499
 
@@ -3782,10 +3871,12 @@ export class Agent<
       );
     }
 
-    return (await getServerByName<Cloudflare.Env, Agent>(
+    // Zero-RTT: the root's RootFacetRpcSurface methods all self-initialize,
+    // so we skip the `getServerByName` → `setName` init round-trip.
+    return getAgentStubByName<Cloudflare.Env, Agent>(
       binding as unknown as DurableObjectNamespace<Agent>,
       root.name
-    )) as unknown as RootFacetRpcSurface;
+    ) as unknown as RootFacetRpcSurface;
   }
 
   private _cf_rootResolvesToSelf(): boolean {
@@ -4043,6 +4134,9 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; idempotent?: boolean }
   ): Promise<{ schedule: Schedule<T>; created: boolean }> {
+    // Root schedule owner is resolved zero-RTT by facet delegation
+    // (`_rootAlarmOwner`); initialize before touching schedule storage.
+    await this.__unsafe_ensureInitialized();
     return this._insertScheduleForOwner(
       ownerPath,
       when,
@@ -4141,6 +4235,9 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<{ schedule: Schedule<T>; created: boolean }> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before touching
+    // schedule storage.
+    await this.__unsafe_ensureInitialized();
     return this._insertIntervalScheduleForOwner(
       ownerPath,
       intervalSeconds,
@@ -4162,6 +4259,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<{ ok: boolean; callback?: string }> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before reading
+    // schedule storage.
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     const result = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
@@ -4191,6 +4291,9 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before sweeping
+    // schedule/facet-run storage.
+    await this.__unsafe_ensureInitialized();
     const rows = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
       WHERE owner_path IS NOT NULL
@@ -4315,6 +4418,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<Schedule<unknown> | undefined> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before reading
+    // schedule storage.
+    await this.__unsafe_ensureInitialized();
     return this._getScheduleForOwner(ownerPath, id);
   }
 
@@ -4327,6 +4433,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     criteria: ScheduleCriteria = {}
   ): Promise<Schedule<unknown>[]> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before reading
+    // schedule storage.
+    await this.__unsafe_ensureInitialized();
     return this._listSchedulesForOwner(ownerPath, criteria);
   }
 
@@ -4339,6 +4448,9 @@ export class Agent<
   async _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before arming the
+    // root keepAlive heartbeat.
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
     this._facetKeepAliveTokens.add(token);
@@ -4355,6 +4467,9 @@ export class Agent<
    * @internal
    */
   async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before adjusting the
+    // root keepAlive heartbeat.
+    await this.__unsafe_ensureInitialized();
     if (!this._facetKeepAliveTokens.delete(token)) return;
     this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
     await this._scheduleNextAlarm();
@@ -4370,6 +4485,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before writing to
+    // facet-run storage.
+    await this.__unsafe_ensureInitialized();
     const ownerPathJson = JSON.stringify(ownerPath);
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     if (!ownerPathKey) {
@@ -4392,6 +4510,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before writing to
+    // facet-run storage.
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     this.sql`
       DELETE FROM cf_agents_facet_runs
@@ -5889,6 +6010,9 @@ export class Agent<
   async _cf_checkRunFibersForFacet(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<number> {
+    // Dispatched onto this facet stub during root alarm housekeeping;
+    // initialize so `selfPath`/fiber state are hydrated before use.
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
     if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -5936,6 +6060,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     row: ScheduleStorageRow
   ): Promise<boolean> {
+    // Dispatched onto this facet stub when the root fires a facet-owned
+    // schedule; initialize so `selfPath` and callbacks resolve correctly.
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
     if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -6053,6 +6180,9 @@ export class Agent<
   async _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize before walking the
+    // facet tree and cancelling parent-owned schedules.
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
 
     if (targetPath.length === 0) {
@@ -6921,6 +7051,9 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize so `_isFacet` and
+    // connection state are hydrated before routing the broadcast.
+    await this.__unsafe_ensureInitialized();
     if (this._isFacet && this._cf_currentSubAgentBridge) {
       this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
       return;
@@ -6938,6 +7071,9 @@ export class Agent<
   async _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize so sub-agent
+    // connection state is hydrated before enumerating it.
+    await this.__unsafe_ensureInitialized();
     const metas: SubAgentConnectionMeta[] = [];
     for (const connection of super.getConnections()) {
       const meta = this._cf_subAgentConnectionMetaForPath(
@@ -6953,6 +7089,9 @@ export class Agent<
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize so connection
+    // targets are hydrated before dispatch.
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
@@ -6965,6 +7104,9 @@ export class Agent<
     code?: number,
     reason?: string
   ): Promise<void> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize so connection
+    // targets are hydrated before closing.
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
@@ -6976,6 +7118,9 @@ export class Agent<
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
+    // Resolved zero-RTT via `_rootAlarmOwner`; initialize so connection
+    // targets are hydrated before mutating state.
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return null;
@@ -7244,6 +7389,9 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    // Forwarded from the root's WebSocket entry onto this facet stub;
+    // initialize before wiring up the bridged connection.
+    await this.__unsafe_ensureInitialized();
     await this._cf_runWithSubAgentBridge(bridge, async () => {
       const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
       const request = new Request(meta.uri ?? "http://placeholder/", {
@@ -7280,6 +7428,9 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    // Forwarded from the root's WebSocket entry onto this facet stub;
+    // initialize before dispatching the bridged message.
+    await this.__unsafe_ensureInitialized();
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
@@ -7294,6 +7445,9 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    // Forwarded from the root's WebSocket entry onto this facet stub;
+    // initialize before handling the bridged close.
+    await this.__unsafe_ensureInitialized();
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
@@ -7553,6 +7707,10 @@ export class Agent<
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    // `getSubAgentByName` resolves this parent stub without a `setName`
+    // round-trip; initialize before resolving the facet so `onStart()`
+    // (which hydrates sub-agent state) has run.
+    await this.__unsafe_ensureInitialized();
     const stub = await this._cf_resolveSubAgent(className, name);
     return await this._cf_invokeStubMethod(stub, className, method, args);
   }
@@ -7570,6 +7728,9 @@ export class Agent<
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    // Reached zero-RTT from `parentAgent()`/workflows on the root; the name
+    // check below reads `this.name`, and dispatch expects a warm agent.
+    await this.__unsafe_ensureInitialized();
     const [self, next, ...rest] = path;
     if (!self) {
       throw new Error(`Sub-agent path invocation requires a non-empty path.`);
@@ -7809,7 +7970,10 @@ export class Agent<
           `exported under that class name and registered as a Durable Object binding.`
       );
     }
-    return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
+    // Zero-RTT: the parent's RPC surfaces self-initialize (internal `_cf_*`
+    // methods and auto-wrapped user methods), so we skip the
+    // `getServerByName` → `setName` init round-trip.
+    return getAgentStubByName<Cloudflare.Env, T>(binding, parent.name);
   }
 
   private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
@@ -7855,13 +8019,14 @@ export class Agent<
       );
     }
 
-    const rootStubPromise = getServerByName<Cloudflare.Env, Agent>(
+    // Zero-RTT: `_cf_invokeSubAgentPath` self-initializes on the root, so we
+    // skip the `getServerByName` → `setName` init round-trip.
+    const rootStub = getAgentStubByName<Cloudflare.Env, Agent>(
       rootBinding,
       root.name
     );
     const targetPath = parentPath.map((step) => ({ ...step }));
     const invokeBridge = async (method: string, args: unknown[]) => {
-      const rootStub = await rootStubPromise;
       const bridge = rootStub as unknown as SubAgentPathInvokeEndpoint;
       return await bridge._cf_invokeSubAgentPath(targetPath, method, args);
     };
@@ -12898,7 +13063,9 @@ export async function routeAgentEmail<
     );
   }
 
-  const agent = await getAgentByName(
+  // Zero-RTT: `_onEmail` self-initializes, so we skip the `getAgentByName`
+  // → `setName` init round-trip here.
+  const agent = getAgentStubByName<Env, Agent<Env>>(
     namespace as unknown as DurableObjectNamespace<Agent<Env>>,
     routingInfo.agentId
   );

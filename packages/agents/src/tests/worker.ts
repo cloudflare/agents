@@ -70,7 +70,9 @@ export {
   Sub_,
   ReservedClassParent,
   TestUnboundParentAgent,
-  TestMinifiedNameParentAgent
+  TestMinifiedNameParentAgent,
+  SelfInitAgent,
+  SelfInitEmailAgent
 } from "./agents";
 export { ChatSdkStateAgent } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
@@ -142,7 +144,9 @@ import type {
   HookingSubAgentParent,
   ReservedClassParent,
   TestUnboundParentAgent,
-  TestMinifiedNameParentAgent
+  TestMinifiedNameParentAgent,
+  SelfInitAgent,
+  SelfInitEmailAgent
 } from "./agents";
 
 export type Env = {
@@ -196,6 +200,8 @@ export type Env = {
   HookingSubAgentParent: DurableObjectNamespace<HookingSubAgentParent>;
   ReservedClassParent: DurableObjectNamespace<ReservedClassParent>;
   TestConnectionUriAgent: DurableObjectNamespace<TestConnectionUriAgent>;
+  SelfInitAgent: DurableObjectNamespace<SelfInitAgent>;
+  SelfInitEmailAgent: DurableObjectNamespace<SelfInitEmailAgent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
   // accessed via ctx.exports as facet classes — no standalone bindings needed.
   // Workflow bindings for integration testing

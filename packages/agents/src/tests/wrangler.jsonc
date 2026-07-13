@@ -265,6 +265,14 @@
       {
         "class_name": "TestMinifiedNameParentAgent",
         "name": "TestMinifiedNameParentAgent"
+      },
+      {
+        "class_name": "SelfInitAgent",
+        "name": "SelfInitAgent"
+      },
+      {
+        "class_name": "SelfInitEmailAgent",
+        "name": "SelfInitEmailAgent"
       }
     ]
   },
@@ -371,7 +379,9 @@
         "HookingSubAgentParent",
         "ReservedClassParent",
         "TestUnboundParentAgent",
-        "TestMinifiedNameParentAgent"
+        "TestMinifiedNameParentAgent",
+        "SelfInitAgent",
+        "SelfInitEmailAgent"
       ],
       "tag": "v1"
     }

@@ -39,7 +39,7 @@ import type {
   WorkflowStep,
   WorkflowStepEvent
 } from "cloudflare:workers";
-import { getAgentByName, type Agent } from "./index";
+import type { Agent } from "./index";
 import type {
   AgentWorkflowParams,
   AgentWorkflowStep,
@@ -52,7 +52,7 @@ import type {
   AgentWorkflowOrigin,
   AgentWorkflowPathStep
 } from "./workflow-types";
-import { isInternalJsStubProp } from "./utils";
+import { getAgentStubByName, isInternalJsStubProp } from "./utils";
 
 type AgentPathInvoker = {
   _cf_invokeAgentPath(
@@ -251,8 +251,11 @@ export class AgentWorkflow<
       );
     }
 
-    // Get the Agent stub by name
-    this._agent = await getAgentByName<Cloudflare.Env, AgentType>(
+    // Get the Agent stub by name. Zero-RTT: the agent self-initializes on
+    // its own RPC entry surface (auto-wrapped user methods and
+    // `_cf_invokeAgentPath`), so we skip the `getAgentByName` → `setName`
+    // init round-trip.
+    this._agent = getAgentStubByName<Cloudflare.Env, AgentType>(
       namespace,
       resolvedAgentName
     );
@@ -276,10 +279,12 @@ export class AgentWorkflow<
       );
     }
 
-    const rootAgent = (await getAgentByName<Cloudflare.Env, Agent>(
+    // Zero-RTT: `_cf_invokeAgentPath` self-initializes on the root, so we
+    // skip the `getAgentByName` → `setName` init round-trip.
+    const rootAgent = getAgentStubByName<Cloudflare.Env, Agent>(
       namespace,
       root.name
-    )) as unknown as AgentPathInvoker;
+    ) as unknown as AgentPathInvoker;
 
     return new Proxy(
       {},
