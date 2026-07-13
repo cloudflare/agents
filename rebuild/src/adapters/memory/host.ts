@@ -11,6 +11,14 @@ export interface MemoryHost {
   alarms: MemoryAlarmTimer;
   connections: MemoryConnectionRegistry;
   bus: EventBus;
+  /**
+   * Wires this host's alarm timer so that, when it fires, `agent.onAlarm()`
+   * is invoked. The `AlarmTimer` port itself has no firing hook (a real
+   * Durable Object delivers alarms via a platform callback, not via the
+   * port) — this is the in-memory adapter's stand-in for that delivery
+   * mechanism, mirroring how an adapter is expected to drive `onAlarm()`.
+   */
+  attachAgent(agent: { onAlarm(): void | Promise<void> }): void;
 }
 
 export interface CreateMemoryHostOptions {
@@ -30,5 +38,14 @@ export function createMemoryHost(options: CreateMemoryHostOptions = {}): MemoryH
     () => clock.now()
   );
 
-  return { clock, store, alarms, connections, bus };
+  return {
+    clock,
+    store,
+    alarms,
+    connections,
+    bus,
+    attachAgent(agent: { onAlarm(): void | Promise<void> }): void {
+      alarms.onAlarm(() => agent.onAlarm());
+    },
+  };
 }

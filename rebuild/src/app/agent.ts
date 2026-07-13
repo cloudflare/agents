@@ -1,0 +1,694 @@
+import { NotFoundError, ValidationError, toErrorValue } from "../kernel/errors.js";
+import { createEventBus, type EventBus } from "../kernel/events.js";
+import { defaultIdSource, type IdSource } from "../kernel/ids.js";
+import type { AgentHandle, AgentSpawner } from "../ports/agent-spawner.js";
+import type { AlarmTimer } from "../ports/alarms.js";
+import type { Clock } from "../ports/clock.js";
+import type { EmailMessage, EmailTransport } from "../ports/email.js";
+import type { KeyValueStore } from "../ports/storage.js";
+import type { Connection, ConnectionRegistry } from "../ports/transport.js";
+import type { WorkflowRuntime } from "../ports/workflow-runtime.js";
+
+import {
+  createSubAgentRegistry,
+  type SubAgentRecord,
+  type SubAgentRegistry,
+} from "../domain/delegation/registry.js";
+import {
+  RECOVERY_SCHEDULE_ID,
+  createFiberService,
+  type FiberContext,
+  type FiberInspection,
+  type FiberRecoveryContext,
+  type FiberRecoveryResult,
+  type FiberService,
+  type FiberStatus,
+  type StartResult,
+} from "../domain/fibers/fibers.js";
+import { createTaskQueue, type QueueItem, type TaskQueue } from "../domain/queue/queue.js";
+import {
+  createCallableRegistry,
+  scanCallables,
+  type CallableMetadata,
+  type CallableRegistry,
+  type RpcRequest,
+} from "../domain/rpc/callable.js";
+import {
+  createKeepAlive,
+  type KeepAlive,
+} from "../domain/scheduling/keep-alive.js";
+import {
+  createScheduler,
+  type ListCriteria,
+  type RetryPolicy,
+  type Schedule,
+  type ScheduleSpec,
+  type Scheduler,
+} from "../domain/scheduling/scheduler.js";
+import { createStateContainer, type StateContainer, type StateSource } from "../domain/state/state.js";
+import {
+  createWorkflowService,
+  type WorkflowInfo,
+  type WorkflowService,
+  type WorkflowStatus,
+} from "../domain/workflows/workflows.js";
+
+/** Internal schedule/callback names are namespaced under this prefix (see scheduler.ts). */
+const INTERNAL_PREFIX = "$internal:";
+
+/**
+ * The adapter contract the app layer composes over. Provided by an adapter
+ * (in-memory for tests/e2e, a future Cloudflare Durable Object adapter for
+ * production). The adapter owns driving the lifecycle entry points
+ * (`start()`, `onAlarm()`, `onMessage()`, `onConnect()`, `onClose()`) — the
+ * Agent never reaches out to the platform itself.
+ */
+export interface AgentHost {
+  className: string;
+  name: string;
+  store: KeyValueStore;
+  /** The adapter must call `agent.onAlarm()` when this timer fires. */
+  alarm: AlarmTimer;
+  connections: ConnectionRegistry;
+  clock: Clock;
+  ids?: IdSource;
+  spawner?: AgentSpawner;
+  email?: EmailTransport;
+  workflowRuntime?: WorkflowRuntime;
+  /** Root-first ancestor chain, set by the spawner that constructed this instance. */
+  parentPath?: Array<{ className: string; name: string }>;
+  /** Adapter-specific teardown seam, invoked at the end of `destroy()`. */
+  onDestroyed?: () => void | Promise<void>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Thin composition root: wires the domain services over a scoped-per-module
+ * view of `host.store`, exposes their operations as a flat delegation
+ * surface, and defines the overridable hook seams (`onStart`, `onConnect`,
+ * `onMessage`, ...). No business logic lives here — every decision belongs to
+ * a domain service or a subclass hook.
+ */
+export class Agent<State = unknown> {
+  readonly host: AgentHost;
+  readonly events: EventBus;
+  readonly ids: IdSource;
+
+  private readonly internalCallbacks = new Map<
+    string,
+    (payload: unknown, schedule: Schedule) => Promise<void>
+  >();
+
+  private readonly scheduler: Scheduler;
+  private readonly keepAliveService: KeepAlive;
+  private readonly fibers: FiberService;
+  private readonly taskQueue: TaskQueue;
+  private readonly stateContainer: StateContainer<State>;
+  private readonly subAgents?: SubAgentRegistry;
+  private readonly workflows?: WorkflowService;
+  private readonly callables: CallableRegistry;
+  private callablesScanned = false;
+
+  constructor(host: AgentHost) {
+    this.host = host;
+    this.ids = host.ids ?? defaultIdSource;
+    this.events = createEventBus({ agent: host.className, name: host.name }, () => host.clock.now());
+
+    this.scheduler = createScheduler({
+      store: host.store,
+      alarm: host.alarm,
+      clock: host.clock,
+      ids: this.ids,
+      bus: this.events,
+      dispatch: (callback, payload, schedule) => this.dispatchSchedule(callback, payload, schedule),
+    });
+
+    this.keepAliveService = createKeepAlive(this.scheduler);
+
+    this.fibers = createFiberService({
+      store: host.store,
+      clock: host.clock,
+      ids: this.ids,
+      bus: this.events,
+      keepAlive: this.keepAliveService,
+      scheduler: this.scheduler,
+      onRecovered: (ctx) => Promise.resolve(this.onFiberRecovered(ctx)),
+    });
+    this.internalCallbacks.set(RECOVERY_SCHEDULE_ID, async () => {
+      await this.fibers.checkInterrupted();
+    });
+
+    this.taskQueue = createTaskQueue({
+      store: host.store,
+      clock: host.clock,
+      ids: this.ids,
+      bus: this.events,
+      dispatch: (callback, payload, item) => this.dispatchQueue(callback, payload, item),
+    });
+
+    this.stateContainer = createStateContainer<State>({
+      store: host.store,
+      bus: this.events,
+      initialState: this.getInitialState(),
+      validate: (next, source) => this.validateStateChange(next, source),
+      onChanged: (state, source) => this.onStateChanged(state, source),
+      broadcast: (state, excludeConnectionId) => this.broadcastState(state, excludeConnectionId),
+    });
+
+    if (host.spawner) {
+      this.subAgents = createSubAgentRegistry({
+        store: host.store,
+        spawner: host.spawner,
+        clock: host.clock,
+        ids: this.ids,
+      });
+    }
+
+    if (host.workflowRuntime) {
+      this.workflows = createWorkflowService({
+        store: host.store,
+        runtime: host.workflowRuntime,
+        clock: host.clock,
+        ids: this.ids,
+        bus: this.events,
+        hooks: {
+          onProgress: (wf, payload) => this.onWorkflowProgress(wf, payload),
+          onComplete: (wf) => this.onWorkflowComplete(wf),
+        },
+      });
+    }
+
+    this.callables = createCallableRegistry({ bus: this.events });
+  }
+
+  /**
+   * `@callable` method decorators tag themselves via `ctx.addInitializer`,
+   * which for a subclass runs as part of *that subclass's* own construction
+   * step — after `super()` (this base constructor) has already returned. So
+   * scanning can't happen in the constructor above; it's deferred to first
+   * use, by which point the whole prototype chain has finished constructing.
+   */
+  private ensureCallablesScanned(): void {
+    if (this.callablesScanned) return;
+    this.callablesScanned = true;
+    for (const [name, { fn, opts }] of scanCallables(this)) {
+      this.callables.register(name, fn, opts);
+    }
+  }
+
+  // --- dispatch tables ------------------------------------------------------
+
+  private async dispatchSchedule(callback: string, payload: unknown, schedule: Schedule): Promise<void> {
+    const internal = this.internalCallbacks.get(callback);
+    if (internal) {
+      await internal(payload, schedule);
+      return;
+    }
+    if (callback.startsWith(INTERNAL_PREFIX)) {
+      // An internal callback with no registered handler (e.g. the keep-alive
+      // heartbeat) needs no side effect: its only job is to keep the alarm
+      // armed, which the scheduler already does on every create/cancel.
+      return;
+    }
+    const fn = (this as unknown as Record<string, unknown>)[callback];
+    if (typeof fn !== "function") {
+      throw new NotFoundError(`No handler for scheduled callback "${callback}"`);
+    }
+    await (fn as (payload: unknown, schedule: Schedule) => unknown).call(this, payload, schedule);
+  }
+
+  private async dispatchQueue(callback: string, payload: unknown, item: QueueItem): Promise<void> {
+    const fn = (this as unknown as Record<string, unknown>)[callback];
+    if (typeof fn !== "function") {
+      throw new NotFoundError(`No handler for queued callback "${callback}"`);
+    }
+    await (fn as (payload: unknown, item: QueueItem) => unknown).call(this, payload, item);
+  }
+
+  // --- state ------------------------------------------------------------
+
+  get state(): State {
+    return this.stateContainer.get();
+  }
+
+  setState(next: State): void {
+    this.stateContainer.set(next, { kind: "server" });
+  }
+
+  /** Override to seed state the first time this agent runs (no persisted value yet). */
+  protected getInitialState(): State | undefined {
+    return undefined;
+  }
+
+  /** Override to reject a state change (throw). Called for both server and connection sources. */
+  protected validateStateChange(_next: State, _source: StateSource): void {}
+
+  /** Override to observe a state change after it has been persisted. */
+  protected onStateChanged(_state: State, _source: StateSource): void {}
+
+  private broadcastState(state: State, excludeConnectionId?: string): void {
+    const frame = JSON.stringify({ type: "cf_agent_state", state });
+    for (const conn of this.host.connections.connections()) {
+      if (excludeConnectionId !== undefined && conn.id === excludeConnectionId) continue;
+      if (!this.shouldSendProtocolMessages(conn)) continue;
+      conn.send(frame);
+    }
+  }
+
+  // --- scheduling ---------------------------------------------------------
+
+  /** Sugar: a Date (fires once at that instant), a number (delay in seconds, once), or a cron string. */
+  schedule<T = unknown>(
+    when: Date | number | string,
+    callback: string,
+    payload?: T,
+    options?: { id?: string; retry?: RetryPolicy },
+  ): Schedule<T> {
+    return this.scheduler.create(this.toScheduleSpec(when), callback, payload, options);
+  }
+
+  private toScheduleSpec(when: Date | number | string): ScheduleSpec {
+    if (when instanceof Date) {
+      return { kind: "once", at: when.getTime() };
+    }
+    if (typeof when === "number") {
+      return { kind: "once", at: this.host.clock.now() + when * 1000 };
+    }
+    return { kind: "cron", expression: when };
+  }
+
+  scheduleEvery<T = unknown>(
+    everySeconds: number,
+    callback: string,
+    payload?: T,
+    options?: { id?: string; retry?: RetryPolicy },
+  ): Schedule<T> {
+    return this.scheduler.create({ kind: "interval", everySeconds }, callback, payload, options);
+  }
+
+  getScheduleById<T = unknown>(id: string): Schedule<T> | undefined {
+    return this.scheduler.get<T>(id);
+  }
+
+  listSchedules<T = unknown>(criteria?: ListCriteria): Schedule<T>[] {
+    return this.scheduler.list<T>(criteria);
+  }
+
+  cancelSchedule(id: string): boolean {
+    return this.scheduler.cancel(id);
+  }
+
+  private rearmAlarm(): void {
+    const next = this.scheduler.nextWake();
+    if (next === null) {
+      this.host.alarm.clear();
+    } else {
+      this.host.alarm.set(next);
+    }
+  }
+
+  // --- keep-alive -----------------------------------------------------------
+
+  keepAlive(): () => void {
+    return this.keepAliveService.acquire();
+  }
+
+  keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
+    return this.keepAliveService.while(fn);
+  }
+
+  // --- queue ------------------------------------------------------------
+
+  queue<T>(callback: string, payload: T): Promise<string> {
+    return this.taskQueue.enqueue(callback, payload);
+  }
+
+  dequeue(id: string): void {
+    this.taskQueue.dequeue(id);
+  }
+
+  dequeueAll(): void {
+    this.taskQueue.dequeueAll();
+  }
+
+  dequeueAllByCallback(callback: string): void {
+    this.taskQueue.dequeueAllByCallback(callback);
+  }
+
+  getQueue(id: string): QueueItem | undefined {
+    return this.taskQueue.get(id);
+  }
+
+  getQueues(predicate: (item: QueueItem) => boolean): QueueItem[] {
+    return this.taskQueue.find(predicate);
+  }
+
+  // --- fibers -----------------------------------------------------------
+
+  runFiber<T>(name: string, fn: (ctx: FiberContext) => Promise<T>): Promise<T> {
+    return this.fibers.run(name, fn);
+  }
+
+  startFiber(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<void>,
+    options?: { idempotencyKey?: string; metadata?: Record<string, unknown>; waitForCompletion?: boolean },
+  ): Promise<StartResult> {
+    return this.fibers.start(name, fn, options);
+  }
+
+  stash(data: unknown): void {
+    this.fibers.stash(data);
+  }
+
+  inspectFiber(fiberId: string): FiberInspection | null {
+    return this.fibers.inspect(fiberId);
+  }
+
+  inspectFiberByKey(idempotencyKey: string): FiberInspection | null {
+    return this.fibers.inspectByKey(idempotencyKey);
+  }
+
+  listFibers(options?: { status?: FiberStatus[]; name?: string }): FiberInspection[] {
+    return this.fibers.list(options);
+  }
+
+  cancelFiber(fiberId: string, reason?: string): boolean {
+    return this.fibers.cancel(fiberId, reason);
+  }
+
+  cancelFiberByKey(idempotencyKey: string, reason?: string): boolean {
+    return this.fibers.cancelByKey(idempotencyKey, reason);
+  }
+
+  resolveFiber(fiberId: string, result: FiberRecoveryResult): boolean {
+    return this.fibers.resolve(fiberId, result);
+  }
+
+  deleteFibers(options?: { status?: FiberStatus[]; settledBefore?: number }): number {
+    return this.fibers.deleteFibers(options);
+  }
+
+  /** Override to resolve an orphaned managed fiber found on recovery scan. Default: leave it interrupted. */
+  protected onFiberRecovered(
+    _ctx: FiberRecoveryContext,
+  ): void | FiberRecoveryResult | Promise<void | FiberRecoveryResult> {
+    return undefined;
+  }
+
+  // --- sub-agents ---------------------------------------------------------
+
+  private requireSubAgents(): SubAgentRegistry {
+    if (!this.subAgents) {
+      throw new ValidationError("No AgentSpawner configured on this host: sub-agents are unavailable");
+    }
+    return this.subAgents;
+  }
+
+  subAgent(className: string, name: string): AgentHandle {
+    return this.requireSubAgents().get(className, name);
+  }
+
+  hasSubAgent(className: string, name: string): boolean {
+    return this.subAgents?.has(className, name) ?? false;
+  }
+
+  listSubAgents(className?: string): SubAgentRecord[] {
+    return this.subAgents?.list(className) ?? [];
+  }
+
+  async deleteSubAgent(className: string, name: string): Promise<void> {
+    return this.requireSubAgents().delete(className, name);
+  }
+
+  abortSubAgent(className: string, name: string, reason?: unknown): void {
+    this.requireSubAgents().abort(className, name, reason);
+  }
+
+  parentPath(): Array<{ className: string; name: string }> {
+    return this.host.parentPath ?? [];
+  }
+
+  selfPath(): Array<{ className: string; name: string }> {
+    return [...this.parentPath(), { className: this.host.className, name: this.host.name }];
+  }
+
+  /** Single-hop handle to the direct parent, via the spawner. Undefined at the root or with no spawner. */
+  parentAgent(): AgentHandle | undefined {
+    const path = this.parentPath();
+    const parent = path[path.length - 1];
+    if (!parent || !this.host.spawner) return undefined;
+    return this.host.spawner.get(parent.className, parent.name);
+  }
+
+  // --- workflows ----------------------------------------------------------
+
+  private requireWorkflows(): WorkflowService {
+    if (!this.workflows) {
+      throw new ValidationError("No WorkflowRuntime configured on this host: workflows are unavailable");
+    }
+    return this.workflows;
+  }
+
+  async runWorkflow(
+    workflowName: string,
+    options?: { id?: string; params?: unknown; metadata?: Record<string, unknown> },
+  ): Promise<WorkflowInfo> {
+    return this.requireWorkflows().run(workflowName, options);
+  }
+
+  async sendWorkflowEvent(workflowId: string, event: { type: string; payload?: unknown }): Promise<void> {
+    return this.requireWorkflows().sendEvent(workflowId, event);
+  }
+
+  async approveWorkflow(workflowId: string, reason?: string): Promise<void> {
+    return this.requireWorkflows().approve(workflowId, reason);
+  }
+
+  async rejectWorkflow(workflowId: string, reason?: string): Promise<void> {
+    return this.requireWorkflows().reject(workflowId, reason);
+  }
+
+  async terminateWorkflow(workflowId: string): Promise<void> {
+    return this.requireWorkflows().terminate(workflowId);
+  }
+
+  async pauseWorkflow(workflowId: string): Promise<void> {
+    return this.requireWorkflows().pause(workflowId);
+  }
+
+  async resumeWorkflow(workflowId: string): Promise<void> {
+    return this.requireWorkflows().resume(workflowId);
+  }
+
+  async restartWorkflow(workflowId: string): Promise<void> {
+    return this.requireWorkflows().restart(workflowId);
+  }
+
+  async workflowStatus(workflowId: string): Promise<WorkflowInfo> {
+    return this.requireWorkflows().status(workflowId);
+  }
+
+  getWorkflow(workflowId: string): WorkflowInfo | undefined {
+    return this.workflows?.get(workflowId);
+  }
+
+  listWorkflows(criteria?: {
+    status?: WorkflowStatus[];
+    workflowName?: string;
+    limit?: number;
+    offset?: number;
+  }): { workflows: WorkflowInfo[]; total: number } {
+    return this.workflows?.list(criteria) ?? { workflows: [], total: 0 };
+  }
+
+  deleteWorkflow(workflowId: string): boolean {
+    return this.workflows?.delete(workflowId) ?? false;
+  }
+
+  deleteWorkflows(criteria?: { status?: WorkflowStatus[]; updatedBefore?: number }): number {
+    return this.workflows?.deleteMany(criteria) ?? 0;
+  }
+
+  migrateWorkflowBinding(oldName: string, newName: string): number {
+    return this.workflows?.migrateBinding(oldName, newName) ?? 0;
+  }
+
+  async onWorkflowCallback(cb: {
+    workflowId: string;
+    kind: "progress" | "complete" | "error";
+    payload?: unknown;
+  }): Promise<{ recognized: boolean }> {
+    return this.requireWorkflows().onCallback(cb);
+  }
+
+  /** Override to observe workflow progress callbacks. */
+  protected onWorkflowProgress(_wf: WorkflowInfo, _payload: unknown): void | Promise<void> {}
+
+  /** Override to observe workflow completion. */
+  protected onWorkflowComplete(_wf: WorkflowInfo): void | Promise<void> {}
+
+  // --- email ------------------------------------------------------------
+
+  async sendEmail(message: EmailMessage): Promise<{ messageId: string }> {
+    if (!this.host.email) {
+      throw new ValidationError("No EmailTransport configured on this host");
+    }
+    const result = await this.host.email.send(message);
+    this.events.emit("email:reply", { to: message.to, messageId: result.messageId });
+    return result;
+  }
+
+  /** Seam for inbound email routing (adapter/edge concern); default no-op. */
+  protected onEmail(_message: EmailMessage): void | Promise<void> {}
+
+  // --- rpc ----------------------------------------------------------------
+
+  callableMethods(): Map<string, CallableMetadata> {
+    this.ensureCallablesScanned();
+    return this.callables.callableMethods();
+  }
+
+  // --- connections / readonly ------------------------------------------
+
+  setConnectionReadonly(conn: Connection, flag: boolean): void {
+    conn.state["readonly"] = flag;
+  }
+
+  isConnectionReadonly(conn: Connection): boolean {
+    return conn.state["readonly"] === true;
+  }
+
+  /** Override to mark a connection readonly at connect time. Default: writable. */
+  protected shouldConnectionBeReadonly(_conn: Connection): boolean {
+    return false;
+  }
+
+  /** Override to suppress cf_agent_* protocol frames for a connection. Default: send them. */
+  protected shouldSendProtocolMessages(_conn: Connection): boolean {
+    return true;
+  }
+
+  // --- lifecycle ----------------------------------------------------------
+
+  /** Adapter calls this once per activation, before routing any messages/alarms. */
+  async start(): Promise<void> {
+    await this.onStart();
+    await this.fibers.checkInterrupted();
+    await this.taskQueue.flush();
+    this.rearmAlarm();
+  }
+
+  /** Override for first-activation setup. Default: no-op. */
+  protected onStart(): void | Promise<void> {}
+
+  async onAlarm(): Promise<void> {
+    await this.scheduler.onAlarm();
+  }
+
+  async onConnect(conn: Connection): Promise<void> {
+    const readonly = this.shouldConnectionBeReadonly(conn);
+    this.setConnectionReadonly(conn, readonly);
+
+    if (this.shouldSendProtocolMessages(conn)) {
+      conn.send(
+        JSON.stringify({
+          type: "cf_agent_identity",
+          className: this.host.className,
+          name: this.host.name,
+          connectionId: conn.id,
+        }),
+      );
+      if (this.stateContainer.initialized()) {
+        conn.send(JSON.stringify({ type: "cf_agent_state", state: this.stateContainer.get() }));
+      }
+    }
+
+    this.events.emit("connect", { connectionId: conn.id });
+  }
+
+  async onClose(conn: Connection): Promise<void> {
+    this.events.emit("disconnect", { connectionId: conn.id });
+  }
+
+  async onMessage(conn: Connection, raw: string): Promise<void> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      await this.onUnhandledMessage(conn, raw);
+      return;
+    }
+
+    try {
+      if (isRecord(parsed) && parsed["type"] === "rpc") {
+        this.ensureCallablesScanned();
+        const request: RpcRequest = {
+          id: String(parsed["id"]),
+          method: String(parsed["method"]),
+          args: Array.isArray(parsed["args"]) ? (parsed["args"] as unknown[]) : [],
+        };
+        await this.callables.dispatch(request, (response) => conn.send(JSON.stringify(response)));
+        return;
+      }
+
+      if (isRecord(parsed) && parsed["type"] === "cf_agent_state") {
+        if (this.isConnectionReadonly(conn)) {
+          conn.send(JSON.stringify({ type: "cf_agent_state_error", error: "connection is read-only" }));
+          return;
+        }
+        try {
+          this.stateContainer.set(parsed["state"] as State, { kind: "connection", connectionId: conn.id });
+        } catch (err) {
+          conn.send(JSON.stringify({ type: "cf_agent_state_error", error: toErrorValue(err).message }));
+        }
+        return;
+      }
+
+      await this.onUnhandledMessage(conn, parsed);
+    } catch (err) {
+      await this.onError(err);
+    }
+  }
+
+  /** Override to handle message types the base router doesn't recognize (Think overrides this). */
+  protected onUnhandledMessage(_conn: Connection, _message: unknown): void | Promise<void> {}
+
+  /** Override to observe/report errors raised while routing a message. Default: swallow. */
+  protected onError(_error: unknown): void | Promise<void> {}
+
+  /** HTTP seam for an adapter's router; no default routing (adapter/edge concern). */
+  onRequest(_req: unknown): unknown {
+    throw new NotFoundError("onRequest is not implemented");
+  }
+
+  async destroy(): Promise<void> {
+    for (const s of this.scheduler.list({ includeInternal: true })) {
+      this.scheduler.cancel(s.id);
+    }
+    this.host.alarm.clear();
+    this.host.store.deleteAll();
+    for (const conn of this.host.connections.connections()) {
+      conn.close();
+    }
+    this.events.emit("destroy", {});
+    await this.host.onDestroyed?.();
+  }
+
+  // --- misc -----------------------------------------------------------
+
+  broadcast(message: string, exclude?: string[]): void {
+    this.host.connections.broadcast(message, exclude);
+  }
+
+  get name(): string {
+    return this.host.name;
+  }
+
+  get className(): string {
+    return this.host.className;
+  }
+}
