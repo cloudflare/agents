@@ -155,6 +155,15 @@ export async function createWorker(
       }
     }
 
+    // Add the python_workers flag if user-supplied compatibilityFlags exists but doesn't include it
+    if (
+      wranglerConfig &&
+      wranglerConfig.compatibilityFlags &&
+      !wranglerConfig.compatibilityFlags.includes("python_workers")
+    ) {
+      wranglerConfig.compatibilityFlags.push("python_workers");
+    }
+
     return {
       mainModule: entryPoint,
       modules,
