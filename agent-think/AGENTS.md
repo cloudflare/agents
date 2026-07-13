@@ -40,6 +40,8 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    ├─ AgentThink WorkerEntrypoint.dispatch  (src/index.ts)
    │     getAgentByName(env.ThinkAgent, session) → setContext → start()
    │     start() ONLY submits the durable turn — returns in ~1s
+   │     failed-run continuation refreshes GitHub auth through gh-app's private
+   │     AgentThinkTokenBroker binding before submitting into the same session
    ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + complete Workspace VFS
    │     file tools and both bash backends share the same synchronized tree;
    │     container backend claims from the warm pool per turn:

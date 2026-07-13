@@ -416,8 +416,7 @@ function App() {
 
   const continueThread = async (thread: ThreadMeta) => {
     const accepted = window.confirm(
-      "Continue this failed run using its existing transcript and workspace? " +
-        "Older runs may still need a fresh GitHub mention if their installation token has expired."
+      "Continue this failed run using its existing transcript and workspace?"
     );
     if (!accepted) return;
     setContinuing(thread.session);

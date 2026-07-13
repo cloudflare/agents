@@ -6,7 +6,10 @@ import productionWorker, {
   WorkspaceProxy,
   WorkspaceServiceProxy
 } from "../src/index";
-import { ThinkAgent as ProductionThinkAgent } from "../src/agent";
+import {
+  type AgentThinkEnv,
+  ThinkAgent as ProductionThinkAgent
+} from "../src/agent";
 import { mockInference } from "./mock-inference";
 
 /** Production agent with deterministic inference for real-container E2E. */
@@ -51,7 +54,9 @@ export default {
       };
       return Response.json(await testPool.runMaintenance());
     }
-    return productionWorker.fetch(request, env);
+    return productionWorker.fetch(request, env as AgentThinkEnv);
   },
-  scheduled: productionWorker.scheduled
+  scheduled(controller, env, ctx) {
+    return productionWorker.scheduled(controller, env as AgentThinkEnv, ctx);
+  }
 } satisfies ExportedHandler<Env>;
