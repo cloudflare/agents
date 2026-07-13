@@ -1,5 +1,54 @@
 # @cloudflare/agents
 
+## 0.17.4
+
+### Patch Changes
+
+- [#1902](https://github.com/cloudflare/agents/pull/1902) [`a9d78c0`](https://github.com/cloudflare/agents/commit/a9d78c01379e7715f7fe33046e71bd9eaf3611ef) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Always apply the Worker-safe `CfWorkerJsonSchemaValidator` to MCP client connections by default.
+
+  `MCPClientConnection` now owns the default (merged in its constructor), so every construction path uses the Worker-safe validator unless the caller supplies their own — including the RPC `addMcpServer(name, namespace)` path via `MCPClientManager.connect()`, which previously skipped it. Without the default, the MCP SDK fell back to its AJV validator when a server exposed tools with `outputSchema`; AJV compiles schemas with `new Function`, which Workers disallows, failing discovery with "Code generation from strings disallowed for this context".
+
+  `connect()` now builds connections through `createConnection()` instead of duplicating construction, so the two paths can no longer drift. Caller-supplied `client.jsonSchemaValidator` overrides are respected on the live connection; because validator instances cannot survive JSON serialization, they are no longer persisted, and a previously persisted, serialization-degraded validator is ignored on restore — after hibernation the connection falls back to the Worker-safe default instead of failing discovery.
+
+- [#1903](https://github.com/cloudflare/agents/pull/1903) [`3ba6a78`](https://github.com/cloudflare/agents/commit/3ba6a78c1d585948453803524093d686394ce4d4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: url-mode elicitation support with a real elicitation handler
+
+  - Agents can now respond to server-initiated `elicitation/create` requests by
+    calling `this.mcp.configureElicitationHandlers({ form, url })`, typically in
+    `onStart()`. The advertised modes are persisted with each MCP server, so
+    connections restored after Durable Object hibernation re-advertise them at
+    the handshake and the handlers re-attach when onStart runs.
+  - Connections advertise elicitation modes based on what can actually be
+    handled: they advertise exactly the modes with configured handlers at the
+    initialize handshake; without handlers they advertise no elicitation
+    capability. An explicit
+    `client.capabilities.elicitation` (e.g. via `addMcpServer`) always wins,
+    is persisted with the server options, and survives hibernation — it is no
+    longer clobbered by a hardcoded value.
+
+- [#1925](https://github.com/cloudflare/agents/pull/1925) [`762998d`](https://github.com/cloudflare/agents/commit/762998da1c873701305a44c598e9c029617047b4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: consume the persisted capability seed at first use instead of at restore-time read
+
+  The capability stamp persisted on each MCP server row (used to re-advertise elicitation modes at the handshake after Durable Object hibernation) was read-and-cleared when the connection object was created, before any connection attempt. Wakes that never reached a handshake burned it: a restore that parked on a pending OAuth flow, or a wake interrupted between restore and `onStart` re-stamping the rows, left the next wake's connections negotiating without the elicitation capability until some later reconnect.
+
+  The stamp is now read without clearing and only cleared once a seeded handshake actually completes in a session that has not configured handlers, preserving the one-successful-restore semantics: after the seed is used in a completed handshake it no longer re-advertises stale modes, and any `configureElicitationHandlers` call still re-stamps every row. Sessions with handlers configured own their row stamps, so a handshake there (e.g. re-adding a server under a stable id) keeps the fresh stamp in place for the next wake.
+
+- [#1910](https://github.com/cloudflare/agents/pull/1910) [`9e1b733`](https://github.com/cloudflare/agents/commit/9e1b733426620642ae67b70a6fea63459e8a1e8c) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: advertise no elicitation capability when no handler is configured
+
+  Connections without an elicitation handler previously advertised form-mode
+  elicitation while rejecting every elicitation request that arrived, so
+  spec-compliant servers chose elicitation over their fallback flows and the
+  tool call failed mid-flight. Connections now advertise the elicitation
+  capability only when it can be handled: form mode, URL mode, or both, based on
+  handlers configured via `this.mcp.configureElicitationHandlers({ form, url })`.
+  Connections without handlers advertise no elicitation capability, letting
+  servers fall back gracefully.
+
+  An explicit `client.capabilities.elicitation` declaration remains authoritative.
+  Only advertise modes your Agent can handle.
+
+- [#1869](https://github.com/cloudflare/agents/pull/1869) [`f274903`](https://github.com/cloudflare/agents/commit/f274903ee06123bc12cd5834d5187b7ffec4722e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix `addMcpServer()` reporting `ready` for an HTTP MCP connection that was restored while OAuth is still in progress.
+
+  For an existing `AUTHENTICATING` connection, `addMcpServer()` now prefers the live authorization URL, otherwise returns a persisted absolute HTTP(S) authorization URL. If neither is available, it reconnects the existing connection without re-registering it: a new authorization URL is returned and persisted, a connected result is discovered before returning `ready`, and failed or incomplete OAuth results throw instead of falling through to `ready`.
+
 ## 0.17.3
 
 ### Patch Changes
