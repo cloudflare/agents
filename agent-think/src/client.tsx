@@ -16,6 +16,7 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { CommandCenterState, ThreadMeta } from "./command-center";
+import { STALE_RUN_MS } from "./run-status";
 import "./styles.css";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
@@ -182,6 +183,14 @@ function ThreadView({ session }: { session: string }) {
 
 // ── Command center (the `/` route) ─────────────────────────────────
 
+function canContinueThread(thread: ThreadMeta): boolean {
+  return (
+    thread.status === "error" ||
+    (thread.status === "running" &&
+      Date.now() - thread.updatedAt >= STALE_RUN_MS)
+  );
+}
+
 function threadStatusLabel(t: ThreadMeta): string {
   return t.status === "running"
     ? "running"
@@ -340,13 +349,17 @@ function CommandCenterView({
                     {threadStatusLabel(t)} · {relativeTime(t.updatedAt)}
                   </span>
                 </button>
-                {t.status === "error" && (
+                {canContinueThread(t) && (
                   <button
                     className="run__continue"
                     disabled={continuing === t.session}
                     onClick={() => onContinue(t)}
                   >
-                    {continuing === t.session ? "Continuing…" : "Continue"}
+                    {continuing === t.session
+                      ? "Continuing…"
+                      : t.status === "running"
+                        ? "Recover stale"
+                        : "Continue"}
                   </button>
                 )}
               </div>
