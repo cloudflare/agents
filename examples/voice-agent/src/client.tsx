@@ -27,6 +27,12 @@ import {
 } from "@cloudflare/kumo";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useSFUVoice } from "./use-sfu-voice";
+import {
+  DEFAULT_STT_SETTINGS,
+  ProviderSettings,
+  getSttQuery,
+  type SttSettings
+} from "./stt-settings";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -118,10 +124,14 @@ function getAudioOutputLabel(device: MediaDeviceInfo, index: number) {
 
 function WebRTCApp({
   llmModel,
-  onLlmModelChange
+  onLlmModelChange,
+  sttSettings,
+  onSttSettingsChange
 }: {
   llmModel: LlmModel;
   onLlmModelChange: (m: LlmModel) => void;
+  sttSettings: SttSettings;
+  onSttSettingsChange: (settings: SttSettings) => void;
 }) {
   const sessionId = useRef(getSessionId()).current;
 
@@ -141,7 +151,7 @@ function WebRTCApp({
   } = useSFUVoice({
     agent: "my-voice-agent",
     name: sessionId,
-    query: { llm: llmModel }
+    query: { llm: llmModel, ...getSttQuery(sttSettings) }
   });
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -201,6 +211,12 @@ function WebRTCApp({
           Kimi
         </Button>
       </div>
+
+      <ProviderSettings
+        settings={sttSettings}
+        disabled={isInCall}
+        onChange={onSttSettingsChange}
+      />
 
       {/* Error banner */}
       {error && (
@@ -380,7 +396,8 @@ function App() {
   const [transport, setTransport] = useState<"websocket" | "webrtc">(
     "websocket"
   );
-  const [sttModel, setSttModel] = useState<"flux" | "nova-3">("flux");
+  const [sttSettings, setSttSettings] =
+    useState<SttSettings>(DEFAULT_STT_SETTINGS);
   const [llmModel, setLlmModel] = useState<LlmModel>("glm");
   const [outputDeviceId, setOutputDeviceId] = useState("default");
 
@@ -401,7 +418,7 @@ function App() {
   } = useVoiceAgent({
     agent: "my-voice-agent",
     name: sessionId,
-    query: { model: sttModel, llm: llmModel },
+    query: { llm: llmModel, ...getSttQuery(sttSettings) },
     outputDeviceId,
     onReconnect: () => {
       setToast("Reconnected to agent.");
@@ -595,7 +612,12 @@ function App() {
             </Button>
           </div>
 
-          <WebRTCApp llmModel={llmModel} onLlmModelChange={setLlmModel} />
+          <WebRTCApp
+            llmModel={llmModel}
+            onLlmModelChange={setLlmModel}
+            sttSettings={sttSettings}
+            onSttSettingsChange={setSttSettings}
+          />
 
           {/* Footer */}
           <div className="mt-4 flex justify-center">
@@ -652,24 +674,11 @@ function App() {
           </Button>
         </div>
 
-        {/* STT model selector */}
-        <div className="mb-4 flex items-center justify-center gap-2">
-          <span className="text-xs text-kumo-secondary">STT Model:</span>
-          <Button
-            variant={sttModel === "flux" ? "primary" : "ghost"}
-            size="sm"
-            onClick={() => setSttModel("flux")}
-          >
-            Flux
-          </Button>
-          <Button
-            variant={sttModel === "nova-3" ? "primary" : "ghost"}
-            size="sm"
-            onClick={() => setSttModel("nova-3")}
-          >
-            Nova 3
-          </Button>
-        </div>
+        <ProviderSettings
+          settings={sttSettings}
+          disabled={isInCall}
+          onChange={setSttSettings}
+        />
 
         {/* LLM model selector */}
         <div className="mb-4 flex items-center justify-center gap-2">

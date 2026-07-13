@@ -2782,6 +2782,15 @@ importers:
       '@cloudflare/voice':
         specifier: '*'
         version: link:../../packages/voice
+      '@cloudflare/voice-assemblyai':
+        specifier: '*'
+        version: link:../../voice-providers/assemblyai
+      '@cloudflare/voice-elevenlabs':
+        specifier: '*'
+        version: link:../../voice-providers/elevenlabs
+      '@cloudflare/voice-telnyx':
+        specifier: '*'
+        version: link:../../voice-providers/telnyx
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
