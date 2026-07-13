@@ -1087,6 +1087,20 @@ export interface ChatOptions {
   onClientToolCall?: ClientToolExecutor;
   /** Channel id this turn belongs to. See {@link RunTurnBase.channel}. */
   channel?: string;
+  /**
+   * Server-supplied metadata for this turn. Persisted on the turn's user
+   * message alongside {@link ChatOptions.channel} (as `metadata.turnMetadata`)
+   * so a recovered/continued turn re-resolves it from durable history, and
+   * readable during the turn via {@link Think.activeTurnMetadata}.
+   *
+   * Trust contract mirrors the channel stamp: only server-side callers can set
+   * it — reserved metadata keys on client-supplied messages are stripped at
+   * intake. This gives messenger/RPC entry points (e.g.
+   * {@link Think.chatWithMessengerContext}) a per-turn, recovery-safe carrier
+   * for facts like "which authenticated principal initiated this turn" without
+   * resorting to mutable agent-wide state.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 /** Input accepted by {@link Think.runTurn}. */
@@ -1734,6 +1748,13 @@ type ThinkWorkflowPromptContext = {
 };
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
+
+/**
+ * Message-metadata keys that are server-written turn context (stamped by
+ * `_stampChannel`) and trusted by hooks and recovery. They are stripped from
+ * client-supplied messages at intake so a client can never forge them.
+ */
+const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
 
 /**
  * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
@@ -3861,6 +3882,17 @@ export class Think<
     return this._activeChannelContext;
   }
 
+  /**
+   * The server-supplied metadata stamped on the active turn's user message
+   * ({@link ChatOptions.metadata}). Like the channel stamp, it is persisted on
+   * the durable user message, so recovered/continued turns re-resolve the same
+   * value; client-supplied message metadata can never populate it (reserved
+   * keys are stripped at intake). `undefined` when the turn carried none.
+   */
+  get activeTurnMetadata(): Record<string, unknown> | undefined {
+    return this._turnMetadataFromMessages(this.messages);
+  }
+
   /** Resolve a channel id to a turn-scoped {@link ChannelContext}, if registered. */
   private _resolveChannelContext(
     channel: string | undefined
@@ -3923,14 +3955,16 @@ export class Think<
   }
 
   /**
-   * Stamp the channel id onto user messages so a recovered/continued turn can
-   * re-resolve the channel from durable history.
+   * Stamp the channel id — and, when supplied, the caller's turn metadata —
+   * onto user messages so a recovered/continued turn can re-resolve both from
+   * durable history.
    */
   private _stampChannel(
     messages: UIMessage[],
-    channel: string | undefined
+    channel: string | undefined,
+    turnMetadata?: Record<string, unknown>
   ): UIMessage[] {
-    if (!channel) {
+    if (!channel && !turnMetadata) {
       return messages;
     }
     return messages.map((message) =>
@@ -3939,24 +3973,44 @@ export class Think<
             ...message,
             metadata: {
               ...(message.metadata as Record<string, unknown> | undefined),
-              channel
+              ...(channel ? { channel } : {}),
+              ...(turnMetadata ? { turnMetadata } : {})
             }
           }
         : message
     );
   }
 
-  /** The channel stamped on the latest user message in the given list, if any. */
-  private _channelFromMessages(messages: UIMessage[]): string | undefined {
+  /** Metadata of the latest user message in the given list, if any. */
+  private _latestUserMessageMetadata(
+    messages: UIMessage[]
+  ): Record<string, unknown> | undefined {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (message.role === "user") {
-        const channel = (message.metadata as { channel?: unknown } | undefined)
-          ?.channel;
-        return typeof channel === "string" ? channel : undefined;
+        return message.metadata as Record<string, unknown> | undefined;
       }
     }
     return undefined;
+  }
+
+  /** The channel stamped on the latest user message in the given list, if any. */
+  private _channelFromMessages(messages: UIMessage[]): string | undefined {
+    const channel = this._latestUserMessageMetadata(messages)?.channel;
+    return typeof channel === "string" ? channel : undefined;
+  }
+
+  /** The turn metadata stamped on the latest user message, if any. */
+  private _turnMetadataFromMessages(
+    messages: UIMessage[]
+  ): Record<string, unknown> | undefined {
+    const turnMetadata =
+      this._latestUserMessageMetadata(messages)?.turnMetadata;
+    return turnMetadata &&
+      typeof turnMetadata === "object" &&
+      !Array.isArray(turnMetadata)
+      ? (turnMetadata as Record<string, unknown>)
+      : undefined;
   }
 
   /** Re-resolve the channel for a continuation from the latest user message. */
@@ -6691,7 +6745,11 @@ export class Think<
               ? await userMessage(this.messages)
               : this._normalizeChatMessages(userMessage);
 
-          for (const msg of this._stampChannel(resolved, options?.channel)) {
+          for (const msg of this._stampChannel(
+            resolved,
+            options?.channel,
+            options?.metadata
+          )) {
             await this._appendMessageToHistory(msg);
           }
           this._broadcastMessages();
@@ -12189,9 +12247,33 @@ export class Think<
     msg: UIMessage,
     serverMessages: readonly UIMessage[]
   ): Promise<void> {
+    const sanitized = this._stripReservedMessageMetadata(msg);
     const resolved =
-      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
+      sanitized.role === "assistant"
+        ? resolveToolMergeId(sanitized, serverMessages)
+        : sanitized;
     await this._upsertMessageInHistory(resolved);
+  }
+
+  /**
+   * Strip {@link RESERVED_MESSAGE_METADATA_KEYS} from a client-supplied message
+   * at intake. Those keys are server-written turn context (stamped by
+   * `_stampChannel`) that hooks and recovery re-resolve and trust, so a client
+   * must never be able to forge them.
+   */
+  private _stripReservedMessageMetadata(msg: UIMessage): UIMessage {
+    const metadata = msg.metadata as Record<string, unknown> | undefined;
+    if (
+      !metadata ||
+      !RESERVED_MESSAGE_METADATA_KEYS.some((key) => key in metadata)
+    ) {
+      return msg;
+    }
+    const rest = { ...metadata };
+    for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
+      delete rest[key];
+    }
+    return { ...msg, metadata: rest };
   }
 
   private _persistClientTools(): void {
