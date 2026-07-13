@@ -1,4 +1,16 @@
-import type { TTSProvider, StreamingTTSProvider } from "@cloudflare/voice";
+import type {
+  TTSProvider,
+  StreamingTTSProvider,
+  Transcriber,
+  TranscriberSession,
+  TranscriberSessionOptions
+} from "@cloudflare/voice";
+
+const DEFAULT_STT_MODEL_ID = "scribe_v2_realtime";
+const DEFAULT_STT_AUDIO_FORMAT = "pcm_16000";
+const DEFAULT_STT_SAMPLE_RATE = 16_000;
+const DEFAULT_STT_BASE_URL =
+  "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
 
 export interface ElevenLabsTTSOptions {
   /** ElevenLabs API key. */
@@ -9,6 +21,39 @@ export interface ElevenLabsTTSOptions {
   modelId?: string;
   /** Output format. @default "mp3_44100_128" */
   outputFormat?: string;
+}
+
+export interface ElevenLabsSTTOptions {
+  /** ElevenLabs API key. */
+  apiKey: string;
+  /** Realtime STT model ID. @default "scribe_v2_realtime" */
+  modelId?: string;
+  /** Audio format sent by the voice pipeline. @default "pcm_16000" */
+  audioFormat?: string;
+  /** Sample rate in Hz. @default 16000 */
+  sampleRate?: number;
+  /** Optional language code, e.g. "en" or "eng". */
+  languageCode?: string;
+  /** Bias recognition toward these terms. Realtime supports up to 50 terms. */
+  keyterms?: string[];
+  /** Remove filler words, false starts, and disfluencies. @default false */
+  noVerbatim?: boolean;
+  /** Filter background audio before transcription. @default false */
+  filterBackgroundAudio?: boolean;
+  /** Include language detection metadata on committed transcripts. @default false */
+  includeLanguageDetection?: boolean;
+  /** Disable provider-side logging where supported. @default true */
+  enableLogging?: boolean;
+  /** Silence threshold used by ElevenLabs VAD commit strategy. @default 1.5 */
+  vadSilenceThresholdSecs?: number;
+  /** VAD confidence threshold. @default 0.4 */
+  vadThreshold?: number;
+  /** Minimum speech duration in milliseconds. @default 100 */
+  minSpeechDurationMs?: number;
+  /** Minimum silence duration in milliseconds. @default 100 */
+  minSilenceDurationMs?: number;
+  /** Override the realtime WebSocket URL. */
+  baseUrl?: string;
 }
 
 const DEFAULT_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"; // George
@@ -145,4 +190,271 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
       console.error("[ElevenLabsTTS] Stream error:", error);
     }
   }
+}
+
+/**
+ * ElevenLabs Scribe v2 Realtime speech-to-text provider for the Agents voice
+ * pipeline. Uses ElevenLabs' VAD commit strategy so committed transcript
+ * segments map to voice-agent turns.
+ */
+export class ElevenLabsSTT implements Transcriber {
+  #options: ElevenLabsSTTOptions;
+
+  constructor(options: ElevenLabsSTTOptions) {
+    this.#options = options;
+  }
+
+  createSession(options?: TranscriberSessionOptions): TranscriberSession {
+    return new ElevenLabsSTTSession(this.#options, options);
+  }
+}
+
+class ElevenLabsSTTSession implements TranscriberSession {
+  #providerOptions: ElevenLabsSTTOptions;
+  #sessionOptions: TranscriberSessionOptions | undefined;
+  #ws: WebSocket | null = null;
+  #closed = false;
+  #ready: Promise<void>;
+  #readyResolve!: () => void;
+  #readyReject!: (error: Error) => void;
+  #readySettled = false;
+  #pendingChunks: ArrayBuffer[] = [];
+
+  constructor(
+    providerOptions: ElevenLabsSTTOptions,
+    sessionOptions?: TranscriberSessionOptions
+  ) {
+    this.#providerOptions = providerOptions;
+    this.#sessionOptions = sessionOptions;
+    this.#ready = new Promise((resolve, reject) => {
+      this.#readyResolve = resolve;
+      this.#readyReject = reject;
+    });
+    this.#connect();
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.#ready;
+  }
+
+  feed(chunk: ArrayBuffer): void {
+    if (this.#closed) return;
+    if (!this.#ws) {
+      this.#pendingChunks.push(chunk);
+      return;
+    }
+    this.#sendAudioChunk(chunk);
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#pendingChunks = [];
+    this.#ws?.close();
+    this.#ws = null;
+  }
+
+  async #connect(): Promise<void> {
+    try {
+      const response = await fetch(this.#connectionUrl(), {
+        headers: {
+          Upgrade: "websocket",
+          "xi-api-key": this.#providerOptions.apiKey
+        }
+      });
+
+      const ws = (response as unknown as { webSocket?: WebSocket }).webSocket;
+      if (!ws) {
+        throw new Error(
+          `ElevenLabsSTT: failed to establish WebSocket connection (HTTP ${response.status}).`
+        );
+      }
+
+      ws.addEventListener("message", (event: MessageEvent) => {
+        this.#handleMessage(event);
+      });
+      ws.addEventListener("error", () => {
+        this.#rejectReady(new Error("ElevenLabsSTT: WebSocket error."));
+        this.#closed = true;
+      });
+      ws.addEventListener("close", () => {
+        this.#rejectReady(
+          new Error("ElevenLabsSTT: WebSocket closed before session start.")
+        );
+        this.#closed = true;
+      });
+
+      (ws as unknown as { accept: () => void }).accept();
+
+      if (this.#closed) {
+        ws.close();
+        return;
+      }
+
+      this.#ws = ws;
+      for (const chunk of this.#pendingChunks) {
+        this.#sendAudioChunk(chunk);
+      }
+      this.#pendingChunks = [];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.#rejectReady(new Error(message));
+      this.#closed = true;
+    }
+  }
+
+  #resolveReady(): void {
+    if (this.#readySettled) return;
+    this.#readySettled = true;
+    this.#readyResolve();
+  }
+
+  #rejectReady(error: Error): void {
+    if (this.#readySettled) return;
+    this.#readySettled = true;
+    this.#readyReject(error);
+  }
+
+  #connectionUrl(): string {
+    const url = new URL(
+      (this.#providerOptions.baseUrl ?? DEFAULT_STT_BASE_URL).replace(
+        "wss://",
+        "https://"
+      )
+    );
+    url.searchParams.set(
+      "model_id",
+      this.#providerOptions.modelId ?? DEFAULT_STT_MODEL_ID
+    );
+    url.searchParams.set(
+      "audio_format",
+      this.#providerOptions.audioFormat ?? DEFAULT_STT_AUDIO_FORMAT
+    );
+    url.searchParams.set("commit_strategy", "vad");
+    url.searchParams.set(
+      "vad_silence_threshold_secs",
+      String(this.#providerOptions.vadSilenceThresholdSecs ?? 1.5)
+    );
+    url.searchParams.set(
+      "vad_threshold",
+      String(this.#providerOptions.vadThreshold ?? 0.4)
+    );
+    url.searchParams.set(
+      "min_speech_duration_ms",
+      String(this.#providerOptions.minSpeechDurationMs ?? 100)
+    );
+    url.searchParams.set(
+      "min_silence_duration_ms",
+      String(this.#providerOptions.minSilenceDurationMs ?? 100)
+    );
+    if (this.#providerOptions.languageCode) {
+      url.searchParams.set("language_code", this.#providerOptions.languageCode);
+    }
+    if (this.#providerOptions.noVerbatim !== undefined) {
+      url.searchParams.set(
+        "no_verbatim",
+        String(this.#providerOptions.noVerbatim)
+      );
+    }
+    if (this.#providerOptions.filterBackgroundAudio !== undefined) {
+      url.searchParams.set(
+        "filter_background_audio",
+        String(this.#providerOptions.filterBackgroundAudio)
+      );
+    }
+    if (this.#providerOptions.includeLanguageDetection !== undefined) {
+      url.searchParams.set(
+        "include_language_detection",
+        String(this.#providerOptions.includeLanguageDetection)
+      );
+    }
+    if (this.#providerOptions.enableLogging !== undefined) {
+      url.searchParams.set(
+        "enable_logging",
+        String(this.#providerOptions.enableLogging)
+      );
+    }
+    for (const keyterm of this.#providerOptions.keyterms ?? []) {
+      url.searchParams.append("keyterms", keyterm);
+    }
+    return url.toString();
+  }
+
+  #sendAudioChunk(chunk: ArrayBuffer): void {
+    this.#ws?.send(
+      JSON.stringify({
+        message_type: "input_audio_chunk",
+        audio_base_64: arrayBufferToBase64(chunk),
+        commit: false,
+        sample_rate: this.#providerOptions.sampleRate ?? DEFAULT_STT_SAMPLE_RATE
+      })
+    );
+  }
+
+  #handleMessage(event: MessageEvent): void {
+    if (this.#closed || typeof event.data !== "string") return;
+
+    let data: unknown;
+    try {
+      data = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+
+    if (!isObject(data)) return;
+    const messageType = data.message_type;
+    if (messageType === "session_started") {
+      this.#resolveReady();
+      return;
+    }
+
+    if (messageType === "partial_transcript") {
+      const text = stringProp(data, "text");
+      if (text) {
+        this.#sessionOptions?.onSpeechStart?.(text);
+        this.#sessionOptions?.onInterim?.(text);
+      }
+      return;
+    }
+
+    if (
+      messageType === "committed_transcript" ||
+      messageType === "committed_transcript_with_timestamps"
+    ) {
+      const text = stringProp(data, "text");
+      if (text) {
+        this.#sessionOptions?.onUtterance?.(text);
+      }
+      return;
+    }
+
+    if (typeof messageType === "string" && messageType.includes("error")) {
+      console.error(
+        `[ElevenLabsSTT] ${messageType}: ${stringProp(data, "error") ?? event.data}`
+      );
+    }
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringProp(
+  value: Record<string, unknown>,
+  key: string
+): string | undefined {
+  const prop = value[key];
+  return typeof prop === "string" ? prop : undefined;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }
