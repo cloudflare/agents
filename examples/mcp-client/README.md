@@ -14,7 +14,7 @@ An Agent that acts as an MCP **client** — dynamically connects to remote MCP s
 
 ```sh
 npm install
-npm run dev
+npm run start
 ```
 
 The UI lets you add MCP server URLs, see their connection state, browse their tools, prompts, and resources, and run tools. If a tool call triggers an elicitation, a card appears asking for your input.

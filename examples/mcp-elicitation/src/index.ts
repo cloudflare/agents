@@ -150,7 +150,12 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
           };
         }
         return {
-          content: [{ type: "text", text: "Account connected. Thanks!" }]
+          content: [
+            {
+              type: "text",
+              text: "Account connection page opened. Complete it in your browser."
+            }
+          ]
         };
       }
     );
