@@ -183,7 +183,15 @@ There's also `this.broadcast` that sends a WS message to all connected clients (
 
 ### `this.name`
 
-It's hard to get a Durable Object's `name` from within it. `partyserver` tries to make it available in `this.name` but it's not a perfect solution. Read more about it [here](https://github.com/cloudflare/workerd/issues/2240).
+Since [2026-03-15](https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/), the Workers runtime populates `ctx.id.name` inside a Durable Object addressed via `idFromName()` or `getByName()` — from construction onward, including alarm handlers. `partyserver` reads `ctx.id.name` first, so for named access `this.name` resolves natively with no extra machinery.
+
+`ctx.id.name` is still `undefined` — permanently, [by design](https://developers.cloudflare.com/durable-objects/api/id/#name) — in three cases:
+
+- the object is addressed via `idFromString()` (even if the id was originally created with `idFromName()`) or `newUniqueId()`;
+- the name is longer than 1,024 bytes;
+- the alarm firing was scheduled before 2026-03-15 (reschedule it from a `fetch()` or RPC handler where the name is available).
+
+For those cases `partyserver` falls back to a legacy name record in storage (written by the `setName()` bootstrap), and `this.name` throws if no name can be resolved at all.
 
 ## Layer 2: Agent
 
