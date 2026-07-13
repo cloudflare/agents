@@ -4,6 +4,39 @@ import { describe, expect, it } from "vitest";
 import type { CommandCenterAgent } from "../src/command-center";
 
 describe("agent-think reliability", () => {
+  it("claims a failed continuation only once", async () => {
+    const session = `continuation-${crypto.randomUUID()}`;
+    const commandCenter = await getAgentByName<Env, CommandCenterAgent>(
+      env.CommandCenter,
+      "main"
+    );
+    await commandCenter.recordDispatch({
+      session,
+      repo: "cloudflare/agents",
+      issueNumber: 1,
+      instruction: "test"
+    });
+    await commandCenter.recordTurn({
+      session,
+      outcome: "error",
+      error: "payment required"
+    });
+
+    expect(await commandCenter.claimContinuation(session)).toMatchObject({
+      ok: true,
+      thread: { status: "error" }
+    });
+    expect(await commandCenter.claimContinuation(session)).toEqual({
+      ok: false,
+      reason: "not_failed"
+    });
+    expect((await commandCenter.getSnapshot()).threads[session]).toMatchObject({
+      status: "running",
+      runs: 2,
+      lastError: undefined
+    });
+  });
+
   it("records terminal command-center state through the real DO", async () => {
     const session = `reliability-${crypto.randomUUID()}`;
     const commandCenter = await getAgentByName<Env, CommandCenterAgent>(

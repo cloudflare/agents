@@ -5,8 +5,8 @@
  * worker has ever dispatched: repo/issue coordinates, live status, and
  * per-thread tool counters. ThinkAgent reports lifecycle events here
  * fire-and-forget (see `#report` in agent.ts) — a reporting failure must
- * never break a run, and the command center never drives runs, it only
- * observes them.
+ * never break a run. The only control mutation is an atomic claim for
+ * continuing a failed run from the operator command center.
  *
  * The UI connects with `useAgent({ agent: "command-center", name: "main" })`
  * and receives every update through the agents SDK state sync, which is what
@@ -110,6 +110,25 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
   /** Read-only snapshot for the HTTP fallback (see /api/command-center). */
   async getSnapshot(): Promise<CommandCenterState> {
     return this.state;
+  }
+
+  async claimContinuation(
+    session: string
+  ): Promise<
+    | { ok: true; thread: ThreadMeta }
+    | { ok: false; reason: "not_found" | "not_failed" }
+  > {
+    const thread = this.state.threads[session];
+    if (!thread) return { ok: false, reason: "not_found" };
+    if (thread.status !== "error") return { ok: false, reason: "not_failed" };
+    this.#put({
+      ...thread,
+      status: "running",
+      updatedAt: Date.now(),
+      runs: thread.runs + 1,
+      lastError: undefined
+    });
+    return { ok: true, thread };
   }
 
   #put(meta: ThreadMeta): void {

@@ -43,6 +43,10 @@ export default defineConfig({
   test: {
     name: "unit",
     include: [path.join(testDir, "**/*.test.ts")],
+    // Provider routing is pure HTTP and runs in Node from the package test
+    // script. The Workers pool's fetch bridge cannot observe both fallback
+    // dispatches through an injected fetch implementation.
+    exclude: [path.join(testDir, "model.test.ts")],
     setupFiles: [path.join(testDir, "setup.ts")],
     // The first module resolution in the isolate has to load think + workspace;
     // 15s keeps a cold start from tripping a spurious timeout.

@@ -43,6 +43,28 @@ describe("agent-think HTTP surface", () => {
     expect(res.status).toBe(404);
   });
 
+  it("rejects cross-origin command-center continuation requests", async () => {
+    const res = await SELF.fetch(
+      "https://agent-think.test/api/command-center/continue/cloudflare-agents-1",
+      {
+        method: "POST",
+        headers: { origin: "https://attacker.example" }
+      }
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when continuing an unknown command-center session", async () => {
+    const res = await SELF.fetch(
+      "https://agent-think.test/api/command-center/continue/cloudflare-agents-1",
+      {
+        method: "POST",
+        headers: { origin: "https://agent-think.test" }
+      }
+    );
+    expect(res.status).toBe(404);
+  });
+
   it("GET /thread/:session is handled by the SPA fallback (not the 404 tail)", async () => {
     // /thread/* is a client-side route: the worker serves index.html and lets
     // the React app read the session from the path. We assert it's *handled*

@@ -205,6 +205,56 @@ export default {
       }
     }
 
+    const continuation = url.pathname.match(
+      /^\/api\/command-center\/continue\/([^/]+)$/
+    );
+    if (request.method === "POST" && continuation) {
+      if (request.headers.get("origin") !== url.origin) {
+        return Response.json(
+          { error: "same-origin request required" },
+          { status: 403 }
+        );
+      }
+      const session = decodeURIComponent(continuation[1]);
+      const commandCenter = await getAgentByName<Env, CommandCenterAgent>(
+        env.CommandCenter,
+        "main"
+      );
+      const claim = await commandCenter.claimContinuation(session);
+      if (!claim.ok) {
+        return claim.reason === "not_found"
+          ? Response.json({ error: "thread not found" }, { status: 404 })
+          : Response.json(
+              { error: "only failed runs can be continued" },
+              { status: 409 }
+            );
+      }
+      const agent = await getAgentByName<Env, ThinkAgent>(
+        env.ThinkAgent,
+        session
+      );
+      try {
+        const submissionId = await agent.continueRun();
+        return Response.json(
+          {
+            session,
+            submissionId,
+            warning:
+              "GitHub operations may require a new issue mention if the stored installation token has expired."
+          },
+          { status: 202 }
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await commandCenter.recordTurn({
+          session,
+          outcome: "error",
+          error: message
+        });
+        return Response.json({ error: message }, { status: 500 });
+      }
+    }
+
     // Read-only state snapshot for the command-center UI: instant hydration
     // on page load, and a poll fallback whenever the agents WS state sync is
     // not connected.
