@@ -12,13 +12,16 @@ import type { McpAgent } from "../mcp";
 //
 // These tests pin that behavior: a cold-woken agent whose first-ever entry
 // point is a native DO RPC call resolves this.name purely from ctx.id.name,
-// with NO __ps_name seeding and no setName() bootstrap. Contrast with the
-// "Cold Wake Initialization" tests in mcp/transports/rpc.test.ts, which seed
-// the legacy __ps_name record — those pin the fallback that still covers
-// pre-2026-03-15 alarm records and raw-id (idFromString()/newUniqueId() +
-// setName()) addressing, where ctx.id.name stays undefined by design.
+// with NO __ps_name seeding and no setName() bootstrap. (The "Cold Wake
+// Initialization" tests in mcp/transports/rpc.test.ts still seed __ps_name,
+// but they address via idFromName(), so under the current runtime the seed
+// is inert — the legacy fallback paths it would feed are pinned upstream in
+// partyserver's own test suite, not here.)
 describe("this.name resolution from ctx.id.name", () => {
   it("resolves this.name on a cold agent addressed via idFromName(), without __ps_name seeding", async () => {
+    // The "rpc:" prefix is load-bearing: McpAgent parses this.name as
+    // `${transport}:${sessionId}`, and handleMcpMessage requires the RPC
+    // transport.
     const doName = `rpc:ctx-id-name-${crypto.randomUUID()}`;
     const id = env.MCP_OBJECT.idFromName(doName);
     const stub = env.MCP_OBJECT.get(id) as DurableObjectStub<McpAgent>;
