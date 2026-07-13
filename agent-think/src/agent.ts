@@ -127,9 +127,12 @@ function agentThinkInstructions(ctx: RunContext | null): string | null {
   ].join("\n");
 }
 
-interface AgentThinkEnv extends Env {
+export type AgentThinkEnv = Omit<Env, "GITHUB_AUTH"> & {
   CLOUDFLARE_AIG_TOKEN?: string;
-}
+  GITHUB_AUTH: Env["GITHUB_AUTH"] & {
+    mintInstallationToken(repo: string): Promise<string>;
+  };
+};
 
 class ThinkBase extends Think<AgentThinkEnv> {}
 
@@ -239,6 +242,15 @@ export class ThinkAgent extends ThinkBase {
 
   async getContext(): Promise<RunContext | null> {
     return this.#context;
+  }
+
+  async refreshInstallationToken(installationToken: string): Promise<void> {
+    const context = this.#context;
+    if (!context)
+      throw new Error("Run context is unavailable for this session");
+    this.#context = { ...context, installationToken };
+    await this.ctx.storage.put(CONTEXT_KEY, this.#context);
+    this.#authedToken = null;
   }
 
   /**
