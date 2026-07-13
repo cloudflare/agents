@@ -260,6 +260,18 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `email:receive` | `{ from, to, subject? }` | An email is received  |
 | `email:reply`   | `{ from, to, subject? }` | A reply email is sent |
 
+## Agent initialization span
+
+When Worker traces are enabled, every `Agent` constructor runs its setup —
+method wrapping, schema creation, and MCP client manager initialization —
+inside an `agent_initialization` span. Constructor-time child spans group under
+this one stable parent instead of appearing as top-level clutter. The span
+carries `cloudflare.agents.agent.name` (the agent class),
+`cloudflare.agents.agent.id` (the named instance, omitted when the name is not
+yet readable during construction), and `cloudflare.agents.operation.name`
+(`agent_initialization`). Like the rest of the tracing in this package, it is a
+no-op when the runtime has no native tracing capability.
+
 ## AI SDK tracing
 
 `agents/observability/ai` instruments the Vercel AI SDK with Workers' native

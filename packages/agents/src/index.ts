@@ -82,6 +82,7 @@ import {
   type Observability,
   type ObservabilityEvent
 } from "./observability";
+import { tracer } from "./observability/tracing/cloudflare";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
@@ -2242,20 +2243,44 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    if (!wrappedClasses.has(this.constructor)) {
-      // Auto-wrap custom methods with agent context
-      this._autoWrapCustomMethods();
-      wrappedClasses.add(this.constructor);
+    // The instance name is not always readable during construction: facets
+    // restore `cf_agents_facet_name` after the constructor runs, and DOs
+    // addressed via idFromString()/newUniqueId() are named later through
+    // setName(). Leave the attribute unset rather than fail construction.
+    let agentId: string | undefined;
+    try {
+      agentId = this.name;
+    } catch {
+      agentId = undefined;
     }
 
-    this._ensureSchema();
+    this.mcp = tracer.openSpan(
+      "agent_initialization",
+      {
+        "cloudflare.agents.agent.id": agentId,
+        "cloudflare.agents.agent.name": this._ParentClass.name,
+        "cloudflare.agents.operation.name": "agent_initialization"
+      },
+      (span) => {
+        if (!wrappedClasses.has(this.constructor)) {
+          // Auto-wrap custom methods with agent context
+          this._autoWrapCustomMethods();
+          wrappedClasses.add(this.constructor);
+        }
 
-    // Initialize MCPClientManager AFTER tables are created
-    this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
-      storage: this.ctx.storage,
-      createAuthProvider: (callbackUrl) =>
-        this.createMcpOAuthProvider(callbackUrl)
-    });
+        this._ensureSchema();
+
+        // Initialize MCPClientManager AFTER tables are created
+        const mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
+          storage: this.ctx.storage,
+          createAuthProvider: (callbackUrl) =>
+            this.createMcpOAuthProvider(callbackUrl)
+        });
+
+        span.finish();
+        return mcp;
+      }
+    );
 
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
