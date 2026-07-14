@@ -615,30 +615,27 @@ export class MCPClientManager {
   }
 
   /**
-   * Read and clear the capabilities persisted on a stored server row. The
-   * stamp is valid for one restore: sessions that configure handlers re-stamp
-   * every row, so a deploy that stops configuring them stops advertising
-   * stale modes after its first wake instead of forever.
+   * Clear the capabilities persisted on a stored server row. Called once a
+   * seeded connection's handshake completes (see `createConnection`): the
+   * stamp is valid for one successful restore — sessions that configure
+   * handlers re-stamp every row, so a deploy that stops configuring them
+   * stops advertising stale modes after its first connected wake instead of
+   * forever, while wakes that never handshake don't burn the stamp.
    */
-  private consumeStoredCapabilities(
-    serverId: string
-  ): ClientCapabilities | undefined {
+  private clearStoredCapabilities(serverId: string): void {
     const rows = this.sql<MCPServerRow>(
       "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers WHERE id = ?",
       serverId
     );
     const row = rows[0];
-    if (!row?.server_options) return undefined;
+    if (!row?.server_options) return;
     const options: MCPServerOptions = JSON.parse(row.server_options);
-    const capabilities = options.capabilities;
-    if (capabilities) {
-      options.capabilities = undefined;
-      this.saveServerToStorage({
-        ...row,
-        server_options: JSON.stringify(options)
-      });
-    }
-    return capabilities;
+    if (!options.capabilities) return;
+    options.capabilities = undefined;
+    this.saveServerToStorage({
+      ...row,
+      server_options: JSON.stringify(options)
+    });
   }
 
   /**
@@ -1205,6 +1202,14 @@ export class MCPClientManager {
       type: options.transport?.type ?? ("auto" as TransportType)
     };
 
+    // Stored servers re-advertise the capabilities persisted on their row
+    // (see MCPServerOptions.capabilities); fresh registrations have no row
+    // yet and rely on the handlers below. The stamp is read without
+    // clearing so a wake that never handshakes (OAuth still pending, isolate
+    // death before connect) doesn't burn it — it is consumed at first use,
+    // once a seeded handshake completes.
+    const capabilitySeed = this.getStoredServerOptions(id)?.capabilities;
+
     this.mcpConnections[id] = new MCPClientConnection(
       new URL(url),
       {
@@ -1215,10 +1220,7 @@ export class MCPClientManager {
         client: options.client ?? {},
         transport: normalizedTransport,
         elicitationHandlers: this.scopedElicitationHandlers(id),
-        // Stored servers re-advertise the capabilities persisted on their
-        // row (see MCPServerOptions.capabilities); fresh registrations have
-        // no row yet and rely on the handlers above.
-        capabilitySeed: this.consumeStoredCapabilities(id)
+        capabilitySeed
       }
     );
 
@@ -1232,6 +1234,36 @@ export class MCPClientManager {
         this._onObservabilityEvent.fire(event);
       })
     );
+
+    if (capabilitySeed) {
+      const conn = this.mcpConnections[id];
+      // Every handshake reports its success through this event, so it marks
+      // the seed's first use. The burn only targets deploys that stopped
+      // configuring handlers: a session with handlers configured owns the
+      // row stamps (each configure call re-stamps them, and re-registering
+      // a server writes a fresh one), and configureElicitationHandlers
+      // drops the in-memory seed on live connections — either way a fresh
+      // stamp meant for the next wake is never wiped here.
+      const seedClear = conn.onObservabilityEvent((event) => {
+        if (
+          event.type !== "mcp:client:connect" ||
+          event.payload.state !== MCPConnectionState.CONNECTED
+        ) {
+          return;
+        }
+        seedClear.dispose();
+        if (this._elicitationHandlers || !conn.options.capabilitySeed) return;
+        // migrateServerId may have renamed the row while the handshake was
+        // in flight — clear under the connection's current id.
+        const currentId = Object.keys(this.mcpConnections).find(
+          (key) => this.mcpConnections[key] === conn
+        );
+        if (currentId) {
+          this.clearStoredCapabilities(currentId);
+        }
+      });
+      store.add(seedClear);
+    }
 
     return this.mcpConnections[id];
   }

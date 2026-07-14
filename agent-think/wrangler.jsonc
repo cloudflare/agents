@@ -19,6 +19,16 @@
   // Workers AI powers the model (see MODEL_ID in src/agent.ts).
   "ai": { "binding": "AI" },
 
+  // Private token broker. GitHub App credentials remain in gh-app; this
+  // binding mints a fresh short-lived installation token for continuations.
+  "services": [
+    {
+      "binding": "GITHUB_AUTH",
+      "service": "gh-app",
+      "entrypoint": "AgentThinkTokenBroker"
+    }
+  ],
+
   // Worker Loader: the Workspace's "shell" backend (just-bash) runs in a
   // Dynamic Worker loaded through this binding.
   "worker_loaders": [{ "binding": "LOADER" }],

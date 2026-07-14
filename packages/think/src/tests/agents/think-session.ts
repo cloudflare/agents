@@ -698,6 +698,7 @@ export class ThinkTestAgent extends Think {
   }> = [];
   private _beforeTurnMessagesJson: string[] = [];
   private _capturedTurnChannels: string[] = [];
+  private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
 
   override configureChannels() {
     return {
@@ -754,11 +755,46 @@ export class ThinkTestAgent extends Think {
     });
     this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
+    this._capturedTurnMetadata.push(this.activeTurnMetadata);
     if (this._turnConfigOverride) return this._turnConfigOverride;
   }
 
   async getCapturedTurnChannelsForTest(): Promise<string[]> {
     return this._capturedTurnChannels;
+  }
+
+  async getCapturedTurnMetadataForTest(): Promise<
+    (Record<string, unknown> | undefined)[]
+  > {
+    return this._capturedTurnMetadata;
+  }
+
+  async getActiveTurnMetadataForTest(): Promise<
+    Record<string, unknown> | undefined
+  > {
+    return this.activeTurnMetadata;
+  }
+
+  async runChatTurnForTest(options: {
+    input?: string;
+    channel?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.chat(options.input ?? "hi", new TestCollectingCallback(), {
+      channel: options.channel,
+      metadata: options.metadata
+    });
+  }
+
+  async persistIncomingMessageForTest(msg: UIMessage): Promise<void> {
+    await (
+      this as unknown as {
+        _persistIncomingMessage(
+          m: UIMessage,
+          serverMessages: readonly UIMessage[]
+        ): Promise<void>;
+      }
+    )._persistIncomingMessage(msg, this.messages);
   }
 
   async runChannelTurnForTest(options: {

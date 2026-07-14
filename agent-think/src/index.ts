@@ -24,7 +24,12 @@
  */
 
 import { getAgentByName, routeAgentRequest } from "agents";
-import { ThinkAgent, WorkspaceProxy, WorkspaceServiceProxy } from "./agent";
+import {
+  type AgentThinkEnv,
+  ThinkAgent,
+  WorkspaceProxy,
+  WorkspaceServiceProxy
+} from "./agent";
 import { CommandCenterAgent } from "./command-center";
 import { Sandbox } from "./sandbox";
 import { WarmPool } from "./warm-pool";
@@ -87,7 +92,7 @@ export interface DispatchResult {
 
 import { WorkerEntrypoint } from "cloudflare:workers";
 
-export class AgentThink extends WorkerEntrypoint<Env> {
+export class AgentThink extends WorkerEntrypoint<AgentThinkEnv> {
   /**
    * Start a repro/pr run for an issue. Returns immediately with a
    * link to the live thread; the turn runs to completion in the
@@ -103,7 +108,7 @@ export class AgentThink extends WorkerEntrypoint<Env> {
    * Reachable only over the service-binding RPC surface.
    */
   async resetSession(session: string): Promise<{ reset: boolean }> {
-    const agent = await getAgentByName<Env, ThinkAgent>(
+    const agent = await getAgentByName<AgentThinkEnv, ThinkAgent>(
       this.env.ThinkAgent,
       session
     );
@@ -118,11 +123,14 @@ export class AgentThink extends WorkerEntrypoint<Env> {
  * the dev-only HTTP route (local e2e harness).
  */
 async function runDispatch(
-  env: Env,
+  env: AgentThinkEnv,
   input: DispatchInput
 ): Promise<DispatchResult> {
   const session = sessionName(input.repo, input.issueNumber);
-  const agent = await getAgentByName<Env, ThinkAgent>(env.ThinkAgent, session);
+  const agent = await getAgentByName<AgentThinkEnv, ThinkAgent>(
+    env.ThinkAgent,
+    session
+  );
   await agent.setContext({
     repo: input.repo,
     issueNumber: input.issueNumber,
@@ -138,7 +146,7 @@ async function runDispatch(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: AgentThinkEnv): Promise<Response> {
     const url = new URL(request.url);
 
     // Dev-only local trigger + readback, so `wrangler dev --local` can drive a
@@ -187,7 +195,7 @@ export default {
       }
       const readback = url.pathname.match(/^\/dev\/messages\/([^/]+)$/);
       if (request.method === "GET" && readback) {
-        const agent = await getAgentByName<Env, ThinkAgent>(
+        const agent = await getAgentByName<AgentThinkEnv, ThinkAgent>(
           env.ThinkAgent,
           decodeURIComponent(readback[1])
         );
@@ -197,11 +205,63 @@ export default {
         /^\/dev\/workspace-sync\/([^/]+)$/
       );
       if (request.method === "GET" && workspaceSync) {
-        const agent = await getAgentByName<Env, ThinkAgent>(
+        const agent = await getAgentByName<AgentThinkEnv, ThinkAgent>(
           env.ThinkAgent,
           decodeURIComponent(workspaceSync[1])
         );
         return Response.json(await agent.debugWorkspaceSync());
+      }
+    }
+
+    const continuation = url.pathname.match(
+      /^\/api\/command-center\/continue\/([^/]+)$/
+    );
+    if (request.method === "POST" && continuation) {
+      if (request.headers.get("origin") !== url.origin) {
+        return Response.json(
+          { error: "same-origin request required" },
+          { status: 403 }
+        );
+      }
+      const session = decodeURIComponent(continuation[1]);
+      const commandCenter = await getAgentByName<Env, CommandCenterAgent>(
+        env.CommandCenter,
+        "main"
+      );
+      const claim = await commandCenter.claimContinuation(session);
+      if (!claim.ok) {
+        return claim.reason === "not_found"
+          ? Response.json({ error: "thread not found" }, { status: 404 })
+          : Response.json(
+              { error: "only failed or stale runs can be continued" },
+              { status: 409 }
+            );
+      }
+      const agent = await getAgentByName<AgentThinkEnv, ThinkAgent>(
+        env.ThinkAgent,
+        session
+      );
+      try {
+        const token = await env.GITHUB_AUTH.mintInstallationToken(
+          claim.thread.repo
+        );
+        await agent.refreshInstallationToken(token);
+        const submissionId = await agent.continueRun();
+        return Response.json(
+          {
+            session,
+            submissionId
+          },
+          { status: 202 }
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await commandCenter.recordTurn({
+          session,
+          outcome: "error",
+          error: message
+        });
+        return Response.json({ error: message }, { status: 500 });
       }
     }
 
@@ -251,7 +311,7 @@ export default {
       )
     );
   }
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<AgentThinkEnv>;
 
 /**
  * Stable per-issue session name. Both verbs on the same issue reuse
