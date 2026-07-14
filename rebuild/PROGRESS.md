@@ -55,7 +55,14 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 - [x] app rewire: events out, no Connection/frames; extractions 1-4, 6 (audits 25 §2-3, 26)
 - [x] adapters/websocket-chat + relay; resumable.ts retired; e2e rewired (audit 25 §4-6)
 
+## Cloudflare adapter wave (doc 27): real Durable Object hosting — planned
+- [ ] W1 substrate: vitest 4 bump, workers test rig, DurableKeyValueStore + DurableAlarmTimer, port contract suites green in workerd
+- [ ] W2 hosting: hostAgent shell + router + hibernatable WS connections, chat e2e in workerd
+- [ ] W3 delegation: facet spawner + root-multiplexed child alarm
+- [ ] W4 capabilities: workflows/email/service-binding adapters + example worker
+
 ## Log
+- 2026-07-14: Cloudflare adapter plan written (audit/27-cloudflare-adapters.md): sync KeyValueStore over ctx.storage.kv (SQL fallback), alarm mirror over the async slot, hibernatable-WS connections (hibernation == eviction, already survived by design), hostAgent mixin shell, facet spawner with root-multiplexed child alarms, contract suites re-run in workerd as the faithfulness proof. Three open questions for review (facets vs ctx.exports, client-package compat smoke test, example placement).
 - 2026-07-14: interactive demo added (demo/cli.ts + node file-store/real-alarm adapters + Anthropic SDK model adapter). Offline scripted model works keyless; verified live: streaming, workspace tool, approval flow, kill-mid-stream -> restart recovery. 1050 tests still green.
 - 2026-07-14: recovery conversation-dep surgery (the R2 deferral) done by the orchestrator: recovery.ts now owns continue/terminalize semantics (commits the repaired partial itself, persists the terminal message itself) over turnState + session + one scheduleTurn callback; Think's three recovery callbacks collapsed to scheduleRecoveryTurn. think.ts 1070 lines. 1050 tests green.
 - 2026-07-14: refactor R3 done (1050 tests): websocket-chat adapter (cf_agent_* frames, resume via log offsets, echo exclusion, readonly), relayTurn in domain/events with adapter wrapper, resumable.ts deleted (log owns retention), chat-session + actions-approvals e2e run through the adapter. Refactor waves complete.
