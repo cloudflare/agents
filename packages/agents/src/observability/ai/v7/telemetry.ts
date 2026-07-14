@@ -92,7 +92,7 @@ export function createAISDKV7Telemetry(
       toolSpans,
       instrumentation.tracer
     );
-    state.span.finish(finishAttributesFromEvent(event, { recordOutputs }));
+    state.span.finish(finishAttributesFromEvent(event));
     operations.delete(event.callId);
   };
 
@@ -110,11 +110,6 @@ export function createAISDKV7Telemetry(
           ...correlationAttributes({ callId: event.callId }),
           ...runtimeContextAttributes(event.runtimeContext)
         },
-        // Opt-in chat inputs (prompt/messages) the event already carries; only
-        // read when recordInputs is set. Potentially PII.
-        content: recordInputs
-          ? { inputMessages: inputContentFromEvent(event) }
-          : undefined,
         context: semanticContextFromEvent(event),
         integration: "ai-sdk",
         model: readString(event.modelId),
@@ -142,6 +137,9 @@ export function createAISDKV7Telemetry(
 
       const span = modelCallSpan({
         attributes: correlationAttributes({ callId: event.callId }),
+        content: recordInputs
+          ? { inputMessages: inputContentFromEvent(event) }
+          : undefined,
         integration: "ai-sdk",
         model: readString(event.modelId),
         operation: isStreamOperation(state.operationName)
@@ -171,7 +169,8 @@ export function createAISDKV7Telemetry(
       span.finish(
         finishAttributesFromEvent(event, {
           includePerformance: true,
-          includeResponse: true
+          includeResponse: true,
+          recordOutputs
         })
       );
     },

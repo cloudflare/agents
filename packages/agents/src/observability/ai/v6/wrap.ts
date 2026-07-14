@@ -9,7 +9,6 @@ import type { SemanticContext } from "../../genai/telemetry";
 import { writeSpanAttributes } from "../../tracing/tracer";
 import type { AgentTracer } from "../../tracing/tracer";
 import {
-  extractInputContent,
   extractModelInfo,
   extractRequestSummary,
   finishAttributesFromResult
@@ -151,8 +150,7 @@ function createOperationWrapper(
             operationName,
             extractModelInfo(params.model),
             params,
-            instrumentation.options,
-            content
+            instrumentation.options
           );
           writeSpanAttributes(operationSpan, span.attributes);
 
@@ -171,7 +169,7 @@ function createOperationWrapper(
 
           return finishWhenStreamCompletes(result, operationSpan, {
             includeResponse: !hasModelSpan,
-            recordOutputs: content.recordOutputs,
+            recordOutputs: hasModelSpan ? false : content.recordOutputs,
             startedAtMs: hasModelSpan ? undefined : startedAtMs
           });
         }
@@ -196,8 +194,7 @@ function createOperationWrapper(
           operationName,
           extractModelInfo(params.model),
           params,
-          instrumentation.options,
-          content
+          instrumentation.options
         );
         writeSpanAttributes(operationSpan, span.attributes);
 
@@ -215,7 +212,9 @@ function createOperationWrapper(
         operationSpan.finish(
           finishAttributesFromResult(result, {
             includeResponse: !canWrapModel(wrapLanguageModel, params.model),
-            recordOutputs: content.recordOutputs
+            recordOutputs: canWrapModel(wrapLanguageModel, params.model)
+              ? false
+              : content.recordOutputs
           })
         );
         return result;
@@ -264,7 +263,8 @@ function operationParamsForCall(
             tracer,
             wrapLanguageModel,
             params.model,
-            operationName
+            operationName,
+            content
           )
         }
       : {})
@@ -305,19 +305,13 @@ function operationSpanForCall(
   operation: string,
   model: ModelInfo | undefined,
   params: AISDKV6CallParams,
-  options: AISDKInstrumentationOptions | undefined,
-  content: ContentRecording
+  options: AISDKInstrumentationOptions | undefined
 ): ReturnType<typeof operationSpan> {
   return operationSpan({
     attributes: {
       ...metadataAttributes(telemetryMetadata(params)),
       ...contextAttributes(params, options)
     },
-    // Opt-in chat inputs (prompt/messages) on the operation root span; only
-    // read from caller params when recordInputs is set. Potentially PII.
-    content: content.recordInputs
-      ? { inputMessages: extractInputContent(params) }
-      : undefined,
     context: semanticContext(params),
     integration: "ai-sdk",
     model: model?.modelId,

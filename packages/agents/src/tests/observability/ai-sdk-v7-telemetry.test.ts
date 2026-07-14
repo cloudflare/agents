@@ -502,11 +502,18 @@ describe("createAISDKV7Telemetry opt-in content recording", () => {
   function driveOperation(
     telemetry: ReturnType<typeof createAISDKV7Telemetry>
   ) {
-    telemetry.onStart?.({
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onLanguageModelCallStart?.({
       callId: "call-1",
       messages: [{ content: "secret message", role: "user" }],
-      operationId: "ai.generateText",
+      modelId: "content-model",
       prompt: "secret prompt"
+    });
+    telemetry.onLanguageModelCallEnd?.({
+      callId: "call-1",
+      modelId: "content-model",
+      text: "the answer is 42",
+      toolCalls: [{ toolName: "multiply" }]
     });
     telemetry.onToolExecutionStart?.({
       callId: "call-1",
@@ -552,10 +559,20 @@ describe("createAISDKV7Telemetry opt-in content recording", () => {
     const operationSpan = tracing.spans.find(
       (span) => span.attributes["gen_ai.operation.name"] === "invoke_agent"
     );
-    expect(operationSpan?.attributes["gen_ai.input.messages"]).toBe(
+    expect(operationSpan?.attributes).not.toHaveProperty([
+      "gen_ai.input.messages"
+    ]);
+    expect(operationSpan?.attributes).not.toHaveProperty([
+      "gen_ai.output.messages"
+    ]);
+
+    const chatSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes["gen_ai.input.messages"]).toBe(
       JSON.stringify([{ content: "secret message", role: "user" }])
     );
-    expect(operationSpan?.attributes["gen_ai.output.messages"]).toBe(
+    expect(chatSpan?.attributes["gen_ai.output.messages"]).toBe(
       JSON.stringify({
         text: "the answer is 42",
         toolCalls: [{ toolName: "multiply" }]
@@ -585,10 +602,14 @@ describe("createAISDKV7Telemetry opt-in content recording", () => {
     const operationSpan = tracing.spans.find(
       (span) => span.attributes["gen_ai.operation.name"] === "invoke_agent"
     );
-    expect(operationSpan?.attributes).toHaveProperty(["gen_ai.input.messages"]);
     expect(operationSpan?.attributes).not.toHaveProperty([
-      "gen_ai.output.messages"
+      "gen_ai.input.messages"
     ]);
+    const chatSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes).toHaveProperty(["gen_ai.input.messages"]);
+    expect(chatSpan?.attributes).not.toHaveProperty(["gen_ai.output.messages"]);
     const toolSpan = tracing.spans.find(
       (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
     );
@@ -605,14 +626,22 @@ describe("createAISDKV7Telemetry opt-in content recording", () => {
       tracer: tracing
     });
 
-    telemetry.onStart?.({
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onLanguageModelCallStart?.({
       callId: "call-1",
-      operationId: "ai.generateText",
+      modelId: "content-model",
       prompt: "x".repeat(70_000)
+    });
+    telemetry.onLanguageModelCallEnd?.({
+      callId: "call-1",
+      modelId: "content-model"
     });
     telemetry.onEnd?.({ callId: "call-1", operationId: "ai.generateText" });
 
-    const value = tracing.spans[0]?.attributes["gen_ai.input.messages"];
+    const chatSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    const value = chatSpan?.attributes["gen_ai.input.messages"];
     expect(typeof value).toBe("string");
     const text = value as string;
     expect(text.endsWith("…[truncated]")).toBe(true);

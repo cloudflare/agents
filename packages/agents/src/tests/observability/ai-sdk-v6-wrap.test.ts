@@ -1427,6 +1427,7 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
 
   function multiplyAI(): {
     readonly ai: AISDKV6Namespace;
+    readonly model: TestModel;
     readonly tool: { readonly execute: (input: unknown) => Promise<number> };
   } {
     const tool = {
@@ -1435,29 +1436,56 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
         return a * b;
       }
     };
+    const model: TestModel = {
+      modelId: "content-model",
+      provider: "content-provider",
+      doGenerate: async () => ({
+        finishReason: "stop",
+        text: "model answer"
+      })
+    };
     const ai: AISDKV6Namespace = {
       generateText: async (params) => {
+        const wrappedModel = params.model as TestModel;
+        const modelResult = (await wrappedModel.doGenerate({
+          messages: params.messages,
+          prompt: params.prompt
+        })) as { readonly text: string };
         const tools = params.tools as { readonly multiply: typeof tool };
         const toolResult = await tools.multiply.execute({ a: 6, b: 7 });
         return {
           finishReason: "stop",
-          text: `result: ${toolResult}`,
+          text: `${modelResult.text}: ${toolResult}`,
           toolCalls: [{ toolName: "multiply" }]
+        };
+      },
+      wrapLanguageModel({ model: rawModel, middleware }) {
+        const original = rawModel as TestModel;
+        return {
+          ...original,
+          doGenerate: async (params?: unknown) =>
+            middleware.wrapGenerate
+              ? middleware.wrapGenerate({
+                  doGenerate: () => original.doGenerate(params),
+                  params: params ?? {}
+                })
+              : original.doGenerate(params)
         };
       }
     };
-    return { ai, tool };
+    return { ai, model, tool };
   }
 
   it("records NO content attribute by default (the privacy default)", async () => {
     const tracing = new RecordingTracer();
-    const { ai } = multiplyAI();
+    const { ai, model, tool } = multiplyAI();
 
     // No options, no experimental_telemetry flag: content must be absent.
     await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
       messages: [{ content: "secret prompt", role: "user" }],
+      model,
       prompt: "secret prompt",
-      tools: { multiply: multiplyAI().tool }
+      tools: { multiply: tool }
     });
 
     for (const span of tracing.spans) {
@@ -1473,28 +1501,33 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
 
   it("records chat and tool content when the wrapper opts in", async () => {
     const tracing = new RecordingTracer();
-    const { ai } = multiplyAI();
+    const { ai, model, tool } = multiplyAI();
 
     await createAISDKV6Wrapper(ai, {
       options: { recordInputs: true, recordOutputs: true },
       tracer: tracing
     }).generateText({
       messages: [{ content: "hello", role: "user" }],
-      tools: { multiply: multiplyAI().tool }
+      model,
+      tools: { multiply: tool }
     });
 
     const root = tracing.rootSpans[0];
-    expect(root?.attributes["gen_ai.input.messages"]).toBe(
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.input.messages"]);
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.output.messages"]);
+    const chatSpan = root?.children.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes["gen_ai.input.messages"]).toBe(
       JSON.stringify([{ content: "hello", role: "user" }])
     );
-    expect(root?.attributes["gen_ai.output.messages"]).toBe(
-      JSON.stringify({
-        text: "result: 42",
-        toolCalls: [{ toolName: "multiply" }]
-      })
+    expect(chatSpan?.attributes["gen_ai.output.messages"]).toBe(
+      JSON.stringify({ text: "model answer" })
     );
 
-    const toolSpan = root?.children[0];
+    const toolSpan = root?.children.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
     expect(toolSpan?.attributes["gen_ai.tool.call.arguments"]).toBe(
       JSON.stringify({ a: 6, b: 7 })
     );
@@ -1503,36 +1536,36 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
 
   it("opts in per call through experimental_telemetry (the Think path)", async () => {
     const tracing = new RecordingTracer();
-    const { ai } = multiplyAI();
+    const { ai, model, tool } = multiplyAI();
 
     await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
       experimental_telemetry: { recordInputs: true, recordOutputs: true },
+      model,
       prompt: "hello there",
-      tools: { multiply: multiplyAI().tool }
+      tools: { multiply: tool }
     });
 
     const root = tracing.rootSpans[0];
-    expect(root?.attributes["gen_ai.input.messages"]).toBe(
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.input.messages"]);
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.output.messages"]);
+    const chatSpan = root?.children.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes["gen_ai.input.messages"]).toBe(
       JSON.stringify("hello there")
     );
-    expect(root?.attributes["gen_ai.output.messages"]).toBe(
-      JSON.stringify({
-        text: "result: 42",
-        toolCalls: [{ toolName: "multiply" }]
-      })
+    expect(chatSpan?.attributes["gen_ai.output.messages"]).toBe(
+      JSON.stringify({ text: "model answer" })
     );
-    const toolSpan = root?.children[0];
+    const toolSpan = root?.children.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
     expect(toolSpan?.attributes["gen_ai.tool.call.result"]).toBe("42");
   });
 
   it("lets an explicit per-call flag override the wrapper opt-in", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
-      generateText: async () => ({
-        finishReason: "stop",
-        text: "public answer"
-      })
-    };
+    const { ai, model, tool } = multiplyAI();
 
     // Wrapper opts in, but the call explicitly opts OUT of inputs.
     await createAISDKV6Wrapper(ai, {
@@ -1540,30 +1573,44 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
       tracer: tracing
     }).generateText({
       experimental_telemetry: { recordInputs: false },
-      prompt: "secret prompt"
+      model,
+      prompt: "secret prompt",
+      tools: { multiply: tool }
     });
 
     const root = tracing.rootSpans[0];
     expect(root?.attributes).not.toHaveProperty(["gen_ai.input.messages"]);
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.output.messages"]);
+    const chatSpan = root?.children.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes).not.toHaveProperty(["gen_ai.input.messages"]);
     // recordOutputs still applies (not overridden).
-    expect(root?.attributes["gen_ai.output.messages"]).toBe(
-      JSON.stringify({ text: "public answer" })
+    expect(chatSpan?.attributes["gen_ai.output.messages"]).toBe(
+      JSON.stringify({ text: "model answer" })
     );
   });
 
   it("truncates oversized content to a bounded, marked value", async () => {
     const tracing = new RecordingTracer();
     const bigPrompt = "x".repeat(70_000);
-    const ai: AISDKV6Namespace = {
-      generateText: async () => ({ finishReason: "stop", text: "ok" })
-    };
+    const { ai, model, tool } = multiplyAI();
 
     await createAISDKV6Wrapper(ai, {
       options: { recordInputs: true },
       tracer: tracing
-    }).generateText({ prompt: bigPrompt });
+    }).generateText({
+      model,
+      prompt: bigPrompt,
+      tools: { multiply: tool }
+    });
 
-    const value = tracing.rootSpans[0]?.attributes["gen_ai.input.messages"];
+    const root = tracing.rootSpans[0];
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.input.messages"]);
+    const chatSpan = root?.children.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    const value = chatSpan?.attributes["gen_ai.input.messages"];
     expect(typeof value).toBe("string");
     const text = value as string;
     expect(text.endsWith("…[truncated]")).toBe(true);

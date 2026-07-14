@@ -471,11 +471,11 @@ where recording raw conversation content in Workers Observability is acceptable.
 
 The flag names mirror the AI SDK's own `TelemetrySettings`:
 
-- `recordInputs` — records chat inputs (prompt/messages) on the operation span
-  (`gen_ai.input.messages`) and tool arguments on the `execute_tool` span
-  (`gen_ai.tool.call.arguments`).
-- `recordOutputs` — records model output (text/object/tool calls) on the
-  operation span (`gen_ai.output.messages`) and the tool result on the
+- `recordInputs` — records each model call's chat inputs (prompt/messages) on
+  its `chat` span (`gen_ai.input.messages`) and tool arguments on the
+  `execute_tool` span (`gen_ai.tool.call.arguments`).
+- `recordOutputs` — records each model call's output (text/object/tool calls) on
+  its `chat` span (`gen_ai.output.messages`) and the tool result on the
   `execute_tool` span (`gen_ai.tool.call.result`), on the success path only —
   never on error or abort.
 

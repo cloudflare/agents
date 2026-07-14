@@ -37,10 +37,14 @@ export type AISDKV7LanguageModelCallEvent = AISDKV7TelemetryOptions & {
   readonly callId: string;
   readonly finishReason?: unknown;
   readonly frequencyPenalty?: unknown;
+  readonly content?: unknown;
   readonly maxOutputTokens?: unknown;
   readonly maxTokens?: unknown;
+  readonly messages?: unknown;
   readonly modelId?: string | undefined;
+  readonly object?: unknown;
   readonly performance?: unknown;
+  readonly prompt?: unknown;
   readonly presencePenalty?: unknown;
   readonly provider?: string | undefined;
   readonly response?: unknown;
@@ -48,6 +52,8 @@ export type AISDKV7LanguageModelCallEvent = AISDKV7TelemetryOptions & {
   readonly responseModel?: unknown;
   readonly seed?: unknown;
   readonly temperature?: unknown;
+  readonly text?: unknown;
+  readonly toolCalls?: unknown;
   readonly topK?: unknown;
   readonly topP?: unknown;
   readonly totalUsage?: unknown;

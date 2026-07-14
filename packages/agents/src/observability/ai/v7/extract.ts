@@ -97,6 +97,11 @@ export function inputContentFromEvent(event: object): unknown {
  */
 export function outputContentFromEvent(event: object): unknown {
   const record = eventRecord(event);
+  // Model-call end events expose their normalized per-call output as content.
+  if (Array.isArray(record.content)) {
+    return record.content;
+  }
+
   const output: Record<string, unknown> = {};
   if (record.text !== undefined) {
     output.text = record.text;

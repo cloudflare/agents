@@ -1,19 +1,22 @@
 import { modelCallSpan } from "../../genai/telemetry";
 import type { AgentTracer } from "../../tracing/tracer";
 import {
+  extractInputContent,
   extractModelInfo,
   extractRequestSummary,
   finishAttributesFromResult
 } from "./extract";
 import type { ModelInfo } from "./extract";
 import { finishWhenStreamCompletes } from "./streams";
+import type { ContentRecording } from "./tools";
 import type { AISDKV6WrapLanguageModel } from "./types";
 
 export function wrapModel(
   tracer: AgentTracer,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   model: unknown,
-  parentOperation: string
+  parentOperation: string,
+  content: ContentRecording
 ): unknown {
   if (!wrapLanguageModel) {
     return model;
@@ -34,7 +37,8 @@ export function wrapModel(
           "doGenerate",
           modelInfo,
           params,
-          parentOperation
+          parentOperation,
+          content
         );
         return tracer.withSpan(
           span.name,
@@ -42,7 +46,10 @@ export function wrapModel(
           async (modelCall) => {
             const result = await doGenerate();
             modelCall.finish(
-              finishAttributesFromResult(result, { includeResponse: true })
+              finishAttributesFromResult(result, {
+                includeResponse: true,
+                recordOutputs: content.recordOutputs
+              })
             );
             return result;
           }
@@ -53,7 +60,8 @@ export function wrapModel(
           "doStream",
           modelInfo,
           params,
-          parentOperation
+          parentOperation,
+          content
         );
         // The provider call runs INSIDE the activation callback so its work
         // (fetch subrequests, etc.) nests under the chat span; the span stays
@@ -67,6 +75,7 @@ export function wrapModel(
               const result = await doStream();
               return finishWhenStreamCompletes(result, modelCall, {
                 includeResponse: true,
+                recordOutputs: content.recordOutputs,
                 startedAtMs
               });
             } catch (cause: unknown) {
@@ -84,19 +93,21 @@ function modelCallSpanForModel(
   operation: string,
   model: ModelInfo | undefined,
   params: unknown,
-  parentOperation: string
+  parentOperation: string,
+  content: ContentRecording
 ): ReturnType<typeof modelCallSpan> {
+  const record =
+    typeof params === "object" && params !== null
+      ? (params as Record<string, unknown>)
+      : {};
   return modelCallSpan({
+    content: content.recordInputs
+      ? { inputMessages: extractInputContent(record) }
+      : undefined,
     integration: "ai-sdk",
     model: model?.modelId,
     operation,
     provider: model?.provider,
-    request: extractRequestSummary(
-      // SAFETY: AI SDK middleware params are records; only known numeric fields are read via readNumber.
-      typeof params === "object" && params !== null
-        ? (params as Record<string, unknown>)
-        : {},
-      parentOperation
-    )
+    request: extractRequestSummary(record, parentOperation)
   });
 }

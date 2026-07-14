@@ -295,7 +295,6 @@ export function operationSpanName(agentName: string | undefined): string {
 /** Builds the root span for an SDK operation such as generateText or streamText. */
 export function operationSpan(input: {
   readonly attributes: TraceAttributes | undefined;
-  readonly content?: OperationContent | undefined;
   readonly context?: SemanticContext | undefined;
   readonly integration: IntegrationName;
   readonly model: string | undefined;
@@ -306,14 +305,6 @@ export function operationSpan(input: {
   return {
     attributes: {
       ...input.attributes,
-      // Opt-in content: undefined unless the caller passed it under an explicit
-      // record flag, and dropped by serializeContent when not representable.
-      [TraceAttribute.GenAI.InputMessages]: serializeContent(
-        input.content?.inputMessages
-      ),
-      [TraceAttribute.GenAI.OutputMessages]: serializeContent(
-        input.content?.outputMessages
-      ),
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.AgentID]: input.context?.agentId,
@@ -337,6 +328,7 @@ export function operationSpan(input: {
 /** Builds the child span for an underlying model call. */
 export function modelCallSpan(input: {
   readonly attributes?: TraceAttributes | undefined;
+  readonly content?: OperationContent | undefined;
   readonly integration: IntegrationName;
   readonly model: string | undefined;
   readonly operation: string;
@@ -346,6 +338,9 @@ export function modelCallSpan(input: {
   return {
     attributes: {
       ...input.attributes,
+      [TraceAttribute.GenAI.InputMessages]: serializeContent(
+        input.content?.inputMessages
+      ),
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
