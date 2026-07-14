@@ -95,7 +95,11 @@ export function stateToolsFromBackend(backend: StateBackend): ToolProvider {
 }
 
 // ── Connector model (createCodemodeRuntime) ───────────────────────────
-export { StateConnector, stateConnector } from "./connector";
+export {
+  StateConnector,
+  stateConnector,
+  type StateConnectorOptions
+} from "./connector";
 export {
   STATE_METHODS,
   callStateMethod,

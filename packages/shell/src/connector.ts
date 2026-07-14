@@ -65,26 +65,35 @@ function inputSchemaFor(method: StateMethodName): InputSchema {
   };
 }
 
+export interface StateConnectorOptions {
+  /** Sandbox namespace. Defaults to `state`. */
+  name?: string;
+}
+
 export class StateConnector extends CodemodeConnector {
   #backend: StateBackend;
+  #options: StateConnectorOptions;
 
   constructor(
     ctx: DurableObjectState | ExecutionContext,
-    backend: StateBackend
+    backend: StateBackend,
+    options: StateConnectorOptions = {}
   ) {
     super(ctx, {});
     this.#backend = backend;
+    this.#options = options;
   }
 
   override name(): string {
-    return "state";
+    return this.#options.name ?? "state";
   }
 
   protected override instructions(): string {
+    const name = this.name();
     return [
       "A persistent virtual filesystem. Every method takes a single object",
-      'argument: state.readFile({ path: "/notes.txt" }),',
-      'state.writeFile({ path, content }), state.glob({ pattern: "src/**" }).',
+      `argument: ${name}.readFile({ path: "/notes.txt" }),`,
+      `${name}.writeFile({ path, content }), ${name}.glob({ pattern: "src/**" }).`,
       "For multi-file refactors prefer planEdits() + applyEditPlan(); for",
       "search-and-replace across a tree use replaceInFiles() — it is",
       "transactional by default."
@@ -107,7 +116,10 @@ export class StateConnector extends CodemodeConnector {
   }
 
   override async getTypeScriptTypes(): Promise<string> {
-    return STATE_TYPES;
+    return STATE_TYPES.replace(
+      "declare const state",
+      `declare const ${this.name()}`
+    );
   }
 }
 
@@ -128,7 +140,8 @@ export class StateConnector extends CodemodeConnector {
  */
 export function stateConnector(
   ctx: DurableObjectState | ExecutionContext,
-  backend: StateBackend
+  backend: StateBackend,
+  options?: StateConnectorOptions
 ): StateConnector {
-  return new StateConnector(ctx, backend);
+  return new StateConnector(ctx, backend, options);
 }

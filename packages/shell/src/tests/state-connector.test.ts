@@ -149,6 +149,15 @@ describe("connector surface", () => {
     expect(await c.getTypeScriptTypes()).toBe(STATE_TYPES);
     expect(STATE_TYPES).toContain("declare const state");
   });
+
+  it("supports a custom namespace in guidance and generated types", async () => {
+    const c = stateConnector(fakeCtx, createMemoryStateBackend(), {
+      name: "workspace"
+    });
+    expect(c.name()).toBe("workspace");
+    expect((await c.describe()).instructions).toContain("workspace.readFile");
+    expect(await c.getTypeScriptTypes()).toContain("declare const workspace");
+  });
 });
 
 // ── Legacy ToolProvider compatibility ──────────────────────────────────
