@@ -172,7 +172,8 @@ export async function createWorker(
         compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [
           "python_workers"
         ]
-      }
+      },
+      warnings: installWarnings
     };
   }
 
