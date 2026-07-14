@@ -1,35 +1,30 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import {
+  Client,
   SSEClientTransport,
-  type SSEClientTransportOptions
-} from "@modelcontextprotocol/sdk/client/sse.js";
-import {
   StreamableHTTPClientTransport,
-  StreamableHTTPError,
-  type StreamableHTTPClientTransportOptions
-} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-// Import types directly from MCP SDK
-import type {
-  Prompt,
-  Resource,
-  Tool
-} from "@modelcontextprotocol/sdk/types.js";
-import {
+  SdkHttpError,
   type ClientCapabilities,
+  type ClientContext,
+  type DiscoverResult,
   type ElicitRequest,
-  ElicitRequestSchema,
   type ElicitResult,
+  type JsonSchemaType,
+  type jsonSchemaValidator,
+  type ListChangedHandlers,
   type ListPromptsResult,
   type ListResourceTemplatesResult,
   type ListResourcesResult,
   type ListToolsResult,
-  PromptListChangedNotificationSchema,
-  ResourceListChangedNotificationSchema,
-  type ResourceTemplate,
+  type McpSubscription,
+  type Prompt,
+  type Resource,
+  type ResourceTemplateType as ResourceTemplate,
   type ServerCapabilities,
-  ToolListChangedNotificationSchema
-} from "@modelcontextprotocol/sdk/types.js";
+  type SSEClientTransportOptions,
+  type StreamableHTTPClientTransportOptions,
+  type Tool
+} from "@modelcontextprotocol/client";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { Emitter, type Event } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
@@ -50,9 +45,43 @@ import type {
 // validator (which compiles schemas with `new Function`) cannot run there.
 // Every connection defaults to the Worker-safe validator unless the caller
 // supplies their own.
-const defaultClientOptions: McpClientOptions = {
-  jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
+class CompatibleWorkerJsonSchemaValidator
+  extends CfWorkerJsonSchemaValidator
+  implements jsonSchemaValidator
+{
+  private readonly legacy = new CfWorkerJsonSchemaValidator({ draft: "7" });
+
+  override getValidator<T>(schema: JsonSchemaType) {
+    const dialect = schema.$schema;
+    return typeof dialect === "string" && /draft-0?7/i.test(dialect)
+      ? this.legacy.getValidator<T>(schema)
+      : super.getValidator<T>(schema);
+  }
+}
+
+const defaultClientOptions: NonNullable<McpClientOptions> = {
+  // Modern schemas default to 2020-12 while explicitly tagged draft-07
+  // schemas from 2025-era servers keep working in the Worker-safe validator.
+  jsonSchemaValidator: new CompatibleWorkerJsonSchemaValidator(),
+  versionNegotiation: { mode: "auto" },
+  inputRequired: { autoFulfill: true }
 };
+
+function raceWithSignal<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
 
 /**
  * Connection state machine for MCP client connections.
@@ -113,7 +142,9 @@ export type MCPDiscoveryResult =
  * connection is recreated (e.g. after Durable Object hibernation).
  */
 export type MCPElicitationHandler = (
-  request: ElicitRequest
+  request: ElicitRequest,
+  /** Aborts when the originating MCP call is cancelled or exhausts its total-time budget. */
+  signal?: AbortSignal
 ) => Promise<ElicitResult>;
 
 export type MCPElicitationHandlers = {
@@ -162,6 +193,7 @@ export class MCPClientConnection {
     | StreamableHTTPClientTransport
     | SSEClientTransport
     | RPCClientTransport;
+  private _restoredListSubscription?: McpSubscription;
   prompts: Prompt[] = [];
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
@@ -176,6 +208,9 @@ export class MCPClientConnection {
   private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
     this._onObservabilityEvent.event;
+
+  private readonly _onListChanged = new Emitter<void>();
+  public readonly onListChanged: Event<void> = this._onListChanged.event;
 
   /**
    * Whether the connection advertised the elicitation capability. The SDK
@@ -199,11 +234,24 @@ export class MCPClientConnection {
        * the source of truth. Explicit `client.capabilities` win per key.
        */
       capabilitySeed?: ClientCapabilities;
+      /** SDK discovery result paired with a resumed modern HTTP session. */
+      discoverResult?: DiscoverResult;
     } = { client: {}, transport: {} }
   ) {
     this.options = {
       ...options,
-      client: { ...defaultClientOptions, ...options.client }
+      client: {
+        ...defaultClientOptions,
+        ...options.client,
+        versionNegotiation: {
+          ...defaultClientOptions.versionNegotiation,
+          ...options.client?.versionNegotiation
+        },
+        inputRequired: {
+          ...defaultClientOptions.inputRequired,
+          ...options.client?.inputRequired
+        }
+      }
     };
 
     this.client = this.createClient();
@@ -229,10 +277,44 @@ export class MCPClientConnection {
         ...seed,
         ...this.options.client?.capabilities,
         ...(elicitation ? { elicitation } : {})
-      } as ClientCapabilities
+      } as ClientCapabilities,
+      listChanged: this.createListChangedHandlers(
+        this.options.client?.listChanged
+      )
     };
 
     return new Client(this._info, clientOptions);
+  }
+
+  private createListChangedHandlers(
+    configured?: ListChangedHandlers
+  ): ListChangedHandlers {
+    return {
+      tools: {
+        ...configured?.tools,
+        onChanged: (error, tools) => {
+          if (!error && tools) this.tools = tools;
+          configured?.tools?.onChanged(error, tools);
+          this._onListChanged.fire();
+        }
+      },
+      prompts: {
+        ...configured?.prompts,
+        onChanged: (error, prompts) => {
+          if (!error && prompts) this.prompts = prompts;
+          configured?.prompts?.onChanged(error, prompts);
+          this._onListChanged.fire();
+        }
+      },
+      resources: {
+        ...configured?.resources,
+        onChanged: (error, resources) => {
+          if (!error && resources) this.resources = resources;
+          configured?.resources?.onChanged(error, resources);
+          this._onListChanged.fire();
+        }
+      }
+    };
   }
 
   /**
@@ -251,7 +333,7 @@ export class MCPClientConnection {
     // clearing the handlers un-advertises the capability on rebuild.
     this.options.capabilitySeed = undefined;
 
-    if (!this.client.transport) {
+    if (!this._transport) {
       this.client = this.createClient();
     }
   }
@@ -274,7 +356,7 @@ export class MCPClientConnection {
     // first. Rebuild the client so the new handshake advertises the current
     // handler-derived capabilities — reconnects are documented as the point
     // where handler changes on a live connection take effect.
-    if (this.client.transport) {
+    if (this._transport) {
       this._transport = undefined;
       try {
         await this.client.close();
@@ -296,10 +378,9 @@ export class MCPClientConnection {
       // client throws on registering a handler for an undeclared capability.
       if (this._elicitationEnabled) {
         this.client.setRequestHandler(
-          ElicitRequestSchema,
-          async (request: ElicitRequest) => {
-            return await this.handleElicitationRequest(request);
-          }
+          "elicitation/create",
+          async (request: ElicitRequest, context: ClientContext) =>
+            await this.handleElicitationRequest(request, context.mcpReq.signal)
         );
       }
 
@@ -337,7 +418,9 @@ export class MCPClientConnection {
    * - Explicit: finish on that transport
    * - Auto: try streamable-http, then sse on 404/405/Not Implemented
    */
-  private async finishAuthProbe(code: string): Promise<void> {
+  private async finishAuthProbe(
+    callbackParams: URLSearchParams
+  ): Promise<void> {
     if (!this.options.transport.authProvider) {
       throw new Error("No auth provider configured");
     }
@@ -349,12 +432,21 @@ export class MCPClientConnection {
 
     const finishAuth = async (base: HttpTransportType) => {
       const transport = this.getTransport(base);
-      if (
-        "finishAuth" in transport &&
-        typeof transport.finishAuth === "function"
-      ) {
-        await transport.finishAuth(code);
+      let completed = false;
+      try {
+        if (
+          "finishAuth" in transport &&
+          typeof transport.finishAuth === "function"
+        ) {
+          await transport.finishAuth(callbackParams);
+          completed = true;
+        }
+      } finally {
+        if (typeof transport.close === "function") {
+          await transport.close().catch(() => {});
+        }
       }
+      if (completed) this.client = this.createClient();
     };
 
     if (configuredType === "rpc") {
@@ -372,7 +464,17 @@ export class MCPClientConnection {
       "finishAuth" in authTransport &&
       typeof authTransport.finishAuth === "function"
     ) {
-      await authTransport.finishAuth(code);
+      let completed = false;
+      try {
+        await authTransport.finishAuth(callbackParams);
+        completed = true;
+      } finally {
+        if (typeof authTransport.close === "function") {
+          await authTransport.close().catch(() => {});
+        }
+        if (this._transport === authTransport) this._transport = undefined;
+      }
+      if (completed) this.client = this.createClient();
       return;
     }
 
@@ -397,7 +499,7 @@ export class MCPClientConnection {
    * Complete OAuth authorization
    */
   async completeAuthorization(
-    code: string,
+    callback: string | URLSearchParams,
     options: { alreadyAccepted?: boolean } = {}
   ): Promise<void> {
     const expectedState = options.alreadyAccepted
@@ -415,7 +517,11 @@ export class MCPClientConnection {
 
     try {
       // Finish OAuth by probing transports per configuration
-      await this.finishAuthProbe(code);
+      const callbackParams =
+        typeof callback === "string"
+          ? new URLSearchParams({ code: callback })
+          : callback;
+      await this.finishAuthProbe(callbackParams);
     } catch (error) {
       this.connectionState = MCPConnectionState.FAILED;
       throw error;
@@ -620,8 +726,8 @@ export class MCPClientConnection {
       // initialized again without its persisted session id.
       const staleSession =
         this._probingCapabilities &&
-        e instanceof StreamableHTTPError &&
-        e.code === 404;
+        e instanceof SdkHttpError &&
+        e.status === 404;
       return {
         success: false,
         reason: staleSession ? "stale-session" : "error",
@@ -649,18 +755,15 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.tools exists
    */
   async registerTools(): Promise<Tool[]> {
-    if (
-      this.serverCapabilities?.tools?.listChanged ||
-      this._probingCapabilities
-    ) {
+    if (this._probingCapabilities) {
       this.client.setNotificationHandler(
-        ToolListChangedNotificationSchema,
-        async (_notification) => {
+        "notifications/tools/list_changed",
+        async () => {
           this.tools = await this.fetchTools();
+          this._onListChanged.fire();
         }
       );
     }
-
     return this.fetchTools();
   }
 
@@ -669,18 +772,15 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.resources exists
    */
   async registerResources(): Promise<Resource[]> {
-    if (
-      this.serverCapabilities?.resources?.listChanged ||
-      this._probingCapabilities
-    ) {
+    if (this._probingCapabilities) {
       this.client.setNotificationHandler(
-        ResourceListChangedNotificationSchema,
-        async (_notification) => {
+        "notifications/resources/list_changed",
+        async () => {
           this.resources = await this.fetchResources();
+          this._onListChanged.fire();
         }
       );
     }
-
     return this.fetchResources();
   }
 
@@ -689,18 +789,15 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.prompts exists
    */
   async registerPrompts(): Promise<Prompt[]> {
-    if (
-      this.serverCapabilities?.prompts?.listChanged ||
-      this._probingCapabilities
-    ) {
+    if (this._probingCapabilities) {
       this.client.setNotificationHandler(
-        PromptListChangedNotificationSchema,
-        async (_notification) => {
+        "notifications/prompts/list_changed",
+        async () => {
           this.prompts = await this.fetchPrompts();
+          this._onListChanged.fire();
         }
       );
     }
-
     return this.fetchPrompts();
   }
 
@@ -712,11 +809,12 @@ export class MCPClientConnection {
     let toolsAgg: Tool[] = [];
     let toolsResult: ListToolsResult = { tools: [] };
     do {
-      toolsResult = await this.client
-        .listTools({
-          cursor: toolsResult.nextCursor
-        })
-        .catch(this._capabilityErrorHandler({ tools: [] }, "tools/list"));
+      const params = { cursor: toolsResult.nextCursor };
+      toolsResult = await (
+        this._probingCapabilities
+          ? this.client.request({ method: "tools/list", params })
+          : this.client.listTools(params)
+      ).catch(this._capabilityErrorHandler({ tools: [] }, "tools/list"));
       toolsAgg = toolsAgg.concat(toolsResult.tools);
     } while (toolsResult.nextCursor);
     return toolsAgg;
@@ -726,13 +824,14 @@ export class MCPClientConnection {
     let resourcesAgg: Resource[] = [];
     let resourcesResult: ListResourcesResult = { resources: [] };
     do {
-      resourcesResult = await this.client
-        .listResources({
-          cursor: resourcesResult.nextCursor
-        })
-        .catch(
-          this._capabilityErrorHandler({ resources: [] }, "resources/list")
-        );
+      const params = { cursor: resourcesResult.nextCursor };
+      resourcesResult = await (
+        this._probingCapabilities
+          ? this.client.request({ method: "resources/list", params })
+          : this.client.listResources(params)
+      ).catch(
+        this._capabilityErrorHandler({ resources: [] }, "resources/list")
+      );
       resourcesAgg = resourcesAgg.concat(resourcesResult.resources);
     } while (resourcesResult.nextCursor);
     return resourcesAgg;
@@ -742,11 +841,12 @@ export class MCPClientConnection {
     let promptsAgg: Prompt[] = [];
     let promptsResult: ListPromptsResult = { prompts: [] };
     do {
-      promptsResult = await this.client
-        .listPrompts({
-          cursor: promptsResult.nextCursor
-        })
-        .catch(this._capabilityErrorHandler({ prompts: [] }, "prompts/list"));
+      const params = { cursor: promptsResult.nextCursor };
+      promptsResult = await (
+        this._probingCapabilities
+          ? this.client.request({ method: "prompts/list", params })
+          : this.client.listPrompts(params)
+      ).catch(this._capabilityErrorHandler({ prompts: [] }, "prompts/list"));
       promptsAgg = promptsAgg.concat(promptsResult.prompts);
     } while (promptsResult.nextCursor);
     return promptsAgg;
@@ -758,16 +858,17 @@ export class MCPClientConnection {
       resourceTemplates: []
     };
     do {
-      templatesResult = await this.client
-        .listResourceTemplates({
-          cursor: templatesResult.nextCursor
-        })
-        .catch(
-          this._capabilityErrorHandler(
-            { resourceTemplates: [] },
-            "resources/templates/list"
-          )
-        );
+      const params = { cursor: templatesResult.nextCursor };
+      templatesResult = await (
+        this._probingCapabilities
+          ? this.client.request({ method: "resources/templates/list", params })
+          : this.client.listResourceTemplates(params)
+      ).catch(
+        this._capabilityErrorHandler(
+          { resourceTemplates: [] },
+          "resources/templates/list"
+        )
+      );
       templatesAgg = templatesAgg.concat(templatesResult.resourceTemplates);
     } while (templatesResult.nextCursor);
     return templatesAgg;
@@ -782,12 +883,14 @@ export class MCPClientConnection {
    * deprecated — pass the `elicitationHandlers` connection option instead.
    */
   async handleElicitationRequest(
-    request: ElicitRequest
+    request: ElicitRequest,
+    signal?: AbortSignal
   ): Promise<ElicitResult> {
     const mode = request.params.mode === "url" ? "url" : "form";
     const handler = this.options.elicitationHandlers?.[mode];
     if (handler) {
-      return handler(request);
+      const pending = signal ? handler(request, signal) : handler(request);
+      return raceWithSignal(pending, signal);
     }
     if (this.options.elicitationHandlers) {
       throw new Error(
@@ -821,6 +924,40 @@ export class MCPClientConnection {
     }
   }
 
+  get protocolVersion(): string | undefined {
+    if (this._transport instanceof StreamableHTTPClientTransport) {
+      return this._transport.protocolVersion;
+    }
+
+    return undefined;
+  }
+
+  get discoverResult(): DiscoverResult | undefined {
+    return this.client.getDiscoverResult();
+  }
+
+  private async openRestoredListSubscription(): Promise<void> {
+    const capabilities = this.client.getServerCapabilities();
+    const filter = {
+      ...(capabilities?.tools?.listChanged && { toolsListChanged: true }),
+      ...(capabilities?.prompts?.listChanged && { promptsListChanged: true }),
+      ...(capabilities?.resources?.listChanged && {
+        resourcesListChanged: true
+      })
+    };
+    if (Object.keys(filter).length === 0) return;
+
+    try {
+      this._restoredListSubscription = await this.client.listen(filter);
+    } catch (error) {
+      // A restored session is still usable when its optional listen stream
+      // cannot be reopened. Surface the error without failing the connection.
+      this.client.onerror?.(
+        error instanceof Error ? error : new Error(String(error))
+      );
+    }
+  }
+
   private getTransportName(
     transport?:
       | StreamableHTTPClientTransport
@@ -845,6 +982,8 @@ export class MCPClientConnection {
   async close(): Promise<void> {
     const transport = this._transport;
     this._transport = undefined;
+    await this._restoredListSubscription?.close().catch(() => {});
+    this._restoredListSubscription = undefined;
     const url = this.url.toString();
     const transportName = this.getTransportName(transport);
 
@@ -940,9 +1079,16 @@ export class MCPClientConnection {
       const transport = this.getTransport(currentTransportType);
 
       try {
-        await this.client.connect(transport);
+        const prior =
+          transport instanceof StreamableHTTPClientTransport &&
+          transport.sessionId &&
+          this.options.discoverResult
+            ? this.options.discoverResult
+            : undefined;
+        await this.client.connect(transport, prior ? { prior } : undefined);
         this._transport = transport;
         this._pendingAuthTransport = undefined;
+        if (prior) await this.openRestoredListSubscription();
 
         return {
           state: MCPConnectionState.CONNECTED,

@@ -646,11 +646,8 @@ export {
   type RPCServerTransportOptions
 } from "./rpc";
 
-export {
-  ElicitRequestSchema,
-  type ElicitRequest,
-  type ElicitResult
-} from "@modelcontextprotocol/sdk/types.js";
+export { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
 
 export type {
   MCPClientOAuthResult,

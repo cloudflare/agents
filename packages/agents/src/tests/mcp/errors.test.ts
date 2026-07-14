@@ -76,6 +76,21 @@ describe("MCP Error Utilities", () => {
       ).toBe(true);
     });
 
+    it("should detect v2 HTTP status fields and wrapped causes", () => {
+      expect(
+        isTransportNotImplemented({
+          code: "CLIENT_HTTP_NOT_IMPLEMENTED",
+          data: { status: 404 }
+        })
+      ).toBe(true);
+      expect(
+        isTransportNotImplemented({
+          data: { cause: { status: 405 } }
+        })
+      ).toBe(true);
+      expect(isUnauthorized({ data: { cause: { status: 401 } } })).toBe(true);
+    });
+
     it("should detect 404 status code in message (legacy format)", () => {
       expect(isTransportNotImplemented(new Error("HTTP 404"))).toBe(true);
       expect(isTransportNotImplemented(new Error("Error: 404"))).toBe(true);

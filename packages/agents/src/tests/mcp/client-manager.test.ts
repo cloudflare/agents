@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { MCPClientManager } from "../../mcp/client";
 import {
   MCPClientConnection,
@@ -7,7 +7,7 @@ import {
 } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/client";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -61,6 +61,16 @@ function createMockAuthProvider(
     redirectToAuthorization: vi.fn(),
     saveCodeVerifier: vi.fn(),
     codeVerifier: vi.fn(),
+    saveDiscoveryState: vi.fn(),
+    discoveryState: vi.fn().mockReturnValue({
+      authorizationServerUrl: "http://test.com",
+      authorizationServerMetadata: {
+        issuer: "http://test.com",
+        authorization_endpoint: "http://test.com/authorize",
+        token_endpoint: "http://test.com/token",
+        response_types_supported: ["code"]
+      }
+    }),
     async checkState(
       state: string
     ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
@@ -533,9 +543,19 @@ describe("MCPClientManager OAuth Integration", () => {
 
       expect(result.serverId).toBe(serverId);
       expect(result.authSuccess).toBe(true);
-      expect(completeAuthSpy).toHaveBeenCalledWith(authCode, {
-        alreadyAccepted: true
-      });
+      expect(completeAuthSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          get: expect.any(Function)
+        }),
+        { alreadyAccepted: true }
+      );
+      const callbackParams = completeAuthSpy.mock.calls[0]?.[0];
+      expect(callbackParams).toBeInstanceOf(URLSearchParams);
+      expect(
+        callbackParams instanceof URLSearchParams
+          ? callbackParams.get("code")
+          : undefined
+      ).toBe(authCode);
       // Verify auth provider has correct serverId and preserved clientId
       expect(connection.options.transport.authProvider?.serverId).toBe(
         serverId
@@ -1247,7 +1267,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const state = stateStorage.createState(serverId);
       const xssPayload = "</script><img src=x onerror=alert(1)>";
       const callbackRequest = new Request(
-        `${callbackUrl}?error=access_denied&error_description=${encodeURIComponent(xssPayload)}&state=${state}`
+        `${callbackUrl}?error=access_denied&error_description=${encodeURIComponent(
+          xssPayload
+        )}&state=${state}`
       );
       const result = await manager.handleCallbackRequest(callbackRequest);
 
@@ -2103,9 +2125,15 @@ describe("MCPClientManager OAuth Integration", () => {
       conn.init = vi.fn().mockImplementation(async () => {
         conn.connectionState = "connected";
       });
-      Object.defineProperty(conn, "sessionId", {
-        configurable: true,
-        get: () => "persisted-session-id"
+      Object.defineProperties(conn, {
+        sessionId: {
+          configurable: true,
+          get: () => "persisted-session-id"
+        },
+        protocolVersion: {
+          configurable: true,
+          get: () => "2025-11-25"
+        }
       });
 
       const result = await manager.connectToServer(id);
@@ -2115,7 +2143,10 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(server).toBeDefined();
       expect(server?.server_options).not.toBeNull();
       const serverOptions = JSON.parse(server?.server_options ?? "{}");
-      expect(serverOptions.transport?.sessionId).toBe("persisted-session-id");
+      expect(serverOptions.transport).toMatchObject({
+        sessionId: "persisted-session-id",
+        protocolVersion: "2025-11-25"
+      });
     });
 
     it("should terminate streamable-http sessions before closing a connection", async () => {
@@ -2805,7 +2836,6 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "test_tool",
           arguments: { message: "test" }
         },
-        undefined,
         undefined
       );
     });
@@ -2885,7 +2915,6 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "tool_one",
           arguments: {}
         },
-        undefined,
         undefined
       );
 
@@ -2895,7 +2924,6 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "tool_two",
           arguments: {}
         },
-        undefined,
         undefined
       );
     });
@@ -3451,7 +3479,6 @@ describe("MCPClientManager OAuth Integration", () => {
           const conn1 = manager.mcpConnections["server-1"];
           expect(conn1.client.callTool).toHaveBeenCalledWith(
             { name: "create_charge", arguments: { input: "test" } },
-            undefined,
             undefined
           );
 

@@ -1,4 +1,4 @@
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   McpError,
@@ -227,24 +227,20 @@ describe("MCP Client Connection Integration", () => {
       connection.client.getInstructions = vi
         .fn()
         .mockResolvedValue("Test instructions");
-      connection.client.listTools = vi.fn().mockResolvedValue({
-        tools: [
-          {
-            name: "test-tool",
-            description: "A test tool",
-            inputSchema: { type: "object" }
-          }
-        ]
+      connection.client.request = vi.fn().mockImplementation(({ method }) => {
+        if (method === "tools/list") {
+          return Promise.resolve({
+            tools: [
+              {
+                name: "test-tool",
+                description: "A test tool",
+                inputSchema: { type: "object" }
+              }
+            ]
+          });
+        }
+        return Promise.reject({ code: -32601 });
       });
-      connection.client.listResources = vi
-        .fn()
-        .mockRejectedValue({ code: -32601 });
-      connection.client.listPrompts = vi
-        .fn()
-        .mockRejectedValue({ code: -32601 });
-      connection.client.listResourceTemplates = vi
-        .fn()
-        .mockRejectedValue({ code: -32601 });
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();

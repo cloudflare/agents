@@ -109,7 +109,16 @@ export class ConformanceHost extends Agent<Env> {
     try {
       if (!this._serverId) {
         const result = await this.addMcpServer(SERVER_NAME, serverUrl, {
-          transport: { type: "streamable-http" },
+          transport: {
+            type: "streamable-http",
+            // This scenario intentionally serves 2025-03-26 root metadata
+            // whose issuer is a same-origin /oauth path. SDK v2 correctly
+            // rejects that RFC 8414 mismatch by default; the compatibility
+            // option is explicit and scoped only to this known legacy server.
+            ...(scenario === "auth/2025-03-26-oauth-metadata-backcompat" && {
+              skipIssuerMetadataValidation: true
+            })
+          },
           client: {
             capabilities: {
               // Opt into SDK-side default application (SEP-1034) on top of
