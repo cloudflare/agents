@@ -16,7 +16,7 @@ import {
 import type { ModelInfo } from "./extract";
 import { wrapModel } from "./model";
 import { finishWhenStreamCompletes } from "./streams";
-import { wrapTools } from "./tools";
+import { recordDeniedApprovalResponses, wrapTools } from "./tools";
 import type { ContentRecording } from "./tools";
 import type {
   AISDKV6CallParams,
@@ -153,6 +153,10 @@ function createOperationWrapper(
             instrumentation.options
           );
           writeSpanAttributes(operationSpan, span.attributes);
+          recordDeniedApprovalResponses(
+            instrumentation.tracer,
+            params.messages
+          );
 
           const startedAtMs = Date.now();
           const result = operation(
@@ -197,6 +201,7 @@ function createOperationWrapper(
           instrumentation.options
         );
         writeSpanAttributes(operationSpan, span.attributes);
+        recordDeniedApprovalResponses(instrumentation.tracer, params.messages);
 
         const result = await operation(
           operationParamsForCall(

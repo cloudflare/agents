@@ -310,9 +310,13 @@ const { generateText, streamText } = wrapAISDK(ai);
 operation past 64 UTF-8 bytes; the full target remains on its semantic
 attribute. A model object is wrapped with the SDK's `wrapLanguageModel` helper,
 so provider work is a `chat {model}` child of the operation span. Tool
-execution is wrapped as `execute_tool {tool}`. Stream spans close on completion,
-cancellation, an in-band error, or early consumer return. Async-generator tools
-stay open until iteration ends.
+execution is wrapped as `execute_tool {tool}`. AI SDK v6 approval lifecycle
+segments appear as bounded `tool_approval {tool}` children of an
+`execute_tool {tool}` span, correlated by `gen_ai.tool.call.id` and carrying
+`cloudflare.agents.tool.approval.state` (`requested`, `approved`, or `denied`).
+They never remain open while waiting for a human across invocations. Stream
+spans close on completion, cancellation, an in-band error, or early consumer
+return. Async-generator tools stay open until iteration ends.
 
 ### AI SDK v7
 
@@ -421,7 +425,8 @@ await generateText({
 | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`                          | Aggregate usage on operations and per-call usage on model spans                              |
 | `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.cache_read.input_tokens` | Provider cache usage when reported                                                           |
 | `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
-| `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID only when available                                                   |
+| `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID also correlates approval lifecycle segments                           |
+| `cloudflare.agents.tool.approval.state`                                            | AI SDK v6 approval lifecycle segment: `requested`, `approved`, or `denied`                   |
 | `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in (PII) chat inputs/outputs; omitted unless `recordInputs`/`recordOutputs` is set       |
 | `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                            | Opt-in (PII) tool inputs/outputs; omitted unless `recordInputs`/`recordOutputs` is set       |
 | `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |

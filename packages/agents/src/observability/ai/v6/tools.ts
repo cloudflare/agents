@@ -1,5 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { toolCallSpan, toolResultAttributes } from "../../genai/telemetry";
+import {
+  toolApprovalSpan,
+  toolCallSpan,
+  toolResultAttributes
+} from "../../genai/telemetry";
 import { readString } from "../read";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 
@@ -40,9 +44,13 @@ function wrapTool(
     return tool;
   }
 
-  // SAFETY: AI SDK tool objects have an optional execute function.
+  // SAFETY: AI SDK tool objects have optional execute / needsApproval fields.
   const toolRecord = tool as Record<string, unknown>;
-  if (typeof toolRecord.execute !== "function") {
+  const hasExecute = typeof toolRecord.execute === "function";
+  const hasApproval =
+    typeof toolRecord.needsApproval === "boolean" ||
+    typeof toolRecord.needsApproval === "function";
+  if (!hasExecute && !hasApproval) {
     return tool;
   }
 
@@ -52,7 +60,18 @@ function wrapTool(
   ) as Record<string, unknown> & {
     execute: (...args: readonly unknown[]) => unknown;
   };
-  const originalExecute = toolRecord.execute.bind(tool) as (
+  if (hasApproval) {
+    wrapApprovalCheck(tracer, wrappedTool, toolRecord, tool, toolName);
+  }
+  if (!hasExecute) {
+    return wrappedTool;
+  }
+
+  const execute = toolRecord.execute;
+  if (typeof execute !== "function") {
+    return wrappedTool;
+  }
+  const originalExecute = execute.bind(tool) as (
     ...args: readonly unknown[]
   ) => unknown;
 
@@ -72,6 +91,13 @@ function wrapTool(
       // the consumer's next() call sites) can be re-entered into the tool
       // span's async context.
       const inSpanContext = AsyncLocalStorage.snapshot() as ContextSnapshot;
+      const approval = approvalResponseForOptions(
+        args[1],
+        extractToolCallId(args[1])
+      );
+      if (approval?.approved === true) {
+        recordApprovalChild(tracer, toolName, approval.toolCallId, "approved");
+      }
       const result = originalExecute(...args);
 
       if (isPromiseLike(result)) {
@@ -100,6 +126,168 @@ function wrapTool(
   };
 
   return wrappedTool;
+}
+
+function wrapApprovalCheck(
+  tracer: AgentTracer,
+  wrappedTool: Record<string, unknown>,
+  toolRecord: Record<string, unknown>,
+  tool: object,
+  toolName: string
+): void {
+  const approval = toolRecord.needsApproval;
+  const original =
+    typeof approval === "function"
+      ? (approval.bind(tool) as (...args: readonly unknown[]) => unknown)
+      : undefined;
+
+  wrappedTool.needsApproval = (...args: readonly unknown[]) => {
+    const result = original ? original(...args) : approval;
+    const recordRequested = (needed: unknown): unknown => {
+      const toolCallId = extractToolCallId(args[1]);
+      if (needed === true && !hasApprovalResponse(args[1], toolCallId)) {
+        recordApprovalSegment(tracer, toolName, toolCallId, "requested");
+      }
+      return needed;
+    };
+
+    return isPromiseLike(result)
+      ? Promise.resolve(result).then(recordRequested)
+      : recordRequested(result);
+  };
+}
+
+/** Records denied responses, whose tool never reaches execute(). */
+export function recordDeniedApprovalResponses(
+  tracer: AgentTracer,
+  messages: unknown
+): void {
+  for (const response of approvalResponses(messages)) {
+    if (!response.approved) {
+      recordApprovalSegment(
+        tracer,
+        response.toolName,
+        response.toolCallId,
+        "denied"
+      );
+    }
+  }
+}
+
+function recordApprovalSegment(
+  tracer: AgentTracer,
+  toolName: string,
+  toolCallId: string | undefined,
+  state: "approved" | "denied" | "requested"
+): void {
+  const tool = toolCallSpan({
+    integration: "ai-sdk",
+    operation: "tool.approval",
+    toolCallId,
+    toolName
+  });
+  tracer.withSpan(tool.name, tool.attributes, () => {
+    recordApprovalChild(tracer, toolName, toolCallId, state);
+  });
+}
+
+function recordApprovalChild(
+  tracer: AgentTracer,
+  toolName: string,
+  toolCallId: string | undefined,
+  state: "approved" | "denied" | "requested"
+): void {
+  const approval = toolApprovalSpan({ state, toolCallId, toolName });
+  tracer.withSpan(approval.name, approval.attributes, () => undefined);
+}
+
+function hasApprovalResponse(
+  options: unknown,
+  toolCallId: string | undefined
+): boolean {
+  return approvalResponseForOptions(options, toolCallId) !== undefined;
+}
+
+function approvalResponseForOptions(
+  options: unknown,
+  toolCallId: string | undefined
+): ReturnType<typeof approvalResponses>[number] | undefined {
+  if (
+    toolCallId === undefined ||
+    typeof options !== "object" ||
+    options === null
+  ) {
+    return undefined;
+  }
+  return approvalResponses((options as Record<string, unknown>).messages).find(
+    (response) => response.toolCallId === toolCallId
+  );
+}
+
+function approvalResponses(messagesValue: unknown): Array<{
+  readonly approved: boolean;
+  readonly toolCallId: string;
+  readonly toolName: string;
+}> {
+  if (!Array.isArray(messagesValue)) {
+    return [];
+  }
+
+  const approvalToTool = new Map<string, string>();
+  const toolNames = new Map<string, string>();
+  for (const message of messagesValue) {
+    if (typeof message !== "object" || message === null) continue;
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (typeof part !== "object" || part === null) continue;
+      const record = part as Record<string, unknown>;
+      const type = readString(record.type);
+      if (type === "tool-call") {
+        const toolCallId = readString(record.toolCallId);
+        const toolName = readString(record.toolName);
+        if (toolCallId && toolName) toolNames.set(toolCallId, toolName);
+      } else if (type === "tool-approval-request") {
+        const approvalId = readString(record.approvalId);
+        const toolCallId = readString(record.toolCallId);
+        if (approvalId && toolCallId)
+          approvalToTool.set(approvalId, toolCallId);
+      }
+    }
+  }
+
+  const lastMessage = messagesValue.at(-1);
+  const lastContent =
+    typeof lastMessage === "object" && lastMessage !== null
+      ? (lastMessage as Record<string, unknown>).content
+      : undefined;
+  const decisions: Array<{
+    readonly approvalId: string;
+    readonly approved: boolean;
+  }> = [];
+  if (Array.isArray(lastContent)) {
+    for (const part of lastContent) {
+      if (typeof part !== "object" || part === null) continue;
+      const record = part as Record<string, unknown>;
+      if (record.type !== "tool-approval-response") continue;
+      const approvalId = readString(record.approvalId);
+      if (approvalId && typeof record.approved === "boolean") {
+        decisions.push({ approvalId, approved: record.approved });
+      }
+    }
+  }
+
+  return decisions.flatMap(({ approvalId, approved }) => {
+    const toolCallId = approvalToTool.get(approvalId);
+    if (!toolCallId) return [];
+    return [
+      {
+        approved,
+        toolCallId,
+        toolName: toolNames.get(toolCallId) ?? "tool"
+      }
+    ];
+  });
 }
 
 /**

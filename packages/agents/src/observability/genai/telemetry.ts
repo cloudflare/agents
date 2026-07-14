@@ -404,6 +404,27 @@ export function toolCallSpan(input: {
   };
 }
 
+/** Builds a bounded child span for one tool-approval lifecycle segment. */
+export function toolApprovalSpan(input: {
+  readonly state: "approved" | "denied" | "requested";
+  readonly toolCallId?: string | undefined;
+  readonly toolName: string;
+}): SpanSpec {
+  return {
+    attributes: {
+      [TraceAttribute.Cloudflare.IntegrationName]: "ai-sdk",
+      [TraceAttribute.Cloudflare.OperationName]: "tool.approval",
+      [TraceAttribute.Cloudflare.ToolApprovalState]: input.state,
+      [TraceAttribute.GenAI.OperationName]:
+        TraceAttribute.GenAI.OperationNameValueExecuteTool,
+      [TraceAttribute.GenAI.ToolCallID]: input.toolCallId,
+      [TraceAttribute.GenAI.ToolName]: input.toolName,
+      [TraceAttribute.GenAI.ToolType]: "function"
+    },
+    name: spanName("tool_approval", input.toolName)
+  };
+}
+
 /** Projects a completed model operation into canonical finish attributes. */
 export function finishAttributes(input: {
   readonly content?: OperationContent | undefined;

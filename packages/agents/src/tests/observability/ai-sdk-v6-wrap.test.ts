@@ -1619,6 +1619,101 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
   });
 });
 
+describe("createAISDKV6Wrapper tool approval spans", () => {
+  function approvalMessages(approved: boolean): Array<Record<string, unknown>> {
+    return [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "approval-call-1",
+            toolName: "deploy"
+          },
+          {
+            type: "tool-approval-request",
+            approvalId: "approval-1",
+            toolCallId: "approval-call-1"
+          }
+        ]
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-approval-response",
+            approvalId: "approval-1",
+            approved
+          }
+        ]
+      }
+    ];
+  }
+
+  function approvalAI(mode: "approved" | "denied" | "requested") {
+    let executions = 0;
+    const tool = {
+      needsApproval: (_input: unknown, _options?: unknown) => true,
+      execute: async (_input: unknown, _options?: unknown) => {
+        executions += 1;
+        return "deployed";
+      }
+    };
+    const messages =
+      mode === "requested" ? [] : approvalMessages(mode === "approved");
+    const ai: AISDKV6Namespace = {
+      generateText: async (params) => {
+        const wrapped = (params.tools as { deploy: typeof tool }).deploy;
+        const options = {
+          messages,
+          toolCallId: "approval-call-1"
+        };
+        await wrapped.needsApproval({}, options);
+        if (mode === "approved") {
+          await wrapped.execute({}, options);
+        }
+        return { finishReason: "stop" };
+      }
+    };
+    return { ai, executions: () => executions, messages, tool };
+  }
+
+  it.each([
+    ["requested", "requested", 0],
+    ["approved", "approved", 1],
+    ["denied", "denied", 0]
+  ] as const)(
+    "records a %s approval as a child of execute_tool",
+    async (mode, expectedState, expectedExecutions) => {
+      const tracing = new RecordingTracer();
+      const fixture = approvalAI(mode);
+
+      await createAISDKV6Wrapper(fixture.ai, { tracer: tracing }).generateText({
+        messages: fixture.messages,
+        tools: { deploy: fixture.tool }
+      });
+
+      expect(fixture.executions()).toBe(expectedExecutions);
+      const approval = tracing.spans.find(
+        (span) => span.name === "tool_approval deploy"
+      );
+      expect(approval?.attributes).toMatchObject({
+        "cloudflare.agents.operation.name": "tool.approval",
+        "cloudflare.agents.tool.approval.state": expectedState,
+        "gen_ai.tool.call.id": "approval-call-1",
+        "gen_ai.tool.name": "deploy"
+      });
+      expect(approval?.ended).toBe(true);
+      expect(approval?.parent?.attributes).toMatchObject({
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.call.id": "approval-call-1",
+        "gen_ai.tool.name": "deploy"
+      });
+      expect(approval?.parent?.ended).toBe(true);
+    }
+  );
+});
+
 async function* streamFrom(chunks: readonly unknown[]): AsyncIterable<unknown> {
   for (const chunk of chunks) {
     yield chunk;
