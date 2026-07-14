@@ -5,6 +5,7 @@ import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
 import type {
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkSessionTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
@@ -25,6 +26,13 @@ const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 async function freshAgent(name: string) {
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+    name
+  );
+}
+
+async function freshPropsAgent(name: string) {
+  return getServerByName(
+    env.ThinkPropsTestAgent as unknown as DurableObjectNamespace<ThinkPropsTestAgent>,
     name
   );
 }
@@ -151,6 +159,25 @@ async function freshLegacyConfigMigrationAgent(name: string) {
 // ── Core chat functionality ──────────────────────────────────────
 
 describe("Think — core", () => {
+  it("should forward routed props to onStart", async () => {
+    const room = `props-${crypto.randomUUID()}`;
+    const response = await exports.default.fetch(
+      `http://example.com/agents/think-props-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    expect(ws).toBeDefined();
+    ws.accept();
+
+    try {
+      const agent = await freshPropsAgent(room);
+      expect(await agent.getStartProps()).toEqual({ tenantId: "tenant-1" });
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it("should run a chat turn and persist messages", async () => {
     const agent = await freshAgent("chat-basic");
     const result = await agent.testChat("Hello!");

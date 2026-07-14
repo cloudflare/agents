@@ -40,6 +40,10 @@
         "name": "ThinkTestAgent"
       },
       {
+        "class_name": "ThinkPropsTestAgent",
+        "name": "ThinkPropsTestAgent"
+      },
+      {
         "class_name": "ThinkToolsTestAgent",
         "name": "ThinkToolsTestAgent"
       },
@@ -168,6 +172,7 @@
         "LoopToolTestAgent",
         "OverflowRecoveryTestAgent",
         "ThinkTestAgent",
+        "ThinkPropsTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
         "ThinkClientToolsAgent",

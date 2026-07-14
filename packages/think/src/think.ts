@@ -2707,7 +2707,7 @@ export class Think<
     super(ctx, env);
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async () => {
+    this.onStart = async (props?: Props) => {
       // 1. Workspace initialization
       if (!this.workspace) {
         this.workspace = new Workspace({
@@ -2786,7 +2786,7 @@ export class Think<
       await this._initializeChannels();
 
       // 8. User's onStart
-      await _onStart();
+      await _onStart(props);
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
       // before draining any recovered programmatic work they may enqueue.
