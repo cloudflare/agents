@@ -340,11 +340,8 @@ async function installPythonPackage(
     return;
   }
 
-  // Skip if the package already exists in the filesystem
-  if (fileSystem.read(`python_modules/${name}/__init__.py`) !== null) {
-    installedPackages.set(name, "existing");
-    return;
-  }
+  // TODO: In the JS impl., a check is done here for whether the package already exists in the filesystem
+  // Assess in the future whether this is sensible to repeat
 
   // If installation is already in progress, wait for it
   const existing = inProgress.get(name);
@@ -467,6 +464,7 @@ async function fetchPackageMetadata(
 
 async function fetchPythonPackageMetadata(name: string, registry: string) {
   // Fetch package metadata from PyPI JSON API
+  // TODO: Redo this to use the PyPA simple repository API
   const metadataResponse = await fetchWithTimeout(`${registry}/${name}/json`);
   if (!metadataResponse.ok) {
     const hint =
