@@ -39,6 +39,7 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+import { normalizeWorkflowRetention } from "./workflow-retention";
 export { camelCaseToKebabCase } from "./utils";
 import {
   type RetryOptions,
@@ -11244,11 +11245,18 @@ export class Agent<
       __agentOrigin: agentOrigin
     };
 
-    // Create the workflow instance
+    // Create the workflow instance. Keep the platform option unchanged; the
+    // normalized values below are only for local SQLite expiry arithmetic.
     const instance = await workflow.create({
       id: workflowId,
-      params: augmentedParams
+      params: augmentedParams,
+      ...(options?.retention === undefined
+        ? {}
+        : { retention: options.retention })
     });
+
+    const { successRetentionSeconds, errorRetentionSeconds } =
+      normalizeWorkflowRetention(options?.retention);
 
     // Track the workflow in our database
     const id = nanoid();
@@ -11257,8 +11265,14 @@ export class Agent<
       : null;
     try {
       this.sql`
-        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
-        VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
+        INSERT INTO cf_agents_workflows (
+          id, workflow_id, workflow_name, status, metadata,
+          success_retention_seconds, error_retention_seconds
+        )
+        VALUES (
+          ${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson},
+          ${successRetentionSeconds}, ${errorRetentionSeconds}
+        )
       `;
     } catch (e) {
       if (

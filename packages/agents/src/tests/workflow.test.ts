@@ -73,6 +73,71 @@ describe("workflow operations", () => {
       expect(state?.alarm).not.toBeNull();
     });
 
+    it("passes retention through and stores normalized outcome policies", async () => {
+      const agentStub = await getTestAgent("workflow-custom-retention");
+      const workflowId = "wf-custom-retention";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: "1 day",
+        errorRetention: "2 weeks"
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(2 * 7 * 24 * 60 * 60);
+      expect(state?.expiresAt).toBeNull();
+      expect(state?.alarm).not.toBeNull();
+    });
+
+    it("normalizes numeric retention from milliseconds", async () => {
+      const agentStub = await getTestAgent("workflow-numeric-retention");
+      const workflowId = "wf-numeric-retention";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: 60_001,
+        errorRetention: 120_000
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(61);
+      expect(state?.errorRetentionSeconds).toBe(120);
+    });
+
+    it("uses the 30-day tracking fallback for an omitted outcome", async () => {
+      const agentStub = await getTestAgent("workflow-partial-retention");
+      const workflowId = "wf-partial-retention";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: "1 day"
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(30 * 24 * 60 * 60);
+    });
+
+    it.each([
+      ["complete", 24 * 60 * 60],
+      ["errored", 2 * 24 * 60 * 60],
+      ["terminated", 2 * 24 * 60 * 60]
+    ] as const)(
+      "derives %s expiry from custom outcome retention",
+      async (status, retentionSeconds) => {
+        const workflowId = `wf-custom-expiry-${status}`;
+        const agentStub = await getTestAgent(workflowId);
+        await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+          successRetention: "1 day",
+          errorRetention: "2 days"
+        });
+
+        await agentStub.setWorkflowTerminalForTest(workflowId, status);
+        const state = await agentStub.getWorkflowCleanupState(workflowId);
+        expect(state?.expiresAt).toBe(
+          (state?.completedAt ?? 0) + retentionSeconds
+        );
+      }
+    );
+
     it.each([
       ["complete", "successRetentionSeconds"],
       ["errored", "errorRetentionSeconds"],
