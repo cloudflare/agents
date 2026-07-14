@@ -1,0 +1,35 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "rebuild-e2e-test-worker",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ThinkRecoveryE2EAgent",
+        "name": "ThinkRecoveryE2EAgent"
+      },
+      {
+        "class_name": "ThinkRecoveryHelperParent",
+        "name": "ThinkRecoveryHelperParent"
+      },
+      {
+        "class_name": "ThinkRecoveryHelperAgent",
+        "name": "ThinkRecoveryHelperAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ThinkRecoveryE2EAgent",
+        "ThinkRecoveryHelperParent",
+        "ThinkRecoveryHelperAgent"
+      ]
+    }
+  ]
+}

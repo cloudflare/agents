@@ -22,6 +22,7 @@
   "include": [
     "src/adapters/cloudflare",
     "demo/cloudflare",
-    "test-workers"
+    "test-workers",
+    "e2e"
   ]
 }
