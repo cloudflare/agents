@@ -2874,7 +2874,7 @@ export class Think<
           await this._recoverSubmissionsOnStart();
           this._recoverWorkflowNotifications();
           if (this._hasPendingSubmissions()) {
-            this._startSubmissionDrain();
+            await this._scheduleSubmissionDrain();
           }
           if (this._hasPendingWorkflowNotifications()) {
             this._startWorkflowNotificationDrain();
@@ -9723,7 +9723,6 @@ export class Think<
         if (existing) {
           if (existing.status === "pending") {
             await this._scheduleSubmissionDrain();
-            this._startSubmissionDrain();
           }
           return {
             ...this._inspectionFromSubmissionRow(existing),
@@ -9762,7 +9761,6 @@ export class Think<
         });
         await this._emitSubmissionStatus(row);
         await this._scheduleSubmissionDrain();
-        this._startSubmissionDrain();
 
         return {
           ...this._inspectionFromSubmissionRow(row),
@@ -9775,12 +9773,6 @@ export class Think<
   private async _scheduleSubmissionDrain(): Promise<void> {
     await this.schedule(0, "_drainThinkSubmissions", undefined, {
       idempotent: true
-    });
-  }
-
-  private _startSubmissionDrain(): void {
-    void this.keepAliveWhile(() => this._drainSubmissions()).catch((error) => {
-      console.error("[Think] Failed to drain submissions", error);
     });
   }
 
@@ -9862,8 +9854,7 @@ export class Think<
           trigger: "submission",
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
-          // The drain runs fire-and-forget (`_startSubmissionDrain` /
-          // `_drainThinkSubmissions` alarm), so it can inherit the ALS of a turn
+          // The alarm-owned drain can inherit the ALS of a turn
           // that called `submitMessages` mid-turn (e.g. a detached-finish notify
           // from a `beforeTurn` hook). `allowNested` skips the
           // not-inside-active-turn guard for that case. Safe on every submission

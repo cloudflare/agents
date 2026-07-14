@@ -5494,6 +5494,47 @@ export class ThinkProgrammaticTestAgent extends Think {
     );
   }
 
+  async probeSubmissionAlarmOwnershipForTest(): Promise<{
+    readonly alarmDrainCalls: number;
+    readonly inlineDrainCalls: number;
+    readonly submission: SubmitMessagesResult;
+  }> {
+    const submissionId = `alarm-owned-${crypto.randomUUID()}`;
+    const internal = this as unknown as {
+      _cf_executingScheduleRowId?: string;
+      _drainSubmissions(): Promise<void>;
+      _scheduleSubmissionDrain(): Promise<void>;
+    };
+    const originalDrain = internal._drainSubmissions;
+    let alarmDrainCalls = 0;
+    let inlineDrainCalls = 0;
+    internal._drainSubmissions = async () => {
+      if (internal._cf_executingScheduleRowId === undefined) {
+        inlineDrainCalls += 1;
+      } else {
+        alarmDrainCalls += 1;
+      }
+    };
+
+    try {
+      const submission = await this.testSubmitMessages("alarm owned", {
+        submissionId
+      });
+      // A DO alarm may interleave while this RPC awaits. The base Agent sets
+      // _cf_executingScheduleRowId only around an awaited schedule callback,
+      // which distinguishes the correct owner from the old inline starter.
+      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return { alarmDrainCalls, inlineDrainCalls, submission };
+    } finally {
+      internal._drainSubmissions = originalDrain;
+      // The probe's no-op alarm consumed its schedule row while leaving the
+      // submission pending. Re-arm the real drain for the eventual assertion.
+      await internal._scheduleSubmissionDrain();
+    }
+  }
+
   private async _waitForSubmissionForTest(
     submissionId: string,
     predicate: (submission: ThinkSubmissionInspection) => boolean
