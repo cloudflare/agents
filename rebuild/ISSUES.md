@@ -356,3 +356,20 @@ scheduled-task reconciliation) so recovery after eviction is automatic.
 browser API). Marked do-not-use-in-production upstream and the API is unstable.
 Tracked for completeness only — no action until the platform API stabilizes;
 revisit alongside ISSUE-003's transport vendoring.
+
+---
+
+## ISSUE-026 — Wire compat is name-level, not payload-level
+
+**Status:** open · **Area:** Transport (`adapters/websocket-chat`) — found by the test-port audit ([audit 29](./audit/29-test-coverage-port.md) §1)
+
+We kept the `cf_agent_*` frame NAMES but the original payload envelopes differ:
+the original chat request wraps its payload as `{ id, init: { method: "POST",
+body: JSON.stringify({ messages, ...}) } }` (ours reads `frame.messages`
+directly); original response chunks are `{ id, body, done, error }` with a
+terminal `done` (ours emits `{ id, chunk }` with no done framing); RPC/resume
+field shapes need the same audit. Until fixed, the real `agents/react` client
+(ISSUE-007) and every copy-paste WIRE test will fail on framing rather than
+behavior. Fix is adapter-only (accept `init.body`, emit `body`/`done`), with two
+ported original tests (`streaming-message-id`, `assistant-agent`) as the
+acceptance gate — audit 29 track T0.
