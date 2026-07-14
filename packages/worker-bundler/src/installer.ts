@@ -120,6 +120,11 @@ export async function installDependencies(
   const packageJsonContent = fileSystem.read("package.json");
   const pyprojectTomlContent = fileSystem.read("pyproject.toml");
 
+  if (packageJsonContent && pyprojectTomlContent) {
+    result.warnings.push("Cannot have package.json and pyproject.toml");
+    return result;
+  }
+
   if (packageJsonContent) {
     let packageJson: PackageJson;
     try {
@@ -159,7 +164,7 @@ export async function installDependencies(
       )
     );
   } else if (pyprojectTomlContent) {
-    await installDependenciesPython(fileSystem, pyprojectTomlContent);
+    return await installDependenciesPython(fileSystem, pyprojectTomlContent);
   }
   return result;
 }
