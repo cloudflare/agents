@@ -11,6 +11,8 @@ const DEFAULT_STT_AUDIO_FORMAT = "pcm_16000";
 const DEFAULT_STT_SAMPLE_RATE = 16_000;
 const DEFAULT_STT_BASE_URL =
   "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
+// About 30 seconds of 16 kHz mono PCM16 audio while the socket connects.
+const MAX_PENDING_BYTES = 960_000;
 
 export interface ElevenLabsTTSOptions {
   /** ElevenLabs API key. */
@@ -219,6 +221,9 @@ class ElevenLabsSTTSession implements TranscriberSession {
   #readyReject!: (error: Error) => void;
   #readySettled = false;
   #pendingChunks: ArrayBuffer[] = [];
+  #pendingBytes = 0;
+  #pendingOverflowLogged = false;
+  #speechStarted = false;
 
   constructor(
     providerOptions: ElevenLabsSTTOptions,
@@ -230,7 +235,8 @@ class ElevenLabsSTTSession implements TranscriberSession {
       this.#readyResolve = resolve;
       this.#readyReject = reject;
     });
-    this.#connect();
+    this.#ready.catch(() => {});
+    void this.#connect();
   }
 
   waitUntilReady(): Promise<void> {
@@ -240,6 +246,16 @@ class ElevenLabsSTTSession implements TranscriberSession {
   feed(chunk: ArrayBuffer): void {
     if (this.#closed) return;
     if (!this.#ws) {
+      if (this.#pendingBytes + chunk.byteLength > MAX_PENDING_BYTES) {
+        if (!this.#pendingOverflowLogged) {
+          this.#pendingOverflowLogged = true;
+          console.error(
+            "[ElevenLabsSTT] Pending audio buffer full — dropping audio until the socket connects."
+          );
+        }
+        return;
+      }
+      this.#pendingBytes += chunk.byteLength;
       this.#pendingChunks.push(chunk);
       return;
     }
@@ -253,6 +269,7 @@ class ElevenLabsSTTSession implements TranscriberSession {
       new Error("ElevenLabsSTT: WebSocket closed before session start.")
     );
     this.#pendingChunks = [];
+    this.#pendingBytes = 0;
     this.#ws?.close();
     this.#ws = null;
   }
@@ -299,6 +316,7 @@ class ElevenLabsSTTSession implements TranscriberSession {
         this.#sendAudioChunk(chunk);
       }
       this.#pendingChunks = [];
+      this.#pendingBytes = 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.#rejectReady(new Error(message));
@@ -320,10 +338,9 @@ class ElevenLabsSTTSession implements TranscriberSession {
 
   #connectionUrl(): string {
     const url = new URL(
-      (this.#providerOptions.baseUrl ?? DEFAULT_STT_BASE_URL).replace(
-        "wss://",
-        "https://"
-      )
+      (this.#providerOptions.baseUrl ?? DEFAULT_STT_BASE_URL)
+        .replace(/^wss:\/\//, "https://")
+        .replace(/^ws:\/\//, "http://")
     );
     url.searchParams.set(
       "model_id",
@@ -414,7 +431,10 @@ class ElevenLabsSTTSession implements TranscriberSession {
     if (messageType === "partial_transcript") {
       const text = stringProp(data, "text");
       if (text) {
-        this.#sessionOptions?.onSpeechStart?.(text);
+        if (!this.#speechStarted) {
+          this.#speechStarted = true;
+          this.#sessionOptions?.onSpeechStart?.(text);
+        }
         this.#sessionOptions?.onInterim?.(text);
       }
       return;
@@ -424,6 +444,7 @@ class ElevenLabsSTTSession implements TranscriberSession {
       messageType === "committed_transcript" ||
       messageType === "committed_transcript_with_timestamps"
     ) {
+      this.#speechStarted = false;
       const text = stringProp(data, "text");
       if (text) {
         this.#sessionOptions?.onUtterance?.(text);
