@@ -8,6 +8,7 @@ interface DebugMessage {
 
 interface ThreadMeta {
   status: "running" | "done" | "error";
+  tools?: number;
   lastError?: string;
 }
 
@@ -219,20 +220,26 @@ describe("E2E: production graph with inference adapter", () => {
     );
 
     let duringRecovery: ThreadMeta | undefined;
-    await vi.waitUntil(
-      async () => {
-        const [current, transcript] = await Promise.all([
-          thread(session),
-          messages(session)
-        ]);
-        duringRecovery = current;
-        return (
-          current?.status === "running" &&
-          transcriptText(transcript).includes("recovery-command-ok count=1")
-        );
-      },
-      { timeout: 120_000, interval: 200 }
-    );
+    try {
+      await vi.waitUntil(
+        async () => {
+          const current = await thread(session);
+          duringRecovery = current;
+          // afterToolCall records this only after the command result returns.
+          // Think publishes the assistant transcript atomically at the end of
+          // the turn, so command-center state is the durable mid-turn signal.
+          return current?.status === "running" && current.tools === 1;
+        },
+        { timeout: 120_000, interval: 200 }
+      );
+    } catch (error) {
+      throw new Error(
+        `Timed out observing recovery window; current=${JSON.stringify(duringRecovery)}\n` +
+          `transcript=${JSON.stringify(await messages(session), null, 2)}\n` +
+          `wrangler=${wranglerOutput().slice(-20_000)}`,
+        { cause: error }
+      );
+    }
     expect(duringRecovery?.status).toBe("running");
 
     await waitForThread(session, "done");
