@@ -40,6 +40,9 @@ class TestTranscriberSession implements TranscriberSession {
   #onUtterance: ((text: string) => void) | undefined;
   #utteranceThreshold: number;
 
+  // Test introspection: agent_context values delivered mid-session.
+  agentContexts: string[] = [];
+
   constructor(options?: TranscriberSessionOptions, utteranceThreshold = 20000) {
     this.#onInterim = options?.onInterim;
     this.#onSpeechStart = options?.onSpeechStart;
@@ -61,6 +64,11 @@ class TestTranscriberSession implements TranscriberSession {
     }
   }
 
+  updateAgentContext(text: string): void {
+    if (this.#closed) return;
+    this.agentContexts.push(text);
+  }
+
   close(): void {
     this.#closed = true;
   }
@@ -69,12 +77,19 @@ class TestTranscriberSession implements TranscriberSession {
 class TestTranscriber implements Transcriber {
   #utteranceThreshold: number;
 
+  // Test introspection: the most recently created session.
+  lastSession: TestTranscriberSession | null = null;
+
   constructor(utteranceThreshold = 20000) {
     this.#utteranceThreshold = utteranceThreshold;
   }
 
   createSession(options?: TranscriberSessionOptions): TranscriberSession {
-    return new TestTranscriberSession(options, this.#utteranceThreshold);
+    this.lastSession = new TestTranscriberSession(
+      options,
+      this.#utteranceThreshold
+    );
+    return this.lastSession;
   }
 }
 
@@ -521,6 +536,18 @@ export class TestVoiceAgent extends VoiceBase {
             JSON.stringify({
               type: "_message_count",
               count: this.getMessageCount()
+            })
+          );
+          break;
+        case "_get_agent_context":
+          const contexts =
+            this.transcriber instanceof TestTranscriber
+              ? (this.transcriber.lastSession?.agentContexts ?? [])
+              : [];
+          connection.send(
+            JSON.stringify({
+              type: "_agent_context",
+              contexts
             })
           );
           break;

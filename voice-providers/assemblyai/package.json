@@ -1,10 +1,10 @@
 {
-  "name": "@cloudflare/voice-elevenlabs",
+  "name": "@cloudflare/voice-assemblyai",
   "private": true,
   "version": "0.0.1",
-  "description": "ElevenLabs STT and TTS providers for Cloudflare Agents voice pipeline",
+  "description": "AssemblyAI Universal 3.5 Pro Realtime STT provider for Cloudflare Agents voice pipeline",
   "repository": {
-    "directory": "voice-providers/elevenlabs",
+    "directory": "voice-providers/assemblyai",
     "type": "git",
     "url": "git+https://github.com/cloudflare/agents.git"
   },
@@ -34,10 +34,9 @@
     "agents",
     "voice",
     "stt",
-    "tts",
-    "elevenlabs",
-    "text-to-speech",
-    "speech-to-text"
+    "assemblyai",
+    "speech-to-text",
+    "streaming"
   ],
   "author": "Cloudflare Inc.",
   "license": "MIT",

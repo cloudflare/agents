@@ -2718,6 +2718,15 @@ importers:
       '@cloudflare/voice':
         specifier: '*'
         version: link:../../packages/voice
+      '@cloudflare/voice-assemblyai':
+        specifier: '*'
+        version: link:../../voice-providers/assemblyai
+      '@cloudflare/voice-elevenlabs':
+        specifier: '*'
+        version: link:../../voice-providers/elevenlabs
+      '@cloudflare/voice-telnyx':
+        specifier: '*'
+        version: link:../../voice-providers/telnyx
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -4615,6 +4624,12 @@ importers:
       wrangler:
         specifier: ^4.105.0
         version: 4.105.0(@cloudflare/workers-types@4.20260629.1)
+
+  voice-providers/assemblyai:
+    dependencies:
+      '@cloudflare/voice':
+        specifier: '>=0.3.3 <1.0.0'
+        version: link:../../packages/voice
 
   voice-providers/deepgram:
     dependencies:

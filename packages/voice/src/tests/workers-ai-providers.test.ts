@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { WorkersAIFluxSTT, WorkersAINova3STT } from "../workers-ai-providers";
+import {
+  WorkersAIFluxSTT,
+  WorkersAINova3STT,
+  WorkersAITTS
+} from "../workers-ai-providers";
 
 class MockWebSocket {
   accepted = false;
@@ -358,5 +362,35 @@ describe("WorkersAINova3STT", () => {
     );
 
     expect(utterances).toEqual(["late message"]);
+  });
+});
+
+// --- WorkersAITTS ---
+
+describe("WorkersAITTS", () => {
+  it("returns audio bytes for an ok response", async () => {
+    const audio = new Uint8Array([1, 2, 3, 4]).buffer;
+    const ai = {
+      run: async () => new Response(audio, { status: 200 })
+    };
+    const tts = new WorkersAITTS(ai as never);
+    const result = await tts.synthesize("hello");
+    expect(result).not.toBeNull();
+    expect(new Uint8Array(result!)).toEqual(new Uint8Array([1, 2, 3, 4]));
+  });
+
+  it("returns null and logs instead of forwarding an error body as audio", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = {
+      run: async () =>
+        new Response(JSON.stringify({ name: "AiError", httpCode: 429 }), {
+          status: 429
+        })
+    };
+    const tts = new WorkersAITTS(ai as never);
+    const result = await tts.synthesize("hello");
+    expect(result).toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("429"));
+    errSpy.mockRestore();
   });
 });

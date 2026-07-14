@@ -64,6 +64,16 @@ export class WorkersAITTS implements TTSProvider {
       { returnRawResponse: true, ...(signal ? { signal } : {}) }
     )) as Response;
 
+    // Without this check an error body (e.g. a 429 quota JSON) would be
+    // forwarded to the client as audio bytes and fail to decode silently.
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      console.error(
+        `[WorkersAITTS] TTS request failed: HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`
+      );
+      return null;
+    }
+
     return await response.arrayBuffer();
   }
 }
