@@ -56,6 +56,7 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 - [x] adapters/websocket-chat + relay; resumable.ts retired; e2e rewired (audit 25 §4-6)
 
 ## Log
+- 2026-07-14: interactive demo added (demo/cli.ts + node file-store/real-alarm adapters + Anthropic SDK model adapter). Offline scripted model works keyless; verified live: streaming, workspace tool, approval flow, kill-mid-stream -> restart recovery. 1050 tests still green.
 - 2026-07-14: recovery conversation-dep surgery (the R2 deferral) done by the orchestrator: recovery.ts now owns continue/terminalize semantics (commits the repaired partial itself, persists the terminal message itself) over turnState + session + one scheduleTurn callback; Think's three recovery callbacks collapsed to scheduleRecoveryTurn. think.ts 1070 lines. 1050 tests green.
 - 2026-07-14: refactor R3 done (1050 tests): websocket-chat adapter (cf_agent_* frames, resume via log offsets, echo exclusion, readonly), relayTurn in domain/events with adapter wrapper, resumable.ts deleted (log owns retention), chat-session + actions-approvals e2e run through the adapter. Refactor waves complete.
 - 2026-07-14: refactor R2 done (1029 tests): app/ transport-free (banned-token test), turn-state + pending-interactions + assembly + maybeParkSuspension + session builder extracted; agent.ts 643 / think.ts 1096 lines (above ~450 target — recovery conversation-dep surgery deferred, inherent delegation surface). EventBus field renamed to `bus`; events() is the ConversationEventLog.
