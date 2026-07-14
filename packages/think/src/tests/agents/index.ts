@@ -8,6 +8,7 @@ export {
 } from "./assistant-agent-loop";
 export {
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkToolsTestAgent,
   ThinkSessionTestAgent,
   ThinkAsyncConfigSessionAgent,

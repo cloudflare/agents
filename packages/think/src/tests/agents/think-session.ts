@@ -3216,6 +3216,26 @@ export class ThinkAgentToolParent extends Agent {
   }
 }
 
+type ThinkPropsTestProps = {
+  tenantId: string;
+};
+
+export class ThinkPropsTestAgent extends Think<
+  Cloudflare.Env,
+  unknown,
+  ThinkPropsTestProps
+> {
+  private _startProps?: ThinkPropsTestProps;
+
+  override onStart(props?: ThinkPropsTestProps): void {
+    this._startProps = props;
+  }
+
+  getStartProps(): ThinkPropsTestProps | undefined {
+    return this._startProps;
+  }
+}
+
 // ── ThinkSessionTestAgent ───────────────────────────────────
 // Extends Think with Session configuration for context block testing.
 
