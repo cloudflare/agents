@@ -8,6 +8,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:workers": "vitest run --config vitest.workers.config.ts",
+    "test:ported": "vitest run --config vitest.ported.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:all": "npm run test && npm run test:workers",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cloudflare.json",
     "demo": "tsx demo/cli.ts",

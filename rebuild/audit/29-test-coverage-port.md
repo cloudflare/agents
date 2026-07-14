@@ -144,7 +144,43 @@ non-empty. Counting: original Think-relevant surface ≈ 1,250 behavioral tests
 covers a large but unmeasured fraction — the table turns that into a real
 number instead of a feeling.
 
-## 5. Sequencing against the issue backlog
+## 5. The porting workflow (mechanical, per original test file)
+
+Infrastructure (in place): `test-workers/ported/` (own worker + wrangler.jsonc
++ `compat.ts` shim + `COVERAGE.md` ledger) run by `npm run test:ported`;
+`e2e/` run by `npm run test:e2e`. Both are separate vitest projects so their
+expected failures never turn `test` / `test:workers` red.
+
+Per file:
+1. **Copy** the original test file to `test-workers/ported/<name>.test.ts`
+   (or `e2e/<name>.test.ts`), adding a provenance header: original path, the
+   `git log -1 --format=%h -- <path>` commit, port date, and
+   `Modifications:` list (aim for "imports only").
+2. **Re-point imports** at `./compat.js` — never at rebuild internals. If the
+   file needs a name the shim lacks, add it to the shim (that keeps the
+   compat surface documented in one place).
+3. **Re-author the fixture agents** it depends on in
+   `test-workers/ported/fixtures/` (rebuilt Think subclass + `hostAgent`,
+   test-only RPC helpers via the shell's `withAgent` seam), export from
+   `fixtures/index.ts`, bind in `ported/wrangler.jsonc` under the ORIGINAL
+   binding names (+ same-tag `new_sqlite_classes`).
+4. **Run** `npm run test:ported` (or `test:e2e`). Do NOT fix behavioral
+   failures — that is later goal-work. Only compile/import/fixture-shape
+   problems are fixed during porting.
+5. **Record** the row in `COVERAGE.md`: status `ported`, pass/fail counts,
+   and a triage tag per failing test: `framing` (ISSUE-026) ·
+   `missing-feature ISSUE-NNN` · `fixture-gap` · `divergence` (explain) ·
+   `flake`. New gaps discovered get a new ISSUE first, then the tag.
+6. **Commit** the test + fixtures + ledger row together.
+
+Rule amendment (clean-room): porting agents MAY read the original **test**
+files under `packages/think/src/{tests,e2e-tests,react-tests}/` and
+`packages/agents/src/tests/` — including the original fixture agents (they
+document the public API being certified). The god files
+(`think.ts`, `agents/src/index.ts`, `agents/src/chat/*` implementation) stay
+off-limits to implementers.
+
+## 6. Sequencing against the issue backlog
 
 T0/T1 force ISSUE-026 and surface ISSUE-015/018 concretely; T2 is
 independent after T0; T3 can run as parallel codex waves per area (same
