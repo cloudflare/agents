@@ -2546,7 +2546,9 @@ export class Think<
    * Enable them exclusively where recording conversation content in Workers
    * Observability is acceptable. When enabled, Think forwards the matching
    * `experimental_telemetry.recordInputs`/`recordOutputs` for every turn, which
-   * the tracing adapter serializes (truncated) onto the spans.
+   * the tracing adapter serializes (truncated) onto the spans. A per-turn
+   * `experimental_telemetry.recordInputs`/`recordOutputs` supplied by a caller
+   * is authoritative and can enable content independently of these fields.
    */
   recordInputs = false;
   recordOutputs = false;

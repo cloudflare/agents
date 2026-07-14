@@ -73,7 +73,9 @@ export type ToolContent = {
  * for the span name and scalar attributes, then split the remainder across
  * those two content values, keeping even the worst case under the ceiling.
  * Oversized values are truncated with a marker rather than risking the whole
- * span being dropped.
+ * span being dropped. (Caller-supplied scalar metadata passes through
+ * untruncated; unusually large metadata values eat into the reserved headroom,
+ * so keep them small when content recording is enabled.)
  */
 const MAX_SPAN_BYTES = 64 * 1024;
 const SPAN_METADATA_HEADROOM_BYTES = 8 * 1024;

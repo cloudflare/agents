@@ -456,8 +456,10 @@ an attribute: failures emit `error.type`, but the adapter does not invent an
 By default the adapters emit no conversation content. Prompts, messages, model
 output, and tool inputs/outputs are not recorded unless you explicitly opt in
 (see [Opt-in content recording](#opt-in-content-recording-records-pii) below).
-System instructions, schemas, headers, provider options, and raw error messages
-are never recorded under any configuration. Metadata and context values must be
+The dedicated top-level `system` parameter, schemas, headers, provider options,
+and raw error messages are never recorded under any configuration. (A
+`system`-role entry inside the `messages` array is part of the conversation and
+is recorded when `recordInputs` is set.) Metadata and context values must be
 scalar; objects and arrays are dropped.
 
 #### Opt-in content recording (records PII)
