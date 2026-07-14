@@ -24,8 +24,20 @@
         "name": "STORE_TEST_AGENT"
       },
       {
+        "class_name": "FacetProbeRoot",
+        "name": "FACET_PROBE_ROOT"
+      },
+      {
+        "class_name": "FacetProbeChild",
+        "name": "FACET_PROBE_CHILD"
+      },
+      {
         "class_name": "ChatAgentDO",
         "name": "CHAT_AGENT_DO"
+      },
+      {
+        "class_name": "ChildAgentDO",
+        "name": "CHILD_AGENT_DO"
       }
     ]
   },
@@ -36,6 +48,7 @@
       "new_sqlite_classes": [
         "ScaffoldAgent",
         "StoreTestAgent",
+        "FacetProbeRoot",
         "ChatAgentDO"
       ]
     }
