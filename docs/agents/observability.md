@@ -289,9 +289,10 @@ identity: `gen_ai.agent.name` is the class name, `gen_ai.agent.id` is the named
 instance, and `gen_ai.conversation.id` is the opaque Durable Object ID. These
 are defaults; `beforeTurn` can override `functionId` or the corresponding
 metadata fields for applications with a different identity model. Think records
-no conversation content by default; set `recordTraceContent = true` on the agent
-to attach prompts, output, and tool inputs/outputs to the spans (records PII —
-see [Opt-in content recording](#opt-in-content-recording-records-pii)).
+no conversation content by default; set `recordInputs = true` and/or
+`recordOutputs = true` on the agent to attach prompts, output, and tool
+inputs/outputs to the spans (records PII — see
+[Opt-in content recording](#opt-in-content-recording-records-pii)).
 
 ### AI SDK v6
 
@@ -502,8 +503,9 @@ const telemetry = createAISDKTelemetry({
 });
 ```
 
-Think exposes this as a single `recordTraceContent` flag (off by default); set
-it to `true` on an agent to record content for every turn. See
+Think exposes the same `recordInputs`/`recordOutputs` flags (both off by
+default) as agent fields; set either to `true` on an agent to record that
+content for every turn. See
 [Think configuration](https://github.com/cloudflare/agents/blob/main/docs/think/index.md).
 
 For v6, only `experimental_context` exists. Configure its allowlist on the

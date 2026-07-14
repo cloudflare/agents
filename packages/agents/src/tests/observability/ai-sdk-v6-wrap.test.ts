@@ -1553,7 +1553,7 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
 
   it("truncates oversized content to a bounded, marked value", async () => {
     const tracing = new RecordingTracer();
-    const bigPrompt = "x".repeat(20_000);
+    const bigPrompt = "x".repeat(70_000);
     const ai: AISDKV6Namespace = {
       generateText: async () => ({ finishReason: "stop", text: "ok" })
     };
@@ -1567,7 +1567,7 @@ describe("createAISDKV6Wrapper opt-in content recording", () => {
     expect(typeof value).toBe("string");
     const text = value as string;
     expect(text.endsWith("…[truncated]")).toBe(true);
-    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(4096);
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(28_672);
     expect(text.length).toBeLessThan(bigPrompt.length);
   });
 });

@@ -2535,18 +2535,21 @@ export class Think<
   waitForMcpConnections: boolean | { timeout: number } = false;
 
   /**
-   * Records raw prompts, messages, model output, and tool inputs/outputs as
-   * span attributes on Think's out-of-the-box traces.
+   * Records raw prompts and messages (`recordInputs`) and model output plus
+   * tool inputs/outputs (`recordOutputs`) as span attributes on Think's
+   * out-of-the-box traces. The field names mirror the AI SDK's own
+   * `TelemetrySettings.recordInputs`/`recordOutputs`.
    *
-   * ⚠️ This content is potentially PII and is recorded ONLY when this flag is
-   * `true`. It is OFF by default: traces otherwise carry only scalar metadata
-   * (token counts, finish reasons, tool names, request settings). Enable it
-   * exclusively where recording conversation content in Workers Observability
-   * is acceptable. When enabled, Think sets the AI SDK's
+   * ⚠️ This content is potentially PII and is recorded ONLY when the flag is
+   * `true`. Both are OFF by default: traces otherwise carry only scalar
+   * metadata (token counts, finish reasons, tool names, request settings).
+   * Enable them exclusively where recording conversation content in Workers
+   * Observability is acceptable. When enabled, Think forwards the matching
    * `experimental_telemetry.recordInputs`/`recordOutputs` for every turn, which
    * the tracing adapter serializes (truncated) onto the spans.
    */
-  recordTraceContent = false;
+  recordInputs = false;
+  recordOutputs = false;
 
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();
@@ -5219,12 +5222,11 @@ export class Think<
       // default while preserving an explicit caller label.
       functionId: base?.functionId ?? this.constructor.name,
       // Opt-in span content recording (potentially PII). OFF unless the agent
-      // sets `recordTraceContent`; when on, forward the AI SDK's own
-      // recordInputs/recordOutputs so the tracing adapter captures prompts,
-      // output, and tool inputs/outputs for the turn.
-      ...(this.recordTraceContent
-        ? { recordInputs: true, recordOutputs: true }
-        : {}),
+      // sets `recordInputs`/`recordOutputs`; when on, forward the AI SDK's own
+      // matching flags so the tracing adapter captures prompts, output, and
+      // tool inputs/outputs for the turn.
+      ...(this.recordInputs ? { recordInputs: true } : {}),
+      ...(this.recordOutputs ? { recordOutputs: true } : {}),
       metadata: {
         agentId: this.name,
         conversationId: this.ctx.id.toString(),

@@ -64,12 +64,24 @@ export type ToolContent = {
 };
 
 /**
- * Maximum UTF-8 byte length for a serialized content attribute value. Workers'
- * custom span attribute values are bounded, so opt-in content (prompts, tool
- * payloads) is capped well under that ceiling: a large prompt is truncated with
- * a marker rather than risking the whole attribute — or span — being dropped.
+ * workerd soft-caps total user-span data at 64 KiB (`MAX_SPAN_BYTES` in the
+ * runtime's trace implementation); past that it silently ignores span
+ * modifications, and downstream tail-stream submission may apply further
+ * limits. The cap is on the WHOLE span, not per attribute — and a single span
+ * can carry up to two opt-in content attributes (input + output messages, or
+ * tool arguments + result) alongside its scalar metadata. So reserve headroom
+ * for the span name and scalar attributes, then split the remainder across
+ * those two content values, keeping even the worst case under the ceiling.
+ * Oversized values are truncated with a marker rather than risking the whole
+ * span being dropped.
  */
-const MAX_CONTENT_ATTRIBUTE_BYTES = 4096;
+const MAX_SPAN_BYTES = 64 * 1024;
+const SPAN_METADATA_HEADROOM_BYTES = 8 * 1024;
+const MAX_CONTENT_ATTRIBUTES_PER_SPAN = 2;
+const MAX_CONTENT_ATTRIBUTE_BYTES = Math.floor(
+  (MAX_SPAN_BYTES - SPAN_METADATA_HEADROOM_BYTES) /
+    MAX_CONTENT_ATTRIBUTES_PER_SPAN
+);
 const CONTENT_TRUNCATION_MARKER = "…[truncated]";
 
 /**

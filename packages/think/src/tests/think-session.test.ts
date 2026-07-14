@@ -433,10 +433,10 @@ describe("Think — core", () => {
     expect(telemetry.recordOutputs).toBeUndefined();
   });
 
-  it("records span content when recordTraceContent opts in", async () => {
+  it("records span content when recordInputs/recordOutputs opt in", async () => {
     const agent = await freshAgent("chat-content-optin");
 
-    await agent.setRecordTraceContent(true);
+    await agent.setRecordContent(true);
     const telemetry = await agent.captureTurnTelemetryContent();
     expect(telemetry.recordInputs).toBe(true);
     expect(telemetry.recordOutputs).toBe(true);

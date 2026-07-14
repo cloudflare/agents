@@ -154,7 +154,8 @@ export class ThinkAgent extends ThinkBase {
    * value. This opts into Think's PII-recording surface, which is OFF by
    * default for every other agent.
    */
-  override recordTraceContent = true;
+  override recordInputs = true;
+  override recordOutputs = true;
 
   /**
    * We expose our own container-backed `bash` tool; skip Think's built-in

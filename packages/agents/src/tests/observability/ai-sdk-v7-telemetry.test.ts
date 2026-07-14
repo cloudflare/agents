@@ -608,7 +608,7 @@ describe("createAISDKV7Telemetry opt-in content recording", () => {
     telemetry.onStart?.({
       callId: "call-1",
       operationId: "ai.generateText",
-      prompt: "x".repeat(20_000)
+      prompt: "x".repeat(70_000)
     });
     telemetry.onEnd?.({ callId: "call-1", operationId: "ai.generateText" });
 
@@ -616,7 +616,7 @@ describe("createAISDKV7Telemetry opt-in content recording", () => {
     expect(typeof value).toBe("string");
     const text = value as string;
     expect(text.endsWith("…[truncated]")).toBe(true);
-    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(4096);
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(28_672);
   });
 
   it("never records tool output on the error path", () => {

@@ -998,16 +998,17 @@ export class ThinkTestAgent extends Think {
     return this._telemetryEvents;
   }
 
-  /** Flip the opt-in span-content recording flag for a test. */
-  async setRecordTraceContent(value: boolean): Promise<void> {
-    this.recordTraceContent = value;
+  /** Flip the opt-in span-content recording flags for a test. */
+  async setRecordContent(value: boolean): Promise<void> {
+    this.recordInputs = value;
+    this.recordOutputs = value;
   }
 
   /**
    * Resolves the per-turn telemetry the way `_runInferenceLoop` does and
    * reports only the opt-in content flags, so a test can assert that
-   * `recordTraceContent` gates `recordInputs`/`recordOutputs` without driving a
-   * full inference turn.
+   * `recordInputs`/`recordOutputs` gate the AI SDK telemetry flags without
+   * driving a full inference turn.
    */
   async captureTurnTelemetryContent(): Promise<{
     recordInputs?: boolean;
