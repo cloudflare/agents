@@ -361,12 +361,13 @@ void flush;
 void setupMockFetch;
 
 describe("AssemblyAISTT class shape", () => {
-  it("createSession returns an object with feed(), close(), updateAgentContext()", () => {
+  it("createSession returns the expected session methods", () => {
     const provider = new AssemblyAISTT({ apiKey: "k" });
     const session = provider.createSession();
     expect(typeof session.feed).toBe("function");
     expect(typeof session.close).toBe("function");
     expect(typeof session.updateAgentContext).toBe("function");
+    expect(typeof session.waitUntilReady).toBe("function");
   });
 });
 
@@ -375,7 +376,7 @@ describe("AssemblyAISession — connect", () => {
     const { ws, calls } = setupMockFetch();
     const provider = new AssemblyAISTT({ apiKey: "MY_KEY" });
 
-    provider.createSession();
+    const session = provider.createSession();
     await flush();
 
     expect(calls).toHaveLength(1);
@@ -399,6 +400,7 @@ describe("AssemblyAISession — connect", () => {
     );
 
     expect(ws.accept).toHaveBeenCalledTimes(1);
+    await expect(session.waitUntilReady?.()).resolves.toBeUndefined();
   });
 });
 
@@ -846,8 +848,12 @@ describe("AssemblyAISession — close", () => {
 
     const provider = new AssemblyAISTT({ apiKey: "k" });
     const session = provider.createSession();
+    const readiness = expect(session.waitUntilReady?.()).rejects.toThrow(
+      "AssemblyAISTT: session closed before connection established."
+    );
 
     session.close(); // before fetch resolves
+    await readiness;
     resolveFetch({ webSocket: ws });
     await flush();
 
@@ -957,8 +963,12 @@ describe("AssemblyAISession — server Error/Warning messages", () => {
     );
 
     const provider = new AssemblyAISTT({ apiKey: "bad-key" });
-    provider.createSession();
+    const session = provider.createSession();
     await flush();
+
+    await expect(session.waitUntilReady?.()).rejects.toThrow(
+      "AssemblyAISTT: failed to establish WebSocket connection (HTTP 401): Unauthorized"
+    );
 
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("401"));
     expect(errSpy).toHaveBeenCalledWith(

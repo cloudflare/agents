@@ -137,3 +137,22 @@ it("signals speech start once per committed segment", async () => {
   );
   session.close();
 });
+
+it("contains audio send failures while the socket is closing", async () => {
+  const { ws } = connectWith();
+  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession();
+  await flush();
+  ws.send.mockImplementation(() => {
+    throw new Error("socket is closing");
+  });
+
+  expect(() => session.feed(new ArrayBuffer(3_200))).not.toThrow();
+  expect(errorSpy).toHaveBeenCalledWith(
+    expect.stringContaining("send failed"),
+    expect.anything()
+  );
+
+  errorSpy.mockRestore();
+  session.close();
+});

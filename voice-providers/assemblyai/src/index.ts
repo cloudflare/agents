@@ -329,6 +329,10 @@ class AssemblyAISession implements TranscriberSession {
   #ws: WebSocket | null = null;
   #connected = false;
   #closed = false;
+  #ready: Promise<void>;
+  #readyResolve!: () => void;
+  #readyReject!: (error: Error) => void;
+  #readySettled = false;
   #pendingChunks: ArrayBuffer[] = [];
   #pendingBytes = 0;
   #pendingOverflowLogged = false;
@@ -345,7 +349,16 @@ class AssemblyAISession implements TranscriberSession {
   ) {
     this.#providerOpts = providerOpts;
     this.#sessionOpts = sessionOpts;
+    this.#ready = new Promise<void>((resolve, reject) => {
+      this.#readyResolve = resolve;
+      this.#readyReject = reject;
+    });
+    this.#ready.catch(() => {});
     void this.#connect();
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.#ready;
   }
 
   async #connect(): Promise<void> {
@@ -370,9 +383,10 @@ class AssemblyAISession implements TranscriberSession {
         // Auth and config failures arrive as a plain HTTP response (e.g. 401)
         // instead of an upgrade — surface the status and body.
         const body = await resp.text().catch(() => "");
-        console.error(
-          `[AssemblyAISTT] Failed to establish WebSocket connection: HTTP ${resp.status}${body ? ` — ${body.slice(0, 300)}` : ""}`
-        );
+        const message = `AssemblyAISTT: failed to establish WebSocket connection (HTTP ${resp.status})${body ? `: ${body.slice(0, 300)}` : "."}`;
+        console.error(message);
+        this.#rejectReady(new Error(message));
+        this.#closed = true;
         return;
       }
 
@@ -393,6 +407,11 @@ class AssemblyAISession implements TranscriberSession {
       });
       ws.addEventListener("close", (event: CloseEvent) => {
         this.#connected = false;
+        this.#rejectReady(
+          new Error(
+            "AssemblyAISTT: WebSocket closed before connection established."
+          )
+        );
         // Surface an unexpected close — fatal failures (auth `1008`, session
         // errors `3xxx`, network drops) arrive only as close frames, since the
         // shared `TranscriberSession` interface has no error callback. Skip
@@ -406,6 +425,11 @@ class AssemblyAISession implements TranscriberSession {
       ws.addEventListener("error", (event: Event) => {
         console.error("[AssemblyAISTT] WebSocket error:", event);
         this.#connected = false;
+        this.#rejectReady(
+          new Error(
+            "AssemblyAISTT: WebSocket error before connection established."
+          )
+        );
       });
 
       // Apply any agent_context queued before the socket was ready, then flush
@@ -417,9 +441,27 @@ class AssemblyAISession implements TranscriberSession {
       for (const chunk of this.#pendingChunks) this.#sendAudio(chunk);
       this.#pendingChunks = [];
       this.#pendingBytes = 0;
+      this.#resolveReady();
     } catch (err) {
       console.error("[AssemblyAISTT] Connection error:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      this.#rejectReady(
+        new Error(`AssemblyAISTT: connection failed: ${message}`)
+      );
+      this.#closed = true;
     }
+  }
+
+  #resolveReady(): void {
+    if (this.#readySettled) return;
+    this.#readySettled = true;
+    this.#readyResolve();
+  }
+
+  #rejectReady(error: Error): void {
+    if (this.#readySettled) return;
+    this.#readySettled = true;
+    this.#readyReject(error);
   }
 
   feed(chunk: ArrayBuffer): void {
@@ -524,6 +566,9 @@ class AssemblyAISession implements TranscriberSession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#rejectReady(
+      new Error("AssemblyAISTT: session closed before connection established.")
+    );
     this.#pendingChunks = [];
     this.#pendingBytes = 0;
     this.#coalesceChunks = [];

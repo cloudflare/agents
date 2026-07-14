@@ -401,14 +401,21 @@ class ElevenLabsSTTSession implements TranscriberSession {
   }
 
   #sendAudioChunk(chunk: ArrayBuffer): void {
-    this.#ws?.send(
-      JSON.stringify({
-        message_type: "input_audio_chunk",
-        audio_base_64: arrayBufferToBase64(chunk),
-        commit: false,
-        sample_rate: this.#providerOptions.sampleRate ?? DEFAULT_STT_SAMPLE_RATE
-      })
-    );
+    try {
+      this.#ws?.send(
+        JSON.stringify({
+          message_type: "input_audio_chunk",
+          audio_base_64: arrayBufferToBase64(chunk),
+          commit: false,
+          sample_rate:
+            this.#providerOptions.sampleRate ?? DEFAULT_STT_SAMPLE_RATE
+        })
+      );
+    } catch (error) {
+      if (!this.#closed) {
+        console.error("[ElevenLabsSTT] WebSocket send failed:", error);
+      }
+    }
   }
 
   #handleMessage(event: MessageEvent): void {
