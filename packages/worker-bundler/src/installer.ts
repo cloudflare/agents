@@ -159,7 +159,7 @@ export async function installDependencies(
       )
     );
   } else if (pyprojectTomlContent) {
-    await installDependenciesPython(pyprojectTomlContent, result, fileSystem);
+    await installDependenciesPython(fileSystem, pyprojectTomlContent);
   }
   return result;
 }
@@ -168,16 +168,20 @@ export async function installDependencies(
  * Install Python dependencies declared in a pyproject.toml file.
  */
 async function installDependenciesPython(
-  pyprojectTomlContent: string,
-  result: InstallResult,
-  fileSystem: FileSystem
-): Promise<void> {
+  fileSystem: FileSystem,
+  pyprojectTomlContent: string
+): Promise<InstallResult> {
+  const result: InstallResult = {
+    installed: [],
+    warnings: []
+  };
+
   let pyprojectToml: PyprojectToml;
   try {
     pyprojectToml = parseToml(pyprojectTomlContent) as PyprojectToml;
   } catch {
     result.warnings.push("Failed to parse pyproject.toml");
-    return;
+    return result;
   }
 
   // Collect dependencies to install
@@ -208,6 +212,7 @@ async function installDependenciesPython(
       )
     )
   );
+  return result;
 }
 
 /**
