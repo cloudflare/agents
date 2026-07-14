@@ -1020,10 +1020,12 @@ export class ThinkTestAgent extends Think {
 
     return {
       toUIMessageStream(options?: { sendReasoning?: boolean }) {
-        const originalStream = result.toUIMessageStream(options);
-        const reader = (
-          originalStream as unknown as ReadableStream<unknown>
-        ).getReader();
+        // `StreamableResult.toUIMessageStream()` returns an `AsyncIterable`
+        // (not a `ReadableStream`), so consume it via its async iterator
+        // rather than `getReader()`.
+        const iterator = (
+          result.toUIMessageStream(options) as AsyncIterable<unknown>
+        )[Symbol.asyncIterator]();
         let chunkCount = 0;
         let shouldThrow = false;
 
@@ -1044,10 +1046,10 @@ export class ThinkTestAgent extends Think {
                 }
                 while (true) {
                   if (shouldThrow && config) {
-                    await reader.cancel();
+                    await iterator.return?.();
                     throw new SimulatedChatError(config.message);
                   }
-                  const { done, value } = await reader.read();
+                  const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
                   chunkCount++;
                   if (config && chunkCount >= config.afterChunks) {
@@ -1068,7 +1070,7 @@ export class ThinkTestAgent extends Think {
                 }
               },
               async return() {
-                await reader.cancel();
+                await iterator.return?.();
                 return { done: true as const, value: undefined };
               }
             };
