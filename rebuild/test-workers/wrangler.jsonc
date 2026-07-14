@@ -52,5 +52,12 @@
         "ChatAgentDO"
       ]
     }
+  ],
+  "workflows": [
+    {
+      "name": "capability-workflow",
+      "binding": "CAPABILITY_WORKFLOW",
+      "class_name": "CapabilityWorkflow"
+    }
   ]
 }

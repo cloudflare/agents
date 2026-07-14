@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Think Worker Demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #f6f6f2;
+        color: #1e2523;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 18px;
+        border-bottom: 1px solid #d7d8cf;
+        background: #ffffff;
+      }
+      h1 {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 650;
+      }
+      #status {
+        font-size: 13px;
+        color: #59635f;
+      }
+      main {
+        overflow: auto;
+        padding: 18px;
+      }
+      #messages {
+        width: min(860px, 100%);
+        margin: 0 auto;
+        display: grid;
+        gap: 12px;
+      }
+      .message {
+        max-width: 78ch;
+        padding: 10px 12px;
+        border: 1px solid #dadbd3;
+        background: #ffffff;
+        border-radius: 8px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .user {
+        justify-self: end;
+        background: #e7f0ec;
+        border-color: #c6d9d0;
+      }
+      .assistant {
+        justify-self: start;
+      }
+      .tool {
+        margin-top: 8px;
+        padding: 8px;
+        border-radius: 6px;
+        background: #f1f1eb;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .approval {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      form {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        width: min(860px, calc(100% - 36px));
+        margin: 0 auto;
+        padding: 14px 0 18px;
+      }
+      input,
+      button {
+        font: inherit;
+      }
+      input {
+        min-width: 0;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid #c8cbc2;
+        background: #ffffff;
+      }
+      button {
+        border: 1px solid #263c33;
+        border-radius: 8px;
+        background: #263c33;
+        color: #ffffff;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      button.secondary {
+        border-color: #b8bcb2;
+        background: #ffffff;
+        color: #263c33;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          background: #171917;
+          color: #eef1ec;
+        }
+        header,
+        .message,
+        input,
+        button.secondary {
+          background: #20231f;
+          color: #eef1ec;
+          border-color: #3a4039;
+        }
+        .user {
+          background: #20362e;
+          border-color: #315246;
+        }
+        .tool {
+          background: #2b2f2a;
+        }
+        #status {
+          color: #aeb7b0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Think Worker Demo</h1>
+      <span id="status">connecting</span>
+    </header>
+    <main>
+      <div id="messages"></div>
+    </main>
+    <form id="composer">
+      <input
+        id="input"
+        name="input"
+        autocomplete="off"
+        placeholder="Message"
+      />
+      <button type="submit">Send</button>
+    </form>
+    <script>
+      const status = document.querySelector("#status");
+      const messagesEl = document.querySelector("#messages");
+      const form = document.querySelector("#composer");
+      const input = document.querySelector("#input");
+      const pending = new Map();
+      let messages = [];
+
+      const wsUrl = `${location.origin.replace("http", "ws")}/agents/demo-agent-do/default?_pk=${crypto.randomUUID()}`;
+      const ws = new WebSocket(wsUrl);
+
+      function textOf(message) {
+        return (message.parts || [])
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("");
+      }
+
+      function toolName(part) {
+        return part.type.replace(/^tool-/, "");
+      }
+
+      function send(frame) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+      }
+
+      function renderTool(part) {
+        const el = document.createElement("div");
+        el.className = "tool";
+        el.textContent = `${toolName(part)} ${part.state}`;
+        if (part.state === "approval-requested") {
+          const controls = document.createElement("div");
+          controls.className = "approval";
+          const approve = document.createElement("button");
+          approve.type = "button";
+          approve.textContent = "Approve";
+          const deny = document.createElement("button");
+          deny.type = "button";
+          deny.className = "secondary";
+          deny.textContent = "Deny";
+          approve.onclick = () =>
+            send({
+              type: "cf_agent_tool_approval",
+              toolCallId: part.toolCallId,
+              approved: true
+            });
+          deny.onclick = () =>
+            send({
+              type: "cf_agent_tool_approval",
+              toolCallId: part.toolCallId,
+              approved: false
+            });
+          controls.append(approve, deny);
+          el.append(controls);
+        }
+        return el;
+      }
+
+      function renderMessage(message) {
+        const el = document.createElement("article");
+        el.className = `message ${message.role}`;
+        const text = textOf(message);
+        el.append(document.createTextNode(text || message.role));
+        for (const part of message.parts || []) {
+          if (part.type && part.type.startsWith("tool-")) {
+            el.append(renderTool(part));
+          }
+        }
+        return el;
+      }
+
+      function renderMessages(messages) {
+        messagesEl.replaceChildren(...messages.map(renderMessage));
+        messagesEl.lastElementChild?.scrollIntoView({ block: "end" });
+      }
+
+      function pushStreamText(id, delta) {
+        let el = pending.get(id);
+        if (!el) {
+          el = document.createElement("article");
+          el.className = "message assistant";
+          pending.set(id, el);
+          messagesEl.append(el);
+        }
+        el.textContent += delta;
+        el.scrollIntoView({ block: "end" });
+      }
+
+      ws.addEventListener("open", () => {
+        status.textContent = "connected";
+      });
+
+      ws.addEventListener("close", () => {
+        status.textContent = "disconnected";
+      });
+
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(event.data);
+        if (frame.type === "cf_agent_chat_messages") {
+          pending.clear();
+          messages = frame.messages || [];
+          renderMessages(messages);
+        } else if (frame.type === "cf_agent_message_updated") {
+          pending.delete(frame.requestId);
+          messages = messages.filter((message) => message.id !== frame.message.id);
+          messages.push(frame.message);
+          renderMessages(messages);
+        } else if (frame.type === "cf_agent_use_chat_response") {
+          const chunk = frame.chunk;
+          if (chunk.type === "text-delta") pushStreamText(frame.id, chunk.delta);
+          if (chunk.type === "tool-approval-requested") {
+            status.textContent = "approval requested";
+          }
+        } else if (frame.type === "cf_agent_chat_recovering") {
+          status.textContent = frame.active ? "recovering" : "connected";
+        }
+      });
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const value = input.value.trim();
+        if (!value) return;
+        input.value = "";
+        const requestId = crypto.randomUUID();
+        const user = { id: requestId, role: "user", parts: [{ type: "text", text: value }] };
+        messages.push(user);
+        renderMessages(messages);
+        send({ type: "cf_agent_use_chat_request", id: requestId, input: value });
+      });
+    </script>
+  </body>
+</html>

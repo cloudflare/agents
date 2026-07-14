@@ -1,4 +1,5 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkflowEntrypoint } from "cloudflare:workers";
+import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import {
   createDurableAlarmTimer,
   type DurableAlarmTimer
@@ -13,6 +14,18 @@ import type { ModelClient } from "../src/ports/model.js";
 export class ScaffoldAgent extends DurableObject {
   override async fetch(): Promise<Response> {
     return new Response("scaffold");
+  }
+}
+
+export class CapabilityWorkflow extends WorkflowEntrypoint<
+  Cloudflare.Env,
+  { value?: string }
+> {
+  override async run(
+    event: Readonly<WorkflowEvent<{ value?: string }>>,
+    _step: WorkflowStep
+  ): Promise<unknown> {
+    return { echoed: event.payload.value ?? null };
   }
 }
 
@@ -388,6 +401,22 @@ export class ChatAgentDO extends HostedChatAgentDO {
 
 export default {
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/capabilities/echo") {
+      return new Response("capability echo", {
+        headers: {
+          "x-capability": "fetch",
+          "x-method": request.method
+        }
+      });
+    }
+    if (url.pathname === "/capabilities/redirect") {
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "/capabilities/echo" }
+      });
+    }
+
     return (
       (await routeAgentRequest(
         request,

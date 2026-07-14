@@ -6,5 +6,6 @@ declare namespace Cloudflare {
     FACET_PROBE_CHILD: DurableObjectNamespace;
     CHAT_AGENT_DO: DurableObjectNamespace;
     CHILD_AGENT_DO: DurableObjectNamespace;
+    CAPABILITY_WORKFLOW: Workflow;
   }
 }

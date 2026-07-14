@@ -10,7 +10,8 @@
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "test:all": "npm run test && npm run test:workers",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cloudflare.json",
-    "demo": "tsx demo/cli.ts"
+    "demo": "tsx demo/cli.ts",
+    "demo:cf": "wrangler dev --config demo/cloudflare/wrangler.jsonc"
   },
   "dependencies": {
     "mimetext": "^3.0.28",
