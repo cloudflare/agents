@@ -10,6 +10,9 @@
     "directory": "public",
     "binding": "ASSETS"
   },
+  "ai": {
+    "binding": "AI"
+  },
   "durable_objects": {
     "bindings": [
       {

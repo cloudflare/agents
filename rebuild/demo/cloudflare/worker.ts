@@ -3,17 +3,23 @@ import { z } from "zod";
 import { Think } from "../../src/app/think.js";
 import type { AgentHost } from "../../src/app/agent.js";
 import { action, type Action } from "../../src/domain/actions/actions.js";
+import { createAiSdkModel } from "../../src/adapters/ai-sdk/model.js";
 import { createAnthropicModel } from "../../src/adapters/anthropic/model.js";
 import { hostAgent } from "../../src/adapters/cloudflare/shell.js";
 import { routeAgentRequest } from "../../src/adapters/cloudflare/routing.js";
 import type { ModelClient, ModelRequest } from "../../src/ports/model.js";
+import { createWorkersAI } from "workers-ai-provider";
 
 interface DemoEnv {
   ASSETS: Fetcher;
   DEMO_AGENT_DO: DurableObjectNamespace;
   ANTHROPIC_API_KEY?: string;
   DEMO_MODEL?: string;
+  AI?: Ai;
+  WORKERS_AI_MODEL?: string;
 }
+
+const DEFAULT_WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
 const short = (value: unknown, max = 120): string => {
   const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -97,6 +103,25 @@ function createOfflineModel(): ModelClient {
   };
 }
 
+export function selectModel(env: DemoEnv): ModelClient {
+  // Prefer explicit external credentials, then the local Workers AI binding,
+  // and keep the demo usable offline when neither is configured.
+  if (env.ANTHROPIC_API_KEY) {
+    return createAnthropicModel({
+      apiKey: env.ANTHROPIC_API_KEY,
+      model: env.DEMO_MODEL ?? "claude-opus-4-8"
+    });
+  }
+  if (env.AI) {
+    return createAiSdkModel(
+      createWorkersAI({ binding: env.AI })(
+        env.WORKERS_AI_MODEL ?? DEFAULT_WORKERS_AI_MODEL
+      )
+    );
+  }
+  return createOfflineModel();
+}
+
 export class DemoThink extends Think {
   model: ModelClient = createOfflineModel();
 
@@ -143,12 +168,7 @@ export const DemoAgentDO = hostAgent(DemoThink, {
   create: (host: AgentHost, _ctx: DurableObjectState, rawEnv: unknown) => {
     const env = rawEnv as DemoEnv;
     const agent = new DemoThink(host);
-    if (env.ANTHROPIC_API_KEY) {
-      agent.model = createAnthropicModel({
-        apiKey: env.ANTHROPIC_API_KEY,
-        model: env.DEMO_MODEL ?? "claude-opus-4-8"
-      });
-    }
+    agent.model = selectModel(env);
     return agent;
   }
 });
