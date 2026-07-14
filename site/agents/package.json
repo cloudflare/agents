@@ -14,7 +14,7 @@
     "@chonkiejs/core": "^0.0.11",
     "@gsap/react": "^2.1.2",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@modelcontextprotocol/server": "2.0.0-beta.2",
+    "@modelcontextprotocol/server": "2.0.0-beta.4",
     "@orama/orama": "^3.1.18",
     "@use-it/interval": "^1.0.0",
     "agents": "*",

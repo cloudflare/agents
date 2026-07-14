@@ -11,7 +11,7 @@
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.42.3",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@modelcontextprotocol/server": "2.0.0-beta.2",
+    "@modelcontextprotocol/server": "2.0.0-beta.4",
     "@vitejs/plugin-react": "^6.0.3",
     "agents": "*",
     "chess.js": "^1.4.0",
