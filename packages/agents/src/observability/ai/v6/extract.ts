@@ -21,56 +21,17 @@ export type ModelInfo = {
 export function finishAttributesFromResult(
   result: unknown,
   options: {
+    readonly aiGatewayLogId?: string | undefined;
     readonly includeResponse?: boolean;
-    readonly recordOutputs?: boolean;
   } = {}
 ): TraceAttributes {
   return finishAttributes({
-    content: options.recordOutputs
-      ? { outputMessages: extractOutputContent(result) }
-      : undefined,
+    aiGatewayLogId: options.aiGatewayLogId,
     finishReason: extractFinishReason(result),
     response: options.includeResponse ? extractResponseInfo(result) : undefined,
     toolCallCount: extractToolCallCount(result),
     usage: extractAISDKv6TokenUsage(result)
   });
-}
-
-/**
- * Reads the opt-in input content (prompt/messages) from AI SDK v6 call params.
- * Prefers the structured message list; falls back to the bare prompt. Callers
- * gate this behind `recordInputs`; it is potentially PII.
- */
-export function extractInputContent(params: Record<string, unknown>): unknown {
-  if (Array.isArray(params.messages)) {
-    return params.messages;
-  }
-  return params.prompt;
-}
-
-/**
- * Reads the opt-in output content (text/object/tool calls) from an AI SDK v6
- * result. Callers gate this behind `recordOutputs`; it is potentially PII.
- */
-export function extractOutputContent(result: unknown): unknown {
-  if (typeof result !== "object" || result === null) {
-    return undefined;
-  }
-
-  // SAFETY: AI SDK result objects are records with optional output fields.
-  const record = result as Record<string, unknown>;
-  const output: Record<string, unknown> = {};
-  if (record.text !== undefined) {
-    output.text = record.text;
-  }
-  if (record.object !== undefined) {
-    output.object = record.object;
-  }
-  if (Array.isArray(record.toolCalls) && record.toolCalls.length > 0) {
-    output.toolCalls = record.toolCalls;
-  }
-
-  return Object.keys(output).length > 0 ? output : undefined;
 }
 
 export function extractRequestSummary(

@@ -1,17 +1,17 @@
-import type { ContentRecordingOptions } from "../options";
+import { extractAIGatewayLogId } from "../ai-gateway";
 import { readString } from "../read";
 import {
+  aiGatewayLogAttributes,
   modelCallSpan,
   operationSpan,
-  toolCallSpan,
-  toolResultAttributes
+  toolCallSpan
 } from "../../genai/telemetry";
+import { writeSpanAttributes } from "../../tracing/tracer";
 import type { TraceAttributes } from "../../tracing/tracer";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 import {
   correlationAttributes,
   finishAttributesFromEvent,
-  inputContentFromEvent,
   operationNameFromId,
   requestSummaryFromEvent,
   semanticContextFromEvent
@@ -48,23 +48,16 @@ type ToolState = {
 
 /** Tracing configuration for the AI SDK v7 telemetry adapter. */
 export type AISDKV7Instrumentation = {
-  readonly options?: ContentRecordingOptions | undefined;
   readonly tracer: AgentTracer;
 };
 
 /**
  * Creates an AI SDK v7 `Telemetry` object that projects callback events into
- * Cloudflare-compatible GenAI spans. Raw prompts, messages, and tool
- * inputs/outputs are recorded ONLY when the caller opts in via
- * `options.recordInputs`/`recordOutputs`; both default to `false`, so the
- * default projection carries no content.
+ * Cloudflare-compatible GenAI spans without recording raw prompts or outputs.
  */
 export function createAISDKV7Telemetry(
   instrumentation: AISDKV7Instrumentation
 ): AISDKV7Telemetry {
-  // Opt-in content recording (potentially PII); OFF unless explicitly enabled.
-  const recordInputs = instrumentation.options?.recordInputs === true;
-  const recordOutputs = instrumentation.options?.recordOutputs === true;
   const operations = new Map<string, OperationState>();
   const modelSpans = new Map<string, ModelState[]>();
   // Keyed by `${callId}:${toolCallId}` — concurrent operations can reuse a
@@ -137,9 +130,6 @@ export function createAISDKV7Telemetry(
 
       const span = modelCallSpan({
         attributes: correlationAttributes({ callId: event.callId }),
-        content: recordInputs
-          ? { inputMessages: inputContentFromEvent(event) }
-          : undefined,
         integration: "ai-sdk",
         model: readString(event.modelId),
         operation: isStreamOperation(state.operationName)
@@ -168,9 +158,9 @@ export function createAISDKV7Telemetry(
         );
       span.finish(
         finishAttributesFromEvent(event, {
+          includeAIGatewayLog: true,
           includePerformance: true,
-          includeResponse: true,
-          recordOutputs
+          includeResponse: true
         })
       );
     },
@@ -183,9 +173,6 @@ export function createAISDKV7Telemetry(
 
       const toolName = readString(event.toolCall.toolName) ?? "tool";
       const span = toolCallSpan({
-        // Opt-in tool arguments the event already carries; only read when
-        // recordInputs is set. Potentially PII.
-        content: recordInputs ? { arguments: event.toolCall.input } : undefined,
         integration: "ai-sdk",
         operation: "tool.execute",
         toolName
@@ -224,12 +211,7 @@ export function createAISDKV7Telemetry(
       if (event.toolOutput?.type === "tool-error") {
         span.fail(event.toolOutput.error);
       } else {
-        // Opt-in tool result on the success path only; never on error/abort.
-        span.finish(
-          recordOutputs
-            ? toolResultAttributes(event.toolOutput?.output)
-            : undefined
-        );
+        span.finish();
       }
       toolSpans.delete(toolSpanKey(event.callId, toolCallId));
     },
@@ -297,12 +279,20 @@ export function createAISDKV7Telemetry(
           try {
             return Promise.resolve(options.execute()).catch(
               (cause: unknown) => {
+                writeSpanAttributes(
+                  span,
+                  aiGatewayLogAttributes(extractAIGatewayLogId(cause))
+                );
                 span.fail(cause);
                 removeModelState(modelSpans, options.callId, state);
                 throw cause;
               }
             );
           } catch (cause: unknown) {
+            writeSpanAttributes(
+              span,
+              aiGatewayLogAttributes(extractAIGatewayLogId(cause))
+            );
             span.fail(cause);
             removeModelState(modelSpans, options.callId, state);
             throw cause;

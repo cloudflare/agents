@@ -1,5 +1,5 @@
 import type { AISDKInstrumentationOptions } from "../options";
-import { readBoolean, readString } from "../read";
+import { readString } from "../read";
 import {
   metadataAttributes,
   operationSpan,
@@ -17,7 +17,6 @@ import type { ModelInfo } from "./extract";
 import { wrapModel } from "./model";
 import { finishWhenStreamCompletes } from "./streams";
 import { recordDeniedApprovalResponses, wrapTools } from "./tools";
-import type { ContentRecording } from "./tools";
 import type {
   AISDKV6CallParams,
   AISDKV6Operation,
@@ -142,10 +141,6 @@ function createOperationWrapper(
             return operation(params, ...args);
           }
 
-          const content = contentRecordingForCall(
-            params,
-            instrumentation.options
-          );
           const span = operationSpanForCall(
             operationName,
             extractModelInfo(params.model),
@@ -164,8 +159,7 @@ function createOperationWrapper(
               params,
               operationName,
               wrapLanguageModel,
-              instrumentation.tracer,
-              content
+              instrumentation.tracer
             ),
             ...args
           );
@@ -173,7 +167,6 @@ function createOperationWrapper(
 
           return finishWhenStreamCompletes(result, operationSpan, {
             includeResponse: !hasModelSpan,
-            recordOutputs: hasModelSpan ? false : content.recordOutputs,
             startedAtMs: hasModelSpan ? undefined : startedAtMs
           });
         }
@@ -190,10 +183,6 @@ function createOperationWrapper(
           return operation(params, ...args);
         }
 
-        const content = contentRecordingForCall(
-          params,
-          instrumentation.options
-        );
         const span = operationSpanForCall(
           operationName,
           extractModelInfo(params.model),
@@ -208,18 +197,14 @@ function createOperationWrapper(
             params,
             operationName,
             wrapLanguageModel,
-            instrumentation.tracer,
-            content
+            instrumentation.tracer
           ),
           ...args
         );
 
         operationSpan.finish(
           finishAttributesFromResult(result, {
-            includeResponse: !canWrapModel(wrapLanguageModel, params.model),
-            recordOutputs: canWrapModel(wrapLanguageModel, params.model)
-              ? false
-              : content.recordOutputs
+            includeResponse: !canWrapModel(wrapLanguageModel, params.model)
           })
         );
         return result;
@@ -254,13 +239,12 @@ function operationParamsForCall(
   params: AISDKV6CallParams,
   operationName: AISDKV6OperationName,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
-  tracer: AgentTracer,
-  content: ContentRecording
+  tracer: AgentTracer
 ): AISDKV6CallParams {
   return {
     ...params,
     ...(shouldWrapTools(operationName) && params.tools !== undefined
-      ? { tools: wrapTools(tracer, params.tools, content) }
+      ? { tools: wrapTools(tracer, params.tools) }
       : {}),
     ...(params.model !== undefined
       ? {
@@ -268,8 +252,7 @@ function operationParamsForCall(
             tracer,
             wrapLanguageModel,
             params.model,
-            operationName,
-            content
+            operationName
           )
         }
       : {})
@@ -324,32 +307,6 @@ function operationSpanForCall(
     provider: model?.provider,
     request: extractRequestSummary(params, operation)
   });
-}
-
-/**
- * Resolves opt-in content recording for a call. The per-call
- * `experimental_telemetry.recordInputs`/`recordOutputs` settings (the AI SDK's
- * own {@link https://sdk.vercel.ai TelemetrySettings} vocabulary) are
- * authoritative and may opt in OR out; they fall back to the wrapper-level
- * option, and finally to `false`. Content is potentially PII, so the effective
- * default is OFF and content is emitted only when a flag resolves to `true`.
- */
-function contentRecordingForCall(
-  params: AISDKV6CallParams,
-  options: AISDKInstrumentationOptions | undefined
-): ContentRecording {
-  const telemetry =
-    typeof params.experimental_telemetry === "object" &&
-    params.experimental_telemetry !== null
-      ? (params.experimental_telemetry as Record<string, unknown>)
-      : undefined;
-
-  return {
-    recordInputs:
-      readBoolean(telemetry?.recordInputs) ?? options?.recordInputs ?? false,
-    recordOutputs:
-      readBoolean(telemetry?.recordOutputs) ?? options?.recordOutputs ?? false
-  };
 }
 
 /** Reads the per-call `experimental_telemetry.metadata` record, if present. */

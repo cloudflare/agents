@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as ai from "ai";
 import { convertArrayToReadableStream, MockLanguageModelV3 } from "ai/test";
+import { createWorkersAI } from "workers-ai-provider";
 import { RecordingTracer } from "./recording-tracer";
 import { createAISDKV6Wrapper } from "../../observability/ai/v6/wrap";
 
@@ -95,6 +96,114 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
       chatSpan?.attributes["gen_ai.response.time_to_first_chunk"];
     expect(typeof timeToFirstChunk).toBe("number");
     expect(timeToFirstChunk).toBeGreaterThanOrEqual(0);
+    expect(chatSpan?.ended).toBe(true);
+  });
+
+  it("records an AI Gateway log id exposed in provider response headers", async () => {
+    const tracing = new RecordingTracer();
+    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const model = new MockLanguageModelV3({
+      doGenerate: {
+        content: [{ type: "text", text: "Hello" }],
+        finishReason: { raw: "stop", unified: "stop" },
+        response: {
+          headers: { "cf-aig-log-id": "gateway-log-integration" }
+        },
+        usage: {
+          inputTokens: {
+            cacheRead: undefined,
+            cacheWrite: undefined,
+            noCache: 2,
+            total: 2
+          },
+          outputTokens: { reasoning: undefined, text: 1, total: 1 }
+        },
+        warnings: []
+      },
+      modelId: "gateway-model",
+      provider: "workersai.chat"
+    });
+
+    const result = await wrapped.generateText({ model, prompt: "Say hello" });
+
+    expect(result.text).toBe("Hello");
+    const chatSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes).toMatchObject({
+      "cloudflare.ai_gateway.log.id": "gateway-log-integration"
+    });
+    expect(tracing.rootSpans[0]?.attributes).not.toHaveProperty([
+      "cloudflare.ai_gateway.log.id"
+    ]);
+  });
+
+  it("records the log id exposed on a real Workers AI provider binding", async () => {
+    const tracing = new RecordingTracer();
+    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const binding = {
+      aiGatewayLogId: null as string | null,
+      async run() {
+        this.aiGatewayLogId = "gateway-log-binding-integration";
+        return {
+          response: "Hello from Workers AI",
+          usage: { completion_tokens: 4, prompt_tokens: 3 }
+        };
+      }
+    };
+    const workersai = createWorkersAI({
+      binding: binding as unknown as Ai,
+      gateway: { id: "default" }
+    });
+
+    const result = await wrapped.generateText({
+      model: workersai("@cf/meta/llama-3.1-8b-instruct"),
+      prompt: "Say hello"
+    });
+
+    expect(result.text).toBe("Hello from Workers AI");
+    const chatSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes).toMatchObject({
+      "cloudflare.ai_gateway.log.id": "gateway-log-binding-integration"
+    });
+  });
+
+  it("keeps a Workers AI binding log id through stream completion", async () => {
+    const tracing = new RecordingTracer();
+    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const binding = {
+      aiGatewayLogId: null as string | null,
+      async run() {
+        this.aiGatewayLogId = "gateway-log-stream-binding";
+        return {
+          response: "Hello stream",
+          usage: { completion_tokens: 2, prompt_tokens: 2 }
+        };
+      }
+    };
+    const workersai = createWorkersAI({
+      binding: binding as unknown as Ai,
+      gateway: { id: "default" }
+    });
+
+    const result = wrapped.streamText({
+      model: workersai("@cf/meta/llama-3.1-8b-instruct"),
+      prompt: "Say hello"
+    });
+    let text = "";
+    for await (const chunk of result.textStream) {
+      text += chunk;
+    }
+
+    expect(text).toBe("Hello stream");
+    const chatSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chatSpan?.attributes).toMatchObject({
+      "cloudflare.ai_gateway.log.id": "gateway-log-stream-binding"
+    });
     expect(chatSpan?.ended).toBe(true);
   });
 

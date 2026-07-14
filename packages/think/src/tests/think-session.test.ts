@@ -425,23 +425,6 @@ describe("Think — core", () => {
     ]);
   });
 
-  it("does not record span content by default", async () => {
-    const agent = await freshAgent("chat-content-default");
-
-    const telemetry = await agent.captureTurnTelemetryContent();
-    expect(telemetry.recordInputs).toBeUndefined();
-    expect(telemetry.recordOutputs).toBeUndefined();
-  });
-
-  it("records span content when recordInputs/recordOutputs opt in", async () => {
-    const agent = await freshAgent("chat-content-optin");
-
-    await agent.setRecordContent(true);
-    const telemetry = await agent.captureTurnTelemetryContent();
-    expect(telemetry.recordInputs).toBe(true);
-    expect(telemetry.recordOutputs).toBe(true);
-  });
-
   it("should build assistant message with text parts", async () => {
     const agent = await freshAgent("chat-parts");
     await agent.testChat("Hello!");

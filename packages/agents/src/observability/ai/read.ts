@@ -8,11 +8,6 @@ export function readNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
-/** Narrows an unknown value to a boolean. */
-export function readBoolean(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
 /** AI SDK token counts are either a plain number or `{ total?: number, ... }`. */
 export function readTokenCount(value: unknown): number | undefined {
   if (typeof value === "number") {

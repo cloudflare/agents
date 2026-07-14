@@ -147,17 +147,6 @@ export class ThinkAgent extends ThinkBase {
   override storeTools = true;
 
   /**
-   * Record prompts, model output, and tool inputs/outputs on the turn's
-   * tracing spans. agent-think is an internal automation agent whose turns
-   * operate on public GitHub issues/PRs (no end-user PII), so capturing the
-   * full conversation content in Workers Observability is worth the debugging
-   * value. This opts into Think's PII-recording surface, which is OFF by
-   * default for every other agent.
-   */
-  override recordInputs = true;
-  override recordOutputs = true;
-
-  /**
    * We expose our own container-backed `bash` tool; skip Think's built-in
    * just-bash. Note: even if this flag is ever flipped back,
    * getTools() spreads after the workspace tools, so our `bash` would

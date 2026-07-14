@@ -1,6 +1,11 @@
-import { finishAttributes } from "../../genai/telemetry";
+import {
+  aiGatewayLogAttributes,
+  finishAttributes
+} from "../../genai/telemetry";
 import type { ResponseSummary, TokenUsageSummary } from "../../genai/telemetry";
+import { writeSpanAttributes } from "../../tracing/tracer";
 import type { TraceAttributes, AgentSpan } from "../../tracing/tracer";
+import { extractAIGatewayLogId } from "../ai-gateway";
 import {
   extractAISDKv6TokenUsage,
   extractFinishReason,
@@ -8,8 +13,8 @@ import {
 } from "./extract";
 
 type StreamSummary = {
+  readonly aiGatewayLogId?: string;
   readonly finishReason?: string;
-  readonly outputContent?: unknown;
   readonly response?: ResponseSummary;
   readonly toolCallCount?: number;
   readonly timeToFirstChunkSeconds?: number;
@@ -20,12 +25,12 @@ export function finishWhenStreamCompletes(
   result: unknown,
   span: AgentSpan,
   options: {
+    readonly aiGatewayLogId?: string;
+    readonly includeAIGatewayLog?: boolean;
     readonly includeResponse?: boolean;
-    readonly recordOutputs?: boolean;
     readonly startedAtMs?: number;
   } = {}
 ): unknown {
-  const recordOutputs = options.recordOutputs === true;
   return patchStreamFields(
     result,
     {
@@ -34,27 +39,39 @@ export function finishWhenStreamCompletes(
           finishAttributesFromStreamSummary(
             summary,
             options.includeResponse === true,
-            recordOutputs
+            options.includeAIGatewayLog === true,
+            options.aiGatewayLogId
           )
         );
       },
-      onError: (cause) => {
+      onError: (cause, observedAIGatewayLogId) => {
+        if (options.includeAIGatewayLog) {
+          writeSpanAttributes(
+            span,
+            aiGatewayLogAttributes(
+              observedAIGatewayLogId ??
+                extractAIGatewayLogId(cause) ??
+                options.aiGatewayLogId
+            )
+          );
+        }
         span.fail(cause);
       }
     },
     options.startedAtMs,
-    recordOutputs
+    options.includeAIGatewayLog ? options.aiGatewayLogId : undefined
   );
 }
 
 function finishAttributesFromStreamSummary(
   summary: StreamSummary | undefined,
   includeResponse: boolean,
-  recordOutputs: boolean
+  includeAIGatewayLog: boolean,
+  initialAIGatewayLogId: string | undefined
 ): TraceAttributes {
   return finishAttributes({
-    content: recordOutputs
-      ? { outputMessages: summary?.outputContent }
+    aiGatewayLogId: includeAIGatewayLog
+      ? (summary?.aiGatewayLogId ?? initialAIGatewayLogId)
       : undefined,
     finishReason: summary?.finishReason,
     response: includeResponse ? summary?.response : undefined,
@@ -68,10 +85,13 @@ function patchStreamFields(
   result: unknown,
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
-    readonly onError: (cause: unknown) => void;
+    readonly onError: (
+      cause: unknown,
+      aiGatewayLogId: string | undefined
+    ) => void;
   },
   startedAtMs: number | undefined,
-  recordOutputs: boolean
+  aiGatewayLogId: string | undefined
 ): unknown {
   if (typeof result !== "object" || result === null) {
     hooks.onComplete(undefined);
@@ -92,12 +112,15 @@ function patchStreamFields(
     hooks.onComplete(summary);
   };
 
-  const errorOnce = (cause: unknown) => {
+  const errorOnce = (
+    cause: unknown,
+    observedAIGatewayLogId: string | undefined
+  ) => {
     if (closed) {
       return;
     }
     closed = true;
-    hooks.onError(cause);
+    hooks.onError(cause, observedAIGatewayLogId);
   };
 
   // Instrumentation must fail open: if the SDK's private stream fields change
@@ -115,7 +138,7 @@ function patchStreamFields(
             onError: errorOnce
           },
           startedAtMs,
-          recordOutputs
+          aiGatewayLogId
         ),
         writable: true
       });
@@ -142,7 +165,7 @@ function patchStreamFields(
                   onError: errorOnce
                 },
                 startedAtMs,
-                recordOutputs
+                aiGatewayLogId
               )
             : wrapAsyncIterable(
                 streamField.stream,
@@ -151,7 +174,7 @@ function patchStreamFields(
                   onError: errorOnce
                 },
                 startedAtMs,
-                recordOutputs
+                aiGatewayLogId
               ),
         writable: true
       });
@@ -205,13 +228,16 @@ function wrapReadableStream(
   stream: ReadableStream<unknown>,
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
-    readonly onError: (cause: unknown) => void;
+    readonly onError: (
+      cause: unknown,
+      aiGatewayLogId: string | undefined
+    ) => void;
   },
   startedAtMs: number | undefined,
-  recordOutputs: boolean
+  aiGatewayLogId: string | undefined
 ): ReadableStream<unknown> {
   let reader: ReadableStreamDefaultReader<unknown> | undefined;
-  const state = createStreamState(hooks, startedAtMs, recordOutputs);
+  const state = createStreamState(hooks, startedAtMs, aiGatewayLogId);
 
   return new ReadableStream<unknown>({
     async pull(controller) {
@@ -276,14 +302,17 @@ function wrapAsyncIterable(
   stream: AsyncIterable<unknown>,
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
-    readonly onError: (cause: unknown) => void;
+    readonly onError: (
+      cause: unknown,
+      aiGatewayLogId: string | undefined
+    ) => void;
   },
   startedAtMs: number | undefined,
-  recordOutputs: boolean
+  aiGatewayLogId: string | undefined
 ): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
-      const state = createStreamState(hooks, startedAtMs, recordOutputs);
+      const state = createStreamState(hooks, startedAtMs, aiGatewayLogId);
       try {
         for await (const chunk of stream) {
           state.observeChunk(chunk);
@@ -304,10 +333,13 @@ function wrapAsyncIterable(
 function createStreamState(
   hooks: {
     readonly onComplete: (summary: StreamSummary | undefined) => void;
-    readonly onError: (cause: unknown) => void;
+    readonly onError: (
+      cause: unknown,
+      aiGatewayLogId: string | undefined
+    ) => void;
   },
   startedAtMs: number | undefined,
-  recordOutputs: boolean
+  initialAIGatewayLogId: string | undefined
 ): {
   readonly closed: boolean;
   cancel(): void;
@@ -316,6 +348,7 @@ function createStreamState(
   observeChunk(chunk: unknown): void;
 } {
   let closed = false;
+  let aiGatewayLogId = initialAIGatewayLogId;
   let finishReason: string | undefined;
   let toolCallCount = 0;
   let usage: TokenUsageSummary | undefined;
@@ -323,12 +356,10 @@ function createStreamState(
   let observedError: { readonly cause: unknown } | undefined;
   let observedAbort = false;
   let firstChunkAtMs: number | undefined;
-  // Opt-in output accumulation (PII); only populated when recordOutputs is set.
-  const output = createOutputAccumulator();
 
   const settleObserved = (): boolean => {
     if (observedError) {
-      hooks.onError(observedError.cause);
+      hooks.onError(observedError.cause, aiGatewayLogId);
       return true;
     }
 
@@ -337,7 +368,7 @@ function createStreamState(
       // completes the stream normally — it never rejects with an AbortError.
       // Surface a structurally AbortError-shaped cause so the tracer
       // classifies the span as canceled instead of a false success.
-      hooks.onError({ name: "AbortError" });
+      hooks.onError({ name: "AbortError" }, aiGatewayLogId);
       return true;
     }
 
@@ -372,8 +403,8 @@ function createStreamState(
 
       hooks.onComplete(
         streamSummaryFromParts({
+          aiGatewayLogId,
           finishReason,
-          outputContent: recordOutputs ? output.content() : undefined,
           response,
           timeToFirstChunkSeconds:
             firstChunkAtMs === undefined || startedAtMs === undefined
@@ -390,11 +421,12 @@ function createStreamState(
       }
 
       closed = true;
-      hooks.onError(cause);
+      hooks.onError(cause, aiGatewayLogId);
     },
     observeChunk(rawChunk) {
       firstChunkAtMs ??= Date.now();
       const chunk = unwrapChunkEnvelope(rawChunk);
+      aiGatewayLogId = extractAIGatewayLogId(chunk) ?? aiGatewayLogId;
       // AI SDK v6 signals mid-stream provider failures as an in-band
       // `{ type: "error" }` chunk rather than rejecting the stream, so the
       // stream still reaches normal completion afterward. Record it here and
@@ -407,9 +439,6 @@ function createStreamState(
       }
       if (isToolCallChunk(chunk)) {
         toolCallCount += 1;
-      }
-      if (recordOutputs) {
-        output.observe(chunk);
       }
       finishReason = extractFinishReason(chunk) ?? finishReason;
       usage = extractAISDKv6TokenUsage(chunk) ?? usage;
@@ -454,19 +483,19 @@ function isAbortChunk(chunk: unknown): boolean {
 }
 
 function streamSummaryFromParts(input: {
+  readonly aiGatewayLogId: string | undefined;
   readonly finishReason: string | undefined;
-  readonly outputContent: unknown;
   readonly response: ResponseSummary | undefined;
   readonly timeToFirstChunkSeconds: number | undefined;
   readonly toolCallCount: number;
   readonly usage: TokenUsageSummary | undefined;
 }): StreamSummary {
   return {
+    ...(input.aiGatewayLogId !== undefined
+      ? { aiGatewayLogId: input.aiGatewayLogId }
+      : {}),
     ...(input.finishReason !== undefined
       ? { finishReason: input.finishReason }
-      : {}),
-    ...(input.outputContent !== undefined
-      ? { outputContent: input.outputContent }
       : {}),
     ...(input.response ? { response: input.response } : {}),
     ...(input.timeToFirstChunkSeconds !== undefined
@@ -474,67 +503,6 @@ function streamSummaryFromParts(input: {
       : {}),
     ...(input.toolCallCount > 0 ? { toolCallCount: input.toolCallCount } : {}),
     ...(input.usage ? { usage: input.usage } : {})
-  };
-}
-
-/**
- * Accumulates opt-in output content from an AI SDK v6 stream: concatenates
- * `text-delta` chunks, collects `tool-call` chunks, and keeps the latest
- * object payload (streamObject). Only fed chunks when `recordOutputs` is set;
- * the assembled value is potentially PII.
- */
-function createOutputAccumulator(): {
-  content(): unknown;
-  observe(chunk: unknown): void;
-} {
-  let text = "";
-  const toolCalls: unknown[] = [];
-  let object: unknown;
-
-  return {
-    content() {
-      const output: Record<string, unknown> = {};
-      if (text.length > 0) {
-        output.text = text;
-      }
-      if (toolCalls.length > 0) {
-        output.toolCalls = toolCalls;
-      }
-      if (object !== undefined) {
-        output.object = object;
-      }
-      return Object.keys(output).length > 0 ? output : undefined;
-    },
-    observe(chunk) {
-      if (typeof chunk !== "object" || chunk === null) {
-        // streamObject's partialObjectStream yields bare object snapshots.
-        if (chunk !== undefined) {
-          object = chunk;
-        }
-        return;
-      }
-
-      const record = chunk as Record<string, unknown>;
-      if (record.type === "text-delta") {
-        const delta = record.text ?? record.delta;
-        if (typeof delta === "string") {
-          text += delta;
-        }
-        return;
-      }
-      if (record.type === "tool-call") {
-        toolCalls.push(chunk);
-        return;
-      }
-      if (record.object !== undefined) {
-        object = record.object;
-        return;
-      }
-      // A bare object snapshot (partialObjectStream) with no discriminant.
-      if (record.type === undefined) {
-        object = chunk;
-      }
-    }
   };
 }
 

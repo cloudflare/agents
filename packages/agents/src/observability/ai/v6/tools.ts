@@ -1,26 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import {
-  toolApprovalSpan,
-  toolCallSpan,
-  toolResultAttributes
-} from "../../genai/telemetry";
+import { toolApprovalSpan, toolCallSpan } from "../../genai/telemetry";
 import { readString } from "../read";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 
 /** Context snapshot type returned by AsyncLocalStorage.snapshot(). */
 type ContextSnapshot = <R>(fn: () => R) => R;
 
-/** Resolved opt-in content recording for tool arguments and results (PII). */
-export type ContentRecording = {
-  readonly recordInputs: boolean;
-  readonly recordOutputs: boolean;
-};
-
-export function wrapTools(
-  tracer: AgentTracer,
-  tools: unknown,
-  content: ContentRecording
-): unknown {
+export function wrapTools(tracer: AgentTracer, tools: unknown): unknown {
   if (typeof tools !== "object" || tools === null) {
     return tools;
   }
@@ -29,7 +15,7 @@ export function wrapTools(
   const toolRecord = tools as Record<string, unknown>;
   const wrappedTools: Record<string, unknown> = {};
   for (const [toolName, tool] of Object.entries(toolRecord)) {
-    wrappedTools[toolName] = wrapTool(tracer, toolName, tool, content);
+    wrappedTools[toolName] = wrapTool(tracer, toolName, tool);
   }
   return wrappedTools;
 }
@@ -37,8 +23,7 @@ export function wrapTools(
 function wrapTool(
   tracer: AgentTracer,
   toolName: string,
-  tool: unknown,
-  content: ContentRecording
+  tool: unknown
 ): unknown {
   if (typeof tool !== "object" || tool === null) {
     return tool;
@@ -77,8 +62,6 @@ function wrapTool(
 
   wrappedTool.execute = (...args) => {
     const span = toolCallSpan({
-      // Opt-in tool arguments (first execute arg); gated by recordInputs.
-      content: content.recordInputs ? { arguments: args[0] } : undefined,
       integration: "ai-sdk",
       operation: "tool.execute",
       toolCallId: extractToolCallId(args[1]),
@@ -102,13 +85,7 @@ function wrapTool(
 
       if (isPromiseLike(result)) {
         return Promise.resolve(result).then(
-          (resolved) =>
-            settleToolResult(
-              resolved,
-              toolSpan,
-              inSpanContext,
-              content.recordOutputs
-            ),
+          (resolved) => settleToolResult(resolved, toolSpan, inSpanContext),
           (cause: unknown) => {
             toolSpan.fail(cause);
             throw cause;
@@ -116,12 +93,7 @@ function wrapTool(
         );
       }
 
-      return settleToolResult(
-        result,
-        toolSpan,
-        inSpanContext,
-        content.recordOutputs
-      );
+      return settleToolResult(result, toolSpan, inSpanContext);
     });
   };
 
@@ -298,27 +270,20 @@ function approvalResponses(messagesValue: unknown): Array<{
 function settleToolResult(
   result: unknown,
   span: AgentSpan,
-  inSpanContext: ContextSnapshot,
-  recordOutputs: boolean
+  inSpanContext: ContextSnapshot
 ): unknown {
   if (isAsyncIterable(result)) {
-    return finishWhenIterableCompletes(
-      result,
-      span,
-      inSpanContext,
-      recordOutputs
-    );
+    return finishWhenIterableCompletes(result, span, inSpanContext);
   }
 
-  span.finish(recordOutputs ? toolResultAttributes(result) : undefined);
+  span.finish();
   return result;
 }
 
 function finishWhenIterableCompletes(
   iterable: AsyncIterable<unknown>,
   span: AgentSpan,
-  inSpanContext: ContextSnapshot,
-  recordOutputs: boolean
+  inSpanContext: ContextSnapshot
 ): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -327,15 +292,11 @@ function finishWhenIterableCompletes(
       // runs — and creates any nested spans — under the tool span.
       const iterator = inSpanContext(() => iterable[Symbol.asyncIterator]());
       let exhausted = false;
-      // A streaming tool's real result is its generator return value; capture
-      // it only under the opt-in flag.
-      let returnValue: unknown;
       try {
         while (true) {
           const step = await inSpanContext(() => iterator.next());
           if (step.done) {
             exhausted = true;
-            returnValue = step.value;
             return step.value;
           }
           yield step.value;
@@ -357,11 +318,7 @@ function finishWhenIterableCompletes(
         }
         // Covers normal completion and early consumer return; a no-op after
         // fail() since span closure is idempotent.
-        span.finish(
-          recordOutputs && returnValue !== undefined
-            ? toolResultAttributes(returnValue)
-            : undefined
-        );
+        span.finish();
       }
     }
   };

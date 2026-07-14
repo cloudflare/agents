@@ -288,11 +288,8 @@ spans, and `execute_tool {tool}` spans. Think always supplies its durable
 identity: `gen_ai.agent.name` is the class name, `gen_ai.agent.id` is the named
 instance, and `gen_ai.conversation.id` is the opaque Durable Object ID. These
 are defaults; `beforeTurn` can override `functionId` or the corresponding
-metadata fields for applications with a different identity model. Think records
-no conversation content by default; set `recordInputs = true` and/or
-`recordOutputs = true` on the agent to attach prompts, output, and tool
-inputs/outputs to the spans (records PII — see
-[Opt-in content recording](#opt-in-content-recording-records-pii)).
+metadata fields for applications with a different identity model. Think never
+attaches prompts, model output, or tool inputs/outputs to spans.
 
 ### AI SDK v6
 
@@ -351,6 +348,12 @@ nested work performed by a tool under the `execute_tool` span. It handles both
 `onEnd` and `onAbort` terminal paths. `wrapAISDK` and `createAISDKTelemetry`
 project into the same span schema, so the two SDK versions are dashboard-
 compatible.
+
+When a gateway-backed provider exposes its AI Gateway log ID through response
+headers, provider metadata, or the Workers AI binding, the corresponding
+`chat` span includes `cloudflare.ai_gateway.log.id`. The attribute is omitted
+when no actual response exposes an ID; the adapter does not infer one or make an
+extra request.
 
 ### Identity
 
@@ -427,8 +430,6 @@ await generateText({
 | `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
 | `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID also correlates approval lifecycle segments                           |
 | `cloudflare.agents.tool.approval.state`                                            | AI SDK v6 approval lifecycle segment: `requested`, `approved`, or `denied`                   |
-| `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in (PII) chat inputs/outputs; omitted unless `recordInputs`/`recordOutputs` is set       |
-| `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                            | Opt-in (PII) tool inputs/outputs; omitted unless `recordInputs`/`recordOutputs` is set       |
 | `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
 | `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
 
@@ -437,6 +438,7 @@ exists:
 
 | Attribute                                                                               | Meaning                                                                 |
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `cloudflare.ai_gateway.log.id`                                                          | AI Gateway log reference on `chat`, when exposed by the actual response |
 | `cloudflare.agents.integration.name`                                                    | Instrumentation source (`ai-sdk`)                                       |
 | `cloudflare.agents.operation.name`                                                      | Original SDK operation (`streamText`, `doStream`, `tool.execute`, etc.) |
 | `cloudflare.agents.call.id`                                                             | AI SDK v7 callback correlation ID                                       |
@@ -458,62 +460,12 @@ an attribute: failures emit `error.type`, but the adapter does not invent an
 
 ### Context and safety
 
-By default the adapters emit no conversation content. Prompts, messages, model
-output, and tool inputs/outputs are not recorded unless you explicitly opt in
-(see [Opt-in content recording](#opt-in-content-recording-records-pii) below).
-The dedicated top-level `system` parameter, schemas, headers, provider options,
-and raw error messages are never recorded under any configuration. (A
-`system`-role entry inside the `messages` array is part of the conversation and
-is recorded when `recordInputs` is set.) Metadata and context values must be
-scalar; objects and arrays are dropped.
-
-#### Opt-in content recording (records PII)
-
-Chat inputs/outputs and tool inputs/outputs can be attached to the spans behind
-an explicit opt-in. **This content is potentially PII and is recorded only when
-the corresponding flag is `true`; both default to `false`.** Enable it only
-where recording raw conversation content in Workers Observability is acceptable.
-
-The flag names mirror the AI SDK's own `TelemetrySettings`:
-
-- `recordInputs` — records each model call's chat inputs (prompt/messages) on
-  its `chat` span (`gen_ai.input.messages`) and tool arguments on the
-  `execute_tool` span (`gen_ai.tool.call.arguments`).
-- `recordOutputs` — records each model call's output (text/object/tool calls) on
-  its `chat` span (`gen_ai.output.messages`) and the tool result on the
-  `execute_tool` span (`gen_ai.tool.call.result`), on the success path only —
-  never on error or abort.
-
-Each value is serialized to JSON and truncated to a safe byte cap with a
-`…[truncated]` marker, so a large prompt cannot blow up the span.
-
-For v6, set the flags on the wrapper, or per call via `experimental_telemetry`
-(a per-call flag is authoritative and can opt in **or** out):
-
-```ts
-const traced = wrapAISDK(ai, { recordInputs: true, recordOutputs: true });
-
-await traced.generateText({
-  model,
-  prompt: "Will I need an umbrella?",
-  // Per-call override wins over the wrapper default.
-  experimental_telemetry: { recordInputs: false }
-});
-```
-
-For v7, pass the flags to `createAISDKTelemetry`:
-
-```ts
-const telemetry = createAISDKTelemetry({
-  recordInputs: true,
-  recordOutputs: true
-});
-```
-
-Think exposes the same `recordInputs`/`recordOutputs` flags (both off by
-default) as agent fields; set either to `true` on an agent to record that
-content for every turn. See
-[Think configuration](https://github.com/cloudflare/agents/blob/main/docs/think/index.md).
+The adapters never attach prompts, messages, model output, tool arguments, tool
+results, the dedicated `system` parameter, schemas, request headers, provider
+options, or raw error messages to spans. The optional AI Gateway reference is a
+single bounded opaque log ID read from the actual response; response headers
+and provider metadata themselves are not recorded. Metadata and context values must
+be scalar; objects and arrays are dropped.
 
 For v6, only `experimental_context` exists. Configure its allowlist on the
 wrapper:
