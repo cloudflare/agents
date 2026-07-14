@@ -52,6 +52,7 @@ import {
 export {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
+  isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
 import {

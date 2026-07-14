@@ -193,6 +193,14 @@ const SUPERSEDED_ISOLATE_PATTERN =
 const CONNECTION_LOST_PATTERN = /network connection lost/i;
 
 /**
+ * The exact Durable Object storage-reset platform signal. Keep this narrow:
+ * ordinary SQL and generic internal errors are application failures. This is a
+ * transient storage reset, not a memory-limit poison pill.
+ */
+const STORAGE_RESET_PATTERN =
+  /Internal error in Durable Object storage caused object to be reset/i;
+
+/**
  * The Durable Object memory-limit reset — the isolate exceeded its 128 MB limit
  * and was reset by the platform (workerd surfaces this verbatim as
  * "Durable Object's isolate exceeded its memory limit and was reset."; the D1
@@ -264,6 +272,18 @@ export function isDurableObjectCodeUpdateReset(error: unknown): boolean {
 }
 
 /**
+ * Whether an error (or anything in its `cause` chain) carries the exact
+ * Durable Object storage-reset platform fragment. Generic SQL/internal errors
+ * deliberately do not qualify.
+ */
+export function isDurableObjectStorageReset(error: unknown): boolean {
+  for (const e of selfAndCauses(error)) {
+    if (STORAGE_RESET_PATTERN.test(errorMessageOf(e))) return true;
+  }
+  return false;
+}
+
+/**
  * Whether an error (or anything in its `cause` chain, or a raw error-message
  * string) is a Durable Object memory-limit reset — see
  * {@link MEMORY_LIMIT_RESET_PATTERN}. Unlike {@link isPlatformTransientError},
@@ -289,7 +309,9 @@ export function isDurableObjectMemoryLimitReset(error: unknown): boolean {
  *   - "Network connection lost." — the storage/stub connection dropped. The
  *     CF `retryable` flag does not survive error wrappers (e.g. `SqlError`
  *     copies only the message + `cause`) and is absent in some local-dev
- *     shapes, so the verbatim message is matched as well.
+ *     shapes, so the verbatim message is matched as well;
+ *   - the exact "Internal error in Durable Object storage caused object to be
+ *     reset" platform fragment. Generic internal and SQL errors remain fatal.
  *
  * Used to decide whether failed work should be RE-RUN LATER (platform
  * transient — the same work succeeds once the platform recovers, typically
@@ -302,6 +324,7 @@ export function isPlatformTransientError(error: unknown): boolean {
     const message = errorMessageOf(e);
     if (SUPERSEDED_ISOLATE_PATTERN.test(message)) return true;
     if (CONNECTION_LOST_PATTERN.test(message)) return true;
+    if (STORAGE_RESET_PATTERN.test(message)) return true;
     if (isErrorRetryable(e)) return true;
   }
   return false;

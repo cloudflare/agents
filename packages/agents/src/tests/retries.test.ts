@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
+  isDurableObjectStorageReset,
   isErrorRetryable,
   isPlatformTransientError,
   jitterBackoff,
@@ -416,6 +417,57 @@ describe("retries", () => {
       const e = new Error("app error");
       (e as unknown as { cause: unknown }).cause = e;
       expect(isDurableObjectCodeUpdateReset(e)).toBe(false);
+    });
+  });
+
+  describe("isDurableObjectStorageReset", () => {
+    const storageReset =
+      "Internal error in Durable Object storage caused object to be reset";
+
+    it("matches the exact platform fragment case-insensitively", () => {
+      expect(isDurableObjectStorageReset(new Error(storageReset))).toBe(true);
+      expect(
+        isDurableObjectStorageReset(
+          new Error(`storage: ${storageReset.toUpperCase()}. retrying`)
+        )
+      ).toBe(true);
+    });
+
+    it("looks through wrapper errors via the cause chain", () => {
+      const wrapped = new Error("SQL query failed", {
+        cause: new Error(storageReset)
+      });
+      expect(isDurableObjectStorageReset(wrapped)).toBe(true);
+    });
+
+    it("rejects neighboring internal, SQL, and reset messages", () => {
+      expect(
+        isDurableObjectStorageReset(
+          new Error("Internal error in Durable Object storage")
+        )
+      ).toBe(false);
+      expect(
+        isDurableObjectStorageReset(
+          new Error("Internal error caused object to be reset")
+        )
+      ).toBe(false);
+      expect(
+        isDurableObjectStorageReset(
+          new Error("SQL query failed: internal database error")
+        )
+      ).toBe(false);
+      expect(
+        isDurableObjectStorageReset(
+          new Error("Durable Object storage caused object to be restarted")
+        )
+      ).toBe(false);
+    });
+
+    it("is transient but remains distinct from memory-limit poison handling", () => {
+      const error = new Error(storageReset);
+      expect(isDurableObjectStorageReset(error)).toBe(true);
+      expect(isPlatformTransientError(error)).toBe(true);
+      expect(isDurableObjectMemoryLimitReset(error)).toBe(false);
     });
   });
 

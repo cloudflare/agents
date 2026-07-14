@@ -4785,6 +4785,38 @@ describe("Think — onChatRecovery", () => {
     expect(result.incidentStatus).toBe("failed");
   });
 
+  it("re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-storage-reset");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage:
+        "Internal error in Durable Object storage caused object to be reset",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+    expect(result.submissionStatus).toBe("running");
+  });
+
+  it("terminalizes an ordinary application SQL error", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-application-sql");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "constraint failed: application records.slug",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(false);
+    expect(result.incidentStatus).toBe("exhausted");
+    expect(result.exhaustedContexts).toBe(1);
+    expect(result.submissionStatus).toBe("error");
+  });
+
   it("re-throws a retryable-flagged platform error and does NOT terminalize (#1730)", async () => {
     const agent = await freshRecoveryAgent("recovery-throw-retryable-flag");
 

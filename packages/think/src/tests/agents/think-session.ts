@@ -4828,6 +4828,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     textChunks: string[];
   } | null = null;
   private _failNextContinueTransient: string | null = null;
+  private _useRecoveryToolModel = false;
+  private _recoveryToolExecutions = 0;
 
   /**
    * Arm a ONE-SHOT platform-transient fault on the next `continueLastTurn`
@@ -4855,6 +4857,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   override getModel(): LanguageModel {
+    if (this._useRecoveryToolModel) return createToolCallingMockModel();
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -4871,6 +4874,32 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     return createMockModel(this._programmaticResponse);
+  }
+
+  override getTools(): ToolSet {
+    if (!this._useRecoveryToolModel) return {};
+    return {
+      echo: tool({
+        description: "Persist one recovery test side effect",
+        inputSchema: z.object({ message: z.string() }),
+        execute: ({ message }: { message: string }) => {
+          this._recoveryToolExecutions++;
+          return `echo: ${message}`;
+        }
+      })
+    };
+  }
+
+  async useRecoveryToolModelForTest(): Promise<void> {
+    this._useRecoveryToolModel = true;
+  }
+
+  async getRecoveryToolExecutionsForTest(): Promise<number> {
+    return this._recoveryToolExecutions;
+  }
+
+  async getMessagesForTest(): Promise<UIMessage[]> {
+    return this.getMessages();
   }
 
   override onChatResponse(result: ChatResponseResult): void {

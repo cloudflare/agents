@@ -43,6 +43,48 @@ describe("Workspace Durable Object ownership", () => {
     workspace[Symbol.dispose]();
   });
 
+  it("keeps pending Workspace sync retry state and alarms out of Think storage", async () => {
+    const session = `workspace-retry-owner-${crypto.randomUUID()}`;
+    const think = await getAgentByName<Env, ThinkAgent>(
+      env.ThinkAgent,
+      session
+    );
+    await think.getContext();
+    const workspaceObject = env.WorkspaceAgent.get(
+      env.WorkspaceAgent.idFromName(session)
+    );
+
+    await workspaceObject.debugScheduleSyncRetryForTest({
+      backend: "container",
+      attempt: 1,
+      notBefore: Date.now() + 60_000
+    });
+
+    const [thinkKeys, workspacePending, thinkAlarm, workspaceAlarm] =
+      await Promise.all([
+        runInDurableObject(think, async (_instance, state) => [
+          ...(
+            await state.storage.list({ prefix: "workspace:sync-retry:" })
+          ).keys()
+        ]),
+        workspaceObject.debugPendingSyncRetryForTest("container"),
+        runInDurableObject(think, (_instance, state) =>
+          state.storage.getAlarm()
+        ),
+        runInDurableObject(workspaceObject, (_instance, state) =>
+          state.storage.getAlarm()
+        )
+      ]);
+
+    expect(thinkKeys).toEqual([]);
+    expect(workspacePending).toMatchObject({
+      backend: "container",
+      attempt: 1
+    });
+    expect(thinkAlarm).toBeNull();
+    expect(workspaceAlarm).not.toBeNull();
+  });
+
   it("resetting Workspace storage cannot delete Think storage", async () => {
     const session = `workspace-reset-${crypto.randomUUID()}`;
     const think = await getAgentByName<Env, ThinkAgent>(

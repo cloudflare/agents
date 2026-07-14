@@ -16,7 +16,9 @@
  */
 
 import type {
+  ChatRecoveryContext,
   ChatRecoveryExhaustedContext,
+  ChatRecoveryOptions,
   ChatResponseResult,
   Session,
   ToolCallResultContext,
@@ -468,7 +470,21 @@ export class ThinkAgent extends ThinkBase {
     ];
   }
 
+  protected override async onChatRecovery(
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    this.#report((commandCenter) =>
+      commandCenter.recordRecovery({ session: this.name })
+    );
+    return {};
+  }
+
   override async beforeTurn(ctx: TurnContext) {
+    if (ctx.continuation) {
+      this.#report((commandCenter) =>
+        commandCenter.recordRunning({ session: this.name })
+      );
+    }
     // A recovery may start after terminal cleanup released the previous
     // container. Wait for that cleanup, then reconnect and authenticate the
     // container chosen for this continuation.

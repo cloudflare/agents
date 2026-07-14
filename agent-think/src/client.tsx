@@ -192,11 +192,7 @@ function canContinueThread(thread: ThreadMeta): boolean {
 }
 
 function threadStatusLabel(t: ThreadMeta): string {
-  return t.status === "running"
-    ? "running"
-    : t.status === "error"
-      ? "error"
-      : "done";
+  return t.status;
 }
 
 function RequesterAvatar({ thread }: { thread: ThreadMeta }) {
@@ -245,7 +241,7 @@ function aggregateRepos(threads: ThreadMeta[]): RepoAgg[] {
       updatedAt: 0
     };
     agg.issues += 1;
-    if (t.status === "running") agg.running += 1;
+    if (t.status === "running" || t.status === "recovering") agg.running += 1;
     else if (t.status === "error") agg.errored += 1;
     else agg.done += 1;
     agg.updatedAt = Math.max(agg.updatedAt, t.updatedAt);
@@ -267,7 +263,9 @@ function CommandCenterView({
   onContinue: (thread: ThreadMeta) => void;
   continuing: string | null;
 }) {
-  const running = threads.filter((t) => t.status === "running").length;
+  const running = threads.filter(
+    (t) => t.status === "running" || t.status === "recovering"
+  ).length;
   const errored = threads.filter((t) => t.status === "error").length;
   const tools = threads.reduce((n, t) => n + t.tools, 0);
   const toolErrors = threads.reduce((n, t) => n + t.toolErrors, 0);

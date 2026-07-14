@@ -14,6 +14,42 @@ import { releaseContainer, resolveContainerId } from "./pool";
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
 const RESET_ABORT_DELAY_MS = 100;
+const SYNC_RETRY_KEY_PREFIX = "workspace:sync-retry:";
+
+type WorkspaceSyncRetryIntent = {
+  backend: string;
+  attempt: number;
+  notBefore: number;
+};
+
+type WorkspaceSyncRetryResult =
+  | { status: "idle" | "complete"; backend: string }
+  | {
+      status: "pending" | "exhausted";
+      backend: string;
+      attempt: number;
+      error: string;
+      notBefore?: number;
+    };
+
+type WorkspaceWithPendingRetry = Workspace & {
+  retryPendingSync?: (backend?: string) => Promise<WorkspaceSyncRetryResult>;
+};
+
+/**
+ * Compatibility boundary for the Workspace pending-sync retry API. The
+ * published alpha may not expose these fields yet; unknown constructor options
+ * are harmless there, while a newer Workspace consumes this scheduler.
+ */
+type WorkspaceOptionsWithPendingRetry = ConstructorParameters<
+  typeof Workspace
+>[0] & {
+  retryScheduler: {
+    get(backend: string): Promise<WorkspaceSyncRetryIntent | undefined>;
+    schedule(intent: WorkspaceSyncRetryIntent): Promise<void>;
+    clear(backend: string): Promise<void>;
+  };
+};
 
 /**
  * One Workspace-owning Durable Object per Think session. Think transcript and
@@ -47,10 +83,16 @@ export class WorkspaceAgent extends DurableObject<Env> {
       );
     }
     backends.push(this.#backend);
-    this.#workspace = new Workspace({
+    const workspaceOptions: WorkspaceOptionsWithPendingRetry = {
       storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends
-    });
+      backends,
+      retryScheduler: {
+        get: (backend) => this.#getSyncRetry(backend),
+        schedule: (intent) => this.#scheduleSyncRetry(intent),
+        clear: (backend) => this.#clearSyncRetry(backend)
+      }
+    };
+    this.#workspace = new Workspace(workspaceOptions);
   }
 
   override fetch(request: Request): Promise<Response> {
@@ -58,6 +100,22 @@ export class WorkspaceAgent extends DurableObject<Env> {
       return this.#backend.handleFetch(request);
     }
     return Promise.resolve(new Response("not found", { status: 404 }));
+  }
+
+  async alarm(): Promise<void> {
+    const due = await this.#listSyncRetries();
+    for (const intent of due.filter((item) => item.notBefore <= Date.now())) {
+      const retry = (this.#workspace as WorkspaceWithPendingRetry)
+        .retryPendingSync;
+      if (typeof retry !== "function") {
+        // Compatibility mode: preserve the durable signal until Workspace is
+        // upgraded rather than pretending the missing retry completed.
+        await this.ctx.storage.setAlarm(Date.now() + 60_000);
+        return;
+      }
+      await retry.call(this.#workspace, intent.backend);
+    }
+    await this.#armNextSyncRetry();
   }
 
   async getWorkspace(): Promise<WorkspaceStub> {
@@ -115,6 +173,64 @@ export class WorkspaceAgent extends DurableObject<Env> {
 
   async debugIdentity(): Promise<{ id: string }> {
     return { id: this.ctx.id.toString() };
+  }
+
+  async debugScheduleSyncRetryForTest(
+    intent: WorkspaceSyncRetryIntent
+  ): Promise<void> {
+    await this.#scheduleSyncRetry(intent);
+  }
+
+  async debugPendingSyncRetryForTest(
+    backend: string
+  ): Promise<WorkspaceSyncRetryIntent | undefined> {
+    return this.#getSyncRetry(backend);
+  }
+
+  async #getSyncRetry(
+    backend: string
+  ): Promise<WorkspaceSyncRetryIntent | undefined> {
+    return this.ctx.storage.get<WorkspaceSyncRetryIntent>(
+      `${SYNC_RETRY_KEY_PREFIX}${backend}`
+    );
+  }
+
+  async #scheduleSyncRetry(intent: WorkspaceSyncRetryIntent): Promise<void> {
+    await this.ctx.storage.put(
+      `${SYNC_RETRY_KEY_PREFIX}${intent.backend}`,
+      intent
+    );
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || intent.notBefore < alarm) {
+      await this.ctx.storage.setAlarm(intent.notBefore);
+    }
+  }
+
+  async #clearSyncRetry(backend: string): Promise<void> {
+    await this.ctx.storage.delete(`${SYNC_RETRY_KEY_PREFIX}${backend}`);
+    await this.#armNextSyncRetry();
+  }
+
+  async #listSyncRetries(): Promise<WorkspaceSyncRetryIntent[]> {
+    return [
+      ...(await this.ctx.storage.list<WorkspaceSyncRetryIntent>({
+        prefix: SYNC_RETRY_KEY_PREFIX
+      }))
+    ].map(([, intent]) => intent);
+  }
+
+  async #armNextSyncRetry(): Promise<void> {
+    // Workspace leaves exhausted intents durable for inspection. Only a future
+    // intent is actionable; re-arming an exhausted, past-due intent would make
+    // the WorkspaceAgent alarm hot-loop.
+    const next = (await this.#listSyncRetries())
+      .map((intent) => intent.notBefore)
+      .filter((notBefore) => notBefore > Date.now());
+    if (next.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.min(...next));
   }
 
   /** Dev/e2e proof of bidirectional sync with generated-path filtering. */
