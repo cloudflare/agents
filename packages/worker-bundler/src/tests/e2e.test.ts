@@ -1048,9 +1048,8 @@ describe("createWorker with pyproject.toml", () => {
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
       modules: createWorkerResult.modules,
-      compatibilityDate:
-        createWorkerResult.wranglerConfig?.compatibilityDate ?? "2026-01-01",
-      compatibilityFlags: createWorkerResult.wranglerConfig?.compatibilityFlags
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
     }));
     const response = await worker
       .getEntrypoint()
@@ -1089,9 +1088,8 @@ describe("createWorker with pyproject.toml", () => {
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
       modules: createWorkerResult.modules,
-      compatibilityDate:
-        createWorkerResult.wranglerConfig?.compatibilityDate ?? "2026-01-01",
-      compatibilityFlags: createWorkerResult.wranglerConfig?.compatibilityFlags
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
     }));
     const response = await worker
       .getEntrypoint()
