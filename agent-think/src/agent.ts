@@ -1,8 +1,9 @@
 /**
  * ThinkAgent — one Think Durable Object per GitHub issue.
  *
- * Owns one `@cloudflare/workspace.Workspace` shared by Think internals, file
- * tools, and both bash backends. Workspace owns synchronization semantics.
+ * Owns Think transcript/submission state and resolves the same-named
+ * WorkspaceAgent over RPC. WorkspaceAgent exclusively owns Workspace/VFS and
+ * its backend connections; Think internals and file tools share its stub.
  *
  * gh-app calls `dispatch()` (see index.ts) with the issue
  * coordinates, a free-form `instruction` ("reproduce this", "open a
@@ -23,21 +24,11 @@ import type {
   WorkspaceLike as ThinkWorkspaceLike
 } from "@cloudflare/think";
 import { skills, Think } from "@cloudflare/think";
-import {
-  type DurableObjectStorageLike,
-  Workspace,
-  type WorkspaceBackend,
-  WorkspaceProxy,
-  WorkspaceServiceProxy,
-  type WorkspaceStub
-} from "@cloudflare/workspace";
-import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
-import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
+import type { WorkspaceAgent } from "./workspace-agent";
 import type { LanguageModel, ToolSet } from "ai";
 import { getAgentByName } from "agents";
 import type { CommandCenterAgent } from "./command-center";
 import { createAgentThinkModel } from "./model";
-import { releaseContainer, resolveContainerId } from "./pool";
 import { createBashTool } from "./tools/bash";
 import {
   createEditTool,
@@ -52,8 +43,6 @@ import {
   type RunTarget
 } from "./run-context";
 import { AGENT_THINK_MAX_STEPS, classifyTurnOutcome } from "./turn-outcome";
-
-export { WorkspaceProxy, WorkspaceServiceProxy };
 
 const CONTEXT_KEY = "agent-think-context";
 // resetSession aborts the isolate AFTER its RPC response has been delivered;
@@ -136,6 +125,10 @@ export type AgentThinkEnv = Omit<Env, "GITHUB_AUTH"> & {
 
 class ThinkBase extends Think<AgentThinkEnv> {}
 
+type RemoteWorkspace = Awaited<
+  ReturnType<DurableObjectStub<WorkspaceAgent>["getWorkspace"]>
+>;
+
 export class ThinkAgent extends ThinkBase {
   // Think's own chat recovery is the durability layer. Its terminal hook must
   // also release agent-think's external resources and command-center status.
@@ -155,8 +148,8 @@ export class ThinkAgent extends ThinkBase {
    */
   override workspaceBash = false;
 
-  readonly #containerBackend: CloudflareContainerBackend;
-  readonly #workspace: Workspace;
+  readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
+  #workspaceReady: Promise<RemoteWorkspace> | null = null;
   #context: RunContext | null = null;
   /**
    * The installation token the container's `gh`/`git` is currently
@@ -171,39 +164,15 @@ export class ThinkAgent extends ThinkBase {
 
   constructor(ctx: DurableObjectState, env: AgentThinkEnv) {
     super(ctx, env);
-    // This Agent DO OWNS the Workspace (SQLite VFS state); the container is a
-    // SEPARATE `Sandbox` DO handed out by the warm pool. The backend's
-    // `container` factory dials the pool per-connect and returns a Sandbox
-    // stub, so the compute host is decoupled from this DO's lifecycle and can
-    // be pre-warmed / recycled independently. (Aron's hackspace pattern.)
-    const workspaceRef = { binding: "ThinkAgent", id: ctx.id.toString() };
-    this.#containerBackend = new CloudflareContainerBackend({
-      id: "container",
-      container: async () => {
-        const uuid = await resolveContainerId(env, ctx.id.toString());
-        return env.Sandbox.get(env.Sandbox.idFromName(uuid));
-      },
-      workspace: workspaceRef
-    });
-    const backends: WorkspaceBackend[] = [];
-    if (env.LOADER) {
-      backends.push(
-        new WorkerBackend({
-          id: "shell",
-          loader: env.LOADER,
-          workspace: workspaceRef,
-          ctx
-        })
-      );
-    }
-    backends.push(this.#containerBackend);
-    this.#workspace = new Workspace({
-      storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends
-    });
-
-    this.workspace = adaptToThinkWorkspace(
-      this.#workspace
+    // Resolve the Workspace object by the exact same stable name used for the
+    // Think session. No random IDs and no VFS construction against Think SQL.
+    this.#workspaceAgent = env.WorkspaceAgent.get(
+      env.WorkspaceAgent.idFromName(this.name)
+    );
+    // Do not call getWorkspace here: dispatch must submit without attaching a
+    // container. The first durable turn operation resolves it lazily.
+    this.workspace = adaptToThinkWorkspace(() =>
+      this.#getWorkspace()
     ) as unknown as ThinkWorkspaceLike;
 
     this.ctx.blockConcurrencyWhile(async () => {
@@ -212,22 +181,24 @@ export class ThinkAgent extends ThinkBase {
     });
   }
 
-  /**
-   * wsd (running in the Sandbox container) dials back over the loopback
-   * WorkspaceProxy egress with path `/ws` to reach the Workspace that lives in
-   * THIS Agent DO. Forwarded here by the Worker fetch handler.
-   */
-  override async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/ws") {
-      return this.#containerBackend.handleFetch(request);
+  #getWorkspace(): Promise<RemoteWorkspace> {
+    if (!this.#workspaceReady) {
+      this.#workspaceReady = this.#workspaceAgent.getWorkspace();
     }
-    return super.fetch(request);
+    return this.#workspaceReady;
   }
 
-  async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspace.ready();
-    return this.#workspace.stub();
+  async #disposeWorkspaceStub(): Promise<void> {
+    const workspaceReady = this.#workspaceReady;
+    this.#workspaceReady = null;
+    if (!workspaceReady) return;
+    try {
+      const workspace = await workspaceReady;
+      workspace[Symbol.dispose]();
+    } catch {
+      // A failed owner RPC may also invalidate the returned stub. There is
+      // nothing left to dispose in that case; the next turn obtains a new one.
+    }
   }
 
   // ── Control surface (called from index.ts dispatch) ────────────
@@ -244,6 +215,11 @@ export class ThinkAgent extends ThinkBase {
     return this.#context;
   }
 
+  /** Test/diagnostic proof of the stable Think-session → Workspace mapping. */
+  async debugWorkspaceIdentity(): Promise<{ id: string }> {
+    return this.#workspaceAgent.debugIdentity();
+  }
+
   async refreshInstallationToken(installationToken: string): Promise<void> {
     const context = this.#context;
     if (!context)
@@ -257,20 +233,29 @@ export class ThinkAgent extends ThinkBase {
    * Operator escape hatch: wipe this session back to a clean slate. For
    * poisoned sessions — e.g. an unbounded bash-output backlog that OOMs the
    * DO and then CPU-death-loops every wake before recovery can run (see
-   * PLANS/agents/agent-think-1845-rca.md). Drops ALL durable state (messages,
-   * workspace VFS, submissions), releases the container assignment, and
-   * aborts the isolate so the next dispatch starts completely fresh.
+   * PLANS/agents/agent-think-1845-rca.md). Independently resets WorkspaceAgent
+   * (VFS/backend/container) and this object (messages/submissions), then aborts
+   * both isolates so the next dispatch starts completely fresh.
    * RPC-only; deliberately not exposed over HTTP in production.
    */
   async resetSession(): Promise<void> {
     this.#log("session-reset", {});
-    await this.#workspace.close();
-    await releaseContainer(this.env, this.ctx.id.toString());
+    let workspaceError: unknown;
+    try {
+      await this.#workspaceAgent.resetWorkspace();
+    } catch (error) {
+      workspaceError = error;
+    } finally {
+      await this.#disposeWorkspaceStub();
+    }
+    // Think cleanup is independent: even a failed Workspace RPC must not leave
+    // poisoned transcript/submission SQL behind (and vice versa).
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     // Abort after the RPC returns so the caller gets its ack; the next
     // request builds a fresh isolate over the now-empty storage.
     setTimeout(() => this.ctx.abort(), RESET_ABORT_DELAY_MS);
+    if (workspaceError) throw workspaceError;
   }
 
   /**
@@ -401,11 +386,11 @@ export class ThinkAgent extends ThinkBase {
     // Wrap in the SDK-native retry (jittered exponential backoff, 3 attempts):
     // container cold-start + first network call is the flakiest step.
     const result = await this.retry(async () => {
-      const handle = await this.#workspace.shell.exec(script, {
+      await this.#getWorkspace();
+      const r = await this.#workspaceAgent.exec(script, {
         encoding: "utf8",
         backend: "container"
       });
-      const r = await handle.result();
       if (r.exitCode !== 0) {
         throw new Error(
           `gh auth setup failed (${r.exitCode}): ${r.stderr || r.stdout}`
@@ -414,75 +399,6 @@ export class ThinkAgent extends ThinkBase {
       return r;
     });
     this.#log("git-auth-exit", { exitCode: result.exitCode });
-  }
-
-  /** Dev/e2e proof of bidirectional sync with generated-path filtering. */
-  async debugWorkspaceSync(): Promise<{
-    hostFileVisibleInContainer: boolean;
-    sourceFileDurable: boolean;
-    localTempFileDurable: boolean;
-    sourceFileRestoredAfterContainerReplacement: boolean;
-    localTempFileRestoredAfterContainerReplacement: boolean;
-  }> {
-    const id = crypto.randomUUID();
-    const root = `/workspace/sync-${id}`;
-    const hostPath = `${root}/host.txt`;
-    const sourcePath = `${root}/src/source.txt`;
-    const localTempPath = `/temp/sync-${id}.log`;
-
-    await this.#workspace.fs.mkdir(root, { recursive: true });
-    await this.#workspace.fs.writeFile(hostPath, "host");
-
-    const command = [
-      "set -e",
-      `test -f ${shellQuote(hostPath)}`,
-      `mkdir -p ${shellQuote(sourcePath.slice(0, sourcePath.lastIndexOf("/")))}`,
-      `printf source > ${shellQuote(sourcePath)}`,
-      `mkdir -p /temp && printf local > ${shellQuote(localTempPath)}`
-    ].join("\n");
-    const handle = await this.#workspace.shell.exec(command, {
-      encoding: "utf8",
-      backend: "container"
-    });
-    const result = await handle.result();
-    const hostFileVisibleInContainer = result.exitCode === 0;
-    if (!hostFileVisibleInContainer) {
-      throw new Error(result.stderr || result.stdout);
-    }
-
-    const sourceFileDurable =
-      (await this.#workspace.fs.readFile(sourcePath, "utf8")) === "source";
-    let localTempFileDurable = true;
-    try {
-      await this.#workspace.fs.stat(localTempPath);
-    } catch (error) {
-      localTempFileDurable = !isEnoent(error);
-    }
-
-    await this.#workspace.close();
-    await releaseContainer(this.env, this.ctx.id.toString());
-    const replacement = await this.#workspace.shell.exec(
-      `test -f ${shellQuote(sourcePath)}; source=$?; test -f ${shellQuote(localTempPath)}; local=$?; printf '%s %s' "$source" "$local"`,
-      { encoding: "utf8", backend: "container" }
-    );
-    const replacementResult = await replacement.result();
-    const [sourceStatus, localStatus] = replacementResult.stdout
-      .trim()
-      .split(/\s+/)
-      .map(Number);
-    const sourceFileRestoredAfterContainerReplacement = sourceStatus === 0;
-    const localTempFileRestoredAfterContainerReplacement = localStatus === 0;
-
-    await this.#workspace.close();
-    await releaseContainer(this.env, this.ctx.id.toString());
-
-    return {
-      hostFileVisibleInContainer,
-      sourceFileDurable,
-      localTempFileDurable,
-      sourceFileRestoredAfterContainerReplacement,
-      localTempFileRestoredAfterContainerReplacement
-    };
   }
 
   /** Dev/e2e readback: the current message log for this session. */
@@ -617,16 +533,12 @@ export class ThinkAgent extends ThinkBase {
   async #cleanupTurn(outcome: "done" | "error", error?: string): Promise<void> {
     const cleanupErrors: unknown[] = [];
     try {
-      await this.#workspace.close();
+      await this.#workspaceAgent.closeWorkspace();
     } catch (cleanupError) {
       cleanupErrors.push(cleanupError);
+    } finally {
+      await this.#disposeWorkspaceStub();
     }
-    try {
-      await releaseContainer(this.env, this.ctx.id.toString());
-    } catch (cleanupError) {
-      cleanupErrors.push(cleanupError);
-    }
-
     this.#report((commandCenter) =>
       commandCenter.recordTurn({
         session: this.name,
@@ -698,7 +610,9 @@ export class ThinkAgent extends ThinkBase {
 
   override getTools(): ToolSet {
     if (!this.#context) return {} as ToolSet;
-    const store = new WorkspaceFileStore(this.#workspace);
+    const store = new WorkspaceFileStore(
+      adaptToFileWorkspace(() => this.#getWorkspace())
+    );
     const hasShell = Boolean(this.env.LOADER);
     const backends = {
       ...(hasShell
@@ -721,7 +635,16 @@ export class ThinkAgent extends ThinkBase {
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
       bash: createBashTool({
-        workspace: this.#workspace,
+        // Keep exec inside the owner DO. This plain RPC avoids carrying the
+        // alpha.11 nested exec-handle stub into Think's isolate and preserves
+        // timeoutMs, which is published on Workspace.shell but not its stub.
+        workspace: {
+          shell: {
+            exec: async (command, options) => ({
+              result: () => this.#workspaceAgent.exec(command, options)
+            })
+          }
+        },
         maxBytes: 32 * 1024,
         backends,
         defaultBackend: hasShell ? "shell" : "container"
@@ -732,34 +655,69 @@ export class ThinkAgent extends ThinkBase {
 
 // ── Adapters (from examples/think) ─────────────────────────────────
 
-function adaptToThinkWorkspace(ws: Workspace) {
+function adaptToFileWorkspace(
+  getWorkspace: () => Promise<RemoteWorkspace>
+): ConstructorParameters<typeof WorkspaceFileStore>[0] {
+  const fs = async () =>
+    (await getWorkspace()).fs as unknown as ConstructorParameters<
+      typeof WorkspaceFileStore
+    >[0]["fs"];
+  return {
+    fs: {
+      stat: async (path) => (await fs()).stat(path),
+      readFile: async (path, options?: { offset?: number; length?: number }) =>
+        (await fs()).readFile(path, options ?? {}),
+      writeFile: async (path, content, options) =>
+        (await fs()).writeFile(path, content, options),
+      mkdir: async (path, options) => (await fs()).mkdir(path, options),
+      rm: async (path, options) => (await fs()).rm(path, options),
+      readdir: async (path) => (await fs()).readdir(path)
+    }
+  };
+}
+
+function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
+  const fs = async () =>
+    (await getWorkspace()).fs as unknown as ConstructorParameters<
+      typeof WorkspaceFileStore
+    >[0]["fs"] & {
+      readFile(path: string, encoding: "utf8"): Promise<string>;
+      find(
+        directory: string,
+        pattern?: string
+      ): Promise<Array<{ path: string; type: "file" | "dir" }>>;
+    };
   return {
     async readFile(path: string): Promise<string | null> {
       try {
-        return await ws.fs.readFile(path, "utf8");
+        return await (await fs()).readFile(path, "utf8");
       } catch (err) {
         if (isEnoent(err)) return null;
         throw err;
       }
     },
     async writeFile(path: string, content: string): Promise<void> {
-      await ws.fs.writeFile(path, new TextEncoder().encode(content));
+      await (await fs()).writeFile(path, new TextEncoder().encode(content));
     },
     async mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> {
-      await ws.fs.mkdir(path, opts?.recursive ? { recursive: true } : {});
+      await (
+        await fs()
+      ).mkdir(path, opts?.recursive ? { recursive: true } : {});
     },
     async rm(
       path: string,
       opts?: { recursive?: boolean; force?: boolean }
     ): Promise<void> {
-      await ws.fs.rm(path, {
+      await (
+        await fs()
+      ).rm(path, {
         ...(opts?.recursive ? { recursive: true as const } : {}),
         ...(opts?.force ? { force: true as const } : {})
       });
     },
     async stat(path: string) {
       try {
-        const s = await ws.fs.stat(path);
+        const s = await (await fs()).stat(path);
         return {
           path,
           name: path.split("/").pop() ?? path,
@@ -775,7 +733,7 @@ function adaptToThinkWorkspace(ws: Workspace) {
       }
     },
     async readDir(dir: string) {
-      const entries = await ws.fs.readdir(dir);
+      const entries = await (await fs()).readdir(dir);
       return entries.map((e) => ({
         path: `${dir}/${e.name}`,
         name: e.name,
@@ -788,7 +746,7 @@ function adaptToThinkWorkspace(ws: Workspace) {
     },
     async readFileBytes(path: string): Promise<Uint8Array | null> {
       try {
-        const stream = await ws.fs.readFile(path);
+        const stream = await (await fs()).readFile(path);
         const chunks: Uint8Array[] = [];
         for await (const chunk of stream) chunks.push(chunk);
         const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
@@ -836,11 +794,11 @@ function adaptToThinkWorkspace(ws: Workspace) {
         if (rest.length === 0) {
           // No wildcards: a literal path — stat it directly.
           const path = `/${baseParts.join("/")}`;
-          const s = await ws.fs.stat(path);
+          const s = await (await fs()).stat(path);
           return [toInfo(path, s.isDirectory, s.size, s.mtime)];
         }
         const base = baseParts.length === 0 ? "/" : `/${baseParts.join("/")}`;
-        const entries = await ws.fs.find(base, rest);
+        const entries = await (await fs()).find(base, rest);
         return entries.map((e) => toInfo(e.path, e.type === "dir"));
       } catch (err) {
         if (isEnoent(err)) return [];

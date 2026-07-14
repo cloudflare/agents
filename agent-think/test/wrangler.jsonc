@@ -23,6 +23,7 @@
   "durable_objects": {
     "bindings": [
       { "name": "ThinkAgent", "class_name": "ThinkAgent" },
+      { "name": "WorkspaceAgent", "class_name": "WorkspaceAgent" },
       { "name": "Sandbox", "class_name": "Sandbox" },
       { "name": "WarmPool", "class_name": "WarmPool" },
       // Singleton registry behind the command-center UI (threads + metrics).
@@ -55,6 +56,7 @@
     { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
     { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] },
-    { "tag": "v4", "new_sqlite_classes": ["AgentThinkPromptTestAgent"] }
+    { "tag": "v4", "new_sqlite_classes": ["AgentThinkPromptTestAgent"] },
+    { "tag": "v5", "new_sqlite_classes": ["WorkspaceAgent"] }
   ]
 }

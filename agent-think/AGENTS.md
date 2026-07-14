@@ -42,9 +42,11 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    │     start() ONLY submits the durable turn — returns in ~1s
    │     failed-run continuation refreshes GitHub auth through gh-app's private
    │     AgentThinkTokenBroker binding before submitting into the same session
-   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + complete Workspace VFS
-   │     file tools and both bash backends share the same synchronized tree;
-   │     container backend claims from the warm pool per turn:
+   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn/transcript state only
+   ├─ WorkspaceAgent DO (src/workspace-agent.ts) — same stable per-issue name;
+   │     exclusively owns Workspace VFS + backend connection. File tools and
+   │     both bash backends share its RPC stub; the container backend claims
+   │     from the warm pool per turn:
    │        resolveContainerId(env, id) → env.Sandbox.get(idFromName(uuid))
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
    ├─ WarmPool DO (src/warm-pool.ts) — keeps exactly one unassigned container warm

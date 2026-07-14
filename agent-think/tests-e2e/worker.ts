@@ -2,6 +2,7 @@ import productionWorker, {
   AgentThink,
   CommandCenterAgent,
   Sandbox,
+  WorkspaceAgent as ProductionWorkspaceAgent,
   WarmPool as ProductionWarmPool,
   WorkspaceProxy,
   WorkspaceServiceProxy
@@ -18,6 +19,14 @@ export class ThinkAgent extends ProductionThinkAgent {
 
   override getModel() {
     return mockInference();
+  }
+}
+
+/** Test adapter proving Workspace reset failures stay isolated from Think SQL. */
+export class WorkspaceAgent extends ProductionWorkspaceAgent {
+  async resetThenThrow(): Promise<void> {
+    await this.resetWorkspace();
+    throw new Error("injected Workspace reset RPC failure");
   }
 }
 
@@ -53,6 +62,21 @@ export default {
         runMaintenance(): Promise<unknown>;
       };
       return Response.json(await testPool.runMaintenance());
+    }
+    const resetFailure = url.pathname.match(
+      /^\/__test\/workspace-reset-failure\/([^/]+)$/
+    );
+    if (request.method === "POST" && resetFailure) {
+      const session = decodeURIComponent(resetFailure[1]);
+      const workspace = env.WorkspaceAgent.get(
+        env.WorkspaceAgent.idFromName(session)
+      ) as unknown as { resetThenThrow(): Promise<void> };
+      try {
+        await workspace.resetThenThrow();
+        return Response.json({ threw: false });
+      } catch (error) {
+        return Response.json({ threw: true, error: String(error) });
+      }
     }
     return productionWorker.fetch(request, env as AgentThinkEnv);
   },

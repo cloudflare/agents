@@ -120,6 +120,28 @@ describe("E2E: production graph with inference adapter", () => {
     });
   }, 120_000);
 
+  it("keeps Think state readable when Workspace reset RPC throws", async () => {
+    const { session } = await dispatch(
+      "TEST: echo immutable run envelope",
+      issueBase + 5
+    );
+    await waitForThread(session, "done");
+    const before = transcriptText(await messages(session));
+    expect(before).toContain("captured-run-context:");
+
+    const reset = await fetch(
+      `${BASE_URL}/__test/workspace-reset-failure/${encodeURIComponent(session)}`,
+      { method: "POST" }
+    );
+    expect(reset.status).toBe(200);
+    await expect(reset.json()).resolves.toMatchObject({
+      threw: true,
+      error: expect.stringContaining("injected Workspace reset RPC failure")
+    });
+
+    expect(transcriptText(await messages(session))).toBe(before);
+  }, 120_000);
+
   it("uses the lightweight VFS shell when backend is omitted", async () => {
     const { session } = await dispatch(
       "TEST: use default shell",
