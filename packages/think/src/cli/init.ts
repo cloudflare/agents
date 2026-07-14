@@ -346,7 +346,7 @@ const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
 // projects get it transitively. Add it explicitly only if you import
 // `createWorkersAI` yourself.
 export const THIRD_PARTY_DEPENDENCIES: Record<string, string> = {
-  ai: "^6.0.202"
+  ai: "^7.0.0"
 };
 
 export const THIRD_PARTY_DEV_DEPENDENCIES: Record<string, string> = {
