@@ -159,7 +159,7 @@ export async function installDependencies(
       )
     );
   } else if (pyprojectTomlContent) {
-    await installDependnciesPython(pyprojectTomlContent, result, fileSystem);
+    await installDependenciesPython(pyprojectTomlContent, result, fileSystem);
   }
   return result;
 }
@@ -167,7 +167,7 @@ export async function installDependencies(
 /**
  * Install Python dependencies declared in a pyproject.toml file.
  */
-async function installDependnciesPython(
+async function installDependenciesPython(
   pyprojectTomlContent: string,
   result: InstallResult,
   fileSystem: FileSystem
