@@ -249,6 +249,9 @@ class ElevenLabsSTTSession implements TranscriberSession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#rejectReady(
+      new Error("ElevenLabsSTT: WebSocket closed before session start.")
+    );
     this.#pendingChunks = [];
     this.#ws?.close();
     this.#ws = null;

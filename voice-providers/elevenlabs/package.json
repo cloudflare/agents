@@ -26,7 +26,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsx ./scripts/build.ts"
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest run"
   },
   "keywords": [
     "cloudflare",
