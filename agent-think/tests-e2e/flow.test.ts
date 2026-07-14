@@ -190,6 +190,36 @@ describe("E2E: production graph with inference adapter", () => {
     );
   }, 180_000);
 
+  it("keeps a repository install submission running after its command result", async () => {
+    const { session } = await dispatch(
+      "TEST: repository install recovery",
+      issueBase + 4
+    );
+
+    let duringRecovery: ThreadMeta | undefined;
+    await vi.waitUntil(
+      async () => {
+        const [current, transcript] = await Promise.all([
+          thread(session),
+          messages(session)
+        ]);
+        duringRecovery = current;
+        return (
+          current?.status === "running" &&
+          transcriptText(transcript).includes("recovery-command-ok count=1")
+        );
+      },
+      { timeout: 120_000, interval: 200 }
+    );
+    expect(duringRecovery?.status).toBe("running");
+
+    await waitForThread(session, "done");
+    const text = transcriptText(await messages(session));
+    expect(text).toContain("recovery-command-ok count=1");
+    expect(text).toContain("repository-install-recovered");
+    expect(text).not.toContain("recovery-command-ok count=2");
+  }, 180_000);
+
   it("marks a tool-only step-budget exhaustion as error, not done", async () => {
     const { session } = await dispatch(
       "TEST: exhaust step budget",
