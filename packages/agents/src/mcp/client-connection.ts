@@ -8,13 +8,6 @@ import {
   type DiscoverResult,
   type ElicitRequest,
   type ElicitResult,
-  type JsonSchemaType,
-  type jsonSchemaValidator,
-  type ListChangedHandlers,
-  type ListPromptsResult,
-  type ListResourceTemplatesResult,
-  type ListResourcesResult,
-  type ListToolsResult,
   type McpSubscription,
   type Prompt,
   type Resource,
@@ -24,10 +17,21 @@ import {
   type StreamableHTTPClientTransportOptions,
   type Tool
 } from "@modelcontextprotocol/client";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { Emitter, type Event } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
+import { raceWithSignal } from "./abort";
+import {
+  fetchMcpPrompts,
+  fetchMcpResources,
+  fetchMcpResourceTemplates,
+  fetchMcpTools
+} from "./client-catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
+import {
+  createMcpSdkClient,
+  normalizeMcpClientOptions
+} from "./client-runtime";
+export { elicitationCapabilitiesFromHandlers } from "./client-runtime";
 import {
   isTransportNotImplemented,
   isUnauthorized,
@@ -40,48 +44,6 @@ import type {
   TransportType,
   McpClientOptions
 } from "./types";
-
-// Workers disallows runtime code generation, so the MCP SDK's default AJV
-// validator (which compiles schemas with `new Function`) cannot run there.
-// Every connection defaults to the Worker-safe validator unless the caller
-// supplies their own.
-class CompatibleWorkerJsonSchemaValidator
-  extends CfWorkerJsonSchemaValidator
-  implements jsonSchemaValidator
-{
-  private readonly legacy = new CfWorkerJsonSchemaValidator({ draft: "7" });
-
-  override getValidator<T>(schema: JsonSchemaType) {
-    const dialect = schema.$schema;
-    return typeof dialect === "string" && /draft-0?7/i.test(dialect)
-      ? this.legacy.getValidator<T>(schema)
-      : super.getValidator<T>(schema);
-  }
-}
-
-const defaultClientOptions: NonNullable<McpClientOptions> = {
-  // Modern schemas default to 2020-12 while explicitly tagged draft-07
-  // schemas from 2025-era servers keep working in the Worker-safe validator.
-  jsonSchemaValidator: new CompatibleWorkerJsonSchemaValidator(),
-  versionNegotiation: { mode: "auto" },
-  inputRequired: { autoFulfill: true }
-};
-
-function raceWithSignal<T>(
-  promise: Promise<T>,
-  signal?: AbortSignal
-): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason);
-
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
-}
 
 /**
  * Connection state machine for MCP client connections.
@@ -152,24 +114,6 @@ export type MCPElicitationHandlers = {
   url?: MCPElicitationHandler;
 };
 
-/** Derive the elicitation capability to advertise from the handler keys. */
-export function elicitationCapabilitiesFromHandlers(handlers?: {
-  form?: unknown;
-  url?: unknown;
-}): ClientCapabilities["elicitation"] | undefined {
-  if (!handlers) return undefined;
-
-  const elicitation: NonNullable<ClientCapabilities["elicitation"]> = {};
-  if (handlers.form) {
-    elicitation.form = {};
-  }
-  if (handlers.url) {
-    elicitation.url = {};
-  }
-
-  return elicitation.form || elicitation.url ? elicitation : undefined;
-}
-
 export class MCPClientConnection {
   client: Client;
   connectionState: MCPConnectionState = MCPConnectionState.CONNECTING;
@@ -225,7 +169,7 @@ export class MCPClientConnection {
     private readonly _info: ConstructorParameters<typeof Client>[0],
     public options: {
       transport: MCPTransportOptions;
-      client: McpClientOptions;
+      client: NonNullable<McpClientOptions>;
       elicitationHandlers?: MCPElicitationHandlers;
       /**
        * Client capabilities persisted from a previous session, advertised
@@ -240,81 +184,35 @@ export class MCPClientConnection {
   ) {
     this.options = {
       ...options,
-      client: {
-        ...defaultClientOptions,
-        ...options.client,
-        versionNegotiation: {
-          ...defaultClientOptions.versionNegotiation,
-          ...options.client?.versionNegotiation
-        },
-        inputRequired: {
-          ...defaultClientOptions.inputRequired,
-          ...options.client?.inputRequired
-        }
-      }
+      client: normalizeMcpClientOptions(options.client)
     };
 
     this.client = this.createClient();
   }
 
   private createClient(): Client {
-    // Advertise elicitation only when it can actually be handled. Handler
-    // keys map directly to advertised modes, so a form-only handler advertises
-    // form only, a url-only handler advertises url only, and no handlers means
-    // no elicitation capability. An explicit caller-declared
-    // `capabilities.elicitation` wins wholesale so callers can narrow (or
-    // widen) the advertised modes. The restore seed applies last, covering
-    // the window before handlers are reconfigured after hibernation.
-    const seed = this.options.capabilitySeed;
-    const elicitation =
-      this.options.client?.capabilities?.elicitation ??
-      elicitationCapabilitiesFromHandlers(this.options.elicitationHandlers) ??
-      seed?.elicitation;
-    this._elicitationEnabled = elicitation !== undefined;
-    const clientOptions = {
-      ...this.options.client,
-      capabilities: {
-        ...seed,
-        ...this.options.client?.capabilities,
-        ...(elicitation ? { elicitation } : {})
-      } as ClientCapabilities,
-      listChanged: this.createListChangedHandlers(
-        this.options.client?.listChanged
-      )
-    };
-
-    return new Client(this._info, clientOptions);
-  }
-
-  private createListChangedHandlers(
-    configured?: ListChangedHandlers
-  ): ListChangedHandlers {
-    return {
-      tools: {
-        ...configured?.tools,
-        onChanged: (error, tools) => {
+    const created = createMcpSdkClient(
+      this._info,
+      this.options.client,
+      this.options.capabilitySeed,
+      this.options.elicitationHandlers,
+      {
+        tools: (error, tools) => {
           if (!error && tools) this.tools = tools;
-          configured?.tools?.onChanged(error, tools);
           this._onListChanged.fire();
-        }
-      },
-      prompts: {
-        ...configured?.prompts,
-        onChanged: (error, prompts) => {
+        },
+        prompts: (error, prompts) => {
           if (!error && prompts) this.prompts = prompts;
-          configured?.prompts?.onChanged(error, prompts);
           this._onListChanged.fire();
-        }
-      },
-      resources: {
-        ...configured?.resources,
-        onChanged: (error, resources) => {
+        },
+        resources: (error, resources) => {
           if (!error && resources) this.resources = resources;
-          configured?.resources?.onChanged(error, resources);
           this._onListChanged.fire();
         }
       }
-    };
+    );
+    this._elicitationEnabled = created.elicitationEnabled;
+    return created.client;
   }
 
   /**
@@ -805,73 +703,27 @@ export class MCPClientConnection {
     return this.fetchResourceTemplates();
   }
 
+  private catalogFetchOptions() {
+    return {
+      probing: this._probingCapabilities,
+      onCapabilityError: this._capabilityErrorHandler.bind(this)
+    };
+  }
+
   async fetchTools() {
-    let toolsAgg: Tool[] = [];
-    let toolsResult: ListToolsResult = { tools: [] };
-    do {
-      const params = { cursor: toolsResult.nextCursor };
-      toolsResult = await (
-        this._probingCapabilities
-          ? this.client.request({ method: "tools/list", params })
-          : this.client.listTools(params)
-      ).catch(this._capabilityErrorHandler({ tools: [] }, "tools/list"));
-      toolsAgg = toolsAgg.concat(toolsResult.tools);
-    } while (toolsResult.nextCursor);
-    return toolsAgg;
+    return fetchMcpTools(this.client, this.catalogFetchOptions());
   }
 
   async fetchResources() {
-    let resourcesAgg: Resource[] = [];
-    let resourcesResult: ListResourcesResult = { resources: [] };
-    do {
-      const params = { cursor: resourcesResult.nextCursor };
-      resourcesResult = await (
-        this._probingCapabilities
-          ? this.client.request({ method: "resources/list", params })
-          : this.client.listResources(params)
-      ).catch(
-        this._capabilityErrorHandler({ resources: [] }, "resources/list")
-      );
-      resourcesAgg = resourcesAgg.concat(resourcesResult.resources);
-    } while (resourcesResult.nextCursor);
-    return resourcesAgg;
+    return fetchMcpResources(this.client, this.catalogFetchOptions());
   }
 
   async fetchPrompts() {
-    let promptsAgg: Prompt[] = [];
-    let promptsResult: ListPromptsResult = { prompts: [] };
-    do {
-      const params = { cursor: promptsResult.nextCursor };
-      promptsResult = await (
-        this._probingCapabilities
-          ? this.client.request({ method: "prompts/list", params })
-          : this.client.listPrompts(params)
-      ).catch(this._capabilityErrorHandler({ prompts: [] }, "prompts/list"));
-      promptsAgg = promptsAgg.concat(promptsResult.prompts);
-    } while (promptsResult.nextCursor);
-    return promptsAgg;
+    return fetchMcpPrompts(this.client, this.catalogFetchOptions());
   }
 
   async fetchResourceTemplates() {
-    let templatesAgg: ResourceTemplate[] = [];
-    let templatesResult: ListResourceTemplatesResult = {
-      resourceTemplates: []
-    };
-    do {
-      const params = { cursor: templatesResult.nextCursor };
-      templatesResult = await (
-        this._probingCapabilities
-          ? this.client.request({ method: "resources/templates/list", params })
-          : this.client.listResourceTemplates(params)
-      ).catch(
-        this._capabilityErrorHandler(
-          { resourceTemplates: [] },
-          "resources/templates/list"
-        )
-      );
-      templatesAgg = templatesAgg.concat(templatesResult.resourceTemplates);
-    } while (templatesResult.nextCursor);
-    return templatesAgg;
+    return fetchMcpResourceTemplates(this.client, this.catalogFetchOptions());
   }
 
   /**

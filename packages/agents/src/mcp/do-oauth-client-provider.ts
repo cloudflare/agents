@@ -150,15 +150,8 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     return `/${this.clientName}/${this.serverId}/${clientId}`;
   }
 
-  clientInfoKey(clientId: string, issuer?: string) {
-    const suffix = issuer
-      ? `/issuer/${encodeURIComponent(issuer)}/client_info`
-      : "/client_info/";
-    return `${this.keyPrefix(clientId)}${suffix}`;
-  }
-
-  activeIssuerKey(clientId: string) {
-    return `${this.keyPrefix(clientId)}/active_issuer`;
+  clientInfoKey(clientId: string) {
+    return `${this.keyPrefix(clientId)}/client_info/`;
   }
 
   discoveryStateKey() {
@@ -177,86 +170,51 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   }
 
   async clientInformation(
-    context?: OAuthClientInformationContext
+    _context?: OAuthClientInformationContext
   ): Promise<StoredOAuthClientInformation | undefined> {
     if (!this._clientId_) return undefined;
-    const issuer =
-      context?.issuer ??
-      (await this.storage.get<string>(this.activeIssuerKey(this.clientId)));
-    const scoped = issuer
-      ? await this.storage.get<StoredOAuthClientInformation>(
-          this.clientInfoKey(this.clientId, issuer)
-        )
-      : undefined;
     return (
-      scoped ??
       (await this.storage.get<StoredOAuthClientInformation>(
         this.clientInfoKey(this.clientId)
-      )) ??
-      undefined
+      )) ?? undefined
     );
   }
 
   async saveClientInformation(
     clientInformation: StoredOAuthClientInformation,
-    context?: OAuthClientInformationContext
+    _context?: OAuthClientInformationContext
   ): Promise<void> {
     this.clientId = clientInformation.client_id;
-    const issuer = context?.issuer ?? clientInformation.issuer;
-    if (!issuer) {
-      await this.storage.put(
-        this.clientInfoKey(clientInformation.client_id),
-        clientInformation
-      );
-      return;
-    }
-    await this.storage.put({
-      [this.clientInfoKey(clientInformation.client_id, issuer)]:
-        clientInformation,
-      [this.activeIssuerKey(clientInformation.client_id)]: issuer
-    });
+    // Round-trip the SDK's issuer stamp verbatim. The SDK treats a credential
+    // stamped for another issuer as absent, so one durable slot per MCP server
+    // is both sufficient and safer than maintaining our own issuer index.
+    await this.storage.put(
+      this.clientInfoKey(clientInformation.client_id),
+      clientInformation
+    );
   }
 
-  tokenKey(clientId: string, issuer?: string) {
-    return issuer
-      ? `${this.keyPrefix(clientId)}/issuer/${encodeURIComponent(issuer)}/token`
-      : `${this.keyPrefix(clientId)}/token`;
+  tokenKey(clientId: string) {
+    return `${this.keyPrefix(clientId)}/token`;
   }
 
   async tokens(
-    context?: OAuthClientInformationContext
+    _context?: OAuthClientInformationContext
   ): Promise<StoredOAuthTokens | undefined> {
     if (!this._clientId_) return undefined;
-    const issuer =
-      context?.issuer ??
-      (await this.storage.get<string>(this.activeIssuerKey(this.clientId)));
-    const scoped = issuer
-      ? await this.storage.get<StoredOAuthTokens>(
-          this.tokenKey(this.clientId, issuer)
-        )
-      : undefined;
     return (
-      scoped ??
       (await this.storage.get<StoredOAuthTokens>(
         this.tokenKey(this.clientId)
-      )) ??
-      undefined
+      )) ?? undefined
     );
   }
 
   async saveTokens(
     tokens: StoredOAuthTokens,
-    context?: OAuthClientInformationContext
+    _context?: OAuthClientInformationContext
   ): Promise<void> {
-    const issuer = context?.issuer ?? tokens.issuer;
-    if (!issuer) {
-      await this.storage.put(this.tokenKey(this.clientId), tokens);
-      return;
-    }
-    await this.storage.put({
-      [this.tokenKey(this.clientId, issuer)]: tokens,
-      [this.activeIssuerKey(this.clientId)]: issuer
-    });
+    // Keep the SDK-owned issuer stamp intact for SEP-2352 validation.
+    await this.storage.put(this.tokenKey(this.clientId), tokens);
   }
 
   get authUrl() {
@@ -378,18 +336,6 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       }
       if (scope === "all" || scope === "tokens") {
         deleteKeys.push(this.tokenKey(clientId));
-      }
-      if (scope === "all" || scope === "client" || scope === "tokens") {
-        const issuerEntries = await this.storage.list({
-          prefix: `${this.keyPrefix(clientId)}/issuer/`
-        });
-        const suffix = scope === "client" ? "/client_info" : "/token";
-        deleteKeys.push(
-          ...[...issuerEntries.keys()].filter(
-            (key) => scope === "all" || key.endsWith(suffix)
-          )
-        );
-        deleteKeys.push(this.activeIssuerKey(clientId));
       }
       if (scope === "all" || scope === "verifier") {
         deleteKeys.push(

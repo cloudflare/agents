@@ -16,13 +16,16 @@ import type {
   CallToolRequestOptions,
   Client as MCPClient
 } from "@modelcontextprotocol/client";
-import type { Client as LegacyMCPClient } from "@modelcontextprotocol/sdk/client/index.js";
 import type {
-  CallToolResultSchema,
-  CompatibilityCallToolResultSchema,
   CallToolResult,
   ToolAnnotations
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  bindMcpClient,
+  type CallToolSchemaOrOptions,
+  type CompatibleMcpClient,
+  type LegacyCallToolResultSchema
+} from "./client-invoker";
 import type { ZodRawShape } from "zod";
 
 // v2 imports from @x402/core
@@ -314,9 +317,7 @@ export interface X402AugmentedClient {
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
       | null,
     params: CallToolRequest["params"],
-    resultSchema:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
+    resultSchema: LegacyCallToolResultSchema,
     options?: CallToolRequestOptions
   ): Promise<CallToolResult>;
 }
@@ -342,28 +343,11 @@ export type X402ClientConfig = {
   confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
 };
 
-export function withX402Client<T extends MCPClient | LegacyMCPClient>(
+export function withX402Client<T extends CompatibleMcpClient>(
   client: T,
   x402Config: X402ClientConfig
 ): X402AugmentedClient & T {
-  const isV2Client =
-    "getProtocolEra" in client &&
-    typeof (client as { getProtocolEra?: unknown }).getProtocolEra ===
-      "function";
-  const v2Client = client as MCPClient;
-  const v1Client = client as LegacyMCPClient;
-  const originalV2ListTools = isV2Client
-    ? v2Client.listTools.bind(v2Client)
-    : undefined;
-  const originalV1ListTools = !isV2Client
-    ? v1Client.listTools.bind(v1Client)
-    : undefined;
-  const originalV2CallTool = isV2Client
-    ? v2Client.callTool.bind(v2Client)
-    : undefined;
-  const originalV1CallTool = !isV2Client
-    ? v1Client.callTool.bind(v1Client)
-    : undefined;
+  const invoker = bindMcpClient(client);
   const { account } = x402Config;
 
   const maxPaymentValue = x402Config.maxPaymentValue ?? BigInt(100_000); // 0.10 USDC
@@ -385,12 +369,7 @@ export function withX402Client<T extends MCPClient | LegacyMCPClient>(
     params?: Parameters<MCPClient["listTools"]>[0],
     options?: Parameters<MCPClient["listTools"]>[1]
   ) => {
-    const toolsRes = isV2Client
-      ? await originalV2ListTools!(params, options)
-      : await originalV1ListTools!(
-          params as Parameters<LegacyMCPClient["listTools"]>[0],
-          options as Parameters<LegacyMCPClient["listTools"]>[1]
-        );
+    const toolsRes = await invoker.listTools(params, options);
     return {
       ...toolsRes,
       tools: toolsRes.tools.map((tool) => {
@@ -415,38 +394,11 @@ export function withX402Client<T extends MCPClient | LegacyMCPClient>(
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
       | null,
     params: CallToolRequest["params"],
-    resultSchemaOrOptions?:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema
-      | CallToolRequestOptions,
+    schemaOrOptions?: CallToolSchemaOrOptions,
     options?: CallToolRequestOptions
   ): ReturnType<MCPClient["callTool"]> => {
-    const isResultSchema =
-      resultSchemaOrOptions &&
-      typeof (resultSchemaOrOptions as { parse?: unknown }).parse ===
-        "function";
-    const resultSchema = isResultSchema
-      ? (resultSchemaOrOptions as
-          | typeof CallToolResultSchema
-          | typeof CompatibilityCallToolResultSchema)
-      : undefined;
-    const requestOptions =
-      options ??
-      (resultSchemaOrOptions && !isResultSchema
-        ? (resultSchemaOrOptions as CallToolRequestOptions)
-        : undefined);
-    const invoke = async (
-      callParams: CallToolRequest["params"]
-    ): Promise<CallToolResult> => {
-      const result = isV2Client
-        ? await originalV2CallTool!(callParams, requestOptions)
-        : await originalV1CallTool!(
-            callParams as Parameters<LegacyMCPClient["callTool"]>[0],
-            resultSchema,
-            requestOptions as Parameters<LegacyMCPClient["callTool"]>[2]
-          );
-      return result as CallToolResult;
-    };
+    const invoke = (callParams: CallToolRequest["params"]) =>
+      invoker.callTool(callParams, schemaOrOptions, options);
     const res = await invoke(params);
 
     // Check for x402 payment required error in response metadata

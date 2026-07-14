@@ -22,6 +22,7 @@ type JSONRPCMessage = V1JSONRPCMessage;
 type MessageExtraInfo = V1MessageExtraInfo;
 import { getServerByName } from "partyserver";
 import type { McpAgent } from ".";
+import { raceWithSignal } from "./abort";
 
 export const RPC_DO_PREFIX = "rpc:";
 
@@ -40,28 +41,6 @@ function validateBatch(batch: JSONRPCMessage[]): void {
   if (batch.length === 0) {
     throw new Error("Invalid JSON-RPC batch: array must not be empty");
   }
-}
-
-function abortError(signal: AbortSignal): Error {
-  return signal.reason instanceof Error
-    ? signal.reason
-    : new Error(String(signal.reason ?? "Aborted"));
-}
-
-async function raceWithAbort<T>(
-  promise: Promise<T>,
-  signal?: AbortSignal
-): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) throw abortError(signal);
-
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortError(signal));
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
 }
 
 export interface RPCClientTransportOptions<T extends McpAgent = McpAgent> {
@@ -130,7 +109,7 @@ export class RPCClientTransport implements V2Transport {
       const pending = this._stub.handleMcpMessage(
         message as JSONRPCMessage | JSONRPCMessage[]
       ) as Promise<V2JSONRPCMessage | V2JSONRPCMessage[] | undefined>;
-      const result = await raceWithAbort(pending, options?.requestSignal);
+      const result = await raceWithSignal(pending, options?.requestSignal);
 
       if (!result || options?.requestSignal?.aborted) {
         return;

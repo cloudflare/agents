@@ -15,10 +15,6 @@ import type {
   ResourceTemplateType as ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/client";
-import type {
-  CallToolResultSchema,
-  CompatibilityCallToolResultSchema
-} from "@modelcontextprotocol/sdk/types.js";
 import { type RetryOptions, tryN } from "../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";
@@ -32,10 +28,21 @@ import {
   type MCPElicitationHandlers,
   type MCPTransportOptions
 } from "./client-connection";
+import {
+  callV2Tool,
+  type CallToolSchemaOrOptions,
+  type LegacyCallToolResultSchema
+} from "./client-invoker";
 import { toErrorMessage } from "./errors";
 import { RPC_DO_PREFIX } from "./rpc";
-import type { TransportType } from "./types";
-import type { MCPServerRow } from "./client-storage";
+import type { McpClientOptions, TransportType } from "./types";
+import {
+  decodeMcpServerOptions,
+  encodeMcpServerOptions,
+  withMcpSession,
+  type MCPServerRow,
+  type PersistedMcpServerOptions
+} from "./client-storage";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 
@@ -254,30 +261,7 @@ function isBlockedUrl(url: string): boolean {
   return false;
 }
 
-/**
- * Options that can be stored in the server_options column
- * This is what gets JSON.stringify'd and stored in the database
- */
-export type MCPServerOptions = {
-  client?: ConstructorParameters<typeof Client>[1];
-  transport?: {
-    headers?: HeadersInit;
-    type?: TransportType;
-    skipIssuerMetadataValidation?: boolean;
-    sessionId?: string;
-    protocolVersion?: string;
-  };
-  /** Modern SDK discovery advertisement paired with a resumed HTTP session. */
-  discoverResult?: DiscoverResult;
-  /** Retry options for connection and reconnection attempts */
-  retry?: RetryOptions;
-  /**
-   * Client capabilities advertised from configured handlers (currently the
-   * elicitation modes). Handlers are functions and cannot be persisted, so
-   * this records what they advertised for restores after hibernation.
-   */
-  capabilities?: ClientCapabilities;
-};
+export type MCPServerOptions = PersistedMcpServerOptions;
 
 /**
  * Result of an OAuth callback request
@@ -293,7 +277,7 @@ export type RegisterServerOptions = {
   url: string;
   name: string;
   callbackUrl?: string;
-  client?: ConstructorParameters<typeof Client>[1];
+  client?: McpClientOptions;
   transport?: MCPTransportOptions;
   authUrl?: string;
   clientId?: string;
@@ -671,7 +655,7 @@ export class MCPClientManager {
       serverId
     );
     if (!rows.length || !rows[0].server_options) return undefined;
-    return JSON.parse(rows[0].server_options);
+    return decodeMcpServerOptions(rows[0].server_options);
   }
 
   /**
@@ -689,12 +673,12 @@ export class MCPClientManager {
     );
     const row = rows[0];
     if (!row?.server_options) return;
-    const options: MCPServerOptions = JSON.parse(row.server_options);
+    const options = decodeMcpServerOptions(row.server_options);
     if (!options.capabilities) return;
     options.capabilities = undefined;
     this.saveServerToStorage({
       ...row,
-      server_options: JSON.stringify(options)
+      server_options: encodeMcpServerOptions(options)
     });
   }
 
@@ -724,45 +708,18 @@ export class MCPClientManager {
       return;
     }
 
-    const parsedOptions: MCPServerOptions = serverRow.server_options
-      ? JSON.parse(serverRow.server_options)
-      : {};
-
-    const currentSessionId = parsedOptions.transport?.sessionId;
-    const currentProtocolVersion = parsedOptions.transport?.protocolVersion;
-    if (
-      currentSessionId === sessionId &&
-      currentProtocolVersion === protocolVersion &&
-      JSON.stringify(parsedOptions.discoverResult) ===
-        JSON.stringify(discoverResult)
-    ) {
-      return;
-    }
-
-    const nextTransport = {
-      ...(parsedOptions.transport ?? {}),
-      ...(sessionId && protocolVersion ? { sessionId, protocolVersion } : {})
-    };
-
-    if (!sessionId || !protocolVersion) {
-      delete nextTransport.sessionId;
-      delete nextTransport.protocolVersion;
-    }
-
-    const nextOptions: MCPServerOptions = {
-      ...parsedOptions,
-      transport: nextTransport,
-      ...(sessionId && protocolVersion && discoverResult
-        ? { discoverResult }
-        : {})
-    };
-    if (!sessionId || !protocolVersion || !discoverResult) {
-      delete nextOptions.discoverResult;
-    }
-
+    const options = decodeMcpServerOptions(serverRow.server_options);
+    const next =
+      sessionId && protocolVersion
+        ? withMcpSession(options, {
+            id: sessionId,
+            protocolVersion,
+            discoverResult
+          })
+        : withMcpSession(options);
     this.saveServerToStorage({
       ...serverRow,
-      server_options: JSON.stringify(nextOptions)
+      server_options: encodeMcpServerOptions(next)
     });
   }
 
@@ -1021,28 +978,7 @@ export class MCPClientManager {
         }
       }
 
-      const parsedOptions: MCPServerOptions | null = server.server_options
-        ? JSON.parse(server.server_options)
-        : null;
-      // A caller-supplied jsonSchemaValidator is a live instance that can't
-      // survive JSON serialization; drop whatever degraded value an older row
-      // may hold so the connection falls back to the Worker-safe default.
-      if (parsedOptions?.client) {
-        delete parsedOptions.client.jsonSchemaValidator;
-      }
-      // A v2 transport must know which negotiated protocol version belongs to
-      // a resumed session. Older rows only stored sessionId, so reconnect them
-      // fresh rather than sending an unsafe guessed protocol header.
-      if (
-        parsedOptions?.transport?.sessionId &&
-        (!parsedOptions.transport.protocolVersion ||
-          (parsedOptions.transport.protocolVersion === "2026-07-28" &&
-            !parsedOptions.discoverResult))
-      ) {
-        delete parsedOptions.transport.sessionId;
-        delete parsedOptions.transport.protocolVersion;
-        delete parsedOptions.discoverResult;
-      }
+      const parsedOptions = decodeMcpServerOptions(server.server_options);
 
       let authProvider: AgentMcpOAuthProvider | undefined;
       if (server.callback_url) {
@@ -1209,7 +1145,7 @@ export class MCPClientManager {
       };
       // we're overriding authProvider here because we want to be able to access the auth URL
       transport?: MCPTransportOptions;
-      client?: ConstructorParameters<typeof Client>[1];
+      client?: McpClientOptions;
     } = {}
   ): Promise<{
     id: string;
@@ -1334,7 +1270,7 @@ export class MCPClientManager {
     id: string,
     url: string,
     options: {
-      client?: ConstructorParameters<typeof Client>[1];
+      client?: McpClientOptions;
       transport: MCPTransportOptions;
       discoverResult?: DiscoverResult;
     }
@@ -1448,21 +1384,6 @@ export class MCPClientManager {
       }
     });
 
-    // Save to storage, excluding live instances that can't survive JSON
-    // serialization: authProvider is recreated during restore, and
-    // jsonSchemaValidator falls back to the Worker-safe default.
-    const transportWithoutAuth = {
-      ...(options.transport ?? {})
-    } as Record<string, unknown>;
-    delete transportWithoutAuth.authProvider;
-    delete transportWithoutAuth.fetch;
-    delete transportWithoutAuth.reconnectionScheduler;
-    const serializableClient = {
-      ...(options.client ?? {})
-    } as Record<string, unknown>;
-    delete serializableClient.jsonSchemaValidator;
-    delete serializableClient.listChanged;
-    delete serializableClient.responseCacheStore;
     this.saveServerToStorage({
       id,
       name: options.name,
@@ -1470,9 +1391,9 @@ export class MCPClientManager {
       callback_url: options.callbackUrl ?? "",
       client_id: options.clientId ?? null,
       auth_url: options.authUrl ?? null,
-      server_options: JSON.stringify({
-        client: serializableClient,
-        transport: transportWithoutAuth,
+      server_options: encodeMcpServerOptions({
+        client: options.client,
+        transport: options.transport,
         retry: options.retry,
         capabilities: this.advertisedHandlerCapabilities()
       })
@@ -1986,9 +1907,7 @@ export class MCPClientManager {
   private persistAdvertisedCapabilities(): void {
     const capabilities = this.advertisedHandlerCapabilities();
     for (const server of this.getServersFromStorage()) {
-      const options: MCPServerOptions = server.server_options
-        ? JSON.parse(server.server_options)
-        : {};
+      const options = decodeMcpServerOptions(server.server_options);
       if (
         JSON.stringify(options.capabilities) === JSON.stringify(capabilities)
       ) {
@@ -1997,7 +1916,7 @@ export class MCPClientManager {
       options.capabilities = capabilities;
       this.saveServerToStorage({
         ...server,
-        server_options: JSON.stringify(options)
+        server_options: encodeMcpServerOptions(options)
       });
     }
   }
@@ -2318,40 +2237,22 @@ export class MCPClientManager {
    */
   async callTool(
     params: CallToolRequest["params"] & { serverId: string },
-    resultSchema:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
+    resultSchema: LegacyCallToolResultSchema,
     options?: CallToolRequestOptions
   ): ReturnType<Client["callTool"]>;
   async callTool(
     params: CallToolRequest["params"] & { serverId: string },
-    resultSchemaOrOptions?:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema
-      | CallToolRequestOptions,
+    schemaOrOptions?: CallToolSchemaOrOptions,
     options?: CallToolRequestOptions
   ): ReturnType<Client["callTool"]> {
     const { serverId, ...mcpParams } = params;
     const unqualifiedName = mcpParams.name.replace(`${serverId}.`, "");
-    const isLegacySchema =
-      resultSchemaOrOptions &&
-      typeof (resultSchemaOrOptions as { parse?: unknown }).parse ===
-        "function";
-    const requestOptions =
-      options ??
-      (resultSchemaOrOptions && !isLegacySchema
-        ? (resultSchemaOrOptions as CallToolRequestOptions)
-        : undefined);
-    const client = this.mcpConnections[serverId].client;
-    const callParams = { ...mcpParams, name: unqualifiedName };
-    if (isLegacySchema) {
-      return client.request(
-        { method: "tools/call", params: callParams },
-        resultSchemaOrOptions as never,
-        requestOptions
-      ) as ReturnType<Client["callTool"]>;
-    }
-    return client.callTool(callParams, requestOptions);
+    return callV2Tool(
+      this.mcpConnections[serverId].client,
+      { ...mcpParams, name: unqualifiedName },
+      schemaOrOptions,
+      options
+    );
   }
 
   /**

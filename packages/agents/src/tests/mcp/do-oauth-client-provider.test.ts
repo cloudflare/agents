@@ -119,7 +119,7 @@ describe("DurableObjectOAuthClientProvider PKCE binding", () => {
       expect(result.after).toBe(0);
     });
 
-    it("persists discovery state and invalidates issuer-scoped credentials", async () => {
+    it("persists discovery state and invalidates SDK-stamped credentials", async () => {
       const result = await agent().testDiscoveryStateAndIssuerInvalidation();
 
       expect(result.discoveryRoundTrips).toBe(true);
