@@ -6,7 +6,7 @@ import { createMemoryConnection, createMemoryConnectionRegistry } from "../memor
 import type { IdSource } from "../../kernel/ids.js";
 import type { ModelClient } from "../../ports/model.js";
 import { action, type Action } from "../../domain/actions/actions.js";
-import { callable, type StreamingResponse } from "../../domain/rpc/callable.js";
+import { callable, type StreamingResponse } from "../../domain/runtime/rpc/callable.js";
 import type { ConversationEventLog } from "../../domain/events/log.js";
 import type { ToolSet } from "../../domain/tools/types.js";
 import type { AgentHost } from "../../app/agent.js";

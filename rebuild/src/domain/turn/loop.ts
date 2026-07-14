@@ -15,7 +15,7 @@ import { toModelMessages } from "../messages/model.js";
 import { repairTranscript } from "../messages/repair.js";
 import type { AssembledTools, ToolHooks } from "../tools/registry.js";
 import { toDescriptor, type ToolSet } from "../tools/types.js";
-import type { UiChunk } from "../stream/chunks.js";
+import type { UiChunk } from "../conversation/chunks.js";
 
 // ---------------------------------------------------------------------------
 // Public types (audit 09 §1)

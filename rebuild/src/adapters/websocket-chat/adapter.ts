@@ -1,7 +1,7 @@
 import { toErrorValue } from "../../kernel/errors.js";
 import type { Connection, ConnectionRegistry } from "../../ports/transport.js";
 import type { ConversationEvent, StoredEvent } from "../../domain/events/log.js";
-import type { RpcRequest, RpcResponse } from "../../domain/rpc/callable.js";
+import type { RpcRequest, RpcResponse } from "../../domain/runtime/rpc/callable.js";
 import type { ChatMessage } from "../../domain/messages/model.js";
 import type { ToolSet } from "../../domain/tools/types.js";
 import type { Think } from "../../app/think.js";

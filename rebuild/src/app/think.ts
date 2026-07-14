@@ -24,11 +24,11 @@ import {
   type ToolPart,
 } from "../domain/messages/model.js";
 import { repairTranscript } from "../domain/messages/repair.js";
-import { createAccumulator, type UiChunk } from "../domain/stream/chunks.js";
-import { createConversationTurnState, type ConversationTurnState } from "../domain/chat/turn-state.js";
+import { createAccumulator, type UiChunk } from "../domain/conversation/chunks.js";
+import { createConversationTurnState, type ConversationTurnState } from "../domain/conversation/turn-state.js";
 import { relayTurn } from "../domain/events/relay.js";
-import { createPendingInteractions, type PendingInteractions } from "../domain/chat/continuation.js";
-import { assembleTurn } from "../domain/chat/assembly.js";
+import { createPendingInteractions, type PendingInteractions } from "../domain/conversation/continuation.js";
+import { assembleTurn } from "../domain/conversation/assembly.js";
 import type {
   AfterToolCallContext,
   AssembledTools,
@@ -50,7 +50,7 @@ import {
   createSubmissionService,
   type SubmissionRecord,
   type SubmissionService,
-} from "../domain/submissions/submissions.js";
+} from "../domain/reliability/submissions/submissions.js";
 import {
   createActionService,
   type Action,
@@ -66,19 +66,19 @@ import {
   createScheduledTaskService,
   type DeclaredTasks,
   type ScheduledTaskService,
-} from "../domain/scheduled-tasks/tasks.js";
+} from "../domain/reliability/scheduled-tasks/tasks.js";
 import {
   createChatRecovery,
   type ChatRecovery,
   type Incident,
   type RecoveryPolicy,
   type TurnInputSnapshot,
-} from "../domain/recovery/recovery.js";
+} from "../domain/reliability/recovery/recovery.js";
 import {
   createOverflowGuard,
   type ChatErrorClassification,
   type OverflowGuard,
-} from "../domain/recovery/overflow.js";
+} from "../domain/reliability/recovery/overflow.js";
 import { createWorkspace, type Workspace } from "../domain/workspace/workspace.js";
 import { createWorkspaceTools } from "../domain/workspace/tools.js";
 import { createFetchTools, type FetchToolConfig } from "../domain/fetch/fetch-tool.js";
@@ -98,7 +98,7 @@ import {
   type RunStatus,
 } from "../domain/delegation/runs.js";
 import { createSubAgentRegistry } from "../domain/delegation/registry.js";
-import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/fibers/fibers.js";
+import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/runtime/fibers/fibers.js";
 
 // ---------------------------------------------------------------------------
 // Public API types

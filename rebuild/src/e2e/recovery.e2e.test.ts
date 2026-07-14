@@ -4,7 +4,7 @@ import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import { createFakeModel } from "../adapters/memory/fake-model.js";
 import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient, ModelRequest } from "../ports/model.js";
-import type { RecoveryPolicy } from "../domain/recovery/recovery.js";
+import type { RecoveryPolicy } from "../domain/reliability/recovery/recovery.js";
 import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
 import type { AgentHost } from "../app/agent.js";
 import { Think, type SessionBuilder } from "../app/think.js";

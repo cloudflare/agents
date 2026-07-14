@@ -17,23 +17,19 @@ function makeService(deps: { transcriptNotice?: (text: string, informModel: bool
 }
 
 describe("createChannelService", () => {
-  describe("implicit web channel", () => {
-    it("always resolves 'web' even with no registration", () => {
-      const { service } = makeService();
-      expect(service.resolve("web")).toEqual({ channelId: "web", kind: "web" });
-    });
-
+  describe("resolve", () => {
     it("resolve(undefined) yields undefined (a turn with no channel applies no policy)", () => {
       const { service } = makeService();
       expect(service.resolve(undefined)).toBeUndefined();
     });
 
-    it("resolve() of an unregistered id yields undefined", () => {
+    it("an unregistered id yields undefined — including 'web' (there is no implicit channel)", () => {
       const { service } = makeService();
+      expect(service.resolve("web")).toBeUndefined();
       expect(service.resolve("nope")).toBeUndefined();
     });
 
-    it("register() may override the web channel's policy without removing it", () => {
+    it("resolves a registered channel (incl. one named 'web') to its context", () => {
       const { service } = makeService();
       service.register({ web: { kind: "web", instructions: "custom web instructions" } });
       expect(service.resolve("web")).toEqual({ channelId: "web", kind: "web" });
@@ -53,10 +49,10 @@ describe("createChannelService", () => {
       expect(() => service.register({ tg: { kind: "messenger" } })).toThrow();
     });
 
-    it("re-registering 'web' never collides", () => {
+    it("has no privileged 'web' id — re-registering 'web' collides like any other", () => {
       const { service } = makeService();
       service.register({ web: { kind: "web" } });
-      expect(() => service.register({ web: { kind: "web" } })).not.toThrow();
+      expect(() => service.register({ web: { kind: "web" } })).toThrow();
     });
   });
 
@@ -168,7 +164,7 @@ describe("createChannelService", () => {
   });
 
   describe("deliverNotice", () => {
-    it("defaults to the web channel: writes to the transcript", async () => {
+    it("defaults to the transcript when there is no channel", async () => {
       const { service, transcriptNotice, events } = makeService();
       await service.deliverNotice("hello");
       expect(transcriptNotice).toHaveBeenCalledWith("hello", expect.any(Boolean));
@@ -218,18 +214,20 @@ describe("createChannelService", () => {
       expect(post).not.toHaveBeenCalled();
     });
 
-    it("throws on out-of-turn delivery to a voice/custom channel with no deliver hook", async () => {
-      const { service } = makeService();
+    it("falls back to the transcript when delivering to a channel with no deliver hook (out of turn)", async () => {
+      const { service, transcriptNotice } = makeService();
       service.register({ v: { kind: "voice" } });
-      await expect(service.deliverNotice("hi", { channel: "v" })).rejects.toThrow();
+      await service.deliverNotice("hi", { channel: "v" });
+      expect(transcriptNotice).toHaveBeenCalledWith("hi", expect.any(Boolean));
     });
 
-    it("does not throw for in-turn delivery to a voice/custom channel with no deliver hook", async () => {
-      const { service } = makeService();
+    it("falls back to the transcript for in-turn delivery to a channel with no deliver hook", async () => {
+      const { service, transcriptNotice } = makeService();
       service.register({ v: { kind: "voice" } });
       await service.runWithActive({ channelId: "v", kind: "voice" }, async () => {
-        await expect(service.deliverNotice("hi")).resolves.not.toThrow();
+        await service.deliverNotice("hi");
       });
+      expect(transcriptNotice).toHaveBeenCalled();
     });
 
     it("emits notice:failed and rethrows when the delivery hook throws", async () => {
@@ -250,7 +248,7 @@ describe("createChannelService", () => {
       expect(events.some((e) => e.type === "channel:delivered")).toBe(true);
     });
 
-    it("does not emit channel:delivered for a final notice on the web channel", async () => {
+    it("does not emit channel:delivered for a final notice delivered to the transcript", async () => {
       const { service, events } = makeService();
       await service.deliverNotice("done", { kind: "final" });
       expect(events.some((e) => e.type === "channel:delivered")).toBe(false);
@@ -260,7 +258,8 @@ describe("createChannelService", () => {
   describe("channel:resolved event", () => {
     it("is emitted when resolve() successfully resolves a registered channel", () => {
       const { service, events } = makeService();
-      service.resolve("web");
+      service.register({ tg: { kind: "messenger" } });
+      service.resolve("tg");
       expect(events.some((e) => e.type === "channel:resolved")).toBe(true);
     });
 

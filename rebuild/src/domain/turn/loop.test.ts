@@ -9,7 +9,7 @@ import type { ModelChunk, ModelClient, ModelRequest } from "../../ports/model.js
 import { userMessage } from "../messages/model.js";
 import { assembleTools } from "../tools/registry.js";
 import { tool } from "../tools/types.js";
-import type { UiChunk } from "../stream/chunks.js";
+import type { UiChunk } from "../conversation/chunks.js";
 import { createTurnEngine, StallError, type TurnContext } from "./loop.js";
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import type { IdSource } from "../kernel/ids.js";
-import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/fibers/fibers.js";
-import type { QueueItem } from "../domain/queue/queue.js";
+import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/runtime/fibers/fibers.js";
+import type { QueueItem } from "../domain/runtime/queue/queue.js";
 import { Agent, type AgentHost } from "../app/agent.js";
 
 /**

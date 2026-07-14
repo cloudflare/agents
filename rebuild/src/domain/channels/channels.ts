@@ -40,7 +40,7 @@ export interface DeliverNoticeOptions {
 }
 
 export interface ChannelService {
-  /** Validates; merges over the implicit web channel. */
+  /** Validates and registers channels; a duplicate id throws. */
   register(channels: Record<string, ChannelDefinition>): void;
   resolve(channelId: string | undefined): ChannelContext | undefined;
   policyFor(channelId: string | undefined): Promise<ChannelPolicy>;
@@ -49,16 +49,12 @@ export interface ChannelService {
   deliverNotice(text: string, opts?: DeliverNoticeOptions): Promise<void>;
 }
 
-const WEB_CHANNEL_ID = "web";
-const IMPLICIT_WEB: ChannelDefinition = { kind: "web", capabilities: { streaming: true } };
-
 export function createChannelService(deps: {
   bus: EventBus;
-  /** Think wires this: append a notice to the transcript. */
+  /** Think wires this: append a notice to the transcript (the default sink). */
   transcriptNotice: (text: string, informModel: boolean) => Promise<void>;
 }): ChannelService {
   const definitions = new Map<string, ChannelDefinition>();
-  definitions.set(WEB_CHANNEL_ID, IMPLICIT_WEB);
 
   // Turns are serialized, so a simple stack scoped to this service instance
   // is sufficient to track the in-flight turn's channel (with safe nesting).
@@ -88,7 +84,7 @@ export function createChannelService(deps: {
   return {
     register(channels) {
       for (const [id, def] of Object.entries(channels)) {
-        if (id !== WEB_CHANNEL_ID && definitions.has(id)) {
+        if (definitions.has(id)) {
           throw new ValidationError(`channel id "${id}" is already registered`);
         }
         definitions.set(id, def);
@@ -137,28 +133,21 @@ export function createChannelService(deps: {
 
     async deliverNotice(text, opts = {}) {
       const current = activeStack[activeStack.length - 1];
-      const targetId = opts.channel ?? current?.channelId ?? WEB_CHANNEL_ID;
 
       if (opts.channel !== undefined && !definitions.has(opts.channel)) {
         throw new NotFoundError(`unknown channel "${opts.channel}"`);
       }
 
-      const def = definitions.get(targetId);
-      if (!def) {
-        throw new NotFoundError(`unknown channel "${targetId}"`);
-      }
-
+      const targetId = opts.channel ?? current?.channelId;
+      const def = targetId !== undefined ? definitions.get(targetId) : undefined;
       const kind = opts.kind ?? "notice";
-      const inTurn = current?.channelId === targetId;
+      const inTurn = targetId !== undefined && current?.channelId === targetId;
       const thread = opts.thread ?? (inTurn ? current?.thread : undefined);
 
-      if (def.kind === "web") {
-        await deps.transcriptNotice(text, opts.informModel ?? true);
-        deps.bus.emit("notice:delivered", { channel: targetId, kind });
-        return;
-      }
-
-      if (def.deliver) {
+      // A channel with a `deliver` hook goes out-of-band through it. Everything
+      // else — no channel at all, or a channel without a deliver hook — falls back
+      // to the transcript, the default sink. There is no privileged "web" channel.
+      if (def?.deliver) {
         if (thread === undefined && !inTurn) {
           throw new ValidationError(
             `deliverNotice to channel "${targetId}" requires a thread when delivered out of turn`
@@ -180,11 +169,8 @@ export function createChannelService(deps: {
         return;
       }
 
-      // voice / custom channels without a deliver hook: out-of-turn delivery
-      // has nowhere to go and throws; in-turn delivery is a documented no-op.
-      if (!inTurn) {
-        throw new ValidationError(`channel "${targetId}" (${def.kind}) has no deliver hook to deliver to out of turn`);
-      }
+      await deps.transcriptNotice(text, opts.informModel ?? true);
+      deps.bus.emit("notice:delivered", { channel: targetId ?? "transcript", kind });
     },
   };
 }

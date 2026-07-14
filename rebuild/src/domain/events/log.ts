@@ -1,7 +1,7 @@
 import type { Clock } from "../../ports/clock.js";
 import type { KeyValueStore } from "../../ports/storage.js";
 import type { ChatMessage } from "../messages/model.js";
-import type { UiChunk } from "../stream/chunks.js";
+import type { UiChunk } from "../conversation/chunks.js";
 
 /**
  * ConversationEventLog (audit 25 §1): the agent's single outbound port. The

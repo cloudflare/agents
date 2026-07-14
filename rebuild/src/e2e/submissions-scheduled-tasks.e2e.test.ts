@@ -4,7 +4,7 @@ import { createFakeModel } from "../adapters/memory/fake-model.js";
 import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient, ModelMessage } from "../ports/model.js";
 import { userMessage } from "../domain/messages/model.js";
-import type { DeclaredTasks } from "../domain/scheduled-tasks/tasks.js";
+import type { DeclaredTasks } from "../domain/reliability/scheduled-tasks/tasks.js";
 import type { AgentHost } from "../app/agent.js";
 import { Think } from "../app/think.js";
 

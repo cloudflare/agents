@@ -4,9 +4,9 @@ import { createMemoryWorkflowRuntime } from "../adapters/memory/workflow-runtime
 import { createMemoryEmailTransport } from "../adapters/memory/email.js";
 import { createMemoryAgentSpawner } from "../adapters/memory/spawner.js";
 import type { IdSource } from "../kernel/ids.js";
-import { callable, type StreamingResponse } from "../domain/rpc/callable.js";
+import { callable, type StreamingResponse } from "../domain/runtime/rpc/callable.js";
 import type { StoredEvent } from "../domain/events/log.js";
-import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/fibers/fibers.js";
+import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/runtime/fibers/fibers.js";
 import { Agent, type AgentHost } from "./agent.js";
 
 interface CountState {

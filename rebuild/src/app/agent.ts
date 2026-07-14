@@ -23,19 +23,19 @@ import {
   type FiberService,
   type FiberStatus,
   type StartResult,
-} from "../domain/fibers/fibers.js";
+} from "../domain/runtime/fibers/fibers.js";
 import { createConversationEventLog, type ConversationEvent, type ConversationEventLog } from "../domain/events/log.js";
-import { createTaskQueue, type QueueItem, type TaskQueue } from "../domain/queue/queue.js";
+import { createTaskQueue, type QueueItem, type TaskQueue } from "../domain/runtime/queue/queue.js";
 import {
   createCallableRegistry,
   scanCallables,
   type CallableMetadata,
   type CallableRegistry,
-} from "../domain/rpc/callable.js";
+} from "../domain/runtime/rpc/callable.js";
 import {
   createKeepAlive,
   type KeepAlive,
-} from "../domain/scheduling/keep-alive.js";
+} from "../domain/runtime/scheduling/keep-alive.js";
 import {
   createScheduler,
   type ListCriteria,
@@ -43,8 +43,8 @@ import {
   type Schedule,
   type ScheduleSpec,
   type Scheduler,
-} from "../domain/scheduling/scheduler.js";
-import { createStateContainer, type StateContainer, type StateSource } from "../domain/state/state.js";
+} from "../domain/runtime/scheduling/scheduler.js";
+import { createStateContainer, type StateContainer, type StateSource } from "../domain/runtime/state/state.js";
 import {
   createWorkflowService,
   type WorkflowInfo,
@@ -158,7 +158,6 @@ export class Agent<State = unknown> {
       initialState: this.getInitialState(),
       validate: (next, source) => this.validateStateChange(next, source),
       onChanged: (state, source) => this.onStateChanged(state, source),
-      broadcast: (state, source) => this.publishStateChanged(state, source),
     });
 
     if (host.spawner) {
@@ -252,8 +251,12 @@ export class Agent<State = unknown> {
 
   /** `origin` flows into the published `state:changed` event; defaults to `{ kind: "server" }`. */
   setState(next: State, origin: StateOrigin = { kind: "server" }): void {
-    const source: StateSource = origin.kind === "server" ? { kind: "server" } : { kind: "connection", connectionId: origin.sourceId };
+    const source: StateSource = {kind: origin.kind}
+    // set() validates + persists + fires onStateChanged; a throwing validation
+    // stops us before the publish. The container is coarse (ADR-0001), so the
+    // sourceId rides on the event from here — it never enters the domain.
     this.stateContainer.set(next, source);
+    this.publishStateChanged(next, origin);
   }
 
   /** Override to seed state the first time this agent runs (no persisted value yet). */
@@ -267,8 +270,7 @@ export class Agent<State = unknown> {
   /** Override to observe a state change after it has been persisted. */
   protected onStateChanged(_state: State, _source: StateSource): void {}
 
-  private publishStateChanged(state: State, source: StateSource): void {
-    const origin: StateOrigin = source.kind === "server" ? { kind: "server" } : { kind: "client", sourceId: source.connectionId };
+  private publishStateChanged(state: State, origin: StateOrigin): void {
     this.eventLog.publish({ type: "state:changed", state, origin });
   }
 
