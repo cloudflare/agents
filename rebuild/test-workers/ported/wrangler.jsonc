@@ -29,6 +29,26 @@
       {
         "class_name": "ThinkExecuteHitlAgent",
         "name": "ThinkExecuteHitlAgent"
+      },
+      {
+        "class_name": "ThinkToolsTestAgent",
+        "name": "ThinkToolsTestAgent"
+      },
+      {
+        "class_name": "ThinkRecoveryTestAgent",
+        "name": "ThinkRecoveryTestAgent"
+      },
+      {
+        "class_name": "ThinkAgentToolParent",
+        "name": "ThinkAgentToolParent"
+      },
+      {
+        "class_name": "ThinkNestedMiddleAgent",
+        "name": "ThinkNestedMiddleAgent"
+      },
+      {
+        "class_name": "StuckThinkAgentToolChild",
+        "name": "StuckThinkAgentToolChild"
       }
     ]
   },
@@ -39,7 +59,9 @@
         "TestAssistantAgentAgent",
         "ThinkClientToolsAgent",
         "ThinkTestAgent",
-        "ThinkExecuteHitlAgent"
+        "ThinkExecuteHitlAgent",
+        "ThinkToolsTestAgent",
+        "ThinkRecoveryTestAgent"
       ]
     }
   ]

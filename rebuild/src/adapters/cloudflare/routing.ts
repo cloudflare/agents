@@ -76,6 +76,10 @@ function isDurableObjectNamespace(
 function toKebabCase(value: string): string {
   return value
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    // Acronym boundaries: "E2EAgent" -> "E2E-Agent", matching the original
+    // slugger's parity rules (found by the ported e2e suite: without this,
+    // ThinkStallRecoveryE2EAgent slugged to "...e2-eagent" and never routed).
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
     .replace(/[_\s]+/g, "-")
     .toLowerCase();
 }

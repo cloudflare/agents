@@ -19,6 +19,34 @@
       {
         "class_name": "ThinkRecoveryHelperAgent",
         "name": "ThinkRecoveryHelperAgent"
+      },
+      {
+        "class_name": "ThinkToolRollbackE2EAgent",
+        "name": "ThinkToolRollbackE2EAgent"
+      },
+      {
+        "class_name": "ThinkPersistFalseE2EAgent",
+        "name": "ThinkPersistFalseE2EAgent"
+      },
+      {
+        "class_name": "ThinkStallRecoveryE2EAgent",
+        "name": "ThinkStallRecoveryE2EAgent"
+      },
+      {
+        "class_name": "ThinkContextOverflowE2EAgent",
+        "name": "ThinkContextOverflowE2EAgent"
+      },
+      {
+        "class_name": "ThinkSubmissionRecoveryE2EAgent",
+        "name": "ThinkSubmissionRecoveryE2EAgent"
+      },
+      {
+        "class_name": "ThinkActionPauseRecoveryE2EAgent",
+        "name": "ThinkActionPauseRecoveryE2EAgent"
+      },
+      {
+        "class_name": "ThinkActionLedgerRecoveryE2EAgent",
+        "name": "ThinkActionLedgerRecoveryE2EAgent"
       }
     ]
   },
@@ -28,7 +56,14 @@
       "new_sqlite_classes": [
         "ThinkRecoveryE2EAgent",
         "ThinkRecoveryHelperParent",
-        "ThinkRecoveryHelperAgent"
+        "ThinkRecoveryHelperAgent",
+        "ThinkToolRollbackE2EAgent",
+        "ThinkPersistFalseE2EAgent",
+        "ThinkStallRecoveryE2EAgent",
+        "ThinkContextOverflowE2EAgent",
+        "ThinkSubmissionRecoveryE2EAgent",
+        "ThinkActionPauseRecoveryE2EAgent",
+        "ThinkActionLedgerRecoveryE2EAgent"
       ]
     }
   ]

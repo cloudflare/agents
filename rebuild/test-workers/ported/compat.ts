@@ -34,7 +34,17 @@ export const getServerByName = getAgentByName;
  * tests that assert observability events fail here with a clear triage
  * signal rather than a confusing frame mismatch.
  */
-export function subscribe(..._args: unknown[]): () => void {
+export type ObservabilityEvent = {
+  type?: string;
+  name?: string;
+  payload: Record<string, unknown> & { toolCallIds?: string[] };
+  [key: string]: unknown;
+};
+
+export function subscribe(
+  _channel: string,
+  _callback: (event: ObservabilityEvent) => void
+): () => void {
   throw new Error("observability bridge not implemented — ISSUE-009 (triage: missing-feature)");
 }
 
@@ -44,11 +54,18 @@ export function subscribe(..._args: unknown[]): () => void {
  * in test files.
  */
 export type {
-  ChatResponseResult,
   TurnResult,
   StreamCallback,
   ChatErrorContext,
 } from "../../src/app/think.js";
+export type { ChatMessage as RebuiltChatMessage } from "../../src/domain/messages/model.js";
+export type ChatResponseResult = {
+  requestId: string;
+  status: "completed" | "error" | "interrupted";
+  continuation: boolean;
+  message?: import("../../src/domain/messages/model.js").ChatMessage;
+  attachments?: Array<Record<string, unknown>>;
+};
 export { Think } from "../../src/app/think.js";
 export { action } from "../../src/domain/actions/actions.js";
 export type { Action } from "../../src/domain/actions/actions.js";
