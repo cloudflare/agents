@@ -103,3 +103,60 @@ dependencies; in-package modules (mcp client, extensions, browser,
 observability) get vendored into the rebuild tree (or a future extracted
 package) since `agents` itself is the package being replaced and can't stay
 a dependency long-term.
+
+## Appendix — breadth-first coverage scout (2026-07-14)
+
+Prompted by the session-subsystem miss: a file-name-level sweep of every
+package and export map in the monorepo, diffed against audits 00–28 and the
+rebuild source. Result: coverage is near-complete; the misses cluster in
+top-level "loose files" and the `experimental/` corner. Confirmed gaps
+(functionality in the original with NO rebuild equivalent and no prior
+audit mention):
+
+1. **`think/media-eviction.ts` (253 LOC)** — aged-media eviction: purges
+   inline base64 media (screenshots, data-URL attachments) from *persisted*
+   transcripts after an age threshold, beyond read-time truncation. The
+   rebuild truncates at the row/read level but never reclaims stored media.
+   Candidate: a session/store housekeeping pass. Verified absent (no
+   eviction concept in `domain/`).
+2. **`agents/chat/message-reconciler.ts`** — pure functions aligning
+   CLIENT-supplied message arrays with server state on persistence (merge
+   server-known tool outputs into stale client copies, etc.). The rebuild's
+   `chat(messages[])` path persists what it's given; useChat-style clients
+   that round-trip full arrays need reconciliation. Matters directly for
+   the client-compat goal; small, pure, and liftable.
+3. **Workflow-side base class** (`agents/workflows.ts` 619 + `workflow-types`
+   + `think/workflows.ts` 293) — `AgentWorkflow extends WorkflowEntrypoint`
+   with agent-callback plumbing (progress/step events routed back to the
+   originating agent). The rebuild has the agent-side tracking (audit 20)
+   and the runtime binding adapter (W4) but nothing for authors to extend
+   on the workflow side. The callback-routing params the original augments
+   (`__agentName` etc.) are the missing wire.
+4. **`agents/sub-routing.ts` (335 LOC)** — external addressability for
+   sub-agents (`routeSubAgentRequest`, URL routing into facets). The
+   rebuild's children are parent-mediated only. Natural W-follow-up to the
+   Cloudflare `routing.ts` if externally addressable children are wanted.
+5. **`agents/experimental/webmcp.ts`** — WebMCP (`navigator.modelContext`)
+   bridge, loudly marked do-not-use-in-production. Not covered anywhere;
+   consciously parked, not planned.
+
+Partial/minor (rebuild has adjacent coverage; verify depth when relevant):
+`agents/chat/pre-stream-turns.ts` (resume-handshake parking for the window
+between accepted request and first chunk — our adapter answers
+`resume_none` there); `chat/tool-output-truncation.ts` +
+`chat/sanitize.ts` (rebuild truncates in store/actions/fetch; the original
+also depth-limits tool outputs and strips ephemeral provider metadata —
+overlaps the known row-size-guard gap); `agents/retries.ts` (scheduler
+retry exists; the general `this.retry()` utility doesn't);
+`agents/serializable.ts` (type-level `Serializable<T>` state constraint —
+rebuild validates at runtime only).
+
+Accounted-for elsewhere: `agents/schedule.ts` (DSL — audit 05),
+`agents/email.ts` resolvers (deferred inbound email), `agent-tools*`
+(audit 19), `types.ts` MessageType (wire vocabulary, kept),
+`think/server-entry.ts` (framework runtime glue, follows framework/),
+`experimental/memory/*` (session subsystem, above), `internal_context.ts`
+(the ALS the rebuild deliberately eliminated), dev tooling packages
+(`create-think`, `worker-bundler`, `agents/cli`, `think/cli` — build-time,
+no runtime behavior to port; `worker-bundler` becomes relevant only with
+the extensions/WorkerLoader lift).
