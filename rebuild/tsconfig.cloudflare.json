@@ -7,7 +7,8 @@
       "ES2022"
     ],
     "types": [
-      "node"
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types"
     ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -19,12 +20,7 @@
     "noEmit": true
   },
   "include": [
-    "src",
-    "demo"
-  ],
-  "exclude": [
     "src/adapters/cloudflare",
-    "test-workers",
-    "demo/cloudflare"
+    "test-workers"
   ]
 }

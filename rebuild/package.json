@@ -7,18 +7,24 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "test:all": "npm run test && npm run test:workers",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cloudflare.json",
     "demo": "tsx demo/cli.ts"
   },
   "dependencies": {
+    "mimetext": "^3.0.28",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@types/node": "^22.0.0",
     "esbuild": "^0.28.1",
     "tsx": "^4.23.1",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "wrangler": "^4.105.0"
   }
 }

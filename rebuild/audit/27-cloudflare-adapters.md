@@ -297,7 +297,8 @@ In-tree, not a sub-package — but strictly config-partitioned:
   typecheck` runs both projects. This keeps DOM/workers globals out of the
   domain build.
 - **Vitest**: node config unchanged (`src/**/*.test.ts`); new
-  `vitest.workers.config.ts` using `defineWorkersConfig` +
+  `vitest.workers.config.ts` using the `cloudflareTest` vite plugin
+  (pool-workers 0.16's API; `defineWorkersConfig` is gone) +
   `wrangler.jsonc` (compatibility date + flags per §0, the facets
   experimental flag, DO bindings + `new_sqlite_classes` migrations — facet
   child classes bound but not sqlite-migrated), including only
@@ -305,8 +306,10 @@ In-tree, not a sub-package — but strictly config-partitioned:
   the proven pairing with `@cloudflare/vitest-pool-workers` ^0.16.20; the
   node suite must pass unchanged after the bump (do this first, as its own
   commit).
-- Deps: devDeps `wrangler` ^4.105, `@cloudflare/vitest-pool-workers` ^0.16,
-  `@cloudflare/workers-types` ^4.20260629; dependency `mimetext` ^3.
+- Deps: devDeps `wrangler` pinned 4.105.0 (newer wrangler wants
+  workers-types v5; 4.105.0 is what pool-workers 0.16.20 itself pins),
+  `@cloudflare/vitest-pool-workers` 0.16.20, `@cloudflare/workers-types`
+  ^4.20260629; dependency `mimetext` ^3.
 - Scripts: `test` (node, unchanged), `test:workers`, `test:all`,
   `demo:cf` (`wrangler dev --config demo/cloudflare/wrangler.jsonc`).
 

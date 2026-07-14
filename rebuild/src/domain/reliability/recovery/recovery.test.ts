@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { createMemoryAlarmTimer } from "../../../adapters/memory/alarms.js";
 import { createTestClock, type TestClock } from "../../../adapters/memory/clock.js";
 import { createMemoryKeyValueStore } from "../../../adapters/memory/store.js";
@@ -34,9 +34,9 @@ interface ConversationFake {
   turnState: ConversationTurnState;
   history: ChatMessage[];
   session(): Promise<Session>;
-  publish: ReturnType<typeof vi.fn>;
-  scheduleTurn: ReturnType<typeof vi.fn>;
-  onTerminal: ReturnType<typeof vi.fn>;
+  publish: Mock<(...args: unknown[]) => unknown>;
+  scheduleTurn: Mock<(...args: unknown[]) => Promise<void>>;
+  onTerminal: Mock<(...args: unknown[]) => Promise<void>>;
 }
 
 function conversationFake(): ConversationFake {

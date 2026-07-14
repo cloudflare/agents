@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rebuild-test-worker",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // the vitest runner itself needs these node modules inside workerd
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ScaffoldAgent",
+        "name": "SCAFFOLD_AGENT"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      // SQLite-backed: required for the synchronous ctx.storage.sql / .kv APIs
+      "new_sqlite_classes": [
+        "ScaffoldAgent"
+      ]
+    }
+  ]
+}
