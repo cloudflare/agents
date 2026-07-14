@@ -1,23 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import { createFakeModel } from "../adapters/memory/fake-model.js";
+import { createMemoryConnectionRegistry } from "../adapters/memory/transport.js";
 import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient } from "../ports/model.js";
 import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
 import type { ToolSet } from "../domain/tools/types.js";
 import type { AgentHost } from "../app/agent.js";
 import { Think } from "../app/think.js";
+import { attachChatTransport } from "../adapters/websocket-chat/adapter.js";
+import { connectChatClient } from "../adapters/websocket-chat/test-helpers.js";
 
 /**
  * Scenario 1 (audit 24 §1): the everyday chat turn — a Think subclass with a
- * system prompt, one user tool, and workspace tools on, driven entirely
- * through Think's typed public methods and its event log (wave R2 rewires
- * away from the `cf_agent_*` WebSocket protocol; the WS adapter, wave R3,
- * re-covers this same scenario at the frame level). This is broader than
- * think.test.ts's "text turn"/"client tool suspension" cases: it exercises a
- * *server-executed* tool (no suspension) alongside the workspace tool
- * bundle, and checks that `history()` on a fresh read reflects the settled
+ * system prompt, one user tool, and workspace tools on. Rewired in wave R3
+ * to drive the turn through `attachChatTransport` + `connectChatClient`:
+ * frame in (`cf_agent_use_chat_request`) -> Think method -> pipeline ->
+ * event log -> frame out (`cf_agent_use_chat_response`), the full path the
+ * WS adapter exists for. This is broader than think.test.ts's "text
+ * turn"/"client tool suspension" cases: it exercises a *server-executed*
+ * tool (no suspension) alongside the workspace tool bundle, and checks that
+ * both `history()` and a newly-connecting second client see the settled
  * tool output.
  */
 
@@ -41,6 +45,12 @@ function eventsOfType<T extends ConversationEvent["type"]>(
   type: T,
 ): Array<Extract<ConversationEvent, { type: T }>> {
   return events.map((e) => e.event).filter((e): e is Extract<ConversationEvent, { type: T }> => e.type === type);
+}
+
+function framesOfType(frames: unknown[], type: string): Array<Record<string, unknown>> {
+  return frames.filter(
+    (f): f is Record<string, unknown> => typeof f === "object" && f !== null && (f as { type?: unknown }).type === type,
+  );
 }
 
 class ChatSessionThink extends Think<unknown> {
@@ -74,7 +84,7 @@ function makeAgent(): { agent: ChatSessionThink; mem: MemoryHost } {
 }
 
 describe("e2e: chat session", () => {
-  it("streams a tool-call turn end to end, validates + executes the tool, persists it, and a fresh history() read sees it", async () => {
+  it("streams a tool-call turn end to end over the WS chat transport, validates + executes the tool, persists it, and both history() and a newly-connecting client see it", async () => {
     const { agent } = makeAgent();
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "add", input: { a: 7, b: 5 }, id: "call_1" },
@@ -87,8 +97,16 @@ describe("e2e: chat session", () => {
     const events: StoredEvent[] = [];
     agent.events().subscribe("live", (e) => events.push(e));
 
-    const result = await agent.chat("what is 7 + 5?", undefined, { requestId: "req_1" });
-    expect(result.outcome).toBe("completed");
+    const registry = createMemoryConnectionRegistry();
+    const transport = attachChatTransport(agent, registry);
+    const client = await connectChatClient(transport, registry);
+
+    // Frame in: the client sends the chat request over the wire, not agent.chat() directly.
+    await client.send({ type: "cf_agent_use_chat_request", id: "req_1", input: "what is 7 + 5?" });
+
+    await vi.waitFor(() => {
+      expect(framesOfType(client.frames, "cf_agent_use_chat_response").some((f) => (f.chunk as { type: string }).type === "finish")).toBe(true);
+    });
 
     // Chunk events stream in order: start ... tool-input -> tool-output ... finish.
     const chunkTypes = eventsOfType(events, "chunk").map((e) => e.chunk.type);
@@ -98,6 +116,11 @@ describe("e2e: chat session", () => {
     const idxOutput = chunkTypes.indexOf("tool-output-available");
     expect(idxInput).toBeGreaterThan(0);
     expect(idxOutput).toBeGreaterThan(idxInput);
+
+    // Frame out: the same chunk sequence reached the client, tagged with the request id.
+    const responseFrames = framesOfType(client.frames, "cf_agent_use_chat_response");
+    expect(responseFrames.every((f) => f.id === "req_1")).toBe(true);
+    expect(responseFrames.map((f) => (f.chunk as { type: string }).type)).toEqual(chunkTypes);
 
     // The tool ran server-side (no client suspension) with validated input.
     const chunks = eventsOfType(events, "chunk").map((e) => e.chunk);
@@ -128,6 +151,13 @@ describe("e2e: chat session", () => {
     expect(history).toHaveLength(2);
     const syncedToolPart = history[1]!.parts.find((p) => p.type === "tool-add");
     expect(syncedToolPart).toMatchObject({ state: "output-available", output: 12 });
+
+    // And a second live connection, joining after the fact, gets the same settled history on connect.
+    const second = await connectChatClient(transport, registry);
+    const sync = framesOfType(second.frames, "cf_agent_chat_messages")[0];
+    expect(sync?.messages).toHaveLength(2);
+    const secondSyncedToolPart = (sync?.messages as typeof messages)[1]!.parts.find((p) => p.type === "tool-add");
+    expect(secondSyncedToolPart).toMatchObject({ state: "output-available", output: 12 });
 
     expect(busEvents).toContain("message:response");
     expect(eventsOfType(events, "turn:settled")[0]).toMatchObject({ requestId: "req_1", outcome: "completed" });

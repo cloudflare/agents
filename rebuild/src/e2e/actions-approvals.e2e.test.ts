@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import { createFakeModel } from "../adapters/memory/fake-model.js";
+import { createMemoryConnectionRegistry } from "../adapters/memory/transport.js";
 import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient } from "../ports/model.js";
 import {
@@ -14,14 +15,22 @@ import {
 import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
 import type { AgentHost } from "../app/agent.js";
 import { Think, type ChatResponseResult } from "../app/think.js";
+import { attachChatTransport } from "../adapters/websocket-chat/adapter.js";
+import { connectChatClient } from "../adapters/websocket-chat/test-helpers.js";
 
 /**
  * Scenario 5 (audit 24 §5): the HITL (human-in-the-loop) path — idempotent
  * ledger replay, inline approval, durable-pause parking, per-turn
- * authorization, and reply attachments, all through the public Think API
- * (wave R2: no transport — `resolveApproval()` replaces the
- * `cf_agent_tool_approval` frame; the WS adapter, wave R3, re-covers the
- * frame-level path).
+ * authorization, and reply attachments, through the public Think API.
+ *
+ * Wave R3: the two approval-path cases (inline approval-gated tool +
+ * durable-pause) are rewired to run through `attachChatTransport` +
+ * `connectChatClient`, so both branches of the inbound `cf_agent_tool_approval`
+ * frame (`toolCallId` for an in-turn suspension, `executionId` for a parked
+ * durable-pause) are exercised at the frame level — frame -> `resolveApproval`
+ * -> pipeline -> log -> frame. The ledger-replay, authorization-denial, and
+ * reply-attachment cases aren't approval paths in that sense and stay
+ * method/event-driven, as R2 left them.
  */
 
 function counterIds(): IdSource {
@@ -44,6 +53,12 @@ function eventsOfType<T extends ConversationEvent["type"]>(
   type: T,
 ): Array<Extract<ConversationEvent, { type: T }>> {
   return events.map((e) => e.event).filter((e): e is Extract<ConversationEvent, { type: T }> => e.type === type);
+}
+
+function framesOfType(frames: unknown[], type: string): Array<Record<string, unknown>> {
+  return frames.filter(
+    (f): f is Record<string, unknown> => typeof f === "object" && f !== null && (f as { type?: unknown }).type === type,
+  );
 }
 
 class ActionsThink extends Think<unknown> {
@@ -131,7 +146,7 @@ describe("e2e: actions and approvals", () => {
     expect(secondTurnCharge).toMatchObject({ state: "output-available", output: { charged: 42, orderId: "order-1" } });
   });
 
-  it("approval-gated delete_account: approve executes once; a separate reject settles as output-error without executing", async () => {
+  it("approval-gated delete_account over the WS chat transport: a cf_agent_tool_approval(toolCallId) frame approves once; a separate reject settles as output-error without executing", async () => {
     const { agent } = makeAgent();
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "delete_account", input: { confirm: true }, id: "call_1" },
@@ -141,30 +156,63 @@ describe("e2e: actions and approvals", () => {
     const events: StoredEvent[] = [];
     agent.events().subscribe("live", (e) => events.push(e));
 
-    await agent.chat("delete my account", undefined, { requestId: "req_1" });
+    const registry = createMemoryConnectionRegistry();
+    const transport = attachChatTransport(agent, registry);
+    const client = await connectChatClient(transport, registry);
 
+    await client.send({ type: "cf_agent_use_chat_request", id: "req_1", input: "delete my account" });
+
+    await vi.waitFor(() => {
+      const approvalRequested = framesOfType(client.frames, "cf_agent_use_chat_response")
+        .map((f) => f.chunk as { type: string })
+        .find((c) => c.type === "tool-approval-requested");
+      expect(approvalRequested).toBeDefined();
+    });
     const approvalRequested = eventsOfType(events, "chunk")
       .map((e) => e.chunk)
       .find((c) => c.type === "tool-approval-requested");
     expect(approvalRequested).toBeDefined();
 
-    await agent.resolveApproval({ toolCallId: "call_1", approved: true });
+    await client.send({ type: "cf_agent_tool_approval", toolCallId: "call_1", approved: true });
 
     await vi.waitFor(async () => {
       const messages = await agent.getMessages();
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Account deleted."))).toBe(true);
     });
     expect(agent.actionExecuteCounts.delete_account).toBe(1);
+    expect(
+      framesOfType(client.frames, "cf_agent_message_updated").some((f) =>
+        (f.message as { parts: Array<{ type: string; text?: string }> }).parts.some(
+          (p) => p.type === "text" && p.text === "Account deleted.",
+        ),
+      ),
+    ).toBe(true);
 
-    // A fresh turn, rejected this time: settles as output-error, never executes.
+    // A fresh turn, rejected this time via the frame: settles as output-error, never executes.
     const { agent: agent2 } = makeAgent();
     agent2.model = createFakeModel([
       { kind: "tool-call", toolName: "delete_account", input: { confirm: true }, id: "call_r" },
       { kind: "text", text: "Okay, not deleting." },
     ]);
     await agent2.start();
-    await agent2.chat("delete my account", undefined, { requestId: "req_2" });
-    await agent2.resolveApproval({ toolCallId: "call_r", approved: false, reason: "changed my mind" });
+    const registry2 = createMemoryConnectionRegistry();
+    const transport2 = attachChatTransport(agent2, registry2);
+    const client2 = await connectChatClient(transport2, registry2);
+
+    await client2.send({ type: "cf_agent_use_chat_request", id: "req_2", input: "delete my account" });
+    await vi.waitFor(() => {
+      expect(
+        framesOfType(client2.frames, "cf_agent_use_chat_response").some(
+          (f) => (f.chunk as { type: string }).type === "tool-approval-requested",
+        ),
+      ).toBe(true);
+    });
+    await client2.send({
+      type: "cf_agent_tool_approval",
+      toolCallId: "call_r",
+      approved: false,
+      reason: "changed my mind",
+    });
 
     await vi.waitFor(async () => {
       const messages = await agent2.getMessages();
@@ -177,7 +225,7 @@ describe("e2e: actions and approvals", () => {
     expect(agent2.actionExecuteCounts.delete_account ?? 0).toBe(0);
   });
 
-  it("durable-pause deploy: parks, ends the turn, and approveExecution runs once, writes output, and auto-continues", async () => {
+  it("durable-pause deploy over the WS chat transport: parks, ends the turn, and a cf_agent_tool_approval(executionId) frame runs it once, writes output, and auto-continues", async () => {
     const { agent } = makeAgent();
     agent.authorizeTurn = (): AuthorizationDecision => ({ allowed: true, grantedPermissions: ["ops:deploy"] });
     agent.model = createFakeModel([
@@ -186,25 +234,33 @@ describe("e2e: actions and approvals", () => {
     ]);
     await agent.start();
 
-    const result = await agent.chat("deploy to prod", undefined, { requestId: "req_1" });
-    expect(result.outcome).toBe("suspended"); // durable-pause ends the turn
+    const registry = createMemoryConnectionRegistry();
+    const transport = attachChatTransport(agent, registry);
+    const client = await connectChatClient(transport, registry);
+
+    await client.send({ type: "cf_agent_use_chat_request", id: "req_1", input: "deploy to prod" });
+
+    await vi.waitFor(() => {
+      expect(agent.pendingApprovals()).toHaveLength(1); // durable-pause ends the turn
+    });
 
     const pending = agent.pendingApprovals();
-    expect(pending).toHaveLength(1);
     expect(pending[0]!.descriptor).toMatchObject({ action: "deploy", kind: "durable-pause", permissions: ["ops:deploy"] });
 
-    const output = await agent.approveExecution(pending[0]!.executionId);
-    expect(output).toEqual({ deployed: "prod" });
+    await client.send({ type: "cf_agent_tool_approval", executionId: pending[0]!.executionId, approved: true });
 
     await vi.waitFor(async () => {
       const messages = await agent.getMessages();
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Deployed to prod!"))).toBe(true);
     });
     expect(agent.actionExecuteCounts.deploy).toBe(1);
+    const messages = await agent.getMessages();
+    const deployPart = messages.flatMap((m) => m.parts).find((p) => p.type === "tool-deploy");
+    expect(deployPart).toMatchObject({ state: "output-available", output: { deployed: "prod" } });
 
-    // Idempotent: a second approve on the same execution is a no-op (no re-execute).
-    const secondOutput = await agent.approveExecution(pending[0]!.executionId);
-    expect(secondOutput).toEqual({ deployed: "prod" });
+    // Idempotent: a second approval frame for the same execution is a no-op (no re-execute).
+    await client.send({ type: "cf_agent_tool_approval", executionId: pending[0]!.executionId, approved: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(agent.actionExecuteCounts.deploy).toBe(1);
   });
 

@@ -8,8 +8,10 @@ import type { UiChunk } from "../stream/chunks.js";
  * agent publishes typed ConversationEvents here; adapters subscribe (from an
  * offset, or "live") and translate events into whatever their surface speaks
  * (WS frames, parent RPC, ...). The log is durable, offset-addressed, and
- * absorbs `domain/stream/resumable.ts`'s retention role: a turn's `chunk`
- * events are the durable trace a reconnecting client replays from.
+ * absorbed the retention role formerly played by `domain/stream/resumable.ts`
+ * (deleted in wave R3 once the WS adapter landed on this log instead): a
+ * turn's `chunk` events are the durable trace a reconnecting client replays
+ * from.
  */
 
 export type ConversationEvent =

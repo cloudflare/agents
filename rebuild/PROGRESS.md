@@ -53,9 +53,10 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 - [x] domain/events/log.ts — ConversationEventLog (audit 25 §1)
 - [x] Agent exposes scheduler/fibers/keepAlive + registerInternalCallback (audit 26 §5)
 - [x] app rewire: events out, no Connection/frames; extractions 1-4, 6 (audits 25 §2-3, 26)
-- [ ] adapters/websocket-chat + relay; resumable.ts retired; e2e rewired (audit 25 §4-6)
+- [x] adapters/websocket-chat + relay; resumable.ts retired; e2e rewired (audit 25 §4-6)
 
 ## Log
+- 2026-07-14: refactor R3 done (1050 tests): websocket-chat adapter (cf_agent_* frames, resume via log offsets, echo exclusion, readonly), relayTurn in domain/events with adapter wrapper, resumable.ts deleted (log owns retention), chat-session + actions-approvals e2e run through the adapter. Refactor waves complete.
 - 2026-07-14: refactor R2 done (1029 tests): app/ transport-free (banned-token test), turn-state + pending-interactions + assembly + maybeParkSuspension + session builder extracted; agent.ts 643 / think.ts 1096 lines (above ~450 target — recovery conversation-dep surgery deferred, inherent delegation surface). EventBus field renamed to `bus`; events() is the ConversationEventLog.
 - 2026-07-14: refactor R1 done (973 tests): ConversationEventLog + Agent protected services; both Think facades and the fake-method dispatch hack deleted.
 - 2026-07-14: refactor audit docs 25 (transport & lifecycle) and 26 (Think decomposition) written; decisions: methods canonical (no command envelope), replay built into the event port, cf_agent_* kept in the WS adapter, extractions bundled.

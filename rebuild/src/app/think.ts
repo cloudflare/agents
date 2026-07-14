@@ -26,6 +26,7 @@ import {
 import { repairTranscript } from "../domain/messages/repair.js";
 import { createAccumulator, type UiChunk } from "../domain/stream/chunks.js";
 import { createConversationTurnState, type ConversationTurnState } from "../domain/chat/turn-state.js";
+import { relayTurn } from "../domain/events/relay.js";
 import { createPendingInteractions, type PendingInteractions } from "../domain/chat/continuation.js";
 import { assembleTurn } from "../domain/chat/assembly.js";
 import type {
@@ -823,29 +824,20 @@ export class Think<State = unknown> extends Agent<State> {
   // Entry points (audit 23 "Entry points")
   // ==========================================================================
 
-  /** TODO(R3): extract into adapters/relay/child-relay.ts's `relayTurn()` — a minimal inline log subscription for now (audit 25 §5). */
+  /**
+   * Relays this turn's events onto `callback` (sub-agent / streaming
+   * callers) via `relayTurn` (domain/events/relay.ts, audit 25 §5): a
+   * subscription installed before the turn starts, so it only ever needs
+   * "live" (nothing to catch up on). Adapters relaying an *already
+   * in-flight* turn use the same primitive directly, from the turn's
+   * `startOffset` (see adapters/relay/child-relay.ts).
+   */
   async chat(input: string | ChatMessage[], callback?: StreamCallback, opts?: { channel?: string; requestId?: string; clientTools?: ToolSet }): Promise<TurnResult> {
     this.ensureRuntime();
     const requestId = opts?.requestId ?? this.ids.newId("req");
     const newMessages = this.toMessages(input);
 
-    let unsubscribe: (() => void) | undefined;
-    if (callback) {
-      unsubscribe = this.events().subscribe("live", (stored) => {
-        const e = stored.event;
-        if (e.type === "turn:started" && e.requestId === requestId) {
-          callback.onStart({ requestId });
-        } else if (e.type === "chunk" && e.requestId === requestId) {
-          callback.onEvent(e.chunk);
-        } else if (e.type === "recovering:changed" && e.requestId === requestId && e.active) {
-          callback.onInterrupted?.();
-        } else if (e.type === "turn:settled" && e.requestId === requestId) {
-          if (e.outcome === "failed" || e.outcome === "cancelled") callback.onError(e.errorText ?? e.outcome);
-          else callback.onDone();
-          unsubscribe?.();
-        }
-      });
-    }
+    const unsubscribe = callback ? relayTurn(this.events(), requestId, callback) : undefined;
 
     try {
       const outcome = await this.executeTurn({
@@ -1003,6 +995,17 @@ export class Think<State = unknown> extends Agent<State> {
   /** Lets adapters implement the resume handshake: the currently-streaming turn, if any. */
   activeTurn(): { requestId: string; startOffset: number } | null {
     return this.activeTurnInfo;
+  }
+
+  /**
+   * Whether an interruption/stall recovery is currently in flight — lets an
+   * adapter mirror this at connect time (audit 25 §4). Not covered by
+   * `activeTurn()`: recovery can be scheduled (an alarm/fiber retry
+   * pending) between admissions, when no turn is actively streaming.
+   */
+  isRecovering(): boolean {
+    this.ensureRuntime();
+    return this.chatRecoveryService.isRecovering();
   }
 
   // ==========================================================================
