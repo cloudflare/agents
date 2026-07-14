@@ -152,6 +152,7 @@ export class LiveChatAgent extends AIChatAgent<Env> {
  */
 export class LiveThinkAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
+  override workspaceBash = false;
   override chatRecovery = true;
   override maxSteps = 4;
 

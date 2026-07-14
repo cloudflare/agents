@@ -1,3 +1,5 @@
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
 import type {

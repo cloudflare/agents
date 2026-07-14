@@ -3,11 +3,12 @@
 A [Think](https://www.npmjs.com/package/@cloudflare/think) coding agent on
 Cloudflare Workers, with a small React chat UI.
 
-The model works in a persistent virtual filesystem using the built-in workspace
-tools (read, write, edit, find, grep) and has a colocated `code-review` skill.
-It also has the durable `execute` tool (`createExecuteTool(this)`): the model
-writes sandboxed TypeScript against `state.*` (the same workspace filesystem)
-for batch operations that would otherwise take many tool calls.
+The model sees four built-in tools: `read`, `write`, `edit`, and `bash`. The
+first three handle focused changes. `bash` runs JavaScript in a durable Code
+Mode sandbox for multi-step work, with the persistent filesystem under
+`workspace.*`, skills under `skills.*`, and discovery through `codemode.*`.
+The colocated `code-review` skill is loaded on demand without adding another
+model-visible tool schema.
 
 ## Develop
 
@@ -32,8 +33,25 @@ Open the printed URL and start chatting.
 npm run deploy
 ```
 
+## Code Mode namespaces
+
+Inside `bash`, code can discover and call capabilities without expanding the
+model's direct tool list:
+
+```js
+async () => {
+  const matches = await codemode.search("review TypeScript changes");
+  const skill = await skills.activate_skill({ name: "code-review" });
+  const files = await workspace.glob({ pattern: "src/**/*.ts" });
+  return { matches, skill, files };
+};
+```
+
+Registered MCP servers appear the same way, using their server name as the
+namespace (for example, `github.search_issues(...)`).
+
 ## Next steps
 
-- Add custom tools with `getTools()`
+- Register an MCP server with `addMcpServer()`; it appears automatically inside `bash`
 - Give the model persistent memory with `configureSession()`
 - Try the other starters: `npm create think -- --template coding-agent`

@@ -1,3 +1,5 @@
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+
 import { callable, routeAgentRequest } from "agents";
 import { Think, skills } from "@cloudflare/think";
 import bundledSkills from "agents:skills";

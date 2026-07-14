@@ -225,7 +225,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Now the model sees a `MEMORY` section in its system prompt and gets a `set_context` tool to update it. Facts written to memory persist in SQLite and survive DO hibernation and restarts.
+Now the model sees a `MEMORY` section in its system prompt. It can call `context.set_context()` inside the built-in `bash` tool to update it. Facts written to memory persist in SQLite and survive Durable Object hibernation and restarts.
 
 When you use `configureSession`, the system prompt is built from context blocks rather than `getSystemPrompt()`. The `"soul"` block above acts as the system identity — it is read-only and always appears first. The `"memory"` block is writable, and the model proactively updates it when it learns something useful.
 
@@ -266,14 +266,19 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Think merges tools from multiple sources automatically. On every turn, the model has access to:
+A default turn has four built-ins: `read`, `write`, `edit`, and `bash`.
+Application tools from `getTools()` and browser client tools remain direct. Think
+puts its broader platform capabilities behind namespaces inside `bash`:
 
-1. **Workspace tools** — read, write, edit, list, find, grep, delete (built-in)
-2. **Session tools** — set_context, load_context, search_context (from `configureSession`)
-3. **Your tools** — from `getTools()`
-4. **Skill tools** — activate_skill, read_skill_resource, and optional run_skill_script (from `getSkills()`)
-5. **MCP tools** — from connected MCP servers (if any)
-6. **Client tools** — from the browser (if any)
+1. `workspace.*` for the persistent filesystem
+2. `context.*` for session context
+3. `skills.*` for Agent Skills
+4. `extensions.*` for loaded extension tools
+5. `fetch.*` for configured read-only fetch targets
+6. `<server-name>.*` for each connected MCP server
+7. `codemode.*` for discovery, type descriptions, durable steps, and snippets
+
+Use `codemode.search()` rather than guessing method names.
 
 ## 8. Add lifecycle hooks
 

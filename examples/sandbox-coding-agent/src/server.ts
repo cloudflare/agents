@@ -1,3 +1,5 @@
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+
 /**
  * Think as an orchestrator over containerized coding agents.
  *

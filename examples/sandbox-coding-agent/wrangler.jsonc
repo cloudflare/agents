@@ -4,6 +4,7 @@
   "main": "src/server.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [{ "binding": "LOADER" }],
   // The orchestrator's planning loop uses Workers AI, and the Sandbox routes
   // Claude Code's Anthropic egress through this same binding's AI Gateway.
   "ai": { "binding": "AI", "remote": true },

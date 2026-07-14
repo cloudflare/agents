@@ -49,7 +49,7 @@ interface ChatOptions {
 | -------- | ------------------------------------------- |
 | `signal` | `AbortSignal` to cancel the turn mid-stream |
 
-Tools belong to the child agent. Define durable capabilities with the child's `getTools()`, extensions, MCP tools, or client tool schemas. Legacy callers that pass `options.tools` to `chat()` get a warning and the value is ignored.
+Tools belong to the child agent. Define durable capabilities with the child's `getTools()`, Code Mode extension/MCP namespaces, or client tool schemas. Legacy callers that pass `options.tools` to `chat()` get a warning and the value is ignored.
 
 ### Example: Parent agent calling a child
 

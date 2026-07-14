@@ -1,62 +1,85 @@
 # Tools
 
-Think provides built-in workspace file tools on every turn, plus integration points for custom tools, code execution, and dynamic extensions.
+Think keeps the direct model tool list small and puts broad platform
+capabilities behind one durable Code Mode runtime.
 
-## Tool Merge Order
+## Model-facing tools
 
-On every turn, Think merges tools from multiple sources. Later sources override earlier ones if names collide:
+A default Think turn exposes four built-in tools:
 
-1. **Workspace tools** — `read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash` (built-in)
-2. **`getTools()`** — your custom server-side tools
-3. **Extension tools** — tools from loaded extensions (prefixed by extension name)
-4. **Session tools** — `set_context`, `load_context`, `search_context` (from `configureSession`)
-5. **Skill tools** — `activate_skill`, `read_skill_resource`, `run_skill_script` (from `getSkills()`)
-6. **MCP tools** — from connected MCP servers
-7. **Client tools** — from the browser (see [Client Tools](./client-tools.md))
+| Tool    | Description                                                        |
+| ------- | ------------------------------------------------------------------ |
+| `read`  | Read line-numbered text or multimodal workspace content            |
+| `write` | Write a workspace file and create parent directories               |
+| `edit`  | Apply a focused find-and-replace edit                              |
+| `bash`  | Run JavaScript against namespaced capabilities in a Dynamic Worker |
 
-Tools belong to the agent running the turn. For parent-child orchestration,
-use [Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md) instead of passing one-off tools through
-`chat()`.
+Application-owned tools from `getTools()`, actions from `getActions()`, and
+client tools keep their existing direct model-tool behavior in this release.
+The following Think platform capabilities move inside `bash`:
 
-## Built-in Workspace Tools
+| Namespace         | Source                                                    |
+| ----------------- | --------------------------------------------------------- |
+| `workspace.*`     | The full persistent filesystem API                        |
+| `context.*`       | Session tools from `configureSession()`                   |
+| `skills.*`        | Tools from `getSkills()` and `getSkillScriptRunner()`     |
+| `extensions.*`    | Tools from loaded extensions                              |
+| `fetch.*`         | Static `fetchTools` configuration                         |
+| `<server-name>.*` | Each connected MCP server                                 |
+| `codemode.*`      | Discovery, durable steps, snippets, and type descriptions |
 
-Every Think agent gets `this.workspace` — a virtual filesystem backed by the Durable Object's SQLite storage. Workspace tools are automatically available to the model with no configuration.
+This separation matters for MCP. Calling `addMcpServer()` registers a transport
+and catalog; it no longer converts every JSON Schema into a direct AI SDK tool.
+The model discovers tools through `codemode.search()` and asks for types through
+`codemode.describe()` only when needed.
 
-| Tool     | Description                                                                 |
-| -------- | --------------------------------------------------------------------------- |
-| `read`   | Read text with line numbers; pass images and PDFs to multimodal models      |
-| `write`  | Write content to a file (creates parent directories)                        |
-| `edit`   | Apply a find-and-replace edit to an existing file (supports fuzzy matching) |
-| `list`   | List files and directories in a path                                        |
-| `find`   | Find files matching a glob pattern                                          |
-| `grep`   | Search file contents by regex or fixed string                               |
-| `delete` | Delete a file or directory                                                  |
-| `bash`   | Run a sandboxed Bash script against workspace files                         |
+Tools belong to the agent running the turn. For parent-child orchestration, use
+[Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md)
+instead of passing one-off tools through `chat()`.
 
-The `bash` tool is enabled by default. It mounts workspace files into a
-`just-bash` virtual filesystem, runs with network access disabled, and writes
-created, updated, and deleted files and empty directories back to the workspace.
-Use it for shell-style workflows that combine multiple file operations; use the
-narrower tools for simple reads, writes, and edits.
+## Built-in Code Mode bash
 
-To keep tool calls bounded, the Bash tool snapshots up to 1,000 workspace files
-by default and skips files larger than 1 MB. Skipped files are reported in the
-tool result and are treated as protected during write-back so the script cannot
-accidentally overwrite or delete content that was not mounted. You can tune
-`maxWorkspaceFiles`, `maxWorkspaceFileBytes`, `maxOutputBytes`, `timeout`, and
-`network` through `workspaceBash`.
+The built-in `bash` name preserves Think's familiar four-tool coding surface,
+but it accepts `{ code: string }` and runs JavaScript rather than POSIX shell
+syntax or the old `{ script, cwd }` payload:
 
-Disable the default Bash tool for conservative deployments:
+```js
+async () => {
+  const matches = await codemode.search("find TypeScript files");
+  const files = await workspace.glob({ pattern: "src/**/*.ts" });
+  return { matches, files };
+};
+```
 
-```typescript
-export class MyAgent extends Think<Env> {
-  workspaceBash = false;
+Runs execute in isolated Dynamic Workers with outbound networking blocked. The
+Code Mode runtime records connector calls durably, supports pause and resume,
+and does not replay completed side effects during approval recovery.
 
-  getModel() {
-    /* ... */
-  }
+Add the Worker Loader binding:
+
+```jsonc
+{
+  "worker_loaders": [{ "binding": "LOADER" }]
 }
 ```
+
+The Think framework adds this binding and exports the `CodemodeRuntime` facet
+for generated entries. A custom Worker entry must export it:
+
+```typescript
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+```
+
+Set `workspaceBash = false` when the application provides a custom `bash`, such
+as a container shell. Think then keeps workspace, context, skills, extensions,
+and fetch tools direct for compatibility. An explicit `createExecuteTool(this)`
+runtime gets the same compatibility treatment until it is migrated.
+`workspaceBash` is now boolean; configure the legacy snapshot tool explicitly
+through `createWorkspaceTools()` if an application still needs it.
+
+The standalone `createWorkspaceTools()` factory still includes its legacy
+`just-bash` snapshot tool. This change applies to Think's built-in assembly, not
+to that lower-level factory.
 
 ### R2 Spillover
 
@@ -139,7 +162,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Custom tools are merged with workspace tools automatically. If a custom tool has the same name as a workspace tool, the custom tool wins.
+Custom tools stay direct and are merged after the four built-ins. If a custom tool uses the same name as a built-in, the custom tool wins. A custom `bash` also opts out of Code Mode folding for that turn.
 
 ### Tool Approval
 
@@ -180,11 +203,13 @@ beforeTurn(ctx: TurnContext) {
 
 `activeTools` limits which tools the model can call. `tools` adds extra tools for this turn only (merged on top of existing tools).
 
-## MCP Tools
+## MCP tools
 
-Think inherits MCP client support from the `Agent` base class. MCP tools from connected servers are automatically merged into every turn.
+Think inherits MCP client support from the `Agent` base class. Connecting an MCP
+server does not expose its catalog as direct model tools. Each server becomes a
+Code Mode namespace based on its registered name.
 
-Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
+Set `waitForMcpConnections` to wait for discovery before Think builds `bash`:
 
 ```typescript
 export class MyAgent extends Think<Env> {
@@ -219,17 +244,38 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
+Inside `bash`, discover and call the server directly:
+
+```js
+async () => {
+  const matches = await codemode.search("open pull requests");
+  const docs = await codemode.describe("github.list_pull_requests");
+  return github.list_pull_requests({ owner: "cloudflare", repo: "agents" });
+};
+```
+
+Names must map to unique JavaScript identifiers and cannot collide with Think
+namespaces such as `workspace`, `context`, or `skills`. Applications that
+intentionally want direct MCP tools can call `mcp.getAITools(filter)` explicitly
+from their own tool assembly.
+
 See [Connecting to MCP Servers](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md) for full MCP client documentation.
 
-## Code Execution Tool
+## Explicit code execution tool
 
-Let the LLM write and run TypeScript in a sandboxed Worker, recorded on a durable codemode runtime (abort-and-replay, human approvals, audit trail, reusable snippets). Requires `@cloudflare/codemode` and a `worker_loaders` binding.
+The built-in `bash` is the default Code Mode runtime for new Think agents.
+`createExecuteTool()` remains available for custom layouts and migration. It
+lets the LLM write and run JavaScript in a sandboxed Worker, recorded on a
+durable runtime with approvals, audit history, and reusable snippets.
 
 ```sh
 npm install @cloudflare/codemode
 ```
 
-The one-liner infers everything from the agent — `state.*` from `this.workspace`, the executor from `env.LOADER`, and a live browser (`cdp.*`) from `env.BROWSER` if bound:
+The one-liner infers `state.*` from `this.workspace`, the executor from
+`env.LOADER`, and a live browser (`cdp.*`) from `env.BROWSER` if bound. Using it
+opts the turn into the legacy explicit-runtime layout, so do not add it when the
+built-in `bash` is sufficient:
 
 ```typescript
 import { Think } from "@cloudflare/think";
@@ -267,7 +313,7 @@ export { CodemodeRuntime } from "@cloudflare/codemode";
 
 Each missing piece fails with an error naming the step.
 
-Inside the sandbox the model sees typed namespaces plus the platform SDK:
+Inside this explicit runtime the model sees typed namespaces plus the platform SDK:
 
 - `tools.*` — your AI SDK tools (object args, validated against their schemas). Only tools with an `execute` function are exposed — client-side tools can't run in the sandbox.
 - `state.*` — the workspace filesystem (`state.readFile({ path })`, `state.glob({ pattern })`, `state.planEdits(...)`, …)

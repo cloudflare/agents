@@ -1,3 +1,5 @@
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+
 /**
  * Deploy-churn recovery harness — Worker entry + agent.
  *

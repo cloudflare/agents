@@ -27,7 +27,7 @@
     "@ai-sdk/anthropic": "^3.0.83",
     "@ai-sdk/openai": "^3.0.70",
     "@cloudflare/codemode": ">=0.4.0",
-    "@cloudflare/shell": ">=0.4.0",
+    "@cloudflare/shell": "workspace:^",
     "aywson": "^0.0.16",
     "chat": "^4.31.0",
     "create-think": "workspace:*",

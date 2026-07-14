@@ -854,8 +854,8 @@ path.
 | `configureSession()`       | identity                         | Add context blocks, compaction, search, skills — see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md)                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `workspaceBash`            | `true`                           | Include or configure the default workspace `bash` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `fetchTools`               | `false`                          | Opt-in allowlisted, read-only HTTP fetch tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `workspaceBash`            | `true`                           | Include the durable Code Mode `bash`; set `false` when supplying a custom bash                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `fetchTools`               | `false`                          | Opt-in allowlisted reads exposed as `fetch.*` inside the built-in `bash`; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `messageConcurrency`       | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `waitForMcpConnections`    | `false`                          | Wait for MCP servers before inference                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `chatRecovery`             | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns. Set to `{ maxAttempts, stableTimeoutMs, terminalMessage, onExhausted }` to tune bounded recovery.                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -865,9 +865,9 @@ path.
 ## Agent Skills
 
 Think supports [Agent Skills](https://agentskills.io/) as on-demand
-instructions. A skill source provides a catalog of skill names and descriptions;
-Think adds that catalog to the system prompt and exposes tools the model can use
-when a user task matches a skill.
+instructions. A skill source provides a catalog of skill names and descriptions.
+Think adds that catalog to the system prompt and exposes the registry as
+`skills.*` inside the built-in `bash` when a task matches a skill.
 
 Bundled skills are usually imported with the Think Vite plugin, which includes
 the Agent Skills import support:
@@ -918,13 +918,13 @@ agents/my-agent/skills/release-notes/scripts/format-release-notes.ts
 agents/my-agent/skills/release-notes/references/style-guide.md
 ```
 
-When skills are available, Think exposes:
+When skills are available, `bash` exposes:
 
-| Tool                  | Purpose                                                             |
-| --------------------- | ------------------------------------------------------------------- |
-| `activate_skill`      | Load a matching skill's instructions and bundled resource list      |
-| `read_skill_resource` | Read a bundled resource by `{ name, path }` or `skill-name/path`    |
-| `run_skill_script`    | Run a bundled script when `getSkillScriptRunner()` returns a runner |
+| Method                       | Purpose                                                             |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `skills.activate_skill`      | Load a matching skill's instructions and bundled resource list      |
+| `skills.read_skill_resource` | Read a bundled resource by `{ name, path }` or `skill-name/path`    |
+| `skills.run_skill_script`    | Run a bundled script when `getSkillScriptRunner()` returns a runner |
 
 Skills are not always-on system prompt text. Use `getSystemPrompt()` or a
 Session context block for behavior that should apply to every turn. Use skills
@@ -1189,7 +1189,7 @@ occurrences do not block future runs.
 
 ## Fetch tool
 
-Think can give the model a conservative, **read-only** way to read HTTP resources. It is **off by default**. Set the `fetchTools` property for static config, or call `createFetchTools()` inside `getTools()` for per-tenant/dynamic allowlists (it runs every turn). When configured, Think registers a generic `fetch_url` tool (when a public `allowlist` is provided) plus one `fetch_<name>` tool per binding target, and advertises the capability in the system prompt.
+Think can give the model a conservative, **read-only** way to read HTTP resources. It is **off by default**. Set the `fetchTools` property for static config, or call `createFetchTools()` inside `getTools()` for per-tenant/dynamic allowlists. Static configuration appears under `fetch.*` inside the built-in `bash` and is advertised in the capability prompt.
 
 ```typescript
 export class DocsAgent extends Think<Env> {
@@ -1211,7 +1211,7 @@ export class DocsAgent extends Think<Env> {
 }
 ```
 
-The model sees named tools — `fetch_url({ url, response?, headers? })` and `fetch_docsApi({ path, response?, headers? })` — rather than one polymorphic tool, so per-target policy is baked into each tool.
+Inside `bash`, the model sees named methods: `fetch.fetch_url({ url, response?, headers? })` and `fetch.fetch_docsApi({ path, response?, headers? })`. Per-target policy remains baked into each method.
 
 **Safety model.** The threat surface is the Workers runtime: reaching loopback/`.internal`/internally bound targets, allowlist-bypass tricks, prompt-injected URLs, credential leakage, and context/storage bloat.
 
@@ -1296,12 +1296,12 @@ Peer dependencies you provide:
 
 Bundled with `@cloudflare/think`:
 
-| Package                | Notes                                                 |
-| ---------------------- | ----------------------------------------------------- |
-| `@cloudflare/shell`    | `Workspace` filesystem                                |
-| `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
-| `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
-| `aywson`               | Wrangler JSON/JSONC parsing for the framework plugin  |
+| Package                | Notes                                                                |
+| ---------------------- | -------------------------------------------------------------------- |
+| `@cloudflare/shell`    | `Workspace` filesystem                                               |
+| `@cloudflare/codemode` | Durable runtime for the built-in `bash` and explicit execution tools |
+| `just-bash`            | Bash skill scripts and the standalone workspace-tool factory         |
+| `aywson`               | Wrangler JSON/JSONC parsing for the framework plugin                 |
 
 The Agent Skills engine and its script runner live in
 [`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so skill scripts pull

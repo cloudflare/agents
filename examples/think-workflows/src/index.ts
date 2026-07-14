@@ -1,3 +1,5 @@
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+
 import { getAgentByName, routeAgentRequest } from "agents";
 import { z } from "zod";
 import { Think } from "@cloudflare/think";

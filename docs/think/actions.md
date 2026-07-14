@@ -18,9 +18,9 @@ for a tool that has real side effects:
 - **Reply attachments** — record advisory delivery metadata (a drafted email, a
   card, a voice note) without changing what the model sees.
 
-Actions compile into Think tools, so the model calls them exactly like any other
-tool. Return them from `getActions()`; Think merges them into the tool set
-alongside `getTools()`, workspace tools, extensions, and MCP tools.
+Actions compile into direct Think tools. Return them from `getActions()`; Think
+merges them alongside `getTools()` and the four built-ins. Platform capabilities
+such as extensions and MCP remain behind namespaced Code Mode connectors.
 
 ## Define an action
 

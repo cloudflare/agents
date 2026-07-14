@@ -174,23 +174,57 @@ the child facet until `clearAgentToolRuns()` deletes retained runs.
 See the full [Agent Tools guide](../../docs/agents/agent-tools.md) for rendering,
 drill-in, and cleanup patterns.
 
-## Built-in workspace
+## Built-in workspace and Code Mode bash
 
-Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash`) are automatically available to the model.
+Every Think agent gets `this.workspace`, a virtual filesystem backed by the
+Durable Object's SQLite storage. The model sees four built-in tools:
 
-The `read` tool returns line-numbered text for text files. For images and PDFs, it keeps the persisted tool result compact and passes file bytes to multimodal-capable models using AI SDK content parts.
-The `bash` tool runs sandboxed shell workflows through `just-bash`, with network
-access disabled by default, and syncs changed files and empty directories back
-into the workspace. It snapshots up to 1,000 files by default, skips files larger
-than 1 MB, and treats skipped paths as protected during write-back. Set
-`workspaceBash = false` on your Think subclass to opt out, or pass an options
-object to tune limits, timeout, and network access.
+- `read`, `write`, and `edit` for focused file operations
+- `bash` for multi-step work in a durable Code Mode sandbox
+
+Despite its name, the built-in `bash` accepts `{ code: string }` and executes
+JavaScript, not POSIX shell syntax or the old `{ script, cwd }` payload. Code
+runs in an isolated Dynamic Worker with outbound network access blocked. Think
+injects these globals when their capabilities are configured:
+
+| Namespace         | Capability                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `workspace.*`     | Persistent filesystem, including glob, search, tree, JSON, archive, and batch-edit operations |
+| `context.*`       | Session context reads, writes, search, load, and unload                                       |
+| `skills.*`        | Skill activation, resources, and configured skill scripts                                     |
+| `extensions.*`    | Tools contributed by loaded Think extensions                                                  |
+| `fetch.*`         | Allowlisted HTTP and service-binding reads from `fetchTools`                                  |
+| `<server-name>.*` | Tools from each connected MCP server                                                          |
+| `codemode.*`      | Search, describe, durable steps, and saved snippets                                           |
+
+Use `codemode.search()` and `codemode.describe()` before calling an unfamiliar
+capability. MCP JSON Schemas stay behind this discovery interface and are not
+converted into direct model tools.
+
+The built-in runtime requires a Worker Loader binding:
+
+```jsonc
+{
+  "worker_loaders": [{ "binding": "LOADER" }]
+}
+```
+
+The Think framework configures this binding and exports `CodemodeRuntime`
+automatically. With a custom Worker entry, also export the runtime:
+
+```ts
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+```
+
+Set `workspaceBash = false` when the application supplies its own `bash` tool,
+such as a container shell. That opt-out keeps the other tool families direct
+for compatibility. `workspaceBash` is now boolean; move legacy snapshot options
+to an explicitly created `createWorkspaceTools()` tool set.
 
 ```ts
 export class MyAgent extends Think<Env> {
   getModel() { ... }
-  // this.workspace is ready to use — no setup needed
-  // workspace tools are auto-merged into every chat turn
+  // this.workspace and the four built-in tools are ready to use
 }
 ```
 
@@ -209,9 +243,9 @@ export class MyAgent extends Think<Env> {
 ## Agent Skills
 
 Think supports the [Agent Skills](https://agentskills.io/) directory format as
-a first-class API. Return one or more `SkillSource` objects from `getSkills()`;
-Think adds the skill catalog to the prompt and exposes `activate_skill` and
-`read_skill_resource` tools when skills are available.
+a first-class API. Return one or more `SkillSource` objects from `getSkills()`.
+Think adds the skill catalog to the prompt and exposes the registry under
+`skills.*` inside the built-in `bash` tool.
 
 ```ts
 import { Think, skills } from "@cloudflare/think";
@@ -263,19 +297,19 @@ src/skills/release-notes/references/style-guide.md
 ```
 
 Bundled resources are packaged with explicit `encoding` metadata. Text resources
-are returned directly; binary assets are returned as base64. `read_skill_resource`
-can read `{ name, path }` or a qualified path such as
+are returned directly; binary assets are returned as base64.
+`skills.read_skill_resource()` can read `{ name, path }` or a qualified path such as
 `release-notes/references/style-guide.md`, which helps skills reference resources
 from other skills.
 
 Skills are on-demand instructions, not always-on system prompt text. The model
-sees the catalog first, then calls `activate_skill` when a user task matches a
-skill description. Use `getSystemPrompt()` or a Session context block for
-behavior that should apply to every turn.
+sees the catalog first, then calls `skills.activate_skill()` inside `bash` when
+a task matches a skill description. Use `getSystemPrompt()` or a Session context
+block for behavior that should apply to every turn.
 
 Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
-enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
-Bash scripts under `scripts/`.
+enables `skills.run_skill_script()` inside `bash`, which can run JavaScript,
+TypeScript, Python, and Bash scripts under `scripts/`.
 
 JavaScript and TypeScript scripts are function-style:
 
@@ -347,13 +381,13 @@ Script execution requires a Worker Loader binding:
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
-| `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
-| `fetchTools`               | `false`                            | Opt-in allowlisted HTTP read tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                         |
+| `workspaceBash`            | `true`                             | Include the durable Code Mode `bash`; set `false` when supplying a custom bash                                                                                                                                               |
+| `fetchTools`               | `false`                            | Opt-in allowlisted HTTP reads exposed as `fetch.*` inside the built-in `bash`                                                                                                                                                |
 | `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
 | `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
 | `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
 
-On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
+On each turn, Think appends a small capability block to the assembled system prompt. The block describes the direct tools and tells the model when namespaced Code Mode capabilities are available inside `bash`.
 
 Think enables Durable Object eviction recovery by default. This is separate from client resumable streaming: resumable streaming handles browser disconnect/reconnect while the object keeps running, while `chatRecovery` recovers turns interrupted by process restarts, deploys, or object eviction.
 
@@ -746,8 +780,8 @@ await session.refreshSystemPrompt();
 #### Legacy Session Skills
 
 Session still supports lower-level loadable context providers. Prefer the
-first-class Think skills API (`getSkills()`, `activate_skill`, and
-`read_skill_resource`) for new Agent Skills directories. Use Session skill
+first-class Think skills API (`getSkills()`, `skills.activate_skill()`, and
+`skills.read_skill_resource()`) for new Agent Skills directories. Use Session skill
 providers only when you need generic `load_context` / `unload_context`
 management instead of Think's skills workflow.
 
@@ -765,13 +799,35 @@ configureSession(session: Session) {
 
 ### MCP integration
 
-Think inherits MCP client support from the Agent base class. MCP tools are automatically merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
+Think inherits MCP client support from the Agent base class. Registering a server
+creates a connection; it does not add hundreds of direct model tools. Each
+connected server appears inside the built-in `bash` under its sanitized server
+name:
 
 ```ts
 export class MyAgent extends Think<Env> {
   waitForMcpConnections = true; // or { timeout: 10_000 }
+
+  async onStart() {
+    await this.addMcpServer("github", this.env.GITHUB_MCP);
+  }
 }
 ```
+
+The model can then discover and invoke it:
+
+```js
+async () => {
+  const matches = await codemode.search("open pull requests");
+  const docs = await codemode.describe("github.list_pull_requests");
+  return github.list_pull_requests({ owner: "cloudflare", repo: "agents" });
+};
+```
+
+Server names must map to unique JavaScript identifiers and cannot collide with
+Think namespaces such as `workspace`, `context`, or `skills`. Use
+`mcp.getAITools(filter)` explicitly only when an application intentionally wants
+direct MCP tools.
 
 ### Choosing a turn API
 
@@ -863,7 +919,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
 - **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
-- **MCP integration** — MCP tools auto-merged, wait for connections before inference
+- **MCP integration** — connected servers become Code Mode namespaces without expanding the direct model tool list
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
 - **Multi-tab broadcast** — all connected clients see the stream (resume-aware exclusions)
 - **Partial persistence** — on error, the partial assistant message is saved
@@ -872,37 +928,47 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 
 ## Workspace tools
 
-File operation tools are built into Think and available to the model on every turn. For custom storage backends, the individual tool factories are also exported:
+Think directly exposes `read`, `write`, and `edit`. Richer filesystem operations
+live under `workspace.*` inside `bash`. The standalone workspace tool factory is
+still available for custom agents and legacy direct-tool layouts:
 
 ```ts
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 
-// Use with a custom ReadOperations/WriteOperations implementation
 const tools = createWorkspaceTools(myCustomStorage);
-const toolsWithoutBash = createWorkspaceTools(myCustomStorage, { bash: false });
+const toolsWithoutLegacyBash = createWorkspaceTools(myCustomStorage, {
+  bash: false
+});
 ```
 
-Each tool is an AI SDK `tool()` with Zod schemas. The underlying operations are abstracted behind interfaces (`ReadOperations`, `WriteOperations`, etc.) so you can create tools backed by any storage.
+`createWorkspaceTools()` still returns its standalone `just-bash` tool. Think's
+built-in `bash` uses the durable Code Mode runtime instead.
 
-## Code execution tool
+## Explicit code execution tool
 
-Let the LLM write and run JavaScript in a sandboxed Worker:
+New Think agents should use the built-in `bash`, which already owns one durable
+Code Mode runtime. `createExecuteTool()` remains available for custom layouts.
+An agent that returns an explicit execute runtime from `getTools()` keeps that
+runtime and the legacy direct platform-tool layout for compatibility:
 
 ```ts
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 
 getTools() {
-  return {
-    execute: createExecuteTool({ tools: wsTools, loader: this.env.LOADER })
-  };
+  return { execute: createExecuteTool(this, { tools: myTools }) };
 }
 ```
 
-Requires `@cloudflare/codemode` and a `worker_loaders` binding in `wrangler.jsonc`.
+Do not create a second execute runtime when the built-in `bash` is sufficient.
 
 ## Fetch tool
 
-Give the model a conservative, read-only way to read HTTP resources. It is **off by default** — set the `fetchTools` property (static config) or call `createFetchTools()` inside `getTools()` (dynamic/per-tenant). It registers a generic `fetch_url` tool when a public `allowlist` is configured, plus one `fetch_<name>` tool per binding target.
+Give the model a conservative, read-only way to read HTTP resources. It is off
+by default. Static `fetchTools` configuration appears under `fetch.*` inside the
+built-in `bash`: `fetch.fetch_url()` for a public allowlist and
+`fetch.fetch_<name>()` for each binding target. Calling `createFetchTools()`
+inside `getTools()` remains the direct-tool escape hatch for dynamic or
+per-tenant configuration.
 
 ```ts
 export class DocsAgent extends Think<Env> {
@@ -981,16 +1047,16 @@ getTools() {
 
 ## Runtime dependencies
 
-| Package                      | Notes                                                     |
-| ---------------------------- | --------------------------------------------------------- |
-| `agents`                     | Cloudflare Agents SDK peer dependency                     |
-| `ai`                         | Vercel AI SDK v6 peer dependency                          |
-| `zod`                        | Schema validation peer dependency                         |
-| `@cloudflare/shell`          | Workspace filesystem                                      |
-| `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |
-| `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
-| `just-bash`                  | Bash skill script execution                               |
-| `@chat-adapter/telegram`     | Required for Telegram messengers                          |
+| Package                      | Notes                                                   |
+| ---------------------------- | ------------------------------------------------------- |
+| `agents`                     | Cloudflare Agents SDK peer dependency                   |
+| `ai`                         | Vercel AI SDK v6 peer dependency                        |
+| `zod`                        | Schema validation peer dependency                       |
+| `@cloudflare/shell`          | Workspace filesystem and `workspace.*` connector        |
+| `@cloudflare/codemode`       | Durable built-in `bash` and explicit execution runtimes |
+| `@cloudflare/worker-bundler` | TypeScript skill script compilation                     |
+| `just-bash`                  | Bash skill scripts and standalone workspace tools       |
+| `@chat-adapter/telegram`     | Required for Telegram messengers                        |
 
 ## Acknowledgments
 

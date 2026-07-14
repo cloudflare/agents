@@ -1,3 +1,5 @@
+export { CodemodeRuntime } from "@cloudflare/think/server-entry";
+
 import { callable, routeAgentRequest } from "agents";
 import { Think } from "@cloudflare/think";
 import type {

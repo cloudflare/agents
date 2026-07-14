@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "think-codemode-mcp-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/mcp*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "Assistant", "class_name": "Assistant" },
+      { "name": "CatalogMcp", "class_name": "CatalogMcp" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Assistant", "CatalogMcp"] }
+  ],
+  "observability": { "enabled": true }
+}
