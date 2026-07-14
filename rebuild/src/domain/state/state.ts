@@ -21,7 +21,14 @@ export function createStateContainer<State>(deps: {
   initialState?: State;
   validate?: (next: State, source: StateSource) => void;
   onChanged?: (state: State, source: StateSource) => void;
-  broadcast?: (state: State, excludeConnectionId?: string) => void;
+  /**
+   * Audit 25 §2/§3: transport exclusion used to be the container's job
+   * (broadcast minus the originating connectionId). Now the container just
+   * hands the full source along; the caller (Agent) is the one that knows
+   * how to turn a source into a ConversationEvent origin, and an adapter
+   * downstream decides exclusion when it fans the event out to connections.
+   */
+  broadcast?: (state: State, source: StateSource) => void;
 }): StateContainer<State> {
   let loaded = false;
   let current: State | undefined;
@@ -55,10 +62,7 @@ export function createStateContainer<State>(deps: {
       deps.bus.emit("state:update", { state: next, source });
       deps.onChanged?.(next, source);
 
-      if (deps.broadcast) {
-        const excludeConnectionId = source.kind === "connection" ? source.connectionId : undefined;
-        deps.broadcast(next, excludeConnectionId);
-      }
+      deps.broadcast?.(next, source);
     },
 
     initialized(): boolean {

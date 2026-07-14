@@ -1,12 +1,11 @@
-import { NotFoundError, ValidationError, toErrorValue } from "../kernel/errors.js";
+import { NotFoundError, ValidationError } from "../kernel/errors.js";
 import { createEventBus, type EventBus } from "../kernel/events.js";
 import { defaultIdSource, type IdSource } from "../kernel/ids.js";
 import type { AgentHandle, AgentSpawner } from "../ports/agent-spawner.js";
 import type { AlarmTimer } from "../ports/alarms.js";
 import type { Clock } from "../ports/clock.js";
 import type { EmailMessage, EmailTransport } from "../ports/email.js";
-import type { KeyValueStore } from "../ports/storage.js";
-import type { Connection, ConnectionRegistry } from "../ports/transport.js";
+import { scoped, type KeyValueStore } from "../ports/storage.js";
 import type { WorkflowRuntime } from "../ports/workflow-runtime.js";
 
 import {
@@ -25,13 +24,13 @@ import {
   type FiberStatus,
   type StartResult,
 } from "../domain/fibers/fibers.js";
+import { createConversationEventLog, type ConversationEvent, type ConversationEventLog } from "../domain/events/log.js";
 import { createTaskQueue, type QueueItem, type TaskQueue } from "../domain/queue/queue.js";
 import {
   createCallableRegistry,
   scanCallables,
   type CallableMetadata,
   type CallableRegistry,
-  type RpcRequest,
 } from "../domain/rpc/callable.js";
 import {
   createKeepAlive,
@@ -56,12 +55,16 @@ import {
 /** Internal schedule/callback names are namespaced under this prefix (see scheduler.ts). */
 const INTERNAL_PREFIX = "$internal:";
 
+/** State-change origin, matching `ConversationEvent`'s "state:changed" vocabulary (audit 25 §1). */
+export type StateOrigin = { kind: "server" } | { kind: "client"; sourceId: string };
+
 /**
  * The adapter contract the app layer composes over. Provided by an adapter
  * (in-memory for tests/e2e, a future Cloudflare Durable Object adapter for
  * production). The adapter owns driving the lifecycle entry points
- * (`start()`, `onAlarm()`, `onMessage()`, `onConnect()`, `onClose()`) — the
- * Agent never reaches out to the platform itself.
+ * (`start()`, `onAlarm()`) and translating its own inbound surface into calls
+ * on the agent's typed public methods — the agent never holds a connection or
+ * parses a wire frame (audit 25).
  */
 export interface AgentHost {
   className: string;
@@ -69,7 +72,6 @@ export interface AgentHost {
   store: KeyValueStore;
   /** The adapter must call `agent.onAlarm()` when this timer fires. */
   alarm: AlarmTimer;
-  connections: ConnectionRegistry;
   clock: Clock;
   ids?: IdSource;
   spawner?: AgentSpawner;
@@ -81,20 +83,19 @@ export interface AgentHost {
   onDestroyed?: () => void | Promise<void>;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /**
  * Thin composition root: wires the domain services over a scoped-per-module
  * view of `host.store`, exposes their operations as a flat delegation
- * surface, and defines the overridable hook seams (`onStart`, `onConnect`,
- * `onMessage`, ...). No business logic lives here — every decision belongs to
- * a domain service or a subclass hook.
+ * surface, and defines the overridable hook seams (`onStart`, ...). No
+ * business logic lives here — every decision belongs to a domain service or
+ * a subclass hook. Transport (frames, connections) is entirely an adapter
+ * concern: this class only ever publishes typed `ConversationEvent`s to its
+ * own event log and exposes typed methods for adapters to call.
  */
 export class Agent<State = unknown> {
   readonly host: AgentHost;
-  readonly events: EventBus;
+  /** Telemetry bus: fire-and-forget diagnostics, distinct from ConversationEvents. */
+  readonly bus: EventBus;
   readonly ids: IdSource;
 
   private readonly internalCallbacks = new Map<
@@ -109,20 +110,22 @@ export class Agent<State = unknown> {
   private readonly stateContainer: StateContainer<State>;
   private readonly subAgents?: SubAgentRegistry;
   private readonly workflows?: WorkflowService;
-  private readonly callables: CallableRegistry;
+  private readonly callableRegistry: CallableRegistry;
+  private readonly eventLog: ConversationEventLog;
   private callablesScanned = false;
 
   constructor(host: AgentHost) {
     this.host = host;
     this.ids = host.ids ?? defaultIdSource;
-    this.events = createEventBus({ agent: host.className, name: host.name }, () => host.clock.now());
+    this.bus = createEventBus({ agent: host.className, name: host.name }, () => host.clock.now());
+    this.eventLog = createConversationEventLog({ store: scoped(host.store, "evlog:"), clock: host.clock });
 
     this.schedulerService = createScheduler({
       store: host.store,
       alarm: host.alarm,
       clock: host.clock,
       ids: this.ids,
-      bus: this.events,
+      bus: this.bus,
       dispatch: (callback, payload, schedule) => this.dispatchSchedule(callback, payload, schedule),
     });
 
@@ -132,7 +135,7 @@ export class Agent<State = unknown> {
       store: host.store,
       clock: host.clock,
       ids: this.ids,
-      bus: this.events,
+      bus: this.bus,
       keepAlive: this.keepAliveService,
       scheduler: this.schedulerService,
       onRecovered: (ctx) => Promise.resolve(this.onFiberRecovered(ctx)),
@@ -145,17 +148,17 @@ export class Agent<State = unknown> {
       store: host.store,
       clock: host.clock,
       ids: this.ids,
-      bus: this.events,
+      bus: this.bus,
       dispatch: (callback, payload, item) => this.dispatchQueue(callback, payload, item),
     });
 
     this.stateContainer = createStateContainer<State>({
       store: host.store,
-      bus: this.events,
+      bus: this.bus,
       initialState: this.getInitialState(),
       validate: (next, source) => this.validateStateChange(next, source),
       onChanged: (state, source) => this.onStateChanged(state, source),
-      broadcast: (state, excludeConnectionId) => this.broadcastState(state, excludeConnectionId),
+      broadcast: (state, source) => this.publishStateChanged(state, source),
     });
 
     if (host.spawner) {
@@ -173,7 +176,7 @@ export class Agent<State = unknown> {
         runtime: host.workflowRuntime,
         clock: host.clock,
         ids: this.ids,
-        bus: this.events,
+        bus: this.bus,
         hooks: {
           onProgress: (wf, payload) => this.onWorkflowProgress(wf, payload),
           onComplete: (wf) => this.onWorkflowComplete(wf),
@@ -181,7 +184,7 @@ export class Agent<State = unknown> {
       });
     }
 
-    this.callables = createCallableRegistry({ bus: this.events });
+    this.callableRegistry = createCallableRegistry({ bus: this.bus });
   }
 
   /**
@@ -195,7 +198,7 @@ export class Agent<State = unknown> {
     if (this.callablesScanned) return;
     this.callablesScanned = true;
     for (const [name, { fn, opts }] of scanCallables(this)) {
-      this.callables.register(name, fn, opts);
+      this.callableRegistry.register(name, fn, opts);
     }
   }
 
@@ -247,8 +250,10 @@ export class Agent<State = unknown> {
     return this.stateContainer.get();
   }
 
-  setState(next: State): void {
-    this.stateContainer.set(next, { kind: "server" });
+  /** `origin` flows into the published `state:changed` event; defaults to `{ kind: "server" }`. */
+  setState(next: State, origin: StateOrigin = { kind: "server" }): void {
+    const source: StateSource = origin.kind === "server" ? { kind: "server" } : { kind: "connection", connectionId: origin.sourceId };
+    this.stateContainer.set(next, source);
   }
 
   /** Override to seed state the first time this agent runs (no persisted value yet). */
@@ -262,13 +267,9 @@ export class Agent<State = unknown> {
   /** Override to observe a state change after it has been persisted. */
   protected onStateChanged(_state: State, _source: StateSource): void {}
 
-  private broadcastState(state: State, excludeConnectionId?: string): void {
-    const frame = JSON.stringify({ type: "cf_agent_state", state });
-    for (const conn of this.host.connections.connections()) {
-      if (excludeConnectionId !== undefined && conn.id === excludeConnectionId) continue;
-      if (!this.shouldSendProtocolMessages(conn)) continue;
-      conn.send(frame);
-    }
+  private publishStateChanged(state: State, source: StateSource): void {
+    const origin: StateOrigin = source.kind === "server" ? { kind: "server" } : { kind: "client", sourceId: source.connectionId };
+    this.eventLog.publish({ type: "state:changed", state, origin });
   }
 
   // --- scheduling ---------------------------------------------------------
@@ -551,43 +552,58 @@ export class Agent<State = unknown> {
       throw new ValidationError("No EmailTransport configured on this host");
     }
     const result = await this.host.email.send(message);
-    this.events.emit("email:reply", { to: message.to, messageId: result.messageId });
+    this.bus.emit("email:reply", { to: message.to, messageId: result.messageId });
     return result;
   }
 
   /** Seam for inbound email routing (adapter/edge concern); default no-op. */
   protected onEmail(_message: EmailMessage): void | Promise<void> {}
 
-  // --- rpc ----------------------------------------------------------------
+  // --- rpc / identity -------------------------------------------------------
 
   callableMethods(): Map<string, CallableMetadata> {
     this.ensureCallablesScanned();
-    return this.callables.callableMethods();
+    return this.callableRegistry.callableMethods();
   }
 
-  // --- connections / readonly ------------------------------------------
-
-  setConnectionReadonly(conn: Connection, flag: boolean): void {
-    conn.state["readonly"] = flag;
+  /** The RPC dispatch surface itself; adapters call `.dispatch(request, respond)`. */
+  callables(): CallableRegistry {
+    this.ensureCallablesScanned();
+    return this.callableRegistry;
   }
 
-  isConnectionReadonly(conn: Connection): boolean {
-    return conn.state["readonly"] === true;
+  /** What the identity frame used to carry, minus the transport-supplied connectionId. */
+  identity(): { className: string; name: string } {
+    return { className: this.host.className, name: this.host.name };
   }
 
-  /** Override to mark a connection readonly at connect time. Default: writable. */
-  protected shouldConnectionBeReadonly(_conn: Connection): boolean {
+  // --- conversation events (audit 25 §1-2) -----------------------------------
+
+  /** The agent's single outbound port. Adapters subscribe (from an offset, or "live"). */
+  events(): ConversationEventLog {
+    return this.eventLog;
+  }
+
+  /** For subclasses (Think) that need to publish without an extra indirection. */
+  protected publishEvent(event: ConversationEvent): void {
+    this.eventLog.publish(event);
+  }
+
+  // --- readonly policy (adapter-consulted predicate) --------------------------
+
+  /**
+   * Override to mark a connection readonly at connect time, given
+   * adapter-supplied metadata (headers, auth claims, ...). Default: writable.
+   * This is a plain predicate now — the agent never holds a `Connection` or
+   * tracks readonly flags itself; the adapter consults this and enforces it.
+   */
+  protected shouldConnectionBeReadonly(_meta: Record<string, unknown>): boolean {
     return false;
-  }
-
-  /** Override to suppress cf_agent_* protocol frames for a connection. Default: send them. */
-  protected shouldSendProtocolMessages(_conn: Connection): boolean {
-    return true;
   }
 
   // --- lifecycle ----------------------------------------------------------
 
-  /** Adapter calls this once per activation, before routing any messages/alarms. */
+  /** Adapter calls this once per activation, before routing any stimuli. */
   async start(): Promise<void> {
     await this.onStart();
     await this.fiberService.checkInterrupted();
@@ -602,77 +618,6 @@ export class Agent<State = unknown> {
     await this.schedulerService.onAlarm();
   }
 
-  async onConnect(conn: Connection): Promise<void> {
-    const readonly = this.shouldConnectionBeReadonly(conn);
-    this.setConnectionReadonly(conn, readonly);
-
-    if (this.shouldSendProtocolMessages(conn)) {
-      conn.send(
-        JSON.stringify({
-          type: "cf_agent_identity",
-          className: this.host.className,
-          name: this.host.name,
-          connectionId: conn.id,
-        }),
-      );
-      if (this.stateContainer.initialized()) {
-        conn.send(JSON.stringify({ type: "cf_agent_state", state: this.stateContainer.get() }));
-      }
-    }
-
-    this.events.emit("connect", { connectionId: conn.id });
-  }
-
-  async onClose(conn: Connection): Promise<void> {
-    this.events.emit("disconnect", { connectionId: conn.id });
-  }
-
-  async onMessage(conn: Connection, raw: string): Promise<void> {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      await this.onUnhandledMessage(conn, raw);
-      return;
-    }
-
-    try {
-      if (isRecord(parsed) && parsed["type"] === "rpc") {
-        this.ensureCallablesScanned();
-        const request: RpcRequest = {
-          id: String(parsed["id"]),
-          method: String(parsed["method"]),
-          args: Array.isArray(parsed["args"]) ? (parsed["args"] as unknown[]) : [],
-        };
-        await this.callables.dispatch(request, (response) => conn.send(JSON.stringify(response)));
-        return;
-      }
-
-      if (isRecord(parsed) && parsed["type"] === "cf_agent_state") {
-        if (this.isConnectionReadonly(conn)) {
-          conn.send(JSON.stringify({ type: "cf_agent_state_error", error: "connection is read-only" }));
-          return;
-        }
-        try {
-          this.stateContainer.set(parsed["state"] as State, { kind: "connection", connectionId: conn.id });
-        } catch (err) {
-          conn.send(JSON.stringify({ type: "cf_agent_state_error", error: toErrorValue(err).message }));
-        }
-        return;
-      }
-
-      await this.onUnhandledMessage(conn, parsed);
-    } catch (err) {
-      await this.onError(err);
-    }
-  }
-
-  /** Override to handle message types the base router doesn't recognize (Think overrides this). */
-  protected onUnhandledMessage(_conn: Connection, _message: unknown): void | Promise<void> {}
-
-  /** Override to observe/report errors raised while routing a message. Default: swallow. */
-  protected onError(_error: unknown): void | Promise<void> {}
-
   /** HTTP seam for an adapter's router; no default routing (adapter/edge concern). */
   onRequest(_req: unknown): unknown {
     throw new NotFoundError("onRequest is not implemented");
@@ -684,17 +629,8 @@ export class Agent<State = unknown> {
     }
     this.host.alarm.clear();
     this.host.store.deleteAll();
-    for (const conn of this.host.connections.connections()) {
-      conn.close();
-    }
-    this.events.emit("destroy", {});
+    this.bus.emit("destroy", {});
     await this.host.onDestroyed?.();
-  }
-
-  // --- misc -----------------------------------------------------------
-
-  broadcast(message: string, exclude?: string[]): void {
-    this.host.connections.broadcast(message, exclude);
   }
 
   get name(): string {

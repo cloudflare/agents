@@ -100,21 +100,21 @@ describe("createStateContainer", () => {
     expect(seen).toEqual([{ kind: "server" }]);
   });
 
-  it("broadcasts the new state, excluding the originating connection for client-driven updates", () => {
-    const broadcasts: Array<{ state: Counter; exclude?: string }> = [];
+  it("broadcasts the new state along with its source, for the caller to decide exclusion", () => {
+    const broadcasts: Array<{ state: Counter; source: StateSource }> = [];
     const container = createStateContainer<Counter>({
       store: createMemoryKeyValueStore(),
       bus: bus(),
       initialState: { count: 0 },
-      broadcast: (state, excludeConnectionId) => broadcasts.push({ state, exclude: excludeConnectionId }),
+      broadcast: (state, source) => broadcasts.push({ state, source }),
     });
 
     container.set({ count: 1 }, { kind: "connection", connectionId: "conn_1" });
     container.set({ count: 2 }, { kind: "server" });
 
     expect(broadcasts).toEqual([
-      { state: { count: 1 }, exclude: "conn_1" },
-      { state: { count: 2 }, exclude: undefined },
+      { state: { count: 1 }, source: { kind: "connection", connectionId: "conn_1" } },
+      { state: { count: 2 }, source: { kind: "server" } },
     ]);
   });
 

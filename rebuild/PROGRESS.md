@@ -52,10 +52,11 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 ## Refactor wave (docs 25-26): transport-free agents
 - [x] domain/events/log.ts — ConversationEventLog (audit 25 §1)
 - [x] Agent exposes scheduler/fibers/keepAlive + registerInternalCallback (audit 26 §5)
-- [ ] app rewire: events out, no Connection/frames; extractions 1-4, 6 (audits 25 §2-3, 26)
+- [x] app rewire: events out, no Connection/frames; extractions 1-4, 6 (audits 25 §2-3, 26)
 - [ ] adapters/websocket-chat + relay; resumable.ts retired; e2e rewired (audit 25 §4-6)
 
 ## Log
+- 2026-07-14: refactor R2 done (1029 tests): app/ transport-free (banned-token test), turn-state + pending-interactions + assembly + maybeParkSuspension + session builder extracted; agent.ts 643 / think.ts 1096 lines (above ~450 target — recovery conversation-dep surgery deferred, inherent delegation surface). EventBus field renamed to `bus`; events() is the ConversationEventLog.
 - 2026-07-14: refactor R1 done (973 tests): ConversationEventLog + Agent protected services; both Think facades and the fake-method dispatch hack deleted.
 - 2026-07-14: refactor audit docs 25 (transport & lifecycle) and 26 (Think decomposition) written; decisions: methods canonical (no command envelope), replay built into the event port, cf_agent_* kept in the WS adapter, extractions bundled.
 - 2026-07-13: e2e wave done (939 tests, 57 files). E2e agent fixed two Think bugs (stable session id across restarts; continuation now commits the repaired partial before re-running). Orchestrator closed three follow-up gaps: delegation summarize() reads UiChunk `delta`; Think.onStart reconciles declared tasks; public inspect/list/cancel/deleteSubmissions on Think. Remaining known gap: no public Think entry point for AgentToolRunService.reconcile() (e2e drives the domain service directly).

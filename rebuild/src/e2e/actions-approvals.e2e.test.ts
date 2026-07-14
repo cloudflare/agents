@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { createMemoryConnection, type MemoryConnection } from "../adapters/memory/transport.js";
 import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import { createFakeModel } from "../adapters/memory/fake-model.js";
 import type { IdSource } from "../kernel/ids.js";
@@ -12,13 +11,17 @@ import {
   type AuthorizationDecision,
   type ReplyAttachment,
 } from "../domain/actions/actions.js";
+import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
 import type { AgentHost } from "../app/agent.js";
 import { Think, type ChatResponseResult } from "../app/think.js";
 
 /**
  * Scenario 5 (audit 24 §5): the HITL (human-in-the-loop) path — idempotent
  * ledger replay, inline approval, durable-pause parking, per-turn
- * authorization, and reply attachments, all through the public Think API.
+ * authorization, and reply attachments, all through the public Think API
+ * (wave R2: no transport — `resolveApproval()` replaces the
+ * `cf_agent_tool_approval` frame; the WS adapter, wave R3, re-covers the
+ * frame-level path).
  */
 
 function counterIds(): IdSource {
@@ -30,15 +33,17 @@ function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string;
   return {
     store: mem.store,
     alarm: mem.alarms,
-    connections: mem.connections,
     clock: mem.clock,
     ids: counterIds(),
     ...opts,
   };
 }
 
-function framesOfType(conn: MemoryConnection, type: string): Array<Record<string, unknown>> {
-  return conn.sent.map((s) => JSON.parse(s) as Record<string, unknown>).filter((f) => f.type === type);
+function eventsOfType<T extends ConversationEvent["type"]>(
+  events: StoredEvent[],
+  type: T,
+): Array<Extract<ConversationEvent, { type: T }>> {
+  return events.map((e) => e.event).filter((e): e is Extract<ConversationEvent, { type: T }> => e.type === type);
 }
 
 class ActionsThink extends Think<unknown> {
@@ -127,26 +132,23 @@ describe("e2e: actions and approvals", () => {
   });
 
   it("approval-gated delete_account: approve executes once; a separate reject settles as output-error without executing", async () => {
-    const { agent, mem } = makeAgent();
+    const { agent } = makeAgent();
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "delete_account", input: { confirm: true }, id: "call_1" },
       { kind: "text", text: "Account deleted." },
     ]);
     await agent.start();
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
+    const events: StoredEvent[] = [];
+    agent.events().subscribe("live", (e) => events.push(e));
 
-    await agent.onMessage(
-      conn,
-      JSON.stringify({ type: "cf_agent_use_chat_request", id: "req_1", input: "delete my account" }),
-    );
+    await agent.chat("delete my account", undefined, { requestId: "req_1" });
 
-    const approvalFrame = framesOfType(conn, "cf_agent_use_chat_response").find(
-      (f) => (f.chunk as { type: string }).type === "tool-approval-requested",
-    );
-    expect(approvalFrame).toBeDefined();
+    const approvalRequested = eventsOfType(events, "chunk")
+      .map((e) => e.chunk)
+      .find((c) => c.type === "tool-approval-requested");
+    expect(approvalRequested).toBeDefined();
 
-    await agent.onMessage(conn, JSON.stringify({ type: "cf_agent_tool_approval", toolCallId: "call_1", approved: true }));
+    await agent.resolveApproval({ toolCallId: "call_1", approved: true });
 
     await vi.waitFor(async () => {
       const messages = await agent.getMessages();
@@ -155,22 +157,15 @@ describe("e2e: actions and approvals", () => {
     expect(agent.actionExecuteCounts.delete_account).toBe(1);
 
     // A fresh turn, rejected this time: settles as output-error, never executes.
-    const { agent: agent2, mem: mem2 } = makeAgent();
+    const { agent: agent2 } = makeAgent();
     agent2.model = createFakeModel([
       { kind: "tool-call", toolName: "delete_account", input: { confirm: true }, id: "call_r" },
       { kind: "text", text: "Okay, not deleting." },
     ]);
     await agent2.start();
-    const conn2 = createMemoryConnection("c2");
-    mem2.connections.add(conn2);
-    await agent2.onMessage(
-      conn2,
-      JSON.stringify({ type: "cf_agent_use_chat_request", id: "req_2", input: "delete my account" }),
-    );
-    await agent2.onMessage(
-      conn2,
-      JSON.stringify({ type: "cf_agent_tool_approval", toolCallId: "call_r", approved: false, reason: "changed my mind" }),
-    );
+    await agent2.chat("delete my account", undefined, { requestId: "req_2" });
+    await agent2.resolveApproval({ toolCallId: "call_r", approved: false, reason: "changed my mind" });
+
     await vi.waitFor(async () => {
       const messages = await agent2.getMessages();
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Okay, not deleting."))).toBe(true);
@@ -183,15 +178,13 @@ describe("e2e: actions and approvals", () => {
   });
 
   it("durable-pause deploy: parks, ends the turn, and approveExecution runs once, writes output, and auto-continues", async () => {
-    const { agent, mem } = makeAgent();
+    const { agent } = makeAgent();
     agent.authorizeTurn = (): AuthorizationDecision => ({ allowed: true, grantedPermissions: ["ops:deploy"] });
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "deploy", input: { env: "prod" }, id: "call_1" },
       { kind: "text", text: "Deployed to prod!" },
     ]);
     await agent.start();
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
 
     const result = await agent.chat("deploy to prod", undefined, { requestId: "req_1" });
     expect(result.outcome).toBe("suspended"); // durable-pause ends the turn
@@ -216,7 +209,7 @@ describe("e2e: actions and approvals", () => {
   });
 
   it("an action outside the turn's granted permissions returns an ActionAuthorizationError value to the model, not a thrown error", async () => {
-    const { agent, mem } = makeAgent();
+    const { agent } = makeAgent();
     agent.authorizeTurn = (_ctx: ActionTurnContext): AuthorizationDecision => ({
       allowed: true,
       grantedPermissions: ["something:else"], // does not include "billing:charge"
@@ -226,13 +219,8 @@ describe("e2e: actions and approvals", () => {
       { kind: "text", text: "Sorry, I couldn't charge that order." },
     ]);
     await agent.start();
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
 
-    await agent.onMessage(
-      conn,
-      JSON.stringify({ type: "cf_agent_use_chat_request", id: "req_1", input: "charge order-9" }),
-    );
+    await agent.chat("charge order-9", undefined, { requestId: "req_1" });
 
     expect(agent.actionExecuteCounts.charge ?? 0).toBe(0);
     const messages = await agent.getMessages();
@@ -248,19 +236,14 @@ describe("e2e: actions and approvals", () => {
   });
 
   it("reply attachments surface in onChatResponse", async () => {
-    const { agent, mem } = makeAgent();
+    const { agent } = makeAgent();
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "charge", input: { orderId: "order-2", amount: 17 }, id: "call_1" },
       { kind: "text", text: "Charged order-2." },
     ]);
     await agent.start();
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
 
-    await agent.onMessage(
-      conn,
-      JSON.stringify({ type: "cf_agent_use_chat_request", id: "req_1", input: "charge order-2" }),
-    );
+    await agent.chat("charge order-2", undefined, { requestId: "req_1" });
 
     // The onChatResponse snapshot is the durable read of a turn's
     // attachments: `clearTurn()` (called right after) drops the per-turn

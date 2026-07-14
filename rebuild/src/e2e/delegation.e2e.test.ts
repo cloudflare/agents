@@ -52,7 +52,6 @@ function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string;
   return {
     store: mem.store,
     alarm: mem.alarms,
-    connections: mem.connections,
     clock: mem.clock,
     ids: counterIds(),
     ...opts,

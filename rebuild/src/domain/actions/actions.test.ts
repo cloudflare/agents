@@ -5,7 +5,8 @@ import { createTestClock } from "../../adapters/memory/clock.js";
 import { createEventBus } from "../../kernel/events.js";
 import { stableHash, type IdSource } from "../../kernel/ids.js";
 import { ValidationError } from "../../kernel/errors.js";
-import type { ToolExecutionContext } from "../tools/types.js";
+import type { AssembledTools } from "../tools/registry.js";
+import type { ToolExecutionContext, ToolSet } from "../tools/types.js";
 import {
   action,
   actionRejectionErrorValue,
@@ -15,6 +16,11 @@ import {
   type ActionContext,
   type ActionServiceDeps,
 } from "./actions.js";
+
+/** Wraps a compiled ToolSet as the slice of AssembledTools maybeParkSuspension reads. */
+function assembled(tools: ToolSet): AssembledTools {
+  return { tools } as AssembledTools;
+}
 
 /** A promise plus externally-callable resolve/reject, for controlling interleaving. */
 function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
@@ -807,5 +813,103 @@ describe("attachments", () => {
     service.clearTurn("req-1");
     expect(service.attachments()).toEqual([{ type: "two" }]);
     expect(service.attachments("req-1")).toEqual([]);
+  });
+});
+
+describe("maybeParkSuspension() (audit 26 extraction 4)", () => {
+  it("parks a durable-pause tool's suspension and returns its executionId", () => {
+    const { service } = harness();
+    const tools = service.compile({
+      deploy: action({
+        description: "deploys",
+        inputSchema: z.object({ env: z.string() }),
+        kind: "durable-pause",
+        approval: true,
+        permissions: ["ops:deploy"],
+        approvalSummary: "Deploy to prod",
+        approvalRisk: "high",
+        execute: (input: { env: string }) => ({ deployed: input.env }),
+      }),
+    });
+
+    const result = service.maybeParkSuspension({
+      requestId: "req-1",
+      pending: [{ toolCallId: "call-1", toolName: "deploy", input: { env: "prod" } }],
+      tools: assembled(tools),
+    });
+
+    expect(result.parked).toBe(true);
+    expect(result.executionId).toBeDefined();
+    const pending = service.pendingApprovals(result.executionId);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.descriptor).toMatchObject({
+      action: "deploy",
+      summary: "Deploy to prod",
+      permissions: ["ops:deploy"],
+      risk: "high",
+      kind: "durable-pause",
+      requestId: "req-1",
+      toolCallId: "call-1",
+    });
+  });
+
+  it("is a no-op (not parked) for a plain approval-gated tool", () => {
+    const { service } = harness();
+    const tools = service.compile({
+      dangerous: action({
+        description: "risky",
+        inputSchema: z.object({}),
+        approval: true,
+        execute: () => "ok",
+      }),
+    });
+
+    const result = service.maybeParkSuspension({
+      requestId: "req-1",
+      pending: [{ toolCallId: "call-1", toolName: "dangerous", input: {} }],
+      tools: assembled(tools),
+    });
+
+    expect(result).toEqual({ parked: false });
+    expect(service.pendingApprovals()).toHaveLength(0);
+  });
+
+  it("is a no-op for a client tool (no server metadata at all)", () => {
+    const { service } = harness();
+    const result = service.maybeParkSuspension({
+      requestId: "req-1",
+      pending: [{ toolCallId: "call-1", toolName: "clientTool", input: {} }],
+      tools: assembled({ clientTool: { description: "client", inputSchema: z.object({}) } }),
+    });
+    expect(result).toEqual({ parked: false });
+  });
+
+  it("is a no-op when there is no pending call", () => {
+    const { service } = harness();
+    const result = service.maybeParkSuspension({ requestId: "req-1", pending: [], tools: assembled({}) });
+    expect(result).toEqual({ parked: false });
+  });
+
+  it("defaults permissions to [] and omits risk when the tool declares neither", () => {
+    const { service } = harness();
+    const tools = service.compile({
+      pause: action({
+        description: "pauses",
+        inputSchema: z.object({}),
+        kind: "durable-pause",
+        approval: true,
+        execute: () => "ok",
+      }),
+    });
+
+    const result = service.maybeParkSuspension({
+      requestId: "req-1",
+      pending: [{ toolCallId: "call-1", toolName: "pause", input: {} }],
+      tools: assembled(tools),
+    });
+
+    const pending = service.pendingApprovals(result.executionId);
+    expect(pending[0]!.descriptor.permissions).toEqual([]);
+    expect(pending[0]!.descriptor.risk).toBeUndefined();
   });
 });

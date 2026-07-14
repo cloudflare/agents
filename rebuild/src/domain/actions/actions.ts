@@ -6,6 +6,7 @@ import { normalizeJson, truncateForModel, tryNormalizeJson } from "../../kernel/
 import type { Clock } from "../../ports/clock.js";
 import { scoped, type KeyValueStore } from "../../ports/storage.js";
 import type { ChatMessage } from "../messages/model.js";
+import type { AssembledTools } from "../tools/registry.js";
 import type { Tool, ToolExecutionContext, ToolSet } from "../tools/types.js";
 
 // ---------------------------------------------------------------------------
@@ -167,6 +168,19 @@ export interface ActionService {
   attachments(requestId?: string): ReplyAttachment[];
   /** Drops per-turn grant/attachment state. */
   clearTurn(requestId: string): void;
+  /**
+   * Audit 26 extraction 4: the interpreter of the `durablePause`/
+   * `resolvePermissions`/`approvalRisk` tool metadata `compile()` wrote is
+   * this service, not the turn-orchestration layer. Called with a suspended
+   * turn's first pending tool call; parks it (durably) when that tool is a
+   * durable-pause action, otherwise a no-op. Think's outcome handling calls
+   * this and otherwise stays metadata-blind.
+   */
+  maybeParkSuspension(args: {
+    requestId: string;
+    pending: ReadonlyArray<{ toolCallId: string; toolName: string; input: unknown }>;
+    tools: AssembledTools;
+  }): { parked: boolean; executionId?: string };
 }
 
 export interface ActionServiceDeps {
@@ -460,6 +474,22 @@ export function createActionService(deps: ActionServiceDeps): ActionService {
     };
   }
 
+  function parkExecution(descriptor: ActionApprovalDescriptor): string {
+    const executionId = deps.ids.newId("exec");
+    const row: PendingApproval = {
+      executionId,
+      descriptor,
+      input: descriptor.input,
+      requestId: descriptor.requestId,
+      toolCallId: descriptor.toolCallId,
+      status: "parked",
+      createdAt: deps.clock.now(),
+    };
+    parked.put(executionId, row);
+    deps.bus.emit("tool:approval:parked", { executionId, action: descriptor.action });
+    return executionId;
+  }
+
   function getParked(executionId: string): PendingApproval {
     const row = parked.get<PendingApproval>(executionId);
     if (!row) throw new NotFoundError(`No parked execution "${executionId}"`);
@@ -485,19 +515,7 @@ export function createActionService(deps: ActionServiceDeps): ActionService {
     },
 
     park(descriptor) {
-      const executionId = deps.ids.newId("exec");
-      const row: PendingApproval = {
-        executionId,
-        descriptor,
-        input: descriptor.input,
-        requestId: descriptor.requestId,
-        toolCallId: descriptor.toolCallId,
-        status: "parked",
-        createdAt: deps.clock.now(),
-      };
-      parked.put(executionId, row);
-      deps.bus.emit("tool:approval:parked", { executionId, action: descriptor.action });
-      return executionId;
+      return parkExecution(descriptor);
     },
 
     pendingApprovals(executionId) {
@@ -559,6 +577,29 @@ export function createActionService(deps: ActionServiceDeps): ActionService {
     clearTurn(requestId) {
       grants.delete(requestId);
       turnAttachments.delete(requestId);
+    },
+
+    maybeParkSuspension(args) {
+      const call = args.pending[0];
+      if (!call) return { parked: false };
+      const toolDef = args.tools.tools[call.toolName];
+      const meta = (toolDef?.metadata ?? {}) as Record<string, unknown>;
+      if (meta.durablePause !== true) return { parked: false };
+
+      const resolvePermissionsFn = meta.resolvePermissions as ((input: unknown) => readonly string[]) | undefined;
+      const descriptor: ActionApprovalDescriptor = {
+        requestId: args.requestId,
+        toolCallId: call.toolCallId,
+        action: String(meta.action ?? call.toolName),
+        summary: String(meta.approvalSummary ?? call.toolName),
+        input: call.input,
+        permissions: resolvePermissionsFn ? resolvePermissionsFn(call.input) : [],
+        kind: "durable-pause",
+      };
+      if (meta.approvalRisk) descriptor.risk = meta.approvalRisk as ApprovalRisk;
+
+      const executionId = parkExecution(descriptor);
+      return { parked: true, executionId };
     },
   };
 }

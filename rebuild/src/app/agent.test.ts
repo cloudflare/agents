@@ -1,13 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMemoryConnection } from "../adapters/memory/transport.js";
 import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import { createMemoryWorkflowRuntime } from "../adapters/memory/workflow-runtime.js";
 import { createMemoryEmailTransport } from "../adapters/memory/email.js";
 import { createMemoryAgentSpawner } from "../adapters/memory/spawner.js";
 import type { IdSource } from "../kernel/ids.js";
 import { callable, type StreamingResponse } from "../domain/rpc/callable.js";
+import type { StoredEvent } from "../domain/events/log.js";
 import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/fibers/fibers.js";
-import type { Connection } from "../ports/transport.js";
 import { Agent, type AgentHost } from "./agent.js";
 
 interface CountState {
@@ -19,12 +18,11 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-/** Builds a plain AgentHost (no bus field — Agent creates its own) over a MemoryHost. */
+/** Builds a plain AgentHost (no connections/bus field — Agent creates its own) over a MemoryHost. */
 function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
   return {
     store: mem.store,
     alarm: mem.alarms,
-    connections: mem.connections,
     clock: mem.clock,
     ids: counterIds(),
     ...opts,
@@ -36,10 +34,9 @@ class TestAgent extends Agent<CountState> {
   received: Array<{ payload: unknown }> = [];
   queueReceived: unknown[] = [];
   fiberRecoveries: FiberRecoveryContext[] = [];
-  unhandled: unknown[] = [];
-  errors: unknown[] = [];
   stateChanges: Array<{ state: CountState; source: unknown }> = [];
   rejectState = false;
+  readonlyMeta: Record<string, unknown> | undefined;
 
   protected override getInitialState(): CountState {
     return { count: 0 };
@@ -86,12 +83,9 @@ class TestAgent extends Agent<CountState> {
     return { status: "completed" };
   }
 
-  protected override onUnhandledMessage(_conn: Connection, message: unknown): void {
-    this.unhandled.push(message);
-  }
-
-  protected override onError(error: unknown): void {
-    this.errors.push(error);
+  protected override shouldConnectionBeReadonly(meta: Record<string, unknown>): boolean {
+    this.readonlyMeta = meta;
+    return false;
   }
 }
 
@@ -104,6 +98,12 @@ function makeAgent(className = "TestAgent", name = "a1"): { agent: TestAgent; me
   const agent = new TestAgent(host);
   mem.attachAgent(agent);
   return { agent, mem, host };
+}
+
+function collectEvents(agent: Agent<unknown>): StoredEvent[] {
+  const collected: StoredEvent[] = [];
+  agent.events().subscribe("live", (e) => collected.push(e));
+  return collected;
 }
 
 describe("Agent construction + start ordering", () => {
@@ -206,7 +206,7 @@ describe("scheduler dispatch table", () => {
   it("emits schedule:error for a schedule whose callback has no matching method", async () => {
     const { agent, mem } = makeAgent();
     const events: string[] = [];
-    agent.events.subscribe("*", (e) => events.push(e.type));
+    agent.bus.subscribe("*", (e) => events.push(e.type));
     agent.schedule(new Date(mem.clock.now() + 1000), "noSuchMethod");
     mem.clock.advance(1000);
     await vi.waitFor(() => expect(events).toContain("schedule:error"));
@@ -232,26 +232,19 @@ describe("task queue dispatch", () => {
   });
 });
 
-describe("rpc frame round-trip", () => {
-  it("dispatches a non-streaming @callable method over a connection and replies", async () => {
-    const { agent, mem } = makeAgent();
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
-    await agent.onMessage(conn, JSON.stringify({ type: "rpc", id: "r1", method: "add", args: [2, 3] }));
-    expect(conn.sent).toHaveLength(1);
-    expect(JSON.parse(conn.sent[0]!)).toEqual({ type: "rpc", id: "r1", success: true, result: 5, done: true });
+describe("rpc dispatch surface", () => {
+  it("callables().dispatch() runs a non-streaming @callable method and replies via the responder", async () => {
+    const { agent } = makeAgent();
+    const responses: unknown[] = [];
+    await agent.callables().dispatch({ id: "r1", method: "add", args: [2, 3] }, (r) => responses.push(r));
+    expect(responses).toEqual([{ type: "rpc", id: "r1", success: true, result: 5, done: true }]);
   });
 
   it("streams chunks for a streaming @callable method", async () => {
-    const { agent, mem } = makeAgent();
-    const conn = createMemoryConnection("c2");
-    mem.connections.add(conn);
-    await agent.onMessage(
-      conn,
-      JSON.stringify({ type: "rpc", id: "r2", method: "streamCount", args: [3] }),
-    );
-    const frames = conn.sent.map((s) => JSON.parse(s));
-    expect(frames).toEqual([
+    const { agent } = makeAgent();
+    const responses: unknown[] = [];
+    await agent.callables().dispatch({ id: "r2", method: "streamCount", args: [3] }, (r) => responses.push(r));
+    expect(responses).toEqual([
       { type: "rpc", id: "r2", success: true, result: 0, done: false },
       { type: "rpc", id: "r2", success: true, result: 1, done: false },
       { type: "rpc", id: "r2", success: true, result: 2, done: false },
@@ -267,144 +260,76 @@ describe("rpc frame round-trip", () => {
   });
 });
 
-describe("state update from a connection", () => {
-  it("broadcasts a server-side setState to all connections", async () => {
-    const { agent, mem } = makeAgent();
-    const c1 = createMemoryConnection("c1");
-    const c2 = createMemoryConnection("c2");
-    mem.connections.add(c1);
-    mem.connections.add(c2);
+describe("state changes publish state:changed events", () => {
+  it("setState() publishes a state:changed event with a server origin", async () => {
+    const { agent } = makeAgent();
+    const events = collectEvents(agent);
 
     agent.setState({ count: 5 });
 
-    expect(c1.sent).toHaveLength(1);
-    expect(c2.sent).toHaveLength(1);
-    expect(JSON.parse(c1.sent[0]!)).toEqual({ type: "cf_agent_state", state: { count: 5 } });
+    expect(events).toHaveLength(1);
+    expect(events[0]!.event).toEqual({ type: "state:changed", state: { count: 5 }, origin: { kind: "server" } });
   });
 
-  it("applies a client cf_agent_state update and broadcasts it excluding the source connection", async () => {
-    const { agent, mem } = makeAgent();
-    const source = createMemoryConnection("src");
-    const other = createMemoryConnection("other");
-    mem.connections.add(source);
-    mem.connections.add(other);
+  it("setState() with a client origin publishes state:changed carrying the sourceId", async () => {
+    const { agent } = makeAgent();
+    const events = collectEvents(agent);
 
-    await agent.onMessage(source, JSON.stringify({ type: "cf_agent_state", state: { count: 7 } }));
+    agent.setState({ count: 7 }, { kind: "client", sourceId: "conn_1" });
 
     expect(agent.state).toEqual({ count: 7 });
-    expect(source.sent).toHaveLength(0);
-    expect(other.sent).toHaveLength(1);
-    expect(JSON.parse(other.sent[0]!)).toEqual({ type: "cf_agent_state", state: { count: 7 } });
+    expect(events[0]!.event).toEqual({
+      type: "state:changed",
+      state: { count: 7 },
+      origin: { kind: "client", sourceId: "conn_1" },
+    });
     expect(agent.stateChanges).toHaveLength(1);
   });
 
-  it("rejects a readonly connection's state update with a cf_agent_state_error frame", async () => {
-    const { agent, mem } = makeAgent();
-    const conn = createMemoryConnection("ro");
-    mem.connections.add(conn);
-    agent.setConnectionReadonly(conn, true);
-
-    await agent.onMessage(conn, JSON.stringify({ type: "cf_agent_state", state: { count: 99 } }));
-
-    expect(conn.sent).toHaveLength(1);
-    const frame = JSON.parse(conn.sent[0]!);
-    expect(frame.type).toBe("cf_agent_state_error");
-    expect(agent.state).toEqual({ count: 0 });
-  });
-
-  it("rejects a validated state update with a cf_agent_state_error frame, leaving old state", async () => {
-    const { agent, mem } = makeAgent();
-    const conn = createMemoryConnection("v1");
-    mem.connections.add(conn);
+  it("a rejected state change (validate throws) publishes no event and leaves the old state", async () => {
+    const { agent } = makeAgent();
     agent.rejectState = true;
+    const events = collectEvents(agent);
 
-    await agent.onMessage(conn, JSON.stringify({ type: "cf_agent_state", state: { count: 42 } }));
+    expect(() => agent.setState({ count: 99 }, { kind: "client", sourceId: "v1" })).toThrow();
 
-    const frame = JSON.parse(conn.sent[0]!);
-    expect(frame.type).toBe("cf_agent_state_error");
+    expect(events).toHaveLength(0);
     expect(agent.state).toEqual({ count: 0 });
-  });
-
-  it("routes unrecognized message types to onUnhandledMessage", async () => {
-    const { agent, mem } = makeAgent();
-    const conn = createMemoryConnection("u1");
-    mem.connections.add(conn);
-    await agent.onMessage(conn, JSON.stringify({ type: "custom", foo: "bar" }));
-    expect(agent.unhandled).toEqual([{ type: "custom", foo: "bar" }]);
   });
 });
 
-describe("connect / close lifecycle", () => {
-  it("onConnect sends an identity frame and the current state frame, and emits a connect event", async () => {
-    const { agent, mem } = makeAgent();
-    const events: string[] = [];
-    agent.events.subscribe("*", (e) => events.push(e.type));
-    const conn = createMemoryConnection("conn1");
-    mem.connections.add(conn);
-
-    await agent.onConnect(conn);
-
-    const frames = conn.sent.map((s) => JSON.parse(s));
-    expect(frames[0]).toMatchObject({ type: "cf_agent_identity", className: "TestAgent", name: "a1", connectionId: "conn1" });
-    expect(frames[1]).toEqual({ type: "cf_agent_state", state: { count: 0 } });
-    expect(events).toContain("connect");
-  });
-
-  it("onClose emits a disconnect event", async () => {
-    const { agent } = makeAgent();
-    const events: string[] = [];
-    agent.events.subscribe("*", (e) => events.push(e.type));
-    const conn = createMemoryConnection("conn1");
-    await agent.onClose(conn);
-    expect(events).toContain("disconnect");
-  });
-
-  it("shouldSendProtocolMessages(conn) can suppress identity/state frames", async () => {
-    class QuietAgent extends TestAgent {
-      protected override shouldSendProtocolMessages(): boolean {
-        return false;
-      }
-    }
-    const mem = createMemoryHost({ agent: "QuietAgent", name: "a1" });
-    const host = toHost(mem, { className: "QuietAgent", name: "a1" });
-    const agent = new QuietAgent(host);
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
-    await agent.onConnect(conn);
-    expect(conn.sent).toHaveLength(0);
-  });
-
-  it("shouldConnectionBeReadonly(conn) marks a connection readonly at connect time", async () => {
+describe("readonly policy predicate", () => {
+  it("shouldConnectionBeReadonly(meta) is a plain overridable predicate, not connection-bound", () => {
     class ReadonlyAgent extends TestAgent {
-      protected override shouldConnectionBeReadonly(): boolean {
-        return true;
+      protected override shouldConnectionBeReadonly(meta: Record<string, unknown>): boolean {
+        this.readonlyMeta = meta;
+        return meta.role === "viewer";
       }
     }
     const mem = createMemoryHost({ agent: "ReadonlyAgent", name: "a1" });
     const host = toHost(mem, { className: "ReadonlyAgent", name: "a1" });
     const agent = new ReadonlyAgent(host);
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
-    await agent.onConnect(conn);
-    expect(agent.isConnectionReadonly(conn)).toBe(true);
+    // Exercised indirectly: the predicate is a protected hook an adapter (not
+    // this test) would call directly with its own connection metadata. Cast
+    // to reach the protected member the way an adapter subclassing or
+    // composing over Agent would.
+    const isReadonly = (agent as unknown as { shouldConnectionBeReadonly(meta: Record<string, unknown>): boolean }).shouldConnectionBeReadonly({ role: "viewer" });
+    expect(isReadonly).toBe(true);
+    expect(agent.readonlyMeta).toEqual({ role: "viewer" });
   });
 });
 
 describe("destroy()", () => {
-  it("cancels all schedules, clears storage, closes connections, and clears the alarm", async () => {
+  it("cancels all schedules, clears storage, and clears the alarm", async () => {
     const { agent, mem } = makeAgent();
     agent.schedule(new Date(mem.clock.now() + 5000), "myCallback");
     agent.setState({ count: 3 });
-    const conn = createMemoryConnection("c1");
-    mem.connections.add(conn);
-    await agent.onConnect(conn);
 
     await agent.destroy();
 
     expect(agent.listSchedules()).toHaveLength(0);
     expect(mem.alarms.get()).toBeNull();
     expect(mem.store.list().size).toBe(0);
-    expect(conn.closed).toBe(true);
   });
 
   it("calls host.onDestroyed() if provided", async () => {
@@ -541,7 +466,7 @@ describe("email", () => {
     const host = toHost(mem, { className: "TestAgent", name: "a1", email });
     const agent = new TestAgent(host);
     const events: string[] = [];
-    agent.events.subscribe("*", (e) => events.push(e.type));
+    agent.bus.subscribe("*", (e) => events.push(e.type));
 
     const result = await agent.sendEmail({ from: "a@b.com", to: "c@d.com", subject: "hi" });
     expect(result.messageId).toBeDefined();
@@ -555,22 +480,27 @@ describe("email", () => {
   });
 });
 
+describe("events() / identity()", () => {
+  it("events() is the durable, offset-addressed outbound port", () => {
+    const { agent } = makeAgent();
+    expect(agent.events().head()).toBe(0);
+    agent.setState({ count: 1 });
+    expect(agent.events().head()).toBe(1);
+    const read = agent.events().read(0);
+    expect(read.kind).toBe("events");
+  });
+
+  it("identity() reports className and name", () => {
+    const { agent } = makeAgent("TestAgent", "abc");
+    expect(agent.identity()).toEqual({ className: "TestAgent", name: "abc" });
+  });
+});
+
 describe("misc", () => {
   it("exposes name and className from the host", () => {
     const { agent } = makeAgent("TestAgent", "abc");
     expect(agent.name).toBe("abc");
     expect(agent.className).toBe("TestAgent");
-  });
-
-  it("broadcast() sends to all connections, honoring exclusions", () => {
-    const { agent, mem } = makeAgent();
-    const c1 = createMemoryConnection("c1");
-    const c2 = createMemoryConnection("c2");
-    mem.connections.add(c1);
-    mem.connections.add(c2);
-    agent.broadcast("hello", ["c2"]);
-    expect(c1.sent).toEqual(["hello"]);
-    expect(c2.sent).toEqual([]);
   });
 
   it("a plain Agent subclass with no overrides constructs and starts cleanly", async () => {

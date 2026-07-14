@@ -1,6 +1,5 @@
-import { AbortedError, NotFoundError, ValidationError, toErrorValue, type ErrorValue } from "../kernel/errors.js";
+import { AbortedError, ValidationError, toErrorValue, type ErrorValue } from "../kernel/errors.js";
 import { scoped } from "../ports/storage.js";
-import type { Connection } from "../ports/transport.js";
 import type { ModelChunk, ModelClient, ModelMessage } from "../ports/model.js";
 import type { FetchLike } from "../ports/http.js";
 
@@ -19,8 +18,6 @@ import {
 } from "../domain/turn/loop.js";
 import {
   assistantMessage,
-  isToolPart,
-  toolName,
   userMessage,
   type ChatMessage,
   type MessagePart,
@@ -28,17 +25,17 @@ import {
 } from "../domain/messages/model.js";
 import { repairTranscript } from "../domain/messages/repair.js";
 import { createAccumulator, type UiChunk } from "../domain/stream/chunks.js";
-import { createResumableStreamBuffer, type ResumableStreamBuffer } from "../domain/stream/resumable.js";
-import {
-  assembleTools,
-  type AfterToolCallContext,
-  type AssembledTools,
-  type BeforeToolCallContext,
-  type ToolCallDecision,
-  type ToolHooks,
-  type ToolSources,
+import { createConversationTurnState, type ConversationTurnState } from "../domain/chat/turn-state.js";
+import { createPendingInteractions, type PendingInteractions } from "../domain/chat/continuation.js";
+import { assembleTurn } from "../domain/chat/assembly.js";
+import type {
+  AfterToolCallContext,
+  AssembledTools,
+  BeforeToolCallContext,
+  ToolCallDecision,
+  ToolHooks,
 } from "../domain/tools/registry.js";
-import type { Tool, ToolExecutionContext, ToolSet } from "../domain/tools/types.js";
+import type { Tool, ToolSet } from "../domain/tools/types.js";
 import {
   createSession,
   type ContextProviderLike,
@@ -47,22 +44,19 @@ import {
   type SessionConfig,
   type SessionStatus,
 } from "../domain/session/session.js";
-import type { CompactionConfig } from "../domain/session/compaction.js";
+import { SessionBuilderImpl, type SessionBuilder } from "../domain/session/builder.js";
 import {
   createSubmissionService,
   type SubmissionRecord,
   type SubmissionService,
 } from "../domain/submissions/submissions.js";
 import {
-  actionRejectionErrorValue,
   createActionService,
   type Action,
   type ActionAuthorizationContext,
   type ActionService,
   type ActionTurnContext,
-  type ApprovalRisk,
   type AuthorizationDecision,
-  type ParkedResolution,
   type PendingApproval,
   type ReplyAttachment,
 } from "../domain/actions/actions.js";
@@ -106,7 +100,7 @@ import { createSubAgentRegistry } from "../domain/delegation/registry.js";
 import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/fibers/fibers.js";
 
 // ---------------------------------------------------------------------------
-// Public wire/API types
+// Public API types
 // ---------------------------------------------------------------------------
 
 /** Relay handed to `chat()` for sub-agent / streaming callers. Structurally the delegation module's ChildChatRelay. */
@@ -144,51 +138,8 @@ export interface ChatErrorContext {
   classification?: ChatErrorClassification;
 }
 
-// ---------------------------------------------------------------------------
-// Session builder (audit 23 "configureSession(builder)")
-// ---------------------------------------------------------------------------
-
-export interface SessionBuilder {
-  withContext(
-    label: string,
-    opts?: { description?: string; maxTokens?: number; provider?: ContextProviderLike },
-  ): SessionBuilder;
-  /** Marks the base instructions block with a token budget; content still comes from getSystemPrompt(). */
-  withCachedPrompt(opts?: { maxTokens?: number }): SessionBuilder;
-  onCompaction(summarize: (prompt: string) => Promise<string>, opts?: Omit<CompactionConfig, "summarize">): SessionBuilder;
-  compactAfter(tokens: number): SessionBuilder;
-}
-
-class SessionBuilderImpl implements SessionBuilder {
-  readonly extraBlocks: ContextBlockConfig[] = [];
-  baseMaxTokens: number | undefined;
-  compaction: CompactionConfig | undefined;
-
-  withContext(label: string, opts?: { description?: string; maxTokens?: number; provider?: ContextProviderLike }): SessionBuilder {
-    const block: ContextBlockConfig = { label };
-    if (opts?.description !== undefined) block.description = opts.description;
-    if (opts?.maxTokens !== undefined) block.maxTokens = opts.maxTokens;
-    if (opts?.provider !== undefined) block.provider = opts.provider;
-    this.extraBlocks.push(block);
-    return this;
-  }
-
-  withCachedPrompt(opts?: { maxTokens?: number }): SessionBuilder {
-    this.baseMaxTokens = opts?.maxTokens;
-    return this;
-  }
-
-  onCompaction(summarize: (prompt: string) => Promise<string>, opts?: Omit<CompactionConfig, "summarize">): SessionBuilder {
-    this.compaction = { ...(opts ?? {}), summarize };
-    return this;
-  }
-
-  compactAfter(tokens: number): SessionBuilder {
-    const base = this.compaction ?? { summarize: async (prompt: string) => prompt };
-    this.compaction = { ...base, compactAfterTokens: tokens };
-    return this;
-  }
-}
+/** Re-exported for API compatibility (moved to domain/session/builder.ts per audit 26 extraction 6). */
+export type { SessionBuilder } from "../domain/session/builder.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -214,7 +165,6 @@ interface AdmittedTurnSpec {
   newMessages: ChatMessage[];
   channelId?: string;
   clientTools?: ToolSet;
-  callback?: StreamCallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,10 +172,9 @@ interface AdmittedTurnSpec {
 // ---------------------------------------------------------------------------
 
 /**
- * Think composes the chat domain services over Agent. Like Agent, it is a
- * thin composition root: every real decision lives in a domain module; this
- * class wires them together, exposes the chat entry points, and speaks the
- * `cf_agent_*` WebSocket protocol over Agent's `onUnhandledMessage` seam.
+ * Think composes the chat domain services over Agent: a thin composition
+ * root wiring domain modules and exposing chat entry points. It never speaks
+ * a wire protocol — only typed methods and `ConversationEvent`s (audit 25).
  */
 export class Think<State = unknown> extends Agent<State> {
   // --- configuration surface: plain overridable values (audit 23 table) ----
@@ -262,45 +211,45 @@ export class Think<State = unknown> extends Agent<State> {
   // --- eagerly-built services (safe: only capture callbacks, never bare config values) ---
   private readonly turnQueue: TurnQueue;
   private readonly turnEngine: TurnEngine;
-  private readonly resumableBuffer: ResumableStreamBuffer;
+  private readonly turnState: ConversationTurnState;
   private readonly submissionService: SubmissionService;
   private readonly channelService: ChannelService;
   private readonly scheduledTaskService: ScheduledTaskService;
   private readonly workspace: Workspace;
   private readonly agentRunsService?: AgentToolRunService;
 
-  // --- lazily-built on first use (onStart / defensive) so subclass field
-  // overrides — which only apply once the *subclass's own* constructor has
-  // finished — are seen (Think's constructor runs first and would otherwise
-  // silently capture its own defaults). See report for rationale. ---
+  // --- lazily-built on first use so subclass field overrides (which only
+  // apply once the subclass's own constructor has finished) are seen. ---
   private runtimeInitialized = false;
   private actionService!: ActionService;
   private overflowGuardService!: OverflowGuard;
   private chatRecoveryService!: ChatRecovery;
+  private pendingInteractions!: PendingInteractions;
 
   private sessionInstance?: Session;
   private skillRegistryInstance?: SkillRegistry;
 
-  private readonly continuationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** In-memory only: adapters use this for the resume handshake; not durable across eviction (matches the turn queue's own liveness). */
+  private activeTurnInfo: { requestId: string; startOffset: number } | null = null;
 
   constructor(host: AgentHost) {
     super(host);
 
     this.turnQueue = createTurnQueue();
-    this.turnEngine = createTurnEngine({ clock: host.clock, ids: this.ids, bus: this.events });
-    this.resumableBuffer = createResumableStreamBuffer({ store: scoped(host.store, "think:stream:"), clock: host.clock });
+    this.turnEngine = createTurnEngine({ clock: host.clock, ids: this.ids, bus: this.bus });
+    this.turnState = createConversationTurnState({ store: scoped(host.store, "think:turnstate:") });
     this.workspace = createWorkspace({ store: scoped(host.store, "think:ws:"), clock: host.clock });
 
     this.submissionService = createSubmissionService({
       store: scoped(host.store, "think:"),
       clock: host.clock,
       ids: this.ids,
-      bus: this.events,
+      bus: this.bus,
       runSubmission: (record, signal) => this.runSubmissionTurn(record, signal),
     });
 
     this.channelService = createChannelService({
-      bus: this.events,
+      bus: this.bus,
       transcriptNotice: (text, informModel) => this.appendTranscriptNotice(text, informModel),
     });
 
@@ -309,7 +258,7 @@ export class Think<State = unknown> extends Agent<State> {
       scheduler: this.schedulerService,
       submissions: this.submissionService,
       clock: host.clock,
-      bus: this.events,
+      bus: this.bus,
       defaultTimezone: () => this.getDefaultTimezone(),
       declarations: () => this.getScheduledTasks(),
     });
@@ -324,8 +273,8 @@ export class Think<State = unknown> extends Agent<State> {
         registry,
         clock: host.clock,
         ids: this.ids,
-        bus: this.events,
-        onEvent: (runId, event) => this.broadcast(JSON.stringify({ type: "cf_agent_tool_run_event", runId, event })),
+        bus: this.bus,
+        onEvent: (runId, event) => this.publishEvent({ type: "run:event", runId, event }),
         hooks: {
           onRunStart: (run) => this.onAgentToolStart?.(run),
           onRunFinish: (run) => this.onAgentToolFinish?.(run),
@@ -334,16 +283,17 @@ export class Think<State = unknown> extends Agent<State> {
       });
     }
 
-    // Drives the cf_agent_chat_recovering broadcast from the recovery module's events.
-    this.events.subscribe("chat", (e) => {
+    // Drives the recovering:changed event from the recovery module's telemetry.
+    this.bus.subscribe("chat", (e) => {
+      const requestId = typeof e.payload.requestId === "string" ? e.payload.requestId : undefined;
       if (e.type === "chat:recovery:scheduled") {
-        this.broadcast(JSON.stringify({ type: "cf_agent_chat_recovering", active: true }));
+        this.publishEvent({ type: "recovering:changed", active: true, ...(requestId ? { requestId } : {}) });
       } else if (
         e.type === "chat:recovery:completed" ||
         e.type === "chat:recovery:exhausted" ||
         e.type === "chat:recovery:skipped"
       ) {
-        this.broadcast(JSON.stringify({ type: "cf_agent_chat_recovering", active: false }));
+        this.publishEvent({ type: "recovering:changed", active: false, ...(requestId ? { requestId } : {}) });
       }
     });
   }
@@ -429,34 +379,54 @@ export class Think<State = unknown> extends Agent<State> {
       store: scoped(this.host.store, "think:"),
       clock: this.host.clock,
       ids: this.ids,
-      bus: this.events,
+      bus: this.bus,
       ...(this.authorizeTurn ? { authorizeTurn: (ctx: ActionTurnContext) => this.authorizeTurn!(ctx) } : {}),
       ...(this.authorizeAction ? { authorizeAction: (ctx: ActionAuthorizationContext) => this.authorizeAction!(ctx) } : {}),
       pendingRetryLeaseMs: this.actionLedgerPendingRetryLeaseMs,
-      onResolved: (executionId, resolution) => this.onActionResolved(executionId, resolution),
+      onResolved: (executionId, resolution) => this.pendingInteractions.onExecutionResolved(executionId, resolution),
     });
 
     this.overflowGuardService = createOverflowGuard({
       ...(this.contextOverflow ? { config: this.contextOverflow } : {}),
       ...(this.classifyChatError ? { classify: this.classifyChatError } : {}),
       compact: () => this.compactSession(),
-      bus: this.events,
+      bus: this.bus,
     });
 
+    // recovery.ts's `conversation` dep keeps its 5-closure shape (report);
+    // the closures are now backed by turnState instead of ad hoc bookkeeping.
     this.chatRecoveryService = createChatRecovery({
       store: scoped(this.host.store, "think:"),
       fibers: this.fiberService,
       clock: this.host.clock,
       ids: this.ids,
-      bus: this.events,
+      bus: this.bus,
       policy: this.resolvedRecoveryPolicy(),
       conversation: {
-        lastRequestId: () => this.getLastRequestId(),
-        partialAssistant: (requestId) => this.partialAssistantFor(requestId),
+        lastRequestId: () => this.turnState.lastRequestId(),
+        partialAssistant: (requestId) => this.turnState.partialFor(requestId),
         scheduleRetry: async (input, incident) => this.scheduleRecoveryRetry(input.requestId, incident),
         scheduleContinuation: async (incident) => this.scheduleRecoveryContinuation(incident),
         terminalize: (incident, message) => this.terminalizeRecovery(incident, message),
       },
+    });
+
+    this.pendingInteractions = createPendingInteractions({
+      session: () => this.ensureSession(),
+      actions: this.actionService,
+      tools: async () => {
+        const requestId = this.turnState.lastRequestId();
+        const channelId = requestId ? this.turnState.channelFor(requestId) : undefined;
+        return (await this.buildAssembly(channelId, undefined)).tools;
+      },
+      requestId: () => this.turnState.lastRequestId(),
+      publish: (e) => this.publishEvent(e),
+      requestContinuation: () => {
+        void this.continueLastTurn().catch((err: unknown) => {
+          this.bus.emit("chat:continuation:failed", { error: toErrorValue(err) });
+        });
+      },
+      debounceMs: this.chatToolResultDebounceMs,
     });
   }
 
@@ -479,6 +449,11 @@ export class Think<State = unknown> extends Agent<State> {
   protected override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void | FiberRecoveryResult> {
     this.ensureRuntime();
     return this.chatRecoveryService.onFiberRecovered(ctx);
+  }
+
+  override async destroy(): Promise<void> {
+    this.pendingInteractions?.cancelPending();
+    await super.destroy();
   }
 
   // ==========================================================================
@@ -505,8 +480,8 @@ export class Think<State = unknown> extends Agent<State> {
       // the moment a fresh instance is constructed over the same store.
       sessionId: "main",
       blocks: [baseBlock, ...configured.extraBlocks],
-      onStatus: (s) => this.broadcastSessionStatus(s),
-      onCompactionError: (e) => this.events.emit("chat:context:compaction_error", { error: toErrorValue(e) }),
+      onStatus: (s) => this.publishSessionStatus(s),
+      onCompactionError: (e) => this.bus.emit("chat:context:compaction_error", { error: toErrorValue(e) }),
     };
     if (configured.compaction) config.compaction = configured.compaction;
 
@@ -532,49 +507,13 @@ export class Think<State = unknown> extends Agent<State> {
     return { shortened: after < before };
   }
 
-  private broadcastSessionStatus(status: SessionStatus): void {
-    this.broadcast(
-      JSON.stringify({
-        type: "cf_agent_session",
-        phase: status.phase,
-        tokenEstimate: status.tokenEstimate,
-        tokenThreshold: status.tokenThreshold,
-      }),
-    );
-  }
-
-  // ==========================================================================
-  // Per-request durable bookkeeping (small KV records, synchronous)
-  // ==========================================================================
-
-  private partialKey(requestId: string): string {
-    return `think:reqmsg:${requestId}`;
-  }
-
-  private channelKey(requestId: string): string {
-    return `think:reqchannel:${requestId}`;
-  }
-
-  private recordPartial(requestId: string, message: ChatMessage): void {
-    this.host.store.put(this.partialKey(requestId), message);
-  }
-
-  private partialAssistantFor(requestId: string): ChatMessage | undefined {
-    return this.host.store.get<ChatMessage>(this.partialKey(requestId));
-  }
-
-  private getLastRequestId(): string | undefined {
-    return this.host.store.get<string>("think:lastRequestId");
-  }
-
-  private setLastRequestId(id: string): void {
-    this.host.store.put("think:lastRequestId", id);
-  }
-
-  private async findMessage(id: string): Promise<ChatMessage | undefined> {
-    const session = await this.ensureSession();
-    const history = await session.getHistory();
-    return history.find((m) => m.id === id);
+  private publishSessionStatus(status: SessionStatus): void {
+    this.publishEvent({
+      type: "session:status",
+      phase: status.phase,
+      tokenEstimate: status.tokenEstimate,
+      ...(status.tokenThreshold !== undefined ? { tokenThreshold: status.tokenThreshold } : {}),
+    });
   }
 
   // ==========================================================================
@@ -589,44 +528,28 @@ export class Think<State = unknown> extends Agent<State> {
     const skills = await this.ensureSkills();
     const policy = await this.channelService.policyFor(channelId);
 
-    const builtin: ToolSet = {
-      ...(this.workspaceTools ? createWorkspaceTools(this.workspace) : {}),
-      ...(await session.tools()),
-      ...skills.tools(),
-    };
-    const external: ToolSet = this.fetchTools
-      ? createFetchTools(this.fetchTools, {
-          fetch: this.getFetchClient(),
-          workspace: this.workspace,
-          bus: this.events,
-          clock: this.host.clock,
-        })
-      : {};
+    const workspaceTools = this.workspaceTools ? createWorkspaceTools(this.workspace) : undefined;
+    const fetchTools = this.fetchTools
+      ? createFetchTools(this.fetchTools, { fetch: this.getFetchClient(), workspace: this.workspace, bus: this.bus, clock: this.host.clock })
+      : undefined;
     const actionsToolSet = this.actionService.compile(this.getActions());
-    const sources: ToolSources = {
-      builtin,
-      external,
+
+    const hooks: ToolHooks = {};
+    if (this.beforeToolCall) hooks.beforeToolCall = (ctx) => this.beforeToolCall!(ctx);
+    if (this.afterToolCall) hooks.afterToolCall = (ctx) => this.afterToolCall!(ctx);
+
+    const { system, tools } = await assembleTurn({
+      session,
+      skills,
+      policy,
+      ...(workspaceTools ? { workspaceTools } : {}),
+      ...(fetchTools ? { fetchTools } : {}),
       actions: actionsToolSet,
-      user: this.getTools(),
-      client: clientTools ?? {},
-    };
-
-    const toolHooks: ToolHooks = {};
-    if (this.beforeToolCall) toolHooks.beforeToolCall = (ctx) => this.beforeToolCall!(ctx);
-    if (this.afterToolCall) toolHooks.afterToolCall = (ctx) => this.afterToolCall!(ctx);
-
-    const tools = assembleTools(sources, {
-      hooks: toolHooks,
-      ...(policy.toolFilter ? { filter: policy.toolFilter } : {}),
+      userTools: this.getTools(),
+      ...(clientTools ? { clientTools } : {}),
+      hooks,
       clock: this.host.clock,
     });
-
-    const baseSystemPrompt = await session.freezeSystemPrompt();
-    const catalog = skills.catalogBlock();
-    const capBlock = tools.capabilityBlock();
-    const system = [baseSystemPrompt, policy.instructions, catalog, capBlock]
-      .filter((s): s is string => Boolean(s))
-      .join("\n\n");
 
     return { system, tools, policy };
   }
@@ -640,9 +563,7 @@ export class Think<State = unknown> extends Agent<State> {
     return input;
   }
 
-  private async executeTurn(
-    spec: AdmittedTurnSpec & { admission?: "queue" | "replace" | "reject" },
-  ): Promise<TurnOutcome> {
+  private async executeTurn(spec: AdmittedTurnSpec & { admission?: "queue" | "replace" | "reject" }): Promise<TurnOutcome> {
     this.ensureRuntime();
     return this.turnQueue.run({
       requestId: spec.requestId,
@@ -653,9 +574,8 @@ export class Think<State = unknown> extends Agent<State> {
   }
 
   private async runAdmittedTurn(spec: AdmittedTurnSpec, queueSignal: AbortSignal): Promise<TurnOutcome> {
-    spec.callback?.onStart({ requestId: spec.requestId });
-    this.setLastRequestId(spec.requestId);
-    if (spec.channelId) this.host.store.put(this.channelKey(spec.requestId), spec.channelId);
+    this.turnState.setLastRequestId(spec.requestId);
+    if (spec.channelId) this.turnState.stampChannel(spec.requestId, spec.channelId);
 
     const session = await this.ensureSession();
     const channelCtx = this.channelService.resolve(spec.channelId);
@@ -677,21 +597,23 @@ export class Think<State = unknown> extends Agent<State> {
 
       await this.actionService.authorizeTurnOnce(turnCtx);
 
-      const streamId = spec.requestId;
-      this.resumableBuffer.begin(streamId, spec.requestId);
+      const started = this.events().publish({
+        type: "turn:started",
+        requestId: spec.requestId,
+        trigger: spec.trigger,
+        ...(spec.channelId ? { channelId: spec.channelId } : {}),
+      });
+      this.activeTurnInfo = { requestId: spec.requestId, startOffset: started.offset };
+
       const accumulator = createAccumulator();
       const emit = (chunk: UiChunk): void => {
         accumulator.push(chunk);
-        this.resumableBuffer.append(streamId, chunk);
-        this.broadcastChunk(spec.requestId, chunk);
-        spec.callback?.onEvent(chunk);
-        this.recordPartial(spec.requestId, accumulator.current());
+        this.publishEvent({ type: "chunk", requestId: spec.requestId, chunk });
+        this.turnState.recordPartial(spec.requestId, accumulator.current());
       };
 
       // getModel() may throw (e.g. the default implementation); resolve it up
-      // front so that failure goes through the normal error-outcome pipeline
-      // (emits proper chunks, persists a partial, calls onChatError) instead
-      // of an uncaught rejection swallowed by Agent.onMessage's onError seam.
+      // front so that failure goes through the normal error-outcome pipeline.
       let model: ModelClient;
       try {
         model = this.getModel();
@@ -700,7 +622,6 @@ export class Think<State = unknown> extends Agent<State> {
         emit({ type: "error", errorText: err instanceof Error ? err.message : String(err) });
         emit({ type: "finish", finishReason: "error" });
         const errorOutcome: TurnOutcome = { kind: "error", error: err, steps: [] };
-        this.resumableBuffer.settle(streamId, "errored");
         await this.finalizeOutcome(spec, session, accumulator.current(), errorOutcome, { tools: {} } as AssembledTools);
         this.actionService.clearTurn(spec.requestId);
         return errorOutcome;
@@ -747,8 +668,7 @@ export class Think<State = unknown> extends Agent<State> {
       if (outcome.kind === "error" && outcome.stalled) {
         const result = await this.chatRecoveryService.handleStall(spec.requestId);
         if (result === "recovering") {
-          spec.callback?.onInterrupted?.();
-          this.resumableBuffer.settle(streamId, "errored");
+          this.activeTurnInfo = null;
           this.actionService.clearTurn(spec.requestId);
           return outcome;
         }
@@ -760,7 +680,6 @@ export class Think<State = unknown> extends Agent<State> {
         }
       }
 
-      this.resumableBuffer.settle(streamId, outcome.kind === "error" ? "errored" : "completed");
       await this.finalizeOutcome(spec, session, accumulator.current(), outcome, assembled);
       this.actionService.clearTurn(spec.requestId);
       return outcome;
@@ -776,51 +695,45 @@ export class Think<State = unknown> extends Agent<State> {
   ): Promise<void> {
     if (message.parts.length > 0) {
       await session.appendMessage(message);
-      this.recordPartial(spec.requestId, message);
-      this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message }));
+      this.turnState.recordPartial(spec.requestId, message);
+      this.publishEvent({ type: "message:updated", message, requestId: spec.requestId });
     }
 
     switch (outcome.kind) {
       case "completed": {
         const attachments = this.actionService.attachments(spec.requestId);
         if (this.renderAttachment) for (const att of attachments) this.renderAttachment(att);
-        this.events.emit("message:response", { requestId: spec.requestId, messageId: message.id });
-        spec.callback?.onDone();
+        this.bus.emit("message:response", { requestId: spec.requestId, messageId: message.id });
         if (this.onChatResponse) {
           await this.onChatResponse({ requestId: spec.requestId, outcome: "completed", message, attachments });
         }
+        this.publishEvent({ type: "turn:settled", requestId: spec.requestId, outcome: "completed" });
         break;
       }
       case "suspended": {
-        // The turn engine's suspension reason only distinguishes "client-tool"
-        // vs "approval" — it has no concept of durable-pause actions. Think
-        // itself inspects the tool's metadata (set by ActionService.compile)
-        // to tell an approval-gated tool (wait for a WS approval frame, then
-        // re-execute) from a durable-pause action (park it durably instead).
-        if (outcome.reason === "approval" || outcome.reason === "durable-pause") {
-          const call = outcome.pending[0];
-          const toolDef: Tool | undefined = call ? assembled.tools[call.toolName] : undefined;
-          const meta = (toolDef?.metadata ?? {}) as Record<string, unknown>;
-          if (call && meta.durablePause === true) {
-            const resolvePermissions = meta.resolvePermissions as ((input: unknown) => readonly string[]) | undefined;
-            this.actionService.park({
-              requestId: spec.requestId,
-              toolCallId: call.toolCallId,
-              action: String(meta.action ?? call.toolName),
-              summary: String(meta.approvalSummary ?? call.toolName),
-              input: call.input,
-              permissions: resolvePermissions ? resolvePermissions(call.input) : [],
-              ...(meta.approvalRisk ? { risk: meta.approvalRisk as ApprovalRisk } : {}),
-              kind: "durable-pause",
-            });
-          }
-        }
-        spec.callback?.onDone();
+        // Think stays metadata-blind: ActionService wrote the durablePause
+        // metadata (compile()), so it also interprets it (audit 26 extr. 4).
+        const parked = this.actionService.maybeParkSuspension({
+          requestId: spec.requestId,
+          pending: outcome.pending,
+          tools: assembled,
+        });
+        this.publishEvent({
+          type: "turn:settled",
+          requestId: spec.requestId,
+          outcome: "suspended",
+          suspendedOn: parked.parked ? "durable-pause" : outcome.reason,
+        });
         break;
       }
       case "aborted": {
-        this.events.emit("message:cancel", { requestId: spec.requestId, reason: outcome.reason });
-        spec.callback?.onError(outcome.reason ?? "aborted");
+        this.bus.emit("message:cancel", { requestId: spec.requestId, reason: outcome.reason });
+        this.publishEvent({
+          type: "turn:settled",
+          requestId: spec.requestId,
+          outcome: "cancelled",
+          ...(outcome.reason ? { errorText: outcome.reason } : {}),
+        });
         break;
       }
       case "error": {
@@ -828,14 +741,17 @@ export class Think<State = unknown> extends Agent<State> {
         const ctx: ChatErrorContext = { requestId: spec.requestId, stage: "turn" };
         if (classification) ctx.classification = classification;
         if (this.onChatError) await this.onChatError(outcome.error, ctx);
-        spec.callback?.onError(toErrorValue(outcome.error));
+        this.publishEvent({
+          type: "turn:settled",
+          requestId: spec.requestId,
+          outcome: "failed",
+          errorText: toErrorValue(outcome.error).message,
+        });
         break;
       }
     }
-  }
 
-  private broadcastChunk(requestId: string, chunk: UiChunk): void {
-    this.broadcast(JSON.stringify({ type: "cf_agent_use_chat_response", id: requestId, chunk }));
+    this.activeTurnInfo = null;
   }
 
   // ==========================================================================
@@ -848,13 +764,7 @@ export class Think<State = unknown> extends Agent<State> {
     }
   }
 
-  /**
-   * Retry recovery (audit 14 §1 step 4, "retry" kind): no assistant output
-   * existed yet for this requestId, so re-running the turn from the
-   * already-persisted history (the user's message was appended durably
-   * *before* the fiber-wrapped model call, so it survives the interruption
-   * on its own) is a faithful replay. No new messages to add.
-   */
+  /** Retry (audit 14 §1): no assistant output existed yet; replay from persisted history. */
   private scheduleRecoveryRetry(requestId: string, incident: Incident): void {
     this.notifyChatRecovery(requestId, incident);
     void this.executeTurn({
@@ -863,65 +773,47 @@ export class Think<State = unknown> extends Agent<State> {
       continuation: true,
       newMessages: [],
     }).catch((err: unknown) => {
-      this.events.emit("chat:recovery:run_failed", { requestId, incidentId: incident.incidentId, error: toErrorValue(err) });
+      this.bus.emit("chat:recovery:run_failed", { requestId, incidentId: incident.incidentId, error: toErrorValue(err) });
     });
   }
 
   /**
-   * Continuation recovery (audit 14 §1 step 4, "continue" kind): a partial
-   * assistant message was already streamed to clients when the turn was
-   * interrupted, but — unlike a turn that suspends normally (client tool /
-   * approval), which reaches `finalizeOutcome`'s `session.appendMessage` —
-   * an eviction or stall abort happens *inside* the fiber-wrapped model call,
-   * before `finalizeOutcome` ever runs. The only durable trace of that partial
-   * output is the `think:reqmsg:` bookkeeping blob (`partialAssistantFor`),
-   * which is not part of session history. Without committing it first here,
-   * this "continuation" would be indistinguishable from a retry — the next
-   * turn would simply re-run over the pre-turn history, discarding whatever
-   * was already said (and, for a partial tool call, risking the model
-   * re-issuing it). Commit the repaired partial (healing any dangling tool
-   * part exactly as `onConnect`'s live-transcript repair does) before
-   * re-running, so the continuation turn actually continues from it.
+   * Continuation (audit 14 §1): a partial assistant message streamed before
+   * the interruption is only durable in turnState, never in session history
+   * (an eviction/stall abort happens inside the model call, before
+   * `finalizeOutcome`'s `appendMessage` runs). Commit the repaired partial
+   * first, so re-running actually continues from it instead of looking like
+   * a retry.
    */
   private scheduleRecoveryContinuation(incident: Incident): void {
     this.notifyChatRecovery(incident.requestId, incident);
-    void this.commitInterruptedPartial(incident.requestId)
-      .then(() =>
-        this.executeTurn({
-          requestId: incident.requestId,
-          trigger: "continuation",
-          continuation: true,
-          newMessages: [],
-        }),
-      )
-      .catch((err: unknown) => {
-        this.events.emit("chat:recovery:run_failed", {
-          requestId: incident.requestId,
-          incidentId: incident.incidentId,
-          error: toErrorValue(err),
-        });
+    void (async () => {
+      const session = await this.ensureSession();
+      const repaired = await this.turnState.commitInterruptedPartial(incident.requestId, session, this.repairInterruptedToolPart);
+      if (repaired) {
+        this.publishEvent({ type: "message:updated", message: repaired, requestId: incident.requestId });
+      }
+      await this.executeTurn({
+        requestId: incident.requestId,
+        trigger: "continuation",
+        continuation: true,
+        newMessages: [],
       });
-  }
-
-  private async commitInterruptedPartial(requestId: string): Promise<void> {
-    const partial = this.partialAssistantFor(requestId);
-    if (!partial || partial.parts.length === 0) return;
-    const already = await this.findMessage(partial.id);
-    if (already) return; // already part of history (e.g. a normal suspension already committed it)
-    const repairOpts = this.repairInterruptedToolPart ? { repairPart: this.repairInterruptedToolPart } : undefined;
-    const [repaired] = repairTranscript([partial], repairOpts).messages;
-    const session = await this.ensureSession();
-    await session.appendMessage(repaired!);
-    this.recordPartial(requestId, repaired!);
-    this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message: repaired }));
+    })().catch((err: unknown) => {
+      this.bus.emit("chat:recovery:run_failed", {
+        requestId: incident.requestId,
+        incidentId: incident.incidentId,
+        error: toErrorValue(err),
+      });
+    });
   }
 
   private async terminalizeRecovery(incident: Incident, message: string): Promise<void> {
     const session = await this.ensureSession();
     const terminalMsg = assistantMessage([{ type: "text", text: message }], this.ids.newId("msg"));
     await session.appendMessage(terminalMsg);
-    this.recordPartial(incident.requestId, terminalMsg);
-    this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message: terminalMsg }));
+    this.turnState.recordPartial(incident.requestId, terminalMsg);
+    this.publishEvent({ type: "message:updated", message: terminalMsg, requestId: incident.requestId });
     if (this.onChatError) {
       await this.onChatError(new Error(message), { requestId: incident.requestId, stage: "recovery" });
     }
@@ -931,10 +823,30 @@ export class Think<State = unknown> extends Agent<State> {
   // Entry points (audit 23 "Entry points")
   // ==========================================================================
 
-  async chat(input: string | ChatMessage[], callback?: StreamCallback, opts?: { channel?: string; requestId?: string }): Promise<TurnResult> {
+  /** TODO(R3): extract into adapters/relay/child-relay.ts's `relayTurn()` — a minimal inline log subscription for now (audit 25 §5). */
+  async chat(input: string | ChatMessage[], callback?: StreamCallback, opts?: { channel?: string; requestId?: string; clientTools?: ToolSet }): Promise<TurnResult> {
     this.ensureRuntime();
     const requestId = opts?.requestId ?? this.ids.newId("req");
     const newMessages = this.toMessages(input);
+
+    let unsubscribe: (() => void) | undefined;
+    if (callback) {
+      unsubscribe = this.events().subscribe("live", (stored) => {
+        const e = stored.event;
+        if (e.type === "turn:started" && e.requestId === requestId) {
+          callback.onStart({ requestId });
+        } else if (e.type === "chunk" && e.requestId === requestId) {
+          callback.onEvent(e.chunk);
+        } else if (e.type === "recovering:changed" && e.requestId === requestId && e.active) {
+          callback.onInterrupted?.();
+        } else if (e.type === "turn:settled" && e.requestId === requestId) {
+          if (e.outcome === "failed" || e.outcome === "cancelled") callback.onError(e.errorText ?? e.outcome);
+          else callback.onDone();
+          unsubscribe?.();
+        }
+      });
+    }
+
     try {
       const outcome = await this.executeTurn({
         requestId,
@@ -942,18 +854,20 @@ export class Think<State = unknown> extends Agent<State> {
         continuation: false,
         newMessages,
         ...(opts?.channel ? { channelId: opts.channel } : {}),
-        ...(callback ? { callback } : {}),
+        ...(opts?.clientTools ? { clientTools: opts.clientTools } : {}),
       });
       return this.toTurnResult(requestId, outcome);
     } catch (err) {
       callback?.onError(toErrorValue(err));
       return { requestId, outcome: "error", error: toErrorValue(err) };
+    } finally {
+      unsubscribe?.();
     }
   }
 
   private toTurnResult(requestId: string, outcome: TurnOutcome): TurnResult {
     const result: TurnResult = { requestId, outcome: outcome.kind };
-    const stored = this.partialAssistantFor(requestId);
+    const stored = this.turnState.partialFor(requestId);
     if (stored) result.message = stored;
     if (outcome.kind === "error") result.error = toErrorValue(outcome.error);
     if (outcome.kind === "aborted") result.error = { name: "AbortedError", message: outcome.reason ?? "aborted" };
@@ -963,6 +877,7 @@ export class Think<State = unknown> extends Agent<State> {
   async runTurn(args: {
     input: string | ChatMessage[];
     channel?: string;
+    clientTools?: ToolSet;
     mode: "wait" | "submit" | "stream";
     callback?: StreamCallback;
   }): Promise<TurnResult | (SubmissionRecord & { accepted: boolean }) | void> {
@@ -970,7 +885,9 @@ export class Think<State = unknown> extends Agent<State> {
     if (args.mode === "submit") {
       return this.submitMessages(this.toMessages(args.input));
     }
-    const opts = args.channel ? { channel: args.channel } : undefined;
+    const opts: { channel?: string; clientTools?: ToolSet } = {};
+    if (args.channel) opts.channel = args.channel;
+    if (args.clientTools) opts.clientTools = args.clientTools;
     if (args.mode === "stream") {
       await this.chat(args.input, args.callback, opts);
       return;
@@ -1039,6 +956,14 @@ export class Think<State = unknown> extends Agent<State> {
     }
   }
 
+  /** Repaired transcript — what `onConnect` used to send. */
+  async history(): Promise<ChatMessage[]> {
+    this.ensureRuntime();
+    const session = await this.ensureSession();
+    const rawHistory = await session.getHistory();
+    return repairTranscript(rawHistory, this.repairInterruptedToolPart ? { repairPart: this.repairInterruptedToolPart } : undefined).messages;
+  }
+
   async getMessages(): Promise<ChatMessage[]> {
     const session = await this.ensureSession();
     return session.getHistory();
@@ -1050,8 +975,9 @@ export class Think<State = unknown> extends Agent<State> {
     await session.clearMessages();
     this.submissionService.markAllPendingSkipped();
     this.turnQueue.cancelAll("cleared");
-    this.host.store.delete("think:lastRequestId");
-    this.broadcast(JSON.stringify({ type: "cf_agent_chat_clear" }));
+    this.pendingInteractions.cancelPending();
+    this.turnState.setLastRequestId(undefined);
+    this.publishEvent({ type: "conversation:cleared" });
   }
 
   cancelChat(requestId: string, reason?: string): boolean {
@@ -1064,7 +990,7 @@ export class Think<State = unknown> extends Agent<State> {
 
   async continueLastTurn(): Promise<TurnOutcome | undefined> {
     this.ensureRuntime();
-    const requestId = this.getLastRequestId();
+    const requestId = this.turnState.lastRequestId();
     if (!requestId) return undefined;
     return this.executeTurn({
       requestId: this.ids.newId("req"),
@@ -1072,6 +998,25 @@ export class Think<State = unknown> extends Agent<State> {
       continuation: true,
       newMessages: [],
     });
+  }
+
+  /** Lets adapters implement the resume handshake: the currently-streaming turn, if any. */
+  activeTurn(): { requestId: string; startOffset: number } | null {
+    return this.activeTurnInfo;
+  }
+
+  // ==========================================================================
+  // Client-tool / approval resolution (audit 25 §2; delegates to PendingInteractions)
+  // ==========================================================================
+
+  async applyToolResult(args: { toolCallId: string; output: unknown; isError?: boolean }): Promise<void> {
+    this.ensureRuntime();
+    await this.pendingInteractions.applyToolResult(args);
+  }
+
+  async resolveApproval(args: { toolCallId?: string; executionId?: string; approved: boolean; reason?: string }): Promise<void> {
+    this.ensureRuntime();
+    await this.pendingInteractions.resolveApproval(args);
   }
 
   pendingApprovals(executionId?: string): PendingApproval[] {
@@ -1089,28 +1034,6 @@ export class Think<State = unknown> extends Agent<State> {
     return this.actionService.rejectExecution(executionId, reason);
   }
 
-  private async onActionResolved(executionId: string, resolution: ParkedResolution): Promise<void> {
-    void executionId;
-    const session = await this.ensureSession();
-    const snapshot = this.partialAssistantFor(resolution.requestId);
-    if (!snapshot) return;
-    const stored = (await this.findMessage(snapshot.id)) ?? snapshot;
-    const updatedParts = stored.parts.map((p) => {
-      if (isToolPart(p) && p.toolCallId === resolution.toolCallId) {
-        if (resolution.rejection) {
-          return { ...p, state: "output-error", errorText: resolution.rejection.message } as MessagePart;
-        }
-        return { ...p, state: "output-available", output: resolution.output } as MessagePart;
-      }
-      return p;
-    });
-    const updated: ChatMessage = { ...stored, parts: updatedParts };
-    await session.updateMessage(updated);
-    this.recordPartial(resolution.requestId, updated);
-    this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message: updated }));
-    this.maybeAutoContinue(updated);
-  }
-
   replyAttachments(requestId?: string): ReplyAttachment[] {
     this.ensureRuntime();
     return this.actionService.attachments(requestId);
@@ -1126,7 +1049,7 @@ export class Think<State = unknown> extends Agent<State> {
     const message = assistantMessage([{ type: "text", text }], this.ids.newId("msg"));
     message.metadata = { notice: true, informModel };
     await session.appendMessage(message);
-    this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message }));
+    this.publishEvent({ type: "message:updated", message });
   }
 
   async reconcileScheduledTasks(): Promise<void> {
@@ -1169,218 +1092,5 @@ export class Think<State = unknown> extends Agent<State> {
     cfg: Parameters<typeof buildAgentTool>[1],
   ): Tool {
     return buildAgentTool(agentClassName, cfg, { runs: this.requireAgentRuns() });
-  }
-
-  // ==========================================================================
-  // Auto-continuation (client tool results / approvals)
-  // ==========================================================================
-
-  private maybeAutoContinue(message: ChatMessage): void {
-    const toolParts = message.parts.filter(isToolPart);
-    if (toolParts.length === 0) return;
-    const allSettled = toolParts.every((p) => p.state === "output-available" || p.state === "output-error");
-    if (!allSettled) return;
-
-    const key = message.id;
-    const existing = this.continuationTimers.get(key);
-    if (existing !== undefined) clearTimeout(existing);
-
-    const fire = (): void => {
-      this.continuationTimers.delete(key);
-      void this.continueLastTurn().catch((err: unknown) => {
-        this.events.emit("chat:continuation:failed", { error: toErrorValue(err) });
-      });
-    };
-
-    if (this.chatToolResultDebounceMs <= 0) {
-      fire();
-    } else {
-      this.continuationTimers.set(key, setTimeout(fire, this.chatToolResultDebounceMs));
-    }
-  }
-
-  // ==========================================================================
-  // WebSocket protocol (over Agent's onUnhandledMessage / onConnect)
-  // ==========================================================================
-
-  override async onConnect(conn: Connection): Promise<void> {
-    await super.onConnect(conn);
-    this.ensureRuntime();
-    const session = await this.ensureSession();
-    const rawHistory = await session.getHistory();
-    const repairOpts = this.repairInterruptedToolPart ? { repairPart: this.repairInterruptedToolPart } : undefined;
-    const messages = repairTranscript(rawHistory, repairOpts).messages;
-    conn.send(JSON.stringify({ type: "cf_agent_chat_messages", messages }));
-    if (this.chatRecoveryService.isRecovering()) {
-      conn.send(JSON.stringify({ type: "cf_agent_chat_recovering", active: true }));
-    }
-  }
-
-  protected override async onUnhandledMessage(conn: Connection, message: unknown): Promise<void> {
-    if (typeof message !== "object" || message === null) return;
-    const msg = message as Record<string, unknown>;
-    this.ensureRuntime();
-
-    switch (msg.type) {
-      case "cf_agent_use_chat_request":
-        await this.handleChatRequestFrame(conn, msg);
-        return;
-      case "cf_agent_chat_clear":
-        await this.clearMessages();
-        return;
-      case "cf_agent_chat_request_cancel":
-        this.cancelChat(String(msg.id));
-        return;
-      case "cf_agent_stream_resume_request":
-        await this.handleResumeRequest(conn, msg);
-        return;
-      case "cf_agent_stream_resume_ack":
-        return;
-      case "cf_agent_tool_result":
-        await this.handleToolResultFrame(msg);
-        return;
-      case "cf_agent_tool_approval":
-        await this.handleToolApprovalFrame(msg);
-        return;
-      default:
-        return;
-    }
-  }
-
-  private parseClientTools(raw: unknown): ToolSet | undefined {
-    if (!Array.isArray(raw)) return undefined;
-    const tools: ToolSet = {};
-    for (const item of raw) {
-      if (!item || typeof item !== "object") continue;
-      const { name, description, inputSchema } = item as { name?: string; description?: string; inputSchema?: unknown };
-      if (!name) continue;
-      tools[name] = { description: description ?? "", inputSchema: { jsonSchema: inputSchema ?? {} } };
-    }
-    return tools;
-  }
-
-  private async handleChatRequestFrame(_conn: Connection, msg: Record<string, unknown>): Promise<void> {
-    const requestId = typeof msg.id === "string" ? msg.id : this.ids.newId("req");
-    const channel = typeof msg.channel === "string" ? msg.channel : undefined;
-    const clientTools = this.parseClientTools(msg.clientTools);
-
-    let newMessages: ChatMessage[];
-    if (Array.isArray(msg.messages)) {
-      newMessages = msg.messages as ChatMessage[];
-    } else if (typeof msg.input === "string") {
-      newMessages = [userMessage(msg.input, this.ids.newId("msg"))];
-    } else {
-      newMessages = [];
-    }
-
-    await this.executeTurn({
-      requestId,
-      trigger: "websocket",
-      continuation: false,
-      newMessages,
-      ...(channel ? { channelId: channel } : {}),
-      ...(clientTools ? { clientTools } : {}),
-    });
-  }
-
-  private async handleResumeRequest(conn: Connection, msg: Record<string, unknown>): Promise<void> {
-    const requested = typeof msg.id === "string" ? msg.id : undefined;
-
-    const active = this.resumableBuffer.activeStream();
-    if (active && (requested === undefined || active.streamId === requested)) {
-      const rec = this.resumableBuffer.read(active.streamId);
-      conn.send(JSON.stringify({ type: "cf_agent_stream_resuming", id: active.requestId }));
-      for (const chunk of rec?.chunks ?? []) {
-        conn.send(JSON.stringify({ type: "cf_agent_use_chat_response", id: active.requestId, chunk, replay: true }));
-      }
-      return;
-    }
-
-    if (requested !== undefined) {
-      const rec = this.resumableBuffer.read(requested);
-      if (rec) {
-        conn.send(JSON.stringify({ type: "cf_agent_stream_resuming", id: requested }));
-        for (const chunk of rec.chunks) {
-          conn.send(JSON.stringify({ type: "cf_agent_use_chat_response", id: requested, chunk, replay: true }));
-        }
-        return;
-      }
-    }
-
-    conn.send(JSON.stringify({ type: "cf_agent_stream_resume_none" }));
-  }
-
-  private async handleToolResultFrame(msg: Record<string, unknown>): Promise<void> {
-    const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : undefined;
-    if (!toolCallId) return;
-
-    const session = await this.ensureSession();
-    const last = await session.getLatestLeaf();
-    if (!last || last.role !== "assistant") return;
-
-    const updatedParts = last.parts.map((p) => {
-      if (isToolPart(p) && p.toolCallId === toolCallId && (p.state === "input-available" || p.state === "input-streaming")) {
-        return { ...p, state: "output-available", output: msg.output } as MessagePart;
-      }
-      return p;
-    });
-    const updated: ChatMessage = { ...last, parts: updatedParts };
-    await session.updateMessage(updated);
-
-    const requestId = this.getLastRequestId();
-    if (requestId) this.recordPartial(requestId, updated);
-    this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message: updated }));
-    this.maybeAutoContinue(updated);
-  }
-
-  private async handleToolApprovalFrame(msg: Record<string, unknown>): Promise<void> {
-    const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : undefined;
-    const executionId = typeof msg.executionId === "string" ? msg.executionId : undefined;
-    const approved = msg.approved === true;
-    const reason = typeof msg.reason === "string" ? msg.reason : undefined;
-
-    if (executionId) {
-      if (approved) await this.approveExecution(executionId);
-      else await this.rejectExecution(executionId, reason);
-      return;
-    }
-    if (!toolCallId) return;
-
-    const session = await this.ensureSession();
-    const last = await session.getLatestLeaf();
-    if (!last || last.role !== "assistant") return;
-    const part = last.parts.find((p): p is ToolPart => isToolPart(p) && p.toolCallId === toolCallId);
-    if (!part || part.state !== "approval-requested") return;
-
-    let updatedPart: MessagePart;
-    if (!approved) {
-      updatedPart = {
-        ...part,
-        state: "output-error",
-        errorText: actionRejectionErrorValue(toolName(part), reason).error.message,
-      };
-    } else {
-      const requestId = this.getLastRequestId() ?? "";
-      const channelId = this.host.store.get<string>(this.channelKey(requestId));
-      const { tools } = await this.buildAssembly(channelId, undefined);
-      const name = toolName(part);
-      const ctx: ToolExecutionContext = {
-        toolCallId,
-        requestId,
-        messages: await session.getHistory(),
-        signal: new AbortController().signal,
-      };
-      const { output, isError } = await tools.execute(name, part.input, ctx);
-      updatedPart = isError
-        ? { ...part, state: "output-error", errorText: typeof output === "string" ? output : JSON.stringify(output) }
-        : { ...part, state: "output-available", output };
-    }
-
-    const updated: ChatMessage = { ...last, parts: last.parts.map((p) => (p === part ? updatedPart : p)) };
-    await session.updateMessage(updated);
-    const requestId = this.getLastRequestId();
-    if (requestId) this.recordPartial(requestId, updated);
-    this.broadcast(JSON.stringify({ type: "cf_agent_message_updated", message: updated }));
-    this.maybeAutoContinue(updated);
   }
 }

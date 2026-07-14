@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { AbortedError } from "../kernel/errors.js";
-import { createMemoryConnection } from "../adapters/memory/transport.js";
 import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import { createFakeModel } from "../adapters/memory/fake-model.js";
 import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient, ModelRequest } from "../ports/model.js";
 import type { RecoveryPolicy } from "../domain/recovery/recovery.js";
+import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
 import type { AgentHost } from "../app/agent.js";
 import { Think, type SessionBuilder } from "../app/think.js";
 
@@ -27,22 +27,28 @@ import { Think, type SessionBuilder } from "../app/think.js";
  * user's message was already durably appended to session history before the
  * fiber-wrapped model call, so replaying just means re-running over existing
  * history) but silently wrong for a continuation: the partial assistant
- * message buffered mid-stream is only ever written to the `think:reqmsg:`
- * scratch key (via `recordPartial`, for the resumable-stream/partial-turn-
- * result APIs), never appended to session history, because `finalizeOutcome`
- * — the only code path that appends it — never runs when the turn is cut off
- * by an eviction or a stall abort. Left as it was, "continuation" and
- * "retry" behaved identically: the model would regenerate a fresh reply with
- * no memory of what it had already said. Split the shared helper into
+ * message buffered mid-stream is only ever written to `turnState`'s scratch
+ * key, never appended to session history, because `finalizeOutcome` — the
+ * only code path that appends it — never runs when the turn is cut off by an
+ * eviction or a stall abort. Left as it was, "continuation" and "retry"
+ * behaved identically: the model would regenerate a fresh reply with no
+ * memory of what it had already said. Split the shared helper into
  * `scheduleRecoveryRetry` (unchanged behavior) and
- * `scheduleRecoveryContinuation`, which now calls a new
- * `commitInterruptedPartial()` to append the repaired partial (reusing the
- * same `repairTranscript`/`repairInterruptedToolPart` machinery `onConnect`
- * already uses for the live transcript) to session history *before*
- * re-running the turn. The tests below exercise both the stall path (b) and
- * this deep-recovery path (a) and would have passed trivially under the old,
- * indistinguishable-continuation behavior — the assertions on the *number*
- * of model calls and on the appended partial text are what pin the fix down.
+ * `scheduleRecoveryContinuation`, which now calls
+ * `turnState.commitInterruptedPartial()` to append the repaired partial
+ * (reusing the same `repairTranscript`/`repairInterruptedToolPart` machinery
+ * `history()` already uses for the live transcript) to session history
+ * *before* re-running the turn. The tests below exercise both the stall path
+ * (b) and this deep-recovery path (a) and would have passed trivially under
+ * the old, indistinguishable-continuation behavior — the assertions on the
+ * *number* of model calls and on the appended partial text are what pin the
+ * fix down.
+ *
+ * Wave R2 update: this file previously drove interactions through the
+ * `cf_agent_*` frame protocol over `agent.onMessage(conn, ...)`. Transport is
+ * now entirely an adapter concern (audit 25) — this rewrite calls `chat()`
+ * directly and asserts against the agent's own `ConversationEvent` log
+ * instead of frames; the WS adapter (wave R3) re-covers the frame-level path.
  */
 
 function counterIds(): IdSource {
@@ -54,11 +60,17 @@ function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string;
   return {
     store: mem.store,
     alarm: mem.alarms,
-    connections: mem.connections,
     clock: mem.clock,
     ids: counterIds(),
     ...opts,
   };
+}
+
+function eventsOfType<T extends ConversationEvent["type"]>(
+  events: StoredEvent[],
+  type: T,
+): Array<Extract<ConversationEvent, { type: T }>> {
+  return events.map((e) => e.event).filter((e): e is Extract<ConversationEvent, { type: T }> => e.type === type);
 }
 
 class RecoveryThink extends Think<unknown> {
@@ -135,19 +147,13 @@ describe("e2e: chat recovery", () => {
   it("(a) a hang-then-answer model recovers via the stall watchdog and completes with a continuation that includes the earlier partial text", async () => {
     vi.useFakeTimers();
     try {
-      const { agent, mem } = makeAgent();
+      const { agent } = makeAgent();
       const { model } = partialThenHangModel(1);
       agent.model = model;
       agent.chatStreamStallTimeoutMs = 50;
       await agent.start();
 
-      const conn = createMemoryConnection("c1");
-      mem.connections.add(conn);
-
-      const chatPromise = agent.onMessage(
-        conn,
-        JSON.stringify({ type: "cf_agent_use_chat_request", id: "req_1", input: "tell me a story" }),
-      );
+      const chatPromise = agent.chat("tell me a story", undefined, { requestId: "req_1" });
       await vi.advanceTimersByTimeAsync(50); // stall fires; original call returns "recovering"
       await chatPromise;
       await flushFakeTimers(); // let the fire-and-forget continuation settle
@@ -215,38 +221,33 @@ describe("e2e: chat recovery", () => {
   it("(b) an always-hanging model exhausts recovery attempts and persists the configured terminal message", async () => {
     vi.useFakeTimers();
     try {
-      const { agent, mem } = makeAgent();
+      const { agent } = makeAgent();
       agent.model = createFakeModel(() => ({ kind: "hang" }));
       agent.chatStreamStallTimeoutMs = 50;
       const policy: RecoveryPolicy = { maxAttempts: 1, terminalMessage: "Giving up after retries." };
       agent.chatRecovery = policy;
       await agent.start();
 
-      const events: Array<{ type: string; payload: unknown }> = [];
-      agent.events.subscribe("chat", (e) => events.push(e));
+      const busEvents: Array<{ type: string; payload: unknown }> = [];
+      agent.bus.subscribe("chat", (e) => busEvents.push(e));
+      const events: StoredEvent[] = [];
+      agent.events().subscribe("live", (e) => events.push(e));
 
-      const conn = createMemoryConnection("c1");
-      mem.connections.add(conn);
-      const chatPromise = agent.onMessage(
-        conn,
-        JSON.stringify({ type: "cf_agent_use_chat_request", id: "req_1", input: "hi" }),
-      );
+      const chatPromise = agent.chat("hi", undefined, { requestId: "req_1" });
       await vi.advanceTimersByTimeAsync(50); // first stall -> attempt 1 scheduled (continuation)
       await chatPromise;
 
       await vi.advanceTimersByTimeAsync(50); // second stall on the continuation -> exhausted
       await flushFakeTimers();
 
-      expect(events.some((e) => e.type === "chat:recovery:exhausted")).toBe(true);
+      expect(busEvents.some((e) => e.type === "chat:recovery:exhausted")).toBe(true);
 
       const messages = await agent.getMessages();
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Giving up after retries."))).toBe(
         true,
       );
-      const recoveringFrames = conn.sent
-        .map((s) => JSON.parse(s) as Record<string, unknown>)
-        .filter((f) => f.type === "cf_agent_chat_recovering");
-      expect(recoveringFrames[recoveringFrames.length - 1]).toMatchObject({ active: false });
+      const recovering = eventsOfType(events, "recovering:changed");
+      expect(recovering[recovering.length - 1]).toMatchObject({ active: false });
     } finally {
       vi.useRealTimers();
     }
@@ -271,8 +272,8 @@ describe("e2e: chat recovery", () => {
     });
     await agent.start();
 
-    const events: Array<{ type: string; payload: unknown }> = [];
-    agent.events.subscribe("chat", (e) => events.push(e));
+    const busEvents: Array<{ type: string; payload: unknown }> = [];
+    agent.bus.subscribe("chat", (e) => busEvents.push(e));
 
     // One prior turn so there's something to compact.
     await agent.chat("first question", undefined, { requestId: "req_0" });
@@ -285,7 +286,7 @@ describe("e2e: chat recovery", () => {
       text: "Done after compaction.",
     });
 
-    const compactionEvents = events.filter((e) => e.type === "chat:context:compacted");
+    const compactionEvents = busEvents.filter((e) => e.type === "chat:context:compacted");
     expect(compactionEvents).toHaveLength(1);
     expect(compactionEvents[0]!.payload).toMatchObject({ reason: "reactive", shortened: true });
   });

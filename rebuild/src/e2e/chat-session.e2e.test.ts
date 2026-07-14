@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createMemoryConnection, type MemoryConnection } from "../adapters/memory/transport.js";
 import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import { createFakeModel } from "../adapters/memory/fake-model.js";
 import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient } from "../ports/model.js";
+import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
 import type { ToolSet } from "../domain/tools/types.js";
 import type { AgentHost } from "../app/agent.js";
 import { Think } from "../app/think.js";
@@ -12,11 +12,13 @@ import { Think } from "../app/think.js";
 /**
  * Scenario 1 (audit 24 §1): the everyday chat turn — a Think subclass with a
  * system prompt, one user tool, and workspace tools on, driven entirely
- * through the `cf_agent_*` WebSocket protocol over MemoryConnections. This is
- * broader than think.test.ts's "text turn"/"client tool suspension" cases: it
- * exercises a *server-executed* tool (no suspension) alongside the workspace
- * tool bundle, and checks a second connection's full-history sync includes
- * the settled tool output.
+ * through Think's typed public methods and its event log (wave R2 rewires
+ * away from the `cf_agent_*` WebSocket protocol; the WS adapter, wave R3,
+ * re-covers this same scenario at the frame level). This is broader than
+ * think.test.ts's "text turn"/"client tool suspension" cases: it exercises a
+ * *server-executed* tool (no suspension) alongside the workspace tool
+ * bundle, and checks that `history()` on a fresh read reflects the settled
+ * tool output.
  */
 
 function counterIds(): IdSource {
@@ -28,19 +30,17 @@ function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string;
   return {
     store: mem.store,
     alarm: mem.alarms,
-    connections: mem.connections,
     clock: mem.clock,
     ids: counterIds(),
     ...opts,
   };
 }
 
-function connectionFrames(conn: MemoryConnection): Array<Record<string, unknown>> {
-  return conn.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
-}
-
-function framesOfType(conn: MemoryConnection, type: string): Array<Record<string, unknown>> {
-  return connectionFrames(conn).filter((f) => f.type === type);
+function eventsOfType<T extends ConversationEvent["type"]>(
+  events: StoredEvent[],
+  type: T,
+): Array<Extract<ConversationEvent, { type: T }>> {
+  return events.map((e) => e.event).filter((e): e is Extract<ConversationEvent, { type: T }> => e.type === type);
 }
 
 class ChatSessionThink extends Think<unknown> {
@@ -74,29 +74,24 @@ function makeAgent(): { agent: ChatSessionThink; mem: MemoryHost } {
 }
 
 describe("e2e: chat session", () => {
-  it("streams a tool-call turn end to end, validates + executes the tool, persists it, and syncs a fresh connection", async () => {
-    const { agent, mem } = makeAgent();
+  it("streams a tool-call turn end to end, validates + executes the tool, persists it, and a fresh history() read sees it", async () => {
+    const { agent } = makeAgent();
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "add", input: { a: 7, b: 5 }, id: "call_1" },
       { kind: "text", text: "7 + 5 is 12." },
     ]);
     await agent.start();
 
-    const events: string[] = [];
-    agent.events.subscribe("message", (e) => events.push(e.type));
+    const busEvents: string[] = [];
+    agent.bus.subscribe("message", (e) => busEvents.push(e.type));
+    const events: StoredEvent[] = [];
+    agent.events().subscribe("live", (e) => events.push(e));
 
-    const conn1 = createMemoryConnection("c1");
-    mem.connections.add(conn1);
-    await agent.onConnect(conn1);
+    const result = await agent.chat("what is 7 + 5?", undefined, { requestId: "req_1" });
+    expect(result.outcome).toBe("completed");
 
-    await agent.onMessage(
-      conn1,
-      JSON.stringify({ type: "cf_agent_use_chat_request", id: "req_1", input: "what is 7 + 5?" }),
-    );
-
-    // Chunk frames stream in order: start ... tool-input -> tool-output ... finish.
-    const responseFrames = framesOfType(conn1, "cf_agent_use_chat_response");
-    const chunkTypes = responseFrames.map((f) => (f.chunk as { type: string }).type);
+    // Chunk events stream in order: start ... tool-input -> tool-output ... finish.
+    const chunkTypes = eventsOfType(events, "chunk").map((e) => e.chunk.type);
     expect(chunkTypes[0]).toBe("start");
     expect(chunkTypes[chunkTypes.length - 1]).toBe("finish");
     const idxInput = chunkTypes.indexOf("tool-input-available");
@@ -105,10 +100,11 @@ describe("e2e: chat session", () => {
     expect(idxOutput).toBeGreaterThan(idxInput);
 
     // The tool ran server-side (no client suspension) with validated input.
-    const inputFrame = responseFrames.find((f) => (f.chunk as { type: string }).type === "tool-input-available")!;
-    expect(inputFrame.chunk).toMatchObject({ executor: "server", input: { a: 7, b: 5 } });
-    const outputFrame = responseFrames.find((f) => (f.chunk as { type: string }).type === "tool-output-available")!;
-    expect(outputFrame.chunk).toMatchObject({ output: 12, isError: false });
+    const chunks = eventsOfType(events, "chunk").map((e) => e.chunk);
+    const inputChunk = chunks.find((c) => c.type === "tool-input-available")!;
+    expect(inputChunk).toMatchObject({ executor: "server", input: { a: 7, b: 5 } });
+    const outputChunk = chunks.find((c) => c.type === "tool-output-available")!;
+    expect(outputChunk).toMatchObject({ output: 12, isError: false });
 
     // Final assistant message persisted with both the tool part and the text.
     const messages = await agent.getMessages();
@@ -127,17 +123,13 @@ describe("e2e: chat session", () => {
       expect.arrayContaining(["add", "read", "write", "edit", "list", "find", "grep", "delete"]),
     );
 
-    // A second, freshly-connected client receives the full settled history.
-    const conn2 = createMemoryConnection("c2");
-    mem.connections.add(conn2);
-    await agent.onConnect(conn2);
-    const sync = framesOfType(conn2, "cf_agent_chat_messages");
-    expect(sync).toHaveLength(1);
-    const syncedMessages = sync[0]!.messages as Array<{ parts: Array<Record<string, unknown>> }>;
-    expect(syncedMessages).toHaveLength(2);
-    const syncedToolPart = syncedMessages[1]!.parts.find((p) => p.type === "tool-add");
+    // A fresh history() read (what a newly-connecting adapter client would sync) sees the settled history.
+    const history = await agent.history();
+    expect(history).toHaveLength(2);
+    const syncedToolPart = history[1]!.parts.find((p) => p.type === "tool-add");
     expect(syncedToolPart).toMatchObject({ state: "output-available", output: 12 });
 
-    expect(events).toContain("message:response");
+    expect(busEvents).toContain("message:response");
+    expect(eventsOfType(events, "turn:settled")[0]).toMatchObject({ requestId: "req_1", outcome: "completed" });
   });
 });
