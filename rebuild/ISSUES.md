@@ -202,3 +202,157 @@ Project discovery/config/codegen (~1.7k LOC), zero runtime coupling — operates
 files, not agent instances. Portable as-is (together with `think/server-entry.ts`'s
 generated-entry contract) whenever the rebuild grows a `create-think`-style
 developer experience. No action until then.
+
+---
+
+## ISSUE-014 — Re-implement aged-media eviction
+
+**Status:** open · **Area:** Conversation/Session (audit 28 appendix #1)
+
+Original: `think/media-eviction.ts` (253 LOC). Long-lived sessions accumulate
+inline base64 media (screenshot tool results, data-URL attachments) in the
+persisted transcript; read-time truncation hides it from the model but never
+reclaims storage. Re-implement as a session/store housekeeping pass (age
+threshold → strip/replace media parts in persisted messages, keep a stub marker).
+Natural home: `domain/session` maintenance alongside compaction, driven by the
+scheduler's internal housekeeping.
+
+---
+
+## ISSUE-015 — Re-implement client message reconciliation on persistence
+
+**Status:** open · **Area:** Conversation (audit 28 appendix #2)
+
+Original: `agents/chat/message-reconciler.ts` — pure functions aligning
+CLIENT-supplied message arrays with server state (merge server-known tool outputs
+into stale client copies, dedupe/align ids) before persisting. The rebuild's
+`chat(messages[])` path persists what it is given, which corrupts server-side
+tool state for useChat-style clients that round-trip full arrays. Small and pure —
+port the strategy set into `domain/messages` (it may be near-liftable despite the
+re-implement label). Gate for ISSUE-007 (real-client compat).
+
+---
+
+## ISSUE-016 — Re-implement the workflow-side base class (`AgentWorkflow`)
+
+**Status:** open · **Area:** Workflows (audit 28 appendix #3)
+
+Original: `agents/workflows.ts` (619) + `workflow-types.ts` + `think/workflows.ts`
+(293). The rebuild has agent-side tracking (audit 20) and the runtime binding
+adapter (W4) but nothing workflow authors extend: a `WorkflowEntrypoint` subclass
+that routes progress/step events back to the originating agent (the original
+augments create-params with `__agentName`/`__agentBinding`/`__agentOrigin` for the
+return path). Design the return path against the rebuild's typed surface
+(`getAgentByName` + `__call`) rather than the original's binding lookup.
+
+---
+
+## ISSUE-017 — Re-implement sub-agent external routing
+
+**Status:** open · **Area:** Infrastructure/Cloudflare (audit 28 appendix #4)
+
+Original: `agents/sub-routing.ts` (335 LOC) — `routeSubAgentRequest`, URL
+addressability for facet children. Rebuild children are parent-mediated only
+(`__call` via the spawner). Extend `adapters/cloudflare/routing.ts` + shell with a
+path scheme addressing a child through its root DO (the root must resolve the
+facet and forward), including WebSocket upgrade pass-through to a child's chat.
+
+---
+
+## ISSUE-018 — Pre-stream resume window: park, don't `resume_none`
+
+**Status:** open · **Area:** Conversation/Transport (audit 28 appendix, partial)
+
+Original: `agents/chat/pre-stream-turns.ts`. Between "request accepted" and
+"first chunk streamed" a resume request finds no active stream; the original
+parks the connection and attaches it when the stream starts. The rebuild's WS
+adapter answers `cf_agent_stream_resume_none` in that window, so a client that
+reconnects immediately after submitting can miss the turn start (it still gets
+the settled message via `message:updated`). Fix in `adapters/websocket-chat`:
+treat queued-but-not-started turns as resumable (the event log + turn state
+already know about them).
+
+---
+
+## ISSUE-019 — Tool-output depth truncation + persistence sanitization parity
+
+**Status:** open · **Area:** Messages/Session (audit 28 appendix, partial; extends the known row-size gap)
+
+Original: `agents/chat/tool-output-truncation.ts` (depth/size-limited tool output
+shrinking) and `chat/sanitize.ts` (strip ephemeral provider metadata, enforce row
+size before SQLite writes). The rebuild truncates in `messages/store`,
+`actions`, and `fetch`, but has no depth-limited generic tool-output pass and the
+row-size guard is not wired into the session persistence path (known gap since
+the Think-composition wave). Consolidate: one sanitize/truncate pass at the
+session append seam.
+
+---
+
+## ISSUE-020 — General `retry()` utility (+ queue retry parity)
+
+**Status:** open · **Area:** Durable Runtime (audit 28 appendix, minor)
+
+Original: `agents/retries.ts` (308 LOC) — shared `RetryOptions` + backoff engine
+behind `schedule()`, `scheduleEvery()`, `queue()`, and a public `this.retry(fn)`.
+The rebuild's scheduler has `RetryPolicy` and the task queue tracks attempts, but
+there is no public retry helper and queue retry semantics are thinner. Port the
+backoff vocabulary once into `kernel/` or `domain/runtime` and expose
+`Agent.retry()`.
+
+---
+
+## ISSUE-021 — Type-level `Serializable<State>` constraint
+
+**Status:** open · **Area:** Durable Runtime/State (audit 28 appendix, minor)
+
+Original: `agents/serializable.ts` — a compile-time type that rejects
+non-JSON-round-trippable state (functions, Dates, bigints...) at the type level.
+The rebuild validates at runtime only. Cheap DX win: add the conditional type and
+apply it to `Agent<State>`'s state surface without changing runtime behavior.
+
+---
+
+## ISSUE-022 — Re-implement an MCP *server* story on the shell
+
+**Status:** open · **Area:** Integration/Shell (audit 28: `McpAgent` is re-implement)
+
+The original `McpAgent` extends Agent (storage, `getConnections`, elicitation
+hook) to expose an agent as an MCP server. Not consumable (ISSUE-003 covers the
+client half only). When wanted: a shell-level adapter exposing a rebuilt agent's
+tools/callables over MCP transports, reusing the vendored transport code from
+ISSUE-003. Design question: which surface (callables registry? tool set?) maps to
+MCP tools.
+
+---
+
+## ISSUE-023 — Re-implement inbound email routing
+
+**Status:** open · **Area:** Infrastructure/Cloudflare (deferred at W4)
+
+W4 shipped outbound `EmailTransport` only. The original also routes inbound email
+to agents (`routeAgentEmail` + resolver strategies + HMAC-signed reply headers in
+`agents/email.ts`, reply/forward via an `EmailBridge` RpcTarget). Re-implement on
+the rebuild: an email routing helper resolving agent class+name from the
+message, an `onEmail` typed entry point on the shell, and signed reply support.
+
+---
+
+## ISSUE-024 — Public Think entry point for delegation run reconciliation
+
+**Status:** open · **Area:** Delegation (known gap since the e2e wave)
+
+`AgentToolRunService.reconcile()` (settle parent-side `running` rows against
+children's real terminal state on startup) has no public Think method — e2e
+drives the domain service directly. Expose it (likely inside `onStart`, mirroring
+scheduled-task reconciliation) so recovery after eviction is automatic.
+
+---
+
+## ISSUE-025 — WebMCP bridge (parked)
+
+**Status:** open · **Area:** Integration (audit 28 appendix #5)
+
+`agents/experimental/webmcp.ts` bridges `navigator.modelContext` (Google's WebMCP
+browser API). Marked do-not-use-in-production upstream and the API is unstable.
+Tracked for completeness only — no action until the platform API stabilizes;
+revisit alongside ISSUE-003's transport vendoring.
