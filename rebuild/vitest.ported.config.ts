@@ -1,5 +1,6 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+import { lowerEsDecorators } from "./vitest.plugins.js";
 
 /**
  * Ported-original-tests project (audit 29). Deliberately separate from
@@ -9,6 +10,7 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   plugins: [
+    lowerEsDecorators(),
     cloudflareTest({
       wrangler: { configPath: "./test-workers/ported/wrangler.jsonc" },
     }),

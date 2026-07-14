@@ -13,12 +13,34 @@
     "enable_nodejs_process_v2"
   ],
   "durable_objects": {
-    "bindings": []
+    "bindings": [
+      {
+        "class_name": "TestAssistantAgentAgent",
+        "name": "TestAssistantAgentAgent"
+      },
+      {
+        "class_name": "ThinkClientToolsAgent",
+        "name": "ThinkClientToolsAgent"
+      },
+      {
+        "class_name": "ThinkTestAgent",
+        "name": "ThinkTestAgent"
+      },
+      {
+        "class_name": "ThinkExecuteHitlAgent",
+        "name": "ThinkExecuteHitlAgent"
+      }
+    ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": []
+      "new_sqlite_classes": [
+        "TestAssistantAgentAgent",
+        "ThinkClientToolsAgent",
+        "ThinkTestAgent",
+        "ThinkExecuteHitlAgent"
+      ]
     }
   ]
 }

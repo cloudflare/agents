@@ -8,15 +8,26 @@
  * surface).
  */
 import type { DurableObjectStub } from "@cloudflare/workers-types";
-import { getAgentByName as rebuiltGetAgentByName, routeAgentRequest } from "../../src/adapters/cloudflare/routing.js";
+import {
+  getAgentByName as rebuiltGetAgentByName,
+  routeAgentRequest,
+} from "../../src/adapters/cloudflare/routing.js";
 
 export { routeAgentRequest };
 
 /** Original `agents` export. The rebuilt version is async (it __init's the name). */
-export const getAgentByName = rebuiltGetAgentByName;
+export function getAgentByName<T extends Rpc.DurableObjectBranded | undefined>(
+  namespace: DurableObjectNamespace<T>,
+  name: string
+): Promise<DurableObjectStub<T>> {
+  return rebuiltGetAgentByName(
+    namespace as unknown as DurableObjectNamespace,
+    name
+  ) as Promise<DurableObjectStub<T>>;
+}
 
 /** partyserver's older equivalent — same semantics for test purposes. */
-export const getServerByName = rebuiltGetAgentByName;
+export const getServerByName = getAgentByName;
 
 /**
  * `agents/observability` subscribe. Not bridged yet (ISSUE-009) — ported
@@ -40,8 +51,14 @@ export type {
 } from "../../src/app/think.js";
 export { Think } from "../../src/app/think.js";
 export { action } from "../../src/domain/actions/actions.js";
+export type { Action } from "../../src/domain/actions/actions.js";
+export { callable } from "../../src/domain/runtime/rpc/callable.js";
+export { tool } from "../../src/domain/tools/types.js";
 export type { AgentHost } from "../../src/app/agent.js";
 export { hostAgent } from "../../src/adapters/cloudflare/shell.js";
+export type { ChatMessage, MessagePart, ToolPart } from "../../src/domain/messages/model.js";
+export type { ModelChunk, ModelClient, ModelRequest } from "../../src/ports/model.js";
+export type { ToolSet } from "../../src/domain/tools/types.js";
 
 /** Convenience for fixtures: typed stub with the shell's RPC surface. */
 export type AgentStub = DurableObjectStub & {

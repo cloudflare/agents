@@ -3,4 +3,4 @@
  * `tests/agents/*` class against the rebuilt public API (Think subclass +
  * hostAgent). Export DO classes here; bind them in ../wrangler.jsonc.
  */
-export {};
+export * from "./ported-agents.js";

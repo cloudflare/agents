@@ -32,14 +32,14 @@ explain) · `flake`.
 | fetch-tools.test.ts | 32 | INTERNAL | quarry | checklist vs domain/fetch suite |
 | assistant-tools.test.ts | 30 | PUBLIC-API | pending | T3 |
 | scheduled-tasks.test.ts | 14 | PUBLIC-API | pending | T3 |
-| message-reconciliation.test.ts | 8 | WIRE | pending | T1; executable spec for ISSUE-015 |
-| execute-hitl.test.ts | 10 | WIRE | pending | T1 |
+| message-reconciliation.test.ts | 8 | WIRE | ported 0/8 | All fail `framing` (ISSUE-026: init.body request never parsed → 10s timeouts) before reaching the intended `missing-feature ISSUE-015` reconciliation asserts. Re-triage after 026. |
+| execute-hitl.test.ts | 10 | WIRE | ported 0/10 | All fail `framing` (ISSUE-026: requests unparsed → 15s timeouts). The rebuild HAS the approval/durable-pause flow, so expect real signal here once 026 lands; original execute-tool paused-output semantics may add `missing-feature ISSUE-004` residue. |
 | hydration-budget.test.ts | 13 | PUBLIC-API | blocked ISSUE-014 | media-eviction dependent |
 | actions-durable-pause.test.ts | 18 | PUBLIC-API | pending | T3 |
 | host-embedding.test.ts | 11 | INTERNAL | blocked ISSUE-013 | framework/server-entry |
-| onconnect-broadcast.test.ts | 9 | WIRE | pending | T1 |
+| onconnect-broadcast.test.ts | 9 | WIRE | ported 5/9 | Identity/state/history connect frames already compatible (5 pass). 4 fail: on-connect CHAT_MESSAGES suppression while a stream is active, and terminal replay via `cf_agent_stream_resuming` on reconnect (ours answers `resume_none`) — `framing` + ISSUE-018-adjacent `divergence` (#1645 semantics). |
 | actions-attach-reply.test.ts | 12 | WIRE | pending | T1 |
-| assistant-agent.test.ts | 5 | WIRE | pending | **T0 acceptance gate** |
+| assistant-agent.test.ts | 5 | WIRE | ported 0/5 | **T0 gate.** All fail `framing` (ISSUE-026: init.body envelope + {body,done} response chunks → timeouts). |
 | channel-recovery.test.ts | 5 | PUBLIC-API | pending | T3 |
 | stream-cleanup.test.ts | 11 | PUBLIC-API | pending | T3; retention semantics differ (event log) — expect divergence notes |
 | media-eviction.test.ts | 9 | INTERNAL | blocked ISSUE-014 | port pure-fn tests with the impl |
@@ -47,7 +47,7 @@ explain) · `flake`.
 | action-pause-recovery.test.ts | 3 | PUBLIC-API | pending | T3 |
 | onstart-degraded.test.ts | 5 | PUBLIC-API | pending | T3 |
 | agent-tool-reattach-recovery.test.ts | 2 | WIRE | pending | T1 |
-| streaming-message-id.test.ts | 1 | WIRE | pending | **T0 acceptance gate** |
+| streaming-message-id.test.ts | 1 | WIRE | ported 0/1 | **T0 gate.** Fails `framing` (ISSUE-026); also asserts start-chunk messageId alignment once the envelope exists. |
 | run-turn-recovery.test.ts | 2 | PUBLIC-API | pending | T3 |
 | turn-metadata.test.ts | 4 | PUBLIC-API | pending | T3 |
 | execute-tool.test.ts | 6 | PUBLIC-API | blocked ISSUE-004 | codemode |
