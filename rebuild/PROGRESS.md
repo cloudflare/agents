@@ -49,7 +49,14 @@ the spec. **Never read `packages/think/` or `packages/agents/`.**
 - [x] app/think (audit 23)
 - [x] e2e scenarios (audit 24)
 
+## Refactor wave (docs 25-26): transport-free agents
+- [ ] domain/events/log.ts — ConversationEventLog (audit 25 §1)
+- [ ] Agent exposes scheduler/fibers/keepAlive + registerInternalCallback (audit 26 §5)
+- [ ] app rewire: events out, no Connection/frames; extractions 1-4, 6 (audits 25 §2-3, 26)
+- [ ] adapters/websocket-chat + relay; resumable.ts retired; e2e rewired (audit 25 §4-6)
+
 ## Log
+- 2026-07-14: refactor audit docs 25 (transport & lifecycle) and 26 (Think decomposition) written; decisions: methods canonical (no command envelope), replay built into the event port, cf_agent_* kept in the WS adapter, extractions bundled.
 - 2026-07-13: e2e wave done (939 tests, 57 files). E2e agent fixed two Think bugs (stable session id across restarts; continuation now commits the repaired partial before re-running). Orchestrator closed three follow-up gaps: delegation summarize() reads UiChunk `delta`; Think.onStart reconciles declared tasks; public inspect/list/cancel/deleteSubmissions on Think. Remaining known gap: no public Think entry point for AgentToolRunService.reconcile() (e2e drives the domain service directly).
 - 2026-07-13: Think composition root done (919 tests). Known gaps noted in agent report: deep interruption recovery + full delegation flow deferred to e2e; MessageStore row-size guard not wired (session owns persistence).
 - 2026-07-13: wave 5 done (901 tests): chat recovery + overflow guard, Agent composition root over memory host.
