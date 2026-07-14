@@ -16,19 +16,19 @@
     "test:e2e": "vitest run --config tests-e2e/vitest.config.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.83",
-    "@ai-sdk/openai": "^3.0.70",
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
     "@cloudflare/ai-chat": "workspace:*",
     "@cloudflare/think": "workspace:*",
     "@cloudflare/workspace": "0.0.0-alpha.11",
     "@platformatic/vfs": "^0.4.0",
     "agents": "workspace:*",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "diff": "^9.0.0",
     "isomorphic-git": "^1.38.5",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "workers-ai-provider": "^3.3.0",
+    "workers-ai-provider": "https://pkg.pr.new/cloudflare/ai/workers-ai-provider@601",
     "zod": "^4.4.3"
   },
   "devDependencies": {
