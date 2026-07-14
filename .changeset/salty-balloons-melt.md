@@ -1,6 +1,7 @@
 ---
 "@cloudflare/voice": patch
 "@cloudflare/voice-assemblyai": patch
+"@cloudflare/voice-elevenlabs": patch
 ---
 
-Add an AssemblyAI streaming STT provider for the voice pipeline.
+Add AssemblyAI and ElevenLabs streaming STT providers for the voice pipeline.
