@@ -185,6 +185,7 @@ describe("Think framework discovery", () => {
       main: "virtual:think/entry",
       compatibility_date: "2026-06-11",
       compatibility_flags: ["nodejs_compat"],
+      worker_loaders: [{ binding: "LOADER" }],
       durable_objects: {
         bindings: [
           { name: "ThinkAgent_Support", class_name: "ThinkAgent_Support" }
@@ -383,7 +384,8 @@ describe("Think framework discovery", () => {
         ],
         assets: {
           run_worker_first: ["/auth/*", "/chat/*"]
-        }
+        },
+        worker_loaders: [{ binding: "CUSTOM_LOADER" }]
       },
       inferred
     );
@@ -399,6 +401,10 @@ describe("Think framework discovery", () => {
       "/auth/*",
       "/chat/*"
     ]);
+    expect(result.config.worker_loaders).toEqual([
+      { binding: "LOADER" },
+      { binding: "CUSTOM_LOADER" }
+    ]);
   });
 
   it("diagnoses missing bindings and migrations", () => {
@@ -412,10 +418,31 @@ describe("Think framework discovery", () => {
 
     expect(diagnostics).toMatchObject([
       { code: "missing-durable-object-class", severity: "error" },
-      { code: "missing-migration-class", severity: "error" }
+      { code: "missing-migration-class", severity: "error" },
+      { code: "missing-worker-loader-binding", severity: "error" }
     ]);
     expect(diagnostics[0]?.message).toContain(`agent "support"`);
     expect(diagnostics[0]?.message).toContain(`agents/support.ts`);
+  });
+
+  it("requires the Worker Loader used by the built-in Code Mode bash", () => {
+    const manifest = discoverThinkApp({
+      files: { "agents/support.ts": "export class SupportAgent {}" }
+    });
+
+    expect(
+      diagnoseThinkWorkerConfig(manifest, {
+        durable_objects: {
+          bindings: [{ name: "Support", class_name: "ThinkAgent_Support" }]
+        },
+        migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }]
+      })
+    ).toEqual([
+      expect.objectContaining({
+        code: "missing-worker-loader-binding",
+        path: "worker_loaders"
+      })
+    ]);
   });
 
   it("does not require facet bindings or migrations in production config", () => {
@@ -431,7 +458,8 @@ describe("Think framework discovery", () => {
       durable_objects: {
         bindings: [{ name: "Support", class_name: "ThinkAgent_Support" }]
       },
-      migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }]
+      migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }],
+      worker_loaders: [{ binding: "LOADER" }]
     });
 
     expect(diagnostics).toEqual([]);
@@ -448,7 +476,8 @@ describe("Think framework discovery", () => {
       durable_objects: {
         bindings: [{ name: "Support", class_name: "ThinkAgent_Support" }]
       },
-      migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }]
+      migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }],
+      worker_loaders: [{ binding: "LOADER" }]
     };
 
     expect(diagnoseThinkWorkerConfig(manifest, userConfig)).toEqual([
@@ -595,6 +624,7 @@ describe("Think framework discovery", () => {
           bindings: [{ name: "Support", class_name: "ThinkAgent_Support" }]
         },
         migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }],
+        worker_loaders: [{ binding: "LOADER" }],
         assets: { run_worker_first: ["/chat/*"] }
       })
     ).toEqual([
@@ -619,6 +649,7 @@ describe("Think framework discovery", () => {
           bindings: [{ name: "Support", class_name: "ThinkAgent_Support" }]
         },
         migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }],
+        worker_loaders: [{ binding: "LOADER" }],
         assets: { run_worker_first: ["/chat/*"] }
       })
     ).toEqual([

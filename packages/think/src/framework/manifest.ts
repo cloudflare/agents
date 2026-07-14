@@ -118,6 +118,7 @@ export interface ThinkWorkerConfig extends Record<string, unknown> {
   main: string;
   compatibility_date: string;
   compatibility_flags: string[];
+  worker_loaders: Array<{ binding: string }>;
   durable_objects: {
     bindings: Array<{ name: string; class_name: string }>;
   };

@@ -124,6 +124,14 @@
         "name": "ThinkExecuteHitlAgent"
       },
       {
+        "class_name": "ThinkCodemodeBashAgent",
+        "name": "ThinkCodemodeBashAgent"
+      },
+      {
+        "class_name": "ThinkCodemodeBashMcpServer",
+        "name": "ThinkCodemodeBashMcpServer"
+      },
+      {
         "class_name": "ThinkFetchToolsTestAgent",
         "name": "ThinkFetchToolsTestAgent"
       },
@@ -193,6 +201,8 @@
         "ThinkMessengerRouteTestAgent",
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
+        "ThinkCodemodeBashAgent",
+        "ThinkCodemodeBashMcpServer",
         "ThinkFetchToolsTestAgent",
         "ThinkOnStartReconcileFailureAgent",
         "ThinkOnStartHydrationFailureAgent",

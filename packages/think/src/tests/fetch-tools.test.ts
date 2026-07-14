@@ -597,11 +597,12 @@ describe("Think — fetchTools integration", () => {
     expect(toolNames).not.toContain("fetch_url");
   });
 
-  it("merges fetch_url and advertises it in the capability prompt when enabled", async () => {
+  it("exposes fetch inside Code Mode without adding a direct model tool", async () => {
     const a = await agent(`fetch-on-${crypto.randomUUID()}`);
     await a.enableFetch();
     const { toolNames, system } = await a.captureTurn();
-    expect(toolNames).toContain("fetch_url");
-    expect(system).toContain("fetch tools are available");
+    expect(toolNames).not.toContain("fetch_url");
+    expect(toolNames).toContain("bash");
+    expect(system).toContain("`fetch` namespace inside `bash`");
   });
 });

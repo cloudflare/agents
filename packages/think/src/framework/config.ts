@@ -47,6 +47,7 @@ export function createThinkWorkerDefaults(
     main: options.main ?? "virtual:think/entry",
     compatibility_date: options.compatibilityDate ?? "2026-06-11",
     compatibility_flags: ["nodejs_compat"],
+    worker_loaders: [{ binding: "LOADER" }],
     durable_objects: {
       bindings: manifest.bindings.map((binding) => ({
         name: binding.name,
@@ -91,6 +92,10 @@ export function mergeThinkWorkerConfig(
   config.compatibility_flags = mergeStringArrays(
     asStringArray(inferred.compatibility_flags),
     asStringArray(user.compatibility_flags)
+  );
+  config.worker_loaders = mergeWorkerLoaders(
+    inferred.worker_loaders,
+    user.worker_loaders
   );
 
   config.assets = {
@@ -308,11 +313,11 @@ export function inferRequiredBindings(
   const requirements = manifest.platformRequirements.filter(
     (requirement) => requirement.kind === "worker_loader"
   );
-  if (requirements.length === 0 && manifest.features.includes("skills")) {
-    requirements.push({
+  if (manifest.agents.length > 0) {
+    requirements.unshift({
       kind: "worker_loader",
       binding: "LOADER",
-      reason: "Agents with colocated skills need a Worker Loader binding."
+      reason: "Think's built-in Code Mode bash needs a Worker Loader binding."
     });
   }
   const seen = new Set<string>();
@@ -328,6 +333,24 @@ export function inferRequiredBindings(
       }
     ];
   });
+}
+
+function mergeWorkerLoaders(
+  inferredValue: unknown,
+  userValue: unknown
+): Array<{ binding: string }> {
+  const merged: Array<{ binding: string }> = [];
+  const seen = new Set<string>();
+  for (const value of [inferredValue, userValue]) {
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      const binding = asRecord(entry).binding;
+      if (typeof binding !== "string" || seen.has(binding)) continue;
+      seen.add(binding);
+      merged.push({ binding });
+    }
+  }
+  return merged;
 }
 
 function mergeDurableObjectBindings(

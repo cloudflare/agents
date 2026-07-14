@@ -8,7 +8,7 @@ import {
   type Executor
 } from "@cloudflare/codemode";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
-import type { StateBackend, WorkspaceFsLike } from "@cloudflare/shell";
+import type { StateBackend } from "@cloudflare/shell";
 import { createWorkspaceStateBackend } from "@cloudflare/shell";
 import { StateConnector } from "@cloudflare/shell/workers";
 import {
@@ -18,6 +18,7 @@ import {
   type BrowserConnectorSessionOptions
 } from "agents/browser";
 import type { WorkspaceLike } from "./workspace";
+import { resolveWorkspaceFs } from "./workspace-fs";
 
 /**
  * The minimum agent surface for the `createExecuteTool(this)` one-liner.
@@ -158,39 +159,6 @@ function isAgent(
   return "env" in source && !("executor" in source) && !("loader" in source);
 }
 
-// The agent one-liner derives state from the workspace, which requires the
-// full filesystem surface (`WorkspaceFsLike`) — a concrete `Workspace` has
-// it; a minimal custom `WorkspaceLike` may not.
-const WORKSPACE_FS_METHODS = [
-  "readFile",
-  "readFileBytes",
-  "writeFile",
-  "writeFileBytes",
-  "appendFile",
-  "exists",
-  "stat",
-  "lstat",
-  "mkdir",
-  "readDir",
-  "rm",
-  "cp",
-  "mv",
-  "symlink",
-  "readlink",
-  "glob"
-] as const;
-
-function workspaceFs(
-  workspace: WorkspaceLike | undefined
-): WorkspaceFsLike | undefined {
-  if (!workspace) return undefined;
-  const candidate = workspace as unknown as Record<string, unknown>;
-  for (const method of WORKSPACE_FS_METHODS) {
-    if (typeof candidate[method] !== "function") return undefined;
-  }
-  return workspace as unknown as WorkspaceFsLike;
-}
-
 function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
   const env = ((agent as unknown as { env?: unknown }).env ?? {}) as {
     LOADER?: WorkerLoader;
@@ -203,7 +171,7 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
         "call createExecuteTool({ ctx, loader, ... }) with explicit options."
     );
   }
-  const fs = workspaceFs(agent.workspace);
+  const fs = resolveWorkspaceFs(agent.workspace);
   return {
     ctx,
     loader: env.LOADER,

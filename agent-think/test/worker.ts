@@ -24,6 +24,8 @@ const promptTestSkillSource: SkillSource = {
 };
 
 export class AgentThinkPromptTestAgent extends Think<Env> {
+  override workspaceBash = false;
+
   #runContext: RunContext = {
     repo: "cloudflare/agents",
     issueNumber: 1871,

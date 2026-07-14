@@ -266,6 +266,7 @@ import { createWorkspaceTools } from "./tools/workspace";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
+import { createThinkBashRuntime } from "./tools/bash";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
@@ -1917,7 +1918,7 @@ export interface TurnContext {
   system: string;
   /** Assembled model messages (truncated, pruned). */
   messages: ModelMessage[];
-  /** Merged tool set (workspace + getTools + session + MCP + client + caller). */
+  /** Model-facing tools; broad Think/MCP capabilities may live behind `bash`. */
   tools: ToolSet;
   /** The language model from getModel(). */
   model: LanguageModel;
@@ -2482,8 +2483,9 @@ export class Think<
     "skillsFingerprint"
   ] as const;
   /**
-   * Wait for MCP server connections to be ready before the inference
-   * loop. MCP tools are auto-merged into the tool set.
+   * Wait for MCP server connections to be ready before the inference loop
+   * builds the Code Mode `bash` runtime. Connected servers appear as sandbox
+   * namespaces; they are not converted into direct AI SDK tools.
    *
    * Set to `true` for a default 10s timeout, or `{ timeout: ms }`
    * for a custom timeout. Defaults to `false` (no waiting).
@@ -2676,14 +2678,87 @@ export class Think<
    */
   codemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
 
+  /** Runtime handle last installed by Think's built-in Code Mode bash. */
+  private _builtinCodemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
+
   /**
-   * Include the default workspace Bash tool. Enabled by default so models can
-   * run shell-style multi-file workflows against the workspace. Set to `false`
-   * to omit it from the built-in workspace tools.
+   * Include Think's built-in `bash` tool. The default is a durable Code Mode
+   * runtime backed by a Dynamic Worker; it exposes the workspace and Think
+   * platform capabilities as namespaced globals. Set to `false` when the
+   * application supplies its own `bash` tool (for example a container shell).
    */
-  workspaceBash:
-    | boolean
-    | NonNullable<Parameters<typeof createWorkspaceTools>[1]>["bash"] = true;
+  workspaceBash = true;
+
+  private _usesCodemodeBash(): boolean {
+    return this.workspaceBash !== false;
+  }
+
+  private _createFetchToolSet(): ToolSet {
+    return this.fetchTools
+      ? createFetchTools({
+          ...this.fetchTools,
+          workspace: this.workspace,
+          onEvent: (event: FetchToolEvent) => {
+            (
+              this._emit as unknown as (
+                type: string,
+                payload: Record<string, unknown>
+              ) => void
+            ).call(this, "tool:fetch", { ...event });
+          }
+        })
+      : {};
+  }
+
+  private _createCodemodeBashRuntime(
+    contextTools: ToolSet,
+    skillTools: ToolSet,
+    extensionTools: ToolSet = {},
+    fetchTools: ToolSet = {}
+  ): ReturnType<typeof createThinkBashRuntime> | undefined {
+    if (!this._usesCodemodeBash()) return undefined;
+    const loader = (this.env as Cloudflare.Env & { LOADER?: WorkerLoader })
+      .LOADER;
+    if (!loader) {
+      throw new Error(
+        "Think's built-in bash requires a Worker Loader binding named LOADER. " +
+          'Add `"worker_loaders": [{ "binding": "LOADER" }]` to wrangler.jsonc, ' +
+          "or set workspaceBash = false and provide your own bash tool."
+      );
+    }
+    const runtime = createThinkBashRuntime({
+      ctx: this.ctx,
+      loader,
+      workspace: this.workspace,
+      mcp: this.mcp,
+      toolSets: [
+        {
+          name: "context",
+          tools: contextTools,
+          instructions:
+            "Read, search, load, and update the agent's durable context."
+        },
+        {
+          name: "skills",
+          tools: skillTools,
+          instructions:
+            "Activate agent skills and access their bundled resources."
+        },
+        {
+          name: "extensions",
+          tools: extensionTools,
+          instructions: "Call tools contributed by loaded Think extensions."
+        },
+        {
+          name: "fetch",
+          tools: fetchTools,
+          instructions:
+            "Read allowlisted HTTP resources and configured service bindings."
+        }
+      ]
+    });
+    return runtime;
+  }
 
   /**
    * Opt-in HTTP fetch tools. Disabled by default — set to a config object to
@@ -4218,9 +4293,13 @@ export class Think<
     const hasExtensionTools =
       toolNames.has("load_extension") || toolNames.has("list_extensions");
     const hasExecuteTool = toolNames.has("execute");
-    const hasFetchTools = [...toolNames].some((name) =>
-      name.startsWith("fetch_")
-    );
+    const hasCodemodeBash =
+      toolNames.has("bash") &&
+      this._builtinCodemode !== undefined &&
+      this.codemode === this._builtinCodemode;
+    const hasFetchTools =
+      [...toolNames].some((name) => name.startsWith("fetch_")) ||
+      (hasCodemodeBash && this.fetchTools !== false);
 
     const lines = [
       "You are running inside a Think agent.",
@@ -4255,7 +4334,11 @@ export class Think<
       );
     }
 
-    if (hasExecuteTool) {
+    if (hasCodemodeBash) {
+      lines.push(
+        "- The `bash` tool runs JavaScript in a durable Code Mode sandbox. Use `codemode.search()` and `codemode.describe()` to discover namespaced capabilities such as `workspace`, `context`, `skills`, `extensions`, `fetch`, and connected MCP servers."
+      );
+    } else if (hasExecuteTool) {
       lines.push(
         "- If sandboxed execution is available, prefer it for safe, bounded checks or coordinated multi-step operations."
       );
@@ -4263,7 +4346,9 @@ export class Think<
 
     if (hasFetchTools) {
       lines.push(
-        "- If fetch tools are available, use them to read allowlisted HTTP resources (documentation, APIs). They are read-only and bounded; respect their allowlist and do not assume access to other URLs."
+        hasCodemodeBash
+          ? "- Allowlisted, read-only fetch tools are available in the `fetch` namespace inside `bash`."
+          : "- If fetch tools are available, use them to read allowlisted HTTP resources (documentation, APIs). They are read-only and bounded; respect their allowlist and do not assume access to other URLs."
       );
     }
 
@@ -4494,7 +4579,14 @@ export class Think<
       await this.session.addContext(registry.contextLabel, {
         description: "Think skills: available skill catalog",
         provider: {
-          get: () => registry.systemPrompt()
+          get: async () => {
+            const prompt = await registry.systemPrompt();
+            if (!prompt) return prompt;
+            return prompt.replace(
+              "use activate_skill with its name before proceeding",
+              "activate it before proceeding: use skills.activate_skill({ name }) inside the built-in bash, or activate_skill when skills are exposed directly"
+            );
+          }
         }
       });
 
@@ -5143,28 +5235,40 @@ export class Think<
     }
 
     const workspaceTools = createWorkspaceTools(this.workspace, {
-      bash: this.workspaceBash
+      bash: false
     });
-    const fetchToolSet: ToolSet = this.fetchTools
-      ? createFetchTools({
-          ...this.fetchTools,
-          workspace: this.workspace,
-          onEvent: (event: FetchToolEvent) => {
-            (
-              this._emit as unknown as (
-                type: string,
-                payload: Record<string, unknown>
-              ) => void
-            ).call(this, "tool:fetch", { ...event });
-          }
-        })
-      : {};
+    const fetchToolSet = this._createFetchToolSet();
     const baseTools = this.getTools();
+    // `createExecuteTool(this)` installs its own runtime handle from getTools().
+    // Preserve that explicit runtime and its approval/resume behavior until the
+    // application migrates to the built-in bash. A handle equal to our previous
+    // built-in handle is not explicit; it is safe to replace for this turn.
+    const hasExplicitCodemodeRuntime =
+      this.codemode !== undefined && this.codemode !== this._builtinCodemode;
+    const hasCustomBash = "bash" in baseTools;
     const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
     await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
     const skillTools = this._skillRegistry?.tools() ?? {};
+    const bashRuntime =
+      hasExplicitCodemodeRuntime || hasCustomBash
+        ? undefined
+        : this._createCodemodeBashRuntime(
+            contextTools,
+            skillTools,
+            extensionTools,
+            fetchToolSet
+          );
+    if (bashRuntime) {
+      this._builtinCodemode = bashRuntime.runtime;
+      this.codemode = bashRuntime.runtime;
+    } else if (this.codemode === this._builtinCodemode) {
+      // A dynamic getTools() may replace the built-in with a custom bash on a
+      // later turn. Do not advertise that custom tool as Code Mode-native.
+      this.codemode = undefined;
+      this._builtinCodemode = undefined;
+    }
     const clientToolSet = createToolsFromClientSchemas(
       input.clientTools,
       input.clientToolExecutor
@@ -5172,14 +5276,20 @@ export class Think<
         : undefined
     );
     let tools: ToolSet = {
-      ...workspaceTools,
-      ...fetchToolSet,
+      ...(bashRuntime
+        ? {
+            read: workspaceTools.read,
+            write: workspaceTools.write,
+            edit: workspaceTools.edit,
+            bash: bashRuntime.tool
+          }
+        : workspaceTools),
+      ...(!bashRuntime ? fetchToolSet : {}),
       ...baseTools,
       ...actionTools,
-      ...extensionTools,
-      ...contextTools,
-      ...skillTools,
-      ...(this.mcp?.getAITools?.() ?? {}),
+      ...(!bashRuntime ? extensionTools : {}),
+      ...(!bashRuntime ? contextTools : {}),
+      ...(!bashRuntime ? skillTools : {}),
       ...clientToolSet
     };
 
@@ -12392,21 +12502,54 @@ export class Think<
   // transcript with the new outcome, and auto-continue so the model sees it.
 
   /**
-   * The codemode runtime handle behind the execute tool. `this.codemode` is
-   * assigned when `createExecuteRuntime(this)` / `createExecuteTool(this)`
-   * runs (normally at turn start, via `getTools()`); after a DO restart no
-   * turn may have run yet, so fall back to building the tools once.
+   * Resolve the canonical Code Mode runtime. The built-in bash runtime is
+   * reconstructed from durable context, skills, workspace, and MCP connection
+   * state after hibernation. Applications that opt out with
+   * `workspaceBash = false` retain the legacy `createExecuteTool(this)` path.
    */
-  private _codemodeRuntime():
-    | import("@cloudflare/codemode").CodemodeRuntimeHandle
-    | undefined {
-    if (!this.codemode) {
+  private async _codemodeRuntime(): Promise<
+    import("@cloudflare/codemode").CodemodeRuntimeHandle | undefined
+  > {
+    if (this.codemode) return this.codemode;
+
+    // Rebuild an application-owned explicit execute runtime first. This is the
+    // pre-Code-Mode-native compatibility path and is also what makes approvals
+    // survive a Durable Object restart.
+    let hasCustomBash = false;
+    try {
+      hasCustomBash = "bash" in this.getTools();
+    } catch {
+      // A custom getTools() may require turn-time context.
+    }
+    if (this.codemode) return this.codemode;
+    if (hasCustomBash) return undefined;
+
+    if (this._usesCodemodeBash()) {
       try {
-        this.getTools();
+        await this._refreshSkillsIfChanged();
+        const runtime = this._createCodemodeBashRuntime(
+          await this.session.tools(),
+          this._skillRegistry?.tools() ?? {},
+          this.extensionManager?.getTools() ?? {},
+          this._createFetchToolSet()
+        );
+        if (runtime) {
+          this._builtinCodemode = runtime.runtime;
+          this.codemode = runtime.runtime;
+        }
       } catch {
-        // getTools may require turn-time context; without it there is
-        // simply no runtime to resolve.
+        // The runtime may be unavailable before initialization finishes or when
+        // deployment configuration is incomplete. Callers below return a
+        // stable "no runtime" response rather than leaking setup exceptions.
       }
+      return this.codemode;
+    }
+
+    try {
+      this.getTools();
+    } catch {
+      // A custom getTools() may require turn-time context; without it there is
+      // simply no runtime to resolve.
     }
     return this.codemode;
   }
@@ -12423,7 +12566,7 @@ export class Think<
   async pendingExecutions(
     executionId?: string
   ): Promise<import("@cloudflare/codemode").PendingAction[]> {
-    const runtime = this._codemodeRuntime();
+    const runtime = await this._codemodeRuntime();
     if (!runtime) return [];
     return runtime.pending(executionId);
   }
@@ -12459,7 +12602,7 @@ export class Think<
       });
     }
 
-    const runtime = this._codemodeRuntime();
+    const runtime = await this._codemodeRuntime();
     if (runtime) {
       const pending = await runtime.pending(executionId);
       const seen = new Set<string>();
@@ -12508,14 +12651,14 @@ export class Think<
     if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
       return await this._approveActionPause(executionId);
     }
-    const runtime = this._codemodeRuntime();
+    const runtime = await this._codemodeRuntime();
     if (!runtime) {
       return {
         status: "error",
         executionId,
         error:
-          "No codemode runtime is configured — the execute tool was never " +
-          "created on this agent."
+          "No codemode runtime is configured — the built-in bash or execute " +
+          "tool was never created on this agent."
       };
     }
     const output = truncatePausedExecutionOutput(
@@ -12669,14 +12812,14 @@ export class Think<
     if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
       return await this._rejectActionPause(executionId, reason);
     }
-    const runtime = this._codemodeRuntime();
+    const runtime = await this._codemodeRuntime();
     if (!runtime) {
       return {
         status: "error",
         executionId,
         error:
-          "No codemode runtime is configured — the execute tool was never " +
-          "created on this agent."
+          "No codemode runtime is configured — the built-in bash or execute " +
+          "tool was never created on this agent."
       };
     }
     const pending = await runtime.pending(executionId);
