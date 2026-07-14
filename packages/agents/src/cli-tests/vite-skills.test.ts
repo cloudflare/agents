@@ -246,6 +246,8 @@ describe("turndown stub vite plugin", () => {
 
     const code = await load(plugin, ctx)("\0agents:turndown-stub");
     expect(code).toContain("class TurndownService");
+    expect(code).toContain("throw new Error(message)");
+    expect(code).toContain("agents({ stubTurndown: false })");
     expect(code).toContain("export default TurndownService");
   });
 
