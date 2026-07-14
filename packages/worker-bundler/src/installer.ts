@@ -182,7 +182,7 @@ async function installDependenciesPython(
 
   // Collect dependencies to install
   const depsToInstall: Record<string, string> = {};
-  depsToInstall["workers-runtime-sdk"] = "*"; // Should this always take the latest?
+  depsToInstall["workers-runtime-sdk"] = "*"; // TODO: Should this always take the latest?
   for (const dep of pyprojectToml.project?.dependencies ?? []) {
     const name = dep.trim();
     if (!name) continue;
