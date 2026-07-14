@@ -1,14 +1,17 @@
+import type { ContentRecordingOptions } from "../options";
 import { readString } from "../read";
 import {
   modelCallSpan,
   operationSpan,
-  toolCallSpan
+  toolCallSpan,
+  toolResultAttributes
 } from "../../genai/telemetry";
 import type { TraceAttributes } from "../../tracing/tracer";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 import {
   correlationAttributes,
   finishAttributesFromEvent,
+  inputContentFromEvent,
   operationNameFromId,
   requestSummaryFromEvent,
   semanticContextFromEvent
@@ -45,16 +48,23 @@ type ToolState = {
 
 /** Tracing configuration for the AI SDK v7 telemetry adapter. */
 export type AISDKV7Instrumentation = {
+  readonly options?: ContentRecordingOptions | undefined;
   readonly tracer: AgentTracer;
 };
 
 /**
  * Creates an AI SDK v7 `Telemetry` object that projects callback events into
- * Cloudflare-compatible GenAI spans without recording raw prompts or outputs.
+ * Cloudflare-compatible GenAI spans. Raw prompts, messages, and tool
+ * inputs/outputs are recorded ONLY when the caller opts in via
+ * `options.recordInputs`/`recordOutputs`; both default to `false`, so the
+ * default projection carries no content.
  */
 export function createAISDKV7Telemetry(
   instrumentation: AISDKV7Instrumentation
 ): AISDKV7Telemetry {
+  // Opt-in content recording (potentially PII); OFF unless explicitly enabled.
+  const recordInputs = instrumentation.options?.recordInputs === true;
+  const recordOutputs = instrumentation.options?.recordOutputs === true;
   const operations = new Map<string, OperationState>();
   const modelSpans = new Map<string, ModelState[]>();
   // Keyed by `${callId}:${toolCallId}` — concurrent operations can reuse a
@@ -82,7 +92,7 @@ export function createAISDKV7Telemetry(
       toolSpans,
       instrumentation.tracer
     );
-    state.span.finish(finishAttributesFromEvent(event));
+    state.span.finish(finishAttributesFromEvent(event, { recordOutputs }));
     operations.delete(event.callId);
   };
 
@@ -100,6 +110,11 @@ export function createAISDKV7Telemetry(
           ...correlationAttributes({ callId: event.callId }),
           ...runtimeContextAttributes(event.runtimeContext)
         },
+        // Opt-in chat inputs (prompt/messages) the event already carries; only
+        // read when recordInputs is set. Potentially PII.
+        content: recordInputs
+          ? { inputMessages: inputContentFromEvent(event) }
+          : undefined,
         context: semanticContextFromEvent(event),
         integration: "ai-sdk",
         model: readString(event.modelId),
@@ -169,6 +184,9 @@ export function createAISDKV7Telemetry(
 
       const toolName = readString(event.toolCall.toolName) ?? "tool";
       const span = toolCallSpan({
+        // Opt-in tool arguments the event already carries; only read when
+        // recordInputs is set. Potentially PII.
+        content: recordInputs ? { arguments: event.toolCall.input } : undefined,
         integration: "ai-sdk",
         operation: "tool.execute",
         toolName
@@ -207,7 +225,12 @@ export function createAISDKV7Telemetry(
       if (event.toolOutput?.type === "tool-error") {
         span.fail(event.toolOutput.error);
       } else {
-        span.finish();
+        // Opt-in tool result on the success path only; never on error/abort.
+        span.finish(
+          recordOutputs
+            ? toolResultAttributes(event.toolOutput?.output)
+            : undefined
+        );
       }
       toolSpans.delete(toolSpanKey(event.callId, toolCallId));
     },

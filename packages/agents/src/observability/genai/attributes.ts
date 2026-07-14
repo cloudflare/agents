@@ -31,10 +31,14 @@ export const TraceAttribute = {
     AgentName: "gen_ai.agent.name",
     AgentVersion: "gen_ai.agent.version",
     ConversationID: "gen_ai.conversation.id",
+    // Opt-in content keys (PII). Emitted only when the caller sets the explicit
+    // record flag; never populated on the default privacy-preserving path.
+    InputMessages: "gen_ai.input.messages",
     OperationName: "gen_ai.operation.name",
     OperationNameValueChat: "chat",
     OperationNameValueExecuteTool: "execute_tool",
     OperationNameValueInvokeAgent: "invoke_agent",
+    OutputMessages: "gen_ai.output.messages",
     OutputType: "gen_ai.output.type",
     ProviderName: "gen_ai.provider.name",
     RequestFrequencyPenalty: "gen_ai.request.frequency_penalty",
@@ -49,7 +53,11 @@ export const TraceAttribute = {
     ResponseID: "gen_ai.response.id",
     ResponseModel: "gen_ai.response.model",
     ResponseTimeToFirstChunk: "gen_ai.response.time_to_first_chunk",
+    // Opt-in tool content keys (PII), emitted only under the explicit record
+    // flag, consistent with the semconv `gen_ai.tool.call.*` execute_tool span.
+    ToolCallArguments: "gen_ai.tool.call.arguments",
     ToolCallID: "gen_ai.tool.call.id",
+    ToolCallResult: "gen_ai.tool.call.result",
     ToolName: "gen_ai.tool.name",
     ToolType: "gen_ai.tool.type",
     UsageCacheCreationInputTokens: "gen_ai.usage.cache_creation.input_tokens",

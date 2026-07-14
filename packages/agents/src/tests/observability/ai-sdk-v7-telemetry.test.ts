@@ -490,3 +490,158 @@ describe("createAISDKV7Telemetry", () => {
     ]);
   });
 });
+
+describe("createAISDKV7Telemetry opt-in content recording", () => {
+  const CONTENT_KEYS = [
+    "gen_ai.input.messages",
+    "gen_ai.output.messages",
+    "gen_ai.tool.call.arguments",
+    "gen_ai.tool.call.result"
+  ] as const;
+
+  function driveOperation(
+    telemetry: ReturnType<typeof createAISDKV7Telemetry>
+  ) {
+    telemetry.onStart?.({
+      callId: "call-1",
+      messages: [{ content: "secret message", role: "user" }],
+      operationId: "ai.generateText",
+      prompt: "secret prompt"
+    });
+    telemetry.onToolExecutionStart?.({
+      callId: "call-1",
+      toolCall: {
+        input: { a: 6, b: 7 },
+        toolCallId: "tool-call-1",
+        toolName: "multiply"
+      }
+    });
+    telemetry.onToolExecutionEnd?.({
+      callId: "call-1",
+      toolCall: { toolCallId: "tool-call-1", toolName: "multiply" },
+      toolOutput: { output: { product: 42 }, type: "tool-result" }
+    });
+    telemetry.onEnd?.({
+      callId: "call-1",
+      operationId: "ai.generateText",
+      text: "the answer is 42",
+      toolCalls: [{ toolName: "multiply" }]
+    });
+  }
+
+  it("records NO content attribute by default (the privacy default)", () => {
+    const tracing = new RecordingTracer();
+    driveOperation(createAISDKV7Telemetry({ tracer: tracing }));
+
+    for (const span of tracing.spans) {
+      for (const key of CONTENT_KEYS) {
+        expect(span.attributes).not.toHaveProperty([key]);
+      }
+    }
+  });
+
+  it("records chat and tool content when the caller opts in", () => {
+    const tracing = new RecordingTracer();
+    driveOperation(
+      createAISDKV7Telemetry({
+        options: { recordInputs: true, recordOutputs: true },
+        tracer: tracing
+      })
+    );
+
+    const operationSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "invoke_agent"
+    );
+    expect(operationSpan?.attributes["gen_ai.input.messages"]).toBe(
+      JSON.stringify([{ content: "secret message", role: "user" }])
+    );
+    expect(operationSpan?.attributes["gen_ai.output.messages"]).toBe(
+      JSON.stringify({
+        text: "the answer is 42",
+        toolCalls: [{ toolName: "multiply" }]
+      })
+    );
+
+    const toolSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
+    expect(toolSpan?.attributes["gen_ai.tool.call.arguments"]).toBe(
+      JSON.stringify({ a: 6, b: 7 })
+    );
+    expect(toolSpan?.attributes["gen_ai.tool.call.result"]).toBe(
+      JSON.stringify({ product: 42 })
+    );
+  });
+
+  it("records only inputs when only recordInputs is set", () => {
+    const tracing = new RecordingTracer();
+    driveOperation(
+      createAISDKV7Telemetry({
+        options: { recordInputs: true },
+        tracer: tracing
+      })
+    );
+
+    const operationSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "invoke_agent"
+    );
+    expect(operationSpan?.attributes).toHaveProperty(["gen_ai.input.messages"]);
+    expect(operationSpan?.attributes).not.toHaveProperty([
+      "gen_ai.output.messages"
+    ]);
+    const toolSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
+    expect(toolSpan?.attributes).toHaveProperty(["gen_ai.tool.call.arguments"]);
+    expect(toolSpan?.attributes).not.toHaveProperty([
+      "gen_ai.tool.call.result"
+    ]);
+  });
+
+  it("truncates oversized content to a bounded, marked value", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({
+      options: { recordInputs: true },
+      tracer: tracing
+    });
+
+    telemetry.onStart?.({
+      callId: "call-1",
+      operationId: "ai.generateText",
+      prompt: "x".repeat(20_000)
+    });
+    telemetry.onEnd?.({ callId: "call-1", operationId: "ai.generateText" });
+
+    const value = tracing.spans[0]?.attributes["gen_ai.input.messages"];
+    expect(typeof value).toBe("string");
+    const text = value as string;
+    expect(text.endsWith("…[truncated]")).toBe(true);
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(4096);
+  });
+
+  it("never records tool output on the error path", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({
+      options: { recordInputs: true, recordOutputs: true },
+      tracer: tracing
+    });
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.streamText" });
+    telemetry.onToolExecutionStart?.({
+      callId: "call-1",
+      toolCall: { toolCallId: "tool-1", toolName: "boom" }
+    });
+    telemetry.onToolExecutionEnd?.({
+      callId: "call-1",
+      toolCall: { toolCallId: "tool-1", toolName: "boom" },
+      toolOutput: { error: new Error("secret error"), type: "tool-error" }
+    });
+
+    const toolSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
+    expect(toolSpan?.attributes).not.toHaveProperty([
+      "gen_ai.tool.call.result"
+    ]);
+  });
+});

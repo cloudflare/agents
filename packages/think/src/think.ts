@@ -2534,6 +2534,20 @@ export class Think<
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
 
+  /**
+   * Records raw prompts, messages, model output, and tool inputs/outputs as
+   * span attributes on Think's out-of-the-box traces.
+   *
+   * ⚠️ This content is potentially PII and is recorded ONLY when this flag is
+   * `true`. It is OFF by default: traces otherwise carry only scalar metadata
+   * (token counts, finish reasons, tool names, request settings). Enable it
+   * exclusively where recording conversation content in Workers Observability
+   * is acceptable. When enabled, Think sets the AI SDK's
+   * `experimental_telemetry.recordInputs`/`recordOutputs` for every turn, which
+   * the tracing adapter serializes (truncated) onto the spans.
+   */
+  recordTraceContent = false;
+
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();
   private _loggedProtocolWarnings = new Set<string>();
@@ -5204,6 +5218,13 @@ export class Think<
       // AI SDK maps functionId to gen_ai.agent.name. Use the class name by
       // default while preserving an explicit caller label.
       functionId: base?.functionId ?? this.constructor.name,
+      // Opt-in span content recording (potentially PII). OFF unless the agent
+      // sets `recordTraceContent`; when on, forward the AI SDK's own
+      // recordInputs/recordOutputs so the tracing adapter captures prompts,
+      // output, and tool inputs/outputs for the turn.
+      ...(this.recordTraceContent
+        ? { recordInputs: true, recordOutputs: true }
+        : {}),
       metadata: {
         agentId: this.name,
         conversationId: this.ctx.id.toString(),

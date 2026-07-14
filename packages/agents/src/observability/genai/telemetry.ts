@@ -48,6 +48,93 @@ export type SpanSpec = {
 };
 
 /**
+ * Opt-in chat content captured on the operation span. These carry raw prompts,
+ * messages, and model output — potentially PII — so callers MUST leave the
+ * field undefined unless the explicit `recordInputs`/`recordOutputs` flag is
+ * set. When undefined the corresponding attribute is simply never written.
+ */
+export type OperationContent = {
+  readonly inputMessages?: unknown;
+  readonly outputMessages?: unknown;
+};
+
+/** Opt-in tool arguments captured on the execute_tool span (PII). */
+export type ToolContent = {
+  readonly arguments?: unknown;
+};
+
+/**
+ * Maximum UTF-8 byte length for a serialized content attribute value. Workers'
+ * custom span attribute values are bounded, so opt-in content (prompts, tool
+ * payloads) is capped well under that ceiling: a large prompt is truncated with
+ * a marker rather than risking the whole attribute — or span — being dropped.
+ */
+const MAX_CONTENT_ATTRIBUTE_BYTES = 4096;
+const CONTENT_TRUNCATION_MARKER = "…[truncated]";
+
+/**
+ * Serializes an opt-in content payload (chat messages, tool arguments/results)
+ * to a JSON string bounded to {@link MAX_CONTENT_ATTRIBUTE_BYTES}. Returns
+ * undefined for an absent or non-JSON-representable value so the attribute is
+ * omitted rather than written as a broken value. This is the single point where
+ * content is projected onto a scalar span attribute.
+ */
+export function serializeContent(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    // Circular structures or throwing getters: drop the attribute, fail open.
+    return undefined;
+  }
+
+  // JSON.stringify returns undefined for functions, symbols, and bare undefined.
+  if (json === undefined) {
+    return undefined;
+  }
+
+  return truncateToBytes(json, MAX_CONTENT_ATTRIBUTE_BYTES);
+}
+
+function truncateToBytes(text: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(text).length <= maxBytes) {
+    return text;
+  }
+
+  const budget = maxBytes - encoder.encode(CONTENT_TRUNCATION_MARKER).length;
+  let bytes = 0;
+  let result = "";
+  // Iterating the string yields whole code points, so a multi-byte character is
+  // never split across the truncation boundary.
+  for (const character of text) {
+    const characterBytes = encoder.encode(character).length;
+    if (bytes + characterBytes > budget) {
+      break;
+    }
+    bytes += characterBytes;
+    result += character;
+  }
+
+  return `${result}${CONTENT_TRUNCATION_MARKER}`;
+}
+
+/**
+ * Projects an opt-in tool result onto the execute_tool span. Callers invoke
+ * this only when `recordOutputs` is set; the value is serialized and truncated
+ * through the same enforcement point as every other content attribute.
+ */
+export function toolResultAttributes(result: unknown): TraceAttributes {
+  return {
+    [TraceAttribute.GenAI.ToolCallResult]: serializeContent(result)
+  };
+}
+
+/**
  * Builds a semconv-formula span name (`"{operation} {target}"`), falling back
  * to the bare operation when the target is unavailable or the combined name
  * exceeds the Workers Observability 64 UTF-8-byte budget. The full target
@@ -194,6 +281,7 @@ export function operationSpanName(agentName: string | undefined): string {
 /** Builds the root span for an SDK operation such as generateText or streamText. */
 export function operationSpan(input: {
   readonly attributes: TraceAttributes | undefined;
+  readonly content?: OperationContent | undefined;
   readonly context?: SemanticContext | undefined;
   readonly integration: IntegrationName;
   readonly model: string | undefined;
@@ -204,6 +292,14 @@ export function operationSpan(input: {
   return {
     attributes: {
       ...input.attributes,
+      // Opt-in content: undefined unless the caller passed it under an explicit
+      // record flag, and dropped by serializeContent when not representable.
+      [TraceAttribute.GenAI.InputMessages]: serializeContent(
+        input.content?.inputMessages
+      ),
+      [TraceAttribute.GenAI.OutputMessages]: serializeContent(
+        input.content?.outputMessages
+      ),
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.AgentID]: input.context?.agentId,
@@ -271,6 +367,7 @@ function requestAttributes(
 
 /** Builds the child span for a tool execution. */
 export function toolCallSpan(input: {
+  readonly content?: ToolContent | undefined;
   readonly integration: IntegrationName;
   readonly operation: string;
   readonly toolCallId?: string | undefined;
@@ -278,6 +375,11 @@ export function toolCallSpan(input: {
 }): SpanSpec {
   return {
     attributes: {
+      // Opt-in tool arguments: undefined unless the caller passed them under an
+      // explicit record flag.
+      [TraceAttribute.GenAI.ToolCallArguments]: serializeContent(
+        input.content?.arguments
+      ),
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
@@ -295,6 +397,7 @@ export function toolCallSpan(input: {
 
 /** Projects a completed model operation into canonical finish attributes. */
 export function finishAttributes(input: {
+  readonly content?: OperationContent | undefined;
   readonly finishReason: string | undefined;
   readonly response?: ResponseSummary | undefined;
   readonly timeToFirstChunkSeconds?: number | undefined;
@@ -302,6 +405,11 @@ export function finishAttributes(input: {
   readonly usage: TokenUsageSummary | undefined;
 }): TraceAttributes {
   return {
+    // Opt-in output content: undefined unless the caller passed it under an
+    // explicit `recordOutputs` flag.
+    [TraceAttribute.GenAI.OutputMessages]: serializeContent(
+      input.content?.outputMessages
+    ),
     [TraceAttribute.Cloudflare.ResponseFinishReason]: input.finishReason,
     [TraceAttribute.Cloudflare.ToolCount]: input.toolCallCount,
     [TraceAttribute.Cloudflare.UsageTotalTokens]: totalTokens(input.usage),

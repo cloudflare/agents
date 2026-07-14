@@ -9,6 +9,7 @@ import {
 
 type StreamSummary = {
   readonly finishReason?: string;
+  readonly outputContent?: unknown;
   readonly response?: ResponseSummary;
   readonly toolCallCount?: number;
   readonly timeToFirstChunkSeconds?: number;
@@ -20,9 +21,11 @@ export function finishWhenStreamCompletes(
   span: AgentSpan,
   options: {
     readonly includeResponse?: boolean;
+    readonly recordOutputs?: boolean;
     readonly startedAtMs?: number;
   } = {}
 ): unknown {
+  const recordOutputs = options.recordOutputs === true;
   return patchStreamFields(
     result,
     {
@@ -30,7 +33,8 @@ export function finishWhenStreamCompletes(
         span.finish(
           finishAttributesFromStreamSummary(
             summary,
-            options.includeResponse === true
+            options.includeResponse === true,
+            recordOutputs
           )
         );
       },
@@ -38,15 +42,20 @@ export function finishWhenStreamCompletes(
         span.fail(cause);
       }
     },
-    options.startedAtMs
+    options.startedAtMs,
+    recordOutputs
   );
 }
 
 function finishAttributesFromStreamSummary(
   summary: StreamSummary | undefined,
-  includeResponse: boolean
+  includeResponse: boolean,
+  recordOutputs: boolean
 ): TraceAttributes {
   return finishAttributes({
+    content: recordOutputs
+      ? { outputMessages: summary?.outputContent }
+      : undefined,
     finishReason: summary?.finishReason,
     response: includeResponse ? summary?.response : undefined,
     timeToFirstChunkSeconds: summary?.timeToFirstChunkSeconds,
@@ -61,7 +70,8 @@ function patchStreamFields(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
   },
-  startedAtMs: number | undefined
+  startedAtMs: number | undefined,
+  recordOutputs: boolean
 ): unknown {
   if (typeof result !== "object" || result === null) {
     hooks.onComplete(undefined);
@@ -104,7 +114,8 @@ function patchStreamFields(
             onComplete: completeOnce,
             onError: errorOnce
           },
-          startedAtMs
+          startedAtMs,
+          recordOutputs
         ),
         writable: true
       });
@@ -130,7 +141,8 @@ function patchStreamFields(
                   onComplete: completeOnce,
                   onError: errorOnce
                 },
-                startedAtMs
+                startedAtMs,
+                recordOutputs
               )
             : wrapAsyncIterable(
                 streamField.stream,
@@ -138,7 +150,8 @@ function patchStreamFields(
                   onComplete: completeOnce,
                   onError: errorOnce
                 },
-                startedAtMs
+                startedAtMs,
+                recordOutputs
               ),
         writable: true
       });
@@ -194,10 +207,11 @@ function wrapReadableStream(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
   },
-  startedAtMs: number | undefined
+  startedAtMs: number | undefined,
+  recordOutputs: boolean
 ): ReadableStream<unknown> {
   let reader: ReadableStreamDefaultReader<unknown> | undefined;
-  const state = createStreamState(hooks, startedAtMs);
+  const state = createStreamState(hooks, startedAtMs, recordOutputs);
 
   return new ReadableStream<unknown>({
     async pull(controller) {
@@ -264,11 +278,12 @@ function wrapAsyncIterable(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
   },
-  startedAtMs: number | undefined
+  startedAtMs: number | undefined,
+  recordOutputs: boolean
 ): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
-      const state = createStreamState(hooks, startedAtMs);
+      const state = createStreamState(hooks, startedAtMs, recordOutputs);
       try {
         for await (const chunk of stream) {
           state.observeChunk(chunk);
@@ -291,7 +306,8 @@ function createStreamState(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (cause: unknown) => void;
   },
-  startedAtMs: number | undefined
+  startedAtMs: number | undefined,
+  recordOutputs: boolean
 ): {
   readonly closed: boolean;
   cancel(): void;
@@ -307,6 +323,8 @@ function createStreamState(
   let observedError: { readonly cause: unknown } | undefined;
   let observedAbort = false;
   let firstChunkAtMs: number | undefined;
+  // Opt-in output accumulation (PII); only populated when recordOutputs is set.
+  const output = createOutputAccumulator();
 
   const settleObserved = (): boolean => {
     if (observedError) {
@@ -355,6 +373,7 @@ function createStreamState(
       hooks.onComplete(
         streamSummaryFromParts({
           finishReason,
+          outputContent: recordOutputs ? output.content() : undefined,
           response,
           timeToFirstChunkSeconds:
             firstChunkAtMs === undefined || startedAtMs === undefined
@@ -388,6 +407,9 @@ function createStreamState(
       }
       if (isToolCallChunk(chunk)) {
         toolCallCount += 1;
+      }
+      if (recordOutputs) {
+        output.observe(chunk);
       }
       finishReason = extractFinishReason(chunk) ?? finishReason;
       usage = extractAISDKv6TokenUsage(chunk) ?? usage;
@@ -433,6 +455,7 @@ function isAbortChunk(chunk: unknown): boolean {
 
 function streamSummaryFromParts(input: {
   readonly finishReason: string | undefined;
+  readonly outputContent: unknown;
   readonly response: ResponseSummary | undefined;
   readonly timeToFirstChunkSeconds: number | undefined;
   readonly toolCallCount: number;
@@ -442,12 +465,76 @@ function streamSummaryFromParts(input: {
     ...(input.finishReason !== undefined
       ? { finishReason: input.finishReason }
       : {}),
+    ...(input.outputContent !== undefined
+      ? { outputContent: input.outputContent }
+      : {}),
     ...(input.response ? { response: input.response } : {}),
     ...(input.timeToFirstChunkSeconds !== undefined
       ? { timeToFirstChunkSeconds: input.timeToFirstChunkSeconds }
       : {}),
     ...(input.toolCallCount > 0 ? { toolCallCount: input.toolCallCount } : {}),
     ...(input.usage ? { usage: input.usage } : {})
+  };
+}
+
+/**
+ * Accumulates opt-in output content from an AI SDK v6 stream: concatenates
+ * `text-delta` chunks, collects `tool-call` chunks, and keeps the latest
+ * object payload (streamObject). Only fed chunks when `recordOutputs` is set;
+ * the assembled value is potentially PII.
+ */
+function createOutputAccumulator(): {
+  content(): unknown;
+  observe(chunk: unknown): void;
+} {
+  let text = "";
+  const toolCalls: unknown[] = [];
+  let object: unknown;
+
+  return {
+    content() {
+      const output: Record<string, unknown> = {};
+      if (text.length > 0) {
+        output.text = text;
+      }
+      if (toolCalls.length > 0) {
+        output.toolCalls = toolCalls;
+      }
+      if (object !== undefined) {
+        output.object = object;
+      }
+      return Object.keys(output).length > 0 ? output : undefined;
+    },
+    observe(chunk) {
+      if (typeof chunk !== "object" || chunk === null) {
+        // streamObject's partialObjectStream yields bare object snapshots.
+        if (chunk !== undefined) {
+          object = chunk;
+        }
+        return;
+      }
+
+      const record = chunk as Record<string, unknown>;
+      if (record.type === "text-delta") {
+        const delta = record.text ?? record.delta;
+        if (typeof delta === "string") {
+          text += delta;
+        }
+        return;
+      }
+      if (record.type === "tool-call") {
+        toolCalls.push(chunk);
+        return;
+      }
+      if (record.object !== undefined) {
+        object = record.object;
+        return;
+      }
+      // A bare object snapshot (partialObjectStream) with no discriminant.
+      if (record.type === undefined) {
+        object = chunk;
+      }
+    }
   };
 }
 

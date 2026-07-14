@@ -77,16 +77,54 @@ export function requestSummaryFromEvent(
   };
 }
 
+/**
+ * Reads the opt-in input content (prompt/messages) from an AI SDK v7 operation
+ * event. Prefers the structured message list; falls back to the bare prompt.
+ * Callers gate this behind `recordInputs`; it is potentially PII.
+ */
+export function inputContentFromEvent(event: object): unknown {
+  const record = eventRecord(event);
+  if (Array.isArray(record.messages)) {
+    return record.messages;
+  }
+  return record.prompt;
+}
+
+/**
+ * Reads the opt-in output content (text/object/tool calls) from an AI SDK v7
+ * result-like event. Callers gate this behind `recordOutputs`; it is
+ * potentially PII.
+ */
+export function outputContentFromEvent(event: object): unknown {
+  const record = eventRecord(event);
+  const output: Record<string, unknown> = {};
+  if (record.text !== undefined) {
+    output.text = record.text;
+  }
+  if (record.object !== undefined) {
+    output.object = record.object;
+  }
+  if (Array.isArray(record.toolCalls) && record.toolCalls.length > 0) {
+    output.toolCalls = record.toolCalls;
+  }
+
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
 /** Extracts safe finish attributes from an AI SDK v7 result-like event. */
 export function finishAttributesFromEvent(
   event: object,
   options: {
     readonly includePerformance?: boolean;
     readonly includeResponse?: boolean;
+    readonly recordOutputs?: boolean;
   } = {}
 ): TraceAttributes {
   const record = eventRecord(event);
   return finishAttributes({
+    content: options.recordOutputs
+      ? { outputMessages: outputContentFromEvent(record) }
+      : undefined,
     finishReason: extractFinishReason(record),
     response: options.includeResponse
       ? responseSummaryFromEvent(record)

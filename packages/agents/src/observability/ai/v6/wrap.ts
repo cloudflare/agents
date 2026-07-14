@@ -1,5 +1,5 @@
 import type { AISDKInstrumentationOptions } from "../options";
-import { readString } from "../read";
+import { readBoolean, readString } from "../read";
 import {
   metadataAttributes,
   operationSpan,
@@ -9,6 +9,7 @@ import type { SemanticContext } from "../../genai/telemetry";
 import { writeSpanAttributes } from "../../tracing/tracer";
 import type { AgentTracer } from "../../tracing/tracer";
 import {
+  extractInputContent,
   extractModelInfo,
   extractRequestSummary,
   finishAttributesFromResult
@@ -17,6 +18,7 @@ import type { ModelInfo } from "./extract";
 import { wrapModel } from "./model";
 import { finishWhenStreamCompletes } from "./streams";
 import { wrapTools } from "./tools";
+import type { ContentRecording } from "./tools";
 import type {
   AISDKV6CallParams,
   AISDKV6Operation,
@@ -141,11 +143,16 @@ function createOperationWrapper(
             return operation(params, ...args);
           }
 
+          const content = contentRecordingForCall(
+            params,
+            instrumentation.options
+          );
           const span = operationSpanForCall(
             operationName,
             extractModelInfo(params.model),
             params,
-            instrumentation.options
+            instrumentation.options,
+            content
           );
           writeSpanAttributes(operationSpan, span.attributes);
 
@@ -155,7 +162,8 @@ function createOperationWrapper(
               params,
               operationName,
               wrapLanguageModel,
-              instrumentation.tracer
+              instrumentation.tracer,
+              content
             ),
             ...args
           );
@@ -163,6 +171,7 @@ function createOperationWrapper(
 
           return finishWhenStreamCompletes(result, operationSpan, {
             includeResponse: !hasModelSpan,
+            recordOutputs: content.recordOutputs,
             startedAtMs: hasModelSpan ? undefined : startedAtMs
           });
         }
@@ -179,11 +188,16 @@ function createOperationWrapper(
           return operation(params, ...args);
         }
 
+        const content = contentRecordingForCall(
+          params,
+          instrumentation.options
+        );
         const span = operationSpanForCall(
           operationName,
           extractModelInfo(params.model),
           params,
-          instrumentation.options
+          instrumentation.options,
+          content
         );
         writeSpanAttributes(operationSpan, span.attributes);
 
@@ -192,14 +206,16 @@ function createOperationWrapper(
             params,
             operationName,
             wrapLanguageModel,
-            instrumentation.tracer
+            instrumentation.tracer,
+            content
           ),
           ...args
         );
 
         operationSpan.finish(
           finishAttributesFromResult(result, {
-            includeResponse: !canWrapModel(wrapLanguageModel, params.model)
+            includeResponse: !canWrapModel(wrapLanguageModel, params.model),
+            recordOutputs: content.recordOutputs
           })
         );
         return result;
@@ -234,12 +250,13 @@ function operationParamsForCall(
   params: AISDKV6CallParams,
   operationName: AISDKV6OperationName,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
-  tracer: AgentTracer
+  tracer: AgentTracer,
+  content: ContentRecording
 ): AISDKV6CallParams {
   return {
     ...params,
     ...(shouldWrapTools(operationName) && params.tools !== undefined
-      ? { tools: wrapTools(tracer, params.tools) }
+      ? { tools: wrapTools(tracer, params.tools, content) }
       : {}),
     ...(params.model !== undefined
       ? {
@@ -288,13 +305,19 @@ function operationSpanForCall(
   operation: string,
   model: ModelInfo | undefined,
   params: AISDKV6CallParams,
-  options: AISDKInstrumentationOptions | undefined
+  options: AISDKInstrumentationOptions | undefined,
+  content: ContentRecording
 ): ReturnType<typeof operationSpan> {
   return operationSpan({
     attributes: {
       ...metadataAttributes(telemetryMetadata(params)),
       ...contextAttributes(params, options)
     },
+    // Opt-in chat inputs (prompt/messages) on the operation root span; only
+    // read from caller params when recordInputs is set. Potentially PII.
+    content: content.recordInputs
+      ? { inputMessages: extractInputContent(params) }
+      : undefined,
     context: semanticContext(params),
     integration: "ai-sdk",
     model: model?.modelId,
@@ -302,6 +325,32 @@ function operationSpanForCall(
     provider: model?.provider,
     request: extractRequestSummary(params, operation)
   });
+}
+
+/**
+ * Resolves opt-in content recording for a call. The per-call
+ * `experimental_telemetry.recordInputs`/`recordOutputs` settings (the AI SDK's
+ * own {@link https://sdk.vercel.ai TelemetrySettings} vocabulary) are
+ * authoritative and may opt in OR out; they fall back to the wrapper-level
+ * option, and finally to `false`. Content is potentially PII, so the effective
+ * default is OFF and content is emitted only when a flag resolves to `true`.
+ */
+function contentRecordingForCall(
+  params: AISDKV6CallParams,
+  options: AISDKInstrumentationOptions | undefined
+): ContentRecording {
+  const telemetry =
+    typeof params.experimental_telemetry === "object" &&
+    params.experimental_telemetry !== null
+      ? (params.experimental_telemetry as Record<string, unknown>)
+      : undefined;
+
+  return {
+    recordInputs:
+      readBoolean(telemetry?.recordInputs) ?? options?.recordInputs ?? false,
+    recordOutputs:
+      readBoolean(telemetry?.recordOutputs) ?? options?.recordOutputs ?? false
+  };
 }
 
 /** Reads the per-call `experimental_telemetry.metadata` record, if present. */

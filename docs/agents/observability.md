@@ -288,7 +288,10 @@ spans, and `execute_tool {tool}` spans. Think always supplies its durable
 identity: `gen_ai.agent.name` is the class name, `gen_ai.agent.id` is the named
 instance, and `gen_ai.conversation.id` is the opaque Durable Object ID. These
 are defaults; `beforeTurn` can override `functionId` or the corresponding
-metadata fields for applications with a different identity model.
+metadata fields for applications with a different identity model. Think records
+no conversation content by default; set `recordTraceContent = true` on the agent
+to attach prompts, output, and tool inputs/outputs to the spans (records PII —
+see [Opt-in content recording](#opt-in-content-recording-records-pii)).
 
 ### AI SDK v6
 
@@ -418,6 +421,8 @@ await generateText({
 | `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.cache_read.input_tokens` | Provider cache usage when reported                                                           |
 | `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
 | `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID only when available                                                   |
+| `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in (PII) chat inputs/outputs; omitted unless `recordInputs`/`recordOutputs` is set       |
+| `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                            | Opt-in (PII) tool inputs/outputs; omitted unless `recordInputs`/`recordOutputs` is set       |
 | `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
 | `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
 
@@ -447,10 +452,59 @@ an attribute: failures emit `error.type`, but the adapter does not invent an
 
 ### Context and safety
 
-The adapters never emit prompts, messages, system instructions, tool inputs,
-tool outputs, schemas, headers, provider options, raw model output, or raw error
-messages. Metadata and context values must be scalar; objects and arrays are
-dropped.
+By default the adapters emit no conversation content. Prompts, messages, model
+output, and tool inputs/outputs are not recorded unless you explicitly opt in
+(see [Opt-in content recording](#opt-in-content-recording-records-pii) below).
+System instructions, schemas, headers, provider options, and raw error messages
+are never recorded under any configuration. Metadata and context values must be
+scalar; objects and arrays are dropped.
+
+#### Opt-in content recording (records PII)
+
+Chat inputs/outputs and tool inputs/outputs can be attached to the spans behind
+an explicit opt-in. **This content is potentially PII and is recorded only when
+the corresponding flag is `true`; both default to `false`.** Enable it only
+where recording raw conversation content in Workers Observability is acceptable.
+
+The flag names mirror the AI SDK's own `TelemetrySettings`:
+
+- `recordInputs` — records chat inputs (prompt/messages) on the operation span
+  (`gen_ai.input.messages`) and tool arguments on the `execute_tool` span
+  (`gen_ai.tool.call.arguments`).
+- `recordOutputs` — records model output (text/object/tool calls) on the
+  operation span (`gen_ai.output.messages`) and the tool result on the
+  `execute_tool` span (`gen_ai.tool.call.result`), on the success path only —
+  never on error or abort.
+
+Each value is serialized to JSON and truncated to a safe byte cap with a
+`…[truncated]` marker, so a large prompt cannot blow up the span.
+
+For v6, set the flags on the wrapper, or per call via `experimental_telemetry`
+(a per-call flag is authoritative and can opt in **or** out):
+
+```ts
+const traced = wrapAISDK(ai, { recordInputs: true, recordOutputs: true });
+
+await traced.generateText({
+  model,
+  prompt: "Will I need an umbrella?",
+  // Per-call override wins over the wrapper default.
+  experimental_telemetry: { recordInputs: false }
+});
+```
+
+For v7, pass the flags to `createAISDKTelemetry`:
+
+```ts
+const telemetry = createAISDKTelemetry({
+  recordInputs: true,
+  recordOutputs: true
+});
+```
+
+Think exposes this as a single `recordTraceContent` flag (off by default); set
+it to `true` on an agent to record content for every turn. See
+[Think configuration](https://github.com/cloudflare/agents/blob/main/docs/think/index.md).
 
 For v6, only `experimental_context` exists. Configure its allowlist on the
 wrapper:
