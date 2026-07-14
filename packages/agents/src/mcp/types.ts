@@ -1,4 +1,4 @@
-import type { Client } from "@modelcontextprotocol/sdk/client";
+import type { Client } from "@modelcontextprotocol/client";
 
 export type MaybePromise<T> = T | Promise<T>;
 export type MaybeConnectionTag = { role: string } | undefined;

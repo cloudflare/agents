@@ -1,10 +1,11 @@
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
-  OAuthClientInformation,
-  OAuthClientInformationFull,
+  OAuthClientInformationContext,
   OAuthClientMetadata,
-  OAuthTokens
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+  OAuthClientProvider,
+  OAuthDiscoveryState,
+  StoredOAuthClientInformation,
+  StoredOAuthTokens
+} from "@modelcontextprotocol/client";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { nanoid } from "nanoid";
 
@@ -149,47 +150,113 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     return `/${this.clientName}/${this.serverId}/${clientId}`;
   }
 
-  clientInfoKey(clientId: string) {
-    return `${this.keyPrefix(clientId)}/client_info/`;
+  clientInfoKey(clientId: string, issuer?: string) {
+    const suffix = issuer
+      ? `/issuer/${encodeURIComponent(issuer)}/client_info`
+      : "/client_info/";
+    return `${this.keyPrefix(clientId)}${suffix}`;
   }
 
-  async clientInformation(): Promise<OAuthClientInformation | undefined> {
-    if (!this._clientId_) {
-      return undefined;
-    }
+  activeIssuerKey(clientId: string) {
+    return `${this.keyPrefix(clientId)}/active_issuer`;
+  }
+
+  discoveryStateKey() {
+    return `/${this.clientName}/${this.serverId}/oauth_discovery`;
+  }
+
+  async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
+    await this.storage.put(this.discoveryStateKey(), state);
+  }
+
+  async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
     return (
-      (await this.storage.get<OAuthClientInformation>(
-        this.clientInfoKey(this.clientId)
-      )) ?? undefined
-    );
-  }
-
-  async saveClientInformation(
-    clientInformation: OAuthClientInformationFull
-  ): Promise<void> {
-    await this.storage.put(
-      this.clientInfoKey(clientInformation.client_id),
-      clientInformation
-    );
-    this.clientId = clientInformation.client_id;
-  }
-
-  tokenKey(clientId: string) {
-    return `${this.keyPrefix(clientId)}/token`;
-  }
-
-  async tokens(): Promise<OAuthTokens | undefined> {
-    if (!this._clientId_) {
-      return undefined;
-    }
-    return (
-      (await this.storage.get<OAuthTokens>(this.tokenKey(this.clientId))) ??
+      (await this.storage.get<OAuthDiscoveryState>(this.discoveryStateKey())) ??
       undefined
     );
   }
 
-  async saveTokens(tokens: OAuthTokens): Promise<void> {
-    await this.storage.put(this.tokenKey(this.clientId), tokens);
+  async clientInformation(
+    context?: OAuthClientInformationContext
+  ): Promise<StoredOAuthClientInformation | undefined> {
+    if (!this._clientId_) return undefined;
+    const issuer =
+      context?.issuer ??
+      (await this.storage.get<string>(this.activeIssuerKey(this.clientId)));
+    const scoped = issuer
+      ? await this.storage.get<StoredOAuthClientInformation>(
+          this.clientInfoKey(this.clientId, issuer)
+        )
+      : undefined;
+    return (
+      scoped ??
+      (await this.storage.get<StoredOAuthClientInformation>(
+        this.clientInfoKey(this.clientId)
+      )) ??
+      undefined
+    );
+  }
+
+  async saveClientInformation(
+    clientInformation: StoredOAuthClientInformation,
+    context?: OAuthClientInformationContext
+  ): Promise<void> {
+    this.clientId = clientInformation.client_id;
+    const issuer = context?.issuer ?? clientInformation.issuer;
+    if (!issuer) {
+      await this.storage.put(
+        this.clientInfoKey(clientInformation.client_id),
+        clientInformation
+      );
+      return;
+    }
+    await this.storage.put({
+      [this.clientInfoKey(clientInformation.client_id, issuer)]:
+        clientInformation,
+      [this.activeIssuerKey(clientInformation.client_id)]: issuer
+    });
+  }
+
+  tokenKey(clientId: string, issuer?: string) {
+    return issuer
+      ? `${this.keyPrefix(clientId)}/issuer/${encodeURIComponent(issuer)}/token`
+      : `${this.keyPrefix(clientId)}/token`;
+  }
+
+  async tokens(
+    context?: OAuthClientInformationContext
+  ): Promise<StoredOAuthTokens | undefined> {
+    if (!this._clientId_) return undefined;
+    const issuer =
+      context?.issuer ??
+      (await this.storage.get<string>(this.activeIssuerKey(this.clientId)));
+    const scoped = issuer
+      ? await this.storage.get<StoredOAuthTokens>(
+          this.tokenKey(this.clientId, issuer)
+        )
+      : undefined;
+    return (
+      scoped ??
+      (await this.storage.get<StoredOAuthTokens>(
+        this.tokenKey(this.clientId)
+      )) ??
+      undefined
+    );
+  }
+
+  async saveTokens(
+    tokens: StoredOAuthTokens,
+    context?: OAuthClientInformationContext
+  ): Promise<void> {
+    const issuer = context?.issuer ?? tokens.issuer;
+    if (!issuer) {
+      await this.storage.put(this.tokenKey(this.clientId), tokens);
+      return;
+    }
+    await this.storage.put({
+      [this.tokenKey(this.clientId, issuer)]: tokens,
+      [this.activeIssuerKey(this.clientId)]: issuer
+    });
   }
 
   get authUrl() {
@@ -296,28 +363,45 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   }
 
   async invalidateCredentials(
-    scope: "all" | "client" | "tokens" | "verifier"
+    scope: "all" | "client" | "tokens" | "verifier" | "discovery"
   ): Promise<void> {
-    if (!this._clientId_) return;
-
     const deleteKeys: string[] = [];
 
-    if (scope === "all" || scope === "client") {
-      deleteKeys.push(this.clientInfoKey(this.clientId));
+    if (scope === "all" || scope === "discovery") {
+      deleteKeys.push(this.discoveryStateKey());
     }
-    if (scope === "all" || scope === "tokens") {
-      deleteKeys.push(this.tokenKey(this.clientId));
-    }
-    if (scope === "all" || scope === "verifier") {
-      deleteKeys.push(
-        ...(await this.codeVerifierKeys(this.clientId, {
-          includeChallengeKeys: true
-        }))
-      );
+
+    if (this._clientId_) {
+      const clientId = this.clientId;
+      if (scope === "all" || scope === "client") {
+        deleteKeys.push(this.clientInfoKey(clientId));
+      }
+      if (scope === "all" || scope === "tokens") {
+        deleteKeys.push(this.tokenKey(clientId));
+      }
+      if (scope === "all" || scope === "client" || scope === "tokens") {
+        const issuerEntries = await this.storage.list({
+          prefix: `${this.keyPrefix(clientId)}/issuer/`
+        });
+        const suffix = scope === "client" ? "/client_info" : "/token";
+        deleteKeys.push(
+          ...[...issuerEntries.keys()].filter(
+            (key) => scope === "all" || key.endsWith(suffix)
+          )
+        );
+        deleteKeys.push(this.activeIssuerKey(clientId));
+      }
+      if (scope === "all" || scope === "verifier") {
+        deleteKeys.push(
+          ...(await this.codeVerifierKeys(clientId, {
+            includeChallengeKeys: true
+          }))
+        );
+      }
     }
 
     if (deleteKeys.length > 0) {
-      await this.storage.delete(deleteKeys);
+      await this.storage.delete([...new Set(deleteKeys)]);
     }
   }
 

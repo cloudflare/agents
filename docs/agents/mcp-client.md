@@ -15,6 +15,12 @@ The MCP client capability lets your agent:
 
 ## Quick Start
 
+Install the exact MCP client peer used by this Agents release:
+
+```sh
+pnpm add agents @modelcontextprotocol/client@2.0.0-beta.4
+```
+
 ```typescript
 import { Agent } from "agents";
 
@@ -95,6 +101,20 @@ await this.addMcpServer("internal", "https://internal-mcp.example.com/mcp", {
 });
 ```
 
+### Legacy OAuth metadata compatibility
+
+SDK v2 validates authorization-server metadata issuers by default. A trusted 2025-era server with known mismatched RFC 8414 metadata can opt out explicitly:
+
+```typescript
+await this.addMcpServer("legacy", "https://legacy.example.com/mcp", {
+  transport: {
+    skipIssuerMetadataValidation: true
+  }
+});
+```
+
+This weakens OAuth mix-up protection. Do not enable it for unknown servers or as a general fallback.
+
 ### Retry Options
 
 Configure retry behavior for connection and reconnection attempts:
@@ -111,9 +131,13 @@ await this.addMcpServer("github", "https://mcp.github.com/mcp", {
 
 These options are persisted and used when reconnecting after hibernation or after OAuth completion. Default: 3 attempts, 500ms base delay, 5s max delay. See [Retries](./retries.md) for more details.
 
-### Elicitation
+### Protocol negotiation and elicitation
 
-MCP servers can request input from the client during a tool call (`elicitation/create`). To respond, configure an elicitation handler before MCP connections are registered or restored:
+Agents uses the MCP v2 client and automatically negotiates the protocol version for every connection. It uses `server/discover` with modern servers and falls back to the 2025 `initialize` handshake on the same connection for legacy Streamable HTTP, SSE, and RPC servers.
+
+MCP servers can request input from the client during `callTool`, `getPrompt`, or `readResource`. Modern servers return an `input_required` result; the MCP SDK automatically invokes the configured `elicitation/create` handler, sends its response, and continues the original request. Agents does not expose an intermediate continuation: the original call stays pending while human input is collected and eventually resolves to the ordinary tool, prompt, or resource result. Legacy 2025 servers continue to use pushed `elicitation/create` requests. Both eras share the same handlers.
+
+Configure elicitation handlers before MCP connections are registered or restored:
 
 ```typescript
 import { Agent } from "agents";
@@ -135,6 +159,8 @@ class MyAgent extends Agent<Env> {
 ```
 
 The advertised modes are persisted with each MCP server, so a connection restored from storage after hibernation re-advertises the same modes at the handshake; the handlers themselves re-attach when `onStart()` runs. Configuring a handler after an MCP connection is already active updates the in-memory handler, but the server only sees new advertised elicitation modes after that connection reconnects.
+
+Handlers and pending calls are memory-only. A Durable Object hibernation or isolate restart does not preserve an in-flight interactive call; callers must retry it after the connection is restored. Agents intentionally does not persist modern `requestState` or implement a manual/resumable continuation layer.
 
 Connections advertise only the elicitation modes with configured handlers at the `initialize` handshake: configure `form` to advertise form-mode elicitation, `url` to advertise url-mode elicitation (MCP spec 2025-11-25 — url mode is used for sensitive flows like OAuth URLs), or both to advertise both modes. Without handlers, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
 
@@ -416,7 +442,7 @@ function Dashboard() {
     onMcpUpdate: (mcpState) => {
       setTools(mcpState.tools);
       setServers(mcpState.servers);
-    }
+    },
   });
 
   return (
@@ -429,10 +455,8 @@ function Dashboard() {
       ))}
 
       <h2>Available Tools ({tools.length})</h2>
-      {tools.map(tool => (
-        <div key={`${tool.serverId}-${tool.name}`}>
-          {tool.name}
-        </div>
+      {tools.map((tool) => (
+        <div key={`${tool.serverId}-${tool.name}`}>{tool.name}</div>
       ))}
     </div>
   );

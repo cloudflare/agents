@@ -1,5 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type {
+  Client,
+  Prompt,
+  Resource,
+  ServerCapabilities,
+  SSEClientTransportOptions,
+  Tool
+} from "@modelcontextprotocol/client";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   type AgentEmail
@@ -16,15 +23,7 @@ export {
   SUB_PREFIX
 } from "./sub-routing";
 export type { SubAgentPathMatch } from "./sub-routing";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
-
-import type {
-  Prompt,
-  Resource,
-  ServerCapabilities,
-  Tool
-} from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
@@ -954,6 +953,12 @@ export type AddMcpServerOptions = {
     headers?: HeadersInit;
     /** Transport type: "sse", "streamable-http", or "auto" (default) */
     type?: TransportType;
+    /**
+     * Compatibility escape hatch for a trusted legacy authorization server
+     * whose RFC 8414 issuer does not match its metadata discovery URL.
+     * Security-weakening; leave false unless the server is explicitly known.
+     */
+    skipIssuerMetadataValidation?: boolean;
   };
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
@@ -12324,7 +12329,11 @@ export class Agent<
     agentsPrefix?: string,
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
-      transport?: { headers?: HeadersInit; type?: TransportType };
+      transport?: {
+        headers?: HeadersInit;
+        type?: TransportType;
+        skipIssuerMetadataValidation?: boolean;
+      };
     }
   ): Promise<
     | {
@@ -12348,6 +12357,7 @@ export class Agent<
       transport?: {
         headers?: HeadersInit;
         type?: TransportType;
+        skipIssuerMetadataValidation?: boolean;
       };
     }
   ): Promise<
@@ -12554,6 +12564,7 @@ export class Agent<
           transport?: {
             headers?: HeadersInit;
             type?: TransportType;
+            skipIssuerMetadataValidation?: boolean;
           };
           retry?: RetryOptions;
         }
@@ -12652,7 +12663,9 @@ export class Agent<
       transport: {
         ...headerTransportOpts,
         authProvider,
-        type: transportType
+        type: transportType,
+        skipIssuerMetadataValidation:
+          resolvedOptions?.transport?.skipIssuerMetadataValidation
       },
       retry: resolvedOptions?.retry
     });

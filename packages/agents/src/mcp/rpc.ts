@@ -1,16 +1,25 @@
 import type {
-  Transport,
-  TransportSendOptions
+  JSONRPCMessage as V2JSONRPCMessage,
+  MessageExtraInfo as V2MessageExtraInfo,
+  Transport as V2Transport,
+  TransportSendOptions as V2TransportSendOptions
+} from "@modelcontextprotocol/client";
+import type {
+  Transport as V1Transport,
+  TransportSendOptions as V1TransportSendOptions
 } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
-  JSONRPCMessage,
-  MessageExtraInfo
+  JSONRPCMessage as V1JSONRPCMessage,
+  MessageExtraInfo as V1MessageExtraInfo
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   isJSONRPCErrorResponse,
   isJSONRPCResultResponse,
   JSONRPCMessageSchema
 } from "@modelcontextprotocol/sdk/types.js";
+
+type JSONRPCMessage = V1JSONRPCMessage;
+type MessageExtraInfo = V1MessageExtraInfo;
 import { getServerByName } from "partyserver";
 import type { McpAgent } from ".";
 
@@ -33,13 +42,35 @@ function validateBatch(batch: JSONRPCMessage[]): void {
   }
 }
 
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error(String(signal.reason ?? "Aborted"));
+}
+
+async function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw abortError(signal);
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
 export interface RPCClientTransportOptions<T extends McpAgent = McpAgent> {
   namespace: DurableObjectNamespace<T>;
   name: string;
   props?: Record<string, unknown>;
 }
 
-export class RPCClientTransport implements Transport {
+export class RPCClientTransport implements V2Transport {
   private _namespace: DurableObjectNamespace<McpAgent>;
   private _name: string;
   private _props?: Record<string, unknown>;
@@ -50,7 +81,7 @@ export class RPCClientTransport implements Transport {
   sessionId?: string;
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
+  onmessage?: (message: V2JSONRPCMessage, extra?: V2MessageExtraInfo) => void;
 
   constructor(options: RPCClientTransportOptions<McpAgent>) {
     this._namespace = options.namespace;
@@ -88,24 +119,26 @@ export class RPCClientTransport implements Transport {
   }
 
   async send(
-    message: JSONRPCMessage | JSONRPCMessage[],
-    options?: TransportSendOptions
+    message: V2JSONRPCMessage | V2JSONRPCMessage[],
+    options?: V2TransportSendOptions
   ): Promise<void> {
     if (!this._started || !this._stub) {
       throw new Error("Transport not started");
     }
 
     try {
-      const result: JSONRPCMessage | JSONRPCMessage[] | undefined =
-        await this._stub.handleMcpMessage(message);
+      const pending = this._stub.handleMcpMessage(
+        message as JSONRPCMessage | JSONRPCMessage[]
+      ) as Promise<V2JSONRPCMessage | V2JSONRPCMessage[] | undefined>;
+      const result = await raceWithAbort(pending, options?.requestSignal);
 
-      if (!result) {
+      if (!result || options?.requestSignal?.aborted) {
         return;
       }
 
-      const extra: MessageExtraInfo | undefined = options?.relatedRequestId
-        ? { requestInfo: { headers: {} } }
-        : undefined;
+      // The v2 client transport contract no longer uses the v1 requestInfo
+      // placeholder. Correlation is carried by JSON-RPC ids in this adapter.
+      const extra: V2MessageExtraInfo | undefined = undefined;
 
       const messages = Array.isArray(result) ? result : [result];
       for (const msg of messages) {
@@ -129,7 +162,7 @@ type PendingRPCResponse = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
-export class RPCServerTransport implements Transport {
+export class RPCServerTransport implements V1Transport {
   private _started = false;
   private _protocolVersion?: string;
   private _timeout: number;
@@ -237,7 +270,7 @@ export class RPCServerTransport implements Transport {
 
   async send(
     message: JSONRPCMessage,
-    options?: TransportSendOptions
+    options?: V1TransportSendOptions
   ): Promise<void> {
     if (!this._started) {
       throw new Error("Transport not started");
@@ -262,7 +295,9 @@ export class RPCServerTransport implements Transport {
 
       this.onerror?.(
         new Error(
-          `No pending RPC request found for response: ${JSON.stringify(message)}`
+          `No pending RPC request found for response: ${JSON.stringify(
+            message
+          )}`
         )
       );
       return;

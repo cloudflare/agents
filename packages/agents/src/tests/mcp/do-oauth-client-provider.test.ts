@@ -118,5 +118,16 @@ describe("DurableObjectOAuthClientProvider PKCE binding", () => {
       // invalidateCredentials("verifier") sweeps all three, including the orphan.
       expect(result.after).toBe(0);
     });
+
+    it("persists discovery state and invalidates issuer-scoped credentials", async () => {
+      const result = await agent().testDiscoveryStateAndIssuerInvalidation();
+
+      expect(result.discoveryRoundTrips).toBe(true);
+      expect(result.discoveryCleared).toBe(true);
+      expect(result.scopedTokenBefore).toBe(true);
+      expect(result.scopedTokenAfter).toBe(false);
+      expect(result.scopedClientBefore).toBe(true);
+      expect(result.scopedClientAfter).toBe(false);
+    });
   });
 });
