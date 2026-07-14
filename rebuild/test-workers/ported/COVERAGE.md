@@ -36,7 +36,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
-| client-tools.test.ts | 82 | WIRE | pending | T1 (largest wire file); observability asserts hit the ISSUE-009 shim |
+| client-tools.test.ts | 82 | WIRE | claimed P3 | T1 (largest wire file); observability asserts hit the ISSUE-009 shim |
 | think-session.test.ts | 198 | WIRE+API | pending | split on port: wire half T1, api half T3 |
 | hooks.test.ts | 105 | WIRE+API | pending | split T1/T3 |
 | submissions.test.ts | 51 | PUBLIC-API | pending | T3 |
@@ -53,7 +53,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | actions-durable-pause.test.ts | 18 | PUBLIC-API | pending | T3 |
 | host-embedding.test.ts | 11 | INTERNAL | blocked ISSUE-013 | framework/server-entry |
 | onconnect-broadcast.test.ts | 9 | WIRE | ported 5/9 | connect frames compatible; 4 fail on active-stream suppression + terminal replay (`framing` + ISSUE-018-adjacent divergence, #1645) |
-| actions-attach-reply.test.ts | 12 | WIRE | pending | T1 |
+| actions-attach-reply.test.ts | 12 | WIRE | claimed P3 | T1 |
 | assistant-agent.test.ts | 5 | WIRE | ported 0/5 | **T0 gate** — all `framing` (ISSUE-026) |
 | channel-recovery.test.ts | 5 | PUBLIC-API | pending | T3 |
 | stream-cleanup.test.ts | 11 | PUBLIC-API | pending | T3; event-log retention differs — expect divergence notes |
@@ -61,7 +61,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | workflows.test.ts | 3 | INTERNAL | blocked ISSUE-016 | |
 | action-pause-recovery.test.ts | 3 | PUBLIC-API | pending | T3 |
 | onstart-degraded.test.ts | 5 | PUBLIC-API | pending | T3 |
-| agent-tool-reattach-recovery.test.ts | 2 | WIRE | pending | T1 |
+| agent-tool-reattach-recovery.test.ts | 2 | WIRE | claimed P3 | T1 |
 | streaming-message-id.test.ts | 1 | WIRE | ported 0/1 | **T0 gate** — `framing` (ISSUE-026) |
 | run-turn-recovery.test.ts | 2 | PUBLIC-API | pending | T3 |
 | turn-metadata.test.ts | 4 | PUBLIC-API | pending | T3 |
@@ -87,13 +87,13 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | File | Tests | Status | Notes |
 |---|--:|---|---|
 | chat-recovery.test.ts | 5 | ported 2/5 | Harness proven: wrangler boot/SIGKILL-tree/restart works across all tests. PASS: sub-agent chat recovery after kill via parent alarm; agent-tool re-attach after parent restart (#1630) — both pure-RPC. FAIL (triaged): the three chat-frame scenarios — `framing` ISSUE-026 (`cf_agent_use_chat_request` unparsed, no stream ever starts). |
-| stall-recovery.test.ts | 1 | pending | T2 |
-| context-overflow-recovery.test.ts | 3 | pending | T2 |
-| submission-recovery.test.ts | 3 | pending | T2 |
-| action-pause-recovery.test.ts | 1 | pending | T2 |
-| action-ledger-recovery.test.ts | 1 | pending | T2 |
-| tool-rollback.test.ts | 1 | pending | T2 |
-| persist-false-preserves.test.ts | 1 | pending | T2 |
+| stall-recovery.test.ts | 1 | claimed P4 | T2 |
+| context-overflow-recovery.test.ts | 3 | claimed P4 | T2 |
+| submission-recovery.test.ts | 3 | claimed P4 | T2 |
+| action-pause-recovery.test.ts | 1 | claimed P4 | T2 |
+| action-ledger-recovery.test.ts | 1 | claimed P4 | T2 |
+| tool-rollback.test.ts | 1 | claimed P4 | T2 |
+| persist-false-preserves.test.ts | 1 | claimed P4 | T2 |
 | reattach-budget.test.ts | 1 | pending | T2 (sub-agent recovery fixtures) |
 | task-amplification.test.ts | 2 | pending | T2 (sub-agent recovery fixtures) |
 | messenger-recovery.test.ts | 2 | blocked ISSUE-011 | |
