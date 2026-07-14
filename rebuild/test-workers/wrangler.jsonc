@@ -18,6 +18,10 @@
       {
         "class_name": "ScaffoldAgent",
         "name": "SCAFFOLD_AGENT"
+      },
+      {
+        "class_name": "StoreTestAgent",
+        "name": "STORE_TEST_AGENT"
       }
     ]
   },
@@ -26,7 +30,8 @@
       "tag": "v1",
       // SQLite-backed: required for the synchronous ctx.storage.sql / .kv APIs
       "new_sqlite_classes": [
-        "ScaffoldAgent"
+        "ScaffoldAgent",
+        "StoreTestAgent"
       ]
     }
   ]

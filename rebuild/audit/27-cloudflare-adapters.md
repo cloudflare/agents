@@ -138,9 +138,13 @@ an in-memory mirror:
 - On activation the shell does
   `mirror = await ctx.storage.getAlarm()` inside `blockConcurrencyWhile`
   (before the agent constructor runs any scheduler code).
-- `set(at)` → `mirror = at; void ctx.storage.setAlarm(at)` (fire-and-forget
-  is safe under output gates).
-- `clear()` → `mirror = null; void ctx.storage.deleteAlarm()`.
+- `set(at)` → `mirror = at; enqueue ctx.storage.setAlarm(at)`.
+- `clear()` → `mirror = null; enqueue ctx.storage.deleteAlarm()`.
+- `flush()` → await the queued platform alarm write before ending a host turn
+  that needs the alarm slot to be externally observable. `cloudflare:test`'s
+  `runInDurableObject` only waits for the callback's returned promise, and
+  `runDurableObjectAlarm` first checks `storage.getAlarm()`, so unawaited
+  alarm writes can race with alarm delivery tests.
 - `get()` → mirror.
 
 The shell's `alarm()` handler clears the mirror (the slot has fired — DO
