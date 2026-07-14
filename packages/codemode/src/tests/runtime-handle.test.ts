@@ -87,6 +87,10 @@ describe("createCodemodeRuntime", () => {
 
     expect(codemode).toBeDefined();
     expect(codemode.execute).toBeDefined();
+    expect(codemode.description).toContain(
+      "Do not call the bare `fetch(...)` global"
+    );
+    expect(codemode.description).toContain("`fetch.fetch_url(...)`");
 
     const inputSchema = asSchema(codemode.inputSchema);
     expect(inputSchema.jsonSchema).toEqual({

@@ -579,7 +579,7 @@ function buildDescription(
     "- Some methods require approval. The run pauses until the user approves, then resumes automatically. Write code as if the call returns normally.",
     '- A result with `status: "paused"` means the run is awaiting human approval. Tell the user what is pending and wait — do NOT re-issue the code; the run resumes on its own once approved.',
     "- All code outside connector calls and `codemode.step` must be deterministic so resume can replay it.",
-    "- Do not use `fetch` — use connector SDKs.",
+    "- Do not call the bare `fetch(...)` global. Use connector SDK methods instead; a connector itself may be named `fetch` (for example `fetch.fetch_url(...)`).",
     "",
     "## Snippets",
     "",
