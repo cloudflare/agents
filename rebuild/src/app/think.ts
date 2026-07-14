@@ -67,6 +67,7 @@ import {
   type ReplyAttachment,
 } from "../domain/actions/actions.js";
 import {
+  DECLARED_TASK_CALLBACK,
   createScheduledTaskService,
   type DeclaredTasks,
   type ScheduledTaskService,
@@ -102,14 +103,7 @@ import {
   type RunStatus,
 } from "../domain/delegation/runs.js";
 import { createSubAgentRegistry } from "../domain/delegation/registry.js";
-import type {
-  ListCriteria,
-  RetryPolicy,
-  Schedule,
-  ScheduleSpec,
-  Scheduler,
-} from "../domain/scheduling/scheduler.js";
-import type { FiberRecoveryContext, FiberRecoveryResult, FiberService } from "../domain/fibers/fibers.js";
+import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/fibers/fibers.js";
 
 // ---------------------------------------------------------------------------
 // Public wire/API types
@@ -213,9 +207,6 @@ function combineSignals(...signals: AbortSignal[]): AbortSignal {
   return controller.signal;
 }
 
-/** The real method name Agent's private dispatch table resolves declared-task alarms to (see buildSchedulerFacade). */
-const DECLARED_TASK_DISPATCH_METHOD = "__thinkRunDeclaredTaskOccurrence";
-
 interface AdmittedTurnSpec {
   requestId: string;
   trigger: TurnContext["trigger"];
@@ -315,13 +306,16 @@ export class Think<State = unknown> extends Agent<State> {
 
     this.scheduledTaskService = createScheduledTaskService({
       store: scoped(host.store, "think:"),
-      scheduler: this.buildSchedulerFacade(),
+      scheduler: this.schedulerService,
       submissions: this.submissionService,
       clock: host.clock,
       bus: this.events,
       defaultTimezone: () => this.getDefaultTimezone(),
       declarations: () => this.getScheduledTasks(),
     });
+    this.registerInternalCallback(DECLARED_TASK_CALLBACK, (payload) =>
+      this.scheduledTaskService.runOccurrence(payload as { taskId: string; scheduledFor: number }),
+    );
 
     if (host.spawner) {
       const registry = createSubAgentRegistry({ store: host.store, spawner: host.spawner, clock: host.clock, ids: this.ids });
@@ -451,7 +445,7 @@ export class Think<State = unknown> extends Agent<State> {
 
     this.chatRecoveryService = createChatRecovery({
       store: scoped(this.host.store, "think:"),
-      fibers: this.buildFiberFacade(),
+      fibers: this.fiberService,
       clock: this.host.clock,
       ids: this.ids,
       bus: this.events,
@@ -480,51 +474,6 @@ export class Think<State = unknown> extends Agent<State> {
     // Audit 13: declared scheduled tasks reconcile on startup. Invalid
     // declarations throw here, before any schedule rows are persisted.
     await this.reconcileScheduledTasks();
-  }
-
-  // --- facades bridging other domain services onto Agent's own (private)
-  // scheduler/fiber machinery, since Agent exposes only wrapper methods, not
-  // the underlying Scheduler/FiberService objects those modules expect. ---
-
-  private buildSchedulerFacade(): Scheduler {
-    return {
-      create: <T>(spec: ScheduleSpec, _callback: string, payload?: T, options?: { id?: string; retry?: RetryPolicy }): Schedule<T> => {
-        if (spec.kind !== "once") {
-          throw new ValidationError("Think's declared-task scheduler facade only supports 'once' specs");
-        }
-        return this.schedule<T>(new Date(spec.at), DECLARED_TASK_DISPATCH_METHOD, payload, options);
-      },
-      get: <T>(id: string) => this.getScheduleById<T>(id),
-      list: <T>(criteria?: ListCriteria) => this.listSchedules<T>(criteria),
-      cancel: (id: string) => this.cancelSchedule(id),
-      onAlarm: async () => {
-        /* not used: Agent's own onAlarm() drives this scheduler via the facade's create(). */
-      },
-      nextWake: () => null,
-    };
-  }
-
-  /** Real method (not "$internal:"-prefixed) so Agent's dispatch table resolves it by name; see buildSchedulerFacade. */
-  private async __thinkRunDeclaredTaskOccurrence(payload: unknown): Promise<void> {
-    await this.scheduledTaskService.runOccurrence(payload as { taskId: string; scheduledFor: number });
-  }
-
-  private buildFiberFacade(): FiberService {
-    return {
-      run: (name, fn) => this.runFiber(name, fn),
-      start: (name, fn, options) => this.startFiber(name, fn, options),
-      stash: (data) => this.stash(data),
-      inspect: (id) => this.inspectFiber(id),
-      inspectByKey: (key) => this.inspectFiberByKey(key),
-      list: (options) => this.listFibers(options),
-      cancel: (id, reason) => this.cancelFiber(id, reason),
-      cancelByKey: (key, reason) => this.cancelFiberByKey(key, reason),
-      resolve: (id, result) => this.resolveFiber(id, result),
-      deleteFibers: (options) => this.deleteFibers(options),
-      checkInterrupted: async () => {
-        /* not used: Agent's own start()/onFiberRecovered drive fiber recovery scanning. */
-      },
-    };
   }
 
   protected override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void | FiberRecoveryResult> {

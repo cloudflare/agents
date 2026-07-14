@@ -102,9 +102,9 @@ export class Agent<State = unknown> {
     (payload: unknown, schedule: Schedule) => Promise<void>
   >();
 
-  private readonly scheduler: Scheduler;
-  private readonly keepAliveService: KeepAlive;
-  private readonly fibers: FiberService;
+  protected readonly schedulerService: Scheduler;
+  protected readonly keepAliveService: KeepAlive;
+  protected readonly fiberService: FiberService;
   private readonly taskQueue: TaskQueue;
   private readonly stateContainer: StateContainer<State>;
   private readonly subAgents?: SubAgentRegistry;
@@ -117,7 +117,7 @@ export class Agent<State = unknown> {
     this.ids = host.ids ?? defaultIdSource;
     this.events = createEventBus({ agent: host.className, name: host.name }, () => host.clock.now());
 
-    this.scheduler = createScheduler({
+    this.schedulerService = createScheduler({
       store: host.store,
       alarm: host.alarm,
       clock: host.clock,
@@ -126,19 +126,19 @@ export class Agent<State = unknown> {
       dispatch: (callback, payload, schedule) => this.dispatchSchedule(callback, payload, schedule),
     });
 
-    this.keepAliveService = createKeepAlive(this.scheduler);
+    this.keepAliveService = createKeepAlive(this.schedulerService);
 
-    this.fibers = createFiberService({
+    this.fiberService = createFiberService({
       store: host.store,
       clock: host.clock,
       ids: this.ids,
       bus: this.events,
       keepAlive: this.keepAliveService,
-      scheduler: this.scheduler,
+      scheduler: this.schedulerService,
       onRecovered: (ctx) => Promise.resolve(this.onFiberRecovered(ctx)),
     });
     this.internalCallbacks.set(RECOVERY_SCHEDULE_ID, async () => {
-      await this.fibers.checkInterrupted();
+      await this.fiberService.checkInterrupted();
     });
 
     this.taskQueue = createTaskQueue({
@@ -228,6 +228,19 @@ export class Agent<State = unknown> {
     await (fn as (payload: unknown, item: QueueItem) => unknown).call(this, payload, item);
   }
 
+  /**
+   * Register a scheduler callback under a `"$internal:*"` name (module-owned
+   * background work, e.g. a domain service that arms its own occurrences).
+   * Replaces the old pattern of dispatching internal callbacks to a real
+   * (non-"$internal:"-prefixed) prototype method just so `dispatchSchedule`
+   * would find a handler for them.
+   */
+  protected registerInternalCallback(name: string, fn: (payload: unknown) => Promise<void>): void {
+    this.internalCallbacks.set(name, async (payload) => {
+      await fn(payload);
+    });
+  }
+
   // --- state ------------------------------------------------------------
 
   get state(): State {
@@ -267,7 +280,7 @@ export class Agent<State = unknown> {
     payload?: T,
     options?: { id?: string; retry?: RetryPolicy },
   ): Schedule<T> {
-    return this.scheduler.create(this.toScheduleSpec(when), callback, payload, options);
+    return this.schedulerService.create(this.toScheduleSpec(when), callback, payload, options);
   }
 
   private toScheduleSpec(when: Date | number | string): ScheduleSpec {
@@ -286,23 +299,23 @@ export class Agent<State = unknown> {
     payload?: T,
     options?: { id?: string; retry?: RetryPolicy },
   ): Schedule<T> {
-    return this.scheduler.create({ kind: "interval", everySeconds }, callback, payload, options);
+    return this.schedulerService.create({ kind: "interval", everySeconds }, callback, payload, options);
   }
 
   getScheduleById<T = unknown>(id: string): Schedule<T> | undefined {
-    return this.scheduler.get<T>(id);
+    return this.schedulerService.get<T>(id);
   }
 
   listSchedules<T = unknown>(criteria?: ListCriteria): Schedule<T>[] {
-    return this.scheduler.list<T>(criteria);
+    return this.schedulerService.list<T>(criteria);
   }
 
   cancelSchedule(id: string): boolean {
-    return this.scheduler.cancel(id);
+    return this.schedulerService.cancel(id);
   }
 
   private rearmAlarm(): void {
-    const next = this.scheduler.nextWake();
+    const next = this.schedulerService.nextWake();
     if (next === null) {
       this.host.alarm.clear();
     } else {
@@ -349,7 +362,7 @@ export class Agent<State = unknown> {
   // --- fibers -----------------------------------------------------------
 
   runFiber<T>(name: string, fn: (ctx: FiberContext) => Promise<T>): Promise<T> {
-    return this.fibers.run(name, fn);
+    return this.fiberService.run(name, fn);
   }
 
   startFiber(
@@ -357,39 +370,39 @@ export class Agent<State = unknown> {
     fn: (ctx: FiberContext) => Promise<void>,
     options?: { idempotencyKey?: string; metadata?: Record<string, unknown>; waitForCompletion?: boolean },
   ): Promise<StartResult> {
-    return this.fibers.start(name, fn, options);
+    return this.fiberService.start(name, fn, options);
   }
 
   stash(data: unknown): void {
-    this.fibers.stash(data);
+    this.fiberService.stash(data);
   }
 
   inspectFiber(fiberId: string): FiberInspection | null {
-    return this.fibers.inspect(fiberId);
+    return this.fiberService.inspect(fiberId);
   }
 
   inspectFiberByKey(idempotencyKey: string): FiberInspection | null {
-    return this.fibers.inspectByKey(idempotencyKey);
+    return this.fiberService.inspectByKey(idempotencyKey);
   }
 
   listFibers(options?: { status?: FiberStatus[]; name?: string }): FiberInspection[] {
-    return this.fibers.list(options);
+    return this.fiberService.list(options);
   }
 
   cancelFiber(fiberId: string, reason?: string): boolean {
-    return this.fibers.cancel(fiberId, reason);
+    return this.fiberService.cancel(fiberId, reason);
   }
 
   cancelFiberByKey(idempotencyKey: string, reason?: string): boolean {
-    return this.fibers.cancelByKey(idempotencyKey, reason);
+    return this.fiberService.cancelByKey(idempotencyKey, reason);
   }
 
   resolveFiber(fiberId: string, result: FiberRecoveryResult): boolean {
-    return this.fibers.resolve(fiberId, result);
+    return this.fiberService.resolve(fiberId, result);
   }
 
   deleteFibers(options?: { status?: FiberStatus[]; settledBefore?: number }): number {
-    return this.fibers.deleteFibers(options);
+    return this.fiberService.deleteFibers(options);
   }
 
   /** Override to resolve an orphaned managed fiber found on recovery scan. Default: leave it interrupted. */
@@ -577,7 +590,7 @@ export class Agent<State = unknown> {
   /** Adapter calls this once per activation, before routing any messages/alarms. */
   async start(): Promise<void> {
     await this.onStart();
-    await this.fibers.checkInterrupted();
+    await this.fiberService.checkInterrupted();
     await this.taskQueue.flush();
     this.rearmAlarm();
   }
@@ -586,7 +599,7 @@ export class Agent<State = unknown> {
   protected onStart(): void | Promise<void> {}
 
   async onAlarm(): Promise<void> {
-    await this.scheduler.onAlarm();
+    await this.schedulerService.onAlarm();
   }
 
   async onConnect(conn: Connection): Promise<void> {
@@ -666,8 +679,8 @@ export class Agent<State = unknown> {
   }
 
   async destroy(): Promise<void> {
-    for (const s of this.scheduler.list({ includeInternal: true })) {
-      this.scheduler.cancel(s.id);
+    for (const s of this.schedulerService.list({ includeInternal: true })) {
+      this.schedulerService.cancel(s.id);
     }
     this.host.alarm.clear();
     this.host.store.deleteAll();
