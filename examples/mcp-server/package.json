@@ -10,7 +10,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.0.0-beta.2",
+    "@modelcontextprotocol/server": "2.0.0-beta.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {

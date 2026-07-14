@@ -7,12 +7,6 @@ server:
   # the SDK's localhost-only defaults.
   - dns-rebinding-protection
 
-  # @modelcontextprotocol/server@2.0.0-beta.2 does not strip HTTP OWS before
-  # standard-header comparison on runtimes that expose it through Headers.get.
-  # Fixed upstream by modelcontextprotocol/typescript-sdk#2453; remove this
-  # entry when consuming the published beta containing that fix.
-  - http-header-validation
-
   # The exact beta does not yet implement the optional tasks extension. These
   # extension scenarios are selected only by the alpha conformance `all` suite.
   - tasks-lifecycle

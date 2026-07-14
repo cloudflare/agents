@@ -19,7 +19,7 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 The simplest way to create an MCP server. Install the server package directly, then import its constructor alongside the Agents handler:
 
 ```sh
-pnpm add agents @modelcontextprotocol/sdk@1.29.0 @modelcontextprotocol/server@2.0.0-beta.2 zod
+pnpm add agents @modelcontextprotocol/sdk@1.29.0 @modelcontextprotocol/server@2.0.0-beta.4 zod
 ```
 
 ```typescript

@@ -56,3 +56,5 @@ minimumReleaseAgeExclude:
   - cronstrue@3.23.0
   - es-module-lexer@2.2.0
   - tailwindcss@4.3.2
+  - "@modelcontextprotocol/core@2.0.0-beta.4"
+  - "@modelcontextprotocol/server@2.0.0-beta.4"

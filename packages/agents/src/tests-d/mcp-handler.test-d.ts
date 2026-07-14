@@ -42,10 +42,8 @@ const legacyServer = new LegacyMcpServer({
 createLegacyMcpHandler(legacyServer, explicitLegacyOptions);
 createMcpHandler(legacyServer, legacyOptions);
 
-createMcpHandler(
-  // @ts-expect-error v1 factories are not a supported compatibility input.
-  () => new LegacyMcpServer({ name: "legacy", version: "1.0.0" })
-);
+// @ts-expect-error v1 factories are not a supported compatibility input.
+createMcpHandler(() => new LegacyMcpServer({ name: "legacy", version: "1" }));
 
 // @ts-expect-error SDK v2 inputs must be factories.
 createMcpHandler(highLevel);

@@ -5,6 +5,7 @@
  */
 import type {
   CallToolResult,
+  ClientCapabilities,
   GetPromptResult,
   InputRequests,
   InputRequiredResult,
@@ -1142,7 +1143,11 @@ export function createEverythingServerV2(options: EverythingServerV2Options) {
       // server only emits input-request kinds the client declared, and
       // the per-request envelope carries the declared capabilities in
       // the (deprecated) wire vocabulary.
-      const declared = ctx.mcpReq.envelope?.[CLIENT_CAPABILITIES_META_KEY];
+      const declared = (
+        ctx.mcpReq.envelope as unknown as
+          | Record<string, ClientCapabilities>
+          | undefined
+      )?.[CLIENT_CAPABILITIES_META_KEY];
       const inputRequests: InputRequests = {};
       if (declared?.elicitation !== undefined) {
         inputRequests.user_name = inputRequired.elicit({
