@@ -56,7 +56,7 @@ chat- or even agent-specific): durable behavior built on the KV + alarm ports.
 
 **4. Agent** — the base-class *identity and lifecycle*: the one thing actually
 "about the agent". Composition root, `onStart`/`onAlarm`/`destroy`, service
-wiring, hooks, connection lifecycle.
+wiring, and hooks. Transport-free — it never holds a connection or parses a frame.
 - **Location:** `src/app/agent.ts` (glossary at `src/app/CONTEXT.md`)
 
 ### Chat core
@@ -176,12 +176,10 @@ flowchart TD
 
   subgraph edges["Surfaces / edges / reliability"]
     Channels --> Tools
-    Turn --> Channels
+    Conversation --> Channels
     Reliability --> Turn
     Reliability --> Conversation
     Reliability --> Runtime
-    Delegation --> Runtime
-    Delegation --> Turn
     Delegation --> Tools
   end
 
@@ -209,6 +207,13 @@ flowchart TD
   exclusion using that sourceId.
 - **RPC straddle** — the callable *registry* lives in Durable Runtime; the
   request/response *framing* over a connection is a transport-adapter concern.
+- **Channel policy is a Conversation edge** — `assembleTurn` (Conversation) consumes
+  a `ChannelPolicy`, so the dependency is `Conversation → Channels`. The Turn engine
+  itself never imports Channels; it just runs the assembled inputs.
+- **Delegation depends only on Tools** (plus the universal ports/kernel). It relates
+  to Turn and Runtime *conceptually* — children run turns, run-reconciliation is
+  fiber-like — but it reaches children through the `AgentSpawner`/`AgentHandle` port,
+  never importing Turn or Runtime, so there is no code-level edge.
 - **Reliability internals** — Submissions run turns through the TurnQueue;
   Scheduled Tasks arm Schedules (Durable Runtime) and feed Submissions.
 

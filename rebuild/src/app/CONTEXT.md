@@ -13,9 +13,11 @@ and exposes the lifecycle; all behavior lives in domain services.
 _Avoid_: god class (the thing this rebuild deliberately isn't)
 
 **AgentHost**:
-The adapter-provided construction dependencies (`store`, `alarm`, `connections`,
-`clock`, `ids`, `spawner`, `email`, `workflowRuntime`, …) — the seam between the
-Agent and a memory-or-Cloudflare adapter.
+The adapter-provided construction dependencies (`store`, `alarm`, `clock`, `ids`,
+`spawner`, `email`, `workflowRuntime`, `parentPath`, …) — the seam between the Agent
+and a memory-or-Cloudflare adapter. Notably it carries **no connection registry**:
+the Agent never holds a connection or parses a frame — transport is entirely the
+adapter's concern (audit 25).
 
 **Composition root**:
 The constructor that assembles the domain services in a fixed order and wires their

@@ -27,6 +27,16 @@ multi-step tool flows.
 Reasoning is still persisted on the `ChatMessage` and streamed to clients; only
 *provider replay* is missing.
 
+This is also a real gap in the original Think implementation, though the failure
+mode is narrower there. Original Think routes assistant reasoning through the AI
+SDK's `convertToModelMessages`, which can replay reasoning when the persisted
+part still contains the provider metadata. However, its persistence sanitization
+strips OpenAI's ephemeral `reasoningEncryptedContent` (and `itemId`) before the
+message is stored. A later turn therefore cannot faithfully replay OpenAI
+reasoning, even though the in-memory conversion path supports reasoning content.
+The rebuild currently regresses this further by dropping all reasoning at the
+domain `ModelMessage` boundary, regardless of provider.
+
 Correct handling (deferred):
 - Add a reasoning variant to assistant `ModelMessage` content, carrying the
   provider's opaque/signed payload — not just display text (today's reasoning part

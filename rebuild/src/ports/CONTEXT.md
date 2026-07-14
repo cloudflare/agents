@@ -75,7 +75,8 @@ choice, settings, abort signal.
 **ModelChunk**:
 A typed unit streamed *from* the model: text-delta, reasoning-delta, tool-call, or
 finish.
-_Avoid_: chunk, delta — the client-facing streamed unit is a **UiChunk** (Turn).
+_Avoid_: chunk, delta — the client-facing streamed unit is a **UiChunk** (owned by
+Conversation, produced by Turn's engine).
 
 **ToolDescriptor**:
 A tool's advertised shape (name, description, JSON schema) with no executor — what
