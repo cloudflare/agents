@@ -20,7 +20,7 @@
     "@ai-sdk/openai": "^3.0.70",
     "@cloudflare/ai-chat": "workspace:*",
     "@cloudflare/think": "workspace:*",
-    "@cloudflare/workspace": "0.0.0-alpha.11",
+    "@cloudflare/workspace": "https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18",
     "@platformatic/vfs": "^0.4.0",
     "agents": "workspace:*",
     "ai": "^6.0.202",

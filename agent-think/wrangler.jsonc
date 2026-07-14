@@ -48,8 +48,10 @@
 
   "durable_objects": {
     "bindings": [
-      // Owns the Workspace (SQLite VFS) + the Think turn.
+      // Owns only the Think turn, transcript, and submission state.
       { "name": "ThinkAgent", "class_name": "ThinkAgent" },
+      // Same stable per-issue name; exclusively owns Workspace SQLite/VFS.
+      { "name": "WorkspaceAgent", "class_name": "WorkspaceAgent" },
       // Container host, handed out by the warm pool.
       { "name": "Sandbox", "class_name": "Sandbox" },
       // Keeps one container pre-warmed; resolves session -> Sandbox.
@@ -99,6 +101,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
-    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] }
+    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] },
+    { "tag": "v4", "new_sqlite_classes": ["WorkspaceAgent"] }
   ]
 }

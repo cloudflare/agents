@@ -16,7 +16,7 @@
 import { Agent } from "agents";
 import { STALE_RUN_MS } from "./run-status";
 
-export type ThreadStatus = "running" | "done" | "error";
+export type ThreadStatus = "running" | "recovering" | "done" | "error";
 
 export interface ThreadMeta {
   /** Session slug — also the /thread/:session route (e.g. cloudflare-agents-1859). */
@@ -90,6 +90,16 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
     });
   }
 
+  /** A recoverable interruption was detected; no terminal outcome exists yet. */
+  async recordRecovery(input: { session: string }): Promise<void> {
+    this.#setActiveStatus(input.session, "recovering");
+  }
+
+  /** Recovery entered a fresh continuation invocation. */
+  async recordRunning(input: { session: string }): Promise<void> {
+    this.#setActiveStatus(input.session, "running");
+  }
+
   /** A turn reached a terminal state. */
   async recordTurn(input: {
     session: string;
@@ -135,6 +145,17 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
       lastError: undefined
     });
     return { ok: true, thread };
+  }
+
+  #setActiveStatus(session: string, status: "recovering" | "running"): void {
+    const prev = this.state.threads[session];
+    if (!prev || prev.status === "done") return;
+    this.#put({
+      ...prev,
+      status,
+      updatedAt: Date.now(),
+      lastError: undefined
+    });
   }
 
   #put(meta: ThreadMeta): void {
