@@ -2,8 +2,11 @@ import type { EventBus } from "../../kernel/events.js";
 import type { IdSource } from "../../kernel/ids.js";
 import type { Clock } from "../../ports/clock.js";
 import { scoped, type KeyValueStore } from "../../ports/storage.js";
+import type { ConversationTurnState } from "../chat/turn-state.js";
+import type { ConversationEvent } from "../events/log.js";
 import type { FiberRecoveryContext, FiberRecoveryResult, FiberService } from "../fibers/fibers.js";
-import type { ChatMessage } from "../messages/model.js";
+import { assistantMessage, type ChatMessage, type MessagePart, type ToolPart } from "../messages/model.js";
+import type { Session } from "../session/session.js";
 import type { TurnOutcome } from "../turn/loop.js";
 
 /**
@@ -80,12 +83,30 @@ export function createChatRecovery(deps: {
   ids: IdSource;
   bus: EventBus;
   policy?: RecoveryPolicy;
+  /**
+   * The conversation seam (audit 26 §1). Recovery owns the full meaning of
+   * its decisions — what "continue" is (commit the repaired partial, then
+   * re-run) and what "terminalize" is (persist the terminal assistant
+   * message) — so the composition root only supplies state access and two
+   * narrow callbacks.
+   */
   conversation: {
-    lastRequestId(): string | undefined;
-    partialAssistant(requestId: string): ChatMessage | undefined;
-    scheduleRetry(input: TurnInputSnapshot, incident: Incident): Promise<void>;
-    scheduleContinuation(incident: Incident): Promise<void>;
-    terminalize(incident: Incident, message: string): Promise<void>;
+    turnState: ConversationTurnState;
+    session(): Promise<Session>;
+    /** Read at decision time so a subclass-assigned repair hook is honored. */
+    repairPart?(): ((part: ToolPart) => MessagePart) | undefined;
+    /** Publish a client-visible conversation event (message:updated). */
+    publish(event: ConversationEvent): void;
+    /**
+     * Enqueue the recovery turn (continuation-flagged, same requestId).
+     * Must not block on the turn finishing — it may be called from within
+     * the currently-running turn (stall path), and awaiting completion
+     * would deadlock the turn queue.
+     */
+    scheduleTurn(incident: Incident): void | Promise<void>;
+    /** App-level terminal notification (onChatError etc.); the terminal
+        message is already persisted when this fires. */
+    onTerminal?(incident: Incident, terminalText: string): void | Promise<void>;
   };
 }): ChatRecovery {
   const { fibers, bus, ids, conversation } = deps;
@@ -110,10 +131,9 @@ export function createChatRecovery(deps: {
     kv.delete(incidentKey(requestId));
   }
 
-  function getInput(requestId: string): TurnInputSnapshot | undefined {
-    return kv.get<TurnInputSnapshot>(inputKey(requestId));
-  }
-
+  // The input snapshot is stored for diagnostics/inspection; a retry re-runs
+  // from persisted session history (messages are appended before the fiber
+  // starts), so nothing reads it back on the happy path.
   function putInputIfAbsent(input: TurnInputSnapshot): void {
     if (kv.get(inputKey(input.requestId)) === undefined) {
       kv.put(inputKey(input.requestId), input);
@@ -138,13 +158,27 @@ export function createChatRecovery(deps: {
    * stalled-stream recovery: validate the conversation still matches, then
    * schedule a retry/continuation or terminalize on exhaustion.
    */
+  /**
+   * Terminalize: persist the terminal assistant message ourselves — the
+   * composition root only gets notified. Recording it as the request's
+   * partial keeps `partialFor` consistent for late observers.
+   */
+  async function terminalize(incident: Incident): Promise<void> {
+    const session = await conversation.session();
+    const terminalMsg = assistantMessage([{ type: "text", text: terminalMessage }], ids.newId("msg"));
+    await session.appendMessage(terminalMsg);
+    conversation.turnState.recordPartial(incident.requestId, terminalMsg);
+    conversation.publish({ type: "message:updated", message: terminalMsg, requestId: incident.requestId });
+    if (conversation.onTerminal) await conversation.onTerminal(incident, terminalMessage);
+  }
+
   async function decide(
     requestId: string,
     opts: { forceContinue?: boolean },
   ): Promise<"scheduled" | "exhausted" | "skipped"> {
     bus.emit("chat:recovery:detected", { requestId });
 
-    if (conversation.lastRequestId() !== requestId) {
+    if (conversation.turnState.lastRequestId() !== requestId) {
       bus.emit("chat:recovery:skipped", { requestId, reason: "conversation_changed" });
       clearIncident(requestId);
       clearInput(requestId);
@@ -164,7 +198,7 @@ export function createChatRecovery(deps: {
         maxAttempts,
         recoveryKind: existing?.recoveryKind ?? "retry",
       };
-      await conversation.terminalize(incident, terminalMessage);
+      await terminalize(incident);
       if (policy.onExhausted) await policy.onExhausted(incident);
       bus.emit("chat:recovery:exhausted", { requestId, incidentId, attempt, maxAttempts });
       clearIncident(requestId);
@@ -173,18 +207,28 @@ export function createChatRecovery(deps: {
       return "exhausted";
     }
 
-    const hasPartial = opts.forceContinue === true || conversation.partialAssistant(requestId) !== undefined;
+    const hasPartial = opts.forceContinue === true || conversation.turnState.partialFor(requestId) !== undefined;
     const recoveryKind: Incident["recoveryKind"] = hasPartial ? "continue" : "retry";
     const incident: Incident = { incidentId, requestId, attempt, maxAttempts, recoveryKind };
     putIncident(incident);
     setRecovering(requestId, true);
 
     if (recoveryKind === "continue") {
-      await conversation.scheduleContinuation(incident);
-    } else {
-      const input = getInput(requestId) ?? { requestId };
-      await conversation.scheduleRetry(input, incident);
+      // What "continue" MEANS lives here: the interrupted partial only exists
+      // in turn-state scratch (the turn never reached its normal persist), so
+      // commit the repaired partial to history first — otherwise the re-run
+      // is indistinguishable from a retry and the streamed text is lost.
+      const session = await conversation.session();
+      const repaired = await conversation.turnState.commitInterruptedPartial(
+        requestId,
+        session,
+        conversation.repairPart?.(),
+      );
+      if (repaired) {
+        conversation.publish({ type: "message:updated", message: repaired, requestId });
+      }
     }
+    await conversation.scheduleTurn(incident);
 
     bus.emit("chat:recovery:scheduled", { requestId, incidentId, attempt, recoveryKind });
     return "scheduled";

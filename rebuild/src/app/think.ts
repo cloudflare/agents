@@ -394,8 +394,6 @@ export class Think<State = unknown> extends Agent<State> {
       bus: this.bus,
     });
 
-    // recovery.ts's `conversation` dep keeps its 5-closure shape (report);
-    // the closures are now backed by turnState instead of ad hoc bookkeeping.
     this.chatRecoveryService = createChatRecovery({
       store: scoped(this.host.store, "think:"),
       fibers: this.fiberService,
@@ -404,11 +402,16 @@ export class Think<State = unknown> extends Agent<State> {
       bus: this.bus,
       policy: this.resolvedRecoveryPolicy(),
       conversation: {
-        lastRequestId: () => this.turnState.lastRequestId(),
-        partialAssistant: (requestId) => this.turnState.partialFor(requestId),
-        scheduleRetry: async (input, incident) => this.scheduleRecoveryRetry(input.requestId, incident),
-        scheduleContinuation: async (incident) => this.scheduleRecoveryContinuation(incident),
-        terminalize: (incident, message) => this.terminalizeRecovery(incident, message),
+        turnState: this.turnState,
+        session: () => this.ensureSession(),
+        repairPart: () => this.repairInterruptedToolPart,
+        publish: (event) => this.publishEvent(event),
+        scheduleTurn: (incident) => this.scheduleRecoveryTurn(incident),
+        onTerminal: async (incident, terminalText) => {
+          if (this.onChatError) {
+            await this.onChatError(new Error(terminalText), { requestId: incident.requestId, stage: "recovery" });
+          }
+        },
       },
     });
 
@@ -759,65 +762,33 @@ export class Think<State = unknown> extends Agent<State> {
   // Recovery conversation callbacks
   // ==========================================================================
 
-  private notifyChatRecovery(requestId: string, incident: Incident): void {
+  /**
+   * The one recovery callback (audit 26 §1): the recovery module owns what
+   * retry/continue/terminalize MEAN; Think only enqueues the recovery turn.
+   * Fire-and-forget by contract — this can be invoked from within the
+   * currently-running turn (stall path), so awaiting completion would
+   * deadlock the turn queue.
+   */
+  private scheduleRecoveryTurn(incident: Incident): void {
     if (this.onChatRecovery) {
-      void this.onChatRecovery({ requestId, incidentId: incident.incidentId, attempt: incident.attempt });
+      void this.onChatRecovery({
+        requestId: incident.requestId,
+        incidentId: incident.incidentId,
+        attempt: incident.attempt,
+      });
     }
-  }
-
-  /** Retry (audit 14 §1): no assistant output existed yet; replay from persisted history. */
-  private scheduleRecoveryRetry(requestId: string, incident: Incident): void {
-    this.notifyChatRecovery(requestId, incident);
     void this.executeTurn({
-      requestId,
+      requestId: incident.requestId,
       trigger: "continuation",
       continuation: true,
       newMessages: [],
     }).catch((err: unknown) => {
-      this.bus.emit("chat:recovery:run_failed", { requestId, incidentId: incident.incidentId, error: toErrorValue(err) });
-    });
-  }
-
-  /**
-   * Continuation (audit 14 §1): a partial assistant message streamed before
-   * the interruption is only durable in turnState, never in session history
-   * (an eviction/stall abort happens inside the model call, before
-   * `finalizeOutcome`'s `appendMessage` runs). Commit the repaired partial
-   * first, so re-running actually continues from it instead of looking like
-   * a retry.
-   */
-  private scheduleRecoveryContinuation(incident: Incident): void {
-    this.notifyChatRecovery(incident.requestId, incident);
-    void (async () => {
-      const session = await this.ensureSession();
-      const repaired = await this.turnState.commitInterruptedPartial(incident.requestId, session, this.repairInterruptedToolPart);
-      if (repaired) {
-        this.publishEvent({ type: "message:updated", message: repaired, requestId: incident.requestId });
-      }
-      await this.executeTurn({
-        requestId: incident.requestId,
-        trigger: "continuation",
-        continuation: true,
-        newMessages: [],
-      });
-    })().catch((err: unknown) => {
       this.bus.emit("chat:recovery:run_failed", {
         requestId: incident.requestId,
         incidentId: incident.incidentId,
         error: toErrorValue(err),
       });
     });
-  }
-
-  private async terminalizeRecovery(incident: Incident, message: string): Promise<void> {
-    const session = await this.ensureSession();
-    const terminalMsg = assistantMessage([{ type: "text", text: message }], this.ids.newId("msg"));
-    await session.appendMessage(terminalMsg);
-    this.turnState.recordPartial(incident.requestId, terminalMsg);
-    this.publishEvent({ type: "message:updated", message: terminalMsg, requestId: incident.requestId });
-    if (this.onChatError) {
-      await this.onChatError(new Error(message), { requestId: incident.requestId, stage: "recovery" });
-    }
   }
 
   // ==========================================================================
