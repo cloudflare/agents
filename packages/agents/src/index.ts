@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type {
-  Client,
   Prompt,
   Resource,
   ServerCapabilities,
@@ -75,7 +74,7 @@ import {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider
 } from "./mcp/do-oauth-client-provider";
-import type { TransportType } from "./mcp/types";
+import type { McpClientOptions, TransportType } from "./mcp/types";
 import {
   genericObservability,
   type Observability,
@@ -946,7 +945,7 @@ export type AddMcpServerOptions = {
   /** Agents routing prefix (default: "agents") */
   agentsPrefix?: string;
   /** MCP client options */
-  client?: ConstructorParameters<typeof Client>[1];
+  client?: McpClientOptions;
   /** Transport options */
   transport?: {
     /** Custom headers for authentication (e.g., bearer tokens, CF Access) */
@@ -12327,14 +12326,7 @@ export class Agent<
     url: string,
     callbackHostOrOptions?: string | AddMcpServerOptions,
     agentsPrefix?: string,
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
-        skipIssuerMetadataValidation?: boolean;
-      };
-    }
+    options?: Pick<AddMcpServerOptions, "client" | "transport">
   ): Promise<
     | {
         id: string;
@@ -12352,14 +12344,7 @@ export class Agent<
       | AddMcpServerOptions
       | AddRpcMcpServerOptions,
     agentsPrefix?: string,
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
-        skipIssuerMetadataValidation?: boolean;
-      };
-    }
+    options?: Pick<AddMcpServerOptions, "client" | "transport">
   ): Promise<
     | {
         id: string;
@@ -12559,15 +12544,7 @@ export class Agent<
     let resolvedCallbackHost: string | undefined;
     let resolvedAgentsPrefix: string;
     let resolvedOptions:
-      | {
-          client?: ConstructorParameters<typeof Client>[1];
-          transport?: {
-            headers?: HeadersInit;
-            type?: TransportType;
-            skipIssuerMetadataValidation?: boolean;
-          };
-          retry?: RetryOptions;
-        }
+      | Pick<AddMcpServerOptions, "client" | "transport" | "retry">
       | undefined;
 
     let resolvedCallbackPath: string | undefined;

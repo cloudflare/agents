@@ -16,7 +16,7 @@ import {
   WorkerTransport
 } from "../src/mcp/index.ts";
 import { createEverythingServer } from "./everything-server.ts";
-import { createEverythingServerV2 } from "./everything-server-v2.ts";
+import { createEverythingServerV2 } from "./vendor/everything-server-v2.ts";
 
 /**
  * Conformance worker — hosts everything the MCP conformance suite needs from

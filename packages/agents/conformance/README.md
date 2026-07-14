@@ -14,7 +14,7 @@ Runs the official MCP conformance suites against Agents implementations inside w
 
 The stable `@modelcontextprotocol/conformance@0.1.16` dependency remains authoritative for the v1 client and server lanes. The independently exact-pinned `conformance-v2` npm alias exercises both generations served by the SDK v2 handler.
 
-The v2 modern fixture is separate from the frozen SDK v1 fixture. It is adapted from the TypeScript SDK's current conformance server and includes modern envelopes, subscriptions, caching, request-header validation, and multi-round-trip input-required tools.
+The v2 modern fixture is separate from the frozen SDK v1 fixture. Its exact upstream commit, source hash, local workerd delta, and update checker are documented in [`vendor/README.md`](./vendor/README.md).
 
 ## Baselines
 

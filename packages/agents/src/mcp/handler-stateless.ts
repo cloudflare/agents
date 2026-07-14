@@ -1,8 +1,5 @@
 import {
-  McpServer,
-  Server,
   createMcpHandler as createSdkMcpHandler,
-  isJSONRPCRequest,
   isLegacyRequest,
   type AuthInfo,
   type CreateMcpHandlerOptions as SdkCreateMcpHandlerOptions,
@@ -15,8 +12,8 @@ import {
   runWithAuthContext,
   type McpAuthContext
 } from "./auth-context";
-import { createLegacyMcpHandlerInternal } from "./handler-legacy";
-import { WorkerTransport } from "./worker-transport";
+import { internalErrorResponse, reportHandlerError } from "./handler-errors";
+import { createStatelessLegacyRequestHandler } from "./handler-stateless-legacy";
 import type { CORSOptions } from "./types";
 
 export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOptions {
@@ -78,203 +75,12 @@ function withCors(response: Response, options: CORSOptions | false): Response {
   });
 }
 
-function internalErrorResponse(id: string | number | null = null): Response {
-  return Response.json(
-    {
-      jsonrpc: "2.0",
-      error: { code: -32603, message: "Internal server error" },
-      id
-    },
-    { status: 500 }
-  );
-}
-
-function requestIdFromParsedBody(body: unknown): string | number | null {
-  if (
-    typeof body !== "object" ||
-    body === null ||
-    Array.isArray(body) ||
-    !("method" in body) ||
-    typeof body.method !== "string" ||
-    !("id" in body)
-  ) {
-    return null;
-  }
-  return typeof body.id === "string" || typeof body.id === "number"
-    ? body.id
-    : null;
-}
-
-function reportError(
-  onerror: ((error: Error) => void) | undefined,
-  error: unknown
-): void {
-  try {
-    onerror?.(error instanceof Error ? error : new Error(String(error)));
-  } catch {
-    // Error reporting must not change the response.
-  }
-}
-
-const STATELESS_LEGACY_REVERSE_REQUEST_ERROR =
-  "Server-to-client requests are unavailable in stateless legacy mode. " +
-  "Use inputRequired(...) for MCP 2026-07-28 clients, or route 2025-era " +
-  "traffic to a sessionful transport.";
-
 function emptyExecutionContext(): ExecutionContext {
   return {
     props: {},
     waitUntil() {},
     passThroughOnException() {}
   } as unknown as ExecutionContext;
-}
-
-function createLegacyRequestHandler(
-  factory: McpServerFactory,
-  route: string,
-  onerror?: (error: Error) => void
-) {
-  const activeTeardowns = new Set<() => Promise<void>>();
-
-  const fetch = async (
-    request: Request,
-    options: McpHandlerRequestOptions | undefined,
-    authContext: McpAuthContext | undefined,
-    workerCtx: ExecutionContext | undefined
-  ): Promise<Response> => {
-    let product: McpServer | Server | undefined;
-    let transport: WorkerTransport | undefined;
-    let markResourcesReady!: () => void;
-    const resourcesReady = new Promise<void>((resolve) => {
-      markResourcesReady = resolve;
-    });
-    let resourcesAreReady = false;
-    const ready = () => {
-      if (resourcesAreReady) return;
-      resourcesAreReady = true;
-      markResourcesReady();
-    };
-    let teardownPromise: Promise<void> | undefined;
-    const teardown = () => {
-      return (teardownPromise ??= (async () => {
-        await resourcesReady;
-        activeTeardowns.delete(teardown);
-        await Promise.all([
-          transport?.close().catch(() => {}),
-          product?.close().catch(() => {})
-        ]);
-      })());
-    };
-    const onAbort = () => void teardown();
-    activeTeardowns.add(teardown);
-
-    try {
-      product = await factory({
-        era: "legacy",
-        ...(options?.authInfo !== undefined && {
-          authInfo: options.authInfo
-        }),
-        requestInfo: request
-      });
-      transport = new WorkerTransport({ sessionIdGenerator: undefined });
-      ready();
-      if (teardownPromise) {
-        await teardown();
-        throw new Error("This MCP handler has been closed");
-      }
-
-      const send = transport.send.bind(transport);
-      transport.send = async (message, sendOptions) => {
-        if (isJSONRPCRequest(message)) {
-          transport?.onmessage?.({
-            jsonrpc: "2.0",
-            id: message.id,
-            error: {
-              code: -32603,
-              message: STATELESS_LEGACY_REVERSE_REQUEST_ERROR
-            }
-          });
-          return;
-        }
-        await send(message, sendOptions);
-      };
-
-      const handler = createLegacyMcpHandlerInternal(
-        product as never,
-        {
-          route,
-          transport,
-          ...(authContext !== undefined && { authContext })
-        },
-        {
-          ...(options?.authInfo !== undefined && {
-            authInfo: options.authInfo
-          }),
-          ...(options?.parsedBody !== undefined && {
-            parsedBody: options.parsedBody
-          })
-        }
-      );
-      request.signal.addEventListener("abort", onAbort, { once: true });
-      const response = await handler(
-        request,
-        undefined,
-        workerCtx ?? emptyExecutionContext()
-      );
-
-      if (
-        response.body === null ||
-        !response.headers.get("content-type")?.includes("text/event-stream")
-      ) {
-        request.signal.removeEventListener("abort", onAbort);
-        await teardown();
-        return response;
-      }
-
-      const reader = response.body.getReader();
-      const body = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          try {
-            const { done, value } = await reader.read();
-            if (done) {
-              request.signal.removeEventListener("abort", onAbort);
-              await teardown();
-              controller.close();
-            } else if (value !== undefined) {
-              controller.enqueue(value);
-            }
-          } catch (error) {
-            request.signal.removeEventListener("abort", onAbort);
-            await teardown();
-            controller.error(error);
-          }
-        },
-        async cancel(reason) {
-          request.signal.removeEventListener("abort", onAbort);
-          await teardown();
-          await reader.cancel(reason).catch(() => {});
-        }
-      });
-      return new Response(body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers
-      });
-    } catch (error) {
-      ready();
-      request.signal.removeEventListener("abort", onAbort);
-      await teardown();
-      reportError(onerror, error);
-      return internalErrorResponse(
-        requestIdFromParsedBody(options?.parsedBody)
-      );
-    }
-  };
-
-  return {
-    fetch,
-    close: () => Promise.all(Array.from(activeTeardowns, (close) => close()))
-  };
 }
 
 function wrapResponseBodyWithAuthContext(
@@ -349,7 +155,7 @@ export function createStatelessMcpHandler(
   });
   const statelessLegacyHandler =
     legacy === "stateless"
-      ? createLegacyRequestHandler(factory, route, sdkOptions.onerror)
+      ? createStatelessLegacyRequestHandler(factory, route, sdkOptions.onerror)
       : undefined;
   let closed = false;
 
@@ -405,7 +211,7 @@ export function createStatelessMcpHandler(
             request,
             upstreamOptions,
             resolvedAuthContext,
-            workerCtx
+            workerCtx ?? emptyExecutionContext()
           );
         }
         return sdkHandler.fetch(request, upstreamOptions);
@@ -418,7 +224,7 @@ export function createStatelessMcpHandler(
         corsOptions
       );
     } catch (error) {
-      reportError(sdkOptions.onerror, error);
+      reportHandlerError(sdkOptions.onerror, error);
       return withCors(internalErrorResponse(), corsOptions);
     }
   };

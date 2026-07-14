@@ -1,7 +1,6 @@
 /**
- * SDK v2 conformance fixture adapted from the MCP TypeScript SDK's current
- * `test/conformance/src/everythingServer.ts`. It runs inside workerd and is
- * intentionally separate from the frozen SDK v1 fixture.
+ * Workerd adaptation of the MCP TypeScript SDK v2 conformance fixture.
+ * Exact provenance and update instructions live in ./README.md.
  */
 import type {
   CallToolResult,
