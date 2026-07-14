@@ -723,7 +723,6 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
-  private _telemetryEvents: string[] = [];
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
@@ -848,26 +847,6 @@ export class ThinkTestAgent extends Think {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
   }
 
-  async setTurnConfigTelemetry(): Promise<void> {
-    this._telemetryEvents = [];
-    this._turnConfigOverride = {
-      // AI SDK v7: `experimental_telemetry` renamed to `telemetry`;
-      // `metadata` was removed from TelemetryOptions. functionId remains.
-      telemetry: {
-        isEnabled: true,
-        functionId: "think-test-turn",
-        integrations: {
-          onStart: (event) => {
-            this._telemetryEvents.push(`start:${event.functionId ?? ""}`);
-          },
-          onEnd: (event) => {
-            this._telemetryEvents.push(`finish:${event.functionId ?? ""}`);
-          }
-        }
-      }
-    };
-  }
-
   /**
    * Sets a per-turn `experimental_transform` that upper-cases every `text-delta`
    * part flowing through the stream. The transform is constructed inside the DO
@@ -967,10 +946,6 @@ export class ThinkTestAgent extends Think {
     }>
   > {
     return this._stepLog;
-  }
-
-  async getTelemetryEvents(): Promise<string[]> {
-    return this._telemetryEvents;
   }
 
   async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {

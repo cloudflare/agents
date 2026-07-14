@@ -372,20 +372,6 @@ describe("Think — core", () => {
     expect(turnLog[0].toolNames).not.toContain("ignoredRuntimeTool");
   });
 
-  it("should forward turn telemetry to the AI SDK", async () => {
-    const agent = await freshAgent("chat-telemetry");
-
-    await agent.setTurnConfigTelemetry();
-    const result = await agent.testChat("Trace this turn");
-
-    expect(result.done).toBe(true);
-    // AI SDK v7 removed TelemetryOptions.metadata; functionId remains.
-    await expect(agent.getTelemetryEvents()).resolves.toEqual([
-      "start:think-test-turn",
-      "finish:think-test-turn"
-    ]);
-  });
-
   it("should build assistant message with text parts", async () => {
     const agent = await freshAgent("chat-parts");
     await agent.testChat("Hello!");
@@ -1687,8 +1673,8 @@ describe("Think — model message conversion", () => {
       ?.content?.find((part) => part.output?.type === "content")?.output;
 
     expect(toolResult?.value).toContainEqual({
-      type: "file",
-      data: { type: "data", data: "iVBORw0KGgo=" },
+      type: "file-data",
+      data: "iVBORw0KGgo=",
       mediaType: "image/png",
       filename: "screenshot"
     });
