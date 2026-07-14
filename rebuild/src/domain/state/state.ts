@@ -2,6 +2,12 @@ import { NotFoundError } from "../../kernel/errors.js";
 import type { EventBus } from "../../kernel/events.js";
 import type { KeyValueStore } from "../../ports/storage.js";
 
+// ADR-0001 VIOLATION (known; to fix in code later): the State container must
+// carry only coarse provenance ({ kind: "server" | "client" }) and NEVER a
+// connection identity. `connectionId` here is inert — exclusion lives in the
+// websocket-chat adapter and Agent round-trips through a coarse StateOrigin — but
+// its presence in a domain type is exactly the regression ADR-0001 forbids.
+// Planned fix: narrow to { kind: "server" } | { kind: "client" }.
 export type StateSource = { kind: "server" } | { kind: "connection"; connectionId: string };
 
 const STATE_KEY = "state:value";
