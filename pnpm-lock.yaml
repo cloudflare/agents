@@ -3877,9 +3877,6 @@ importers:
       '@modelcontextprotocol/client':
         specifier: 2.0.0-beta.4
         version: 2.0.0-beta.4
-      '@modelcontextprotocol/conformance':
-        specifier: 0.1.16
-        version: 0.1.16(@cfworker/json-schema@4.1.1)
       '@modelcontextprotocol/conformance-v2':
         specifier: npm:@modelcontextprotocol/conformance@0.2.0-alpha.9
         version: '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)'
@@ -6358,10 +6355,6 @@ packages:
   '@modelcontextprotocol/client@2.0.0-beta.4':
     resolution: {integrity: sha512-VNHA/UXDk7mCpVl+jOg5B4WMRRD2OEl+it360Lhi6HiCbrIB2f6pZ0cqSDKXQVUtZvqnhdQHzZAM9h8EKWhq/A==}
     engines: {node: '>=20'}
-
-  '@modelcontextprotocol/conformance@0.1.16':
-    resolution: {integrity: sha512-GI7qiN0r39/MH2srVUR3AXaEN0YLCro20lIBbnvc1frBhszenxvUifBuTzxeVQVagILfBzCIcnungUOma8OrgA==}
-    hasBin: true
 
   '@modelcontextprotocol/conformance@0.2.0-alpha.9':
     resolution: {integrity: sha512-Bi5P5TQlOQGPJxCT7UAHbpG7wsR7sNZskHGtCoZBo6vDu416D2FXPgM4wKbg91teIgj4HjGkhnzlvP7U2dszfQ==}
@@ -14051,21 +14044,6 @@ snapshots:
       jose: 6.2.3
       pkce-challenge: 5.0.1
       zod: 4.4.3
-
-  '@modelcontextprotocol/conformance@0.1.16(@cfworker/json-schema@4.1.1)':
-    dependencies:
-      '@modelcontextprotocol/sdk': 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
-      '@octokit/rest': 22.0.1
-      commander: 14.0.3
-      eventsource-parser: 3.1.0
-      express: 5.2.1
-      jose: 6.2.3
-      undici: 7.28.0
-      yaml: 2.9.0
-      zod: 4.4.3
-    transitivePeerDependencies:
-      - '@cfworker/json-schema'
-      - supports-color
 
   '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)':
     dependencies:

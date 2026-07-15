@@ -1,16 +1,22 @@
-# Expected failures for SDK v2's default stateless 2025 compatibility lane.
-# Every scenario runs unmodified. Reverse-request scenarios fail immediately
-# because the wrapper has no session return path; complete SDK v1 compatibility
-# remains covered separately by baseline-server-handler.yml.
+# SDK v2 handler's explicit stateless 2025-11-25 compatibility path.
+# All 32 scenarios execute; this is not the alpha harness's smaller `active`
+# subset. Complete sessionful compatibility is tested in the legacy lanes.
 server:
+  # A stateless request has no return channel for server-to-client requests.
+  # Impact if unchanged: 2025 clients needing sampling or elicitation must use
+  # createLegacyMcpHandler/McpAgent or migrate the server flow to modern MRTR.
   - tools-call-sampling
   - tools-call-elicitation
   - elicitation-sep1034-defaults
   - elicitation-sep1330-enums
 
-  # The fallback is deliberately sessionless, so the referee cannot open
-  # multiple session-addressed SSE streams and emits its applicability warning.
+  # No durable event stream exists across stateless requests.
+  # Impact if unchanged: retry/Last-Event-ID polling and multiple addressed SSE
+  # streams require a sessionful legacy endpoint.
+  - server-sse-polling
   - server-sse-multiple-streams
 
-  # Host/Origin validation remains an explicit upstream middleware choice.
+  # Same deployment-boundary policy as the modern handler.
+  # Impact if unchanged: arbitrary Host/Origin rejection must be supplied by
+  # deployment routing or application middleware.
   - dns-rebinding-protection

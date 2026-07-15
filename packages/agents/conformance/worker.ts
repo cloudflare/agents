@@ -56,15 +56,28 @@ type RunResult =
 
 export class ConformanceHost extends Agent<Env> {
   private _serverId: string | undefined;
+  private _scenario: string | undefined;
+  private _mrtrIsolationCallMade = false;
 
   onStart() {
     // Accept elicitation requests. Form-mode defaults are applied by the SDK
     // client because the connection advertises `form.applyDefaults` (SEP-1034).
     this.mcp.configureElicitationHandlers({
-      form: async () => ({
-        action: "accept",
-        content: {}
-      }),
+      form: async () => {
+        // The MRTR referee requires an unrelated request while another tool's
+        // input is pending. Issue it from the real application callback: this
+        // exercises SDK-owned continuation while proving requestState and
+        // inputResponses remain scoped to the originating call.
+        if (
+          this._scenario === "sep-2322-client-request-state" &&
+          this._serverId &&
+          !this._mrtrIsolationCallMade
+        ) {
+          this._mrtrIsolationCallMade = true;
+          await this.callTool(this._serverId, "test_mrtr_unrelated", {});
+        }
+        return { action: "accept", content: {} };
+      },
       url: async () => ({
         action: "accept",
         content: {}
@@ -106,19 +119,11 @@ export class ConformanceHost extends Agent<Env> {
     serverUrl: string,
     context?: string
   ): Promise<RunResult> {
+    this._scenario = scenario;
     try {
       if (!this._serverId) {
         const result = await this.addMcpServer(SERVER_NAME, serverUrl, {
-          transport: {
-            type: "streamable-http",
-            // This scenario intentionally serves 2025-03-26 root metadata
-            // whose issuer is a same-origin /oauth path. SDK v2 correctly
-            // rejects that RFC 8414 mismatch by default; the compatibility
-            // option is explicit and scoped only to this known legacy server.
-            ...(scenario === "auth/2025-03-26-oauth-metadata-backcompat" && {
-              skipIssuerMetadataValidation: true
-            })
-          },
+          transport: { type: "streamable-http" },
           client: {
             capabilities: {
               // Opt into SDK-side default application (SEP-1034) on top of
@@ -134,7 +139,7 @@ export class ConformanceHost extends Agent<Env> {
       }
 
       await this.waitForReady(this._serverId);
-      await this.runScenarioSteps(scenario, this._serverId);
+      await this.runScenarioSteps(scenario, this._serverId, context);
       return { status: "done" };
     } catch (error) {
       // Authorization servers without dynamic client registration require
@@ -270,12 +275,15 @@ export class ConformanceHost extends Agent<Env> {
 
   private async runScenarioSteps(
     scenario: string,
-    serverId: string
+    serverId: string,
+    context?: string
   ): Promise<void> {
     switch (scenario) {
       case "initialize":
-        // Connecting runs the full initialize handshake plus discovery
-        // (tools/resources/prompts listing) — nothing further to do.
+      case "request-metadata":
+      case "json-schema-ref-no-deref":
+        // Connecting runs version negotiation and the capability-directed
+        // catalog requests these scenarios observe.
         return;
       case "tools_call":
         await this.callTool(serverId, "add_numbers", { a: 5, b: 3 });
@@ -285,6 +293,54 @@ export class ConformanceHost extends Agent<Env> {
         return;
       case "elicitation-sep1034-client-defaults":
         await this.callTool(serverId, "test_client_elicitation_defaults", {});
+        return;
+      case "sep-2322-client-request-state":
+        // These calls exercise the SDK v2 automatic MRTR engine. The form
+        // handler above inserts the unrelated call during the first round.
+        await this.callTool(serverId, "test_mrtr_echo_state", {});
+        await this.callTool(serverId, "test_mrtr_no_state", {});
+        await this.callTool(serverId, "test_mrtr_no_result_type", {});
+        return;
+      case "http-standard-headers":
+        await this.callTool(serverId, "test_headers", {});
+        await this.mcp.readResource({
+          serverId,
+          uri: "file:///path/to/file%20name.txt"
+        });
+        await this.mcp.getPrompt({ serverId, name: "test_prompt" });
+        return;
+      case "http-custom-headers": {
+        const parsed = context ? (JSON.parse(context) as unknown) : undefined;
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          !("toolCalls" in parsed) ||
+          !Array.isArray(parsed.toolCalls)
+        ) {
+          throw new Error("Missing HTTP custom-header conformance toolCalls");
+        }
+        for (const call of parsed.toolCalls as Array<{
+          name?: unknown;
+          arguments?: unknown;
+        }>) {
+          if (
+            typeof call.name !== "string" ||
+            typeof call.arguments !== "object" ||
+            call.arguments === null ||
+            Array.isArray(call.arguments)
+          ) {
+            throw new Error("Invalid HTTP custom-header conformance toolCall");
+          }
+          await this.callTool(
+            serverId,
+            call.name,
+            call.arguments as Record<string, unknown>
+          );
+        }
+        return;
+      }
+      case "http-invalid-tool-headers":
+        await this.callTool(serverId, "valid_tool", { region: "us-east1" });
         return;
       default:
         if (scenario.startsWith("auth/")) {

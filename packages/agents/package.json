@@ -40,7 +40,6 @@
   "devDependencies": {
     "@ai-sdk/react": "^3.0.204",
     "@modelcontextprotocol/client": "2.0.0-beta.4",
-    "@modelcontextprotocol/conformance": "0.1.16",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.9",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@modelcontextprotocol/server": "2.0.0-beta.4",
@@ -299,11 +298,18 @@
     "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
-    "test:conformance": "pnpm run test:conformance:client && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler && pnpm run test:conformance:server:handler:stateless-legacy && pnpm run test:conformance:server:handler:legacy",
-    "test:conformance:client": "bash conformance/run.sh client --suite all",
+    "test:conformance": "pnpm run test:conformance:client && pnpm run test:conformance:server",
+    "test:conformance:client": "pnpm run test:conformance:client:modern && pnpm run test:conformance:client:2025-11-25 && pnpm run test:conformance:client:2025-06-18 && pnpm run test:conformance:client:2025-03-26 && pnpm run test:conformance:client:extensions",
+    "test:conformance:client:modern": "bash conformance/run.sh client-modern",
+    "test:conformance:client:2025-11-25": "bash conformance/run.sh client-2025-11-25",
+    "test:conformance:client:2025-06-18": "bash conformance/run.sh client-2025-06-18",
+    "test:conformance:client:2025-03-26": "bash conformance/run.sh client-2025-03-26",
+    "test:conformance:client:extensions": "bash conformance/run.sh client-extensions",
+    "test:conformance:server": "pnpm run test:conformance:server:handler && pnpm run test:conformance:server:handler:stateless-legacy && pnpm run test:conformance:server:handler:legacy && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler:extensions",
     "test:conformance:server:mcp-agent": "bash conformance/run.sh server-mcp-agent",
     "test:conformance:server:handler": "bash conformance/run.sh server-handler",
     "test:conformance:server:handler:stateless-legacy": "bash conformance/run.sh server-handler-stateless-legacy",
-    "test:conformance:server:handler:legacy": "bash conformance/run.sh server-handler-legacy"
+    "test:conformance:server:handler:legacy": "bash conformance/run.sh server-handler-legacy",
+    "test:conformance:server:handler:extensions": "bash conformance/run.sh server-handler-extensions"
   }
 }

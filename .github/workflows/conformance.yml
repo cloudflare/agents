@@ -23,18 +23,36 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install
-      - run: pnpm --filter agents run test:conformance:client
+      - run: pnpm --filter agents run test:conformance:client:modern
+
+  client-compatibility:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - 2025-11-25
+          - 2025-06-18
+          - 2025-03-26
+          - extensions
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install
+      - run: pnpm --filter agents run test:conformance:client:${{ matrix.variant }}
 
   server-conformance:
     timeout-minutes: 15
     runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         variant:
           - mcp-agent
           - handler
           - handler:stateless-legacy
           - handler:legacy
+          - handler:extensions
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install
