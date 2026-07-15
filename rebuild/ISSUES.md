@@ -514,9 +514,13 @@ author picks from, composition primary:
    }
    ```
    `rpcProtocol()`/`stateProtocol()` type-check against any `Agent`;
-   `conversationProtocol()` (or the full `cf_agent_*` bundle) type-checks only
-   against a `Think` because it needs the turn surface — enforced by the
-   transport's parameter type, not a runtime check. The `cf_agent_*` browser
+   `conversationProtocol()` type-checks against a `ConversationSurface`
+   **interface** (the turn methods it calls), NOT the concrete `Think` class —
+   an interface has no private brand, so a userland composition implementing
+   those methods satisfies it too (ADR-0002 corollary). Today
+   `attachChatTransport(agent: Think)` leaks this: Think's private fields make
+   the parameter nominal and reject userland compositions — fix it in this
+   refactor. The `cf_agent_*` browser
    bundle ships as ONE composable transport today, DECOMPOSABLE later into
    event-projection / state-sync / rpc / conversation sub-transports (the seams
    are already real). Think is not a different *kind* of thing — it's `Agent` +
