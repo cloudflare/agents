@@ -56,15 +56,22 @@ export default createMcpHandler(createServer);
 
 ```typescript
 createMcpHandler(() => createServer(), {
-  route: "/mcp",             // exact path to handle (default: "/mcp")
-  corsOptions: { ... },       // Agents CORS configuration; false disables it
+  route: "/mcp", // exact path to handle (default: "/mcp")
+  corsOptions: {
+    origin: "https://app.example.com"
+  },
+  allowedOriginHostnames: ["app.example.com"], // hostnames only
   authContext: { props: {} }, // optional application props override
-  legacy: "stateless",       // upstream default; use "reject" for modern-only
-  responseMode: "auto"       // upstream SDK response shaping
+  legacy: "stateless", // upstream default; use "reject" for modern-only
+  responseMode: "auto" // upstream SDK response shaping
 });
 ```
 
 All upstream SDK v2 handler options pass through. Use `createLegacyMcpHandler` for WorkerTransport, storage, session, and event-store options.
+
+The handler validates every present `Origin` header before serving the request. It allows `localhost`, `127.0.0.1`, and `[::1]` by default; requests without `Origin` remain valid for non-browser MCP clients. Browser clients on any other hostname require an explicit `allowedOriginHostnames` entry. Values are hostnames without a scheme or port, and matching ignores the request Origin's scheme and port. `corsOptions.origin` controls the response's CORS header but is not a security allowlist, so configure both options for a cross-origin browser client.
+
+Origin validation meets the Streamable HTTP requirement and protects browser traffic. The handler does not infer a trusted `Host` allowlist from `request.url`: Workers construct that URL from the incoming Host header. If your deployment accepts arbitrary Host values, validate them at the edge or wrap the handler with `hostHeaderValidationResponse` from `@modelcontextprotocol/server` and an explicit deployment-specific allowlist.
 
 ### 2025 compatibility and elicitation
 

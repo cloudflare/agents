@@ -15,8 +15,3 @@ server:
   # streams require a sessionful legacy endpoint.
   - server-sse-polling
   - server-sse-multiple-streams
-
-  # Same deployment-boundary policy as the modern handler.
-  # Impact if unchanged: arbitrary Host/Origin rejection must be supplied by
-  # deployment routing or application middleware.
-  - dns-rebinding-protection

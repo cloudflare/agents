@@ -15,7 +15,8 @@ const highLevel = new McpServer({ name: "modern", version: "1.0.0" });
 const lowLevel = new Server({ name: "modern-low", version: "1.0.0" });
 const modernOptions: CreateStatelessMcpHandlerOptions = {
   legacy: "stateless",
-  route: "/mcp"
+  route: "/mcp",
+  allowedOriginHostnames: ["client.example"]
 };
 
 const highLevelHandler: StatelessMcpHandler = createMcpHandler(

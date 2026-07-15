@@ -55,8 +55,8 @@ not a production-code branch.
 
 | Command                                            | Protocol/lifecycle      | Endpoint              | Current result                        |
 | -------------------------------------------------- | ----------------------- | --------------------- | ------------------------------------- |
-| `test:conformance:server:handler`                  | `2026-07-28` stateless  | `/mcp-handler`        | 39 clean / 1 expected failure         |
-| `test:conformance:server:handler:stateless-legacy` | `2025-11-25` stateless  | `/mcp-handler`        | 25 clean / 7 expected failures        |
+| `test:conformance:server:handler`                  | `2026-07-28` stateless  | `/mcp-handler`        | 40 clean                              |
+| `test:conformance:server:handler:stateless-legacy` | `2025-11-25` stateless  | `/mcp-handler`        | 26 clean / 6 expected failures        |
 | `test:conformance:server:handler:legacy`           | `2025-11-25` sessionful | `/mcp-handler-legacy` | 29 clean / 3 expected failures        |
 | `test:conformance:server:mcp-agent`                | `2025-11-25` sessionful | `/mcp-agent`          | 29 clean / 3 expected failures        |
 | `test:conformance:server:handler:extensions`       | modern optional tasks   | `/mcp-handler`        | 9 expected failures / 1 not exercised |

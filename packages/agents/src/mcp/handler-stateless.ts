@@ -1,6 +1,8 @@
 import {
   createMcpHandler as createSdkMcpHandler,
   isLegacyRequest,
+  localhostAllowedOrigins,
+  originValidationResponse,
   type AuthInfo,
   type CreateMcpHandlerOptions as SdkCreateMcpHandlerOptions,
   type McpHandlerRequestOptions,
@@ -21,6 +23,12 @@ export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOpt
   route?: string;
   /** CORS headers applied by the Worker wrapper. Pass `false` to disable. */
   corsOptions?: CORSOptions | false;
+  /**
+   * Hostnames accepted from a present `Origin` header. Requests without an
+   * Origin (including non-browser MCP clients) remain valid.
+   * @default ["localhost", "127.0.0.1", "[::1]"]
+   */
+  allowedOriginHostnames?: string[];
   /** Application props exposed through {@link getMcpAuthContext}. */
   authContext?: McpAuthContext;
 }
@@ -38,7 +46,7 @@ export type StatelessMcpServerInput = McpServerFactory;
 const DEFAULT_CORS_OPTIONS: Required<CORSOptions> = {
   origin: "*",
   headers:
-    "Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version",
+    "Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version, Mcp-Method, Mcp-Name",
   methods: "GET, POST, DELETE, OPTIONS",
   exposeHeaders: "mcp-session-id",
   maxAge: 86400
@@ -144,6 +152,7 @@ export function createStatelessMcpHandler(
   const {
     route = "/mcp",
     corsOptions = {},
+    allowedOriginHostnames = localhostAllowedOrigins(),
     authContext,
     legacy = "stateless",
     ...sdkOptions
@@ -168,6 +177,14 @@ export function createStatelessMcpHandler(
 
     if (new URL(request.url).pathname !== route) {
       return withCors(new Response("Not Found", { status: 404 }), corsOptions);
+    }
+
+    const originRejection = originValidationResponse(
+      request,
+      allowedOriginHostnames
+    );
+    if (originRejection) {
+      return withCors(originRejection, corsOptions);
     }
 
     if (request.method === "OPTIONS" && corsOptions !== false) {
