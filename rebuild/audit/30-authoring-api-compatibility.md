@@ -240,13 +240,31 @@ not just an internal refactor:
    expressed as tier 2 (extend `Agent` for the platform lifecycle, add
    modules) rather than rebuilding the DO shell by hand.
 
-Hosting is uniform across all three: `hostAgent(YourClass)` works for any
-`Agent` subclass, so a custom composition gets the DO lifecycle (start-once,
-alarms, WS, facets) for free. **Honest gap:** the module factories are
-structurally public and test-proven, but their `{store, clock, ids, bus, …}`
-dep signatures are internal-facing — there's no "build-a-lite-agent" cookbook
-or ergonomic surface yet. That's a docs/DX gap, not an architectural one, and
-it's the natural companion to the compat-alias wave. The publish framing this
+**Hosting gap (corrected 2026-07-15):** hosting is NOT yet uniform across the
+tiers. `hostAgent` is the Cloudflare primary adapter — the DO class that
+supplies the concrete ports over `ctx.storage`/`setAlarm` and drives the
+lifecycle (start-once, alarm→onAlarm, fetch/WS→transport, `__call` RPC). But
+it is currently typed `<A extends Think>` and *always* wires
+`attachChatTransport` (the `cf_agent_*` WS protocol). So it conflates the
+UNIVERSAL adapter role (every hosted agent needs it) with the CHAT-specific
+transport wiring (only chat agents need it) — which means tier 2/3
+(`extends Agent`, no chat) has no hosting path today. Fix: **layer the host** —
+a minimal `hostAgent<A extends Agent>` (lifecycle + ports + alarm/RPC) and a
+`hostChatAgent` variant/option that adds chat transport (ISSUE-030). This is
+not a shim to remove; it's the platform adapter to split. **Two honest gaps
+then:** (a) the layering above; (b) the module factories are structurally
+public and test-proven, but their `{store, clock, ids, bus, …}` dep
+signatures are internal-facing — no "build-a-lite-agent" cookbook or ergonomic
+surface yet. Both are DX/adapter gaps, not domain-architecture ones, and are
+natural companions to the compat-alias wave.
+
+`hostAgent` is worth understanding correctly for the publish story: it is the
+*mechanism* of the transport-free split (the reason Agent/Think stay
+platform-agnostic and node-testable), NOT a compatibility shim for the old
+package. Removing it would mean re-coupling agents to the DO runtime — the
+original's design. The one-line `hostAgent()` wrapper is the small deliberate
+tax that buys transport-freedom; the framework/Vite tier (ISSUE-013) would
+generate it, as the original's codegen did. The publish framing this
 unlocks is stronger than "a compatible Think": **Think is the default
 composition; `Agent` is the base you compose your own on.**
 

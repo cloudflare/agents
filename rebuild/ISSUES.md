@@ -445,3 +445,28 @@ re-execute) and `output-denied` (with reason) for denials; tool results
 apply to `approval-requested`/`approval-responded` parts but never to denied
 ones; denied counts as settled for auto-continuation; reconcile ranks and
 repair's unsettled set updated. Native denial assertions migrated.
+
+---
+
+## ISSUE-030 — Layer `hostAgent`: minimal DO host vs chat host
+
+**Status:** open · **Area:** Cloudflare adapter / hosting (audit 30 §composition-tiers)
+
+`hostAgent` is the Cloudflare primary adapter (the DO class that supplies
+concrete ports over `ctx.storage`/`setAlarm` and drives start-once / alarm /
+fetch-WS / `__call` RPC). Today it is typed `<A extends Think>` and always
+wires `attachChatTransport` (the `cf_agent_*` WS protocol), conflating the
+UNIVERSAL adapter role with CHAT-specific transport wiring. Consequence: a
+primitives-first agent (`extends Agent`, no chat — e.g. scheduled-task-only or
+RPC-only) has no hosting path, and if forced through `hostAgent` would carry
+chat plumbing it never uses. So the "compose your own on `Agent`" tier
+(audit 30) is real at the composition layer but missing its hosting layer.
+
+Fix: split into a minimal `hostAgent<A extends Agent>` (lifecycle + ports +
+alarm + `__call`/`__init`/`__destroy` RPC, no transport) and a `hostChatAgent`
+variant (or a `{ chat: true }` option) that adds `attachChatTransport` for
+`Think` subclasses. Think uses the chat host; lean custom agents use the
+minimal one. Not a shim to remove — the platform adapter to layer. Pairs with
+a "build-a-lite-agent" DX pass (the domain factories are public + test-proven
+but their dep signatures are internal-facing) and with the framework/Vite
+codegen (ISSUE-013) that would generate the wrapper away.
