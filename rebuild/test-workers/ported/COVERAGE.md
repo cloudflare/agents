@@ -83,47 +83,47 @@ refreshes the snapshot in the same commit.
 
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
-| client-tools.test.ts | 86 | WIRE | ported 33/86 | [fidelity:adapter] 53 fail on REAL semantics: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. (ISSUE-029 flipped the approval-vocabulary tests.) |
+| client-tools.test.ts | 86 | WIRE | ported 34/86 | [fidelity:adapter] 53 fail on REAL semantics: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. (ISSUE-029 flipped the approval-vocabulary tests.) |
 | think-session.test.ts | 198 | WIRE+API | rewritten 103/198 (7 dropped-with-pointer) | [fidelity:rewrite] R3 landed in-band stream errors (new `error` ModelChunk variant, threaded through providers/loop/wire) + abort/stall injection seams: +32 flips, zero regressions. Remaining failures keep NAMED missing-feature reasons (sanitization/row-size, saveMessages/addMessages variants, submission seams, child-stream forwarding, keep-recovering override). |
-| hooks.test.ts | 105 | WIRE+API | ported 48/105 | [fidelity:adapter] P7. 25 missing-feature (15 host-bridge/`_insideInferenceLoop`, no-issue-yet; 4 extensions ISSUE-006; 6 small knobs: TurnConfig output/experimental_transform, presence/frequency penalties + timeout, lease-config surface, reasoning lifecycle chunks). 30 divergence (11 suspended-stream-stays-open family; 8 tool-hook gating contract ISSUE-033; 4 async-iterable outputs ISSUE-031; 2 normalize coercion ISSUE-032; 4 error-text wording; 1 ledger replay-by-key, documented). 2 fixture-gap (service-level concurrency — native actions.test.ts covers). Verified 0 per-test flips across the ChatAgent extraction. |
-| submissions.test.ts | 51 | PUBLIC-API | ported 23/51 | [fidelity:adapter] P8. 19 missing-feature (10 running-row recovery tracking `messagesAppliedAt`/`messageIds`; 4 workflow-notification store, adjacent ISSUE-016; 3 `think_final_answer` structured-output tool; 2 misc: async acceptance hook, configurable stale window — all no-issue-yet). 9 divergence (1 bulk-delete deletes ACTIVE rows ISSUE-034 — real bug; 4 cancel reason not persisted to row.error; 2 list ordering oldest-first vs newest-first; 1 conflict-pair detection; 1 dedup retry doesn't rewake drain). |
+| hooks.test.ts | 105 | WIRE+API | ported 62/105 | [fidelity:adapter] P7; F1 flipped 14 (ISSUES 031/032/033 resolved: async-iterable outputs, normalize coercion, hook gating contract). Remaining 25 missing-feature (15 host-bridge/`_insideInferenceLoop`, no-issue-yet; 4 extensions ISSUE-006; 6 small knobs: TurnConfig output/experimental_transform, presence/frequency penalties + timeout, lease-config surface, reasoning lifecycle chunks). 16 divergence (11 suspended-stream-stays-open family; 4 error-text wording; 1 ledger replay-by-key, documented). 2 fixture-gap (service-level concurrency — native actions.test.ts covers). Verified 0 per-test flips across the ChatAgent extraction. |
+| submissions.test.ts | 51 | PUBLIC-API | ported 32/51 | [fidelity:adapter] P8. 19 missing-feature (10 running-row recovery tracking `messagesAppliedAt`/`messageIds`; 4 workflow-notification store, adjacent ISSUE-016; 3 `think_final_answer` structured-output tool; 2 misc: async acceptance hook, configurable stale window — all no-issue-yet). F1 resolved ISSUE-034 (bulk-delete guard) + the 4 stretch divergences (cancel reason persisted, list newest-first, conflict pairs, dedup rewake) — 9 flips incl. bonus cancel/abort-path tests. |
 | agent-tools.test.ts | 33 | PUBLIC-API | ported 11/33 | [fidelity:adapter] P9. 19 missing-feature ISSUE-035 (the whole reattach-budget/`interrupted`/startup-recovery family — one root cause; scope detail folded into the issue). 1 missing-feature structured-output-on-completed-runs (no-issue-yet). 1 divergence turn-skip vocabulary (cancel seals `aborted` vs original `error`). 1 fixture-gap request-id reverse lookup (persists, unseedable). Integrity: 3 codex false-passes reworked to fail honestly (they'll flip with ISSUE-035); 4 weak-but-genuine passes noted (live-relay settle vs restart recovery; #1589 forwarding without attach-window race timing). Verified 0 flips on merged main. |
 | assistant-agent-loop.test.ts | 23 | WIRE | ported 22/23 | [fidelity:adapter] Near-green; 1 residual to pin in the next triage pass. |
 | extension-manager.test.ts | 34 | INTERNAL | blocked ISSUE-006 | ports with the extensions lift |
-| run-turn.test.ts | 26 | PUBLIC-API | pending | T3 |
+| run-turn.test.ts | 26 | PUBLIC-API | claimed P11 | T3 |
 | fetch-tools.test.ts | 32 | INTERNAL | quarry | checklist vs domain/fetch suite |
-| assistant-tools.test.ts | 30 | PUBLIC-API | pending | T3 |
-| scheduled-tasks.test.ts | 14 | PUBLIC-API | pending | T3 |
+| assistant-tools.test.ts | 30 | PUBLIC-API | claimed P11 | T3 |
+| scheduled-tasks.test.ts | 14 | PUBLIC-API | claimed P11 | T3 |
 | message-reconciliation.test.ts | 8 | WIRE | ported 8/8 | [fidelity:adapter] **GREEN** — ISSUE-015 resolved: reconcileIncoming (collapse optimistic duplicates, no-downgrade merge) + pre-turn orphan write-back (preserve + flip to output-error, inputs normalized; approval-requested exempt). Also fixed the P1 fixture to seed through the real session (raw-row seeding bypassed tree bookkeeping). |
 | execute-hitl.test.ts | 10 | WIRE | ported 0/10 | [fidelity:adapter] `fixture-gap`: fixture authored on the approval-gate path (`approval-requested`); original uses ACTIONS durable-pause (paused output as normal `output-available` result + approveExecution). Rework fixture onto the rebuild's durable-pause actions. |
 | hydration-budget.test.ts | 13 | PUBLIC-API | blocked ISSUE-014 | media-eviction dependent |
-| actions-durable-pause.test.ts | 18 | PUBLIC-API | pending | T3 |
+| actions-durable-pause.test.ts | 18 | PUBLIC-API | claimed P11 | T3 |
 | host-embedding.test.ts | 11 | INTERNAL | blocked ISSUE-013 | framework/server-entry |
 | onconnect-broadcast.test.ts | 9 | WIRE | ported 7/9 | [fidelity:adapter] ISSUE-018 resolved: connect-time suppression + proactive STREAM_RESUMING, ACK-gated replay (from first delta), #1645 terminal retention/replay all pass. The 2 remaining tests exercise `/sub/` sub-agent URLs — `blocked ISSUE-017` (they previously 'passed' by asserting against the wrong agent). |
 | actions-attach-reply.test.ts | 12 | WIRE | ported 6/12 | [fidelity:adapter] 6 fail REAL semantics: attachment validation strictness `divergence` (rebuild accepts invalid/non-json-safe attachments the original filters/normalizes) + done-timeouts on specific flows. Candidate small actions fix. |
 | assistant-agent.test.ts | 5 | WIRE | ported 5/5 | [fidelity:light] **T0 gate GREEN** (ISSUE-026 resolved) |
-| channel-recovery.test.ts | 5 | PUBLIC-API | pending | T3 |
-| stream-cleanup.test.ts | 11 | PUBLIC-API | pending | T3; event-log retention differs — expect divergence notes |
+| channel-recovery.test.ts | 5 | PUBLIC-API | claimed P11 | T3 |
+| stream-cleanup.test.ts | 11 | PUBLIC-API | claimed P11 | T3; event-log retention differs — expect divergence notes |
 | media-eviction.test.ts | 9 | INTERNAL | blocked ISSUE-014 | port pure-fn tests with the impl |
 | workflows.test.ts | 3 | INTERNAL | blocked ISSUE-016 | |
 | action-pause-recovery.test.ts | 1 | ported 1/1 | [fidelity:adapter] **GREEN under real kill/restart** — fixed en route: lazy action-registry compile (approveExecution on a fresh activation, deploy-then-approve path). |
-| onstart-degraded.test.ts | 5 | PUBLIC-API | pending | T3 |
+| onstart-degraded.test.ts | 5 | PUBLIC-API | claimed P11 | T3 |
 | agent-tool-reattach-recovery.test.ts | 2 | WIRE | ported 2/2 | [fidelity:adapter] **PASSES** — facet spawner + delegation reattach hold against the original's assertions. |
 | streaming-message-id.test.ts | 1 | WIRE | ported 1/1 | [fidelity:light] **T0 gate GREEN** (ISSUE-026 resolved) |
-| run-turn-recovery.test.ts | 2 | PUBLIC-API | pending | T3 |
-| turn-metadata.test.ts | 4 | PUBLIC-API | pending | T3 |
+| run-turn-recovery.test.ts | 2 | PUBLIC-API | claimed P11 | T3 |
+| turn-metadata.test.ts | 4 | PUBLIC-API | claimed P11 | T3 |
 | execute-tool.test.ts | 6 | PUBLIC-API | blocked ISSUE-004 | codemode |
 | channels.test.ts | 8 | INTERNAL | quarry | vs domain/channels suite |
-| deliver-notice.test.ts | 7 | PUBLIC-API | pending | T3 |
-| fiber.test.ts | 7 | PUBLIC-API | pending | T3 |
-| max-concurrent-agent-tools.test.ts | 5 | PUBLIC-API | pending | T3 |
-| agent-tool-rebind-noop.test.ts | 3 | PUBLIC-API | pending | T3 |
-| nested-agent-tools.test.ts | 3 | PUBLIC-API | pending | T3 |
-| attachment-consumption.test.ts | 4 | PUBLIC-API | pending | T3 |
-| errored-stream-replay.test.ts | 1 | PUBLIC-API | pending | T3 |
+| deliver-notice.test.ts | 7 | PUBLIC-API | claimed P11 | T3 |
+| fiber.test.ts | 7 | PUBLIC-API | claimed P11 | T3 |
+| max-concurrent-agent-tools.test.ts | 5 | PUBLIC-API | claimed P11 | T3 |
+| agent-tool-rebind-noop.test.ts | 3 | PUBLIC-API | claimed P11 | T3 |
+| nested-agent-tools.test.ts | 3 | PUBLIC-API | claimed P11 | T3 |
+| attachment-consumption.test.ts | 4 | PUBLIC-API | claimed P11 | T3 |
+| errored-stream-replay.test.ts | 1 | PUBLIC-API | claimed P11 | T3 |
 | browser-tools.test.ts | 6 | INTERNAL | blocked ISSUE-008 | |
-| channel-threading.test.ts | 4 | PUBLIC-API | pending | T3 |
-| channel-policy.test.ts | 3 | PUBLIC-API | pending | T3 |
+| channel-threading.test.ts | 4 | PUBLIC-API | claimed P11 | T3 |
+| channel-policy.test.ts | 3 | PUBLIC-API | claimed P11 | T3 |
 | messengers.test.ts | 30 | INTERNAL+API | blocked ISSUE-011 | |
 | framework.test.ts | 25 | INTERNAL | blocked ISSUE-013 | |
 | action-types.test-d.ts / chat-options.test-d.ts / tool-call-types.test-d.ts | type | type-level | blocked ISSUE-021 | |
@@ -162,39 +162,39 @@ refreshes the snapshot in the same commit.
 
 | File | ~Tests | Status | Notes |
 |---|--:|---|---|
-| agent-tool-detached.test.ts | 13 | pending | T3 (delegation) |
-| agent-tool-replay.test.ts | 5 | pending | T3 |
-| agent-tools-failure.test.ts | 5 | pending | T3 |
+| agent-tool-detached.test.ts | 13 | claimed P13 | T3 (delegation) |
+| agent-tool-replay.test.ts | 5 | claimed P13 | T3 |
+| agent-tools-failure.test.ts | 5 | claimed P13 | T3 |
 | alarms.test.ts | 3 | native test-workers/alarm.test.ts | verify overlap when convenient |
-| basepath.test.ts | 21 | pending | T3 (routing prefix option) |
+| basepath.test.ts | 21 | claimed P12 | T3 (routing prefix option) |
 | browser-connector.test.ts | 34 | blocked ISSUE-008 | ports with the browser lift |
 | browser-quick-actions.test.ts | 20 | blocked ISSUE-008 | |
-| callable.test.ts | 21 | pending | T3 |
+| callable.test.ts | 21 | claimed P12 | T3 |
 | chat-sdk.test.ts | 9 | blocked ISSUE-011 | messengers depend on chat-sdk Adapter |
-| client-timeout.test.ts | 5 | pending | T3 |
-| deferred-destroy.test.ts | 6 | pending | T3 (shell __destroy semantics) |
+| client-timeout.test.ts | 5 | claimed P12 | T3 |
+| deferred-destroy.test.ts | 6 | claimed P12 | T3 (shell __destroy semantics) |
 | email-headers.test.ts | 10 | blocked ISSUE-023 | |
 | email-routing.test.ts | 46 | blocked ISSUE-023 | |
-| keep-alive.test.ts | 14 | pending | T3 |
-| message-handling.test.ts | 10 | pending | T3 |
+| keep-alive.test.ts | 14 | claimed P12 | T3 |
+| message-handling.test.ts | 10 | claimed P12 | T3 |
 | migration.test.ts | 8 | dropped | migrates the ORIGINAL's old storage schema — meaningless for the rebuild |
-| msg-ordering.test.ts | 1 | pending | T3 |
+| msg-ordering.test.ts | 1 | claimed P12 | T3 |
 | observability.test.ts | 46 | blocked ISSUE-009 | ports with the adapter |
 | protocol-messages.test.ts | 18 | ported 5/18 | [fidelity:adapter] 13 fail on original frame-vocabulary asserts — needs per-test verdicts: genuine missing frames vs deliberate `divergence` (some will become dropped rows). |
-| queue.test.ts | 3 | pending | T3 |
+| queue.test.ts | 3 | claimed P12 | T3 |
 | r2-skills.test.ts | 9 | blocked ISSUE-004 | R2+codemode skills; also quarry vs domain/skills |
-| readonly-connections.test.ts | 45 | pending | T3 |
+| readonly-connections.test.ts | 45 | claimed P12 | T3 |
 | resumable-stream-migration.test.ts | 1 | dropped | old-architecture migration |
 | retries.test.ts | 48 | blocked ISSUE-020 | |
 | retry-integration.test.ts | 18 | blocked ISSUE-020 | |
 | routing.test.ts | 24 | ported 24/24 | [fidelity:light] **GREEN — full original suite passes** (after fixing unknown-binding 400 vs 404 divergence found here). |
-| run-fiber.test.ts | 54 | pending | T3 |
-| schedule.test.ts | 52 | pending | T3 |
+| run-fiber.test.ts | 54 | claimed P13 | T3 |
+| schedule.test.ts | 52 | claimed P12 | T3 |
 | schema-and-state-optimization.test.ts | 31 | quarry | original SQL-schema internals |
 | skill-runner.test.ts | 31 | blocked ISSUE-004 | |
 | skills.test.ts | 13 | blocked ISSUE-004 | quarry vs domain/skills meanwhile |
 | spike-sub-agent-routing.test.ts | 16 | blocked ISSUE-017 | |
-| state.test.ts | 22 | pending | T3 |
+| state.test.ts | 22 | claimed P12 | T3 |
 | sub-agent-routing.test.ts | 22 | blocked ISSUE-017 | |
 | sub-agent.test.ts | 97 | ported 36/97 | [fidelity:adapter] P10. 38 on the board (36 pass; 2 real divergences: null-char name accepted, `Sub_` escapes the reserved-`sub` guard). 20 blocked: 13 ISSUE-036 (facets get no AgentSpawner — no nested spawn, no parentAgent() in a facet), 6 ISSUE-017 (/sub/ routing), 1 ISSUE-009. 20 quarry (old-arch internals: raw schedule rows, fiber-lease delegation, bundler heuristics, legacy migration). 6 dropped: 4 no-equivalent (raw onMessage, broadcast(), getConnections()), 2 native test-workers/delegation.test.ts. Divergence to confirm: parentAgent() on non-facet returns undefined vs original throw. |
 | workflow-error-reporting.test.ts | 7 | blocked ISSUE-016 | |
