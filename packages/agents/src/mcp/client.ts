@@ -51,6 +51,13 @@ export type MCPAITool = {
  */
 export type MCPAIToolSet = Record<string, MCPAITool>;
 
+type MCPAIToolCacheEntry = {
+  connection: MCPClientConnection;
+  /** Catalog arrays are replaced after discovery and tools/list_changed. */
+  catalog: Tool[];
+  tools: MCPAIToolSet;
+};
+
 /** Maximum length of a normalized MCP server id. */
 export const MCP_SERVER_ID_MAX_LENGTH = 64;
 
@@ -350,6 +357,8 @@ export class MCPClientManager {
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
+  /** Converted Zod schemas cached per live connection and catalog revision. */
+  private _aiToolsCache = new Map<string, MCPAIToolCacheEntry>();
   private _storage: DurableObjectStorage;
   private _createAuthProviderFn?: (
     callbackUrl: string
@@ -528,6 +537,8 @@ export class MCPClientManager {
   private _renameInMemoryConnection(oldId: string, newId: string): void {
     if (oldId === newId) return;
 
+    this._aiToolsCache.delete(oldId);
+    this._aiToolsCache.delete(newId);
     const conn = this.mcpConnections[oldId];
     if (conn) {
       this.mcpConnections[newId] = conn;
@@ -1096,6 +1107,7 @@ export class MCPClientManager {
     // During OAuth reconnect, reuse existing connection to preserve state;
     // otherwise drop any existing connection and rebuild it.
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
+      this._aiToolsCache.delete(id);
       delete this.mcpConnections[id];
       this.createConnection(id, url, {
         client: options.client,
@@ -1788,28 +1800,22 @@ export class MCPClientManager {
     return getNamespacedData(this.filterConnections(filter), "tools");
   }
 
-  /**
-   * @param filter - Optional filter to scope results to specific servers
-   * @returns a set of tools that you can use with the AI SDK
-   */
-  getAITools(filter?: MCPServerFilter): MCPAIToolSet {
-    const connections = this.filterConnections(filter);
-
-    for (const [id, conn] of Object.entries(connections)) {
-      if (
-        conn.connectionState !== MCPConnectionState.READY &&
-        conn.connectionState !== MCPConnectionState.AUTHENTICATING
-      ) {
-        console.warn(
-          `[getAITools] WARNING: Reading tools from connection ${id} in state "${conn.connectionState}". Tools may not be loaded yet.`
-        );
-      }
+  private getCachedAIToolsForConnection(
+    serverId: string,
+    connection: MCPClientConnection
+  ): MCPAIToolSet {
+    const cached = this._aiToolsCache.get(serverId);
+    if (
+      cached?.connection === connection &&
+      cached.catalog === connection.tools
+    ) {
+      return cached.tools;
     }
 
     const entries: [string, MCPAITool][] = [];
-    for (const tool of getNamespacedData(connections, "tools")) {
+    for (const tool of connection.tools) {
       try {
-        const toolKey = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
+        const toolKey = `tool_${serverId.replace(/-/g, "")}_${tool.name}`;
         const title = tool.title ?? tool.annotations?.title;
         entries.push([
           toolKey,
@@ -1820,7 +1826,7 @@ export class MCPClientManager {
               const result = await this.callTool({
                 arguments: args,
                 name: tool.name,
-                serverId: tool.serverId
+                serverId
               });
               if (result.isError) {
                 const content = result.content as
@@ -1847,13 +1853,46 @@ export class MCPClientManager {
               : undefined
           }
         ]);
-      } catch (e) {
+      } catch (error) {
         console.warn(
-          `[getAITools] Skipping tool "${tool.name}" from "${tool.serverId}": ${e}`
+          `[getAITools] Skipping tool "${tool.name}" from "${serverId}": ${error}`
         );
       }
     }
-    return Object.fromEntries(entries);
+
+    const tools = Object.fromEntries(entries);
+    this._aiToolsCache.set(serverId, {
+      connection,
+      catalog: connection.tools,
+      tools
+    });
+    return tools;
+  }
+
+  /**
+   * Convert MCP tools to AI SDK-compatible tools. Converted schemas are cached
+   * per live connection until discovery replaces that connection's catalog.
+   *
+   * @param filter - Optional filter to scope results to specific servers
+   * @returns a set of tools that you can use with the AI SDK
+   */
+  getAITools(filter?: MCPServerFilter): MCPAIToolSet {
+    const connections = this.filterConnections(filter);
+    const tools: MCPAIToolSet = {};
+
+    for (const [id, connection] of Object.entries(connections)) {
+      if (
+        connection.connectionState !== MCPConnectionState.READY &&
+        connection.connectionState !== MCPConnectionState.AUTHENTICATING
+      ) {
+        console.warn(
+          `[getAITools] WARNING: Reading tools from connection ${id} in state "${connection.connectionState}". Tools may not be loaded yet.`
+        );
+      }
+      Object.assign(tools, this.getCachedAIToolsForConnection(id, connection));
+    }
+
+    return tools;
   }
 
   /**
@@ -1887,6 +1926,7 @@ export class MCPClientManager {
     const store = this._connectionDisposables.get(id);
     if (store) store.dispose();
     this._connectionDisposables.delete(id);
+    this._aiToolsCache.delete(id);
 
     delete this.mcpConnections[id];
   }

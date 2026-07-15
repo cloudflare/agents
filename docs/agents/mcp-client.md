@@ -361,7 +361,7 @@ async function chat(prompt: string) {
 }
 ```
 
-> **Note:** `getMcpServers().tools` returns raw MCP `Tool` objects for inspection. Use `this.mcp.getAITools()` when passing tools to the AI SDK.
+> **Note:** `getMcpServers().tools` returns raw MCP `Tool` objects for inspection. Use `this.mcp.getAITools()` when passing tools to the AI SDK. Input and output schema conversion is cached per live connection until that server's tool catalog changes.
 
 ## Managing Servers
 

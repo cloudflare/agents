@@ -10,6 +10,7 @@ import type { ToolCallOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
+import { z } from "zod";
 
 function createMockStateStorage() {
   const storage = new Map<string, { serverId: string; createdAt: number }>();
@@ -2625,6 +2626,61 @@ describe("MCPClientManager OAuth Integration", () => {
   });
 
   describe("getAITools() integration", () => {
+    it("caches schema conversion until a connection's tool catalog changes", async () => {
+      const id = "cached-schema-server";
+      await manager.registerServer(id, {
+        url: "http://cached.example.com/mcp",
+        name: "Cached schemas",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+      const conn = manager.mcpConnections[id];
+      conn.connectionState = "ready";
+      conn.tools = [
+        {
+          name: "lookup",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } }
+          },
+          outputSchema: {
+            type: "object",
+            properties: { result: { type: "string" } }
+          }
+        }
+      ];
+
+      const convert = vi.spyOn(z, "fromJSONSchema");
+      const baseline = convert.mock.calls.length;
+      const first = manager.getAITools();
+      expect(convert).toHaveBeenCalledTimes(baseline + 2);
+
+      const second = manager.getAITools({ serverId: id });
+      expect(convert).toHaveBeenCalledTimes(baseline + 2);
+      expect(second).toEqual(first);
+
+      conn.tools = [
+        {
+          name: "lookup",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" }, limit: { type: "number" } }
+          },
+          outputSchema: {
+            type: "object",
+            properties: {
+              result: { type: "string" },
+              total: { type: "number" }
+            }
+          }
+        }
+      ];
+
+      manager.getAITools();
+      expect(convert).toHaveBeenCalledTimes(baseline + 4);
+    });
+
     it("should return AI SDK tools after registering and connecting to server", async () => {
       const id = "test-mcp-server";
       const url = "http://example.com/mcp";
