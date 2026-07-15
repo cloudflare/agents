@@ -266,7 +266,7 @@ describe("createSubmissionService", () => {
     await flushMacrotasks();
 
     const pendingOnly = service.list({ status: ["pending"] });
-    expect(pendingOnly.map((r) => r.submissionId)).toEqual(["s2", "s3"]);
+    expect(pendingOnly.map((r) => r.submissionId)).toEqual(["s3", "s2"]);
 
     const limited = service.list({ limit: 1 });
     expect(limited).toHaveLength(1);

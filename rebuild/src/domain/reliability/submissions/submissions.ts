@@ -190,7 +190,11 @@ export function createSubmissionService(deps: {
       const existingById = suppliedId ? getRow(suppliedId) : undefined;
       const existingByKey = key ? getByIdempotencyKey(key) : undefined;
 
-      if (existingById && existingByKey && existingById.submissionId !== existingByKey.submissionId) {
+      // A conflict is: a supplied submissionId whose idempotencyKey already
+      // maps to a DIFFERENT existing submission — whether or not suppliedId
+      // itself already has a row (a brand-new id colliding with someone
+      // else's key is just as much a conflict as two existing rows disagreeing).
+      if (suppliedId !== undefined && existingByKey && existingByKey.submissionId !== suppliedId) {
         throw new ConflictError(
           `submissionId ${suppliedId} and idempotencyKey ${key} refer to different submissions`
         );
@@ -198,6 +202,10 @@ export function createSubmissionService(deps: {
 
       const existing = existingByKey ?? existingById;
       if (existing) {
+        // A retry that lands on a still-pending row (e.g. inserted by a
+        // previous instance and never drained) must wake the drain loop,
+        // not just report the cached status — otherwise it's stuck forever.
+        if (existing.status === "pending") scheduleDrain();
         return { ...toPublic(existing), accepted: false };
       }
 
@@ -227,7 +235,7 @@ export function createSubmissionService(deps: {
     },
 
     list(options) {
-      let rows = allRows().sort((a, b) => a.seq - b.seq);
+      let rows = allRows().sort((a, b) => b.acceptedAt - a.acceptedAt || b.seq - a.seq);
       if (options?.status) {
         const statuses = options.status;
         rows = rows.filter((r) => statuses.includes(r.status));
@@ -245,6 +253,7 @@ export function createSubmissionService(deps: {
       if (row.status === "pending") {
         row.status = "aborted";
         row.settledAt = deps.clock.now();
+        if (reason !== undefined) row.error = reason;
         saveRow(row);
         deps.bus.emit("chat:submission:cancelled", { submissionId, reason });
         return true;
@@ -254,6 +263,7 @@ export function createSubmissionService(deps: {
         const controller = running.get(submissionId);
         row.status = "aborted";
         row.settledAt = deps.clock.now();
+        if (reason !== undefined) row.error = reason;
         saveRow(row);
         controller?.abort(reason);
         deps.bus.emit("chat:submission:cancelled", { submissionId, reason });
