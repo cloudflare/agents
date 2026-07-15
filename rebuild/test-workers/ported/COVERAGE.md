@@ -202,7 +202,7 @@ refreshes the snapshot in the same commit.
 | workflow-prototype.test.ts | 14 | blocked ISSUE-016 | |
 | workflow-sub-agent.test.ts | 11 | blocked ISSUE-016 | |
 | workflow.test.ts | 47 | blocked ISSUE-016 | |
-| mcp/ (29 files: client-manager 165, worker-transport 66, client-connection 34, client-elicitation 33, transports/rpc 33, oauth2-mcp-client 29, transports/streamable-http 27, auto-transport 22, handler 16, errors 14, event-store 14, wait-connections-e2e 13, add-rpc-mcp-server 13, mcp-protocol 13, normalize-server-id 12, do-oauth-client-provider 11, elicitation 10, transports/auto 10, add-mcp-server 9, http-dedup 8, transports/sse 8, jurisdiction 7, transports/post-keepalive 7, resumability 6, create-oauth-provider 4, outside-context-send 3, session-lifecycle.integration 3, connection-uri 2, codemode-context 1) | ~600 | blocked ISSUE-003/022 | the client-stack tests arrive nearly-verbatim WITH the vendored client (003); handler/elicitation server halves ride 022 |
+| mcp/ (29 files: client-manager 165, worker-transport 66, client-connection 34, client-elicitation 33, transports/rpc 33, oauth2-mcp-client 29, transports/streamable-http 27, auto-transport 22, handler 16, errors 14, event-store 14, wait-connections-e2e 13, add-rpc-mcp-server 13, mcp-protocol 13, normalize-server-id 12, do-oauth-client-provider 11, elicitation 10, transports/auto 10, add-mcp-server 9, http-dedup 8, transports/sse 8, jurisdiction 7, transports/post-keepalive 7, resumability 6, create-oauth-provider 4, outside-context-send 3, session-lifecycle.integration 3, connection-uri 2, codemode-context 1) | ~600 | ported 253/253 landed · rest blocked ISSUE-022/DO-harness | [fidelity:move] M1 resolved ISSUE-003: client stack vendored behind ExternalToolSource; 6 files ported verbatim into src/adapters/mcp/vendor-tests/ (node suite, all passing: client-manager 154, client-connection 17, client-elicitation 23/29 — 6 rpc-transport subtests ride 022, errors 14, normalize-server-id 12, x402 33 counted in its own row). ~22 staged files need the McpAgent server half (ISSUE-022) or a live DO/worker harness — named with reasons in commit 18a29c73. |
 | experimental/memory/session/{session 80, postgres-providers 50, provider 42, skills 30, init-lifecycle 18, search 10} | 230 | quarry | session stays native (audit 28); spec source if ever swapped |
 | experimental/memory/utils/compaction.test.ts | 8 | quarry | vs session/compaction suite |
 
@@ -245,7 +245,7 @@ should absorb any missing behaviors:
 |---|--:|---|---|
 | browser-tests/browser.test.ts | 14 | blocked ISSUE-008 | |
 | webmcp-tests/webmcp.test.ts | 36 | blocked ISSUE-025 | parked with the feature |
-| x402-tests/x402.test.ts | 33 | blocked ISSUE-003 | vendored with the mcp client |
+| x402-tests/x402.test.ts | 33 | ported 33/33 | [fidelity:move] M1 — vendored with the mcp client, green in vendor-tests. |
 | cli-tests/{cli 27, vite-skills 13} | 40 | blocked ISSUE-013 | tooling |
 | react-tests/{client 40, useAgent 25, rpc-robustness 14, cache-ttl 11, cache-invalidation 8, useAgentToolEvents 7, stub-tojson 5, agent-tool-replay 3, resume-overlap-race 2} | 115 | blocked ISSUE-007 | these certify the client package; once consumed as-is they run nearly-verbatim against the rebuild shell |
 | e2e-tests/{fiber-eviction 15, concurrent-fibers 3, poison-row-aging 3, scan-deadline-yield 3, facet-multipass-recovery 1, poison-row-backoff 1} | 26 | pending | T2b — fiber/facet eviction e2e; highly relevant to our fibers + W3 spawner |

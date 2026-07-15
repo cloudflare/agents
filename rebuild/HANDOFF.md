@@ -7,11 +7,11 @@ per-context `CONTEXT.md` (the maintainer's canonical model), `ISSUES.md`,
 `test-workers/ported/COVERAGE.md` (the port ledger), `PROGRESS.md` (log).
 Dashboard: `npm run dashboard` → `dashboard.html`.
 
-Numbers as of this handoff: ported board **288/552 passing by vitest count**
-(`test-workers/ported/BOARD-SNAPSHOT.txt` is the canonical per-test record;
-ledger row estimates differ slightly) · native **1082 node + 42 workerd**,
-typecheck clean · **6 issues resolved, 28 open** (031–034 new, found by the
-P7/P8 ports).
+Numbers as of this handoff: ported workerd board **359/623 passing by vitest
+count** (`BOARD-SNAPSHOT.txt` is the canonical per-test record) + **286 MCP
+vendor-tests green in the node suite** · native **1082+ node + 42 workerd**,
+typecheck clean · **11 issues resolved (incl. 003, 030, 031–034 today), 24
+open** (new today: 035 reattach budgets, 036 facet spawner).
 
 **Verification economy (new discipline, 2026-07-15):** subagents hand off
 vitest `--reporter=json` artifacts (orchestrator reads, never re-runs); board
@@ -29,18 +29,20 @@ Plan is audit 29; ledger is `test-workers/ported/COVERAGE.md` (single source;
 dashboard is generated from it). Status vocabulary + fidelity tags
 (`[fidelity:move|light|adapter|rewrite]`) are documented at the ledger top.
 
-**Done:** waves P1–P8 (P7 `hooks` 48/105 + P8 `submissions` 23/51 ran in
-parallel worktrees during the ChatAgent extraction; both 0-flip verified
-against the merged tree; real bugs found → ISSUES 031–034). P1 first 5 wire files; P2 `chat-recovery` e2e (kill/
+**Done:** waves P1–P10 + fix wave F1 + MCP vendor wave M1 (P7 hooks now
+62/105 and P8 submissions 32/51 after F1's fixes; P9 agent-tools 11/33 —
+19 failures are the ISSUE-035 acceptance suite; P10 sub-agent 36/97-on-board
+— found ISSUE-036). P1 first 5 wire files; P2 `chat-recovery` e2e (kill/
 restart harness); P3 wire remainder; P4 e2e recovery batch; P5
 `assistant-agent-loop`/`protocol-messages`/`routing`(24/24 — first full
 original suite green)/`reattach-budget`/`task-amplification`; P6
 `think-session` (198 tests → 103 pass, **33 named `missing-feature` reasons**
 in its fixtures — a ready-made implementation worklist).
 
-**Remaining (biggest lever = T3 PUBLIC-API waves):** `agent-tools` (33),
-`schedule`, `sub-agent` (97), the `agents/src/tests` Think-relevant subset,
-plus remaining T1/T2 files. The
+**Remaining:** batch waves P11 (18 think-side files) / P12 (11 substrate
+files, aggressive drop-to-native) / P13 (fibers+delegation, 035/036-bound)
+are IN FLIGHT and complete T3 when merged; after that only blocked-on-issue
+rows, T2b eviction e2e, and the T4 quarry program remain. The
 `quarry` set (`agents/chat/__tests__`, ~477) is never ported — it's the spec
 checklist for our native suites.
 
@@ -157,4 +159,4 @@ external wire-compat proof and is now viable post-026.
   adapter change; full re-verify.
 - **Recovery stretch 2–4** and/or continue **T3 port waves** — both are
   green-loop incremental.
-- **ISSUE-003 MCP client** if shifting from parity to new capability.
+- ~~ISSUE-003 MCP client~~ — DONE 2026-07-15 (M1: client vendored behind ExternalToolSource, 253 vendored tests green; Think config wiring + ISSUE-022 server half are the follow-ups).
