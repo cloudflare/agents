@@ -9,7 +9,10 @@ import {
 } from "@cloudflare/codemode";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
 import type { StateBackend } from "@cloudflare/shell";
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import {
+  createWorkspaceStateBackend,
+  isWorkspaceFsLike
+} from "@cloudflare/shell";
 import { StateConnector } from "@cloudflare/shell/workers";
 import {
   BrowserConnector,
@@ -18,7 +21,6 @@ import {
   type BrowserConnectorSessionOptions
 } from "agents/browser";
 import type { WorkspaceLike } from "./workspace";
-import { resolveWorkspaceFs } from "./workspace-fs";
 
 /**
  * The minimum agent surface for the `createExecuteTool(this)` one-liner.
@@ -30,6 +32,8 @@ import { resolveWorkspaceFs } from "./workspace-fs";
  */
 export interface ExecuteToolAgent {
   workspace?: WorkspaceLike;
+  /** Think's native runtime must be disabled before installing this one. */
+  readonly codeTool?: boolean;
   /** Set by `createExecuteRuntime(agent)` so callables can reach the runtime. */
   codemode?: CodemodeRuntimeHandle;
 }
@@ -171,7 +175,7 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
         "call createExecuteTool({ ctx, loader, ... }) with explicit options."
     );
   }
-  const fs = resolveWorkspaceFs(agent.workspace);
+  const fs = isWorkspaceFsLike(agent.workspace) ? agent.workspace : undefined;
   return {
     ctx,
     loader: env.LOADER,
@@ -198,6 +202,13 @@ export function createExecuteRuntime(
   const options: CreateExecuteToolOptions = isAgent(source)
     ? { ...optionsFromAgent(source), ...overrides }
     : { ...source, ...overrides };
+
+  if (agent?.codeTool) {
+    throw new Error(
+      "Think's built-in code runtime is enabled. Set codeTool = false before " +
+        "calling createExecuteRuntime(agent) or createExecuteTool(agent)."
+    );
+  }
 
   if (agent && !options.executor && !options.loader) {
     throw new Error(
@@ -378,6 +389,9 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  *
  * @example One-liner — defaults from the agent
  * ```ts
+ * // On a Think agent, choose this runtime instead of the built-in `code`.
+ * readonly codeTool = false;
+ *
  * getTools() {
  *   return {
  *     // state.* from this.workspace, cdp.* if env.BROWSER is bound,
@@ -389,6 +403,7 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  *
  * @example Agent defaults plus overrides (e.g. custom tools.*)
  * ```ts
+ * readonly codeTool = false;
  * execute: createExecuteTool(this, { tools: myDomainTools })
  * ```
  *

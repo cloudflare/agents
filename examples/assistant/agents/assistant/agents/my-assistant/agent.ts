@@ -32,6 +32,8 @@ import type { AgentConfig } from "../../types";
 // ── MyAssistant — one Think DO per chat (a facet of the directory) ────
 
 export class MyAssistant extends Think<Env> {
+  override readonly codeTool = false;
+
   static options = {
     sendIdentityOnConnect: true
   };

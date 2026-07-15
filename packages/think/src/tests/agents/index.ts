@@ -34,6 +34,7 @@ export { ThinkExecuteToolAgent } from "./execute-tool";
 export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export {
   ThinkCodemodeCodeAgent,
+  ThinkCodemodeCodeDisabledAgent,
   ThinkCodemodeCodeMcpServer
 } from "./codemode-code";
 export { ThinkFiberTestAgent } from "./fiber";

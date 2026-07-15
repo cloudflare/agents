@@ -15,7 +15,6 @@ import type {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { type RetryOptions, tryN } from "../retries";
-import { z } from "zod";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
@@ -32,31 +31,9 @@ import type { TransportType } from "./types";
 import type { MCPServerRow } from "./client-storage";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
+import { MCPAIToolCache, type MCPAIToolSet } from "./ai-tools";
 
-export type MCPAITool = {
-  description?: string;
-  title?: string;
-  execute: (
-    args: Record<string, unknown>,
-    options?: unknown
-  ) => Promise<unknown>;
-  inputSchema: z.ZodType;
-  outputSchema?: z.ZodType;
-};
-
-/**
- * Structural tool set returned by {@link MCPClientManager.getAITools}.
- * Compatible with the AI SDK without importing its types into the core
- * `agents` declaration graph.
- */
-export type MCPAIToolSet = Record<string, MCPAITool>;
-
-type MCPAIToolCacheEntry = {
-  connection: MCPClientConnection;
-  /** Catalog arrays are replaced after discovery and tools/list_changed. */
-  catalog: Tool[];
-  tools: MCPAIToolSet;
-};
+export type { MCPAITool, MCPAIToolSet } from "./ai-tools";
 
 /** Maximum length of a normalized MCP server id. */
 export const MCP_SERVER_ID_MAX_LENGTH = 64;
@@ -357,8 +334,9 @@ export class MCPClientManager {
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
-  /** Converted Zod schemas cached per live connection and catalog revision. */
-  private _aiToolsCache = new Map<string, MCPAIToolCacheEntry>();
+  private readonly _aiToolsCache = new MCPAIToolCache((params) =>
+    this.callTool(params)
+  );
   private _storage: DurableObjectStorage;
   private _createAuthProviderFn?: (
     callbackUrl: string
@@ -537,8 +515,6 @@ export class MCPClientManager {
   private _renameInMemoryConnection(oldId: string, newId: string): void {
     if (oldId === newId) return;
 
-    this._aiToolsCache.delete(oldId);
-    this._aiToolsCache.delete(newId);
     const conn = this.mcpConnections[oldId];
     if (conn) {
       this.mcpConnections[newId] = conn;
@@ -1107,7 +1083,6 @@ export class MCPClientManager {
     // During OAuth reconnect, reuse existing connection to preserve state;
     // otherwise drop any existing connection and rebuild it.
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
-      this._aiToolsCache.delete(id);
       delete this.mcpConnections[id];
       this.createConnection(id, url, {
         client: options.client,
@@ -1800,75 +1775,6 @@ export class MCPClientManager {
     return getNamespacedData(this.filterConnections(filter), "tools");
   }
 
-  private getCachedAIToolsForConnection(
-    serverId: string,
-    connection: MCPClientConnection
-  ): MCPAIToolSet {
-    const cached = this._aiToolsCache.get(serverId);
-    if (
-      cached?.connection === connection &&
-      cached.catalog === connection.tools
-    ) {
-      return cached.tools;
-    }
-
-    const entries: [string, MCPAITool][] = [];
-    for (const tool of connection.tools) {
-      try {
-        const toolKey = `tool_${serverId.replace(/-/g, "")}_${tool.name}`;
-        const title = tool.title ?? tool.annotations?.title;
-        entries.push([
-          toolKey,
-          {
-            description: tool.description,
-            title,
-            execute: async (args) => {
-              const result = await this.callTool({
-                arguments: args,
-                name: tool.name,
-                serverId
-              });
-              if (result.isError) {
-                const content = result.content as
-                  | Array<{ type: string; text?: string }>
-                  | undefined;
-                const textContent = content?.[0];
-                const message =
-                  textContent?.type === "text" && textContent.text
-                    ? textContent.text
-                    : "Tool call failed";
-                throw new Error(message);
-              }
-              return result;
-            },
-            inputSchema: tool.inputSchema
-              ? z.fromJSONSchema(
-                  tool.inputSchema as Parameters<typeof z.fromJSONSchema>[0]
-                )
-              : z.fromJSONSchema({ type: "object" }),
-            outputSchema: tool.outputSchema
-              ? z.fromJSONSchema(
-                  tool.outputSchema as Parameters<typeof z.fromJSONSchema>[0]
-                )
-              : undefined
-          }
-        ]);
-      } catch (error) {
-        console.warn(
-          `[getAITools] Skipping tool "${tool.name}" from "${serverId}": ${error}`
-        );
-      }
-    }
-
-    const tools = Object.fromEntries(entries);
-    this._aiToolsCache.set(serverId, {
-      connection,
-      catalog: connection.tools,
-      tools
-    });
-    return tools;
-  }
-
   /**
    * Convert MCP tools to AI SDK-compatible tools. Converted schemas are cached
    * per live connection until discovery replaces that connection's catalog.
@@ -1889,7 +1795,7 @@ export class MCPClientManager {
           `[getAITools] WARNING: Reading tools from connection ${id} in state "${connection.connectionState}". Tools may not be loaded yet.`
         );
       }
-      Object.assign(tools, this.getCachedAIToolsForConnection(id, connection));
+      Object.assign(tools, this._aiToolsCache.get(id, connection));
     }
 
     return tools;
@@ -1926,7 +1832,6 @@ export class MCPClientManager {
     const store = this._connectionDisposables.get(id);
     if (store) store.dispose();
     this._connectionDisposables.delete(id);
-    this._aiToolsCache.delete(id);
 
     delete this.mcpConnections[id];
   }

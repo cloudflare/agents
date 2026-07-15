@@ -70,14 +70,11 @@ for generated entries. A custom Worker entry must export it:
 export { CodemodeRuntime } from "@cloudflare/think/server-entry";
 ```
 
-Set `codeTool = false` when the application does not want the built-in code
-tool. Returning a custom `bash` or `code` from `getTools()` also opts out
-automatically. Think then keeps workspace, context, skills, extensions, and
-fetch tools direct for compatibility. The deprecated `workspaceBash = false` spelling remains an alias
-for this release. An explicit `createExecuteTool(this)` runtime gets the same
-compatibility treatment until it is migrated. Configure the legacy snapshot
-tool explicitly through `createWorkspaceTools()` if an application still needs
-it.
+Set `codeTool = false` when the application provides a custom `bash`, custom
+`code`, or explicit `createExecuteTool(this)` runtime. Think then keeps
+workspace, context, skills, extensions, and fetch tools direct for compatibility.
+Configure the legacy snapshot tool explicitly through `createWorkspaceTools()`
+if an application still needs it.
 
 The standalone `createWorkspaceTools()` factory still includes its legacy
 `just-bash` snapshot tool. This change applies to Think's built-in assembly, not
@@ -164,7 +161,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Custom tools stay direct and are merged after the four built-ins. If a custom tool uses the same name as a built-in, the custom tool wins. A custom `code` tool also opts out of Code Mode folding for that turn.
+Custom tools stay direct and are merged after the four built-ins. A custom `read`, `write`, or `edit` tool overrides the matching file helper. A custom `code` or `bash` execution surface requires `codeTool = false`; Think rejects two runtime owners instead of silently pairing one tool with another runtime's approval state.
 
 ### Tool Approval
 
@@ -284,6 +281,8 @@ import { Think } from "@cloudflare/think";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 
 export class MyAgent extends Think<Env> {
+  readonly codeTool = false;
+
   getModel() {
     /* ... */
   }
@@ -325,6 +324,8 @@ Inside this explicit runtime the model sees typed namespaces plus the platform S
 Pass overrides for anything beyond the defaults — e.g. custom `tools.*` alongside the agent-derived state:
 
 ```typescript
+// On the enclosing Think class:
+readonly codeTool = false;
 execute: createExecuteTool(this, { tools: myDomainTools });
 ```
 
@@ -432,6 +433,8 @@ import { createBrowserTools } from "@cloudflare/think/tools/browser";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 
 export class ResearchAgent extends Think<Env> {
+  readonly codeTool = false;
+
   getModel() {
     /* ... */
   }

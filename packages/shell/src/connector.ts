@@ -27,7 +27,7 @@ import {
   paramNames,
   requiredParams
 } from "./state-methods";
-import { STATE_TYPES } from "./prompt";
+import { stateTypes } from "./prompt";
 
 // Parameters that are always strings get a real schema type; structured
 // parameters (values, instruction lists, plans, options bags) stay open —
@@ -116,10 +116,7 @@ export class StateConnector extends CodemodeConnector {
   }
 
   override async getTypeScriptTypes(): Promise<string> {
-    return STATE_TYPES.replace(
-      "declare const state",
-      `declare const ${this.name()}`
-    );
+    return stateTypes(this.name());
   }
 }
 

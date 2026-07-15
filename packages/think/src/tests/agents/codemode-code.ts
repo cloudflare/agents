@@ -6,6 +6,7 @@ import type { SkillSource } from "agents/skills";
 import { z } from "zod";
 import { Think } from "../../think";
 import type { StreamCallback } from "../../think";
+import { createExecuteTool } from "../../tools/execute";
 
 const finishReason = (unified: "stop" | "tool-calls") => ({
   unified,
@@ -231,7 +232,7 @@ export class ThinkCodemodeCodeAgent extends Think {
   };
 
   private modelToolNames: string[] = [];
-  private codeSource = `async () => {
+  protected codeSource = `async () => {
     const matches = await codemode.search("Echo a value");
     if (!matches.results.some((match) => match.path === "catalog.echo")) {
       throw new Error("catalog.echo was not discoverable");
@@ -242,7 +243,7 @@ export class ThinkCodemodeCodeAgent extends Think {
     }
     return await catalog.echo({ value: "hello" });
   }`;
-  private resultMarker = "echo:hello";
+  protected resultMarker = "echo:hello";
   private sawResult = false;
 
   override configureSession(session: Session): Session {
@@ -288,7 +289,9 @@ export class ThinkCodemodeCodeAgent extends Think {
     });
   }
 
-  private async runCodeTurn(message: string): Promise<CodemodeCodeTurnResult> {
+  protected async runCodeTurn(
+    message: string
+  ): Promise<CodemodeCodeTurnResult> {
     this.modelToolNames = [];
     this.sawResult = false;
     const callback = new CollectingCallback();
@@ -426,23 +429,13 @@ export class ThinkCodemodeCodeAgent extends Think {
     return this.codemode !== undefined;
   }
 
-  async captureCodeOptOutTools(): Promise<string[]> {
-    const previous = this.codeTool;
-    this.codeTool = false;
-    let names: string[] = [];
-    const previousCode = this.codeSource;
-    const previousMarker = this.resultMarker;
-    this.codeSource = "async () => null";
-    this.resultMarker = "__never__";
+  explicitRuntimeConflictError(): string {
     try {
-      const result = await this.runCodeTurn("Capture direct opt-out tools");
-      names = result.modelToolNames;
-    } finally {
-      this.codeTool = previous;
-      this.codeSource = previousCode;
-      this.resultMarker = previousMarker;
+      createExecuteTool(this);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
     }
-    return names;
   }
 
   async runFetchCodeTurn(): Promise<{
@@ -461,5 +454,16 @@ export class ThinkCodemodeCodeAgent extends Think {
       modelToolNames: result.modelToolNames,
       sawFetchResult: result.sawResult
     };
+  }
+}
+
+export class ThinkCodemodeCodeDisabledAgent extends ThinkCodemodeCodeAgent {
+  override readonly codeTool = false;
+
+  async captureDirectTools(): Promise<string[]> {
+    this.codeSource = "async () => null";
+    this.resultMarker = "Capture direct opt-out tools";
+    const result = await this.runCodeTurn("Capture direct opt-out tools");
+    return result.modelToolNames;
   }
 }

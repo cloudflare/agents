@@ -1,8 +1,23 @@
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
+import type { Tool } from "ai";
+import { assertThinkCodeToolOwnership } from "../tools/code";
 
 describe("Think Code Mode code tool", () => {
+  it("rejects competing code execution surfaces", () => {
+    const builtin = {} as Tool;
+    expect(() =>
+      assertThinkCodeToolOwnership({ code: {} as Tool }, builtin)
+    ).toThrow("custom code tool");
+    expect(() =>
+      assertThinkCodeToolOwnership({ code: builtin, bash: {} as Tool }, builtin)
+    ).toThrow("custom bash tool");
+    expect(() =>
+      assertThinkCodeToolOwnership({ code: builtin }, builtin)
+    ).not.toThrow();
+  });
+
   it("exposes MCP through the server namespace without direct MCP tools", async () => {
     const agent = await getAgentByName(
       env.ThinkCodemodeCodeAgent,
@@ -75,11 +90,11 @@ describe("Think Code Mode code tool", () => {
 
   it("keeps platform tools direct when the built-in code tool is disabled", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeCodeAgent,
+      env.ThinkCodemodeCodeDisabledAgent,
       crypto.randomUUID()
     );
 
-    const names = await agent.captureCodeOptOutTools();
+    const names = await agent.captureDirectTools();
     expect(names).not.toContain("code");
     expect(names).toEqual(
       expect.arrayContaining([
@@ -107,6 +122,17 @@ describe("Think Code Mode code tool", () => {
 
     await agent.runWorkspaceCodeTurn();
     await expect(agent.rebuildBuiltinCodeRuntime()).resolves.toBe(true);
+  });
+
+  it("rejects a second application-owned Code Mode runtime", async () => {
+    const agent = await getAgentByName(
+      env.ThinkCodemodeCodeAgent,
+      crypto.randomUUID()
+    );
+
+    await expect(agent.explicitRuntimeConflictError()).resolves.toContain(
+      "Set codeTool = false"
+    );
   });
 
   it("exposes configured fetch tools under fetch", async () => {

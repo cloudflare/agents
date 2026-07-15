@@ -10,7 +10,8 @@ export {
   type FileStat,
   type WorkspaceChangeEvent,
   type WorkspaceChangeType,
-  type WorkspaceFsLike
+  type WorkspaceFsLike,
+  isWorkspaceFsLike
 } from "./filesystem";
 
 // ── FileSystem interface + InMemoryFs ─────────────────────────────────

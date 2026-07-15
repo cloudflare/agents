@@ -13,6 +13,8 @@ import { validateSkillResourcePath } from "./types";
 import { validateSkillScriptPath } from "./runner";
 
 const SKILL_CONTEXT_LABEL = "think_skills";
+const DEFAULT_ACTIVATION_INSTRUCTION =
+  "When a task matches a skill, use activate_skill with its name before proceeding.";
 
 function stableSourceFingerprint(sources: SkillSource[]): string {
   return sources
@@ -152,30 +154,31 @@ export class SkillRegistry {
     this.warnings.push(...refreshErrors);
   }
 
+  private catalogPrompt(activationInstruction: string): string | null {
+    const catalog = [...this.descriptors.values()].map(
+      (descriptor) => `- ${descriptor.name}: ${descriptor.description}`
+    );
+    return catalog.length
+      ? [`Available skills. ${activationInstruction}`, "", ...catalog].join(
+          "\n"
+        )
+      : null;
+  }
+
   async snapshot(): Promise<SkillRegistrySnapshot> {
     await this.load();
-
-    const catalog: string[] = [];
-
-    for (const descriptor of this.descriptors.values()) {
-      catalog.push(`- ${descriptor.name}: ${descriptor.description}`);
-    }
-
     return {
       fingerprint: this.fingerprint,
-      catalogPrompt: catalog.length
-        ? [
-            "Available skills. When a task matches a skill, use activate_skill with its name before proceeding.",
-            "",
-            ...catalog
-          ].join("\n")
-        : null
+      catalogPrompt: this.catalogPrompt(DEFAULT_ACTIVATION_INSTRUCTION)
     };
   }
 
-  async systemPrompt(): Promise<string | null> {
-    const snapshot = await this.snapshot();
-    return snapshot.catalogPrompt;
+  /** Render the skill catalog with host-specific activation guidance. */
+  async systemPrompt(
+    activationInstruction = DEFAULT_ACTIVATION_INSTRUCTION
+  ): Promise<string | null> {
+    await this.load();
+    return this.catalogPrompt(activationInstruction);
   }
 
   async loadSkill(name: string): Promise<SkillContent | null> {

@@ -2626,7 +2626,9 @@ describe("MCPClientManager OAuth Integration", () => {
   });
 
   describe("getAITools() integration", () => {
-    it("caches schema conversion until a connection's tool catalog changes", async () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("caches schema conversion by live connection, server id, and catalog", async () => {
       const id = "cached-schema-server";
       await manager.registerServer(id, {
         url: "http://cached.example.com/mcp",
@@ -2659,6 +2661,16 @@ describe("MCPClientManager OAuth Integration", () => {
       const second = manager.getAITools({ serverId: id });
       expect(convert).toHaveBeenCalledTimes(baseline + 2);
       expect(second).toEqual(first);
+      expect(second.tool_cachedschemaserver_lookup).toBe(
+        first.tool_cachedschemaserver_lookup
+      );
+
+      const renamedId = "renamed-schema-server";
+      manager.mcpConnections[renamedId] = conn;
+      delete manager.mcpConnections[id];
+      const renamed = manager.getAITools({ serverId: renamedId });
+      expect(convert).toHaveBeenCalledTimes(baseline + 4);
+      expect(renamed).toHaveProperty("tool_renamedschemaserver_lookup");
 
       conn.tools = [
         {
@@ -2678,7 +2690,18 @@ describe("MCPClientManager OAuth Integration", () => {
       ];
 
       manager.getAITools();
-      expect(convert).toHaveBeenCalledTimes(baseline + 4);
+      expect(convert).toHaveBeenCalledTimes(baseline + 6);
+
+      const replacement = new MCPClientConnection(
+        new URL("http://cached.example.com/mcp"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      replacement.connectionState = "ready";
+      replacement.tools = conn.tools;
+      manager.mcpConnections[renamedId] = replacement;
+      manager.getAITools();
+      expect(convert).toHaveBeenCalledTimes(baseline + 8);
     });
 
     it("should return AI SDK tools after registering and connecting to server", async () => {

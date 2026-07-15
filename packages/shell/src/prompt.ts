@@ -322,6 +322,15 @@ declare const state: {
 };
 `.trim();
 
+/** Render the state API declaration under a custom sandbox namespace. */
+export function stateTypes(namespace = "state"): string {
+  if (namespace === "state") return STATE_TYPES;
+  return STATE_TYPES.replace(
+    "declare const state",
+    () => `declare const ${namespace}`
+  ).replaceAll("state.", `${namespace}.`);
+}
+
 /**
  * System-prompt template for using the `state` runtime.
  * Replace `{{types}}` with `STATE_TYPES` before passing to the model.

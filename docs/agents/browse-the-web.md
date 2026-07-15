@@ -140,7 +140,7 @@ export class MyAgent extends Agent<Env> {
 }
 ```
 
-> Using `@cloudflare/think`? The unified execute tool (`createExecuteTool(this)`) already includes `cdp.*` alongside `state.*` and `tools.*` when `env.BROWSER` is bound. See the [Think tools documentation](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md).
+> Using `@cloudflare/think`? Set `readonly codeTool = false` when choosing the explicit `createExecuteTool(this)` runtime; it includes `cdp.*` alongside `state.*` and `tools.*` when `env.BROWSER` is bound. See the [Think tools documentation](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md).
 
 ## TanStack AI
 

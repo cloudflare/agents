@@ -266,7 +266,10 @@ import { createWorkspaceTools } from "./tools/workspace";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
-import { createThinkCodeRuntime } from "./tools/code";
+import {
+  assertThinkCodeToolOwnership,
+  createThinkCodeRuntime
+} from "./tools/code";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
@@ -2670,31 +2673,31 @@ export class Think<
   workspace!: WorkspaceLike;
 
   /**
-   * The codemode runtime behind the execute tool, when one has been created
-   * via `createExecuteRuntime(this)` / `createExecuteTool(this)` (from
-   * `@cloudflare/think/tools/execute`). Gives callables and lifecycle hooks
-   * access to approvals (`approve`/`reject`/`pending`), the audit trail
-   * (`executions`), `expirePaused`, and snippets.
+   * The active Code Mode runtime. Think installs the built-in `code` runtime;
+   * applications that opt out may install an explicit runtime through
+   * `createExecuteRuntime(this)` / `createExecuteTool(this)`. Gives callables
+   * and lifecycle hooks access to approvals, the audit trail, expiry, and
+   * snippets.
    */
   codemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
-
-  /** Runtime handle last installed by Think's built-in `code` tool. */
-  private _builtinCodeRuntime?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
 
   /**
    * Include Think's built-in `code` tool. It runs JavaScript in a durable Code
    * Mode Dynamic Worker with Think platform capabilities as namespaced globals.
    */
-  codeTool = true;
+  readonly codeTool: boolean = true;
 
-  /**
-   * @deprecated Use {@link codeTool}. `false` still disables the built-in code
-   * tool for applications that provide a custom container-backed `bash`.
-   */
-  workspaceBash: boolean | undefined = undefined;
+  private _codeLoader(): WorkerLoader | undefined {
+    return (this.env as Cloudflare.Env & { LOADER?: WorkerLoader }).LOADER;
+  }
 
-  private _usesCodeTool(): boolean {
-    return this.codeTool !== false && this.workspaceBash !== false;
+  private async _waitForConfiguredMcpConnections(): Promise<void> {
+    if (!this.waitForMcpConnections) return;
+    const timeout =
+      typeof this.waitForMcpConnections === "object"
+        ? this.waitForMcpConnections.timeout
+        : 10_000;
+    await this.mcp.waitForConnections({ timeout });
   }
 
   private _createFetchToolSet(): ToolSet {
@@ -2719,10 +2722,8 @@ export class Think<
     skillTools: ToolSet,
     extensionTools: ToolSet = {},
     fetchTools: ToolSet = {}
-  ): ReturnType<typeof createThinkCodeRuntime> | undefined {
-    if (!this._usesCodeTool()) return undefined;
-    const loader = (this.env as Cloudflare.Env & { LOADER?: WorkerLoader })
-      .LOADER;
+  ): ReturnType<typeof createThinkCodeRuntime> {
+    const loader = this._codeLoader();
     if (!loader) {
       throw new Error(
         "Think's built-in code tool requires a Worker Loader binding named LOADER. " +
@@ -2730,38 +2731,16 @@ export class Think<
           "or set codeTool = false."
       );
     }
-    const runtime = createThinkCodeRuntime({
+    return createThinkCodeRuntime({
       ctx: this.ctx,
       loader,
       workspace: this.workspace,
       mcp: this.mcp,
-      toolSets: [
-        {
-          name: "context",
-          tools: contextTools,
-          instructions:
-            "Read, search, load, and update the agent's durable context."
-        },
-        {
-          name: "skills",
-          tools: skillTools,
-          instructions:
-            "Activate agent skills and access their bundled resources."
-        },
-        {
-          name: "extensions",
-          tools: extensionTools,
-          instructions: "Call tools contributed by loaded Think extensions."
-        },
-        {
-          name: "fetch",
-          tools: fetchTools,
-          instructions:
-            "Read allowlisted HTTP resources and configured service bindings."
-        }
-      ]
+      contextTools,
+      skillTools,
+      extensionTools,
+      fetchTools
     });
-    return runtime;
   }
 
   /**
@@ -4297,10 +4276,7 @@ export class Think<
     const hasExtensionTools =
       toolNames.has("load_extension") || toolNames.has("list_extensions");
     const hasExecuteTool = toolNames.has("execute");
-    const hasCodeTool =
-      toolNames.has("code") &&
-      this._builtinCodeRuntime !== undefined &&
-      this.codemode === this._builtinCodeRuntime;
+    const hasCodeTool = this.codeTool && toolNames.has("code");
     const hasFetchTools =
       [...toolNames].some((name) => name.startsWith("fetch_")) ||
       (hasCodeTool && this.fetchTools !== false);
@@ -4583,14 +4559,10 @@ export class Think<
       await this.session.addContext(registry.contextLabel, {
         description: "Think skills: available skill catalog",
         provider: {
-          get: async () => {
-            const prompt = await registry.systemPrompt();
-            if (!prompt) return prompt;
-            return prompt.replace(
-              "use activate_skill with its name before proceeding",
-              "activate it before proceeding: use skills.activate_skill({ name }) inside the built-in code tool, or activate_skill when skills are exposed directly"
-            );
-          }
+          get: () =>
+            registry.systemPrompt(
+              "When a task matches a skill, activate it before proceeding: use skills.activate_skill({ name }) inside the built-in code tool, or activate_skill when skills are exposed directly."
+            )
         }
       });
 
@@ -5230,49 +5202,27 @@ export class Think<
       this._approvedActionInputsFromTranscript();
     // Reset the proactive-compaction cap for this streamText run.
     this._proactiveCompactionsThisRun = 0;
-    if (this.waitForMcpConnections) {
-      const timeout =
-        typeof this.waitForMcpConnections === "object"
-          ? this.waitForMcpConnections.timeout
-          : 10_000;
-      await this.mcp.waitForConnections({ timeout });
-    }
+    await this._waitForConfiguredMcpConnections();
 
     const workspaceTools = createWorkspaceTools(this.workspace, {
       bash: false
     });
     const fetchToolSet = this._createFetchToolSet();
     const baseTools = this.getTools();
-    // `createExecuteTool(this)` installs its own runtime handle from getTools().
-    // Preserve that explicit runtime and its approval/resume behavior until the
-    // application migrates to the built-in code tool. A handle equal to our previous
-    // built-in handle is not explicit; it is safe to replace for this turn.
-    const hasExplicitCodemodeRuntime =
-      this.codemode !== undefined && this.codemode !== this._builtinCodeRuntime;
-    const hasCustomCode = "code" in baseTools || "bash" in baseTools;
     const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
     await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
     const skillTools = this._skillRegistry?.tools() ?? {};
-    const codeRuntime =
-      hasExplicitCodemodeRuntime || hasCustomCode
-        ? undefined
-        : this._createCodeRuntime(
-            contextTools,
-            skillTools,
-            extensionTools,
-            fetchToolSet
-          );
-    if (codeRuntime) {
-      this._builtinCodeRuntime = codeRuntime.runtime;
-      this.codemode = codeRuntime.runtime;
-    } else if (this.codemode === this._builtinCodeRuntime) {
-      // A dynamic getTools() may replace the built-in with a custom code tool
-      // on a later turn. Do not advertise it as the built-in runtime.
-      this.codemode = undefined;
-      this._builtinCodeRuntime = undefined;
-    }
+    const codeRuntime = this.codeTool
+      ? this._createCodeRuntime(
+          contextTools,
+          skillTools,
+          extensionTools,
+          fetchToolSet
+        )
+      : undefined;
+    if (codeRuntime) this.codemode = codeRuntime.runtime;
     const clientToolSet = createToolsFromClientSchemas(
       input.clientTools,
       input.clientToolExecutor
@@ -5306,6 +5256,9 @@ export class Think<
       : undefined;
     if (channelDefinition?.tools) {
       tools = channelDefinition.tools(tools);
+    }
+    if (codeRuntime) {
+      assertThinkCodeToolOwnership(tools, codeRuntime.tool);
     }
 
     const channelInstructions =
@@ -5367,6 +5320,9 @@ export class Think<
     const mergedTools: ToolSet = config.tools
       ? { ...tools, ...config.tools }
       : tools;
+    if (codeRuntime) {
+      assertThinkCodeToolOwnership(mergedTools, codeRuntime.tool);
+    }
     const finalTurnContext: TurnContext = {
       ...ctx,
       system: finalSystem,
@@ -12498,7 +12454,7 @@ export class Think<
 
   // ── Durable execution approvals (codemode HITL) ──────────────────
   //
-  // A `requiresApproval` connector call inside the execute tool pauses the
+  // A `requiresApproval` connector call inside a Code Mode tool pauses the
   // run *durably*: the tool returns `{ status: "paused", executionId,
   // pending }` as a normal output, the model narrates what it needs, and the
   // turn ends. These callables are the resume path: approve/reject the
@@ -12516,37 +12472,20 @@ export class Think<
   > {
     if (this.codemode) return this.codemode;
 
-    // Rebuild an application-owned explicit execute runtime first. This is the
-    // pre-Code-Mode-native compatibility path and is also what makes approvals
-    // survive a Durable Object restart.
-    let hasCustomCode = false;
-    try {
-      const tools = this.getTools();
-      hasCustomCode = "code" in tools || "bash" in tools;
-    } catch {
-      // A custom getTools() may require turn-time context.
-    }
-    if (this.codemode) return this.codemode;
-    if (hasCustomCode) return undefined;
-
-    if (this._usesCodeTool()) {
-      try {
-        await this._refreshSkillsIfChanged();
-        const runtime = this._createCodeRuntime(
-          await this.session.tools(),
-          this._skillRegistry?.tools() ?? {},
-          this.extensionManager?.getTools() ?? {},
-          this._createFetchToolSet()
-        );
-        if (runtime) {
-          this._builtinCodeRuntime = runtime.runtime;
-          this.codemode = runtime.runtime;
-        }
-      } catch {
-        // The runtime may be unavailable before initialization finishes or when
-        // deployment configuration is incomplete. Callers below return a
-        // stable "no runtime" response rather than leaking setup exceptions.
-      }
+    if (this.codeTool) {
+      // Generated Think deployments always provide LOADER. A manually
+      // configured deployment may not; approval-list RPCs keep their historic
+      // empty/no-runtime behavior while inference reports the actionable error.
+      if (!this._codeLoader()) return undefined;
+      await this._waitForConfiguredMcpConnections();
+      await this._refreshSkillsIfChanged();
+      const runtime = this._createCodeRuntime(
+        await this.session.tools(),
+        this._skillRegistry?.tools() ?? {},
+        this.extensionManager?.getTools() ?? {},
+        this._createFetchToolSet()
+      );
+      if (runtime) this.codemode = runtime.runtime;
       return this.codemode;
     }
 
@@ -12560,9 +12499,9 @@ export class Think<
   }
 
   /**
-   * Pending (awaiting-approval) actions across paused executions of the
-   * execute tool's codemode runtime — `{ executionId, seq, connector,
-   * method, args }` each, with FULL args (the transcript copy is truncated).
+   * Pending (awaiting-approval) actions across paused Code Mode executions —
+   * `{ executionId, seq, connector, method, args }` each, with FULL args (the
+   * transcript copy is truncated).
    * Clients reconcile approval cards against this on load.
    *
    * Client-callable (registered below — see the `callable()` calls after the

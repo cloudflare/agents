@@ -216,12 +216,10 @@ automatically. With a custom Worker entry, also export the runtime:
 export { CodemodeRuntime } from "@cloudflare/think/server-entry";
 ```
 
-Set `codeTool = false` when the application does not want the built-in code
-tool. Returning a custom `bash` or `code` from `getTools()` also opts out
-automatically. That keeps the other tool families direct for compatibility. The deprecated
-`workspaceBash = false` spelling remains an alias for this release. Move legacy
-bash snapshot options to an explicitly created `createWorkspaceTools()` tool
-set.
+Set `codeTool = false` when the application provides a custom `bash`, custom
+`code`, or explicit `createExecuteTool(this)` runtime. That explicit ownership
+keeps the other tool families direct for compatibility. Move legacy bash
+snapshot options to an explicitly created `createWorkspaceTools()` tool set.
 
 ```ts
 export class MyAgent extends Think<Env> {
@@ -955,6 +953,8 @@ runtime and the legacy direct platform-tool layout for compatibility:
 
 ```ts
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
+
+readonly codeTool = false;
 
 getTools() {
   return { execute: createExecuteTool(this, { tools: myTools }) };

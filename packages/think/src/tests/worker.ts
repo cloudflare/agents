@@ -36,6 +36,7 @@ export {
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkCodemodeCodeAgent,
+  ThinkCodemodeCodeDisabledAgent,
   ThinkCodemodeCodeMcpServer,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
@@ -75,6 +76,7 @@ import type {
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkCodemodeCodeAgent,
+  ThinkCodemodeCodeDisabledAgent,
   ThinkCodemodeCodeMcpServer,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
@@ -226,6 +228,7 @@ export type Env = {
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   ThinkCodemodeCodeAgent: DurableObjectNamespace<ThinkCodemodeCodeAgent>;
+  ThinkCodemodeCodeDisabledAgent: DurableObjectNamespace<ThinkCodemodeCodeDisabledAgent>;
   ThinkCodemodeCodeMcpServer: DurableObjectNamespace<ThinkCodemodeCodeMcpServer>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;
   ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;

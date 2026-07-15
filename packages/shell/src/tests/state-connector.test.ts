@@ -156,7 +156,17 @@ describe("connector surface", () => {
     });
     expect(c.name()).toBe("workspace");
     expect((await c.describe()).instructions).toContain("workspace.readFile");
-    expect(await c.getTypeScriptTypes()).toContain("declare const workspace");
+    const types = await c.getTypeScriptTypes();
+    expect(types).toContain("declare const workspace");
+    expect(types).toContain("e.g. workspace.readFile({ path })");
+    expect(types).not.toContain("state.");
+
+    const dollar = stateConnector(fakeCtx, createMemoryStateBackend(), {
+      name: "$workspace"
+    });
+    expect(await dollar.getTypeScriptTypes()).toContain(
+      "declare const $workspace"
+    );
   });
 });
 

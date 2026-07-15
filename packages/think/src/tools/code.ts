@@ -5,17 +5,15 @@ import {
   type McpConnectionLike
 } from "@cloudflare/codemode";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
-import type { ToolSet } from "ai";
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import type { Tool, ToolSet } from "ai";
+import {
+  createWorkspaceStateBackend,
+  isWorkspaceFsLike
+} from "@cloudflare/shell";
 import { StateConnector } from "@cloudflare/shell/workers";
+import type { MCPClientManager } from "agents/mcp/client";
 import type { WorkspaceLike } from "./workspace";
 import { createExecuteRuntime, type ExecuteRuntime } from "./execute";
-import { resolveWorkspaceFs } from "./workspace-fs";
-
-export interface ThinkCodeMcpManager {
-  listServers(): Array<{ id: string; name: string }>;
-  mcpConnections: Record<string, McpConnectionLike | undefined>;
-}
 
 class LiveMcpConnector extends McpConnector {
   constructor(
@@ -50,50 +48,67 @@ const RESERVED_NAMESPACES = new Map([
 
 function mcpConnectors(
   ctx: DurableObjectState,
-  manager: ThinkCodeMcpManager
-): LiveMcpConnector[] {
-  const connectors: LiveMcpConnector[] = [];
+  manager: MCPClientManager
+): CodemodeConnector[] {
+  const connectors: CodemodeConnector[] = [];
   const namespaces = new Map<string, string>();
 
   for (const server of manager.listServers()) {
     const connection = manager.mcpConnections[server.id];
     if (!connection) continue;
 
-    const namespace = sanitizeToolName(server.name || server.id);
+    const displayName = server.name || server.id;
+    const namespace = sanitizeToolName(displayName);
     const reservedFor = RESERVED_NAMESPACES.get(namespace);
     if (reservedFor) {
       throw new Error(
-        `MCP server "${server.name}" maps to reserved Code Mode namespace ` +
+        `MCP server "${displayName}" maps to reserved Code Mode namespace ` +
           `"${namespace}", which is owned by ${reservedFor}. Register it ` +
           "with a different server name."
       );
     }
     const existing = namespaces.get(namespace);
-    if (existing) {
+    if (existing !== undefined) {
       throw new Error(
-        `MCP servers "${existing}" and "${server.name}" both map to Code Mode ` +
+        `MCP servers "${existing}" and "${displayName}" both map to Code Mode ` +
           `namespace "${namespace}". Register them with distinct names.`
       );
     }
-    namespaces.set(namespace, server.name);
+    namespaces.set(namespace, displayName);
     connectors.push(new LiveMcpConnector(ctx, namespace, connection));
   }
 
   return connectors;
 }
 
-export interface ThinkCodeToolSet {
-  name: string;
-  tools: ToolSet;
-  instructions?: string;
-}
-
-export interface CreateThinkCodeRuntimeOptions {
+type CreateThinkCodeRuntimeOptions = {
   ctx: DurableObjectState;
   loader: WorkerLoader;
   workspace: WorkspaceLike;
-  mcp: ThinkCodeMcpManager;
-  toolSets?: ThinkCodeToolSet[];
+  mcp: MCPClientManager;
+  contextTools: ToolSet;
+  skillTools: ToolSet;
+  extensionTools: ToolSet;
+  fetchTools: ToolSet;
+};
+
+/** Enforce one owner for Think's model-facing code execution surface. */
+export function assertThinkCodeToolOwnership(
+  tools: ToolSet,
+  builtin: Tool
+): void {
+  const conflict =
+    tools.code !== undefined && tools.code !== builtin
+      ? "code"
+      : tools.bash !== undefined
+        ? "bash"
+        : undefined;
+  if (!conflict) return;
+
+  throw new Error(
+    `Think's built-in code tool cannot be combined with a custom ${conflict} ` +
+      "tool. Set codeTool = false on the agent that owns the custom runtime."
+  );
 }
 
 /**
@@ -104,7 +119,9 @@ export interface CreateThinkCodeRuntimeOptions {
 export function createThinkCodeRuntime(
   options: CreateThinkCodeRuntimeOptions
 ): ExecuteRuntime {
-  const fs = resolveWorkspaceFs(options.workspace);
+  const fs = isWorkspaceFsLike(options.workspace)
+    ? options.workspace
+    : undefined;
   const connectors: CodemodeConnector[] = mcpConnectors(
     options.ctx,
     options.mcp
@@ -116,14 +133,34 @@ export function createThinkCodeRuntime(
       })
     );
   }
-  for (const toolSet of options.toolSets ?? []) {
-    if (Object.keys(toolSet.tools).length === 0) continue;
+  const platformToolSets: Array<
+    readonly [name: string, tools: ToolSet, instructions: string]
+  > = [
+    [
+      "context",
+      options.contextTools,
+      "Read, search, load, and update the agent's durable context."
+    ],
+    [
+      "skills",
+      options.skillTools,
+      "Activate agent skills and access their bundled resources."
+    ],
+    [
+      "extensions",
+      options.extensionTools,
+      "Call tools contributed by loaded Think extensions."
+    ],
+    [
+      "fetch",
+      options.fetchTools,
+      "Read allowlisted HTTP resources and configured service bindings."
+    ]
+  ];
+  for (const [name, tools, instructions] of platformToolSets) {
+    if (Object.keys(tools).length === 0) continue;
     connectors.push(
-      new ToolSetConnector(options.ctx, {
-        name: toolSet.name,
-        tools: toolSet.tools,
-        instructions: toolSet.instructions
-      })
+      new ToolSetConnector(options.ctx, { name, tools, instructions })
     );
   }
   return createExecuteRuntime({

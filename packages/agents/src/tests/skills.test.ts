@@ -145,6 +145,19 @@ Review carefully.
     );
   });
 
+  it("renders caller-specific activation guidance without rewriting prose", async () => {
+    const registry = new SkillRegistry([skills.fromManifest(manifest)]);
+
+    const prompt = await registry.systemPrompt(
+      "Activate through skills.activate_skill({ name })."
+    );
+
+    expect(prompt).toContain(
+      "Activate through skills.activate_skill({ name })."
+    );
+    expect(prompt).toContain("code-review: Review code when asked.");
+  });
+
   it("exposes skill tools for model-visible skills", async () => {
     const registry = new SkillRegistry([skills.fromManifest(manifest)]);
     await registry.load();

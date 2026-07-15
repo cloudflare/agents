@@ -152,6 +152,8 @@ function snapshotOutput(raw: unknown): ExecuteOutputSnapshot | undefined {
 }
 
 export class ThinkExecuteHitlAgent extends Think {
+  override readonly codeTool = false;
+
   #codes: string[] = [`async () => await tools.deploy({ target: "prod" })`];
   #gatedCalls = 0;
 

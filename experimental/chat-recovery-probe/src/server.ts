@@ -54,7 +54,7 @@ const INCIDENT_PREFIX = "cf:chat-recovery:incident:";
 const PROGRESS_KEY = "cf:chat-recovery:progress";
 
 export class ProbeAgent extends Think<Env, ProbeState> {
-  override codeTool = false;
+  override readonly codeTool = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

@@ -36,6 +36,8 @@ async function invoke(
 }
 
 export class ThinkExecuteToolAgent extends Think {
+  override readonly codeTool = false;
+
   getModel(): LanguageModel {
     throw new Error("Model is not used in execute-tool tests");
   }

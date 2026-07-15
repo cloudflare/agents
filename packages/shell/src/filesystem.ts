@@ -179,6 +179,34 @@ export type WorkspaceFsLike = Pick<
   | "glob"
 >;
 
+const WORKSPACE_FS_METHODS = {
+  readFile: true,
+  readFileBytes: true,
+  writeFile: true,
+  writeFileBytes: true,
+  appendFile: true,
+  exists: true,
+  stat: true,
+  lstat: true,
+  mkdir: true,
+  readDir: true,
+  rm: true,
+  cp: true,
+  mv: true,
+  symlink: true,
+  readlink: true,
+  glob: true
+} as const satisfies Record<keyof WorkspaceFsLike, true>;
+
+/** Whether a value implements the filesystem surface used by Shell adapters. */
+export function isWorkspaceFsLike(value: unknown): value is WorkspaceFsLike {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return Object.keys(WORKSPACE_FS_METHODS).every(
+    (method) => typeof candidate[method] === "function"
+  );
+}
+
 // ── Constants ────────────────────────────────────────────────────────
 
 const DEFAULT_INLINE_THRESHOLD = 1_500_000;

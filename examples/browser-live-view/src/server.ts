@@ -23,6 +23,8 @@ export { CodemodeRuntime } from "agents/browser";
 const BROWSER_SESSION_KEY = "main";
 
 export class LiveViewAgent extends Think<Env> {
+  override readonly codeTool = false;
+
   getModel() {
     return "@cf/moonshotai/kimi-k2.7-code";
   }

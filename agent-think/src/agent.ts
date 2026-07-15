@@ -143,7 +143,7 @@ export class ThinkAgent extends ThinkBase {
   override maxSteps = AGENT_THINK_MAX_STEPS;
 
   /** We expose our own container-backed `bash`; omit Think's `code` tool. */
-  override codeTool = false;
+  override readonly codeTool = false;
 
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
   #workspaceReady: Promise<RemoteWorkspace> | null = null;
