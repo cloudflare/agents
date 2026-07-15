@@ -75,29 +75,28 @@ reactive-retry fidelity, approval-state vocabulary (029). Issues resolved:
 not touch frames — a real goal) is ORTHOGONAL to *unopinionated vs
 opinionated* (the real Agent/Think seam).
 
-**ADR-0002 — DRAFT/CONTESTED, needs authoritative rewrite.** The maintainer
-rejected its "Agent is non-conversational" framing. Agreed conclusions:
-- The Agent/Think seam is **opinion, not conversation.** "An agent can
-  converse" is essence, not an opinion; opinions are compaction, subagents,
-  recovery policy, channels, branching sessions, HITL, submissions, skills.
-- transport-free ≠ conversation-free (conversation is all typed methods + a
-  durable log; touches no wire). The `ConversationEventLog` IS conversational
-  and already lives on Agent — the old "it's generic" claim was a
-  rationalization for an incoherent split (outbound conv. on Agent, inbound in
-  Think).
-- **Three-layer model (maintainer: "probably sensible"), aligns with the
-  context map's Context 3 vs 4:** *Durable Runtime* = conversation-free
-  substrate (non-conversational actors) · *Agent* = unopinionated agent that
-  converses (model + turn loop + transcript + event stream, transport-free) ·
-  *Think* = opinions.
-- No strong universal line for turn-loop knobs (maxSteps, stop, tool protocol)
-  — maintainer: it's the **team's case-by-case call** whether something is a
-  sensible global standard or a Think opinion. So the ADR states the layering
-  + the principle, not a hard rule.
-- Mechanical findings that STAND regardless: Think reaches only Agent's
-  public+protected surface (grep-verified — no private access, no casts), so
-  Think is reproducible in userland; and transports must depend on **capability
-  interfaces, not concrete classes** (corollary).
+**ADR-0002 — ACCEPTED (target-state, 2026-07-15), rewritten as
+`docs/adr/0002-three-layers-agent-chatagent-think.md`.** Decisions recorded:
+- Three layers: **`Agent`** (bottom, name unchanged — `Actor` rename rejected
+  for blast radius) = conversation-free durable substrate · **`ChatAgent`**
+  (new, extracted from Think) = unopinionated conversing agent (model, turn
+  loop, transcript, conversation event vocabulary) · **`Think` extends
+  ChatAgent** = opinions (compaction, recovery policy, channels, branching,
+  HITL, submissions, skills, delegation).
+- The seam is **opinion, not conversation**; transport-free ≠
+  conversation-free. Event-log incoherence resolved: mechanism on Agent,
+  conversation vocabulary on ChatAgent.
+- Allocation-of-concerns table accepted first-pass (rows movable by team
+  call); `ConversationApi` split into essence core + `ApprovalApi` +
+  `RecoveryIntrospection` opinion extensions — transports require the
+  intersection they speak, so ISSUE-030 doesn't wait for the split.
+- Invariants carried: each layer uses only the layer below's
+  public+protected surface (promotion rule, grep-verified); transports depend
+  on capability interfaces, never concrete classes.
+- "chat" added to the context-map overloaded-term watchlist (protocol bundle
+  vs ChatAgent layer).
+- **Remaining work:** the ChatAgent extraction itself (separate workstream;
+  mostly re-allocating module wiring, guarded by ported + native suites).
 
 **ISSUE-030 — hosting refactor (well-specified, unbuilt).** Composition-first:
 the DO *has-a* Agent. One generic host that routes platform I/O to **composed

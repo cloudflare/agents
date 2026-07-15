@@ -225,6 +225,7 @@ separated is the main reason the map is split the way it is:
 | Word | Meaning A | Meaning B (and beyond) |
 | ---- | --------- | ---------------------- |
 | **channel** | Kernel: an observability category on the EventBus | Channels/Surfaces: a *surface* a turn arrives on (web/messenger/voice) |
+| **chat** | Hosting/ISSUE-030: the `cf_agent_*` client-protocol bundle ("no chat agent type" rejects gating the host on it) | ADR-0002: `ChatAgent` — the unopinionated conversing layer between `Agent` and `Think` |
 | **chunk / delta** | Infrastructure: `ModelChunk` from the model port | Conversation: `UiChunk` (produced by Turn's engine); also RPC stream chunks (Durable Runtime) |
 | **idempotency key** | Durable Runtime (Fibers): dedupes a managed fiber `start` | Reliability (Submissions): caller turn identity; Actions: ledger execution identity; Reliability (Tasks): per-occurrence identity |
 | **continuation** | Turn: auto-continuation after tool results settle | Reliability: a recovery follow-up turn resuming from a partial |

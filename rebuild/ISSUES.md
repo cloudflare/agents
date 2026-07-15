@@ -548,3 +548,13 @@ the primitives-first hosting path fall out of #1/#2. Pairs with a
 "build-a-lite-agent" DX pass (domain factories are public + test-proven but
 their dep signatures are internal-facing) and the framework/Vite codegen
 (ISSUE-013) that generates #2/#3 away.
+
+**Update (2026-07-15, ADR-0002 accepted):** the inbound seam splits by layer
+— `conversationProtocol()` types against `ConversationApi` (essence: chat/
+cancelChat/applyToolResult/history/clearMessages) intersected with the
+opinion extensions it actually speaks: `ApprovalApi` (resolveApproval) and
+`RecoveryIntrospection` (isRecovering/activeTurn/pendingChatTerminal). The
+full `cf_agent_*` adapter requires all three; a bare turn driver requires
+only `ConversationApi`. Interface definitions live in ADR-0002. This issue
+does NOT wait for the ChatAgent extraction — transports name capabilities,
+not layers.
