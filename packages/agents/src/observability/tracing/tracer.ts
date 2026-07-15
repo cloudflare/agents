@@ -33,7 +33,7 @@ export type AgentTracer = {
     name: string,
     attributes: TraceAttributes,
     run: (span: AgentSpan) => MaybePromise<T>
-  ): MaybePromise<T>;
+  ): T | Promise<T>;
   /**
    * Activates a span and returns whatever `activate` returns (typically the
    * {@link AgentSpan} handle itself). The caller owns the span lifetime and MUST call
@@ -79,7 +79,7 @@ class RuntimeTracer implements AgentTracer {
     name: string,
     attributes: TraceAttributes,
     run: (span: AgentSpan) => MaybePromise<T>
-  ): MaybePromise<T> {
+  ): T | Promise<T> {
     return this.activate(name, attributes, (span) => {
       const result = run(span);
       if (isPromiseLike(result)) {
