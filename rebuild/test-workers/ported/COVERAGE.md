@@ -196,7 +196,7 @@ refreshes the snapshot in the same commit.
 | spike-sub-agent-routing.test.ts | 16 | blocked ISSUE-017 | |
 | state.test.ts | 22 | pending | T3 |
 | sub-agent-routing.test.ts | 22 | blocked ISSUE-017 | |
-| sub-agent.test.ts | 97 | claimed P10 | T3 (delegation surface — big) |
+| sub-agent.test.ts | 97 | ported 36/97 | [fidelity:adapter] P10. 38 on the board (36 pass; 2 real divergences: null-char name accepted, `Sub_` escapes the reserved-`sub` guard). 20 blocked: 13 ISSUE-036 (facets get no AgentSpawner — no nested spawn, no parentAgent() in a facet), 6 ISSUE-017 (/sub/ routing), 1 ISSUE-009. 20 quarry (old-arch internals: raw schedule rows, fiber-lease delegation, bundler heuristics, legacy migration). 6 dropped: 4 no-equivalent (raw onMessage, broadcast(), getConnections()), 2 native test-workers/delegation.test.ts. Divergence to confirm: parentAgent() on non-facet returns undefined vs original throw. |
 | workflow-error-reporting.test.ts | 7 | blocked ISSUE-016 | |
 | workflow-integration.test.ts | 7 | blocked ISSUE-016 | |
 | workflow-prototype.test.ts | 14 | blocked ISSUE-016 | |
