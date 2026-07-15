@@ -196,17 +196,32 @@ class ReminderAgent extends Agent {           // the lighter base, no chat
 | **B** base class | `class ReminderDO extends AgentDurableObject<ReminderAgent> { createAgent(rt){ return new ReminderAgent(rt); } }` | **Same host as a chat agent** — it detects `instanceof Think` and skips the chat transport; a WS upgrade gets a clean 400. No separate type. |
 | **C** driver | `#rt = createAgentRuntime(this.ctx, this.env, rt => new ReminderAgent(rt)); alarm = this.#rt.alarm;` | Omit `{ chat: true }`, forward only `alarm`. |
 
-**Note (2026-07-15): chat and non-chat need not diverge for the author.** The
-host is *chat-aware*, not chat-specific: it attaches `attachChatTransport` only
-when the hosted agent is a `Think`, and rejects WebSocket upgrades otherwise.
-So B/C are the *same* type whether or not the agent chats — the lean case is a
-runtime detail, not a choice the author makes. "Always attach chat, no-op the
-listeners" would instead need chat stubs on `Agent` (re-coupling) or would
-expose the `cf_agent_*` protocol on agents that never opted in — see ISSUE-030.
-A minimal-only host survives only as a bundle-size optimization for lean
-deployments.
+**Note (2026-07-15): there is no "chat" agent type — transports are composed.**
+Of the four concerns the `cf_agent_*` adapter handles, three are already
+Agent-level (grep-confirmed): event-log→wire projection (`events()`), state
+sync (`setState`), and RPC (`callables`); only the conversation-turn surface
+(`chat`/`history`/tool-result/approval/recovery) is Think-specific. So "chat"
+is a client-protocol *bundle*, not a boundary, and the host must not gate on
+`instanceof Think` (that would deny a plain `extends Agent` its generic
+streaming/RPC transports). The corrected model: ONE generic host that routes
+platform I/O to **composed transport adapters**, each requiring its
+capabilities structurally —
 
----
+```ts
+class SupportAgentDO extends AgentDurableObject<SupportAgent> {
+  createAgent(rt) { return new SupportAgent(rt); }
+  transports() { return [conversationProtocol()]; }   // needs the turn surface (Think)
+}
+class ReminderDO extends AgentDurableObject<ReminderAgent> {
+  createAgent(rt) { return new ReminderAgent(rt); }
+  transports() { return [rpcProtocol()]; }            // needs only callables (any Agent)
+}
+```
+
+The author composes what their agent speaks; the capability requirement is
+enforced by each transport's parameter type, not a class check. `Think` isn't a
+different kind of thing — it's `Agent` + composed conversation modules, on the
+same host. See ISSUE-030.
 
 ## Side by side
 

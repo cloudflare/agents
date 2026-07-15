@@ -481,22 +481,46 @@ author picks from, composition primary:
    ```
    The has-a relationship is fully visible; `createAgentRuntime` owns only the
    subtle, identical-across-agents part (see below), not the composition.
-2. **Optional convenience base class** for zero forwarding lines — ONE
-   chat-aware host, not a two-class split. `AgentDurableObject<A extends Agent>`
-   with `createAgent(rt)` as the one seam; it attaches the chat transport
-   *conditionally* (iff `agent instanceof Think`) and a non-chat agent cleanly
-   REJECTS WS upgrades (clear 400) rather than exposing the `cf_agent_*`
-   protocol it never opted into. Rationale (surfaced 2026-07-15): "always
-   attach chat / no-op the listeners" is NOT safe — `attachChatTransport`
-   structurally needs Think's methods (`chat`/`history`/`applyToolResult`/…,
-   confirmed), so making it work on a bare `Agent` would either re-couple the
-   base with chat stubs (undoing the split) or expose the chat protocol on
-   agents that didn't want it (a footgun, not a no-op). The conditional host
-   gives the author ONE type regardless of chat-ness, keeps `Agent` chat-free
-   (the conditional lives in the adapter), and handles the lean case at runtime.
-   A minimal-only host may still exist as a **bundle-size optimization** (avoids
-   pulling the chat adapter into lean deployments) — an optimization, not a
-   correctness fork.
+2. **Optional convenience base class** for zero forwarding lines —
+   `AgentDurableObject<A extends Agent>`, `createAgent(rt)` the one seam. It is
+   a GENERIC host that routes platform I/O (fetch/alarm/ws) to **composed
+   transport adapters**; what the DO speaks is composed in, NOT a property of
+   the agent's type.
+
+   **No "chat" type, no `instanceof Think` (correction, 2026-07-15).** "Chat"
+   is not a coherent agent boundary — it's a client-protocol bundle. The
+   `cf_agent_*` WS adapter fuses four concerns, and three are already
+   Agent-level (grep-confirmed): event-log→wire projection (`events()`), state
+   sync (`setState`/`state`), RPC dispatch (`callables`) — all on `Agent`;
+   only the conversation-turn surface (`chat`/`history`/`applyToolResult`/
+   `resolveApproval`/`isRecovering`/`activeTurn`/`pendingChatTerminal`/
+   `clearMessages`/`cancelChat`) is on `Think`. So gating the host on
+   `instanceof Think` is the wrong axis — it would deny a plain `extends Agent`
+   its *generic* transports (streaming, RPC) that work on any agent. ("Agent
+   knows nothing about chat" was never a design goal — the goal (audit 25) was
+   transport-freedom; the outbound event log is itself on Agent.)
+
+   Compositional model instead: the author composes the transports their agent
+   supports, each requiring its capabilities STRUCTURALLY (an interface), not a
+   class identity:
+   ```ts
+   class SupportAgentDO extends AgentDurableObject<SupportAgent> {
+     createAgent(rt) { return new SupportAgent(rt); }
+     transports() { return [conversationProtocol()]; }  // requires the turn surface
+   }
+   class ReminderDO extends AgentDurableObject<ReminderAgent> {
+     createAgent(rt) { return new ReminderAgent(rt); }
+     transports() { return [rpcProtocol()]; }           // requires only callables
+   }
+   ```
+   `rpcProtocol()`/`stateProtocol()` type-check against any `Agent`;
+   `conversationProtocol()` (or the full `cf_agent_*` bundle) type-checks only
+   against a `Think` because it needs the turn surface — enforced by the
+   transport's parameter type, not a runtime check. The `cf_agent_*` browser
+   bundle ships as ONE composable transport today, DECOMPOSABLE later into
+   event-projection / state-sync / rpc / conversation sub-transports (the seams
+   are already real). Think is not a different *kind* of thing — it's `Agent` +
+   composed conversation modules, hosted by the same generic host.
 3. **`hostAgent(A)` factory** kept as the tersest one-line sugar.
 
 Why the driver/helper is more than "forward 4 methods": the lifecycle wiring is
