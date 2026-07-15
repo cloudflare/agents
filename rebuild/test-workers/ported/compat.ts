@@ -60,11 +60,48 @@ export type ObservabilityEvent = {
   [key: string]: unknown;
 };
 
+const observabilitySubscribers = new Map<
+  string,
+  Set<(event: ObservabilityEvent) => void>
+>();
+
+function subscribersFor(channel: string): Set<(event: ObservabilityEvent) => void> {
+  let set = observabilitySubscribers.get(channel);
+  if (!set) {
+    set = new Set();
+    observabilitySubscribers.set(channel, set);
+  }
+  return set;
+}
+
 export function subscribe(
-  _channel: string,
-  _callback: (event: ObservabilityEvent) => void
+  channel: string,
+  callback: (event: ObservabilityEvent) => void
 ): () => void {
-  throw new Error("observability bridge not implemented — ISSUE-009 (triage: missing-feature)");
+  const set = subscribersFor(channel);
+  set.add(callback);
+  return () => {
+    set.delete(callback);
+  };
+}
+
+export function publishPortedObservability(event: ObservabilityEvent): void {
+  const targets = new Set<(event: ObservabilityEvent) => void>();
+  for (const fn of subscribersFor("*")) targets.add(fn);
+  for (const fn of subscribersFor(channelForPortedType(event.type ?? ""))) {
+    targets.add(fn);
+  }
+  for (const fn of targets) fn(event);
+}
+
+function channelForPortedType(type: string): string {
+  if (type.startsWith("chat")) return "chat";
+  if (type.startsWith("message") || type.startsWith("tool:result")) {
+    return "message";
+  }
+  if (type.startsWith("fiber")) return "fiber";
+  if (type.startsWith("transcript")) return "transcript";
+  return "misc";
 }
 
 /**

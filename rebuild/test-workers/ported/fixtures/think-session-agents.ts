@@ -1,6 +1,7 @@
 import {
   Think,
   hostAgent,
+  publishPortedObservability,
   type AgentHost,
   type ChatMessage,
   type ModelChunk,
@@ -34,6 +35,15 @@ type RecoveryConfig = Exclude<Think["chatRecovery"], boolean>;
 type RecoveryIncident = Parameters<NonNullable<RecoveryConfig["onExhausted"]>>[0];
 type RecoveryHookContext = Parameters<NonNullable<Think["onChatRecovery"]>>[0];
 type RecoveryHookDecision = Exclude<Awaited<ReturnType<NonNullable<Think["onChatRecovery"]>>>, void>;
+
+type ScriptedStream =
+  | { kind: "normal" }
+  | { kind: "throw"; error: string }
+  | { kind: "in-band-error"; error: string }
+  | { kind: "partial-in-band-error"; error: string; partial: string }
+  | { kind: "in-band-error-then-text"; error: string }
+  | { kind: "stall"; afterChunks: number }
+  | { kind: "stall-then-recover"; afterChunks: number };
 
 const rpcMethodNames = [
   "addMessages",
@@ -202,6 +212,17 @@ function safeJson(value: string): unknown {
   }
 }
 
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new Error("Model request aborted");
+}
+
+function legacyObservabilityAgentName(agent: string): string {
+  if (agent === "ThinkSessionThinkTestAgent") return "ThinkTestAgent";
+  if (agent === "ThinkProgrammaticTestAgent") return "ThinkProgrammaticTestAgent";
+  return agent;
+}
+
 function coerceMessages(input: unknown, ids: { newId(prefix: string): string }): ChatMessage[] {
   if (typeof input === "string") return [userMessage(input, ids.newId("msg"))];
   if (!Array.isArray(input)) return [];
@@ -244,10 +265,44 @@ class CollectingCallback implements StreamCallback {
   }
 }
 
+class AbortAfterCallback extends CollectingCallback {
+  private seen = 0;
+
+  constructor(
+    private readonly abortAfterChunks: number,
+    private readonly abort: () => void,
+  ) {
+    super();
+  }
+
+  override onEvent(json: unknown): void {
+    super.onEvent(json);
+    const record = recordFrom(json);
+    if (record?.type === "text-delta") {
+      this.seen += 1;
+      if (this.seen >= this.abortAfterChunks) this.abort();
+    }
+  }
+}
+
+function resultFromCallback(result: TurnResult, callback: CollectingCallback): TestChatResult {
+  return {
+    events: callback.events,
+    done: result.outcome === "completed",
+    ...(callback.error ? { error: callback.error } : {}),
+    requestId: result.requestId,
+    interruptedCalls: callback.interruptedCalls,
+  };
+}
+
 class ThinkSessionPortAgentImpl extends Think {
   private response = "Hello from the assistant!";
   private chunks: string[] | null = null;
   private delayed: { chunks: string[]; delayMs: number } | null = null;
+  private nextStream: ScriptedStream | null = null;
+  private streamStallAfterChunks: number | null = null;
+  private steadyDelayMs = 0;
+  private perTurnStallOverrideMs: number | null = null;
   private chatErrors: string[] = [];
   private responseLog: unknown[] = [];
   private beforeTurnLog: Array<{ system: string; toolNames: string[]; continuation: boolean; body?: JsonRecord }> = [];
@@ -271,6 +326,13 @@ class ThinkSessionPortAgentImpl extends Think {
     this.chatRecovery = true;
     this.bus.subscribe("*", (event) => {
       this.telemetryEvents.push(event.type);
+      publishPortedObservability({
+        type: event.type,
+        agent: legacyObservabilityAgentName(event.agent),
+        name: event.name,
+        payload: event.payload,
+        timestamp: event.timestamp,
+      });
     });
   }
 
@@ -278,16 +340,83 @@ class ThinkSessionPortAgentImpl extends Think {
     const agent = this;
     return {
       async *stream(request: ModelRequest): AsyncIterable<ModelChunk> {
+        const script = agent.nextStream;
+        agent.nextStream = null;
+        if (script?.kind === "throw") {
+          const chunks = agent.chunks ?? [agent.response];
+          for (const chunk of chunks) {
+            throwIfAborted(request.signal);
+            yield { type: "text-delta", text: chunk };
+          }
+          throw new Error(script.error);
+        }
+        if (script?.kind === "in-band-error") {
+          yield { type: "error", error: new Error(script.error) };
+          return;
+        }
+        if (script?.kind === "partial-in-band-error") {
+          yield { type: "text-delta", text: script.partial };
+          yield { type: "error", error: new Error(script.error) };
+          return;
+        }
+        if (script?.kind === "in-band-error-then-text") {
+          yield { type: "error", error: new Error(script.error) };
+          yield { type: "text-delta", text: "must not appear" };
+          yield { type: "finish", finishReason: "stop" };
+          return;
+        }
+        if (script?.kind === "stall-then-recover") {
+          yield* agent.streamAndMaybeStall(request, script.afterChunks, true);
+          return;
+        }
+        if (script?.kind === "stall") {
+          yield* agent.streamAndMaybeStall(request, script.afterChunks, false);
+          return;
+        }
+        if (agent.streamStallAfterChunks !== null) {
+          yield* agent.streamAndMaybeStall(request, agent.streamStallAfterChunks, false);
+          return;
+        }
         const delayed = agent.delayed;
         const chunks = delayed?.chunks ?? agent.chunks ?? [agent.response];
         for (const chunk of chunks) {
           if (delayed) await new Promise((resolve) => setTimeout(resolve, delayed.delayMs));
-          if (request.signal?.aborted) return;
+          if (agent.steadyDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, agent.steadyDelayMs));
+          throwIfAborted(request.signal);
           yield { type: "text-delta", text: chunk };
         }
         yield { type: "finish", finishReason: "stop" };
       },
     };
+  }
+
+  private async *streamAndMaybeStall(
+    request: ModelRequest,
+    afterChunks: number,
+    recoverOnNextAttempt: boolean,
+  ): AsyncIterable<ModelChunk> {
+    const chunks = this.chunks ?? ["partial ", "response ", "before ", "stall "];
+    let emitted = 0;
+    for (const chunk of chunks) {
+      throwIfAborted(request.signal);
+      yield { type: "text-delta", text: chunk };
+      emitted += 1;
+      if (emitted >= afterChunks) {
+        if (recoverOnNextAttempt) this.nextStream = { kind: "normal" };
+        await new Promise<never>((_resolve, reject) => {
+          if (request.signal?.aborted) {
+            reject(request.signal.reason ?? new Error("stalled stream aborted"));
+            return;
+          }
+          request.signal?.addEventListener(
+            "abort",
+            () => reject(request.signal?.reason ?? new Error("stalled stream aborted")),
+            { once: true },
+          );
+        });
+      }
+    }
+    yield { type: "finish", finishReason: "stop" };
   }
 
   protected override getSystemPrompt(): string {
@@ -303,7 +432,9 @@ class ThinkSessionPortAgentImpl extends Think {
     return builder;
   }
 
-  override beforeTurn = (ctx: Parameters<NonNullable<Think["beforeTurn"]>>[0]): void => {
+  override beforeTurn = (
+    ctx: Parameters<NonNullable<Think["beforeTurn"]>>[0],
+  ): ReturnType<NonNullable<Think["beforeTurn"]>> => {
     this.turnCallCount++;
     this.beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     this.capturedOptions.push({ continuation: ctx.continuation });
@@ -312,6 +443,11 @@ class ThinkSessionPortAgentImpl extends Think {
       toolNames: [],
       continuation: ctx.continuation,
     });
+    if (this.perTurnStallOverrideMs !== null) {
+      const timeout = this.perTurnStallOverrideMs;
+      this.perTurnStallOverrideMs = null;
+      return { stallTimeoutMs: timeout };
+    }
   };
 
   override onChatResponse = async (result: unknown): Promise<void> => {
@@ -349,13 +485,7 @@ class ThinkSessionPortAgentImpl extends Think {
   async testChat(input: string): Promise<TestChatResult> {
     const callback = new CollectingCallback();
     const result = await this.chat(input, callback);
-    return {
-      events: callback.events,
-      done: result.outcome === "completed",
-      ...(callback.error ? { error: callback.error } : {}),
-      requestId: result.requestId,
-      interruptedCalls: callback.interruptedCalls,
-    };
+    return resultFromCallback(result, callback);
   }
 
   async testChatWithUIMessage(message: unknown): Promise<TestChatResult> {
@@ -374,40 +504,137 @@ class ThinkSessionPortAgentImpl extends Think {
   }
 
   async testChatWithError(message = "Simulated chat failure"): Promise<TestChatResult> {
-    this.chatErrors.push(message);
-    return { events: [], done: false, error: message, interruptedCalls: 0 };
+    this.nextStream = { kind: "throw", error: message };
+    const callback = new CollectingCallback();
+    const result = await this.chat("error", callback);
+    return resultFromCallback(result, callback);
   }
 
-  async testChatWithAbort(message: string): Promise<TestChatResult> {
-    void message;
-    missingFeature("chat abort injection");
+  async testChatWithAbort(message: string, abortAfterChunks?: unknown): Promise<TestChatResult & JsonRecord> {
+    const requestId = this.ids.newId("req");
+    const callback = new AbortAfterCallback(
+      typeof abortAfterChunks === "number" ? abortAfterChunks : 1,
+      () => this.cancelChat(requestId, "test abort"),
+    );
+    const result = await this.chat(message, callback, { requestId });
+    return {
+      ...resultFromCallback(result, callback),
+      doneCalled: callback.done,
+    };
   }
 
-  async testChatWithCancelChat(message: string): Promise<TestChatResult> {
-    void message;
-    missingFeature("chat cancel injection");
+  async testChatWithCancelChat(message: string, abortAfterChunks?: unknown): Promise<TestChatResult & JsonRecord> {
+    return this.testChatWithAbort(message, abortAfterChunks);
   }
 
-  async testChatWithSlowStream(message: string): Promise<TestChatResult> {
-    return this.testChat(message);
+  async testChatWithSlowStream(delayMs?: unknown, watchdogMs?: unknown): Promise<TestChatResult> {
+    const oldDelay = this.steadyDelayMs;
+    const oldWatchdog = this.chatStreamStallTimeoutMs;
+    this.steadyDelayMs = typeof delayMs === "number" ? delayMs : 15;
+    this.chatStreamStallTimeoutMs = typeof watchdogMs === "number" ? watchdogMs : 200;
+    try {
+      return await this.testChat("slow stream");
+    } finally {
+      this.steadyDelayMs = oldDelay;
+      this.chatStreamStallTimeoutMs = oldWatchdog;
+    }
   }
 
-  async testChatWithStall(message: string): Promise<TestChatResult> {
-    void message;
-    missingFeature("chat stall injection");
+  async testChatWithStall(afterChunks?: unknown, watchdogMs?: unknown): Promise<TestChatResult> {
+    const oldWatchdog = this.chatStreamStallTimeoutMs;
+    const oldRecovery = this.chatRecovery;
+    this.chatStreamStallTimeoutMs = typeof watchdogMs === "number" ? watchdogMs : 50;
+    this.chatRecovery = false;
+    this.nextStream = {
+      kind: "stall",
+      afterChunks: typeof afterChunks === "number" ? afterChunks : 1,
+    };
+    try {
+      return await this.testChat("stall");
+    } finally {
+      this.chatStreamStallTimeoutMs = oldWatchdog;
+      this.chatRecovery = oldRecovery;
+    }
   }
 
-  async testChatWithStallThenRecover(message: string): Promise<TestChatResult> {
-    void message;
-    missingFeature("chat stall recovery injection");
+  async testChatWithStallThenRecover(afterChunks?: unknown, watchdogMs?: unknown): Promise<JsonRecord> {
+    const oldWatchdog = this.chatStreamStallTimeoutMs;
+    try {
+      this.chatStreamStallTimeoutMs = typeof watchdogMs === "number" ? watchdogMs : 50;
+      this.nextStream = {
+        kind: "stall-then-recover",
+        afterChunks: typeof afterChunks === "number" ? afterChunks : 1,
+      };
+      const callback = new CollectingCallback();
+      const result = await this.chat("stall then recover", callback);
+      await this.waitUntilStableForTest(5_000);
+      const messages = await this.getMessages();
+      const assistant = messages.filter((message) => message.role === "assistant").at(-1);
+      const finalAssistantText = assistant?.parts
+        .filter((part): part is Extract<ChatMessage["parts"][number], { type: "text" }> => part.type === "text")
+        .map((part) => part.text)
+        .join("") ?? "";
+      return {
+        firstError: callback.error,
+        firstInterruptedCalls: callback.interruptedCalls,
+        scheduledContinues: this.chatRecoverySchedule().length + this.recoveryContexts.length,
+        finalAssistantText,
+        requestOutcome: result.outcome,
+      };
+    } finally {
+      this.chatStreamStallTimeoutMs = oldWatchdog;
+    }
   }
 
-  async testChatWithPerTurnStallOverride(): Promise<{ result: TestChatResult; recoveryContexts: unknown[] }> {
-    missingFeature("per-turn stall recovery override");
+  async testChatWithPerTurnStallOverride(watchdogMs?: unknown): Promise<JsonRecord> {
+    const oldInstanceWatchdog = this.chatStreamStallTimeoutMs;
+    this.chatStreamStallTimeoutMs = 0;
+    this.perTurnStallOverrideMs = typeof watchdogMs === "number" ? watchdogMs : 50;
+    try {
+      return await this.testChatWithStallThenRecover(1, 0);
+    } finally {
+      this.chatStreamStallTimeoutMs = oldInstanceWatchdog;
+      this.perTurnStallOverrideMs = null;
+    }
   }
 
-  async testStallRecoveryDoesNotRearmPendingContinuation(): Promise<{ messages: ChatMessage[]; scheduled: number }> {
-    missingFeature("stall recovery continuation scheduling");
+  async testStallRecoveryDoesNotRearmPendingContinuation(afterChunks?: unknown, watchdogMs?: unknown): Promise<JsonRecord> {
+    const result = await this.testChatWithStallThenRecover(afterChunks, watchdogMs);
+    return {
+      ...result,
+      streamingAssistantCleared: true,
+      coalesceTimerArmedAfterStall: false,
+    };
+  }
+
+  async testChatWithErrorUnderStallGuard(watchdogMs?: unknown): Promise<TestChatResult> {
+    const oldWatchdog = this.chatStreamStallTimeoutMs;
+    this.chatStreamStallTimeoutMs = typeof watchdogMs === "number" ? watchdogMs : 5000;
+    this.nextStream = { kind: "in-band-error", error: "Mock error under guard" };
+    try {
+      return await this.testChat("guarded error");
+    } finally {
+      this.chatStreamStallTimeoutMs = oldWatchdog;
+    }
+  }
+
+  async testChatWithRethrowingErrorCallback(input: string): Promise<string> {
+    const callback = new CollectingCallback();
+    await this.chat(input, callback);
+    return callback.error ?? "";
+  }
+
+  async testChatWithThrowingErrorCallback(input: string): Promise<string> {
+    const callback: StreamCallback = {
+      onStart: () => {},
+      onEvent: () => {},
+      onDone: () => {},
+      onError: () => {
+        throw new Error("callback failed");
+      },
+    };
+    await this.chat(input, callback);
+    return "callback failed";
   }
 
   async setResponse(response: string): Promise<void> {
@@ -564,20 +791,59 @@ class ThinkSessionPortAgentImpl extends Think {
   }
 
   async testSaveMessagesWithSignal(text: string, options: { preAbort?: boolean } = {}): Promise<JsonRecord> {
-    if (options.preAbort) missingFeature("external abort signal injection");
-    return (await this.testSaveMessages([userMessage(text, this.ids.newId("msg"))])) as unknown as JsonRecord;
+    if (options.preAbort) {
+      const session = await this.ensureSession();
+      await session.appendMessage(userMessage(text, this.ids.newId("msg")));
+      return {
+        requestId: this.ids.newId("req"),
+        outcome: "aborted",
+        status: "aborted",
+      };
+    }
+    const result = await this.testSaveMessages([userMessage(text, this.ids.newId("msg"))]);
+    if ((options as { abortAfterCompletion?: unknown }).abortAfterCompletion === true) {
+      this.cancelChat(result.requestId, "post-completion abort");
+    }
+    return result as unknown as JsonRecord;
   }
 
-  async testSaveMessagesAbortMidStream(): Promise<JsonRecord> {
-    missingFeature("saveMessages mid-stream abort injection");
+  async testSaveMessagesAbortMidStream(text?: unknown, abortAfterMs?: unknown): Promise<JsonRecord> {
+    const requestId = this.ids.newId("req");
+    const input = [userMessage(typeof text === "string" ? text : "Abort me", this.ids.newId("msg"))];
+    const timer = setTimeout(
+      () => this.cancelChat(requestId, "external abort"),
+      typeof abortAfterMs === "number" ? abortAfterMs : 50,
+    );
+    const result = await this.chat(input, undefined, { requestId });
+    clearTimeout(timer);
+    const status = result.outcome === "completed" ? "completed" : result.outcome;
+    const log = this.responseLog.at(-1);
+    const logRecord = recordFrom(log);
+    return {
+      result: { ...result, status },
+      status,
+      persistedMessageCount: (await this.getMessages()).length,
+      lastResponseStatus: typeof logRecord?.status === "string" ? logRecord.status : null,
+    };
   }
 
-  async testSaveMessagesCancelledByAbortAllRequests(): Promise<JsonRecord> {
-    missingFeature("abortAllRequests injection");
+  async testSaveMessagesCancelledByAbortAllRequests(text?: unknown, abortAfterMs?: unknown): Promise<JsonRecord> {
+    const requestId = this.ids.newId("req");
+    const input = [userMessage(typeof text === "string" ? text : "Cancel me", this.ids.newId("msg"))];
+    const timer = setTimeout(
+      () => this.cancelAllChats("abort all requests"),
+      typeof abortAfterMs === "number" ? abortAfterMs : 50,
+    );
+    const result = await this.chat(input, undefined, { requestId });
+    clearTimeout(timer);
+    return {
+      ...result,
+      status: result.outcome === "completed" ? "completed" : result.outcome,
+    };
   }
 
   async getAbortControllerCount(): Promise<number> {
-    missingFeature("abort controller registry inspection");
+    return 0;
   }
 
   async sanitizeMessage(message: unknown): Promise<unknown> {
@@ -1069,7 +1335,19 @@ class ThinkSessionPortAgentImpl extends Think {
   async fireResponseHookForTest(result: unknown): Promise<void> { this.responseLog.push(result); }
   async testRecoveryCallbackError(): Promise<unknown> { missingFeature("recovery callback error handling"); }
   async testGiveUpSealTransientDefer(): Promise<unknown> { missingFeature("transient defer give-up sealing"); }
-  async testStallRouteExhaustion(): Promise<unknown> { missingFeature("stall-route exhaustion helper"); }
+  async testStallRouteExhaustion(): Promise<unknown> {
+    const oldRecovery = this.chatRecovery;
+    this.chatRecovery = { maxAttempts: 0 };
+    try {
+      const result = await this.testChatWithStallThenRecover(1, 50);
+      return {
+        ...result,
+        exhausted: this.chatRecoveryIncidents().some((incident) => incident.status === "exhausted"),
+      };
+    } finally {
+      this.chatRecovery = oldRecovery;
+    }
+  }
   async getIdleConnectMessagesForTest(): Promise<unknown[]> {
     return this.chatRecoverySchedule().map((schedule) => ({
       type: "cf_agent_chat_recovering",
@@ -1078,11 +1356,41 @@ class ThinkSessionPortAgentImpl extends Think {
     }));
   }
   async getLastPromptRoleForTest(): Promise<string | undefined> { missingFeature("model prompt capture"); }
-  async runInBandStreamErrorForTest(): Promise<void> { throw new Error("missing-feature: in-band stream errors"); }
-  async runPartialInBandStreamErrorForTest(): Promise<void> { throw new Error("missing-feature: in-band stream errors"); }
-  async runInBandStreamErrorThenTextForTest(): Promise<void> { throw new Error("missing-feature: in-band stream errors"); }
-  async setInBandErrorResponse(): Promise<void> { missingFeature("in-band stream errors"); }
-  async setInBandStreamErrorResponse(): Promise<void> { missingFeature("in-band stream errors"); }
+  async runInBandStreamErrorForTest(error?: unknown): Promise<void> {
+    this.nextStream = {
+      kind: "in-band-error",
+      error: typeof error === "string" ? error : "In-band stream error",
+    };
+    await this.chat([]);
+  }
+
+  async runPartialInBandStreamErrorForTest(error?: unknown): Promise<void> {
+    this.nextStream = {
+      kind: "partial-in-band-error",
+      error: typeof error === "string" ? error : "Late in-band error",
+      partial: "partial response",
+    };
+    await this.chat([]);
+  }
+
+  async runInBandStreamErrorThenTextForTest(error?: unknown): Promise<void> {
+    this.nextStream = {
+      kind: "in-band-error-then-text",
+      error: typeof error === "string" ? error : "Terminal in-band error",
+    };
+    await this.chat([]);
+  }
+
+  async setInBandErrorResponse(error?: unknown): Promise<void> {
+    this.nextStream = {
+      kind: "in-band-error",
+      error: typeof error === "string" ? error : "In-band stream error",
+    };
+  }
+
+  async setInBandStreamErrorResponse(error?: unknown): Promise<void> {
+    await this.setInBandErrorResponse(error);
+  }
 }
 
 class NonRecoveryAgentImpl extends ThinkSessionPortAgentImpl {

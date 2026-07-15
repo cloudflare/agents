@@ -254,7 +254,7 @@ describe("createAiSdkModel", () => {
     ]);
   });
 
-  it("throws mid-stream provider errors from the async iterable", async () => {
+  it("maps mid-stream provider error parts to in-band error chunks", async () => {
     const error = new Error("provider down");
     const mock = new MockLanguageModelV3({
       doStream: {
@@ -269,7 +269,15 @@ describe("createAiSdkModel", () => {
       },
     });
 
-    await expect(collect(createAiSdkModel(mock).stream(baseRequest))).rejects.toThrow("provider down");
+    await expect(collect(createAiSdkModel(mock).stream(baseRequest))).resolves.toEqual([
+      { type: "text-delta", text: "before" },
+      { type: "error", error },
+      {
+        type: "finish",
+        finishReason: "error",
+        usage: { inputTokens: undefined, outputTokens: undefined },
+      },
+    ]);
   });
 
   it("normalizes aborts to AbortedError", async () => {

@@ -80,9 +80,10 @@ function parseIssues(md) {
   const re = /^## (ISSUE-\d+) — (.+)$/gm;
   let m;
   while ((m = re.exec(md)) !== null) {
-    const rest = md.slice(re.lastIndex, re.lastIndex + 400);
-    const status = rest.match(/\*\*Status:\*\*\s*(resolved|open|in-progress)/i)?.[1] ?? "open";
-    issues.push({ id: m[1], title: m[2].trim(), status: status.toLowerCase() });
+    const nextIssue = md.indexOf("\n## ISSUE-", re.lastIndex);
+    const body = md.slice(re.lastIndex, nextIssue === -1 ? md.length : nextIssue).replace(/\n---\s*$/, "").trim();
+    const status = body.match(/\*\*Status:\*\*\s*(resolved|open|in-progress)/i)?.[1] ?? "open";
+    issues.push({ id: m[1], title: m[2].trim(), status: status.toLowerCase(), body });
   }
   return issues;
 }
@@ -137,6 +138,14 @@ function tally(rows) {
 const allRows = coverage.flatMap((s) => s.rows);
 const totals = tally(allRows);
 const totalTests = allRows.reduce((n, r) => n + (r.tests ?? 0), 0);
+const blockedTestsByIssue = new Map();
+for (const row of allRows) {
+  if (row.cat === "blocked" && row.issue) {
+    const id = `ISSUE-${row.issue}`;
+    blockedTestsByIssue.set(id, (blockedTestsByIssue.get(id) ?? 0) + (row.tests ?? 0));
+  }
+}
+for (const issue of issues) issue.blockedTests = blockedTestsByIssue.get(issue.id) ?? 0;
 const openIssues = issues.filter((i) => i.status !== "resolved");
 const gitInfo = (() => {
   try {
@@ -170,7 +179,10 @@ function chip(row) {
     return `<span class="chip chip-${row.cat}">${row.passed}/${row.total}</span>`;
   }
   if (row.cat === "blocked") {
-    return `<span class="chip chip-blocked">ISSUE-${row.issue ?? "?"}</span>`;
+    const id = row.issue ? `ISSUE-${row.issue}` : null;
+    return id
+      ? `<button class="chip chip-blocked issue-trigger" type="button" data-issue="${id}">${id}</button>`
+      : `<span class="chip chip-blocked">ISSUE-?</span>`;
   }
   return `<span class="chip chip-${row.cat}">${esc(row.status.split(" ")[0])}</span>`;
 }
@@ -210,13 +222,18 @@ const legend = CATS.map(
 ).join("");
 
 const issueChips = issues
+  .toSorted((a, b) => b.blockedTests - a.blockedTests || a.id.localeCompare(b.id))
   .map(
     (i) =>
-      `<span class="ichip ${i.status === "resolved" ? "done" : "open"}" title="${esc(i.title)}">${i.id}<em>${esc(
-        i.title.length > 46 ? i.title.slice(0, 44) + "…" : i.title,
-      )}</em></span>`,
+      `<button class="ichip issue-trigger ${i.status === "resolved" ? "done" : "open"}" type="button" data-issue="${i.id}" title="${esc(i.title)}"><span>${i.id}</span><em>${esc(
+         i.title.length > 46 ? i.title.slice(0, 44) + "…" : i.title,
+      )}</em><b>${i.blockedTests} tests blocked</b></button>`,
   )
   .join("");
+
+const issueDetails = Object.fromEntries(
+  issues.map((i) => [i.id, { title: i.title, body: i.body, blockedTests: i.blockedTests }]),
+);
 
 const logItems = log
   .map((l) => `<li><time>${l.date}</time><p>${esc(l.text)}</p></li>`)
@@ -277,7 +294,8 @@ tr:last-child td{border-bottom:none}
 .file{font-size:12.5px;word-break:break-word;max-width:340px}
 td.num,th.num{text-align:right;width:44px}
 .stat{white-space:nowrap;width:120px}
-.chip{display:inline-block;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;padding:1px 7px;border-radius:9px;border:1px solid;line-height:1.5}
+.chip{display:inline-block;background:transparent;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;padding:1px 7px;border-radius:9px;border:1px solid;line-height:1.5}
+.issue-trigger{cursor:pointer}
 .chip-green{color:var(--c-green);border-color:var(--c-green)}
 .chip-partial{color:var(--c-partial);border-color:var(--c-partial)}
 .chip-pending{color:var(--c-pending);border-color:var(--c-pending)}
@@ -291,11 +309,19 @@ td.num,th.num{text-align:right;width:44px}
 .notes summary:hover{color:var(--accent)}
 .notes p{margin:4px 0 0;max-width:60ch}
 .ichips{display:flex;flex-wrap:wrap;gap:6px}
-.ichip{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;border:1px solid var(--line);border-radius:5px;padding:2px 8px;display:inline-flex;gap:6px;align-items:baseline}
+.ichip{background:transparent;color:inherit;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;border:1px solid var(--line);border-radius:5px;padding:3px 8px;display:inline-flex;gap:6px;align-items:baseline;cursor:pointer;text-align:left}
 .ichip em{font-style:normal;color:var(--ink-2);font-family:ui-sans-serif,system-ui,sans-serif}
+.ichip b{color:var(--ink-3);font-weight:500}
 .ichip.open{border-color:var(--c-blocked);color:var(--c-blocked)}
 .ichip.done{color:var(--ink-3);text-decoration:line-through}
 .ichip.done em{text-decoration:none;color:var(--ink-3)}
+.ichip:hover,.chip-blocked:hover{background:color-mix(in srgb,var(--c-blocked) 10%,transparent)}
+.issue-dialog{width:min(760px,calc(100% - 32px));max-height:calc(100% - 32px);padding:0;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);box-shadow:0 18px 60px #0005}
+.issue-dialog::backdrop{background:#0008}
+.issue-dialog header{display:flex;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--line)}
+.issue-dialog h2{font-size:16px}.issue-dialog .muted{display:block;margin-top:3px}
+.issue-dialog pre{margin:0;padding:18px;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink-2)}
+.dialog-close{align-self:start;border:1px solid var(--line);border-radius:5px;background:transparent;color:var(--ink);cursor:pointer;font-size:18px;line-height:1;padding:4px 7px}
 ol.log{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 ol.log li{display:grid;grid-template-columns:88px 1fr;gap:12px;font-size:13px}
 ol.log time{color:var(--ink-3);font-size:12px}
@@ -330,7 +356,30 @@ a{color:var(--accent)}
     <ol class="log">${logItems}</ol>
   </section>
   <footer>Single source of truth: <span class="mono">test-workers/ported/COVERAGE.md</span> — regenerate with <span class="mono">npm run dashboard</span></footer>
-</main>`;
+</main>
+<dialog class="issue-dialog" id="issue-dialog" aria-labelledby="issue-dialog-title">
+  <header><div><h2 id="issue-dialog-title"></h2><span class="muted mono" id="issue-dialog-meta"></span></div><button class="dialog-close" type="button" aria-label="Close issue details">×</button></header>
+  <pre id="issue-dialog-body"></pre>
+</dialog>
+<script>
+const issueDetails = ${JSON.stringify(issueDetails).replace(/</g, "\\u003c")};
+const dialog = document.querySelector("#issue-dialog");
+document.addEventListener("click", (event) => {
+  const trigger = event.target.closest("[data-issue]");
+  if (!trigger) return;
+  const id = trigger.dataset.issue;
+  const issue = issueDetails[id];
+  if (!issue) return;
+  document.querySelector("#issue-dialog-title").textContent = id + " · " + issue.title;
+  document.querySelector("#issue-dialog-meta").textContent = issue.blockedTests + " tests blocked";
+  document.querySelector("#issue-dialog-body").textContent = issue.body;
+  dialog.showModal();
+});
+document.querySelector(".dialog-close").addEventListener("click", () => dialog.close());
+dialog.addEventListener("click", (event) => {
+  if (event.target === dialog) dialog.close();
+});
+</script>`;
 
 writeFileSync(join(root, "dashboard.html"), html);
 console.log(

@@ -59,6 +59,7 @@ export type ModelChunk =
   | { type: "text-delta"; text: string }
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown }
+  | { type: "error"; error: unknown }
   | {
       type: "finish";
       finishReason: "stop" | "tool-calls" | "length" | "error" | "content-filter";

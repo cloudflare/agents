@@ -483,6 +483,25 @@ describe("Think — recovery basics", () => {
     expect(messages[1]!.parts.find((p) => p.type === "text")).toMatchObject({ text: "no recovery needed" });
   });
 
+  it("chatRecovery: false lets a stalled stream fail terminally instead of scheduling recovery", async () => {
+    vi.useFakeTimers();
+    try {
+      const { agent } = makeThink([{ kind: "hang" }]);
+      agent.chatRecovery = false;
+      agent.chatStreamStallTimeoutMs = 1000;
+      await agent.start();
+
+      const resultPromise = agent.chat("hi", undefined, { requestId: "req_1" });
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await resultPromise;
+
+      expect(result.outcome).toBe("error");
+      expect(agent.chatRecoverySchedule()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("waitUntilStable() returns false while a turn is running, then true after it settles", async () => {
     const { model, push, finish } = controllableModel();
     const { agent } = makeThink([]);
@@ -569,6 +588,75 @@ describe("Think — recovery basics", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Terminal response hooks and failure telemetry
+// ---------------------------------------------------------------------------
+
+describe("Think — terminal response reporting", () => {
+  it("fires onChatResponse with error status and emits chat:request:failed for in-band stream errors", async () => {
+    const { agent } = makeThink([
+      {
+        kind: "custom",
+        chunks: [
+          { type: "text-delta", text: "partial" },
+          { type: "error", error: new Error("provider failed") },
+        ],
+      },
+    ]);
+    await agent.start();
+    const responses: unknown[] = [];
+    const failures: unknown[] = [];
+    agent.onChatResponse = (result) => {
+      responses.push(result);
+    };
+    agent.bus.subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed") failures.push(event.payload);
+    });
+
+    const result = await agent.chat("hi", undefined, { requestId: "req_1" });
+
+    expect(result.outcome).toBe("error");
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      requestId: "req_1",
+      status: "error",
+      error: "provider failed",
+      continuation: false,
+    });
+    expect(failures).toContainEqual(
+      expect.objectContaining({
+        requestId: "req_1",
+        stage: "stream",
+        messagesPersisted: true,
+        error: "provider failed",
+      }),
+    );
+  });
+
+  it("fires onChatResponse with aborted status for cancelled turns", async () => {
+    const { agent } = makeThink([{ kind: "hang" }]);
+    await agent.start();
+    const responses: unknown[] = [];
+    agent.onChatResponse = (result) => {
+      responses.push(result);
+    };
+
+    const chatPromise = agent.chat("hi", undefined, { requestId: "req_1" });
+    await flushMicrotasks();
+    expect(agent.cancelChat("req_1", "stop now")).toBe(true);
+    const result = await chatPromise;
+
+    expect(result.outcome).toBe("aborted");
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      requestId: "req_1",
+      status: "aborted",
+      error: "stop now",
+      continuation: false,
+    });
   });
 });
 

@@ -269,6 +269,16 @@ interface CollectedStep {
   usage?: { inputTokens?: number; outputTokens?: number };
 }
 
+class InBandStreamError extends Error {
+  readonly source: unknown;
+
+  constructor(source: unknown) {
+    super(errorMessage(source));
+    this.name = "InBandStreamError";
+    this.source = source;
+  }
+}
+
 export function createTurnEngine(deps: {
   clock: Clock;
   ids: IdSource;
@@ -469,6 +479,9 @@ export function createTurnEngine(deps: {
         emit({ type: "finish", finishReason });
         return { kind: "completed", steps, finishReason };
       } catch (err) {
+        if (err instanceof InBandStreamError) {
+          return { kind: "error", error: err.source, steps };
+        }
         if (err instanceof StallError) {
           emit({ type: "error", errorText: err.message });
           emit({ type: "finish", finishReason: "error" });
@@ -560,6 +573,10 @@ async function consumeStream(
         case "tool-call":
           collected.toolCalls.push({ toolCallId: chunk.toolCallId, toolName: chunk.toolName, input: chunk.input });
           break;
+        case "error":
+          opts.emit({ type: "error", errorText: errorMessage(chunk.error) });
+          opts.emit({ type: "finish", finishReason: "error" });
+          throw new InBandStreamError(chunk.error);
         case "finish":
           collected.finishReason = chunk.finishReason;
           if (chunk.usage !== undefined) collected.usage = chunk.usage;
@@ -571,4 +588,10 @@ async function consumeStream(
     watchdog?.disarm();
   }
   return collected;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return String(error);
 }

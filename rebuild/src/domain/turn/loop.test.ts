@@ -595,6 +595,36 @@ describe("createTurnEngine — stall watchdog", () => {
 // ---------------------------------------------------------------------------
 
 describe("createTurnEngine — model throws mid-stream", () => {
+  it("treats in-band error chunks as terminal stream errors without duplicating terminal chunks", async () => {
+    const { clock, ids, bus } = makeDeps();
+    const engine = createTurnEngine({ clock, ids, bus });
+    const model = createFakeModel([
+      {
+        kind: "custom",
+        chunks: [
+          { type: "text-delta", text: "partial" },
+          { type: "error", error: new Error("provider error") },
+          { type: "text-delta", text: "ignored" },
+        ],
+      },
+    ]);
+    const tools = assembleTools({}, { clock });
+    const { chunks, emit } = collector();
+
+    const outcome = await engine.run({ context: baseContext(), system: "sys", tools, model, emit });
+
+    expect(outcome.kind).toBe("error");
+    if (outcome.kind === "error") {
+      expect((outcome.error as Error).message).toBe("provider error");
+    }
+    expect(chunks).toEqual([
+      { type: "start", messageId: "msg_1" },
+      { type: "text-delta", id: "t1", delta: "partial" },
+      { type: "error", errorText: "provider error" },
+      { type: "finish", finishReason: "error" },
+    ]);
+  });
+
   it("returns an error outcome; chunks emitted before the throw stand", async () => {
     const { clock, ids, bus } = makeDeps();
     const engine = createTurnEngine({ clock, ids, bus });

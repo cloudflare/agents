@@ -132,9 +132,12 @@ export interface ContextOverflowConfig {
 
 export interface ChatResponseResult {
   requestId: string;
-  outcome: "completed";
+  outcome: "completed" | "error" | "aborted";
+  status: "completed" | "error" | "aborted";
   message: ChatMessage;
   attachments: ReplyAttachment[];
+  continuation: boolean;
+  error?: string;
 }
 
 export interface ChatErrorContext {
@@ -717,7 +720,7 @@ export class Think<State = unknown> extends Agent<State> {
 
       let outcome = await runRecoverably();
 
-      if (outcome.kind === "error" && outcome.stalled) {
+      if (outcome.kind === "error" && outcome.stalled && this.recoveryEnabled) {
         const result = await this.chatRecoveryService.handleStall(spec.requestId);
         if (result === "recovering") {
           this.activeTurnInfo = null;
@@ -774,7 +777,14 @@ export class Think<State = unknown> extends Agent<State> {
         if (this.renderAttachment) for (const att of attachments) this.renderAttachment(att);
         this.bus.emit("message:response", { requestId: spec.requestId, messageId: message.id });
         if (this.onChatResponse) {
-          await this.onChatResponse({ requestId: spec.requestId, outcome: "completed", message, attachments });
+          await this.onChatResponse({
+            requestId: spec.requestId,
+            outcome: "completed",
+            status: "completed",
+            message,
+            attachments,
+            continuation: spec.continuation,
+          });
         }
         this.publishEvent({ type: "turn:settled", requestId: spec.requestId, outcome: "completed" });
         break;
@@ -796,6 +806,17 @@ export class Think<State = unknown> extends Agent<State> {
         break;
       }
       case "aborted": {
+        if (this.onChatResponse) {
+          await this.onChatResponse({
+            requestId: spec.requestId,
+            outcome: "aborted",
+            status: "aborted",
+            message,
+            attachments: this.actionService.attachments(spec.requestId),
+            continuation: spec.continuation,
+            error: outcome.reason ?? "aborted",
+          });
+        }
         this.bus.emit("message:cancel", { requestId: spec.requestId, reason: outcome.reason });
         this.publishEvent({
           type: "turn:settled",
@@ -810,11 +831,33 @@ export class Think<State = unknown> extends Agent<State> {
         const ctx: ChatErrorContext = { requestId: spec.requestId, stage: "turn" };
         if (classification) ctx.classification = classification;
         if (this.onChatError) await this.onChatError(outcome.error, ctx);
+        const errorText = toErrorValue(outcome.error).message;
+        this.bus.emit("message:error", {
+          requestId: spec.requestId,
+          error: errorText,
+        });
+        this.bus.emit("chat:request:failed", {
+          requestId: spec.requestId,
+          stage: "stream",
+          messagesPersisted: spec.newMessages.length > 0 || message.parts.length > 0,
+          error: errorText,
+        });
+        if (this.onChatResponse) {
+          await this.onChatResponse({
+            requestId: spec.requestId,
+            outcome: "error",
+            status: "error",
+            message,
+            attachments: this.actionService.attachments(spec.requestId),
+            continuation: spec.continuation,
+            error: errorText,
+          });
+        }
         this.publishEvent({
           type: "turn:settled",
           requestId: spec.requestId,
           outcome: "failed",
-          errorText: toErrorValue(outcome.error).message,
+          errorText,
         });
         break;
       }

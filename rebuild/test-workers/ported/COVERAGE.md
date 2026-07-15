@@ -41,7 +41,7 @@ file stays the single source of truth.
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
 | client-tools.test.ts | 86 | WIRE | ported 33/86 | 53 fail on REAL semantics: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. (ISSUE-029 flipped the approval-vocabulary tests.) |
-| think-session.test.ts | 198 | WIRE+API | rewritten 71/198 (7 dropped-with-pointer) | R1+R2: waitUntilStable block 9/9; onChatRecovery hook (ctx + persist:false/continue:false decisions) + injection seams landed +17 flips total. Remaining failures keep NAMED missing-feature reasons (in-band stream errors, abort/stall injection, sanitization/row-size, saveMessages/addMessages, submission seams). |
+| think-session.test.ts | 198 | WIRE+API | rewritten 103/198 (7 dropped-with-pointer) | R3 landed in-band stream errors (new `error` ModelChunk variant, threaded through providers/loop/wire) + abort/stall injection seams: +32 flips, zero regressions. Remaining failures keep NAMED missing-feature reasons (sanitization/row-size, saveMessages/addMessages variants, submission seams, child-stream forwarding, keep-recovering override). |
 | hooks.test.ts | 105 | WIRE+API | pending | split T1/T3 |
 | submissions.test.ts | 51 | PUBLIC-API | pending | T3 |
 | agent-tools.test.ts | 33 | PUBLIC-API | pending | T3 |

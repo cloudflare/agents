@@ -65,7 +65,8 @@ export function createAiSdkModel(model: LanguageModel): ModelClient {
               };
               break;
             case "error":
-              throw normalizeError(part.error, request.signal);
+              yield { type: "error", error: normalizeError(part.error, request.signal) };
+              break;
             case "abort":
               throw new AbortedError(part.reason ?? "Model request aborted");
             default:
