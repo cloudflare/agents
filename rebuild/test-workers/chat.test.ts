@@ -73,6 +73,29 @@ function framesOfType(frames: Frame[], type: string): Frame[] {
   return frames.filter((frame) => frame.type === type);
 }
 
+function userMessage(
+  id: string,
+  text: string
+): { id: string; role: "user"; parts: Array<{ type: "text"; text: string }> } {
+  return { id, role: "user", parts: [{ type: "text", text }] };
+}
+
+function chatRequest(id: string, text: string): Frame {
+  return {
+    type: "cf_agent_use_chat_request",
+    id,
+    init: {
+      method: "POST",
+      body: JSON.stringify({ messages: [userMessage(`u_${id}`, text)] })
+    }
+  };
+}
+
+function chunkBody(frame: Frame): { type: string } & Record<string, unknown> {
+  if (typeof frame.body !== "string") throw new Error("response frame missing body");
+  return JSON.parse(frame.body) as { type: string } & Record<string, unknown>;
+}
+
 function messageText(message: unknown): string {
   if (
     typeof message !== "object" ||
@@ -131,11 +154,7 @@ describe("hostAgent chat over Durable Object WebSockets", () => {
       "initial sync"
     );
 
-    client.send({
-      type: "cf_agent_use_chat_request",
-      id: "req_1",
-      input: "hello"
-    });
+    client.send(chatRequest("req_1", "hello"));
     await waitForFrame(
       client.frames,
       (frame) =>
@@ -146,15 +165,35 @@ describe("hostAgent chat over Durable Object WebSockets", () => {
     );
     expect(
       framesOfType(client.frames, "cf_agent_use_chat_response").some(
-        (frame) => frame.id === "req_1"
+        (frame) => frame.id === "req_1" && frame.done === false && typeof frame.body === "string"
       )
     ).toBe(true);
+    expect(
+      chunkBody(
+        framesOfType(client.frames, "cf_agent_use_chat_response").find(
+          (frame) => frame.id === "req_1" && frame.done === false && typeof frame.body === "string"
+        )!
+      ).type
+    ).toBeTruthy();
+    await waitForFrame(
+      client.frames,
+      (frame) =>
+        frame.type === "cf_agent_use_chat_response" &&
+        frame.id === "req_1" &&
+        frame.done === true &&
+        frame.body === undefined,
+      "first terminal response"
+    );
+    await waitForFrame(
+      client.frames,
+      (frame) =>
+        frame.type === "cf_agent_chat_messages" &&
+        Array.isArray(frame.messages) &&
+        frame.messages.length === 2,
+      "first post-settle sync"
+    );
 
-    client.send({
-      type: "cf_agent_use_chat_request",
-      id: "req_2",
-      input: "again"
-    });
+    client.send(chatRequest("req_2", "again"));
     await waitForFrame(
       client.frames,
       (frame) =>
@@ -162,6 +201,15 @@ describe("hostAgent chat over Durable Object WebSockets", () => {
         frame.requestId === "req_2" &&
         messageText(frame.message).includes("worker response 2"),
       "second final message"
+    );
+    await waitForFrame(
+      client.frames,
+      (frame) =>
+        frame.type === "cf_agent_use_chat_response" &&
+        frame.id === "req_2" &&
+        frame.done === true &&
+        frame.body === undefined,
+      "second terminal response"
     );
   });
 
@@ -174,11 +222,7 @@ describe("hostAgent chat over Durable Object WebSockets", () => {
       "initial sync"
     );
 
-    first.send({
-      type: "cf_agent_use_chat_request",
-      id: "req_1",
-      input: "persist"
-    });
+    first.send(chatRequest("req_1", "persist"));
     await waitForFrame(
       first.frames,
       (frame) =>
@@ -272,11 +316,7 @@ describe("hostAgent chat over Durable Object WebSockets", () => {
       "initial sync"
     );
 
-    client.send({
-      type: "cf_agent_use_chat_request",
-      id: "req_1",
-      input: "remove me"
-    });
+    client.send(chatRequest("req_1", "remove me"));
     await waitForFrame(
       client.frames,
       (frame) =>

@@ -955,8 +955,13 @@ export class Think<State = unknown> extends Agent<State> {
     this.ensureRuntime();
     const requestId = this.turnState.lastRequestId();
     if (!requestId) return undefined;
+    // The continuation IS the suspended turn resuming (audit 25 statechart:
+    // suspended -> queued is the same turn), so it keeps the requestId — the
+    // request stream's identity. Recovery continuations already do the same
+    // (incident.requestId); minting a fresh id here orphaned the client's
+    // stream at the wire (ISSUE-027).
     return this.executeTurn({
-      requestId: this.ids.newId("req"),
+      requestId,
       trigger: "continuation",
       continuation: true,
       newMessages: [],

@@ -87,6 +87,22 @@ describe("createSession: messages & history", () => {
     expect(history.map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
   });
 
+  it("re-appending an existing id refreshes content in place — no re-parenting, no history cycle (ISSUE-028)", async () => {
+    const s = session({ blocks: [] });
+    await s.appendMessage(userMessage("hi", "m1"));
+    await s.appendMessage(assistantMessage([{ type: "text", text: "hello" }], "m2"));
+
+    // Clients round-trip full arrays: m1 arrives again after m2 is the leaf.
+    // Before the fix this re-parented m1 onto m2 (a cycle) and getHistory
+    // looped forever.
+    await s.appendMessage(userMessage("hi (edited)", "m1"));
+
+    const history = await s.getHistory();
+    expect(history.map((m) => m.id)).toEqual(["m1", "m2"]);
+    const first = history[0]!;
+    expect(first.parts).toEqual([{ type: "text", text: "hi (edited)" }]);
+  });
+
   it("explicit parentId creates a branch off an earlier message", async () => {
     const s = session({ blocks: [] });
     await s.appendMessage(userMessage("hi", "m1"));

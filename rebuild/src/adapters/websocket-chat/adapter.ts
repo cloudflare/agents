@@ -53,10 +53,39 @@ function parseClientTools(raw: unknown): ToolSet | undefined {
   return tools;
 }
 
-function parseChatInput(frame: Record<string, unknown>): string | ChatMessage[] | undefined {
-  if (Array.isArray(frame.messages)) return frame.messages as ChatMessage[];
-  if (typeof frame.input === "string") return frame.input;
-  return undefined;
+interface ParsedChatRequest {
+  input?: string | ChatMessage[];
+  extras: Record<string, unknown>;
+}
+
+/**
+ * The original protocol wraps the chat payload in a fetch-like envelope:
+ * `{ id, init: { method: "POST", body: JSON.stringify({ messages, ...extras }) } }`
+ * (ISSUE-026). The body's `messages` are UIMessage-shaped — the shape our
+ * ChatMessage was modeled on. Extras observed in the original suites:
+ * `trigger` ("submit-message" | "regenerate-message"), `channel`, client tool
+ * schemas. Legacy direct `messages`/`input` fields remain accepted for
+ * internal callers; the envelope wins when present.
+ */
+function parseChatRequest(frame: Record<string, unknown>): ParsedChatRequest {
+  const init = frame.init;
+  if (isRecord(init) && typeof init.body === "string") {
+    try {
+      const body: unknown = JSON.parse(init.body);
+      if (isRecord(body)) {
+        const { messages, ...extras } = body;
+        return {
+          ...(Array.isArray(messages) ? { input: messages as ChatMessage[] } : {}),
+          extras,
+        };
+      }
+    } catch {
+      // Malformed envelope body: fall through to the legacy fields.
+    }
+  }
+  if (Array.isArray(frame.messages)) return { input: frame.messages as ChatMessage[], extras: frame };
+  if (typeof frame.input === "string") return { input: frame.input, extras: frame };
+  return { extras: {} };
 }
 
 /**
@@ -92,10 +121,44 @@ export function attachChatTransport(
   }
 
   /** One ConversationEvent may fan out to zero, one, or (state:changed) an origin-excluded subset of connections. */
-  function eventToFrame(event: ConversationEvent): { frame: unknown; excludeConnectionId?: string } | undefined {
+  function eventToFrame(
+    event: ConversationEvent,
+  ): { frame: unknown; excludeConnectionId?: string; resyncAfter?: boolean } | undefined {
     switch (event.type) {
       case "chunk":
-        return { frame: { type: "cf_agent_use_chat_response", id: event.requestId, chunk: event.chunk } };
+        // Original wire shape (ISSUE-026): the chunk rides as a serialized
+        // `body`; `done` marks the terminal frame of the request's stream.
+        return {
+          frame: {
+            type: "cf_agent_use_chat_response",
+            id: event.requestId,
+            body: JSON.stringify(event.chunk),
+            done: false,
+          },
+        };
+      case "turn:settled": {
+        // A turn suspended on a client tool or approval keeps its request
+        // stream open — the continuation publishes further chunks and an
+        // eventual terminal settle under the same requestId. A DURABLE-PAUSE
+        // suspension is different (original semantics, execute-hitl suite):
+        // the paused output is the turn's normal tool result and the request
+        // is over from the client's perspective — terminal `done` fires now;
+        // approveExecution later drives a fresh continuation stream.
+        if (event.outcome === "suspended" && event.suspendedOn !== "durable-pause") return undefined;
+        return {
+          frame: {
+            type: "cf_agent_use_chat_response",
+            id: event.requestId,
+            done: true,
+            ...(event.outcome === "failed"
+              ? { error: true, body: JSON.stringify({ type: "error", errorText: event.errorText ?? "turn failed" }) }
+              : {}),
+          },
+          // The original broadcasts a full CHAT_MESSAGES sync after a turn
+          // settles so every client converges on the persisted transcript.
+          resyncAfter: true,
+        };
+      }
       case "message:updated":
         return {
           frame: {
@@ -124,11 +187,19 @@ export function attachChatTransport(
         };
       case "run:event":
         return { frame: { type: "cf_agent_tool_run_event", runId: event.runId, event: event.event } };
-      // turn:started / turn:settled have no direct frame counterpart: their
-      // client-visible effects are the chunk stream's start/finish and the
-      // settled message:updated (audit 25 §4's event->frame table omits them).
+      // turn:started has no direct frame counterpart: its client-visible
+      // effect is the chunk stream starting.
       default:
         return undefined;
+    }
+  }
+
+  /** Post-settle transcript sync (original protocol): every client converges on persisted history. */
+  async function resyncAllConnections(): Promise<void> {
+    const messages = await agent.history();
+    for (const conn of registry.connections()) {
+      if (!deliverable(conn.id)) continue;
+      send(conn, { type: "cf_agent_chat_messages", messages });
     }
   }
 
@@ -139,6 +210,11 @@ export function attachChatTransport(
       if (!deliverable(conn.id)) continue;
       if (mapped.excludeConnectionId !== undefined && mapped.excludeConnectionId === conn.id) continue;
       send(conn, mapped.frame);
+    }
+    if (mapped.resyncAfter) {
+      void resyncAllConnections().catch(() => {
+        // A failed resync is recoverable: the next connect or resume re-syncs.
+      });
     }
   }
 
@@ -188,7 +264,8 @@ export function attachChatTransport(
         send(conn, {
           type: "cf_agent_use_chat_response",
           id: active.requestId,
-          chunk: stored.event.chunk,
+          body: JSON.stringify(stored.event.chunk),
+          done: false,
           replay: true,
         });
       }
@@ -207,11 +284,11 @@ export function attachChatTransport(
 
     switch (frame.type) {
       case "cf_agent_use_chat_request": {
-        const input = parseChatInput(frame);
+        const { input, extras } = parseChatRequest(frame);
         if (input === undefined) return;
         const requestId = typeof frame.id === "string" ? frame.id : agent.ids.newId("req");
-        const channel = typeof frame.channel === "string" ? frame.channel : undefined;
-        const clientTools = parseClientTools(frame.clientTools);
+        const channel = typeof extras.channel === "string" ? extras.channel : undefined;
+        const clientTools = parseClientTools(extras.clientTools ?? extras.tools);
         // Fire-and-forget: chat() never rejects (it turns failures into a
         // TurnResult/callback), and the turn's own events already reach
         // every connection through the live subscription above — awaiting

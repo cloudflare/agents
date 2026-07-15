@@ -110,6 +110,27 @@ function framesOfType(frames: unknown[], type: string): Array<Record<string, unk
   );
 }
 
+function userMessage(id: string, text: string): { id: string; role: "user"; parts: Array<{ type: "text"; text: string }> } {
+  return { id, role: "user", parts: [{ type: "text", text }] };
+}
+
+function chatRequest(
+  id: string,
+  messages: Array<{ id: string; role: "user"; parts: Array<{ type: "text"; text: string }> }>,
+  extras: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: "cf_agent_use_chat_request",
+    id,
+    init: { method: "POST", body: JSON.stringify({ messages, ...extras }) },
+  };
+}
+
+function chunkBody(frame: Record<string, unknown>): { type: string } & Record<string, unknown> {
+  if (typeof frame.body !== "string") throw new Error("response frame missing body");
+  return JSON.parse(frame.body) as { type: string } & Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Connect sync: identity / state / history / recovering
 // ---------------------------------------------------------------------------
@@ -411,8 +432,8 @@ describe("attachChatTransport — resume handshake", () => {
     expect(framesOfType(client.frames, "cf_agent_stream_resuming")).toHaveLength(1);
     const replayed = framesOfType(client.frames, "cf_agent_use_chat_response").filter((f) => f.replay === true);
     expect(replayed.length).toBeGreaterThan(0);
-    expect(replayed[0]).toMatchObject({ id: "req_hang", replay: true });
-    expect((replayed[0]?.chunk as { type: string }).type).toBe("start");
+    expect(replayed[0]).toMatchObject({ id: "req_hang", done: false, replay: true });
+    expect(chunkBody(replayed[0]!).type).toBe("start");
 
     agent.cancelAllChats("test cleanup");
   });
@@ -469,14 +490,21 @@ describe("attachChatTransport — inbound frame parsing", () => {
     const transport = attachChatTransport(agent, registry);
     const client = await connectChatClient(transport, registry);
 
-    await client.send({ type: "cf_agent_use_chat_request", id: "req_a", input: "hello" });
+    await client.send(chatRequest("req_a", [userMessage("u1", "hello")]));
     await vi.waitFor(async () => {
       const messages = await agent.getMessages();
       expect(messages).toHaveLength(2);
     });
 
-    const chunkFrames = framesOfType(client.frames, "cf_agent_use_chat_response");
-    expect(chunkFrames.every((f) => f.id === "req_a")).toBe(true);
+    const responseFrames = framesOfType(client.frames, "cf_agent_use_chat_response");
+    expect(responseFrames.every((f) => f.id === "req_a")).toBe(true);
+    expect(responseFrames.some((f) => f.done === true && f.body === undefined)).toBe(true);
+    const streamedChunks = responseFrames.filter((f) => f.done === false).map(chunkBody);
+    expect(streamedChunks[streamedChunks.length - 1]).toMatchObject({ type: "finish" });
+    await vi.waitFor(() => {
+      const syncs = framesOfType(client.frames, "cf_agent_chat_messages");
+      expect(syncs.some((f) => Array.isArray(f.messages) && f.messages.length === 2)).toBe(true);
+    });
   });
 
   it("cf_agent_use_chat_request with `messages` and `clientTools` offers the client tool to the model", async () => {
@@ -501,6 +529,8 @@ describe("attachChatTransport — inbound frame parsing", () => {
       (t) => t.name,
     );
     expect(toolNames).toContain("pick_color");
+    const modelMessages = (agent.model as FakeModel).requests[0]!.messages;
+    expect(modelMessages).toContainEqual({ role: "user", content: [{ type: "text", text: "use the tool" }] });
   });
 
   it("cf_agent_use_chat_request with neither `input` nor `messages` is ignored", async () => {
@@ -529,7 +559,7 @@ describe("attachChatTransport — inbound frame parsing", () => {
     const transport = attachChatTransport(agent, registry);
     const client = await connectChatClient(transport, registry);
 
-    await client.send({ type: "cf_agent_use_chat_request", id: "req_d", input: "add 2 and 3" });
+    await client.send(chatRequest("req_d", [userMessage("u1", "add 2 and 3")]));
     await vi.waitFor(async () => {
       const messages = await agent.getMessages();
       expect(messages[1]?.parts.find((p) => p.type === "tool-add")).toMatchObject({ state: "input-available" });
@@ -562,9 +592,13 @@ describe("attachChatTransport — inbound frame parsing", () => {
     const transport = attachChatTransport(agent, registry);
     const client = await connectChatClient(transport, registry);
 
-    await client.send({ type: "cf_agent_use_chat_request", id: "req_e", input: "do it" });
+    await client.send(chatRequest("req_e", [userMessage("u1", "do it")]));
     await vi.waitFor(() => {
-      expect(framesOfType(client.frames, "cf_agent_use_chat_response").some((f) => (f.chunk as { type: string }).type === "tool-approval-requested")).toBe(true);
+      expect(
+        framesOfType(client.frames, "cf_agent_use_chat_response")
+          .filter((f) => f.done === false)
+          .some((f) => chunkBody(f).type === "tool-approval-requested"),
+      ).toBe(true);
     });
 
     await client.send({ type: "cf_agent_tool_approval", toolCallId: "call_1", approved: true });
@@ -603,9 +637,13 @@ describe("attachChatTransport — inbound frame parsing", () => {
     const transport = attachChatTransport(agent, registry);
     const client = await connectChatClient(transport, registry);
 
-    await client.send({ type: "cf_agent_use_chat_request", id: "req_f", input: "do it" });
+    await client.send(chatRequest("req_f", [userMessage("u1", "do it")]));
     await vi.waitFor(() => {
-      expect(framesOfType(client.frames, "cf_agent_use_chat_response").some((f) => (f.chunk as { type: string }).type === "tool-approval-requested")).toBe(true);
+      expect(
+        framesOfType(client.frames, "cf_agent_use_chat_response")
+          .filter((f) => f.done === false)
+          .some((f) => chunkBody(f).type === "tool-approval-requested"),
+      ).toBe(true);
     });
 
     await client.send({ type: "cf_agent_tool_approval", toolCallId: "call_1", approved: false, reason: "no thanks" });

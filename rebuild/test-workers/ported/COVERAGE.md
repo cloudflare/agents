@@ -36,7 +36,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
-| client-tools.test.ts | 86 | WIRE | ported 25/86 | 61 fail: dominated by `framing` (ISSUE-026); observability asserts throw via the ISSUE-009 shim; 5 late-timeout unhandled rejections (harness cleanup note). Re-triage post-026. |
+| client-tools.test.ts | 86 | WIRE | ported 34/86 | 52 fail on REAL semantics now: client-tool part-state details, auto-continue/debounce `divergence`, observability asserts on the ISSUE-009 shim, regenerate/branching `missing-feature` (session branching), ~4 residual done-timeouts to pin. Per-test triage continues with stretch tiers. |
 | think-session.test.ts | 198 | WIRE+API | pending | split on port: wire half T1, api half T3 |
 | hooks.test.ts | 105 | WIRE+API | pending | split T1/T3 |
 | submissions.test.ts | 51 | PUBLIC-API | pending | T3 |
@@ -47,14 +47,14 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | fetch-tools.test.ts | 32 | INTERNAL | quarry | checklist vs domain/fetch suite |
 | assistant-tools.test.ts | 30 | PUBLIC-API | pending | T3 |
 | scheduled-tasks.test.ts | 14 | PUBLIC-API | pending | T3 |
-| message-reconciliation.test.ts | 8 | WIRE | ported 0/8 | all `framing` (ISSUE-026) before the intended ISSUE-015 asserts; re-triage after 026 |
-| execute-hitl.test.ts | 10 | WIRE | ported 0/10 | all `framing`; rebuild HAS approvals — expect real signal post-026; possible ISSUE-004 residue |
+| message-reconciliation.test.ts | 8 | WIRE | ported 2/8 | 6 fail `missing-feature ISSUE-015` (merge/repair semantics — clean fast assertions now). This file also found ISSUE-028 (session append cycle -> isolate-wedging infinite loop; fixed). |
+| execute-hitl.test.ts | 10 | WIRE | ported 0/10 | `fixture-gap`: fixture authored on the approval-gate path (`approval-requested`); original uses ACTIONS durable-pause (paused output as normal `output-available` result + approveExecution). Rework fixture onto the rebuild's durable-pause actions. |
 | hydration-budget.test.ts | 13 | PUBLIC-API | blocked ISSUE-014 | media-eviction dependent |
 | actions-durable-pause.test.ts | 18 | PUBLIC-API | pending | T3 |
 | host-embedding.test.ts | 11 | INTERNAL | blocked ISSUE-013 | framework/server-entry |
-| onconnect-broadcast.test.ts | 9 | WIRE | ported 5/9 | connect frames compatible; 4 fail on active-stream suppression + terminal replay (`framing` + ISSUE-018-adjacent divergence, #1645) |
-| actions-attach-reply.test.ts | 12 | WIRE | ported 6/12 | attach-reply surface partly compatible already; remaining 6 `framing` (ISSUE-026). |
-| assistant-agent.test.ts | 5 | WIRE | ported 0/5 | **T0 gate** — all `framing` (ISSUE-026) |
+| onconnect-broadcast.test.ts | 9 | WIRE | ported 5/9 | 4 fail `divergence ISSUE-018`: on-connect CHAT_MESSAGES suppression during active stream + terminal replay via STREAM_RESUMING (#1645). Stretch tier 1. |
+| actions-attach-reply.test.ts | 12 | WIRE | ported 6/12 | 6 fail REAL semantics: attachment validation strictness `divergence` (rebuild accepts invalid/non-json-safe attachments the original filters/normalizes) + done-timeouts on specific flows. Candidate small actions fix. |
+| assistant-agent.test.ts | 5 | WIRE | ported 5/5 | **T0 gate GREEN** (ISSUE-026 resolved) |
 | channel-recovery.test.ts | 5 | PUBLIC-API | pending | T3 |
 | stream-cleanup.test.ts | 11 | PUBLIC-API | pending | T3; event-log retention differs — expect divergence notes |
 | media-eviction.test.ts | 9 | INTERNAL | blocked ISSUE-014 | port pure-fn tests with the impl |
@@ -62,7 +62,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | action-pause-recovery.test.ts | 3 | PUBLIC-API | pending | T3 |
 | onstart-degraded.test.ts | 5 | PUBLIC-API | pending | T3 |
 | agent-tool-reattach-recovery.test.ts | 2 | WIRE | ported 2/2 | **PASSES** — facet spawner + delegation reattach hold against the original's assertions. |
-| streaming-message-id.test.ts | 1 | WIRE | ported 0/1 | **T0 gate** — `framing` (ISSUE-026) |
+| streaming-message-id.test.ts | 1 | WIRE | ported 1/1 | **T0 gate GREEN** (ISSUE-026 resolved) |
 | run-turn-recovery.test.ts | 2 | PUBLIC-API | pending | T3 |
 | turn-metadata.test.ts | 4 | PUBLIC-API | pending | T3 |
 | execute-tool.test.ts | 6 | PUBLIC-API | blocked ISSUE-004 | codemode |
@@ -86,14 +86,14 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 
 | File | Tests | Status | Notes |
 |---|--:|---|---|
-| chat-recovery.test.ts | 5 | ported 2/5 | Harness proven: wrangler boot/SIGKILL-tree/restart works across all tests. PASS: sub-agent chat recovery after kill via parent alarm; agent-tool re-attach after parent restart (#1630) — both pure-RPC. FAIL (triaged): the three chat-frame scenarios — `framing` ISSUE-026. (Routing slug fix for acronym class names applied 2026-07-14: E2E agents now actually route; failures are genuine framing, not connection.) |
-| stall-recovery.test.ts | 1 | ported 0/1 | connects (post slug fix); fails `framing` ISSUE-026 (chat frames never parsed; 191s timeout). |
-| context-overflow-recovery.test.ts | 3 | ported 0/3 | fast-fails ~4s BEFORE chat — triage incomplete (fixture RPC or overflow-config mismatch); re-check post-026. |
-| submission-recovery.test.ts | 3 | ported 0/3 | connects; fails `framing` ISSUE-026 (submission turns never stream). |
-| action-pause-recovery.test.ts | 1 | ported 0/1 | fails ~8s after connect; likely `framing` on the pause-triggering chat; re-check post-026. |
+| chat-recovery.test.ts | 5 | ported 5/5 | **GREEN** — all five kill/restart scenarios recover (chat via persisted alarm, restart churn, post-persist failure surface, sub-agent recovery, agent-tool re-attach #1630). ISSUE-026 resolution unlocked the three chat-frame scenarios. |
+| stall-recovery.test.ts | 1 | ported 1/1 | **GREEN** — stalled turn recovers via scheduled continuation (#1626) under a real kill. |
+| context-overflow-recovery.test.ts | 3 | ported 0/3 | fast-fails ~4s pre-chat: `fixture-gap`/config mismatch between fixture's overflow options and the rebuild's ContextOverflowConfig — pin next. |
+| submission-recovery.test.ts | 3 | ported 0/3 | long timeouts on submission transitions — likely `divergence` in submission surface/RPC names vs original; pin next. |
+| action-pause-recovery.test.ts | 1 | ported 0/1 | fails ~8s: same durable-pause fixture mechanism question as execute-hitl (`fixture-gap`). |
 | action-ledger-recovery.test.ts | 1 | ported 1/1 | **PASSES** — crash-left pending ledger lease reclaimed after real kill/restart. |
-| tool-rollback.test.ts | 1 | ported 0/1 | connects, runs long (361s) then fails `framing` ISSUE-026. |
-| persist-false-preserves.test.ts | 1 | ported 0/1 | connects; fails `framing` ISSUE-026. |
+| tool-rollback.test.ts | 1 | ported 1/1 | **GREEN** — long tool loop recovers across repeated evictions without deep rollback. |
+| persist-false-preserves.test.ts | 1 | ported 0/1 | 75s: recovery hook persist:false mapping — `divergence`/`fixture-gap`; pin with recovery-hook work. |
 | reattach-budget.test.ts | 1 | pending | T2 (sub-agent recovery fixtures) |
 | task-amplification.test.ts | 2 | pending | T2 (sub-agent recovery fixtures) |
 | messenger-recovery.test.ts | 2 | blocked ISSUE-011 | |

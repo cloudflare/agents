@@ -61,6 +61,23 @@ function framesOfType(frames: unknown[], type: string): Array<Record<string, unk
   );
 }
 
+function userMessage(id: string, text: string): { id: string; role: "user"; parts: Array<{ type: "text"; text: string }> } {
+  return { id, role: "user", parts: [{ type: "text", text }] };
+}
+
+function chatRequest(id: string, text: string): Record<string, unknown> {
+  return {
+    type: "cf_agent_use_chat_request",
+    id,
+    init: { method: "POST", body: JSON.stringify({ messages: [userMessage(`u_${id}`, text)] }) },
+  };
+}
+
+function chunkBody(frame: Record<string, unknown>): { type: string } & Record<string, unknown> {
+  if (typeof frame.body !== "string") throw new Error("response frame missing body");
+  return JSON.parse(frame.body) as { type: string } & Record<string, unknown>;
+}
+
 class ActionsThink extends Think<unknown> {
   model!: ModelClient;
   actionExecuteCounts: Record<string, number> = {};
@@ -160,11 +177,12 @@ describe("e2e: actions and approvals", () => {
     const transport = attachChatTransport(agent, registry);
     const client = await connectChatClient(transport, registry);
 
-    await client.send({ type: "cf_agent_use_chat_request", id: "req_1", input: "delete my account" });
+    await client.send(chatRequest("req_1", "delete my account"));
 
     await vi.waitFor(() => {
       const approvalRequested = framesOfType(client.frames, "cf_agent_use_chat_response")
-        .map((f) => f.chunk as { type: string })
+        .filter((f) => f.done === false)
+        .map(chunkBody)
         .find((c) => c.type === "tool-approval-requested");
       expect(approvalRequested).toBeDefined();
     });
@@ -178,6 +196,16 @@ describe("e2e: actions and approvals", () => {
     await vi.waitFor(async () => {
       const messages = await agent.getMessages();
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Account deleted."))).toBe(true);
+    });
+    await vi.waitFor(() => {
+      expect(
+        framesOfType(client.frames, "cf_agent_use_chat_response").some((f) => f.done === true && f.body === undefined),
+      ).toBe(true);
+      expect(
+        framesOfType(client.frames, "cf_agent_chat_messages").some(
+          (f) => Array.isArray(f.messages) && f.messages.length >= 2,
+        ),
+      ).toBe(true);
     });
     expect(agent.actionExecuteCounts.delete_account).toBe(1);
     expect(
@@ -199,11 +227,11 @@ describe("e2e: actions and approvals", () => {
     const transport2 = attachChatTransport(agent2, registry2);
     const client2 = await connectChatClient(transport2, registry2);
 
-    await client2.send({ type: "cf_agent_use_chat_request", id: "req_2", input: "delete my account" });
+    await client2.send(chatRequest("req_2", "delete my account"));
     await vi.waitFor(() => {
       expect(
         framesOfType(client2.frames, "cf_agent_use_chat_response").some(
-          (f) => (f.chunk as { type: string }).type === "tool-approval-requested",
+          (f) => f.done === false && chunkBody(f).type === "tool-approval-requested",
         ),
       ).toBe(true);
     });
@@ -217,6 +245,16 @@ describe("e2e: actions and approvals", () => {
     await vi.waitFor(async () => {
       const messages = await agent2.getMessages();
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Okay, not deleting."))).toBe(true);
+    });
+    await vi.waitFor(() => {
+      expect(
+        framesOfType(client2.frames, "cf_agent_use_chat_response").some((f) => f.done === true && f.body === undefined),
+      ).toBe(true);
+      expect(
+        framesOfType(client2.frames, "cf_agent_chat_messages").some(
+          (f) => Array.isArray(f.messages) && f.messages.length >= 2,
+        ),
+      ).toBe(true);
     });
     const messages2 = await agent2.getMessages();
     const toolPart = messages2[1]!.parts.find((p) => p.type === "tool-delete_account");
@@ -238,7 +276,7 @@ describe("e2e: actions and approvals", () => {
     const transport = attachChatTransport(agent, registry);
     const client = await connectChatClient(transport, registry);
 
-    await client.send({ type: "cf_agent_use_chat_request", id: "req_1", input: "deploy to prod" });
+    await client.send(chatRequest("req_1", "deploy to prod"));
 
     await vi.waitFor(() => {
       expect(agent.pendingApprovals()).toHaveLength(1); // durable-pause ends the turn
@@ -252,6 +290,16 @@ describe("e2e: actions and approvals", () => {
     await vi.waitFor(async () => {
       const messages = await agent.getMessages();
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Deployed to prod!"))).toBe(true);
+    });
+    await vi.waitFor(() => {
+      expect(
+        framesOfType(client.frames, "cf_agent_use_chat_response").some((f) => f.done === true && f.body === undefined),
+      ).toBe(true);
+      expect(
+        framesOfType(client.frames, "cf_agent_chat_messages").some(
+          (f) => Array.isArray(f.messages) && f.messages.length >= 2,
+        ),
+      ).toBe(true);
     });
     expect(agent.actionExecuteCounts.deploy).toBe(1);
     const messages = await agent.getMessages();

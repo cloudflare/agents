@@ -361,7 +361,15 @@ revisit alongside ISSUE-003's transport vendoring.
 
 ## ISSUE-026 — Wire compat is name-level, not payload-level
 
-**Status:** open · **Area:** Transport (`adapters/websocket-chat`) — found by the test-port audit ([audit 29](./audit/29-test-coverage-port.md) §1)
+**Status:** resolved (2026-07-15) · **Area:** Transport (`adapters/websocket-chat`) — found by the test-port audit ([audit 29](./audit/29-test-coverage-port.md) §1)
+
+Resolved: the adapter now speaks the original payloads as canonical — accepts
+the `init.body` request envelope (legacy direct fields still work), emits
+`{id, body, done, error}` chunks with terminal `done` on settle (suspended
+turns keep the stream open, EXCEPT durable-pause which is terminal per the
+original's execute-hitl semantics), and broadcasts a full
+`cf_agent_chat_messages` resync after settle. Native tests + demo page
+converged. T0 gates green (streaming-message-id 1/1, assistant-agent 5/5).
 
 We kept the `cf_agent_*` frame NAMES but the original payload envelopes differ:
 the original chat request wraps its payload as `{ id, init: { method: "POST",
@@ -373,3 +381,34 @@ field shapes need the same audit. Until fixed, the real `agents/react` client
 behavior. Fix is adapter-only (accept `init.body`, emit `body`/`done`), with two
 ported original tests (`streaming-message-id`, `assistant-agent`) as the
 acceptance gate — audit 29 track T0.
+
+---
+
+## ISSUE-027 — Interaction-driven continuations minted fresh requestIds
+
+**Status:** resolved (2026-07-15) · **Area:** app/think (`continueLastTurn`)
+
+Found by the ported approval-flow tests: a turn resuming after
+applyToolResult/resolveApproval is the SAME turn per the audit 25 statechart
+(suspended → queued), and recovery continuations already reuse
+`incident.requestId` — but `continueLastTurn` generated a new id, so the
+continuation's chunks and terminal `done` arrived under an id the client
+never saw, orphaning the request stream at the wire. Fixed: the continuation
+keeps the suspended turn's requestId.
+
+---
+
+## ISSUE-028 — Session append could create a parent cycle → synchronous infinite loop
+
+**Status:** resolved (2026-07-15) · **Area:** Conversation/Session (`domain/session`)
+
+Found by the ported message-reconciliation suite (which wedged entire workerd
+isolates so hard that vitest timeouts never fired). `appendMessage` blindly
+re-parented an already-stored message id onto the current leaf; clients that
+round-trip full message arrays (every useChat-style client) re-send existing
+ids, creating a parent cycle that `rawHistory`'s chain walk followed forever
+— a synchronous infinite loop inside the DO. Fixed: re-appending a known id
+refreshes content in place without re-parenting, and `rawHistory` gained a
+seen-set cycle guard (corruption degrades to truncated history, never a
+hang). Regression test in `domain/session/session.test.ts`. Full
+reconciliation semantics remain ISSUE-015.

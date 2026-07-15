@@ -205,8 +205,13 @@ export function createSession(
     const startId = leafId ?? getLeafId();
     if (!startId) return [];
     const chain: ChatMessage[] = [];
+    const seen = new Set<string>();
     let currentId: string | null | undefined = startId;
     while (currentId) {
+      // Cycle guard: a corrupted parent edge must degrade to a truncated
+      // history, never a synchronous infinite loop (wedges the isolate).
+      if (seen.has(currentId)) break;
+      seen.add(currentId);
       const stored = getStored(currentId);
       if (!stored) break;
       chain.push(stored.message);
@@ -372,6 +377,17 @@ export function createSession(
 
   return {
     async appendMessage(m: ChatMessage, parentId?: string): Promise<void> {
+      const existing = getStored(m.id);
+      if (existing) {
+        // Clients round-trip full message arrays, so an append can carry an
+        // id we already store. Re-parenting that row onto the current leaf
+        // creates a parent CYCLE (the leaf may be its descendant), and
+        // rawHistory's chain walk then loops forever — found by the ported
+        // reconciliation suite (ISSUE-028). Keep the row's position in the
+        // tree; refresh its content only.
+        putStored({ message: m, parentId: existing.parentId });
+        return;
+      }
       const actualParent = parentId ?? getLeafId() ?? null;
       putStored({ message: m, parentId: actualParent });
       addChild(actualParent, m.id);

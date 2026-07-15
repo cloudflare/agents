@@ -53,6 +53,23 @@ function framesOfType(frames: unknown[], type: string): Array<Record<string, unk
   );
 }
 
+function userMessage(id: string, text: string): { id: string; role: "user"; parts: Array<{ type: "text"; text: string }> } {
+  return { id, role: "user", parts: [{ type: "text", text }] };
+}
+
+function chatRequest(id: string, text: string): Record<string, unknown> {
+  return {
+    type: "cf_agent_use_chat_request",
+    id,
+    init: { method: "POST", body: JSON.stringify({ messages: [userMessage(`u_${id}`, text)] }) },
+  };
+}
+
+function chunkBody(frame: Record<string, unknown>): { type: string } & Record<string, unknown> {
+  if (typeof frame.body !== "string") throw new Error("response frame missing body");
+  return JSON.parse(frame.body) as { type: string } & Record<string, unknown>;
+}
+
 class ChatSessionThink extends Think<unknown> {
   model!: ModelClient;
 
@@ -102,10 +119,14 @@ describe("e2e: chat session", () => {
     const client = await connectChatClient(transport, registry);
 
     // Frame in: the client sends the chat request over the wire, not agent.chat() directly.
-    await client.send({ type: "cf_agent_use_chat_request", id: "req_1", input: "what is 7 + 5?" });
+    await client.send(chatRequest("req_1", "what is 7 + 5?"));
 
     await vi.waitFor(() => {
-      expect(framesOfType(client.frames, "cf_agent_use_chat_response").some((f) => (f.chunk as { type: string }).type === "finish")).toBe(true);
+      expect(
+        framesOfType(client.frames, "cf_agent_use_chat_response")
+          .filter((f) => f.done === false)
+          .some((f) => chunkBody(f).type === "finish"),
+      ).toBe(true);
     });
 
     // Chunk events stream in order: start ... tool-input -> tool-output ... finish.
@@ -120,7 +141,12 @@ describe("e2e: chat session", () => {
     // Frame out: the same chunk sequence reached the client, tagged with the request id.
     const responseFrames = framesOfType(client.frames, "cf_agent_use_chat_response");
     expect(responseFrames.every((f) => f.id === "req_1")).toBe(true);
-    expect(responseFrames.map((f) => (f.chunk as { type: string }).type)).toEqual(chunkTypes);
+    expect(responseFrames.filter((f) => f.done === false).map((f) => chunkBody(f).type)).toEqual(chunkTypes);
+    expect(responseFrames.some((f) => f.done === true && f.body === undefined)).toBe(true);
+    await vi.waitFor(() => {
+      const syncs = framesOfType(client.frames, "cf_agent_chat_messages");
+      expect(syncs.some((f) => Array.isArray(f.messages) && f.messages.length === 2)).toBe(true);
+    });
 
     // The tool ran server-side (no client suspension) with validated input.
     const chunks = eventsOfType(events, "chunk").map((e) => e.chunk);
