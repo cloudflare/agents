@@ -4,7 +4,11 @@ import { createMemoryKeyValueStore } from "../../adapters/memory/store.js";
 import { createTestClock } from "../../adapters/memory/clock.js";
 import { defaultIdSource } from "../../kernel/ids.js";
 import { createSession, type Session } from "../session/session.js";
-import { createSkillRegistry, fromManifest, type SkillRegistry } from "../skills/skills.js";
+import {
+  createSkillRegistry,
+  fromManifest,
+  type SkillRegistry
+} from "../skills/skills.js";
 import type { ChannelPolicy } from "../channels/channels.js";
 import type { ToolSet } from "../tools/types.js";
 import { assembleTurn } from "./assembly.js";
@@ -16,8 +20,10 @@ function makeSession(systemPrompt = "You are a test assistant."): Session {
     { store, clock, ids: defaultIdSource },
     {
       sessionId: "main",
-      blocks: [{ label: "instructions", provider: { get: async () => systemPrompt } }],
-    },
+      blocks: [
+        { label: "instructions", provider: { get: async () => systemPrompt } }
+      ]
+    }
   );
 }
 
@@ -39,7 +45,7 @@ describe("assembleTurn", () => {
       policy: noPolicy,
       actions: {},
       userTools: {},
-      clock,
+      clock
     });
 
     expect(result.system).toBe("INSTRUCTIONS\n[readonly]\nBase prompt.");
@@ -49,9 +55,22 @@ describe("assembleTurn", () => {
   it("appends channel instructions, skills catalog, and the capability block in order, blank-line joined", async () => {
     const session = makeSession("Base prompt.");
     const skills = await createSkillRegistry([
-      fromManifest([{ name: "s1", description: "skill one", instructions: "do things", resources: {} }]),
+      fromManifest([
+        {
+          name: "s1",
+          description: "skill one",
+          instructions: "do things",
+          resources: {}
+        }
+      ])
     ]);
-    const workspaceTools: ToolSet = { read: { description: "reads", inputSchema: z.object({}), metadata: { capability: "workspace" } } };
+    const workspaceTools: ToolSet = {
+      read: {
+        description: "reads",
+        inputSchema: z.object({}),
+        metadata: { capability: "workspace" }
+      }
+    };
 
     const result = await assembleTurn({
       session,
@@ -60,7 +79,7 @@ describe("assembleTurn", () => {
       workspaceTools,
       actions: {},
       userTools: {},
-      clock,
+      clock
     });
 
     const segments = result.system.split("\n\n");
@@ -74,7 +93,14 @@ describe("assembleTurn", () => {
     const session = makeSession("Base prompt.");
     const skills = await emptySkills();
 
-    const result = await assembleTurn({ session, skills, policy: {}, actions: {}, userTools: {}, clock });
+    const result = await assembleTurn({
+      session,
+      skills,
+      policy: {},
+      actions: {},
+      userTools: {},
+      clock
+    });
 
     expect(result.system).toBe("INSTRUCTIONS\n[readonly]\nBase prompt.");
     expect(result.system.includes("\n\n\n")).toBe(false);
@@ -89,14 +115,69 @@ describe("assembleTurn", () => {
       session,
       skills,
       policy: {},
-      workspaceTools: { shared: { description: "workspace", inputSchema: schema, execute: () => "workspace" } },
-      fetchTools: { shared: { description: "external", inputSchema: schema, execute: () => "external" } },
-      actions: { shared: { description: "actions", inputSchema: schema, execute: () => "actions" } },
-      userTools: { shared: { description: "user", inputSchema: schema, execute: () => "user" } },
-      clock,
+      workspaceTools: {
+        shared: {
+          description: "workspace",
+          inputSchema: schema,
+          execute: () => "workspace"
+        }
+      },
+      fetchTools: {
+        shared: {
+          description: "external",
+          inputSchema: schema,
+          execute: () => "external"
+        }
+      },
+      actions: {
+        shared: {
+          description: "actions",
+          inputSchema: schema,
+          execute: () => "actions"
+        }
+      },
+      userTools: {
+        shared: {
+          description: "user",
+          inputSchema: schema,
+          execute: () => "user"
+        }
+      },
+      clock
     });
 
     expect(result.tools.tools.shared?.description).toBe("user");
+  });
+
+  it("merges MCP tools into the external bucket with fetch tools", async () => {
+    const session = makeSession();
+    const skills = await emptySkills();
+    const schema = z.object({});
+
+    const result = await assembleTurn({
+      session,
+      skills,
+      policy: {},
+      fetchTools: {
+        shared: {
+          description: "fetch",
+          inputSchema: schema,
+          execute: () => "fetch"
+        }
+      },
+      mcpTools: {
+        shared: {
+          description: "mcp",
+          inputSchema: schema,
+          execute: () => "mcp"
+        }
+      },
+      actions: {},
+      userTools: {},
+      clock
+    });
+
+    expect(result.tools.tools.shared?.description).toBe("mcp");
   });
 
   it("adds a client tool only when its name doesn't collide with a server-sourced tool", async () => {
@@ -108,13 +189,19 @@ describe("assembleTurn", () => {
       session,
       skills,
       policy: {},
-      userTools: { serverTool: { description: "server", inputSchema: schema, execute: () => "server" } },
+      userTools: {
+        serverTool: {
+          description: "server",
+          inputSchema: schema,
+          execute: () => "server"
+        }
+      },
       clientTools: {
         serverTool: { description: "client collision", inputSchema: schema },
-        clientOnly: { description: "client-only", inputSchema: schema },
+        clientOnly: { description: "client-only", inputSchema: schema }
       },
       actions: {},
-      clock,
+      clock
     });
 
     expect(result.tools.tools.serverTool?.description).toBe("server"); // server wins
@@ -129,13 +216,26 @@ describe("assembleTurn", () => {
     const result = await assembleTurn({
       session,
       skills,
-      policy: { toolFilter: (all) => Object.fromEntries(Object.entries(all).filter(([name]) => name !== "blocked")) },
+      policy: {
+        toolFilter: (all) =>
+          Object.fromEntries(
+            Object.entries(all).filter(([name]) => name !== "blocked")
+          )
+      },
       userTools: {
-        blocked: { description: "blocked", inputSchema: schema, execute: () => "x" },
-        allowed: { description: "allowed", inputSchema: schema, execute: () => "y" },
+        blocked: {
+          description: "blocked",
+          inputSchema: schema,
+          execute: () => "x"
+        },
+        allowed: {
+          description: "allowed",
+          inputSchema: schema,
+          execute: () => "y"
+        }
       },
       actions: {},
-      clock,
+      clock
     });
 
     expect(result.tools.tools.blocked).toBeUndefined();

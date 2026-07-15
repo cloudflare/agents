@@ -2,7 +2,12 @@ import type { Clock } from "../../ports/clock.js";
 import type { ChannelPolicy } from "../channels/channels.js";
 import type { Session } from "../session/session.js";
 import type { SkillRegistry } from "../skills/skills.js";
-import { assembleTools, type AssembledTools, type ToolHooks, type ToolSources } from "../tools/registry.js";
+import {
+  assembleTools,
+  type AssembledTools,
+  type ToolHooks,
+  type ToolSources
+} from "../tools/registry.js";
 import type { ToolSet } from "../tools/types.js";
 
 /**
@@ -23,6 +28,7 @@ export interface AssemblyInputs {
   policy?: ChannelPolicy;
   workspaceTools?: ToolSet;
   fetchTools?: ToolSet;
+  mcpTools?: ToolSet;
   /** Optional: absent = no actions tool source (essence has no actions opinion). */
   actions?: ToolSet;
   userTools: ToolSet;
@@ -38,31 +44,40 @@ export interface AssemblyInputs {
  * external < actions < user, then client tools fill in only where they don't
  * collide with a server-sourced name.
  */
-export async function assembleTurn(inputs: AssemblyInputs): Promise<{ system: string; tools: AssembledTools }> {
+export async function assembleTurn(
+  inputs: AssemblyInputs
+): Promise<{ system: string; tools: AssembledTools }> {
   const builtin: ToolSet = {
     ...(inputs.workspaceTools ?? {}),
     ...(await inputs.session.tools()),
-    ...(inputs.skills?.tools() ?? {}),
+    ...(inputs.skills?.tools() ?? {})
   };
 
   const sources: ToolSources = {
     builtin,
-    external: inputs.fetchTools ?? {},
+    // Both fetch and MCP tools are external sources; MCP wins same-name
+    // collisions within that bucket.
+    external: { ...(inputs.fetchTools ?? {}), ...(inputs.mcpTools ?? {}) },
     actions: inputs.actions ?? {},
     user: inputs.userTools,
-    client: inputs.clientTools ?? {},
+    client: inputs.clientTools ?? {}
   };
 
   const tools = assembleTools(sources, {
     ...(inputs.hooks ? { hooks: inputs.hooks } : {}),
     ...(inputs.policy?.toolFilter ? { filter: inputs.policy.toolFilter } : {}),
-    clock: inputs.clock,
+    clock: inputs.clock
   });
 
   const baseSystemPrompt = await inputs.session.freezeSystemPrompt();
   const catalog = inputs.skills?.catalogBlock();
   const capBlock = tools.capabilityBlock();
-  const system = [baseSystemPrompt, inputs.policy?.instructions, catalog, capBlock]
+  const system = [
+    baseSystemPrompt,
+    inputs.policy?.instructions,
+    catalog,
+    capBlock
+  ]
     .filter((s): s is string => Boolean(s))
     .join("\n\n");
 
