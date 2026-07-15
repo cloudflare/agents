@@ -408,6 +408,10 @@ export class Think<State = unknown> extends Agent<State> {
         publish: (event) => this.publishEvent(event),
         scheduleTurn: (incident) => this.scheduleRecoveryTurn(incident),
         onTerminal: async (incident, terminalText) => {
+          // #1645: retain the terminal so a client reconnecting AFTER the
+          // exhaustion can still receive it over the resume handshake
+          // (adapters read it via pendingChatTerminal()).
+          this.turnState.recordTerminal(incident.requestId, terminalText);
           if (this.onChatError) {
             await this.onChatError(new Error(terminalText), { requestId: incident.requestId, stage: "recovery" });
           }
@@ -569,6 +573,11 @@ export class Think<State = unknown> extends Agent<State> {
 
   private async executeTurn(spec: AdmittedTurnSpec & { admission?: "queue" | "replace" | "reject" }): Promise<TurnOutcome> {
     this.ensureRuntime();
+    // #1645, eager clear: submitting a genuinely-new turn supersedes any
+    // retained terminal record at SUBMIT time — before the turn streams —
+    // so a stale exhaustion can never replay over the new conversation.
+    // Continuations resume the recorded turn and must not clear it.
+    if (!spec.continuation) this.turnState.clearTerminal();
     return this.turnQueue.run({
       requestId: spec.requestId,
       trigger: spec.trigger,
@@ -940,6 +949,7 @@ export class Think<State = unknown> extends Agent<State> {
     this.turnQueue.cancelAll("cleared");
     this.pendingInteractions.cancelPending();
     this.turnState.setLastRequestId(undefined);
+    this.turnState.clearTerminal(); // #1645: never replay a stale exhaustion onto an emptied chat
     this.publishEvent({ type: "conversation:cleared" });
   }
 
@@ -971,6 +981,22 @@ export class Think<State = unknown> extends Agent<State> {
   /** Lets adapters implement the resume handshake: the currently-streaming turn, if any. */
   activeTurn(): { requestId: string; startOffset: number } | null {
     return this.activeTurnInfo;
+  }
+
+  /**
+   * #1645, adapter-facing (same family as activeTurn/isRecovering): a turn
+   * that terminalized while no client was connected, retained until a new
+   * turn is submitted or the conversation is cleared. Adapters deliver it
+   * over the resume handshake — a raw on-connect frame is dropped by real
+   * clients.
+   */
+  pendingChatTerminal(): { requestId: string; body: string } | null {
+    return this.turnState.pendingTerminal();
+  }
+
+  /** Test seam for #1645 fixtures: simulate an exhaustion recorded out-of-band. */
+  protected recordChatTerminal(requestId: string, body: string): void {
+    this.turnState.recordTerminal(requestId, body);
   }
 
   /**

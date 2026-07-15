@@ -282,7 +282,27 @@ export function createTurnEngine(deps: {
   return {
     async run(args): Promise<TurnOutcome> {
       const hooks = args.hooks ?? {};
-      const emit = args.emit;
+      // Stamp part ids onto delta chunks, turn-scoped: consecutive deltas of
+      // one kind share an id; a kind change (or any intervening chunk) starts
+      // a new part -> next id. Matches the original UI-stream convention
+      // ("t1", "t2", ...) that clients key streaming text parts by
+      // (ISSUE-018 / client compat).
+      let partSeq = 0;
+      let openDelta: { kind: "text-delta" | "reasoning-delta"; id: string } | null = null;
+      const emit: (chunk: UiChunk) => void = (chunk) => {
+        if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+          if (openDelta === null || openDelta.kind !== chunk.type) {
+            partSeq += 1;
+            openDelta = { kind: chunk.type, id: `t${partSeq}` };
+          }
+          // Field order matters downstream: the wire serializes chunks, and
+          // the original's byte-replayed bodies are {type, id, delta}.
+          args.emit({ type: chunk.type, id: openDelta.id, delta: chunk.delta });
+          return;
+        }
+        openDelta = null;
+        args.emit(chunk);
+      };
       const steps: StepResult[] = [];
 
       // Internal controller: the external signal, a stall, or a replace all

@@ -236,39 +236,97 @@ export function attachChatTransport(
       // No persisted/initial state yet: nothing to send (audit 25 §4, "if initialized").
     }
 
-    await sendChatMessagesResync(conn);
+    const active = agent.activeTurn();
+    if (active) {
+      // Resume is the authoritative delivery path while a stream is live:
+      // announce it and SUPPRESS the CHAT_MESSAGES resync (the client would
+      // otherwise double-apply the in-flight turn). Replay waits for the ACK.
+      send(conn, { type: "cf_agent_stream_resuming", id: active.requestId });
+    } else {
+      await sendChatMessagesResync(conn);
+    }
 
     if (agent.isRecovering()) {
       send(conn, { type: "cf_agent_chat_recovering", active: true });
     }
   }
 
-  async function handleResumeRequest(conn: Connection): Promise<void> {
+  /**
+   * Resume handshake (#1645 shape): request -> STREAM_RESUMING {id} (or
+   * RESUME_NONE) -> client ACK {id} -> replay. Both a live stream and a
+   * retained terminal (recovery exhaustion recorded while nobody was
+   * connected) resume this way — a raw on-connect frame is dropped by real
+   * clients before it reaches their stream reader.
+   */
+  function handleResumeRequest(conn: Connection): void {
     const active = agent.activeTurn();
-    if (!active) {
-      send(conn, { type: "cf_agent_stream_resume_none" });
+    if (active) {
+      send(conn, { type: "cf_agent_stream_resuming", id: active.requestId });
       return;
     }
-    send(conn, { type: "cf_agent_stream_resuming" });
+    const terminal = agent.pendingChatTerminal();
+    if (terminal) {
+      send(conn, { type: "cf_agent_stream_resuming", id: terminal.requestId });
+      return;
+    }
+    send(conn, { type: "cf_agent_stream_resume_none" });
+  }
 
-    const catchUp = agent.events().read(active.startOffset);
+  async function handleResumeAck(conn: Connection, requestId: string): Promise<void> {
+    const terminal = agent.pendingChatTerminal();
+    if (terminal && terminal.requestId === requestId) {
+      send(conn, {
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        body: terminal.body,
+        error: true,
+        done: true,
+        replay: true,
+      });
+      return;
+    }
+
+    // Live stream — or one that settled between RESUMING and the ACK: replay
+    // the request's chunks from the log, and close with a replayed terminal
+    // frame if it already settled.
+    const active = agent.activeTurn();
+    const from = active?.requestId === requestId ? active.startOffset : 0;
+    let catchUp = agent.events().read(from);
+    if (catchUp.kind === "gap") catchUp = agent.events().read(catchUp.firstAvailable);
     if (catchUp.kind === "gap") {
-      // The active turn's early chunks were pruned out from under it (a slow
-      // stream outliving abandonedTurnChunksMs): fall back to a full resync
-      // and let the live subscription carry the rest (audit 25 §4).
+      // Nothing retained at all: fall back to a full resync.
       await sendChatMessagesResync(conn);
       return;
     }
+    let settled: { outcome: string; errorText?: string } | undefined;
     for (const stored of catchUp.events) {
-      if (stored.event.type === "chunk" && stored.event.requestId === active.requestId) {
+      const event = stored.event;
+      if (event.type === "chunk" && event.requestId === requestId) {
+        // Replay starts at the first delta: the original's resumable buffer
+        // never re-sends the stream-open (`start`) — the ACKing client
+        // already owns the message shell from its pre-disconnect state.
+        if ((event.chunk as { type?: string }).type === "start") continue;
         send(conn, {
           type: "cf_agent_use_chat_response",
-          id: active.requestId,
-          body: JSON.stringify(stored.event.chunk),
+          id: requestId,
+          body: JSON.stringify(event.chunk),
           done: false,
           replay: true,
         });
+      } else if (event.type === "turn:settled" && event.requestId === requestId) {
+        settled = { outcome: event.outcome, ...(event.errorText !== undefined ? { errorText: event.errorText } : {}) };
       }
+    }
+    if (settled && settled.outcome !== "suspended") {
+      send(conn, {
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        done: true,
+        replay: true,
+        ...(settled.outcome === "failed"
+          ? { error: true, body: settled.errorText ?? "turn failed" }
+          : {}),
+      });
     }
   }
 
@@ -339,7 +397,10 @@ export function attachChatTransport(
         return;
       }
       case "cf_agent_stream_resume_request":
-        await handleResumeRequest(conn);
+        handleResumeRequest(conn);
+        return;
+      case "cf_agent_stream_resume_ack":
+        if (typeof frame.id === "string") await handleResumeAck(conn, frame.id);
         return;
       case "rpc": {
         if (typeof frame.id !== "string" || typeof frame.method !== "string") return;

@@ -418,7 +418,16 @@ describe("attachChatTransport — resume handshake", () => {
 
   it("cf_agent_stream_resuming replays the active turn's chunks with replay:true, then live", async () => {
     const { agent } = makeAgent();
-    agent.model = createFakeModel([{ kind: "hang" }]);
+    // One delta, then hang: the replay must have something after the
+    // filtered-out `start` shell.
+    agent.model = {
+      async *stream(request) {
+        yield { type: "text-delta", text: "partial " };
+        await new Promise<never>((_resolve, reject) => {
+          request.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      },
+    };
     await agent.start();
     const registry = createMemoryConnectionRegistry();
     const transport = attachChatTransport(agent, registry);
@@ -429,11 +438,20 @@ describe("attachChatTransport — resume handshake", () => {
     const client = await connectChatClient(transport, registry);
     await client.send({ type: "cf_agent_stream_resume_request" });
 
-    expect(framesOfType(client.frames, "cf_agent_stream_resuming")).toHaveLength(1);
+    // #1645 handshake: request only announces; replay waits for the ACK.
+    const resuming = framesOfType(client.frames, "cf_agent_stream_resuming");
+    expect(resuming.length).toBeGreaterThan(0);
+    expect(resuming.at(-1)).toMatchObject({ id: "req_hang" });
+    expect(
+      framesOfType(client.frames, "cf_agent_use_chat_response").filter((f) => f.replay === true),
+    ).toHaveLength(0);
+
+    await client.send({ type: "cf_agent_stream_resume_ack", id: "req_hang" });
     const replayed = framesOfType(client.frames, "cf_agent_use_chat_response").filter((f) => f.replay === true);
     expect(replayed.length).toBeGreaterThan(0);
     expect(replayed[0]).toMatchObject({ id: "req_hang", done: false, replay: true });
-    expect(chunkBody(replayed[0]!).type).toBe("start");
+    // Replay begins at the first delta — the `start` shell is never re-sent.
+    expect(chunkBody(replayed[0]!).type).not.toBe("start");
 
     agent.cancelAllChats("test cleanup");
   });
@@ -459,6 +477,7 @@ describe("attachChatTransport — resume handshake", () => {
     const gapAgent = {
       events: () => fakeLog,
       activeTurn: () => ({ requestId: "req_gap", startOffset: 0 }),
+      pendingChatTerminal: () => null,
       history: async () => [{ id: "m1", role: "user" as const, parts: [{ type: "text" as const, text: "hi" }] }],
     } as unknown as Think;
 
@@ -468,6 +487,7 @@ describe("attachChatTransport — resume handshake", () => {
     registry.add(conn);
 
     await transport.onMessage(conn, JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+    await transport.onMessage(conn, JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "req_gap" }));
 
     const frames = conn.sent.map((raw) => JSON.parse(raw));
     expect(framesOfType(frames, "cf_agent_stream_resuming")).toHaveLength(1);

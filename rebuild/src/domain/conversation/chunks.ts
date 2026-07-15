@@ -8,8 +8,11 @@ import type { ChatMessage, MessagePart, ToolPart } from "../messages/model.js";
  */
 export type UiChunk =
   | { type: "start"; messageId: string }
-  | { type: "text-delta"; delta: string }
-  | { type: "reasoning-delta"; delta: string }
+  // `id` is the streaming PART id ("t1", "t2", ...): consecutive deltas of a
+  // kind share one; production always stamps it (turn loop); it is optional
+  // only so hand-built test chunks stay terse.
+  | { type: "text-delta"; id?: string; delta: string }
+  | { type: "reasoning-delta"; id?: string; delta: string }
   | {
       type: "tool-input-available";
       toolCallId: string;

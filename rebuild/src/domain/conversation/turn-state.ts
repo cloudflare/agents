@@ -17,6 +17,15 @@ export interface ConversationTurnState {
   lastRequestId(): string | undefined;
   /** `undefined` clears the last-request bookkeeping (e.g. clearMessages()). */
   setLastRequestId(id: string | undefined): void;
+  /**
+   * Terminal record (#1645): a turn that terminalized (recovery exhaustion)
+   * while no client was connected is retained so a reconnecting client can
+   * receive it over the resume handshake. Cleared eagerly when a new turn is
+   * submitted and when the conversation is cleared.
+   */
+  recordTerminal(requestId: string, body: string): void;
+  pendingTerminal(): { requestId: string; body: string } | null;
+  clearTerminal(): void;
   channelFor(requestId: string): string | undefined;
   stampChannel(requestId: string, channelId: string): void;
   /**
@@ -34,6 +43,7 @@ export interface ConversationTurnState {
 }
 
 const LAST_REQUEST_KEY = "lastRequestId";
+const TERMINAL_KEY = "pendingTerminal";
 
 function partialKey(requestId: string): string {
   return `partial:${requestId}`;
@@ -66,6 +76,18 @@ export function createConversationTurnState(deps: { store: KeyValueStore }): Con
     setLastRequestId(id) {
       if (id === undefined) store.delete(LAST_REQUEST_KEY);
       else store.put(LAST_REQUEST_KEY, id);
+    },
+
+    recordTerminal(requestId, body) {
+      store.put(TERMINAL_KEY, { requestId, body });
+    },
+
+    pendingTerminal() {
+      return store.get<{ requestId: string; body: string }>(TERMINAL_KEY) ?? null;
+    },
+
+    clearTerminal() {
+      store.delete(TERMINAL_KEY);
     },
 
     channelFor(requestId) {

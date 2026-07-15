@@ -261,7 +261,7 @@ facet and forward), including WebSocket upgrade pass-through to a child's chat.
 
 ## ISSUE-018 — Pre-stream resume window: park, don't `resume_none`
 
-**Status:** open · **Area:** Conversation/Transport (audit 28 appendix, partial)
+**Status:** resolved (2026-07-15) — see resolution note at end · **Area:** Conversation/Transport (audit 28 appendix, partial)
 
 Original: `agents/chat/pre-stream-turns.ts`. Between "request accepted" and
 "first chunk streamed" a resume request finds no active stream; the original
@@ -271,6 +271,17 @@ reconnects immediately after submitting can miss the turn start (it still gets
 the settled message via `message:updated`). Fix in `adapters/websocket-chat`:
 treat queued-but-not-started turns as resumable (the event log + turn state
 already know about them).
+
+Resolution: the adapter now implements the original handshake — on connect
+with an active stream it sends STREAM_RESUMING {id} and suppresses the
+CHAT_MESSAGES resync; replay is ACK-gated (`cf_agent_stream_resume_ack`) and
+starts at the first delta; #1645 terminal outcomes are retained in
+turn-state (written by recovery terminalize, cleared eagerly at new-turn
+submit and on clearMessages, exposed via `Think.pendingChatTerminal()`) and
+delivered over the handshake as a raw-body error frame. Delta chunks now
+carry streaming part ids ("t1", ...) that real clients key text parts by.
+Acceptance: onconnect-broadcast 7/9 (the 2 others are /sub/ routing —
+ISSUE-017).
 
 ---
 

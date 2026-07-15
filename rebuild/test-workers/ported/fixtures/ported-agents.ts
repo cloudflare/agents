@@ -630,18 +630,29 @@ class ThinkClientToolsAgentImpl extends Think {
 
 class ThinkTestAgentImpl extends Think {
   private beforeStepDelayMs = 0;
+  /** Controllable in-flight stream for the resume tests: deltas pushed on demand, hangs until aborted. */
+  private resumePushQueue: string[] = [];
+  private resumeWake: (() => void) | null = null;
 
   protected override getModel(): ModelClient {
+    const agent = this;
     return {
       stream: async function* stream(request: ModelRequest): AsyncIterable<ModelChunk> {
         if (inputText(request).includes("resume")) {
-          await new Promise<never>((_resolve, reject) => {
-            request.signal?.addEventListener(
-              "abort",
-              () => reject(new Error("aborted")),
-              { once: true }
-            );
-          });
+          // Emit nothing until a delta is pushed (testStoreResumableChunk);
+          // hang until cancelled (testCompleteResumableStream) — a genuinely
+          // in-flight stream through the real turn/accumulator/log pipeline.
+          for (;;) {
+            while (agent.resumePushQueue.length > 0) {
+              yield { type: "text-delta", text: agent.resumePushQueue.shift()! };
+            }
+            if (request.signal?.aborted) return;
+            await new Promise<void>((resolve) => {
+              agent.resumeWake = resolve;
+              request.signal?.addEventListener("abort", () => resolve(), { once: true });
+            });
+            if (request.signal?.aborted && agent.resumePushQueue.length === 0) return;
+          }
         }
         yield { type: "text-delta", text: "Hello from the assistant!" };
         yield { type: "finish", finishReason: "stop" };
@@ -663,34 +674,34 @@ class ThinkTestAgentImpl extends Think {
 
   async testCompleteResumableStream(streamId: string): Promise<void> {
     this.cancelChat(streamId, "test complete");
+    this.resumeWake?.();
+    // Let the cancellation settle (turn:settled published) before returning.
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
-  async testStoreResumableChunk(streamId: string, body: string): Promise<void> {
-    this.host.store.put(`test:stream:${streamId}:chunk`, body);
+  async testStoreResumableChunk(_streamId: string, body: string): Promise<void> {
+    // The original stored raw bytes in its resumable buffer; the rebuild's
+    // equivalent is pushing the delta through the live stream so it lands in
+    // the durable event log (replay reads it back from there).
+    const chunk = JSON.parse(body) as { delta: string };
+    this.resumePushQueue.push(chunk.delta);
+    this.resumeWake?.();
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
   async recordTerminalForTest(requestId: string, body: string): Promise<void> {
-    this.host.store.put("test:terminal", { requestId, body });
+    this.recordChatTerminal(requestId, body);
   }
 
   async getPendingChatTerminalForTest(): Promise<{
     requestId: string;
     body: string;
   } | null> {
-    return (
-      this.host.store.get<{ requestId: string; body: string }>("test:terminal") ??
-      null
-    );
-  }
-
-  override async clearMessages(): Promise<void> {
-    await super.clearMessages();
-    this.host.store.delete("test:terminal");
+    return this.pendingChatTerminal();
   }
 
   async setBeforeStepAsyncDelay(ms: number): Promise<void> {
     this.beforeStepDelayMs = ms;
-    this.host.store.put("test:before-step-delay", ms);
   }
 }
 

@@ -52,7 +52,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | hydration-budget.test.ts | 13 | PUBLIC-API | blocked ISSUE-014 | media-eviction dependent |
 | actions-durable-pause.test.ts | 18 | PUBLIC-API | pending | T3 |
 | host-embedding.test.ts | 11 | INTERNAL | blocked ISSUE-013 | framework/server-entry |
-| onconnect-broadcast.test.ts | 9 | WIRE | ported 5/9 | 4 fail `divergence ISSUE-018`: on-connect CHAT_MESSAGES suppression during active stream + terminal replay via STREAM_RESUMING (#1645). Stretch tier 1. |
+| onconnect-broadcast.test.ts | 9 | WIRE | ported 7/9 | ISSUE-018 resolved: connect-time suppression + proactive STREAM_RESUMING, ACK-gated replay (from first delta), #1645 terminal retention/replay all pass. The 2 remaining tests exercise `/sub/` sub-agent URLs — `blocked ISSUE-017` (they previously 'passed' by asserting against the wrong agent). |
 | actions-attach-reply.test.ts | 12 | WIRE | ported 6/12 | 6 fail REAL semantics: attachment validation strictness `divergence` (rebuild accepts invalid/non-json-safe attachments the original filters/normalizes) + done-timeouts on specific flows. Candidate small actions fix. |
 | assistant-agent.test.ts | 5 | WIRE | ported 5/5 | **T0 gate GREEN** (ISSUE-026 resolved) |
 | channel-recovery.test.ts | 5 | PUBLIC-API | pending | T3 |
