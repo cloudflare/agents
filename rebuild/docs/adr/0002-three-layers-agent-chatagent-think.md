@@ -153,6 +153,21 @@ a conversational class.
 
 ## Migration
 
+**LANDED 2026-07-15.** `ChatAgent` extracted to `src/app/chat-agent.ts`
+(essence + 14 protected seams with neutral defaults); `think.ts` slimmed to
+the opinions (1239→706 lines). Verified behavior-identical: typecheck clean,
+native 1082 node + 42 workerd, and a per-test diff of the full ported board
+pre/post extraction — byte-identical (217 passed / 172 failed / 7 skipped of
+396, no name flipped). Bare-ChatAgent coverage added (`chat-agent.test.ts`).
+Two domain seams widened for the split: `assembly.ts` (skills/policy/actions
+now optional, neutral absent-behavior) and `continuation.ts` (`actions`
+optional; executionId-addressed `resolveApproval` throws without it). One
+ordering subtlety is documented in both classes: Think's `ensureRuntime()`
+builds its services *before* `super.ensureRuntime()`, because
+`pendingInteractions` reads the actions seam once at construction.
+
+The original sketch below is retained for the record:
+
 Extracting `ChatAgent` is mostly re-allocating which class wires which
 domain modules — Think is already thin wiring over exported
 `create*(deps)` factories, and the ported suites (`test-workers/ported/`)

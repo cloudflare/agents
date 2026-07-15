@@ -13,11 +13,18 @@ import type { ToolSet } from "../tools/types.js";
  */
 export interface AssemblyInputs {
   session: Session;
-  skills: SkillRegistry;
-  policy: ChannelPolicy;
+  /**
+   * Optional (ADR-0002 migration): ChatAgent's base turn assembly has no
+   * opinion on skills — only Think's composition supplies a registry.
+   * Absent = neutral (no skill tools, no catalog block).
+   */
+  skills?: SkillRegistry;
+  /** Optional: absent = no channel policy (no instructions/filter/step cap). */
+  policy?: ChannelPolicy;
   workspaceTools?: ToolSet;
   fetchTools?: ToolSet;
-  actions: ToolSet;
+  /** Optional: absent = no actions tool source (essence has no actions opinion). */
+  actions?: ToolSet;
   userTools: ToolSet;
   clientTools?: ToolSet;
   hooks?: ToolHooks;
@@ -35,27 +42,27 @@ export async function assembleTurn(inputs: AssemblyInputs): Promise<{ system: st
   const builtin: ToolSet = {
     ...(inputs.workspaceTools ?? {}),
     ...(await inputs.session.tools()),
-    ...inputs.skills.tools(),
+    ...(inputs.skills?.tools() ?? {}),
   };
 
   const sources: ToolSources = {
     builtin,
     external: inputs.fetchTools ?? {},
-    actions: inputs.actions,
+    actions: inputs.actions ?? {},
     user: inputs.userTools,
     client: inputs.clientTools ?? {},
   };
 
   const tools = assembleTools(sources, {
     ...(inputs.hooks ? { hooks: inputs.hooks } : {}),
-    ...(inputs.policy.toolFilter ? { filter: inputs.policy.toolFilter } : {}),
+    ...(inputs.policy?.toolFilter ? { filter: inputs.policy.toolFilter } : {}),
     clock: inputs.clock,
   });
 
   const baseSystemPrompt = await inputs.session.freezeSystemPrompt();
-  const catalog = inputs.skills.catalogBlock();
+  const catalog = inputs.skills?.catalogBlock();
   const capBlock = tools.capabilityBlock();
-  const system = [baseSystemPrompt, inputs.policy.instructions, catalog, capBlock]
+  const system = [baseSystemPrompt, inputs.policy?.instructions, catalog, capBlock]
     .filter((s): s is string => Boolean(s))
     .join("\n\n");
 

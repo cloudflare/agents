@@ -7,8 +7,17 @@ per-context `CONTEXT.md` (the maintainer's canonical model), `ISSUES.md`,
 `test-workers/ported/COVERAGE.md` (the port ledger), `PROGRESS.md` (log).
 Dashboard: `npm run dashboard` → `dashboard.html`.
 
-Numbers as of this handoff: ported board **228/416 passing** · native
-**~1076 node + 42 workerd**, typecheck clean · **6 issues resolved, 24 open**.
+Numbers as of this handoff: ported board **217/396 passing by vitest count**
+(the ledger's 228/416 sums row estimates — the checked-in
+`test-workers/ported/BOARD-SNAPSHOT.txt` is now the canonical per-test
+record) · native **1082 node + 42 workerd**, typecheck clean · **6 issues
+resolved, 24 open**.
+
+**Verification economy (new discipline, 2026-07-15):** subagents hand off
+vitest `--reporter=json` artifacts (orchestrator reads, never re-runs); board
+regression gate = snapshot diff via `scripts/board-snapshot.mjs`; full board
+runs are periodic checkpoints only, waves gate on typecheck + their own
+files. See the COVERAGE.md header.
 
 ---
 
@@ -95,8 +104,12 @@ opinionated* (the real Agent/Think seam).
   on capability interfaces, never concrete classes.
 - "chat" added to the context-map overloaded-term watchlist (protocol bundle
   vs ChatAgent layer).
-- **Remaining work:** the ChatAgent extraction itself (separate workstream;
-  mostly re-allocating module wiring, guarded by ported + native suites).
+- **Migration LANDED (2026-07-15):** `src/app/chat-agent.ts` extracted (14
+  protected seams, neutral defaults); think.ts 1239→706. Ported board
+  per-test diff pre/post: byte-identical. Bare-ChatAgent test proves
+  compose-your-own-agent works with zero opinion services. See the ADR's
+  Migration section for the two domain-seam widenings and the
+  ensureRuntime ordering note.
 
 **ISSUE-030 — hosting refactor (well-specified, unbuilt).** Composition-first:
 the DO *has-a* Agent. One generic host that routes platform I/O to **composed
@@ -132,9 +145,7 @@ external wire-compat proof and is now viable post-026.
 
 ## Suggested next moves (not committed — maintainer's call)
 
-- **ChatAgent extraction** (the ADR-0002 migration): split Think into
-  ChatAgent + Think per the accepted allocation table; guarded by ported +
-  native suites.
+- ~~ChatAgent extraction~~ — DONE 2026-07-15 (see §3).
 - **ISSUE-030 hosting refactor** as a `/goal` (generic host + capability-typed
   transports + AgentHost→AgentRuntime + retype attachChatTransport). Sizeable
   adapter change; full re-verify.

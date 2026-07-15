@@ -7,7 +7,7 @@ single, internally-consistent ubiquitous language.
 The layering (`kernel → ports → domain → app → adapters`) is a *dependency* rule
 and cuts across these contexts — code layout is not the same as a context. For
 example the Turn context is the pure engine in `src/domain/turn/` but its wiring
-lives in `src/app/think.ts`. Where a context does own a subtree, it's nested under
+lives in `src/app/chat-agent.ts`. Where a context does own a subtree, it's nested under
 one directory with the glossary at the root (e.g. `src/domain/runtime/`).
 
 This map is the index. Per-context glossaries (`CONTEXT.md`) live next to the code
@@ -16,12 +16,20 @@ decisions live in [`docs/adr/`](./docs/adr/).
 
 ## Composition roots
 
-Two thin wiring classes own no business logic; they compose the contexts:
+Three thin wiring classes own no business logic; they compose the contexts
+(the ADR-0002 layering, landed 2026-07-15):
 
 - **Agent** (`app/agent.ts`) — wires the Durable Runtime services and owns the
-  base-class lifecycle.
-- **Think** (`app/think.ts`, `extends Agent`) — wires the chat contexts and
-  orchestrates turns through `runTurnInternal`.
+  base-class lifecycle. Conversation-free.
+- **ChatAgent** (`app/chat-agent.ts`, `extends Agent`) — the unopinionated
+  conversing layer: model binding, the turn pipeline (`executeTurn`),
+  transcript/session, pending interactions, and the conversation event
+  vocabulary. Exposes protected seams with neutral defaults; composes no
+  opinion context.
+- **Think** (`app/think.ts`, `extends ChatAgent`) — the opinions: recovery
+  policy, overflow/compaction guard, channels, actions/HITL, submissions,
+  skills, workspace/fetch tools, scheduled tasks, delegation. Plugs into
+  ChatAgent's seams only (public+protected surface — grep-verified).
 
 ## Contexts
 
@@ -150,12 +158,14 @@ Wired by Agent, never Think.
 ## Dependency diagram
 
 Edges point from dependent → dependency. Universal edges are omitted for
-legibility: **every context depends on Kernel + Infrastructure**, and **Think
-composes all the chat contexts**.
+legibility: **every context depends on Kernel + Infrastructure**, and **the
+chat contexts are composed by ChatAgent (essence: Turn, Conversation, Session,
+Tools) and Think (opinions: the rest)**.
 
 ```mermaid
 flowchart TD
-  Think --> Agent
+  Think --> ChatAgent
+  ChatAgent --> Agent
 
   subgraph substrate["Durable substrate"]
     Agent --> Runtime[Durable Runtime]

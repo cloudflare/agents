@@ -1,3 +1,4 @@
+import { ValidationError } from "../../kernel/errors.js";
 import {
   isToolPart,
   toolName,
@@ -67,7 +68,15 @@ export interface PendingInteractionsTimers {
 
 export function createPendingInteractions(deps: {
   session: () => Promise<Session>;
-  actions: ActionService;
+  /**
+   * Optional (ADR-0002 migration): a bare ChatAgent composes no HITL/actions
+   * opinion. Absent, `resolveApproval({ executionId })` throws — the
+   * executionId-addressed approval path is meaningless without an
+   * ActionService to own parked executions; the toolCallId-addressed path
+   * (a suspended client/approval tool part in the transcript) and
+   * `applyToolResult` work fully without it.
+   */
+  actions?: ActionService;
   /** Re-assembled tools for re-executing an approved server tool. */
   tools: () => Promise<AssembledTools>;
   /** The requestId to stamp on a freshly-built ToolExecutionContext. */
@@ -161,6 +170,11 @@ export function createPendingInteractions(deps: {
     reason?: string;
   }): Promise<void> {
     if (args.executionId) {
+      if (!deps.actions) {
+        throw new ValidationError(
+          "resolveApproval({ executionId }) requires an ActionService — this agent composes no actions/HITL opinion",
+        );
+      }
       if (args.approved) await deps.actions.approveExecution(args.executionId);
       else await deps.actions.rejectExecution(args.executionId, args.reason);
       return;

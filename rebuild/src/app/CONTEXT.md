@@ -2,8 +2,10 @@
 
 The base-class identity and lifecycle — the one thing actually "about the agent".
 A thin composition root that owns no business logic: construction, service wiring,
-lifecycle, and the overridable hook surface. Lives in `app/` alongside `think.ts`
-(the chat composition root). See the [context map](../CONTEXT-MAP.md).
+lifecycle, and the overridable hook surface. Lives in `app/` alongside
+`chat-agent.ts` (the unopinionated conversing layer) and `think.ts` (the opinions
+composition) — the ADR-0002 three-layer split, landed 2026-07-15. See the
+[context map](../CONTEXT-MAP.md).
 
 ## Language
 
@@ -45,9 +47,25 @@ the Agent holds the id, the container never sees it (ADR-0001).
 What the identity frame used to carry, minus the transport-supplied connectionId:
 `{ className, name }`. A transport adapter frames it for the wire.
 
+**ChatAgent**:
+The unopinionated conversing layer (`chat-agent.ts`, `extends Agent`; ADR-0002
+layer 2). Wires the conversation *essence*: model binding (`getModel`), the turn
+pipeline (`executeTurn` — admission, streaming, tool dispatch, finalization),
+transcript/session, pending interactions, and the conversation event vocabulary
+(`chunk` / `message:updated` / `turn:started` / `turn:settled`). Composes no
+opinion context; instead it exposes **protected seams** with neutral defaults
+(assembly, turn scope, recoverable execution, error handling, attachments,
+suspension parking, submissions, stability waiters) that an opinionated
+composition overrides.
+_Avoid_: "chat" as in the `cf_agent_*` protocol bundle — that sense lives in
+Hosting/ISSUE-030 (see the context map's overloaded-term watchlist).
+
 **Think**:
-The chat composition root (`think.ts`, `extends Agent`). It wires the chat contexts
-and exposes the overridable subclass API (`getModel`, `getTools`, `getActions`,
-`getSkills`, `configureSession`, `configureChannels`, …). Like Agent, it owns no
+The opinions composition (`think.ts`, `extends ChatAgent`; ADR-0002 layer 3):
+recovery policy, overflow/compaction guard, channels, actions/HITL, submissions,
+skills, workspace/fetch tools, scheduled tasks, delegation-as-tools. It plugs
+into ChatAgent exclusively through the public+protected surface (the promotion
+rule — grep-verified), and exposes the remaining overridable subclass API
+(`getActions`, `getSkills`, `configureChannels`, …). Like Agent, it owns no
 domain language of its own — every behavioral term belongs to a wired context.
-_Avoid_: treating Think as a context; it is a composition root.
+_Avoid_: treating Think (or ChatAgent) as a context; both are composition roots.
