@@ -144,6 +144,15 @@ export { action } from "../../src/domain/actions/actions.js";
 export type { Action } from "../../src/domain/actions/actions.js";
 export { callable } from "../../src/domain/runtime/rpc/callable.js";
 export { tool } from "../../src/domain/tools/types.js";
+export {
+  agentTool,
+  createAgentToolRunService
+} from "../../src/domain/delegation/runs.js";
+export type {
+  AgentToolRun,
+  AgentToolRunService,
+  RunStatus
+} from "../../src/domain/delegation/runs.js";
 export type { AgentHost } from "../../src/app/agent.js";
 export { hostAgent } from "../../src/adapters/cloudflare/shell.js";
 export type { ChatMessage, MessagePart, ToolPart } from "../../src/domain/messages/model.js";

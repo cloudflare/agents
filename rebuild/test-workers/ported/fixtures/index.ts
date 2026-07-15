@@ -13,3 +13,4 @@ export * from "./think-session-agents.js";
 export * from "./hooks-agents.js";
 export * from "./submissions-agents.js";
 export * from "./sub-agent-agents.js";
+export * from "./p13-fibers-agents.js";

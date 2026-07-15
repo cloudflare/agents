@@ -22,6 +22,7 @@ import type {
   TestCaseSensitiveAgent,
   TestOAuthAgent,
   TestProtocolMessagesAgent,
+  TestRunFiberAgent,
   TestScheduleAgent,
   TestStateAgent,
   TestUserNotificationAgent,
@@ -51,6 +52,7 @@ declare global {
       LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
       OverflowRecoveryTestAgent: DurableObjectNamespace<OverflowRecoveryTestAgent>;
       TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
+      TestRunFiberAgent: DurableObjectNamespace<TestRunFiberAgent>;
       TestStateAgent: DurableObjectNamespace<TestStateAgent>;
       TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
       TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;

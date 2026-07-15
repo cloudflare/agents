@@ -159,6 +159,10 @@
         "name": "UserNotificationAgent"
       },
       {
+        "class_name": "TestRunFiberAgent",
+        "name": "TestRunFiberAgent"
+      },
+      {
         "class_name": "TestSubAgentParent",
         "name": "TestSubAgentParent"
       },
@@ -224,6 +228,7 @@
         "TestOAuthAgent",
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",
+        "TestRunFiberAgent",
         "TestSubAgentParent",
         "ReservedClassParent"
       ]

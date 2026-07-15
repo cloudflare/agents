@@ -679,3 +679,57 @@ through the root durable object. Cloudflare facets are not independently
 recursive: only the root DO can call `ctx.facets.get()`, so a facet-of-a-facet
 must be requested via the root's spawner bridge rather than by a child facet
 trying to allocate its own platform facet directly.
+
+## ISSUE-037 — No detached (background) agent-tool delivery ledger: exactly-once claim+lease, give-up budgets, cadence backbone
+
+**Status:** open · **Area:** domain/delegation · **Found by:** P13 agent-tool-detached port (13/13 tests, all blocked)
+
+The original gives a "detached" agent-tool run — one the parent isn't
+actively tailing (e.g. after the parent itself was evicted/restarted, or a
+fire-and-forget background delegation) — a durable delivery guarantee for its
+terminal outcome, independent from ISSUE-035's live re-attach machinery:
+
+- A two-slot claim+lease ledger (`UPDATE ... RETURNING`-guarded CAS) so
+  `onAgentToolFinish`/the global finish hook and a separate `onDetachedDone`
+  callback each fire **exactly once**, even when a fast-path push races a
+  durable backbone retry tick.
+- **Give-up** and **finish** are independent slots: a premature no-progress
+  give-up (soft `interrupted`, reason `no-progress`) must never consume the
+  slot a child's later real completion needs — the real result still lands
+  and repairs the row (#1752).
+- A **no-progress budget** distinct from ISSUE-035's live-tail reattach
+  budget: silence since the last reported progress trips a give-up with no
+  absolute ceiling required.
+- An **escalating backbone cadence** (retry schedule that lengthens per
+  attempt, e.g. 15s → ... → capped at 120s) that re-arms durably and
+  collapses a concurrent fan-out of arm attempts to a single schedule.
+- Terminal broadcast frames (`agent-tool-event`, kind `aborted`/`interrupted`)
+  fire exactly once on cancel/give-up even though detached delivery has no
+  live tail sequence to piggyback on.
+- A persisted, caller-controlled "notify source" tag surviving on the run row.
+- Retry of a failed callback delivery after its claim's lease expires, without
+  double-firing while the lease is still held.
+- Cancelling an *awaited* (non-detached) run must not go through this ledger
+  at all — awaited runs settle synchronously through the caller's `waitForRun`.
+
+None of this exists in the rebuild: `domain/delegation/runs.ts`'s
+`AgentToolRunService` has a single `settle()` No-op-once-terminal guard (a
+one-slot dedupe, not the original's two independent slots for
+give-up-vs-finish), no lease/claim CAS, no no-progress budget, no backbone
+schedule, and no notify-source field. This is a different subsystem from
+ISSUE-035 (which is about a parent's own live re-attach tail budget while it
+stays connected) — ISSUE-037 is about guaranteeing a *background* run's
+outcome still reaches its callback once nobody is tailing it, without
+double-firing. `agent-tool-detached.test.ts`'s fixture calls
+(`seedDetachedRunForTest`, `deliverFinishForTest`, `deliverGiveUpForTest`,
+`detachedReconcileTickForTest`, `detachedBackboneSchedulesForTest`, etc.) have
+no underlying mechanism to route through — the ledger, the lease CAS, and the
+cadence backbone would all have to be invented in the test fixture itself
+with zero connection to real rebuild code, which is not an honest port (it
+would test the fixture's own mock, not the rebuild). Filed as its own issue
+rather than folded into ISSUE-035's scope-detail because the reattach-budget
+family (P9's 19 pinned tests) is about a *live, connected* parent's tail
+loop, while this is about delivery once nobody is watching — related
+motivation, distinct mechanism, and a distinct acceptance suite (this file's
+13 tests). Scope before/alongside ISSUE-035 given the shared `interrupted`
+status vocabulary and give-up reasoning both need.
