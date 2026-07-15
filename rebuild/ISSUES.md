@@ -62,7 +62,20 @@ old out-of-turn throw). Channels glossary DRAFT lifted.
 
 ## ISSUE-003 — Consume the MCP client stack behind `ExternalToolSource`
 
-**Status:** open · **Area:** Integration ([audit 28](./audit/28-reuse-vs-reimplement.md) Tier 2 #1)
+**Status:** resolved (2026-07-15) · **Area:** Integration ([audit 28](./audit/28-reuse-vs-reimplement.md) Tier 2 #1)
+
+Resolved (M1, three phases): client stack vendored at
+`src/adapters/mcp/vendor/` (client manager/connection/transports, DO OAuth
+provider, errors, x402, plus core/events, retries, observability types —
+@ 762998da); `McpToolSource` adapter + `toolSetFromExternalSource` helper at
+`src/adapters/mcp/tool-source.ts`; tools feed assembly via the new additive
+`AssemblyInputs.mcpTools` field (external bucket, alongside fetchTools).
+253 client-half tests ported nearly-verbatim to
+`src/adapters/mcp/vendor-tests/`, all green. NOT included (by design):
+`rpc.ts`/RPC transport and the server half (`McpAgent`, handler, server
+transports, event-store, auth-context) — ride ISSUE-022 with their
+worker-harness tests; wiring an ExternalToolSource instance into Think's
+config surface is a follow-up seam, not part of this issue.
 
 The original's MCP client (`agents/src/mcp/` minus the `McpAgent` server class,
 ~6.9k LOC: transports, OAuth provider, x402, connection lifecycle) imports nothing
