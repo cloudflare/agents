@@ -40,7 +40,7 @@ servers; compatibility is not inferred from the modern lane.
 
 | Command                              | Server protocol/referee selection | Scenarios | Current result                 |
 | ------------------------------------ | --------------------------------- | --------- | ------------------------------ |
-| `test:conformance:client:modern`     | `2026-07-28`                      | 32        | 26 clean / 6 expected failures |
+| `test:conformance:client:modern`     | `2026-07-28`                      | 32        | 27 clean / 5 expected failures |
 | `test:conformance:client:2025-11-25` | `2025-11-25`                      | 18        | 16 clean / 2 expected failures |
 | `test:conformance:client:2025-06-18` | `2025-06-18`                      | 5         | 5 clean                        |
 | `test:conformance:client:2025-03-26` | `2025-03-26` OAuth/backcompat     | 2         | 2 clean                        |

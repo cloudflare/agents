@@ -4309,6 +4309,46 @@ describe("MCPClientManager OAuth Integration", () => {
   });
 
   describe("discoverIfConnected()", () => {
+    it("should persist a new auth URL when discovery requires OAuth", async () => {
+      const serverId = "discovery-oauth-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const authUrl = "https://auth-two.example.com/authorize";
+      saveServerToMock({
+        id: serverId,
+        name: "Migrating OAuth Server",
+        server_url: "http://example.com/mcp",
+        callback_url: callbackUrl,
+        client_id: "client-two",
+        auth_url: null,
+        server_options: null
+      });
+
+      const authProvider = createMockAuthProvider(createMockStateStorage());
+      authProvider.serverId = serverId;
+      authProvider.clientId = "client-two";
+      authProvider.authUrl = authUrl;
+      const connection = new MCPClientConnection(
+        new URL("http://example.com/mcp"),
+        { name: "test", version: "1.0" },
+        {
+          transport: { type: "streamable-http", authProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "connected";
+      connection.discover = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "authenticating";
+        return { success: false, error: "Unauthorized" };
+      });
+      manager.mcpConnections[serverId] = connection;
+
+      const result = await manager.discoverIfConnected(serverId);
+
+      expect(result?.state).toBe("authenticating");
+      expect(mockStorageData.get(serverId)?.auth_url).toBe(authUrl);
+      expect(mockStorageData.get(serverId)?.client_id).toBe("client-two");
+    });
+
     it("should skip discovery when connection not found", async () => {
       const observabilitySpy = vi.fn();
       manager.onObservabilityEvent(observabilitySpy);

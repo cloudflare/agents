@@ -14,12 +14,6 @@ client:
   # the client stops retrying.
   - auth/scope-retry-limit
 
-  # SEP-2352 authorization-server migration does not complete its second OAuth
-  # round against the alpha.9 referee.
-  # Impact if unchanged: an MCP resource that changes authorization server
-  # while connected may fail to recover automatically and require reconnect.
-  - auth/authorization-server-migration
-
   # Alpha.9 requires absent resultType to default to complete. Beta.4 instead
   # rejects the final modern tool result after all five MRTR wire assertions
   # pass.

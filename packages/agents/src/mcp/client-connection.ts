@@ -616,8 +616,13 @@ export class MCPClientConnection {
         clearTimeout(timeoutId);
       }
 
-      // Return to CONNECTED state so user can retry discovery
-      this.connectionState = MCPConnectionState.CONNECTED;
+      // Ordinary discovery failures return to CONNECTED so callers can retry.
+      // A 401 is different: the live transport has already produced an OAuth
+      // authorization URL, so preserve AUTHENTICATING for the manager to
+      // persist and expose that continuation.
+      this.connectionState = isUnauthorized(e)
+        ? MCPConnectionState.AUTHENTICATING
+        : MCPConnectionState.CONNECTED;
 
       const error = e instanceof Error ? e.message : String(e);
       // A restored streamable HTTP session rejected with 404 must be
