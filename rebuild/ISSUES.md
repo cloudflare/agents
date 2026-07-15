@@ -462,11 +462,34 @@ RPC-only) has no hosting path, and if forced through `hostAgent` would carry
 chat plumbing it never uses. So the "compose your own on `Agent`" tier
 (audit 30) is real at the composition layer but missing its hosting layer.
 
-Fix: split into a minimal `hostAgent<A extends Agent>` (lifecycle + ports +
-alarm + `__call`/`__init`/`__destroy` RPC, no transport) and a `hostChatAgent`
-variant (or a `{ chat: true }` option) that adds `attachChatTransport` for
-`Think` subclasses. Think uses the chat host; lean custom agents use the
-minimal one. Not a shim to remove — the platform adapter to layer. Pairs with
-a "build-a-lite-agent" DX pass (the domain factories are public + test-proven
-but their dep signatures are internal-facing) and with the framework/Vite
-codegen (ISSUE-013) that would generate the wrapper away.
+Fix (chosen shape — intermediate class, not a factory): express the adapter as
+a normal DO **base class** the author extends, replacing the `hostAgent`
+factory + its throwing-stub base (`HostedAgentDurableObject`, whose methods all
+throw "hostAgent did not install …" until the factory subclass overrides them —
+a two-level indirection more mysterious than a mixin). The layering becomes the
+class hierarchy:
+
+```ts
+abstract class AgentDurableObject<A extends Agent> extends DurableObject {
+  protected abstract createAgent(host: AgentHost): A;   // the one seam
+  // real lifecycle here: ensure()/start-once, alarm→onAlarm, fetch, __call/__init/__destroy
+}
+abstract class ChatAgentDurableObject<A extends Think> extends AgentDurableObject<A> {
+  // adds attachChatTransport (cf_agent_* WS) + WS entry points
+}
+// author:
+export class MyAgentDO extends ChatAgentDurableObject<MyAgent> {
+  protected createAgent(host) { return new MyAgent(host); }
+}
+```
+
+Invariant to preserve: the AGENT class stays separate and constructed over
+`host` (port-pure, node-testable) — the base class is the DO, the agent is
+NOT the DO. Keep `hostAgent(A)` as optional one-line sugar over the base
+(`class extends ChatAgentDurableObject { createAgent = h => new A(h) }`) so
+both styles exist. Net effect: removes the throwing-stub base, expresses the
+minimal-vs-chat layering as plain inheritance, and gives primitives-first
+(`extends Agent`) agents a hosting path via `AgentDurableObject`. Pairs with a
+"build-a-lite-agent" DX pass (the domain factories are public + test-proven but
+their dep signatures are internal-facing) and the framework/Vite codegen
+(ISSUE-013) that would generate the subclass away.
