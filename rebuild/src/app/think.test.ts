@@ -482,6 +482,94 @@ describe("Think — recovery basics", () => {
     const messages = await agent.getMessages();
     expect(messages[1]!.parts.find((p) => p.type === "text")).toMatchObject({ text: "no recovery needed" });
   });
+
+  it("waitUntilStable() returns false while a turn is running, then true after it settles", async () => {
+    const { model, push, finish } = controllableModel();
+    const { agent } = makeThink([]);
+    agent.model = model;
+    await agent.start();
+
+    const chatPromise = agent.chat("hi", undefined, { requestId: "req_1" });
+    await vi.waitFor(() => expect(agent.activeTurn()).not.toBeNull());
+
+    expect(await agent.waitUntilStable({ timeoutMs: 5 })).toBe(false);
+
+    push({ type: "text-delta", text: "done" });
+    push({ type: "finish", finishReason: "stop" });
+    finish();
+    await chatPromise;
+
+    expect(await agent.waitUntilStable({ timeoutMs: 50 })).toBe(true);
+  });
+
+  it("waitUntilStable() waits for an armed auto-continuation debounce", async () => {
+    const { agent } = makeThink([
+      { kind: "tool-call", toolName: "client_task", input: {}, id: "call_1" },
+      { kind: "text", text: "continued" },
+    ]);
+    agent.tools = {
+      client_task: { description: "client task", inputSchema: z.object({}) },
+    };
+    agent.chatToolResultDebounceMs = 50;
+    await agent.start();
+
+    await agent.chat("use the client", undefined, { requestId: "req_1" });
+    await agent.applyToolResult({ toolCallId: "call_1", output: "ok" });
+
+    expect(await agent.waitUntilStable({ timeoutMs: 5 })).toBe(false);
+    await vi.waitFor(async () => {
+      expect(await agent.waitUntilStable({ timeoutMs: 10 })).toBe(true);
+    });
+  });
+
+  it("chatRecoveryIncidents() lists the active durable recovery incident", async () => {
+    vi.useFakeTimers();
+    try {
+      const { agent } = makeThink([{ kind: "hang" }, { kind: "hang" }]);
+      agent.chatStreamStallTimeoutMs = 1000;
+      await agent.start();
+
+      const chatPromise = agent.chat("hi", undefined, { requestId: "req_1" });
+      await vi.advanceTimersByTimeAsync(1000);
+      await chatPromise;
+
+      expect(agent.chatRecoveryIncidents()).toEqual([
+        expect.objectContaining({
+          requestId: "req_1",
+          attempt: 1,
+          recoveryKind: "continue",
+        }),
+      ]);
+      agent.cancelAllChats("test cleanup");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("chatRecoverySchedule() lists scheduled or in-flight recovery attempts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { agent } = makeThink([{ kind: "hang" }, { kind: "hang" }]);
+      agent.chatStreamStallTimeoutMs = 1000;
+      await agent.start();
+
+      const chatPromise = agent.chat("hi", undefined, { requestId: "req_1" });
+      await vi.advanceTimersByTimeAsync(1000);
+      await chatPromise;
+
+      expect(agent.chatRecoverySchedule()).toEqual([
+        expect.objectContaining({
+          requestId: "req_1",
+          attempt: 1,
+          recoveryKind: "continue",
+          scheduledAt: expect.any(Number),
+        }),
+      ]);
+      agent.cancelAllChats("test cleanup");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -40,7 +40,6 @@ import type {
 import type { Tool, ToolSet } from "../domain/tools/types.js";
 import {
   createSession,
-  type ContextProviderLike,
   type ContextBlockConfig,
   type Session,
   type SessionConfig,
@@ -72,6 +71,7 @@ import {
   createChatRecovery,
   type ChatRecovery,
   type Incident,
+  type RecoverySchedule,
   type RecoveryPolicy,
   type TurnInputSnapshot,
 } from "../domain/reliability/recovery/recovery.js";
@@ -140,6 +140,10 @@ export interface ChatErrorContext {
   classification?: ChatErrorClassification;
 }
 
+export interface WaitUntilStableOptions {
+  timeoutMs?: number;
+}
+
 /** Re-exported for API compatibility (moved to domain/session/builder.ts per audit 26 extraction 6). */
 export type { SessionBuilder } from "../domain/session/builder.js";
 
@@ -158,6 +162,10 @@ function combineSignals(...signals: AbortSignal[]): AbortSignal {
     signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
   }
   return controller.signal;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface AdmittedTurnSpec {
@@ -1034,6 +1042,52 @@ export class Think<State = unknown> extends Agent<State> {
   isRecovering(): boolean {
     this.ensureRuntime();
     return this.chatRecoveryService.isRecovering();
+  }
+
+  chatRecoveryIncidents(): Incident[] {
+    this.ensureRuntime();
+    return this.chatRecoveryService.incidents();
+  }
+
+  chatRecoverySchedule(): RecoverySchedule[] {
+    this.ensureRuntime();
+    return this.chatRecoveryService.scheduledRecoveries();
+  }
+
+  async waitUntilStable(options: WaitUntilStableOptions = {}): Promise<boolean> {
+    this.ensureRuntime();
+    const timeoutMs = options.timeoutMs ?? 5_000;
+    const startedAt = Date.now();
+
+    for (;;) {
+      if (this.isQuiescent()) return true;
+
+      const elapsed = Date.now() - startedAt;
+      const remaining = timeoutMs - elapsed;
+      if (remaining <= 0) return false;
+
+      const waiters: Array<Promise<void>> = [sleep(Math.min(remaining, 25))];
+      if (this.turnQueue.running() !== null || this.turnQueue.pending() > 0) {
+        waiters.push(this.turnQueue.waitUntilStable());
+      }
+      if (this.pendingInteractions.hasPendingContinuation()) {
+        waiters.push(this.pendingInteractions.waitForNoPendingContinuation());
+      }
+      if (this.chatRecoveryService.isRecovering()) {
+        waiters.push(this.chatRecoveryService.waitUntilStable());
+      }
+
+      await Promise.race(waiters);
+    }
+  }
+
+  private isQuiescent(): boolean {
+    return (
+      this.turnQueue.running() === null &&
+      this.turnQueue.pending() === 0 &&
+      !this.pendingInteractions.hasPendingContinuation() &&
+      !this.chatRecoveryService.isRecovering()
+    );
   }
 
   // ==========================================================================

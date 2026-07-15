@@ -54,6 +54,10 @@ export interface PendingInteractions {
    * applyToolResult's.
    */
   onExecutionResolved(executionId: string, resolution: ParkedResolution): Promise<void>;
+  /** True while a debounced continuation timer is armed. */
+  hasPendingContinuation(): boolean;
+  /** Resolves once no debounced continuation timer remains armed. */
+  waitForNoPendingContinuation(): Promise<void>;
 }
 
 export interface PendingInteractionsTimers {
@@ -77,6 +81,14 @@ export function createPendingInteractions(deps: {
   const debounceMs = deps.debounceMs ?? 150;
   const timers = deps.timers ?? { setTimeout, clearTimeout };
   const continuationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let stableWaiters: Array<() => void> = [];
+
+  function notifyIfNoPendingContinuation(): void {
+    if (continuationTimers.size > 0) return;
+    const waiters = stableWaiters;
+    stableWaiters = [];
+    for (const waiter of waiters) waiter();
+  }
 
   function maybeContinue(message: ChatMessage): void {
     const toolParts = message.parts.filter(isToolPart);
@@ -92,6 +104,7 @@ export function createPendingInteractions(deps: {
 
     const fire = (): void => {
       continuationTimers.delete(key);
+      notifyIfNoPendingContinuation();
       deps.requestContinuation();
     };
 
@@ -219,9 +232,19 @@ export function createPendingInteractions(deps: {
     resolveApproval,
     maybeContinue,
     onExecutionResolved,
+    hasPendingContinuation() {
+      return continuationTimers.size > 0;
+    },
+    waitForNoPendingContinuation() {
+      if (continuationTimers.size === 0) return Promise.resolve();
+      return new Promise((resolve) => {
+        stableWaiters.push(resolve);
+      });
+    },
     cancelPending() {
       for (const handle of continuationTimers.values()) timers.clearTimeout(handle);
       continuationTimers.clear();
+      notifyIfNoPendingContinuation();
     },
   };
 }

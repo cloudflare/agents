@@ -37,7 +37,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
 | client-tools.test.ts | 86 | WIRE | ported 33/86 | 53 fail on REAL semantics: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. (ISSUE-029 flipped the approval-vocabulary tests.) |
-| think-session.test.ts | 198 | WIRE+API | rewritten 54/198 (7 dropped-with-pointer) | T3 wave P6. The 137 failures carry 33 NAMED `missing-feature` reasons (fixture helpers throw self-describing errors, never silent stubs) — the de-facto worklist: chat-recovery incident bookkeeping, in-band stream errors, telemetry forwarding, waitUntilStable, sanitization/row-size, saveMessages/addMessages surfaces. |
+| think-session.test.ts | 198 | WIRE+API | rewritten 57/198 (7 dropped-with-pointer) | R1 landed waitUntilStable (block 9/9) + recovery inspection accessors (chatRecoveryIncidents/chatRecoverySchedule): +3 flips (recovering-status hydration #1620, attempt-budget reset on progress, HITL no-seal). Remaining failures keep NAMED missing-feature reasons — next: recovery injection seams + onChatRecovery hook core (R2). |
 | hooks.test.ts | 105 | WIRE+API | pending | split T1/T3 |
 | submissions.test.ts | 51 | PUBLIC-API | pending | T3 |
 | agent-tools.test.ts | 33 | PUBLIC-API | pending | T3 |

@@ -49,6 +49,15 @@ export interface Incident {
   recoveryKind: "retry" | "continue";
 }
 
+export interface RecoverySchedule {
+  requestId: string;
+  incidentId: string;
+  attempt: number;
+  maxAttempts: number;
+  recoveryKind: Incident["recoveryKind"];
+  scheduledAt: number;
+}
+
 export interface ChatRecovery {
   /** Wrap a turn execution in a recoverable fiber. */
   runRecoverable(args: {
@@ -61,6 +70,12 @@ export interface ChatRecovery {
   handleStall(requestId: string): Promise<"recovering" | "terminal">;
   /** Drives the recovering broadcast (cf_agent_chat_recovering). */
   isRecovering(): boolean;
+  /** Durable active incident rows, for read-only adapter/test inspection. */
+  incidents(): Incident[];
+  /** Recovery attempts currently scheduled or in flight. */
+  scheduledRecoveries(): RecoverySchedule[];
+  /** Resolves when no recovery attempt is scheduled or in flight. */
+  waitUntilStable(): Promise<void>;
 }
 
 /** The subset of the stashed fiber snapshot this module cares about. */
@@ -118,6 +133,7 @@ export function createChatRecovery(deps: {
   const incidentKey = (requestId: string): string => `incident:${requestId}`;
   const inputKey = (requestId: string): string => `input:${requestId}`;
   const recoveringKey = (requestId: string): string => `recovering:${requestId}`;
+  let stableWaiters: Array<() => void> = [];
 
   function getIncident(requestId: string): Incident | undefined {
     return kv.get<Incident>(incidentKey(requestId));
@@ -144,13 +160,53 @@ export function createChatRecovery(deps: {
     kv.delete(inputKey(requestId));
   }
 
-  function setRecovering(requestId: string, value: boolean): void {
-    if (value) kv.put(recoveringKey(requestId), true);
-    else kv.delete(recoveringKey(requestId));
+  function notifyIfStable(): void {
+    if (isRecovering()) return;
+    const waiters = stableWaiters;
+    stableWaiters = [];
+    for (const waiter of waiters) waiter();
+  }
+
+  function setRecovering(incident: Incident, value: true): void;
+  function setRecovering(requestId: string, value: false): void;
+  function setRecovering(value: Incident | string, active: boolean): void {
+    if (active) {
+      const incident = value as Incident;
+      const schedule: RecoverySchedule = { ...incident, scheduledAt: deps.clock.now() };
+      kv.put(recoveringKey(incident.requestId), schedule);
+    } else {
+      kv.delete(recoveringKey(value as string));
+      notifyIfStable();
+    }
   }
 
   function isRecovering(): boolean {
-    return kv.list<boolean>({ prefix: "recovering:" }).size > 0;
+    return kv.list<unknown>({ prefix: "recovering:" }).size > 0;
+  }
+
+  function incidents(): Incident[] {
+    return [...kv.list<Incident>({ prefix: "incident:" }).values()];
+  }
+
+  function scheduledRecoveries(): RecoverySchedule[] {
+    const rows: RecoverySchedule[] = [];
+    for (const [key, raw] of kv.list<unknown>({ prefix: "recovering:" })) {
+      if (isRecoverySchedule(raw)) {
+        rows.push(raw);
+        continue;
+      }
+      const requestId = key.slice("recovering:".length);
+      const incident = getIncident(requestId);
+      if (incident) rows.push({ ...incident, scheduledAt: 0 });
+    }
+    return rows;
+  }
+
+  function waitUntilStable(): Promise<void> {
+    if (!isRecovering()) return Promise.resolve();
+    return new Promise((resolve) => {
+      stableWaiters.push(resolve);
+    });
   }
 
   /**
@@ -211,7 +267,7 @@ export function createChatRecovery(deps: {
     const recoveryKind: Incident["recoveryKind"] = hasPartial ? "continue" : "retry";
     const incident: Incident = { incidentId, requestId, attempt, maxAttempts, recoveryKind };
     putIncident(incident);
-    setRecovering(requestId, true);
+    setRecovering(incident, true);
 
     if (recoveryKind === "continue") {
       // What "continue" MEANS lives here: the interrupted partial only exists
@@ -290,5 +346,27 @@ export function createChatRecovery(deps: {
     return result === "scheduled" ? "recovering" : "terminal";
   }
 
-  return { runRecoverable, onFiberRecovered, handleStall, isRecovering };
+  return {
+    runRecoverable,
+    onFiberRecovered,
+    handleStall,
+    isRecovering,
+    incidents,
+    scheduledRecoveries,
+    waitUntilStable,
+  };
+}
+
+function isRecoverySchedule(value: unknown): value is RecoverySchedule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { requestId?: unknown }).requestId === "string" &&
+    typeof (value as { incidentId?: unknown }).incidentId === "string" &&
+    typeof (value as { attempt?: unknown }).attempt === "number" &&
+    typeof (value as { maxAttempts?: unknown }).maxAttempts === "number" &&
+    ((value as { recoveryKind?: unknown }).recoveryKind === "retry" ||
+      (value as { recoveryKind?: unknown }).recoveryKind === "continue") &&
+    typeof (value as { scheduledAt?: unknown }).scheduledAt === "number"
+  );
 }

@@ -180,13 +180,6 @@ function textPart(text: string): { type: "text"; text: string } {
   return { type: "text", text };
 }
 
-function messageText(message: ChatMessage): string {
-  return message.parts
-    .filter((part): part is { type: "text"; text: string } => part.type === "text")
-    .map((part) => part.text)
-    .join("");
-}
-
 function userMessage(text: string, id: string): ChatMessage {
   return { id, role: "user", parts: [textPart(text)] };
 }
@@ -259,6 +252,7 @@ class ThinkSessionPortAgentImpl extends Think {
   private exhaustedContexts: RecoveryIncident[] = [];
   private clientToolNames = new Set<string>();
   private streamingAssistantParts: ChatMessage["parts"] = [];
+  private forceStableTimeout = false;
 
   constructor(host: AgentHost) {
     super(host);
@@ -582,8 +576,12 @@ class ThinkSessionPortAgentImpl extends Think {
     missingFeature("row size enforcement helper");
   }
 
-  async waitUntilStableForTest(): Promise<boolean> {
-    return !(await this.hasPendingInteractionForTest());
+  async waitUntilStableForTest(timeout?: unknown): Promise<boolean> {
+    if (this.forceStableTimeout) return false;
+    const stable = await this.waitUntilStable({
+      timeoutMs: typeof timeout === "number" ? timeout : 5_000,
+    });
+    return stable && !(await this.hasPendingInteractionForTest());
   }
 
   async hasPendingInteractionForTest(): Promise<boolean> {
@@ -663,7 +661,7 @@ class ThinkSessionPortAgentImpl extends Think {
   }
 
   async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {
-    return [...this.host.store.list<RecoveryIncident>({ prefix: "think:recover:incident:" }).values()];
+    return this.chatRecoveryIncidents();
   }
 
   async getExhaustedContextsForTest(): Promise<unknown[]> {
@@ -732,16 +730,27 @@ class ThinkSessionPortAgentImpl extends Think {
     return this.inspectSubmission(submissionId)?.status ?? null;
   }
 
-  async getScheduledChatRecoveryCountForTest(): Promise<number> {
-    missingFeature("chat recovery scheduling inspection");
+  async getScheduledChatRecoveryCountForTest(kind?: unknown): Promise<number> {
+    const schedules = this.chatRecoverySchedule();
+    if (kind !== "_chatRecoveryContinue" && kind !== "_chatRecoveryRetry") return schedules.length;
+    const recoveryKind = kind === "_chatRecoveryContinue" ? "continue" : "retry";
+    return schedules.filter((schedule) => schedule.recoveryKind === recoveryKind).length;
   }
 
-  async getScheduledChatRecoveryPayloadForTest(): Promise<unknown> {
-    missingFeature("chat recovery scheduling inspection");
+  async getScheduledChatRecoveryPayloadForTest(kind?: unknown): Promise<unknown> {
+    const schedules = this.chatRecoverySchedule();
+    const recoveryKind = kind === "_chatRecoveryContinue" ? "continue" : kind === "_chatRecoveryRetry" ? "retry" : undefined;
+    const schedule = schedules.find((entry) => recoveryKind === undefined || entry.recoveryKind === recoveryKind);
+    if (!schedule) return null;
+    return {
+      ...schedule,
+      recoveredRequestId: schedule.requestId,
+      originalRequestId: schedule.requestId,
+    };
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<unknown> {
-    const incidents = [...this.host.store.list<RecoveryIncident>({ prefix: "think:recover:incident:" }).values()];
+    const incidents = this.chatRecoveryIncidents() as Array<RecoveryIncident & JsonRecord>;
     return incidents.find((incident) => incident.incidentId === incidentId || incident.requestId === incidentId) ?? null;
   }
 
@@ -790,11 +799,85 @@ class ThinkSessionPortAgentImpl extends Think {
     };
   }
 
-  async beginIncidentForTest(): Promise<unknown> { missingFeature("chat recovery incident mutation"); }
-  async ageIncidentForTest(): Promise<void> { missingFeature("chat recovery incident mutation"); }
-  async updateIncidentForTest(): Promise<void> { missingFeature("chat recovery incident mutation"); }
-  async seedIncidentForTest(): Promise<void> { missingFeature("chat recovery incident mutation"); }
-  async bumpRecoveryProgressForTest(): Promise<void> { missingFeature("chat recovery progress bookkeeping"); }
+  async beginIncidentForTest(options?: unknown): Promise<unknown> {
+    const record = recordFrom(options) ?? {};
+    const requestId = typeof record.requestId === "string" ? record.requestId : this.ids.newId("req");
+    const recoveryKind = record.recoveryKind === "continue" ? "continue" : "retry";
+    const maxAttempts =
+      typeof record.maxAttempts === "number"
+        ? record.maxAttempts
+        : this.currentRecoveryPolicy().maxAttempts ?? 6;
+    const existing = this.recoveryIncidentRows().find(
+      (row) => row.record.requestId === requestId || row.record.incidentId === record.incidentId,
+    )?.record;
+    const progress = this.host.store.get<number>("test:recovery-progress") ?? 0;
+    const previousProgress = typeof existing?.progress === "number" ? existing.progress : progress;
+    const attempt = existing && previousProgress === progress ? (typeof existing.attempt === "number" ? existing.attempt : 0) + 1 : 1;
+    const nowMs = typeof record.nowMs === "number" ? record.nowMs : Date.now();
+    const incident: JsonRecord = {
+      ...existing,
+      incidentId:
+        typeof existing?.incidentId === "string"
+          ? existing.incidentId
+          : typeof record.incidentId === "string"
+            ? record.incidentId
+            : `${requestId}:`,
+      requestId,
+      attempt,
+      maxAttempts,
+      recoveryKind,
+      status: attempt > maxAttempts ? "exhausted" : "attempting",
+      firstSeenAt: typeof existing?.firstSeenAt === "number" ? existing.firstSeenAt : nowMs,
+      lastAttemptAt: nowMs,
+      progress,
+      exhausted: attempt > maxAttempts,
+    };
+    this.putRecoveryIncident(incident);
+    return incident;
+  }
+
+  async ageIncidentForTest(incidentId?: unknown, ageMs?: unknown): Promise<void> {
+    if (typeof incidentId !== "string") return;
+    const row = this.recoveryIncidentRows().find(
+      (entry) => entry.record.incidentId === incidentId || entry.record.requestId === incidentId,
+    );
+    if (!row) return;
+    const delta = typeof ageMs === "number" ? ageMs : 0;
+    row.record.firstSeenAt = typeof row.record.firstSeenAt === "number" ? row.record.firstSeenAt - delta : Date.now() - delta;
+    row.record.lastAttemptAt = typeof row.record.lastAttemptAt === "number" ? row.record.lastAttemptAt - delta : Date.now() - delta;
+    this.host.store.put(row.key, row.record);
+  }
+
+  async updateIncidentForTest(incidentId?: unknown, status?: unknown, reason?: unknown): Promise<void> {
+    if (typeof incidentId !== "string" || typeof status !== "string") return;
+    const row = this.recoveryIncidentRows().find(
+      (entry) => entry.record.incidentId === incidentId || entry.record.requestId === incidentId,
+    );
+    if (!row) return;
+    row.record.status = status;
+    if (typeof reason === "string") row.record.reason = reason;
+    this.host.store.put(row.key, row.record);
+    this.syncRecoveringRow(row.record);
+  }
+
+  async seedIncidentForTest(options?: unknown): Promise<void> {
+    const record = recordFrom(options);
+    if (!record || typeof record.requestId !== "string") return;
+    const incident: JsonRecord = {
+      incidentId: typeof record.incidentId === "string" ? record.incidentId : `${record.requestId}:`,
+      requestId: record.requestId,
+      attempt: typeof record.attempt === "number" ? record.attempt : 1,
+      maxAttempts: typeof record.maxAttempts === "number" ? record.maxAttempts : this.currentRecoveryPolicy().maxAttempts ?? 6,
+      recoveryKind: record.recoveryKind === "continue" ? "continue" : "retry",
+      ...record,
+    };
+    this.putRecoveryIncident(incident);
+    this.syncRecoveringRow(incident);
+  }
+
+  async bumpRecoveryProgressForTest(): Promise<void> {
+    this.host.store.put("test:recovery-progress", (this.host.store.get<number>("test:recovery-progress") ?? 0) + 1);
+  }
   async dropAssistantMessagesForTest(): Promise<void> { missingFeature("chat recovery transcript mutation"); }
   async clearInMemoryClientToolsForTest(): Promise<void> { missingFeature("durable client-tool registry"); }
   async seedDurableClientToolsForTest(): Promise<void> { missingFeature("durable client-tool registry"); }
@@ -809,7 +892,37 @@ class ThinkSessionPortAgentImpl extends Think {
   async triggerFiberRecovery(): Promise<void> { missingFeature("fiber recovery trigger"); }
   async insertInterruptedFiber(): Promise<void> { missingFeature("interrupted fiber injection"); }
   async insertInterruptedStream(): Promise<void> { missingFeature("interrupted stream injection"); }
-  async setForceStableTimeoutForTest(): Promise<void> { missingFeature("waitUntilStable timeout forcing"); }
+  async setForceStableTimeoutForTest(value?: unknown): Promise<void> {
+    this.forceStableTimeout = value !== false;
+  }
+
+  private recoveryIncidentRows(): Array<{ key: string; record: JsonRecord }> {
+    return [...this.host.store.list<unknown>({ prefix: "think:recover:incident:" })]
+      .map(([key, value]) => ({ key, record: recordFrom(value) }))
+      .filter((row): row is { key: string; record: JsonRecord } => row.record !== null);
+  }
+
+  private putRecoveryIncident(incident: JsonRecord): void {
+    if (typeof incident.requestId !== "string") return;
+    this.host.store.put(`think:recover:incident:${incident.requestId}`, incident);
+  }
+
+  private syncRecoveringRow(incident: JsonRecord): void {
+    if (typeof incident.requestId !== "string") return;
+    const key = `think:recover:recovering:${incident.requestId}`;
+    if (incident.status === "scheduled" || incident.status === "attempting") {
+      this.host.store.put(key, {
+        requestId: incident.requestId,
+        incidentId: typeof incident.incidentId === "string" ? incident.incidentId : `${incident.requestId}:`,
+        attempt: typeof incident.attempt === "number" ? incident.attempt : 1,
+        maxAttempts: typeof incident.maxAttempts === "number" ? incident.maxAttempts : 6,
+        recoveryKind: incident.recoveryKind === "continue" ? "continue" : "retry",
+        scheduledAt: typeof incident.lastAttemptAt === "number" ? incident.lastAttemptAt : Date.now(),
+      });
+    } else {
+      this.host.store.delete(key);
+    }
+  }
 
   async setRequestContextForTest(_body?: unknown, clientTools?: unknown): Promise<void> {
     this.clientToolNames.clear();
@@ -842,7 +955,13 @@ class ThinkSessionPortAgentImpl extends Think {
   async testRecoveryCallbackError(): Promise<unknown> { missingFeature("recovery callback error handling"); }
   async testGiveUpSealTransientDefer(): Promise<unknown> { missingFeature("transient defer give-up sealing"); }
   async testStallRouteExhaustion(): Promise<unknown> { missingFeature("stall-route exhaustion helper"); }
-  async getIdleConnectMessagesForTest(): Promise<unknown[]> { missingFeature("idle connect message capture"); }
+  async getIdleConnectMessagesForTest(): Promise<unknown[]> {
+    return this.chatRecoverySchedule().map((schedule) => ({
+      type: "cf_agent_chat_recovering",
+      recovering: true,
+      id: schedule.requestId,
+    }));
+  }
   async getLastPromptRoleForTest(): Promise<string | undefined> { missingFeature("model prompt capture"); }
   async runInBandStreamErrorForTest(): Promise<void> { throw new Error("missing-feature: in-band stream errors"); }
   async runPartialInBandStreamErrorForTest(): Promise<void> { throw new Error("missing-feature: in-band stream errors"); }
