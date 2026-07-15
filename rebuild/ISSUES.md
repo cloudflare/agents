@@ -630,6 +630,19 @@ mechanism or the Think surface. Acceptance: the P9 reattach family +
 reattach-budget/task-amplification e2e flip. Schedule before/alongside port
 wave P13 (delegation-recovery files).
 
+**Scope detail (P9 triage, 19 pinned tests):** soft-terminal `interrupted`
+rows; typed give-up reasons (`no-progress`, `window-exceeded`,
+`not-tailable`); per-run live-tail reattach/re-arm loops; public budgets
+(`noProgressTimeoutMs` default 120_000, max-window default Infinity,
+per-agent overridable); hard-ceiling child teardown; parallel reattach (a
+hung child must not starve siblings); repair-by-re-issue of interrupted
+rows; scheduled startup recovery with single-flight + pre-startup-snapshot
+semantics; child-side stranded-row finalizers on both chat-recovery paths
+(CONTINUE and RETRY). All 19 P9 rows should flip together when this lands.
+Related smaller gaps found alongside: structured `output` on completed live
+runs is never populated (no-issue-yet); `eventCounters` map in runs.ts is
+never pruned on settle (memory-only, minor).
+
 ## ISSUE-036 — Facets never receive their own AgentSpawner — no nested spawn, no parentAgent() from within a facet
 
 **Status:** open · **Area:** domain/delegation + adapters/cloudflare · **Found by:** P10 ported sub-agent tests
