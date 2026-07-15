@@ -270,8 +270,9 @@ from other skills.
 
 Skills are on-demand instructions, not always-on system prompt text. The model
 sees the catalog first, then calls `activate_skill` when a user task matches a
-skill description. Use `getSystemPrompt()` or a Session context block for
-behavior that should apply to every turn.
+skill description. Use a Session context block for behavior that should apply to
+every turn, especially when the agent also uses skills. `getSystemPrompt()` is a
+legacy fallback and is ignored once Session context blocks are configured.
 
 Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
 enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
@@ -335,7 +336,7 @@ Script execution requires a Worker Loader binding:
 | Method / Property          | Default                            | Description                                                                                                                                                                                                                  |
 | -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `getModel()`               | throws                             | Return the `LanguageModel` to use                                                                                                                                                                                            |
-| `getSystemPrompt()`        | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                                                                                                                              |
+| `getSystemPrompt()`        | careful assistant operating prompt | Legacy system prompt fallback used only when no Session context blocks are configured                                                                                                                                        |
 | `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
 | `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
 | `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |

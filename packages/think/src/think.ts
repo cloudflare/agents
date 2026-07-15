@@ -12,7 +12,7 @@
  * Configuration overrides:
  *   - getModel()            — return a model id string (resolved via the
  *                             built-in workers-ai-provider) or a LanguageModel
- *   - getSystemPrompt()     — return the system prompt (fallback when no context blocks)
+ *   - getSystemPrompt()     — return the legacy fallback system prompt
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
  *   - configureSession()    — add context blocks, compaction, search, skills
@@ -3791,8 +3791,10 @@ export class Think<
   }
 
   /**
-   * Return the system prompt for the assistant.
-   * Used as fallback when no context blocks are configured via `configureSession`.
+   * Return the fallback system prompt for the assistant.
+   * Ignored when Session context blocks are configured. Use
+   * `configureSession().withContext()` for always-on instructions that should
+   * coexist with context blocks or skills.
    */
   getSystemPrompt(): string {
     return [
@@ -4485,6 +4487,15 @@ export class Think<
     try {
       const sources = await this.getSkills();
       if (sources.length === 0) return;
+
+      if (this.getSystemPrompt !== Think.prototype.getSystemPrompt) {
+        const warning =
+          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureSession().withContext(...) instead.";
+        if (!this._loggedSkillWarnings.has(warning)) {
+          this._loggedSkillWarnings.add(warning);
+          console.warn(`[think] ${warning}`);
+        }
+      }
 
       const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
       await registry.load();

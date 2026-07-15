@@ -1,6 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, Think } from "../../think";
+import { action, skills, Think } from "../../think";
 import { Agent } from "agents";
 import type {
   AgentToolEventMessage,
@@ -3327,6 +3327,47 @@ export class ThinkSessionTestAgent extends Think {
 
   async hostGetContext(label: string): Promise<string | null> {
     return this._hostGetContext(label);
+  }
+}
+
+// ── ThinkSystemPromptSkillsWarningAgent ─────────────────────
+// Repro for #1871: getSkills() registers a Session context block, so an
+// overridden getSystemPrompt() is fallback-only and should warn.
+
+export class ThinkSystemPromptSkillsWarningAgent extends Think {
+  override getModel(): LanguageModel {
+    return createMockModel("Skills warning response");
+  }
+
+  override getSystemPrompt(): string {
+    return "You are Robbie, a pirate. Always answer in pirate speak.";
+  }
+
+  override getSkills() {
+    return [
+      skills.fromManifest({
+        id: "test-skills",
+        fingerprint: "v1",
+        skills: [
+          {
+            name: "knot-tying",
+            description: "How to tie useful knots.",
+            body: "Always double-check the hitch."
+          }
+        ]
+      })
+    ];
+  }
+
+  async runChatTurnForWarningTest(): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat("Ahoy!", cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
   }
 }
 
