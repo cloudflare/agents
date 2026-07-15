@@ -733,3 +733,17 @@ loop, while this is about delivery once nobody is watching — related
 motivation, distinct mechanism, and a distinct acceptance suite (this file's
 13 tests). Scope before/alongside ISSUE-035 given the shared `interrupted`
 status vocabulary and give-up reasoning both need.
+
+## ISSUE-038 — Fiber recovery scan: spurious hook fire on settled ledgers; ledger-without-run-row invisible
+
+**Status:** open · **Area:** domain/runtime/fibers · **Found by:** P13 ported run-fiber tests (3 honestly-failing tests)
+
+Two related gaps in `checkInterrupted()` (`fibers.ts`): (1) it invokes
+`onFiberRecovered` (and emits `fiber:recovery:detected/attempt/handled`) for
+every orphaned run row even when its managed ledger row is already terminally
+settled (e.g. `aborted` with a stale lingering run row) — it guards only
+against re-marking the ledger `interrupted`, not against firing the hook;
+(2) it scans only `fiber:run:*` rows, so a managed ledger row without an
+accompanying run row (crash between the two writes) is invisible to recovery
+entirely. Both demonstrated by named failing tests in
+`test-workers/ported/run-fiber.test.ts`.

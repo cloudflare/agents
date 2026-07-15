@@ -162,9 +162,9 @@ refreshes the snapshot in the same commit.
 
 | File | ~Tests | Status | Notes |
 |---|--:|---|---|
-| agent-tool-detached.test.ts | 13 | claimed P13 | T3 (delegation) |
-| agent-tool-replay.test.ts | 5 | claimed P13 | T3 |
-| agent-tools-failure.test.ts | 5 | claimed P13 | T3 |
+| agent-tool-detached.test.ts | 13 | ported 1/1 · 12 blocked ISSUE-037 | [fidelity:adapter] P13. ISSUE-037 filed: no detached/background delivery ledger (two-slot claim+lease, give-up budget, backbone cadence) — distinct from 035's live reattach tail. |
+| agent-tool-replay.test.ts | 5 | blocked ISSUE-035 | P13: all 5 need interrupted-status/replay machinery. |
+| agent-tools-failure.test.ts | 5 | ported 1/5 | [fidelity:adapter] P13. 4 fails cite ISSUE-035 (no failure-envelope ok/status/retryable; no toolCallId-derived stable runId). |
 | alarms.test.ts | 3 | native test-workers/alarm.test.ts | verify overlap when convenient |
 | basepath.test.ts | 21 | claimed P12 | T3 (routing prefix option) |
 | browser-connector.test.ts | 34 | blocked ISSUE-008 | ports with the browser lift |
@@ -188,7 +188,7 @@ refreshes the snapshot in the same commit.
 | retries.test.ts | 48 | blocked ISSUE-020 | |
 | retry-integration.test.ts | 18 | blocked ISSUE-020 | |
 | routing.test.ts | 24 | ported 24/24 | [fidelity:light] **GREEN — full original suite passes** (after fixing unknown-binding 400 vs 404 divergence found here). |
-| run-fiber.test.ts | 54 | claimed P13 | T3 |
+| run-fiber.test.ts | 48 | ported 34/41 | [fidelity:adapter] P13 (original has 48 tests, not 54). 41 on the board: 34 pass; 3 fails pin ISSUE-038 (fiber recovery scan gaps — real bugs); 4 other fails honest. 5 quarry (4 recovery follow-up alarm → native fibers.test.ts backoff/eviction by name; 1 old-arch SQL UNIQUE). 1 blocked ISSUE-003/022 (MCP wake-ordering). 1 missing-feature no-issue-yet (dedupe by caller-supplied fiberId — startFiber has only idempotencyKey). |
 | schedule.test.ts | 52 | claimed P12 | T3 |
 | schema-and-state-optimization.test.ts | 31 | quarry | original SQL-schema internals |
 | skill-runner.test.ts | 31 | blocked ISSUE-004 | |
