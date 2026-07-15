@@ -91,6 +91,25 @@ export class SupportAgentDO extends AgentDurableObject<SupportAgent> {
 - Cost: ~5 lines instead of 1, and the lifecycle is still "somewhere in the
   base" — but it's a *normal base class you can open*, not a synthesized one.
 
+**Implemented (ISSUE-030 W-B, 2026-07-15):** `AgentDurableObject<A extends
+Agent>` in `src/adapters/cloudflare/shell.ts` is this base class, built as
+real methods (not the old throwing-stub-until-a-factory-installs-it
+pattern). Small shape differences from the sketch above, settled during
+implementation because the sketch didn't pin them down: `createAgent(rt,
+ctx, env)` takes the same three params `hostAgent`'s `create` option always
+took (env-dependent construction needs `env`); `transports(agent, registry)`
+takes the just-built agent and connection registry as parameters (it's
+computed once per activation, not a static class-level list) and returns an
+array — composed via a small fan-out so 0, 1, or (later) several transports
+all work; a transport-free agent gets `transports()`'s default `[]`, and a
+WS upgrade against it returns a clean 400. `createAgent` is intentionally
+*not* TS `abstract`, defaulting instead to a method that throws if never
+overridden — `hostAgent`'s return type widens its anonymous subclass to
+`AgentDurableObject<A>`, and every ported fixture that subclasses that
+return value (to add RPC-forwarding methods via `withAgent`) never touches
+`createAgent`; making it `abstract` broke all of them at the type level.
+`hostAgent(AgentClass)` is sugar over this base exactly as documented below.
+
 ## Option C — plain composition + a lifecycle driver
 
 ```ts
