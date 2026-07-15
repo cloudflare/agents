@@ -66,7 +66,7 @@ export type StateOrigin = { kind: "server" } | { kind: "client"; sourceId: strin
  * on the agent's typed public methods — the agent never holds a connection or
  * parses a wire frame (audit 25).
  */
-export interface AgentHost {
+export interface AgentRuntime {
   className: string;
   name: string;
   store: KeyValueStore;
@@ -84,6 +84,14 @@ export interface AgentHost {
 }
 
 /**
+ * @deprecated Renamed to {@link AgentRuntime} (ISSUE-030: the name signals
+ * capabilities provided to the agent, not a `this`-handle). Alias retained
+ * for one milestone so in-flight branches and ported fixtures keep
+ * compiling; will be removed.
+ */
+export type AgentHost = AgentRuntime;
+
+/**
  * Thin composition root: wires the domain services over a scoped-per-module
  * view of `host.store`, exposes their operations as a flat delegation
  * surface, and defines the overridable hook seams (`onStart`, ...). No
@@ -93,7 +101,7 @@ export interface AgentHost {
  * own event log and exposes typed methods for adapters to call.
  */
 export class Agent<State = unknown> {
-  readonly host: AgentHost;
+  readonly host: AgentRuntime;
   /** Telemetry bus: fire-and-forget diagnostics, distinct from ConversationEvents. */
   readonly bus: EventBus;
   readonly ids: IdSource;
@@ -114,7 +122,7 @@ export class Agent<State = unknown> {
   private readonly eventLog: ConversationEventLog;
   private callablesScanned = false;
 
-  constructor(host: AgentHost) {
+  constructor(host: AgentRuntime) {
     this.host = host;
     this.ids = host.ids ?? defaultIdSource;
     this.bus = createEventBus({ agent: host.className, name: host.name }, () => host.clock.now());

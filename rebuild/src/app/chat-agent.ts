@@ -2,7 +2,7 @@ import { ValidationError, toErrorValue, type ErrorValue } from "../kernel/errors
 import { scoped } from "../ports/storage.js";
 import type { ModelChunk, ModelClient, ModelMessage } from "../ports/model.js";
 
-import { Agent, type AgentHost } from "./agent.js";
+import { Agent, type AgentRuntime } from "./agent.js";
 import type { ConversationApi } from "./capabilities.js";
 
 import { createTurnQueue, type TurnQueue } from "../domain/turn/admission.js";
@@ -183,7 +183,7 @@ export class ChatAgent<State = unknown> extends Agent<State> implements Conversa
   /** In-memory only: adapters use this for the resume handshake; not durable across eviction (matches the turn queue's own liveness). */
   private activeTurnInfo: { requestId: string; startOffset: number } | null = null;
 
-  constructor(host: AgentHost) {
+  constructor(host: AgentRuntime) {
     super(host);
 
     this.turnQueue = createTurnQueue();

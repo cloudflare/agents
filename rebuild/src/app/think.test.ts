@@ -8,7 +8,7 @@ import { action, type Action } from "../domain/actions/actions.js";
 import type { ChannelDefinition } from "../domain/channels/channels.js";
 import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
 import type { ToolSet } from "../domain/tools/types.js";
-import type { AgentHost } from "./agent.js";
+import type { AgentRuntime } from "./agent.js";
 import { Think, type StreamCallback } from "./think.js";
 
 // ---------------------------------------------------------------------------
@@ -20,7 +20,7 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,

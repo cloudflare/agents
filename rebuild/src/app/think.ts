@@ -3,7 +3,7 @@ import { scoped } from "../ports/storage.js";
 import type { ModelClient } from "../ports/model.js";
 import type { FetchLike } from "../ports/http.js";
 
-import type { AgentHost } from "./agent.js";
+import type { AgentRuntime } from "./agent.js";
 import {
   ChatAgent,
   combineSignals,
@@ -149,7 +149,7 @@ export class Think<State = unknown> extends ChatAgent<State> implements Approval
 
   private skillRegistryInstance?: SkillRegistry;
 
-  constructor(host: AgentHost) {
+  constructor(host: AgentRuntime) {
     super(host);
 
     this.workspace = createWorkspace({ store: scoped(host.store, "think:ws:"), clock: host.clock });

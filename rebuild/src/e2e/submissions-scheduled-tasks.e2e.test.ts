@@ -5,7 +5,7 @@ import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient, ModelMessage } from "../ports/model.js";
 import { userMessage } from "../domain/messages/model.js";
 import type { DeclaredTasks } from "../domain/reliability/scheduled-tasks/tasks.js";
-import type { AgentHost } from "../app/agent.js";
+import type { AgentRuntime } from "../app/agent.js";
 import { Think } from "../app/think.js";
 
 /**
@@ -33,7 +33,7 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,

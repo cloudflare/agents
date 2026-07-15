@@ -7,7 +7,7 @@ import type { IdSource } from "../kernel/ids.js";
 import { callable, type StreamingResponse } from "../domain/runtime/rpc/callable.js";
 import type { StoredEvent } from "../domain/events/log.js";
 import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/runtime/fibers/fibers.js";
-import { Agent, type AgentHost } from "./agent.js";
+import { Agent, type AgentRuntime } from "./agent.js";
 
 interface CountState {
   count: number;
@@ -18,8 +18,8 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-/** Builds a plain AgentHost (no connections/bus field — Agent creates its own) over a MemoryHost. */
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+/** Builds a plain AgentRuntime (no connections/bus field — Agent creates its own) over a MemoryHost. */
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,
@@ -92,7 +92,7 @@ class TestAgent extends Agent<CountState> {
 /** A minimal Agent subclass with no overrides, used for plain wiring assertions. */
 class PlainAgent extends Agent<{ n: number }> {}
 
-function makeAgent(className = "TestAgent", name = "a1"): { agent: TestAgent; mem: MemoryHost; host: AgentHost } {
+function makeAgent(className = "TestAgent", name = "a1"): { agent: TestAgent; mem: MemoryHost; host: AgentRuntime } {
   const mem = createMemoryHost({ agent: className, name });
   const host = toHost(mem, { className, name });
   const agent = new TestAgent(host);

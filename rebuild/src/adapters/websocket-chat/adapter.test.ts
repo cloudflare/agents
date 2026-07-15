@@ -9,7 +9,7 @@ import { action, type Action } from "../../domain/actions/actions.js";
 import { callable, type StreamingResponse } from "../../domain/runtime/rpc/callable.js";
 import type { ConversationEventLog } from "../../domain/events/log.js";
 import type { ToolSet } from "../../domain/tools/types.js";
-import type { AgentHost } from "../../app/agent.js";
+import type { AgentRuntime } from "../../app/agent.js";
 import { Think } from "../../app/think.js";
 import { attachChatTransport } from "./adapter.js";
 import { connectChatClient } from "./test-helpers.js";
@@ -26,7 +26,7 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,

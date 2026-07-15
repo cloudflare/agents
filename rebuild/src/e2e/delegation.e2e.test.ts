@@ -11,7 +11,7 @@ import type { ModelClient } from "../ports/model.js";
 import type { ToolSet } from "../domain/tools/types.js";
 import { createSubAgentRegistry } from "../domain/delegation/registry.js";
 import { createAgentToolRunService, type AgentToolRun } from "../domain/delegation/runs.js";
-import type { AgentHost } from "../app/agent.js";
+import type { AgentRuntime } from "../app/agent.js";
 import { Think, type ChatResponseResult } from "../app/think.js";
 
 /**
@@ -48,7 +48,7 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,

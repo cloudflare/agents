@@ -13,7 +13,7 @@ import {
   type ReplyAttachment,
 } from "../domain/actions/actions.js";
 import type { ConversationEvent, StoredEvent } from "../domain/events/log.js";
-import type { AgentHost } from "../app/agent.js";
+import type { AgentRuntime } from "../app/agent.js";
 import { Think, type ChatResponseResult } from "../app/think.js";
 import { attachChatTransport } from "../adapters/websocket-chat/adapter.js";
 import { connectChatClient } from "../adapters/websocket-chat/test-helpers.js";
@@ -38,7 +38,7 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,

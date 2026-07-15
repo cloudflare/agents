@@ -5,7 +5,7 @@ import { createFakeModel, type FakeModel, type FakeTurn } from "../adapters/memo
 import type { IdSource } from "../kernel/ids.js";
 import type { ModelClient } from "../ports/model.js";
 import type { ToolSet } from "../domain/tools/types.js";
-import type { AgentHost } from "./agent.js";
+import type { AgentRuntime } from "./agent.js";
 import { ChatAgent } from "./chat-agent.js";
 
 // ---------------------------------------------------------------------------
@@ -18,7 +18,7 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,

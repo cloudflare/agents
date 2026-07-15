@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 
-import type { AgentHost } from "../../app/agent.js";
+import type { AgentRuntime } from "../../app/agent.js";
 import type { Think } from "../../app/think.js";
 import { NotFoundError, toErrorValue, type ErrorValue } from "../../kernel/errors.js";
 import type { AlarmTimer } from "../../ports/alarms.js";
@@ -30,7 +30,7 @@ const CHILD_ALARM_PREFIX = "cf-shell:child-alarm:";
 
 const DELEGATION_SURFACE = new Set(["chat", "cancelChat", "inspectRun"]);
 
-type ParentPath = NonNullable<AgentHost["parentPath"]>;
+type ParentPath = NonNullable<AgentRuntime["parentPath"]>;
 type AlarmLink = { armChild: (at: number | null) => void };
 type RpcCallResult =
   | { ok: true; result: unknown }
@@ -54,7 +54,7 @@ interface Activation<A extends Think> {
 
 export interface HostAgentOptions<A extends Think> {
   /** Env-dependent construction (model keys etc.). Default: new AgentClass(host). */
-  create?: (host: AgentHost, ctx: DurableObjectState, env: unknown) => A;
+  create?: (host: AgentRuntime, ctx: DurableObjectState, env: unknown) => A;
   /** Non-upgrade HTTP requests. Default: 404. */
   onRequest?: (request: Request, agent: A) => Response | Promise<Response>;
   /** Forwarded to attachChatTransport. */
@@ -64,7 +64,7 @@ export interface HostAgentOptions<A extends Think> {
 export class HostedAgentDurableObject<A extends Think> extends DurableObject<unknown> {
   __init(_init: {
     name: string;
-    parentPath?: AgentHost["parentPath"];
+    parentPath?: AgentRuntime["parentPath"];
     facetHosted?: boolean;
   }): Promise<void> {
     throw new Error("hostAgent did not install __init");
@@ -113,7 +113,7 @@ export class HostedAgentDurableObject<A extends Think> extends DurableObject<unk
  * `ctx.id.name`.
  */
 export function hostAgent<A extends Think>(
-  AgentClass: new (host: AgentHost) => A,
+  AgentClass: new (host: AgentRuntime) => A,
   options: HostAgentOptions<A> = {}
 ): new (ctx: DurableObjectState, env: unknown) => HostedAgentDurableObject<A> {
   return class HostedAgentDO extends HostedAgentDurableObject<A> {
@@ -181,7 +181,7 @@ export function hostAgent<A extends Think>(
 
     override async __init(init: {
       name: string;
-      parentPath?: AgentHost["parentPath"];
+      parentPath?: AgentRuntime["parentPath"];
       facetHosted?: boolean;
     }): Promise<void> {
       const store = createDurableKeyValueStore(this.ctx.storage);
@@ -487,7 +487,7 @@ export function hostAgent<A extends Think>(
           activation?.rearm?.();
         };
 
-        const host: AgentHost = {
+        const host: AgentRuntime = {
           className: AgentClass.name,
           name,
           store,

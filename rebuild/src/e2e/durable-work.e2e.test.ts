@@ -3,7 +3,7 @@ import { createMemoryHost, type MemoryHost } from "../adapters/memory/host.js";
 import type { IdSource } from "../kernel/ids.js";
 import type { FiberRecoveryContext, FiberRecoveryResult } from "../domain/runtime/fibers/fibers.js";
 import type { QueueItem } from "../domain/runtime/queue/queue.js";
-import { Agent, type AgentHost } from "../app/agent.js";
+import { Agent, type AgentRuntime } from "../app/agent.js";
 
 /**
  * Scenario 2 (audit 24 §2): schedules, queue, and fibers all have to survive
@@ -18,7 +18,7 @@ function counterIds(): IdSource {
   return { newId: (prefix: string) => `${prefix}_${++n}` };
 }
 
-function toHost(mem: MemoryHost, opts: Partial<AgentHost> & { className: string; name: string }): AgentHost {
+function toHost(mem: MemoryHost, opts: Partial<AgentRuntime> & { className: string; name: string }): AgentRuntime {
   return {
     store: mem.store,
     alarm: mem.alarms,
