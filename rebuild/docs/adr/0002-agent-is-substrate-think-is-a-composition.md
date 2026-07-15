@@ -106,6 +106,35 @@ on any Agent) — they never name Think. Only the conversation transport needs
 `ConversationSurface`. So three of the four `cf_agent_*` concerns are already
 userland-open; the fourth becomes open by interface-typing.
 
+`ConversationSurface` is the **wire-independent inbound contract** of "an agent
+you can converse with" — what a transport *calls*. The outbound stream is the
+generic event log (`events()`), deliberately NOT part of this surface, so the
+conversation transport pulls in only conversation, and state/rpc transports
+pull in only their own capability.
+
+```ts
+interface ConversationSurface {
+  // drive a turn
+  chat(input: string | ChatMessage[], callback?: StreamCallback,
+       opts?: { channel?: string; requestId?: string; clientTools?: ToolSet }): Promise<TurnResult>;
+  cancelChat(requestId: string, reason?: string): boolean;
+  // resolve a suspended interaction (resume a paused turn)
+  applyToolResult(a: { toolCallId: string; output: unknown; isError?: boolean }): Promise<void>;
+  resolveApproval(a: { toolCallId?: string; executionId?: string; approved: boolean; reason?: string }): Promise<void>;
+  // transcript
+  history(): Promise<ChatMessage[]>;
+  clearMessages(): Promise<void>;
+  // reconnect / resume introspection
+  isRecovering(): boolean;
+  activeTurn(): { requestId: string; startOffset: number } | null;
+  pendingChatTerminal(): { requestId: string; body: string } | null;
+}
+```
+
+Callers are transports/drivers, never end users: the WS chat adapter, a future
+HTTP/SSE adapter, the CLI demo, and the delegation relay (a parent driving a
+child's `chat`) are all bindings of one protocol onto this one surface.
+
 ## Consequence / open follow-up
 
 Reproducible-in-userland is **true today but not yet first-class DX.** The
