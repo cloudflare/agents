@@ -269,6 +269,18 @@ describe("WorkersAIFluxSTT", () => {
     expect(interims).toEqual(["not done", "not done yet"]);
     expect(utterances).toEqual(["not done yet"]);
   });
+
+  it("forwards the full keyterms array to ai.run", async () => {
+    const ai = new MockAi();
+    const keyterms = ["BrokerBot", "SkySlope", "MLS", "CMA", "BPO"];
+
+    new WorkersAIFluxSTT(ai, { keyterms }).createSession();
+    await waitForConnect(ai);
+
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0]?.model).toBe("@cf/deepgram/flux");
+    expect(ai.calls[0]?.input.keyterm).toEqual(keyterms);
+  });
 });
 
 describe("WorkersAINova3STT", () => {
@@ -362,6 +374,18 @@ describe("WorkersAINova3STT", () => {
     );
 
     expect(utterances).toEqual(["late message"]);
+  });
+
+  it("forwards the full keyterms array to ai.run", async () => {
+    const ai = new MockAi();
+    const keyterms = ["BrokerBot", "SkySlope", "MLS", "CMA", "BPO"];
+
+    new WorkersAINova3STT(ai, { keyterms }).createSession();
+    await waitForConnect(ai);
+
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0]?.model).toBe("@cf/deepgram/nova-3");
+    expect(ai.calls[0]?.input.keyterm).toEqual(keyterms);
   });
 });
 
