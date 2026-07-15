@@ -51,21 +51,31 @@ function parseCoverage(md) {
     const isQuarryTable = header.some((h) => /maps to/i.test(h));
     const rows = [];
     for (const line of lines.slice(2)) {
-      const cells = line.split("|").slice(1, -1).map((c) => c.trim());
+      const cells = line
+        .split("|")
+        .slice(1, -1)
+        .map((c) => c.trim());
       if (cells.length < 2) continue;
       const name = stripMd(cells[0]);
       const testsCell = cells.find((c) => /^~?\d+$/.test(stripMd(c)));
-      const tests = testsCell ? Number(stripMd(testsCell).replace("~", "")) : null;
+      const tests = testsCell
+        ? Number(stripMd(testsCell).replace("~", ""))
+        : null;
       // Prefer a counted status (ported/rewritten n/m) over any bare status
       // word — defends against malformed rows carrying a stale extra cell.
       const statusCell = isQuarryTable
         ? "quarry"
-        : cells.find((c) => /(?:ported|rewritten)\s+\d+\/\d+/i.test(c)) ??
+        : (cells.find((c) => /(?:ported|rewritten)\s+\d+\/\d+/i.test(c)) ??
           cells.find((c) => STATUS_RE.test(stripMd(c))) ??
-          "pending";
-      const notes = stripMd(cells[cells.length - 1] ?? "");
+          "pending");
+      let notes = stripMd(cells[cells.length - 1] ?? "");
+      // Fidelity is a leading [fidelity:x] token in the notes cell — the
+      // ledger stays the single source for both the status and fidelity axes.
+      const fidMatch = notes.match(/^\[fidelity:(move|light|adapter|rewrite)\]\s*/i);
+      const fidelity = fidMatch ? fidMatch[1].toLowerCase() : null;
+      if (fidMatch) notes = notes.slice(fidMatch[0].length);
       const info = categorize(statusCell);
-      rows.push({ name, tests, status: stripMd(statusCell), notes, ...info });
+      rows.push({ name, tests, status: stripMd(statusCell), notes, fidelity, ...info });
     }
     if (rows.length > 0) sections.push({ heading, rows });
   }
@@ -81,9 +91,19 @@ function parseIssues(md) {
   let m;
   while ((m = re.exec(md)) !== null) {
     const nextIssue = md.indexOf("\n## ISSUE-", re.lastIndex);
-    const body = md.slice(re.lastIndex, nextIssue === -1 ? md.length : nextIssue).replace(/\n---\s*$/, "").trim();
-    const status = body.match(/\*\*Status:\*\*\s*(resolved|open|in-progress)/i)?.[1] ?? "open";
-    issues.push({ id: m[1], title: m[2].trim(), status: status.toLowerCase(), body });
+    const body = md
+      .slice(re.lastIndex, nextIssue === -1 ? md.length : nextIssue)
+      .replace(/\n---\s*$/, "")
+      .trim();
+    const status =
+      body.match(/\*\*Status:\*\*\s*(resolved|open|in-progress)/i)?.[1] ??
+      "open";
+    issues.push({
+      id: m[1],
+      title: m[2].trim(),
+      status: status.toLowerCase(),
+      body
+    });
   }
   return issues;
 }
@@ -112,12 +132,36 @@ const log = parseLog(read("PROGRESS.md"));
 
 const CATS = ["green", "partial", "pending", "blocked", "quarry", "dropped"];
 const CAT_LABEL = {
-  green: "Ported · green",
-  partial: "Ported · failing",
-  pending: "Awaiting port",
-  blocked: "Blocked on issue",
-  quarry: "Spec quarry",
-  dropped: "Dropped / native",
+  green: "Ported · all pass",
+  partial: "Ported · some fail",
+  pending: "Not ported · queued",
+  blocked: "Not ported · blocked",
+  quarry: "Won't port · checklist",
+  dropped: "Won't port · native"
+};
+const CAT_DEF = {
+  green: "Copied across and running; every assertion passes.",
+  partial: "Copied across and running; some assertions fail — triaged (see notes), not port bugs.",
+  pending: "Nothing blocks it — just not reached yet. The unclaimed backlog.",
+  blocked: "Porting now would only re-confirm a named missing feature; ports for real when its ISSUE lands.",
+  quarry: "Tests internals of the deleted architecture — never ported; read as a checklist to preserve behaviour in our native suite.",
+  dropped: "Not ported because it would add nothing — the rebuild's native suite already covers it, or it's meaningless here (e.g. old-schema migration)."
+};
+
+// Fidelity: HOW faithfully a ported test tracks the original (orthogonal to
+// pass/fail). Ordered most → least faithful.
+const FIDS = ["move", "light", "adapter", "rewrite"];
+const FID_LABEL = {
+  move: "Pure move",
+  light: "Light touch",
+  adapter: "New adapter",
+  rewrite: "Rewritten"
+};
+const FID_DEF = {
+  move: "Imports re-pointed, nothing else — runs on generic scaffolding.",
+  light: "Test body verbatim; only a shared harness swap or a minimal fixture.",
+  adapter: "Test body verbatim, but a bespoke fixture agent + compat surface was built (the fixtures can't import the original Think).",
+  rewrite: "Test logic re-authored against the rebuilt API — assertions' substance preserved."
 };
 
 function tally(rows) {
@@ -138,18 +182,36 @@ function tally(rows) {
 const allRows = coverage.flatMap((s) => s.rows);
 const totals = tally(allRows);
 const totalTests = allRows.reduce((n, r) => n + (r.tests ?? 0), 0);
+
+// Fidelity tally over ported/rewritten rows (files, weighted by test count).
+const fidTally = Object.fromEntries(FIDS.map((f) => [f, { files: 0, tests: 0 }]));
+for (const r of allRows) {
+  if (r.fidelity && fidTally[r.fidelity]) {
+    fidTally[r.fidelity].files += 1;
+    fidTally[r.fidelity].tests += r.tests ?? 0;
+  }
+}
+const fidTotalTests = FIDS.reduce((n, f) => n + fidTally[f].tests, 0);
+const fidTotalFiles = FIDS.reduce((n, f) => n + fidTally[f].files, 0);
 const blockedTestsByIssue = new Map();
 for (const row of allRows) {
   if (row.cat === "blocked" && row.issue) {
     const id = `ISSUE-${row.issue}`;
-    blockedTestsByIssue.set(id, (blockedTestsByIssue.get(id) ?? 0) + (row.tests ?? 0));
+    blockedTestsByIssue.set(
+      id,
+      (blockedTestsByIssue.get(id) ?? 0) + (row.tests ?? 0)
+    );
   }
 }
-for (const issue of issues) issue.blockedTests = blockedTestsByIssue.get(issue.id) ?? 0;
+for (const issue of issues)
+  issue.blockedTests = blockedTestsByIssue.get(issue.id) ?? 0;
 const openIssues = issues.filter((i) => i.status !== "resolved");
 const gitInfo = (() => {
   try {
-    return execSync("git log -1 --format=%h·%cd --date=format:%Y-%m-%d\\ %H:%M", { cwd: root })
+    return execSync(
+      "git log -1 --format=%h·%cd --date=format:%Y-%m-%d\\ %H:%M",
+      { cwd: root }
+    )
       .toString()
       .trim();
   } catch {
@@ -161,7 +223,11 @@ const gitInfo = (() => {
 // Render
 // ---------------------------------------------------------------------------
 const esc = (s) =>
-  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 
 function stackedBar(t, totalT) {
   const segs = CATS.filter((c) => t[c].tests > 0)
@@ -202,15 +268,16 @@ function sectionCard(s) {
       <td class="file">${esc(r.name)}</td>
       <td class="num">${r.tests ?? "–"}</td>
       <td class="stat">${chip(r)}${passBar(r)}</td>
+      <td class="fid">${r.fidelity ? `<span class="fchip fchip-${r.fidelity}" title="${esc(FID_DEF[r.fidelity])}">${FID_LABEL[r.fidelity]}</span>` : ""}</td>
       <td class="notes"><details><summary>notes</summary><p>${esc(r.notes)}</p></details></td>
-    </tr>`,
+    </tr>`
     )
     .join("\n");
   return `<section class="card">
     <header><h2>${esc(s.heading)}</h2><span class="muted">${s.rows.length} files · ${sTests} tests</span></header>
     ${stackedBar(t, Math.max(sTests, 1))}
     <div class="scroll"><table>
-      <thead><tr><th>file</th><th class="num">tests</th><th>status</th><th></th></tr></thead>
+      <thead><tr><th>file</th><th class="num">tests</th><th>status</th><th>fidelity</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
   </section>`;
@@ -218,28 +285,49 @@ function sectionCard(s) {
 
 const legend = CATS.map(
   (c) =>
-    `<span class="lg"><i class="dot seg-${c}"></i>${CAT_LABEL[c]} <b>${totals[c].tests}</b></span>`,
+    `<div class="glossg"><span class="lg"><i class="dot seg-${c}"></i><span class="lg-name">${CAT_LABEL[c]}</span> <b>${totals[c].tests}</b></span><span class="def">${CAT_DEF[c]}</span></div>`
+).join("");
+
+function fidBar() {
+  const segs = FIDS.filter((f) => fidTally[f].tests > 0)
+    .map((f) => {
+      const pct = ((fidTally[f].tests / Math.max(fidTotalTests, 1)) * 100).toFixed(2);
+      return `<div class="seg fseg-${f}" style="width:${pct}%" title="${esc(FID_LABEL[f])}: ${fidTally[f].tests} tests, ${fidTally[f].files} files"></div>`;
+    })
+    .join("");
+  return `<div class="bar">${segs}</div>`;
+}
+const fidLegend = FIDS.map(
+  (f) =>
+    `<div class="glossg"><span class="lg"><i class="dot fseg-${f}"></i><span class="lg-name">${FID_LABEL[f]}</span> <b>${fidTally[f].files} files</b></span><span class="def">${FID_DEF[f]}</span></div>`
 ).join("");
 
 const issueChips = issues
-  .toSorted((a, b) => b.blockedTests - a.blockedTests || a.id.localeCompare(b.id))
+  .toSorted(
+    (a, b) => b.blockedTests - a.blockedTests || a.id.localeCompare(b.id)
+  )
   .map(
     (i) =>
       `<button class="ichip issue-trigger ${i.status === "resolved" ? "done" : "open"}" type="button" data-issue="${i.id}" title="${esc(i.title)}"><span>${i.id}</span><em>${esc(
-         i.title.length > 46 ? i.title.slice(0, 44) + "…" : i.title,
-      )}</em><b>${i.blockedTests} tests blocked</b></button>`,
+        i.title.length > 46 ? i.title.slice(0, 44) + "…" : i.title
+      )}</em><b>${i.blockedTests} tests blocked</b></button>`
   )
   .join("");
 
 const issueDetails = Object.fromEntries(
-  issues.map((i) => [i.id, { title: i.title, body: i.body, blockedTests: i.blockedTests }]),
+  issues.map((i) => [
+    i.id,
+    { title: i.title, body: i.body, blockedTests: i.blockedTests }
+  ])
 );
 
 const logItems = log
   .map((l) => `<li><time>${l.date}</time><p>${esc(l.text)}</p></li>`)
   .join("");
 
-const passRate = totals.boardTotal ? ((totals.boardPassed / totals.boardTotal) * 100).toFixed(1) : "0";
+const passRate = totals.boardTotal
+  ? ((totals.boardPassed / totals.boardTotal) * 100).toFixed(1)
+  : "0";
 
 const html = `<title>Rebuild test-port dashboard</title>
 <style>
@@ -247,21 +335,26 @@ const html = `<title>Rebuild test-port dashboard</title>
   --bg:#faf9f6; --card:#ffffff; --ink:#1c1a17; --ink-2:#5f5b53; --ink-3:#8a857a;
   --line:#e7e4dc; --accent:#0f766e;
   --c-green:#008300; --c-partial:#eda100; --c-pending:#1baf7a; --c-blocked:#4a3aa7; --c-quarry:#e87ba4; --c-dropped:#2a78d6;
+  /* fidelity ramp: teal, most→least faithful (sequential, one hue) */
+  --f-move:#0f766e; --f-light:#3f9d94; --f-adapter:#7bbfb7; --f-rewrite:#b9ddd8;
 }
 @media (prefers-color-scheme: dark){:root{
   --bg:#16181d; --card:#1e2127; --ink:#e8e6e1; --ink-2:#a8a49b; --ink-3:#767268;
   --line:#2c2f36; --accent:#2aa79b;
   --c-green:#008300; --c-partial:#c98500; --c-pending:#199e70; --c-blocked:#9085e9; --c-quarry:#d55181; --c-dropped:#3987e5;
+  --f-move:#2aa79b; --f-light:#3f8f87; --f-adapter:#4d6f6a; --f-rewrite:#3a4b49;
 }}
 :root[data-theme="dark"]{
   --bg:#16181d; --card:#1e2127; --ink:#e8e6e1; --ink-2:#a8a49b; --ink-3:#767268;
   --line:#2c2f36; --accent:#2aa79b;
   --c-green:#008300; --c-partial:#c98500; --c-pending:#199e70; --c-blocked:#9085e9; --c-quarry:#d55181; --c-dropped:#3987e5;
+  --f-move:#2aa79b; --f-light:#3f8f87; --f-adapter:#4d6f6a; --f-rewrite:#3a4b49;
 }
 :root[data-theme="light"]{
   --bg:#faf9f6; --card:#ffffff; --ink:#1c1a17; --ink-2:#5f5b53; --ink-3:#8a857a;
   --line:#e7e4dc; --accent:#0f766e;
   --c-green:#008300; --c-partial:#eda100; --c-pending:#1baf7a; --c-blocked:#4a3aa7; --c-quarry:#e87ba4; --c-dropped:#2a78d6;
+  --f-move:#0f766e; --f-light:#3f9d94; --f-adapter:#7bbfb7; --f-rewrite:#b9ddd8;
 }
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--ink);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif;margin:0;padding:32px 20px 64px}
@@ -281,9 +374,20 @@ h2{font-size:14px;margin:0;font-weight:600}
 .seg:hover{filter:brightness(1.18);outline:2px solid var(--ink);outline-offset:-2px}
 .seg-green{background:var(--c-green)}.seg-partial{background:var(--c-partial)}.seg-pending{background:var(--c-pending)}
 .seg-blocked{background:var(--c-blocked)}.seg-quarry{background:var(--c-quarry)}.seg-dropped{background:var(--c-dropped)}
-.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12.5px;color:var(--ink-2)}
-.lg{display:inline-flex;align-items:center;gap:6px}.lg b{color:var(--ink)}
-.dot{width:9px;height:9px;border-radius:2px;display:inline-block}
+.lead{margin:0;color:var(--ink-2);font-size:13px;max-width:78ch}
+.gloss{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 20px}
+.glossg{display:flex;flex-direction:column;gap:1px}
+.lg{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink)}
+.lg .lg-name{font-weight:600}.lg b{color:var(--ink-3);font-weight:500;font-family:ui-monospace,Menlo,monospace}
+.def{color:var(--ink-2);font-size:12px;padding-left:15px;max-width:52ch;line-height:1.4}
+.dot{width:9px;height:9px;border-radius:2px;display:inline-block;flex:none}
+.fseg-move{background:var(--f-move)}.fseg-light{background:var(--f-light)}.fseg-adapter{background:var(--f-adapter)}.fseg-rewrite{background:var(--f-rewrite)}
+td.fid,th:nth-child(4){width:96px}
+.fchip{display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:9px;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+.fchip-move{border-color:var(--f-move);color:var(--f-move)}
+.fchip-light{border-color:var(--f-light)}
+.fchip-adapter{border-color:var(--f-adapter)}
+.fchip-rewrite{border-color:var(--f-rewrite)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
 .card header{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
 .scroll{overflow-x:auto}
@@ -344,7 +448,13 @@ a{color:var(--accent)}
   <section class="card">
     <header><h2>All original tests by status</h2><span class="muted mono">${totalTests} tests</span></header>
     ${stackedBar(totals, Math.max(totalTests, 1))}
-    <div class="legend">${legend}</div>
+    <div class="gloss">${legend}</div>
+  </section>
+  <section class="card">
+    <header><h2>Port fidelity</h2><span class="muted mono">${fidTotalFiles} ported files · ${fidTotalTests} tests</span></header>
+    <p class="lead">Of the files actually on the board, how faithfully each tracks the original — independent of whether its tests currently pass.</p>
+    ${fidBar()}
+    <div class="gloss">${fidLegend}</div>
   </section>
   ${coverage.map(sectionCard).join("\n")}
   <section class="card">
@@ -384,5 +494,5 @@ dialog.addEventListener("click", (event) => {
 writeFileSync(join(root, "dashboard.html"), html);
 console.log(
   `dashboard.html written — board ${totals.boardPassed}/${totals.boardTotal} (${passRate}%), ` +
-    `${totals.green.files} files green, ${openIssues.length} issues open`,
+    `${totals.green.files} files green, ${openIssues.length} issues open`
 );
