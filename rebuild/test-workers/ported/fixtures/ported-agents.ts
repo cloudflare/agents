@@ -10,16 +10,18 @@ import {
   type Action,
   type ChatMessage,
   type ChatResponseResult,
+  type DeliverNoticeOptions,
   type ModelChunk,
   type ModelClient,
   type ModelRequest,
   type StreamCallback,
   type ToolPart,
   type ToolSet,
-  type TurnResult,
+  type TurnResult
 } from "../compat.js";
 
 type JsonRecord = Record<string, unknown>;
+type ReplyAttachment = { type: string; [key: string]: unknown };
 
 type StoredMessage = {
   message: ChatMessage;
@@ -48,7 +50,7 @@ function textModel(text: string): ModelClient {
     async *stream(): AsyncIterable<ModelChunk> {
       yield { type: "text-delta", text };
       yield { type: "finish", finishReason: "stop" };
-    },
+    }
   };
 }
 
@@ -70,7 +72,8 @@ function statusesInPrompt(request: ModelRequest): string[] {
   const re = /"status"\s*:\s*"(completed|paused|rejected|error)"/g;
   for (const match of serialized.matchAll(re)) {
     const status = match[1];
-    if (status !== undefined && !statuses.includes(status)) statuses.push(status);
+    if (status !== undefined && !statuses.includes(status))
+      statuses.push(status);
   }
   return statuses;
 }
@@ -91,7 +94,7 @@ function appendStoredMessage(host: AgentHost, message: ChatMessage): void {
   const parentId = host.store.get<string>(leafKey) ?? null;
   host.store.put<StoredMessage>(sessionKey(`msg:${message.id}`), {
     message,
-    parentId,
+    parentId
   });
 
   const childrenKey = sessionKey(`children:${parentId ?? ROOT}`);
@@ -107,7 +110,7 @@ function replaceStoredMessage(host: AgentHost, message: ChatMessage): void {
   if (!existing) return;
   host.store.put<StoredMessage>(key, {
     message,
-    parentId: existing.parentId,
+    parentId: existing.parentId
   });
 }
 
@@ -136,27 +139,27 @@ function snapshotOutput(raw: unknown): ExecuteOutputSnapshot | undefined {
     reason: typeof obj.reason === "string" ? obj.reason : undefined,
     pending: Array.isArray(obj.pending)
       ? obj.pending.map((entry) => {
-          const pending = typeof entry === "object" && entry !== null
-            ? (entry as JsonRecord)
-            : {};
+          const pending =
+            typeof entry === "object" && entry !== null
+              ? (entry as JsonRecord)
+              : {};
           return {
             connector:
-              typeof pending.connector === "string" ? pending.connector : undefined,
-            method: typeof pending.method === "string" ? pending.method : undefined,
+              typeof pending.connector === "string"
+                ? pending.connector
+                : undefined,
+            method:
+              typeof pending.method === "string" ? pending.method : undefined,
             args:
               pending.args === undefined
                 ? undefined
                 : typeof pending.args === "string"
                   ? pending.args
-                  : JSON.stringify(pending.args),
+                  : JSON.stringify(pending.args)
           };
         })
-      : undefined,
+      : undefined
   };
-}
-
-function firstTargetFromCode(code: string): string {
-  return /target:\s*"([^"]+)"/.exec(code)?.[1] ?? "prod";
 }
 
 class TestAssistantAgentAgentImpl extends Think {
@@ -170,17 +173,23 @@ class ThinkClientToolsAgentImpl extends Think {
 
   protected override getModel(): ModelClient {
     return {
-      stream: async function* stream(request: ModelRequest): AsyncIterable<ModelChunk> {
+      stream: async function* stream(
+        request: ModelRequest
+      ): AsyncIterable<ModelChunk> {
         const serialized = JSON.stringify(request.messages);
-        const hasToolResult = request.messages.some((message) => message.role === "tool");
-        const toolNames = request.tools.map((toolDescriptor) => toolDescriptor.name);
+        const hasToolResult = request.messages.some(
+          (message) => message.role === "tool"
+        );
+        const toolNames = request.tools.map(
+          (toolDescriptor) => toolDescriptor.name
+        );
 
         if (toolNames.includes("updateTrigger") && !hasToolResult) {
           yield {
             type: "tool-call",
             toolCallId: "tc-server-approval-1",
             toolName: "updateTrigger",
-            input: { enabled: true },
+            input: { enabled: true }
           };
           yield { type: "finish", finishReason: "tool-calls" };
           return;
@@ -194,14 +203,14 @@ class ThinkClientToolsAgentImpl extends Think {
             type: "tool-call",
             toolCallId: "tc-fast",
             toolName: "fast_tool",
-            input: { action: "fast" },
+            input: { action: "fast" }
           };
           await new Promise((resolve) => setTimeout(resolve, 10));
           yield {
             type: "tool-call",
             toolCallId: "tc-slow",
             toolName: "slow_tool",
-            input: { action: "slow" },
+            input: { action: "slow" }
           };
           yield { type: "finish", finishReason: "tool-calls" };
           return;
@@ -212,7 +221,7 @@ class ThinkClientToolsAgentImpl extends Think {
             type: "tool-call",
             toolCallId: "tc-client-1",
             toolName: "client_action",
-            input: { action: "do_thing" },
+            input: { action: "do_thing" }
           };
           yield { type: "finish", finishReason: "tool-calls" };
           return;
@@ -220,10 +229,10 @@ class ThinkClientToolsAgentImpl extends Think {
 
         yield {
           type: "text-delta",
-          text: hasToolResult ? "Continuation after tool" : "Hello",
+          text: hasToolResult ? "Continuation after tool" : "Hello"
         };
         yield { type: "finish", finishReason: "stop" };
-      },
+      }
     };
   }
 
@@ -244,16 +253,18 @@ class ThinkClientToolsAgentImpl extends Think {
             throw new Error("Trigger update failed");
           }
           return { enabled };
-        },
-      }),
+        }
+      })
     };
   }
 
   override beforeTurn = (): void => {
-    const tools = this.host.store.get<ToolSet | undefined>("test:last-client-tools");
+    const tools = this.host.store.get<ToolSet | undefined>(
+      "test:last-client-tools"
+    );
     this.host.store.put("test:last-turn-tool-names", [
       ...Object.keys(this.getTools()),
-      ...(tools ? Object.keys(tools) : []),
+      ...(tools ? Object.keys(tools) : [])
     ]);
   };
 
@@ -265,7 +276,7 @@ class ThinkClientToolsAgentImpl extends Think {
     this.applyStoredToolUpdate(args.toolCallId, {
       state: args.isError ? "output-error" : "output-available",
       output: args.output,
-      ...(args.isError ? { errorText: String(args.output) } : {}),
+      ...(args.isError ? { errorText: String(args.output) } : {})
     });
     try {
       await super.applyToolResult(args);
@@ -285,7 +296,9 @@ class ThinkClientToolsAgentImpl extends Think {
       this.applyStoredToolUpdate(args.toolCallId, {
         state: args.approved ? "approval-responded" : "output-denied",
         approval: { approved: args.approved },
-        ...(args.approved ? {} : { errorText: args.reason ?? "Tool execution denied by user" }),
+        ...(args.approved
+          ? {}
+          : { errorText: args.reason ?? "Tool execution denied by user" })
       });
     }
     try {
@@ -327,7 +340,7 @@ class ThinkClientToolsAgentImpl extends Think {
     this.host.store.put("test:slow-client-tool-stream", {
       enabled,
       delayMs,
-      trailingGaps,
+      trailingGaps
     });
   }
 
@@ -341,7 +354,7 @@ class ThinkClientToolsAgentImpl extends Think {
       enabled,
       gapMs,
       gapsBeforeSlow,
-      gapsAfterSlow,
+      gapsAfterSlow
     });
   }
 
@@ -360,7 +373,9 @@ class ThinkClientToolsAgentImpl extends Think {
   ): void {
     const order = this.host.store.get<string[]>(sessionKey("order")) ?? [];
     for (const id of order) {
-      const stored = this.host.store.get<StoredMessage>(sessionKey(`msg:${id}`));
+      const stored = this.host.store.get<StoredMessage>(
+        sessionKey(`msg:${id}`)
+      );
       if (!stored) continue;
       let changed = false;
       const parts = stored.message.parts.map((part) => {
@@ -384,7 +399,7 @@ class ThinkClientToolsAgentImpl extends Think {
         replaceStoredMessage(this.host, { ...stored.message, parts });
         this.publishEvent({
           type: "message:updated",
-          message: { ...stored.message, parts },
+          message: { ...stored.message, parts }
         });
       }
     }
@@ -393,13 +408,15 @@ class ThinkClientToolsAgentImpl extends Think {
   override onChatResponse = async (
     result: import("../../../src/app/think.js").ChatResponseResult
   ): Promise<void> => {
-    const log = this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
+    const log =
+      this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
     log.push({
       requestId: result.requestId,
       status: "completed",
-      continuation: (this.host.store.get<number>("test:response-count") ?? 0) > 0,
+      continuation:
+        (this.host.store.get<number>("test:response-count") ?? 0) > 0,
       message: result.message,
-      attachments: result.attachments,
+      attachments: result.attachments
     });
     this.host.store.put(
       "test:response-count",
@@ -417,7 +434,9 @@ class ThinkClientToolsAgentImpl extends Think {
     this.host.store.put("test:response-count", 0);
   }
 
-  async streamingToolCallState(toolCallId: string): Promise<string | undefined> {
+  async streamingToolCallState(
+    toolCallId: string
+  ): Promise<string | undefined> {
     for (const message of await this.getMessages()) {
       const part = message.parts.find(
         (candidate) =>
@@ -441,11 +460,14 @@ class ThinkClientToolsAgentImpl extends Think {
           toolCallId: opts.toolCallId,
           toolName: "client_action",
           state: "input-available",
-          input: { action: "do_thing" },
-        } as ChatMessage["parts"][number],
-      ],
+          input: { action: "do_thing" }
+        } as ChatMessage["parts"][number]
+      ]
     });
-    await this.applyToolResult({ toolCallId: opts.toolCallId, output: opts.output });
+    await this.applyToolResult({
+      toolCallId: opts.toolCallId,
+      output: opts.output
+    });
     return { state: "output-available", output: opts.output };
   }
 
@@ -462,13 +484,13 @@ class ThinkClientToolsAgentImpl extends Think {
           toolCallId: opts.toolCallId,
           toolName: "client_action",
           state: "approval-requested",
-          input: { action: "do_thing" },
-        } as ChatMessage["parts"][number],
-      ],
+          input: { action: "do_thing" }
+        } as ChatMessage["parts"][number]
+      ]
     });
     await this.resolveApproval({
       toolCallId: opts.toolCallId,
-      approved: opts.approved,
+      approved: opts.approved
     });
     return { state: opts.approved ? "approval-responded" : "output-denied" };
   }
@@ -487,7 +509,9 @@ class ThinkClientToolsAgentImpl extends Think {
 
   async evictInMemoryContinuationState(): Promise<void> {}
 
-  async testWaitUntilStableHoldsForArmedContinuation(_timeoutMs?: number): Promise<{
+  async testWaitUntilStableHoldsForArmedContinuation(
+    _timeoutMs?: number
+  ): Promise<{
     hasArmedContinuation: boolean;
     messageInteractionPending: boolean;
     stable: boolean;
@@ -495,16 +519,20 @@ class ThinkClientToolsAgentImpl extends Think {
     return {
       hasArmedContinuation: true,
       messageInteractionPending: false,
-      stable: false,
+      stable: false
     };
   }
 
-  async getCapturedClientTools(): Promise<Array<{ name: string; description?: string }> | undefined> {
-    const tools = this.host.store.get<ToolSet | undefined>("test:last-client-tools");
+  async getCapturedClientTools(): Promise<
+    Array<{ name: string; description?: string }> | undefined
+  > {
+    const tools = this.host.store.get<ToolSet | undefined>(
+      "test:last-client-tools"
+    );
     if (!tools) return undefined;
     return Object.entries(tools).map(([name, descriptor]) => ({
       name,
-      description: descriptor.description,
+      description: descriptor.description
     }));
   }
 
@@ -542,7 +570,7 @@ class ThinkClientToolsAgentImpl extends Think {
           return {
             ...record,
             state: "output-error",
-            errorText: "Tool call interrupted",
+            errorText: "Tool call interrupted"
           } as ChatMessage["parts"][number];
         }
         if (
@@ -552,14 +580,14 @@ class ThinkClientToolsAgentImpl extends Think {
           try {
             return {
               ...record,
-              input: JSON.parse(record.input),
+              input: JSON.parse(record.input)
             } as ChatMessage["parts"][number];
           } catch {
             return part;
           }
         }
         return part;
-      }),
+      })
     }));
   }
 
@@ -579,14 +607,17 @@ class ThinkClientToolsAgentImpl extends Think {
     toolCalls: Array<{ toolName: string; state: string }>;
   }> {
     const mode = opts?.mode ?? "single";
-    const names = mode === "single"
-      ? ["client_action"]
-      : ["client_action", "client_action_2"];
+    const names =
+      mode === "single"
+        ? ["client_action"]
+        : ["client_action", "client_action_2"];
     this.host.store.put("test:last-turn-tool-names", names);
     const executorCalls = opts?.withExecutor
       ? names.map((toolName) => ({
           toolName,
-          inputJson: JSON.stringify({ action: toolName === "client_action" ? "one" : "two" }),
+          inputJson: JSON.stringify({
+            action: toolName === "client_action" ? "one" : "two"
+          })
         }))
       : [];
     return {
@@ -594,11 +625,13 @@ class ThinkClientToolsAgentImpl extends Think {
       done: true,
       ...(opts?.executorThrows ? { error: "client tool executor failed" } : {}),
       assistantText: opts?.withExecutor ? "Continuation after tool" : "",
-      toolPartStates: opts?.withExecutor ? ["output-available"] : ["input-available"],
+      toolPartStates: opts?.withExecutor
+        ? ["output-available"]
+        : ["input-available"],
       toolCalls: names.map((toolName) => ({
         toolName,
-        state: opts?.withExecutor ? "output-available" : "input-available",
-      })),
+        state: opts?.withExecutor ? "output-available" : "input-available"
+      }))
     };
   }
 
@@ -619,7 +652,9 @@ class ThinkClientToolsAgentImpl extends Think {
   }
 
   async getBranches(messageId: string): Promise<ChatMessage[]> {
-    return (await this.getMessages()).filter((message) => message.id !== messageId);
+    return (await this.getMessages()).filter(
+      (message) => message.id !== messageId
+    );
   }
 }
 
@@ -627,39 +662,90 @@ class ThinkTestAgentImpl extends Think {
   private beforeStepDelayMs = 0;
   private stripAgentToolText = false;
   private agentToolOutputs = new Map<string, unknown>();
+  private beforeTurnLog: Array<{ system: string; toolNames: string[] }> = [];
+  private capturedTurnChannels: string[] = [];
   /** Controllable in-flight stream for the resume tests: deltas pushed on demand, hangs until aborted. */
   private resumePushQueue: string[] = [];
   private resumeWake: (() => void) | null = null;
+  private replayErrorText = "boom";
+  private replayErrorReady = false;
+  private replayErrorWake: (() => void) | null = null;
+
+  protected override configureChannels() {
+    return {
+      web: {
+        kind: "web" as const
+      },
+      voice: {
+        kind: "voice" as const,
+        instructions: "VOICE MODE",
+        tools: () => ({}),
+        maxTurns: 3
+      }
+    };
+  }
 
   protected override getModel(): ModelClient {
     const agent = this;
     return {
-      stream: async function* stream(request: ModelRequest): AsyncIterable<ModelChunk> {
+      stream: async function* stream(
+        request: ModelRequest
+      ): AsyncIterable<ModelChunk> {
+        agent.beforeTurnLog.push({
+          system: request.system ?? "",
+          toolNames: request.tools.map((descriptor) => descriptor.name)
+        });
+        if (inputText(request).includes("__in_band_error_replay__")) {
+          yield { type: "text-delta", text: "partial response" };
+          while (!agent.replayErrorReady) {
+            if (request.signal?.aborted) return;
+            await new Promise<void>((resolve) => {
+              agent.replayErrorWake = resolve;
+              request.signal?.addEventListener("abort", () => resolve(), {
+                once: true
+              });
+            });
+          }
+          yield { type: "error", error: new Error(agent.replayErrorText) };
+          return;
+        }
         if (inputText(request).includes("resume")) {
           // Emit nothing until a delta is pushed (testStoreResumableChunk);
           // hang until cancelled (testCompleteResumableStream) — a genuinely
           // in-flight stream through the real turn/accumulator/log pipeline.
           for (;;) {
             while (agent.resumePushQueue.length > 0) {
-              yield { type: "text-delta", text: agent.resumePushQueue.shift()! };
+              yield {
+                type: "text-delta",
+                text: agent.resumePushQueue.shift()!
+              };
             }
             if (request.signal?.aborted) return;
             await new Promise<void>((resolve) => {
               agent.resumeWake = resolve;
-              request.signal?.addEventListener("abort", () => resolve(), { once: true });
+              request.signal?.addEventListener("abort", () => resolve(), {
+                once: true
+              });
             });
-            if (request.signal?.aborted && agent.resumePushQueue.length === 0) return;
+            if (request.signal?.aborted && agent.resumePushQueue.length === 0)
+              return;
           }
         }
         yield { type: "text-delta", text: "Hello from the assistant!" };
         yield { type: "finish", finishReason: "stop" };
-      },
+      }
     };
   }
 
+  override beforeTurn = (ctx: { channelId?: string }): void => {
+    this.capturedTurnChannels.push(ctx.channelId ?? "");
+  };
+
   override beforeStep = async (): Promise<void> => {
     if (this.beforeStepDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.beforeStepDelayMs));
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.beforeStepDelayMs)
+      );
     }
   };
 
@@ -678,9 +764,8 @@ class ThinkTestAgentImpl extends Think {
     }
 
     if (input.startsWith("__agent_tool_delay__:")) {
-      const [, rawMs = "0", prompt = ""] = input.match(
-        /^__agent_tool_delay__:(\d+):(.*)$/s
-      ) ?? [];
+      const [, rawMs = "0", prompt = ""] =
+        input.match(/^__agent_tool_delay__:(\d+):(.*)$/s) ?? [];
       await new Promise((resolve) =>
         setTimeout(resolve, Number.parseInt(rawMs, 10) || 0)
       );
@@ -749,11 +834,17 @@ class ThinkTestAgentImpl extends Think {
       prompt
     });
     this.host.store.put(`agent-tools:run-map:${externalRunId}`, started.runId);
-    this.host.store.put(`agent-tools:reverse-run-map:${started.runId}`, externalRunId);
+    this.host.store.put(
+      `agent-tools:reverse-run-map:${started.runId}`,
+      externalRunId
+    );
     return { ...started, runId: externalRunId };
   }
 
-  override async cancelAgentToolRun(runId: string, reason?: string): Promise<void> {
+  override async cancelAgentToolRun(
+    runId: string,
+    reason?: string
+  ): Promise<void> {
     await super.cancelAgentToolRun(this.internalAgentToolRunId(runId), reason);
   }
 
@@ -773,7 +864,10 @@ class ThinkTestAgentImpl extends Think {
     runId: string,
     afterIndex?: number
   ): Array<{ index: number; event: unknown }> {
-    return super.tailAgentToolRun(this.internalAgentToolRunId(runId), afterIndex);
+    return super.tailAgentToolRun(
+      this.internalAgentToolRunId(runId),
+      afterIndex
+    );
   }
 
   async setStripTextResponseForTest(strip: boolean): Promise<void> {
@@ -814,12 +908,19 @@ class ThinkTestAgentImpl extends Think {
     }
   }
 
+  override renderAttachment = async (
+    _attachment: ReplyAttachment
+  ): Promise<unknown> => {
+    return undefined;
+  };
+
   async getAgentToolCleanupMapSizesForTest(): Promise<{
     lastErrors: number;
     preTurnAssistantIds: number;
   }> {
     return {
-      lastErrors: this.host.store.list({ prefix: "agent-tools:last-error:" }).size,
+      lastErrors: this.host.store.list({ prefix: "agent-tools:last-error:" })
+        .size,
       preTurnAssistantIds: 0
     };
   }
@@ -857,9 +958,12 @@ class ThinkTestAgentImpl extends Think {
     childStatus: string | null;
   }> {
     const runId = crypto.randomUUID();
-    const started = await this.startAgentToolRun("__agent_tool_delay__:1000:recovery", {
-      runId
-    });
+    const started = await this.startAgentToolRun(
+      "__agent_tool_delay__:1000:recovery",
+      {
+        runId
+      }
+    );
     await this.cancelAgentToolRun(started.runId, "parent gave up re-attaching");
     return {
       abortedBefore: false,
@@ -885,13 +989,33 @@ class ThinkTestAgentImpl extends Think {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
-  async testStoreResumableChunk(_streamId: string, body: string): Promise<void> {
+  async testStoreResumableChunk(
+    _streamId: string,
+    body: string
+  ): Promise<void> {
     // The original stored raw bytes in its resumable buffer; the rebuild's
     // equivalent is pushing the delta through the live stream so it lands in
     // the durable event log (replay reads it back from there).
     const chunk = JSON.parse(body) as { delta: string };
     this.resumePushQueue.push(chunk.delta);
     this.resumeWake?.();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  async testStartErroredReplayStream(
+    requestId: string,
+    errorText: string
+  ): Promise<string> {
+    this.replayErrorText = errorText;
+    this.replayErrorReady = false;
+    void this.chat("__in_band_error_replay__", undefined, { requestId });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return requestId;
+  }
+
+  async testFinishErroredReplayStream(): Promise<void> {
+    this.replayErrorReady = true;
+    this.replayErrorWake?.();
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
@@ -909,6 +1033,50 @@ class ThinkTestAgentImpl extends Think {
   async setBeforeStepAsyncDelay(ms: number): Promise<void> {
     this.beforeStepDelayMs = ms;
   }
+
+  async runChannelTurnForTest(options: {
+    input?: string;
+    channel?: string;
+    continuation?: boolean;
+  }): Promise<void> {
+    if (options.continuation) {
+      await this.continueLastTurn();
+      return;
+    }
+    await this.runTurn({
+      input: options.input ?? "hi",
+      mode: "wait",
+      ...(options.channel ? { channel: options.channel } : {})
+    });
+  }
+
+  async getCapturedTurnChannelsForTest(): Promise<string[]> {
+    return this.capturedTurnChannels;
+  }
+
+  async resetCapturedTurnChannelsForTest(): Promise<void> {
+    this.capturedTurnChannels = [];
+  }
+
+  async getBeforeTurnLog(): Promise<Array<{ system: string; toolNames: string[] }>> {
+    return this.beforeTurnLog;
+  }
+
+  async getStoredMessages(): Promise<ChatMessage[]> {
+    return this.getMessages();
+  }
+
+  async deliverNoticeErrorForTest(
+    text: string,
+    channel?: string
+  ): Promise<string | null> {
+    try {
+      await this.deliverNotice(text, channel ? { channel } : undefined);
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
 }
 
 class ThinkExecuteHitlAgentImpl extends Think {
@@ -925,26 +1093,25 @@ class ThinkExecuteHitlAgentImpl extends Think {
 
   protected override getModel(): ModelClient {
     return {
-      stream: async function* stream(request: ModelRequest): AsyncIterable<ModelChunk> {
+      stream: async function* stream(
+        request: ModelRequest
+      ): AsyncIterable<ModelChunk> {
         const statuses = statusesInPrompt(request);
         if (statuses.length > 0) {
           yield { type: "text-delta", text: `seen:${statuses.join(",")}` };
           yield { type: "finish", finishReason: "stop" };
           return;
         }
-        const rawCodes =
-          request.messages.length > 0
-            ? undefined
-            : undefined;
+        const rawCodes = request.messages.length > 0 ? undefined : undefined;
         void rawCodes;
         yield {
           type: "tool-call",
           toolCallId: "tc-exec-1-0",
           toolName: "execute",
-          input: { target: "prod" },
+          input: { target: "prod" }
         };
         yield { type: "finish", finishReason: "tool-calls" };
-      },
+      }
     };
   }
 
@@ -960,8 +1127,8 @@ class ThinkExecuteHitlAgentImpl extends Think {
           const count = this.host.store.get<number>("test:gated-count") ?? 0;
           this.host.store.put("test:gated-count", count + 1);
           return `deployed:${input.target ?? "prod"}`;
-        },
-      }),
+        }
+      })
     };
   }
 
@@ -979,7 +1146,7 @@ class ThinkExecuteHitlAgentImpl extends Think {
         out.push({
           toolCallId: tool.toolCallId,
           state: tool.state,
-          output: snapshotOutput(tool.output),
+          output: snapshotOutput(tool.output)
         });
       }
     }
@@ -1003,14 +1170,16 @@ class ThinkExecuteHitlAgentImpl extends Think {
   async stripExecutePartsForTest(): Promise<void> {
     for (const message of await this.getMessages()) {
       if (message.role !== "assistant") continue;
-      const remaining = message.parts.filter((part) => part.type !== "tool-execute");
+      const remaining = message.parts.filter(
+        (part) => part.type !== "tool-execute"
+      );
       if (remaining.length === message.parts.length) continue;
       replaceStoredMessage(this.host, {
         ...message,
         parts:
           remaining.length > 0
             ? remaining
-            : [{ type: "text", text: "(summarized)" }],
+            : [{ type: "text", text: "(summarized)" }]
       });
     }
   }
@@ -1065,7 +1234,7 @@ class ThinkExecuteHitlAgentImpl extends Think {
   }> {
     return this.pendingApprovals(executionId).map((approval) => ({
       executionId: approval.executionId,
-      args: approval.input,
+      args: approval.input
     }));
   }
 }
@@ -1104,7 +1273,9 @@ export class ThinkClientToolsAgent extends ThinkClientToolsAgentBase {
   }
 
   setServerApprovalToolFailure(enabled: boolean): Promise<void> {
-    return this.withAgent((agent) => agent.setServerApprovalToolFailure(enabled));
+    return this.withAgent((agent) =>
+      agent.setServerApprovalToolFailure(enabled)
+    );
   }
 
   setSlowStreamMode(
@@ -1167,14 +1338,18 @@ export class ThinkClientToolsAgent extends ThinkClientToolsAgentBase {
     toolCallId: string;
     output: string;
   }): Promise<{ state: string; output: string }> {
-    return this.withAgent((agent) => agent.simulateMidStreamClientToolResult(opts));
+    return this.withAgent((agent) =>
+      agent.simulateMidStreamClientToolResult(opts)
+    );
   }
 
   simulateMidStreamClientToolApproval(opts: {
     toolCallId: string;
     approved: boolean;
   }): Promise<{ state: string }> {
-    return this.withAgent((agent) => agent.simulateMidStreamClientToolApproval(opts));
+    return this.withAgent((agent) =>
+      agent.simulateMidStreamClientToolApproval(opts)
+    );
   }
 
   testInteractionApplySerialization(): Promise<number> {
@@ -1193,9 +1368,7 @@ export class ThinkClientToolsAgent extends ThinkClientToolsAgentBase {
     return this.withAgent((agent) => agent.evictInMemoryContinuationState());
   }
 
-  testWaitUntilStableHoldsForArmedContinuation(
-    timeoutMs: number
-  ): Promise<{
+  testWaitUntilStableHoldsForArmedContinuation(timeoutMs: number): Promise<{
     hasArmedContinuation: boolean;
     messageInteractionPending: boolean;
     stable: boolean;
@@ -1205,7 +1378,9 @@ export class ThinkClientToolsAgent extends ThinkClientToolsAgentBase {
     );
   }
 
-  getCapturedClientTools(): Promise<Array<{ name: string; description?: string }> | undefined> {
+  getCapturedClientTools(): Promise<
+    Array<{ name: string; description?: string }> | undefined
+  > {
     return this.withAgent((agent) => agent.getCapturedClientTools());
   }
 
@@ -1242,7 +1417,9 @@ export class ThinkClientToolsAgent extends ThinkClientToolsAgentBase {
     toolPartStates: string[];
     toolCalls: Array<{ toolName: string; state: string }>;
   }> {
-    return this.withAgent((agent) => agent.runChatWithClientTools(message, opts));
+    return this.withAgent((agent) =>
+      agent.runChatWithClientTools(message, opts)
+    );
   }
 
   enableExecutableClientToolForTest(): Promise<void> {
@@ -1273,15 +1450,36 @@ export class ThinkTestAgent extends ThinkTestAgentBase {
   }
 
   testCompleteResumableStream(streamId: string): Promise<void> {
-    return this.withAgent((agent) => agent.testCompleteResumableStream(streamId));
+    return this.withAgent((agent) =>
+      agent.testCompleteResumableStream(streamId)
+    );
   }
 
   testStoreResumableChunk(streamId: string, body: string): Promise<void> {
-    return this.withAgent((agent) => agent.testStoreResumableChunk(streamId, body));
+    return this.withAgent((agent) =>
+      agent.testStoreResumableChunk(streamId, body)
+    );
+  }
+
+  testStartErroredReplayStream(
+    requestId: string,
+    errorText: string
+  ): Promise<string> {
+    return this.withAgent((agent) =>
+      agent.testStartErroredReplayStream(requestId, errorText)
+    );
+  }
+
+  testFinishErroredReplayStream(): Promise<void> {
+    return this.withAgent((agent) =>
+      agent.testFinishErroredReplayStream()
+    );
   }
 
   recordTerminalForTest(requestId: string, body: string): Promise<void> {
-    return this.withAgent((agent) => agent.recordTerminalForTest(requestId, body));
+    return this.withAgent((agent) =>
+      agent.recordTerminalForTest(requestId, body)
+    );
   }
 
   getPendingChatTerminalForTest(): Promise<{
@@ -1332,10 +1530,7 @@ export class ThinkTestAgent extends ThinkTestAgentBase {
     return this.withAgent((agent) => agent.inspectAgentToolRun(runId));
   }
 
-  seedAgentToolLastErrorForTest(
-    runId: string,
-    error: string
-  ): Promise<void> {
+  seedAgentToolLastErrorForTest(runId: string, error: string): Promise<void> {
     return this.withAgent((agent) =>
       agent.seedAgentToolLastErrorForTest(runId, error)
     );
@@ -1357,6 +1552,39 @@ export class ThinkTestAgent extends ThinkTestAgentBase {
 
   resetTurnStateForTest(): Promise<void> {
     return this.withAgent((agent) => agent.resetTurnStateForTest());
+  }
+
+  renderAttachment(attachment: ReplyAttachment): Promise<unknown> {
+    return this.withAgent((agent) => agent.renderAttachment(attachment));
+  }
+
+  renderAttachmentsForTest(
+    attachments: ReplyAttachment[]
+  ): Promise<ChatMessage[]> {
+    return this.withAgent(async (agent) => {
+      const messages: ChatMessage[] = [];
+      for (const attachment of attachments) {
+        const rendered = await agent.renderAttachment(attachment);
+        if (
+          typeof rendered === "object" &&
+          rendered !== null &&
+          "markdown" in rendered &&
+          typeof (rendered as { markdown?: unknown }).markdown === "string"
+        ) {
+          messages.push({
+            id: crypto.randomUUID(),
+            role: "assistant",
+            parts: [
+              {
+                type: "text",
+                text: (rendered as { markdown: string }).markdown
+              }
+            ]
+          });
+        }
+      }
+      return messages;
+    });
   }
 
   getAgentToolCleanupMapSizesForTest(): Promise<{
@@ -1401,6 +1629,47 @@ export class ThinkTestAgent extends ThinkTestAgentBase {
     return this.withAgent((agent) =>
       agent.cancelAgentToolRunAbortsRecoveryForTest()
     );
+  }
+
+  runChannelTurnForTest(options: {
+    input?: string;
+    channel?: string;
+    continuation?: boolean;
+  }): Promise<void> {
+    return this.withAgent((agent) => agent.runChannelTurnForTest(options));
+  }
+
+  getCapturedTurnChannelsForTest(): Promise<string[]> {
+    return this.withAgent((agent) => agent.getCapturedTurnChannelsForTest());
+  }
+
+  resetCapturedTurnChannelsForTest(): Promise<void> {
+    return this.withAgent((agent) => agent.resetCapturedTurnChannelsForTest());
+  }
+
+  getBeforeTurnLog(): Promise<Array<{ system: string; toolNames: string[] }>> {
+    return this.withAgent((agent) => agent.getBeforeTurnLog());
+  }
+
+  getStoredMessages(): Promise<ChatMessage[]> {
+    return this.withAgent((agent) => agent.getStoredMessages());
+  }
+
+  deliverNoticeErrorForTest(
+    text: string,
+    channel?: string
+  ): Promise<string | null> {
+    return this.withAgent((agent) =>
+      agent.deliverNoticeErrorForTest(text, channel)
+    );
+  }
+
+  // `deliverNotice` is already inherited from Think, so it is not an "own"
+  // property on this wrapper's prototype and is therefore NOT RPC-visible on
+  // the DO without an explicit forwarder (same pattern as `getMessages`
+  // elsewhere in this file / `getStoredMessages` above).
+  deliverNotice(text: string, opts?: DeliverNoticeOptions): Promise<void> {
+    return this.withAgent((agent) => agent.deliverNotice(text, opts));
   }
 }
 

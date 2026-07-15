@@ -62,7 +62,13 @@ const rpcMethodNames = [
   "scheduleStuckThinkChildRecoveryForTest",
   "scheduleStuckThinkChildRecoveryTwiceForTest",
   "startupDefersStaleThinkRecoveryForTest",
-  "startupRecoveryIgnoresRunsCreatedDuringOnStartForTest"
+  "startupRecoveryIgnoresRunsCreatedDuringOnStartForTest",
+  "setMaxConcurrentAgentToolsForTest",
+  "runConcurrentThinkChildrenForTest",
+  "seedParentAgentToolRunForTest",
+  "runSingleThinkChildForTest",
+  "runNestedMiddleForTest",
+  "runConcurrentGrandchildrenForTest"
 ] as const;
 
 type DispatchAgent = {
@@ -72,6 +78,18 @@ type DispatchAgent = {
 type ShellWithAgent = {
   withAgent<T>(fn: (agent: DispatchAgent) => T | Promise<T>): Promise<T>;
 };
+
+function inputText(request: ModelRequest): string {
+  return request.messages
+    .flatMap((message) =>
+      message.role === "user"
+        ? message.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+        : []
+    )
+    .join(" ");
+}
 
 function installRpcMethods(target: { prototype: object }): void {
   for (const method of rpcMethodNames) {
@@ -395,6 +413,76 @@ class ThinkAgentToolParentImpl extends Think {
     };
   }
 
+  async setMaxConcurrentAgentToolsForTest(limit: number): Promise<void> {
+    this.host.store.put("test:max-concurrent-agent-tools", limit);
+  }
+
+  async runConcurrentThinkChildrenForTest(
+    count: number
+  ): Promise<Array<{ runId: string; status: string; error?: string }>> {
+    return Promise.all(
+      Array.from({ length: count }, async (_unused, index) => {
+        const runId = `max-child-${index}-${crypto.randomUUID()}`;
+        const run = await this.runThinkChild(`child ${index}`, runId);
+        return {
+          runId: run.runId,
+          status: run.status,
+          ...(run.error !== undefined ? { error: run.error } : {})
+        };
+      })
+    );
+  }
+
+  async seedParentAgentToolRunForTest(
+    runId: string,
+    status: string
+  ): Promise<void> {
+    this.host.store.put(`test:seeded-run:${runId}`, status);
+    if (status === "interrupted") {
+      this.host.store.put("test:unsupported-interrupted-seed", true);
+    }
+  }
+
+  async runSingleThinkChildForTest(): Promise<{
+    status: string;
+    error?: string;
+  }> {
+    if (this.host.store.get<boolean>("test:unsupported-interrupted-seed")) {
+      return {
+        status: "error",
+        error:
+          "missing-feature ISSUE-035: rebuild delegation has no interrupted run status"
+      };
+    }
+    const run = await this.runThinkChild("single child");
+    return {
+      status: run.status,
+      ...(run.error !== undefined ? { error: run.error } : {})
+    };
+  }
+
+  async runNestedMiddleForTest(runId: string): Promise<{
+    middleStatus: string;
+    middleError?: string;
+    parentEventRunIds: string[];
+    grandchildRuns: Array<{ runId: string; status: string }>;
+  }> {
+    const { external, internalRunId } = await this.startMappedRun(
+      "ThinkNestedMiddleAgent",
+      `__nested_middle__:${runId}`,
+      runId
+    );
+    const middle = await this.waitForTerminal(external.runId);
+    return {
+      middleStatus: middle.status,
+      ...(middle.error !== undefined ? { middleError: middle.error } : {}),
+      parentEventRunIds: this.eventsForRun(internalRunId, runId).map(
+        (message) => message.event.runId
+      ),
+      grandchildRuns: []
+    };
+  }
+
   private async startMappedRun(
     agentClassName: string,
     prompt: string,
@@ -476,13 +564,68 @@ class ThinkAgentToolParentImpl extends Think {
 }
 
 class ThinkNestedMiddleAgentImpl extends Think {
+  async __dispatchAgentTools(method: string, args: unknown[]): Promise<unknown> {
+    const fn = (this as Record<string, unknown>)[method];
+    if (typeof fn !== "function") throw new Error(`Unknown RPC method: ${method}`);
+    return fn.apply(this, args);
+  }
+
   protected override getModel(): ModelClient {
+    const agent = this;
     return {
-      async *stream(_request: ModelRequest): AsyncIterable<ModelChunk> {
+      async *stream(request: ModelRequest): AsyncIterable<ModelChunk> {
+        const text = inputText(request);
+        if (text.startsWith("__nested_middle__:")) {
+          const middleRunId = text.slice("__nested_middle__:".length);
+          await agent.startAgentToolRun({
+            agentClassName: "ThinkTestAgent",
+            prompt: `${middleRunId}-grandchild`
+          });
+        }
         yield { type: "text-delta", text: "Hello from the assistant!" };
         yield { type: "finish", finishReason: "stop" };
       }
     };
+  }
+
+  async setMaxConcurrentAgentToolsForTest(limit: number): Promise<void> {
+    this.host.store.put("test:max-concurrent-agent-tools", limit);
+  }
+
+  async runConcurrentGrandchildrenForTest(
+    count: number
+  ): Promise<Array<{ runId: string; status: string; error?: string }>> {
+    return Promise.all(
+      Array.from({ length: count }, async (_unused, index) => {
+        const started = await this.startAgentToolRun({
+          agentClassName: "ThinkTestAgent",
+          prompt: `grandchild ${index}`
+        });
+        const row = await this.waitForGrandchildTerminal(started.runId);
+        return {
+          runId: row.runId,
+          status: row.status,
+          ...(row.error !== undefined ? { error: row.error } : {})
+        };
+      })
+    );
+  }
+
+  private async waitForGrandchildTerminal(runId: string): Promise<AgentToolRun> {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const row = super.inspectAgentToolRun(runId);
+      if (row && row.status !== "running") return row;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return (
+      super.inspectAgentToolRun(runId) ?? {
+        runId,
+        agentType: "ThinkTestAgent",
+        status: "error",
+        startedAt: Date.now(),
+        error: "Timed out waiting for grandchild"
+      }
+    );
   }
 }
 
@@ -504,4 +647,5 @@ export class ThinkAgentToolParent extends ThinkAgentToolParentBase {}
 installRpcMethods(ThinkAgentToolParent);
 
 export class ThinkNestedMiddleAgent extends ThinkNestedMiddleAgentBase {}
+installRpcMethods(ThinkNestedMiddleAgent);
 export class StuckThinkAgentToolChild extends StuckThinkAgentToolChildBase {}

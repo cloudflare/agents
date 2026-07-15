@@ -19,6 +19,10 @@
         "name": "TestAssistantAgentAgent"
       },
       {
+        "class_name": "TestAssistantToolsAgent",
+        "name": "TestAssistantToolsAgent"
+      },
+      {
         "class_name": "ThinkClientToolsAgent",
         "name": "ThinkClientToolsAgent"
       },
@@ -61,6 +65,22 @@
       {
         "class_name": "ThinkRecoveryTestAgent",
         "name": "ThinkRecoveryTestAgent"
+      },
+      {
+        "class_name": "ThinkFiberTestAgent",
+        "name": "ThinkFiberTestAgent"
+      },
+      {
+        "class_name": "ThinkScheduledTasksTestAgent",
+        "name": "ThinkScheduledTasksTestAgent"
+      },
+      {
+        "class_name": "ThinkOnStartReconcileFailureAgent",
+        "name": "ThinkOnStartReconcileFailureAgent"
+      },
+      {
+        "class_name": "ThinkOnStartHydrationFailureAgent",
+        "name": "ThinkOnStartHydrationFailureAgent"
       },
       {
         "class_name": "ThinkSessionThinkTestAgent",
@@ -193,6 +213,7 @@
       "tag": "v1",
       "new_sqlite_classes": [
         "TestAssistantAgentAgent",
+        "TestAssistantToolsAgent",
         "ThinkClientToolsAgent",
         "ThinkTestAgent",
         "ThinkExecuteHitlAgent",
@@ -204,6 +225,10 @@
         "ThinkHooksSessionAgent",
         "ThinkHooksExtensionAgent",
         "ThinkRecoveryTestAgent",
+        "ThinkFiberTestAgent",
+        "ThinkScheduledTasksTestAgent",
+        "ThinkOnStartReconcileFailureAgent",
+        "ThinkOnStartHydrationFailureAgent",
         "ThinkSessionThinkTestAgent",
         "ThinkSessionRecoveryAgent",
         "ThinkSessionTestAgent",

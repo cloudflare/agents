@@ -1,15 +1,22 @@
 import type {
   TestAssistantAgentAgent,
+  TestAssistantToolsAgent,
   ThinkClientToolsAgent,
   ThinkExecuteHitlAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkAsyncHookTestAgent,
   ThinkConfigInSessionAgent,
   ThinkConfigTestAgent,
+  ThinkAgentToolParent,
+  ThinkNestedMiddleAgent,
+  ThinkFiberTestAgent,
   ThinkLegacyConfigMigrationAgent,
   ThinkNonRecoveryTestAgent,
   ThinkProgrammaticTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkScheduledTasksTestAgent,
+  ThinkOnStartReconcileFailureAgent,
+  ThinkOnStartHydrationFailureAgent,
   ThinkSessionRecoveryAgent,
   ThinkSessionTestAgent,
   ThinkSessionThinkTestAgent,
@@ -25,13 +32,14 @@ import type {
   TestRunFiberAgent,
   TestScheduleAgent,
   TestStateAgent,
-  TestUserNotificationAgent,
+  TestUserNotificationAgent
 } from "./fixtures/index.js";
 
 declare global {
   namespace Cloudflare {
     interface Env {
       TestAssistantAgentAgent: DurableObjectNamespace<TestAssistantAgentAgent>;
+      TestAssistantToolsAgent: DurableObjectNamespace<TestAssistantToolsAgent>;
       ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
       ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
       ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
@@ -39,11 +47,17 @@ declare global {
       ThinkAsyncHookTestAgent: DurableObjectNamespace<ThinkAsyncHookTestAgent>;
       ThinkConfigInSessionAgent: DurableObjectNamespace<ThinkConfigInSessionAgent>;
       ThinkConfigTestAgent: DurableObjectNamespace<ThinkConfigTestAgent>;
+      ThinkAgentToolParent: DurableObjectNamespace<ThinkAgentToolParent>;
+      ThinkNestedMiddleAgent: DurableObjectNamespace<ThinkNestedMiddleAgent>;
+      ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
       ThinkLegacyConfigMigrationAgent: DurableObjectNamespace<ThinkLegacyConfigMigrationAgent>;
       ThinkNonRecoveryTestAgent: DurableObjectNamespace<ThinkNonRecoveryTestAgent>;
       ThinkProgrammaticTestAgent: DurableObjectNamespace<ThinkProgrammaticTestAgent>;
       ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
       ThinkRecoveryTestAgent: DurableObjectNamespace<ThinkRecoveryTestAgent>;
+      ThinkScheduledTasksTestAgent: DurableObjectNamespace<ThinkScheduledTasksTestAgent>;
+      ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;
+      ThinkOnStartHydrationFailureAgent: DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>;
       ThinkSessionRecoveryAgent: DurableObjectNamespace<ThinkSessionRecoveryAgent>;
       ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;
       ThinkSessionThinkTestAgent: DurableObjectNamespace<ThinkSessionThinkTestAgent>;

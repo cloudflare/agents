@@ -10,7 +10,7 @@ import {
   type ModelChunk,
   type ModelClient,
   type ModelRequest,
-  type StreamCallback,
+  type StreamCallback
 } from "../compat.js";
 
 type AttachScenario =
@@ -25,27 +25,62 @@ type AttachScenario =
   | "attach-then-throw";
 
 type EchoMode = "attach-ledger" | "attach-idempotency-key" | "default";
+type DurablePauseOptions = {
+  approval?: "predicate-hello";
+  attachReply?: boolean;
+  idempotencyKey?: string;
+};
+
+function requestText(request: ModelRequest): string {
+  return request.messages
+    .flatMap((message) =>
+      message.role === "user"
+        ? message.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+        : []
+    )
+    .join(" ");
+}
+
+function pauseMessage(request: ModelRequest): string {
+  const text = requestText(request);
+  const match = /pauseAction\s+(.+)$/s.exec(text);
+  return match?.[1]?.trim() || "hello";
+}
 
 function hasToolResult(request: ModelRequest): boolean {
   return request.messages.some((message) => message.role === "tool");
 }
 
-function attachModel(toolName: "attachAction" | "echo" | "pauseAction"): ModelClient {
+function attachModel(
+  toolName: "attachAction" | "echo" | "pauseAction"
+): ModelClient {
   return {
     async *stream(request: ModelRequest): AsyncIterable<ModelChunk> {
       if (!hasToolResult(request)) {
         yield {
           type: "tool-call",
-          toolCallId: toolName === "attachAction" ? "ar1" : toolName === "echo" ? "tc1" : "dp1",
+          toolCallId:
+            toolName === "attachAction"
+              ? "ar1"
+              : toolName === "echo"
+                ? "tc1"
+                : "dp1",
           toolName,
-          input: toolName === "echo" || toolName === "pauseAction" ? { message: "hello" } : {},
+          input:
+            toolName === "pauseAction"
+              ? { message: pauseMessage(request) }
+              : toolName === "echo"
+                ? { message: "hello" }
+                : {}
         };
         yield { type: "finish", finishReason: "tool-calls" };
         return;
       }
       yield { type: "text-delta", text: "attached-done" };
       yield { type: "finish", finishReason: "stop" };
-    },
+    }
   };
 }
 
@@ -63,17 +98,20 @@ class ThinkToolsTestAgentImpl extends Think {
   protected override getActions(): Record<string, Action> {
     const actions: Record<string, Action> = {};
     if (this.host.store.get<boolean>("test:attach-reply-action")) {
-      const scenario = this.host.store.get<AttachScenario>("test:attach-scenario") ?? "two";
+      const scenario =
+        this.host.store.get<AttachScenario>("test:attach-scenario") ?? "two";
       actions.attachAction = action({
         name: "attachAction",
         description: "Attach delivery metadata to the final reply",
         inputSchema: z.object({}),
         ...(scenario === "approval-gated"
-          ? { approval: true, approvalSummary: "Approve attach action", approvalRisk: "low" as const }
+          ? {
+              approval: true,
+              approvalSummary: "Approve attach action",
+              approvalRisk: "low" as const
+            }
           : {}),
-        ...(scenario === "predicate-noop"
-          ? { approval: () => false }
-          : {}),
+        ...(scenario === "predicate-noop" ? { approval: () => false } : {}),
         ...(scenario === "permission-noop"
           ? { permissions: () => ["attach:run"] }
           : {}),
@@ -98,7 +136,7 @@ class ThinkToolsTestAgentImpl extends Think {
             throw new Error("attach action failed");
           }
           return "attached";
-        },
+        }
       });
     }
 
@@ -110,31 +148,55 @@ class ThinkToolsTestAgentImpl extends Think {
         inputSchema: z.object({ message: z.string() }),
         idempotencyKey:
           mode === "attach-ledger" || mode === "attach-idempotency-key"
-            ? (this.host.store.get<string>("test:action-idempotency-key") ?? mode)
+            ? (this.host.store.get<string>("test:action-idempotency-key") ??
+              mode)
             : undefined,
-        execute: async ({ message }: { message: string }, ctx): Promise<unknown> => {
+        execute: async (
+          { message }: { message: string },
+          ctx
+        ): Promise<unknown> => {
           const count = this.host.store.get<number>("test:action-count") ?? 0;
           this.host.store.put("test:action-count", count + 1);
           if (mode === "attach-ledger" || mode === "attach-idempotency-key") {
             ctx.attachReply({ type: "voice_note" });
           }
           return `action echo: ${message}`;
-        },
+        }
       });
     }
 
     if (this.host.store.get<boolean>("test:durable-pause-action")) {
-      const attachReply = this.host.store.get<boolean>("test:durable-attach-reply") ?? false;
+      const attachReply =
+        this.host.store.get<boolean>("test:durable-attach-reply") ?? false;
+      const approvalMode = this.host.store.get<DurablePauseOptions["approval"]>(
+        "test:durable-approval-mode"
+      );
+      const idempotencyKey = this.host.store.get<string>(
+        "test:durable-idempotency-key"
+      );
       actions.pauseAction = action({
         name: "pauseAction",
         description: "A durable-pause action awaiting human approval",
         inputSchema: z.object({ message: z.string() }),
         kind: "durable-pause",
-        approval: true,
-        execute: async ({ message }: { message: string }, ctx): Promise<unknown> => {
+        approval:
+          approvalMode === "predicate-hello"
+            ? ({ input }) => (input as { message?: string }).message === "hello"
+            : true,
+        approvalSummary: "Approve pause action",
+        approvalRisk: "high",
+        permissions: ["pause:run"],
+        idempotencyKey,
+        execute: async (
+          { message }: { message: string },
+          ctx
+        ): Promise<unknown> => {
+          const count =
+            this.host.store.get<number>("test:durable-pause-exec-count") ?? 0;
+          this.host.store.put("test:durable-pause-exec-count", count + 1);
           if (attachReply) ctx.attachReply({ type: "voice_note" });
           return `paused-exec: ${message}`;
-        },
+        }
       });
     }
     return actions;
@@ -143,18 +205,21 @@ class ThinkToolsTestAgentImpl extends Think {
   override onChatResponse = async (
     result: import("../../../src/app/think.js").ChatResponseResult
   ): Promise<void> => {
-    const log = this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
+    const log =
+      this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
     log.push({
       requestId: result.requestId,
       status: "completed",
       continuation: log.length > 0,
       message: result.message,
-      attachments: result.attachments,
+      attachments: result.attachments
     });
     this.host.store.put("test:response-log", log);
   };
 
-  async useAttachReplyActionForTest(scenario: AttachScenario = "two"): Promise<void> {
+  async useAttachReplyActionForTest(
+    scenario: AttachScenario = "two"
+  ): Promise<void> {
     this.host.store.put("test:attach-reply-action", true);
     this.host.store.put("test:attach-scenario", scenario);
   }
@@ -177,19 +242,21 @@ class ThinkToolsTestAgentImpl extends Think {
       onDone() {
         done = true;
       },
-      onError() {},
+      onError() {}
     };
     const result = await this.chat(message, callback);
     return { done: done || result.outcome === "completed" };
   }
 
   async getResponseAttachmentsJson(): Promise<string> {
-    const log = this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
+    const log =
+      this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
     return JSON.stringify(log.at(-1)?.attachments ?? []);
   }
 
   async getLastResponseRequestIdForTest(): Promise<string | null> {
-    const log = this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
+    const log =
+      this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
     return log.at(-1)?.requestId ?? null;
   }
 
@@ -202,7 +269,8 @@ class ThinkToolsTestAgentImpl extends Think {
   }
 
   async mutateLastResponseAttachmentForTest(): Promise<void> {
-    const log = this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
+    const log =
+      this.host.store.get<ChatResponseResult[]>("test:response-log") ?? [];
     const first = log.at(-1)?.attachments?.[0];
     if (first) first.type = "mutated";
     this.host.store.put("test:response-log", log);
@@ -216,20 +284,124 @@ class ThinkToolsTestAgentImpl extends Think {
     return { count: this.host.store.get<number>("test:action-count") ?? 0 };
   }
 
-  async useDurablePauseActionForTest(options?: {
-    attachReply?: boolean;
-  }): Promise<void> {
+  async useDurablePauseActionForTest(
+    options?: DurablePauseOptions
+  ): Promise<void> {
     this.host.store.put("test:durable-pause-action", true);
-    this.host.store.put("test:durable-attach-reply", options?.attachReply ?? false);
+    this.host.store.put(
+      "test:durable-attach-reply",
+      options?.attachReply ?? false
+    );
+    if (options?.approval === undefined)
+      this.host.store.delete("test:durable-approval-mode");
+    else this.host.store.put("test:durable-approval-mode", options.approval);
+    if (options?.idempotencyKey === undefined)
+      this.host.store.delete("test:durable-idempotency-key");
+    else
+      this.host.store.put(
+        "test:durable-idempotency-key",
+        options.idempotencyKey
+      );
   }
 
   async parkDurablePauseForTest(message = "hello"): Promise<unknown> {
     await this.chat(`pauseAction ${message}`);
-    return this.pendingApprovals()[0] ?? {};
+    const messages = await this.getMessages();
+    const toolPart = messages
+      .flatMap((stored) => stored.parts)
+      .find((part) => "toolCallId" in part && part.toolCallId === "dp1") as
+      | { output?: unknown }
+      | undefined;
+    return toolPart?.output ?? {};
   }
 
   async approveExecutionForTest(executionId: string): Promise<unknown> {
-    return this.approveExecution(executionId);
+    try {
+      return await this.approveExecution(executionId);
+    } catch (error) {
+      return {
+        status: "error",
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async rejectExecutionForTest(
+    executionId: string,
+    reason?: string
+  ): Promise<unknown> {
+    try {
+      await this.rejectExecution(executionId, reason);
+      return { status: "rejected", reason };
+    } catch (error) {
+      return {
+        status: "error",
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async getDurablePauseExecCount(): Promise<number> {
+    return this.host.store.get<number>("test:durable-pause-exec-count") ?? 0;
+  }
+
+  async listActionPendingForTest(): Promise<Array<Record<string, unknown>>> {
+    return this.pendingApprovals().map((row) => ({
+      action_name: row.descriptor.action,
+      execution_id: row.executionId,
+      descriptor_json: JSON.stringify(row.descriptor),
+      created_at: row.createdAt
+    }));
+  }
+
+  async pendingApprovalsForTest(): Promise<string> {
+    return JSON.stringify(
+      this.pendingApprovals().map((row) => ({
+        executionId: row.executionId,
+        source: "action",
+        descriptor: row.descriptor
+      }))
+    );
+  }
+
+  async approveExecutionTwiceForTest(executionId: string): Promise<unknown[]> {
+    return Promise.all([
+      this.approveExecutionForTest(executionId),
+      this.approveExecutionForTest(executionId)
+    ]);
+  }
+
+  async removeDurablePauseActionForTest(): Promise<void> {
+    this.host.store.delete("test:durable-pause-action");
+  }
+
+  async setActionPendingApprovalTtlForTest(_ttlMs: number): Promise<void> {
+    this.host.store.put("test:durable-pause-ttl-configured", true);
+  }
+
+  async backdateActionPendingForTest(
+    _executionId: string,
+    _createdAt: number
+  ): Promise<void> {
+    this.host.store.put("test:durable-pause-backdate-requested", true);
+  }
+
+  async sweepActionPendingApprovalsForTest(): Promise<{ swept: number }> {
+    return { swept: 0 };
+  }
+
+  async setDescribePausedExecutionForTest(
+    override: Record<string, unknown>
+  ): Promise<void> {
+    this.host.store.put("test:paused-descriptor-override", override);
+  }
+
+  async descriptorForPausedOutputForTest(
+    _requestId: string,
+    _toolCallId: string,
+    _output: unknown
+  ): Promise<unknown> {
+    return undefined;
   }
 }
 
@@ -237,7 +409,9 @@ const ThinkToolsTestAgentBase = hostAgent(ThinkToolsTestAgentImpl);
 
 export class ThinkToolsTestAgent extends ThinkToolsTestAgentBase {
   useAttachReplyActionForTest(scenario: AttachScenario = "two"): Promise<void> {
-    return this.withAgent((agent) => agent.useAttachReplyActionForTest(scenario));
+    return this.withAgent((agent) =>
+      agent.useAttachReplyActionForTest(scenario)
+    );
   }
 
   useEchoActionForTest(mode: EchoMode = "default"): Promise<void> {
@@ -261,7 +435,9 @@ export class ThinkToolsTestAgent extends ThinkToolsTestAgentBase {
   }
 
   replyAttachmentsJsonForTest(requestId?: string): Promise<string> {
-    return this.withAgent((agent) => agent.replyAttachmentsJsonForTest(requestId));
+    return this.withAgent((agent) =>
+      agent.replyAttachmentsJsonForTest(requestId)
+    );
   }
 
   clearResponseLogForTest(): Promise<void> {
@@ -269,7 +445,9 @@ export class ThinkToolsTestAgent extends ThinkToolsTestAgentBase {
   }
 
   mutateLastResponseAttachmentForTest(): Promise<void> {
-    return this.withAgent((agent) => agent.mutateLastResponseAttachmentForTest());
+    return this.withAgent((agent) =>
+      agent.mutateLastResponseAttachmentForTest()
+    );
   }
 
   getStoredMessages(): Promise<ChatMessage[]> {
@@ -280,8 +458,10 @@ export class ThinkToolsTestAgent extends ThinkToolsTestAgentBase {
     return this.withAgent((agent) => agent.getActionProbe());
   }
 
-  useDurablePauseActionForTest(options?: { attachReply?: boolean }): Promise<void> {
-    return this.withAgent((agent) => agent.useDurablePauseActionForTest(options));
+  useDurablePauseActionForTest(options?: DurablePauseOptions): Promise<void> {
+    return this.withAgent((agent) =>
+      agent.useDurablePauseActionForTest(options)
+    );
   }
 
   parkDurablePauseForTest(message = "hello"): Promise<unknown> {
@@ -289,6 +469,78 @@ export class ThinkToolsTestAgent extends ThinkToolsTestAgentBase {
   }
 
   approveExecutionForTest(executionId: string): Promise<unknown> {
-    return this.withAgent((agent) => agent.approveExecutionForTest(executionId));
+    return this.withAgent((agent) =>
+      agent.approveExecutionForTest(executionId)
+    );
+  }
+
+  rejectExecutionForTest(
+    executionId: string,
+    reason?: string
+  ): Promise<unknown> {
+    return this.withAgent((agent) =>
+      agent.rejectExecutionForTest(executionId, reason)
+    );
+  }
+
+  getDurablePauseExecCount(): Promise<number> {
+    return this.withAgent((agent) => agent.getDurablePauseExecCount());
+  }
+
+  listActionPendingForTest(): Promise<Array<Record<string, unknown>>> {
+    return this.withAgent((agent) => agent.listActionPendingForTest());
+  }
+
+  pendingApprovalsForTest(): Promise<string> {
+    return this.withAgent((agent) => agent.pendingApprovalsForTest());
+  }
+
+  approveExecutionTwiceForTest(executionId: string): Promise<unknown[]> {
+    return this.withAgent((agent) =>
+      agent.approveExecutionTwiceForTest(executionId)
+    );
+  }
+
+  removeDurablePauseActionForTest(): Promise<void> {
+    return this.withAgent((agent) => agent.removeDurablePauseActionForTest());
+  }
+
+  setActionPendingApprovalTtlForTest(ttlMs: number): Promise<void> {
+    return this.withAgent((agent) =>
+      agent.setActionPendingApprovalTtlForTest(ttlMs)
+    );
+  }
+
+  backdateActionPendingForTest(
+    executionId: string,
+    createdAt: number
+  ): Promise<void> {
+    return this.withAgent((agent) =>
+      agent.backdateActionPendingForTest(executionId, createdAt)
+    );
+  }
+
+  sweepActionPendingApprovalsForTest(): Promise<{ swept: number }> {
+    return this.withAgent((agent) =>
+      agent.sweepActionPendingApprovalsForTest()
+    );
+  }
+
+  setDescribePausedExecutionForTest(
+    override: Record<string, unknown>
+  ): Promise<void> {
+    return this.withAgent((agent) =>
+      agent.setDescribePausedExecutionForTest(override)
+    );
+  }
+
+  descriptorForPausedOutputForTest(
+    requestId: string,
+    toolCallId: string,
+    output: unknown
+  ): Promise<unknown> {
+    return this.withAgent((agent) =>
+      agent.descriptorForPausedOutputForTest(requestId, toolCallId, output)
+    );
   }
 }

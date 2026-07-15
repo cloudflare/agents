@@ -119,6 +119,8 @@ export type {
   ChatErrorContext,
   SessionBuilder,
 } from "../../src/app/think.js";
+export type { FiberRecoveryContext } from "../../src/domain/runtime/fibers/fibers.js";
+export type { DeliverNoticeOptions } from "../../src/domain/channels/channels.js";
 export type { ChatMessage as RebuiltChatMessage } from "../../src/domain/messages/model.js";
 export type ChatResponseResult = {
   requestId: string;
@@ -158,6 +160,10 @@ export { hostAgent } from "../../src/adapters/cloudflare/shell.js";
 export type { ChatMessage, MessagePart, ToolPart } from "../../src/domain/messages/model.js";
 export type { ModelChunk, ModelClient, ModelRequest } from "../../src/ports/model.js";
 export type { ToolSet } from "../../src/domain/tools/types.js";
+export type { DeclaredTasks, ScheduledTaskContext } from "../../src/domain/reliability/scheduled-tasks/tasks.js";
+export { DECLARED_TASK_CALLBACK } from "../../src/domain/reliability/scheduled-tasks/tasks.js";
+export { nextOccurrence, parseScheduleDsl } from "../../src/domain/runtime/scheduling/dsl.js";
+export type { Schedule } from "../../src/domain/runtime/scheduling/scheduler.js";
 
 /** Convenience for fixtures: typed stub with the shell's RPC surface. */
 export type AgentStub = DurableObjectStub & {

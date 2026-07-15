@@ -82,7 +82,9 @@ const rpcMethodNames = [
   "getLatestStreamSnapshot",
   "getLatestStreamStatusForTest",
   "getOnExhaustedCallsForTest",
+  "getActiveTurnMetadataForTest",
   "getPendingChatTerminalForTest",
+  "getCapturedTurnMetadataForTest",
   "getRawThinkConfigForTest",
   "getRecoveryContexts",
   "getResponseLog",
@@ -102,6 +104,7 @@ const rpcMethodNames = [
   "insertInterruptedFiber",
   "insertInterruptedStream",
   "mutatingGetMessagesResultChangesCacheForTest",
+  "persistIncomingMessageForTest",
   "persistTestMessage",
   "preScheduleRecoveryContinueForTest",
   "preScheduleRecoveryRetryForTest",
@@ -111,6 +114,8 @@ const rpcMethodNames = [
   "rerunLegacyMigrationForTest",
   "runChatRecoveryContinueForTestWith",
   "runChatRecoveryRetryForTestWith",
+  "runChatTurnForTest",
+  "runNestedAdmissionScenario",
   "runContinueWithPrefillRejectingModelForTest",
   "runEmptyRpcStreamForTest",
   "runEmptyStreamForTest",
@@ -133,6 +138,7 @@ const rpcMethodNames = [
   "setInBandErrorResponse",
   "setInBandStreamErrorResponse",
   "setMultiChunkResponse",
+  "setProgrammaticResponseForTest",
   "setRecoveryOverride",
   "setRecoveryShouldThrowForTest",
   "setRequestContextForTest",
@@ -162,9 +168,21 @@ const rpcMethodNames = [
   "testContinueLastTurnWithSignal",
   "testGiveUpSealTransientDefer",
   "testRecoveryCallbackError",
+  "testRunTurnContinuation",
+  "testRunTurnExpectError",
+  "testRunTurnStream",
+  "testRunTurnStreamArray",
+  "testRunTurnStreamEmpty",
+  "testRunTurnStreamWithFn",
+  "testRunTurnSubmit",
+  "testRunTurnSubmitWithFunction",
+  "testRunTurnWait",
+  "testRunTurnWaitString",
+  "testRunTurnWaitWithFn",
   "testSaveMessages",
   "testSaveMessagesAbortMidStream",
   "testSaveMessagesCancelledByAbortAllRequests",
+  "testSaveMessagesEmptyFunction",
   "testSaveMessagesWithFn",
   "testSaveMessagesWithSignal",
   "testStallRecoveryDoesNotRearmPendingContinuation",
@@ -233,7 +251,12 @@ function coerceMessages(input: unknown, ids: { newId(prefix: string): string }):
     const parts = Array.isArray(record.parts)
       ? (record.parts as ChatMessage["parts"])
       : [textPart(typeof record.content === "string" ? record.content : "")];
-    return { id, role, parts };
+    const message: ChatMessage = { id, role, parts };
+    if (typeof record.metadata === "object" && record.metadata !== null) {
+      message.metadata = record.metadata as JsonRecord;
+    }
+    if (typeof record.createdAt === "number") message.createdAt = record.createdAt;
+    return message;
   });
 }
 
@@ -295,6 +318,14 @@ function resultFromCallback(result: TurnResult, callback: CollectingCallback): T
   };
 }
 
+function withLegacyTurnShape(result: TurnResult, continuation = false): TurnResult & { status: string; continuation: boolean } {
+  return {
+    ...result,
+    status: result.outcome === "completed" ? "completed" : result.outcome,
+    continuation,
+  };
+}
+
 class ThinkSessionPortAgentImpl extends Think {
   private response = "Hello from the assistant!";
   private chunks: string[] | null = null;
@@ -313,6 +344,7 @@ class ThinkSessionPortAgentImpl extends Think {
   private telemetryEvents: string[] = [];
   private capturedOptions: Array<{ continuation: boolean }> = [];
   private capturedClientToolNames: string[][] = [];
+  private capturedTurnMetadata: Array<JsonRecord | undefined> = [];
   private recoveryContexts: Array<{ requestId: string; incidentId: string; attempt: number }> = [];
   private exhaustedContexts: RecoveryIncident[] = [];
   private recoveryOverride: RecoveryHookDecision | undefined;
@@ -320,6 +352,10 @@ class ThinkSessionPortAgentImpl extends Think {
   private clientToolNames = new Set<string>();
   private streamingAssistantParts: ChatMessage["parts"] = [];
   private forceStableTimeout = false;
+  private nestedAdmissionMode: "wait" | "continuation" | "stream" | "submit" | "addMessages" | null = null;
+  private nestedAdmissionAttempted = false;
+  private nestedAdmissionSucceeded = false;
+  private nestedAdmissionError: string | null = null;
 
   constructor(host: AgentHost) {
     super(host);
@@ -432,17 +468,30 @@ class ThinkSessionPortAgentImpl extends Think {
     return builder;
   }
 
-  override beforeTurn = (
+  override beforeTurn = async (
     ctx: Parameters<NonNullable<Think["beforeTurn"]>>[0],
-  ): ReturnType<NonNullable<Think["beforeTurn"]>> => {
+  ) => {
     this.turnCallCount++;
     this.beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     this.capturedOptions.push({ continuation: ctx.continuation });
+    // The rebuild currently has no activeTurnMetadata accessor or chat()
+    // metadata option. Capture the honest observable value instead of
+    // smuggling test metadata through fixture-owned state.
+    this.capturedTurnMetadata.push(undefined);
     this.beforeTurnLog.push({
       system: "",
       toolNames: [],
       continuation: ctx.continuation,
     });
+    if (this.nestedAdmissionMode && !this.nestedAdmissionAttempted) {
+      this.nestedAdmissionAttempted = true;
+      try {
+        await this.runNestedAdmissionForTest(this.nestedAdmissionMode);
+        this.nestedAdmissionSucceeded = true;
+      } catch (error) {
+        this.nestedAdmissionError = error instanceof Error ? error.message : String(error);
+      }
+    }
     if (this.perTurnStallOverrideMs !== null) {
       const timeout = this.perTurnStallOverrideMs;
       this.perTurnStallOverrideMs = null;
@@ -641,6 +690,10 @@ class ThinkSessionPortAgentImpl extends Think {
     this.response = response;
   }
 
+  async setProgrammaticResponseForTest(response: string): Promise<void> {
+    await this.setResponse(response);
+  }
+
   async setMultiChunkResponse(chunks: string[]): Promise<void> {
     this.chunks = chunks;
   }
@@ -672,6 +725,14 @@ class ThinkSessionPortAgentImpl extends Think {
   async persistTestMessage(message: unknown): Promise<void> {
     const session = await this.ensureSession();
     for (const msg of coerceMessages([message], this.ids)) await session.appendMessage(msg);
+  }
+
+  async persistIncomingMessageForTest(message: unknown): Promise<void> {
+    // Exercise the rebuild's real client-intake path. It currently does not
+    // strip reserved metadata keys, so turn-metadata's forge test should fail
+    // honestly on that missing feature rather than passing through a fixture
+    // sanitizer.
+    await this.chat(coerceMessages([message], this.ids));
   }
 
   async appendHistoryMessageForTest(message: unknown): Promise<void> {
@@ -776,8 +837,167 @@ class ThinkSessionPortAgentImpl extends Think {
     return { ...result, status: result.outcome === "completed" ? "completed" : result.outcome };
   }
 
+  async testSaveMessagesEmptyFunction(): Promise<TurnResult & { status?: string }> {
+    const result = await (this.saveMessages as unknown as (input: unknown) => Promise<TurnResult>)(() => []);
+    return { ...result, status: result.outcome === "completed" ? "completed" : result.outcome };
+  }
+
   async testSaveMessagesWithFn(text: string): Promise<TurnResult & { status?: string }> {
     return this.testSaveMessages([userMessage(text, this.ids.newId("msg"))]);
+  }
+
+  async testRunTurnWait(options: unknown): Promise<TurnResult & { status: string; continuation: boolean }> {
+    const record = recordFrom(options);
+    const input = typeof options === "string" ? options : record && "input" in record ? record.input : undefined;
+    const channel = record && typeof record.channel === "string" ? record.channel : undefined;
+    const args: JsonRecord = { mode: "wait", input };
+    if (channel) args.channel = channel;
+    const result = await (this.runTurn as unknown as (args: JsonRecord) => Promise<TurnResult>)(args);
+    return withLegacyTurnShape(result, false);
+  }
+
+  async testRunTurnWaitString(text: string): Promise<TurnResult & { status: string; continuation: boolean }> {
+    return this.testRunTurnWait({ input: text });
+  }
+
+  async testRunTurnWaitWithFn(text: string): Promise<TurnResult & { status: string; continuation: boolean }> {
+    const result = await (this.runTurn as unknown as (args: JsonRecord) => Promise<TurnResult>)({
+      mode: "wait",
+      input: (_current: ChatMessage[]) => [userMessage(text, this.ids.newId("msg"))],
+    });
+    return withLegacyTurnShape(result, false);
+  }
+
+  async testRunTurnContinuation(): Promise<TurnResult & { status: string; continuation: boolean }> {
+    // The rebuild's runTurn signature has no continuation mode/options yet.
+    missingFeature("runTurn continuation mode");
+  }
+
+  async testRunTurnSubmit(
+    text: string,
+    options?: { submissionId?: string; idempotencyKey?: string; metadata?: JsonRecord },
+  ): Promise<unknown> {
+    const args: JsonRecord = { mode: "submit", input: text };
+    if (options?.submissionId) args.submissionId = options.submissionId;
+    if (options?.idempotencyKey) args.idempotencyKey = options.idempotencyKey;
+    if (options?.metadata) args.metadata = options.metadata;
+    return (this.runTurn as unknown as (args: JsonRecord) => Promise<unknown>)(args);
+  }
+
+  async testRunTurnStream(text: string): Promise<TestChatResult> {
+    const callback = new CollectingCallback();
+    await (this.runTurn as unknown as (args: JsonRecord) => Promise<unknown>)({
+      mode: "stream",
+      input: text,
+      callback,
+    });
+    return {
+      events: callback.events,
+      done: callback.done,
+      ...(callback.error ? { error: callback.error } : {}),
+      requestId: callback.requestId,
+      interruptedCalls: callback.interruptedCalls,
+    };
+  }
+
+  async testRunTurnStreamArray(messages: unknown[], channel?: string): Promise<TestChatResult> {
+    const callback = new CollectingCallback();
+    const args: JsonRecord = { mode: "stream", input: coerceMessages(messages, this.ids), callback };
+    if (channel) args.channel = channel;
+    await (this.runTurn as unknown as (args: JsonRecord) => Promise<unknown>)(args);
+    return {
+      events: callback.events,
+      done: callback.done,
+      ...(callback.error ? { error: callback.error } : {}),
+      requestId: callback.requestId,
+      interruptedCalls: callback.interruptedCalls,
+    };
+  }
+
+  async testRunTurnStreamWithFn(text: string): Promise<TestChatResult> {
+    const callback = new CollectingCallback();
+    await (this.runTurn as unknown as (args: JsonRecord) => Promise<unknown>)({
+      mode: "stream",
+      input: (_current: ChatMessage[]) => [userMessage(text, this.ids.newId("msg"))],
+      callback,
+    });
+    return {
+      events: callback.events,
+      done: callback.done,
+      ...(callback.error ? { error: callback.error } : {}),
+      requestId: callback.requestId,
+      interruptedCalls: callback.interruptedCalls,
+    };
+  }
+
+  async testRunTurnStreamEmpty(input: unknown): Promise<TestChatResult> {
+    const callback = new CollectingCallback();
+    await (this.runTurn as unknown as (args: JsonRecord) => Promise<unknown>)({
+      mode: "stream",
+      input,
+      callback,
+    });
+    return {
+      events: callback.events,
+      done: callback.done,
+      ...(callback.error ? { error: callback.error } : {}),
+      requestId: callback.requestId,
+      interruptedCalls: callback.interruptedCalls,
+    };
+  }
+
+  async testRunTurnExpectError(options: unknown): Promise<{ name: string; message: string } | null> {
+    try {
+      await (this.runTurn as unknown as (args: unknown) => Promise<unknown>)(options);
+      return null;
+    } catch (error) {
+      return {
+        name: error instanceof Error ? error.name : "Error",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async testRunTurnSubmitWithFunction(): Promise<{ name: string; message: string } | null> {
+    return this.testRunTurnExpectError({ mode: "submit", input: () => [] });
+  }
+
+  private async runNestedAdmissionForTest(mode: "wait" | "continuation" | "stream" | "submit" | "addMessages"): Promise<void> {
+    const message = userMessage(`nested ${mode}`, this.ids.newId("msg"));
+    switch (mode) {
+      case "wait":
+      case "continuation":
+      case "stream":
+        // Calling these inside beforeTurn would enqueue behind the active
+        // turn and hang in the rebuild because the original nested-admission
+        // guard is not implemented. Report the missing guard without faking
+        // the original error text.
+        missingFeature("nested blocking admission guard");
+      case "submit":
+        await this.runTurn({ mode: "submit", input: [message] });
+        return;
+      case "addMessages":
+        await this.addMessages([message]);
+        return;
+    }
+  }
+
+  async runNestedAdmissionScenario(mode: "wait" | "continuation" | "stream" | "submit" | "addMessages"): Promise<{
+    attempted: boolean;
+    succeeded: boolean;
+    error: string | null;
+  }> {
+    this.nestedAdmissionMode = mode;
+    this.nestedAdmissionAttempted = false;
+    this.nestedAdmissionSucceeded = false;
+    this.nestedAdmissionError = null;
+    await this.testChat(`outer ${mode}`);
+    this.nestedAdmissionMode = null;
+    return {
+      attempted: this.nestedAdmissionAttempted,
+      succeeded: this.nestedAdmissionSucceeded,
+      error: this.nestedAdmissionError,
+    };
   }
 
   async testContinueLastTurn(): Promise<TurnResult & { status?: string }> {
@@ -926,6 +1146,27 @@ class ThinkSessionPortAgentImpl extends Think {
 
   async getCapturedOptions(): Promise<unknown[]> {
     return this.capturedOptions;
+  }
+
+  async getCapturedTurnMetadataForTest(): Promise<Array<JsonRecord | undefined>> {
+    return this.capturedTurnMetadata;
+  }
+
+  async getActiveTurnMetadataForTest(): Promise<JsonRecord | undefined> {
+    // No rebuild activeTurnMetadata accessor exists. Returning undefined is
+    // the closest honest public-API observable.
+    return undefined;
+  }
+
+  async runChatTurnForTest(options: unknown): Promise<void> {
+    const record = recordFrom(options) ?? {};
+    const input = typeof record.input === "string" ? record.input : "hi";
+    const opts: { channel?: string } = {};
+    if (typeof record.channel === "string") opts.channel = record.channel;
+    // The original passed `metadata` as a chat option. The rebuild chat()
+    // signature has no such option, so this deliberately exercises only the
+    // real channel/input path and leaves metadata assertions failing.
+    await this.chat(input, new CollectingCallback(), opts);
   }
 
   async getTurnBodies(): Promise<unknown[]> {
@@ -1407,7 +1648,15 @@ class ProgrammaticAgentImpl extends ThinkSessionPortAgentImpl {}
 class RecoveryAgentImpl extends ThinkSessionPortAgentImpl {}
 
 const ThinkSessionThinkTestAgentBase = hostAgent(ThinkSessionPortAgentImpl);
-export class ThinkSessionThinkTestAgent extends ThinkSessionThinkTestAgentBase {}
+export class ThinkSessionThinkTestAgent extends ThinkSessionThinkTestAgentBase {
+  // `getMessages` is already inherited from ChatAgent, so `installRpcMethods`'s
+  // `method in target.prototype` guard skips it — but an inherited (not
+  // own-prototype) method is not RPC-visible on the DO. Hand-written forwarder,
+  // same pattern as `fixtures/ported-agents.ts`'s `ThinkTestAgent`.
+  getMessages(): Promise<ChatMessage[]> {
+    return this.withAgent((agent) => agent.getMessages());
+  }
+}
 installRpcMethods(ThinkSessionThinkTestAgent);
 
 const ThinkSessionTestAgentBase = hostAgent(SessionConfigAgentImpl);
