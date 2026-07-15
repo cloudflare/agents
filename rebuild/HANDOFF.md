@@ -113,7 +113,11 @@ opinionated* (the real Agent/Think seam).
   Migration section for the two domain-seam widenings and the
   ensureRuntime ordering note.
 
-**ISSUE-030 — hosting refactor (well-specified, unbuilt).** Composition-first:
+**ISSUE-030 — RESOLVED 2026-07-15** (spec-first: capabilities.ts interfaces →
+AgentHost→AgentRuntime rename → W-A transport retype (`ChatTransportAgent`,
+adapter imports no concrete class) → W-B generic `AgentDurableObject` host,
+`hostAgent()` kept as zero-diff sugar; board checkpoint 0 flips). Original
+spec below for the record: Composition-first:
 the DO *has-a* Agent. One generic host that routes platform I/O to **composed
 transport adapters**; NO "chat" agent type / no `instanceof Think` (3 of the 4
 `cf_agent_*` concerns — event projection, state sync, RPC — are Agent-level;

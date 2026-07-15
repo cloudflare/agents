@@ -450,7 +450,7 @@ repair's unsettled set updated. Native denial assertions migrated.
 
 ## ISSUE-030 — Hosting refactor: one generic DO host + composed capability-typed transports
 
-**Status:** open · **Area:** Cloudflare adapter / hosting (audit 30 §composition-tiers)
+**Status:** RESOLVED 2026-07-15 (spec e17b5734 · rename 853e25e3 · W-A transport retype 7fe47326 · W-B generic host c784ee4d; full-board checkpoint zero flips) · **Area:** Cloudflare adapter / hosting (audit 30 §composition-tiers)
 
 `hostAgent` is the Cloudflare primary adapter (the DO class that supplies
 concrete ports over `ctx.storage`/`setAlarm` and drives start-once / alarm /
