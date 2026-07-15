@@ -629,3 +629,27 @@ can replace it with a simpler policy (or disable) without touching the
 mechanism or the Think surface. Acceptance: the P9 reattach family +
 reattach-budget/task-amplification e2e flip. Schedule before/alongside port
 wave P13 (delegation-recovery files).
+
+## ISSUE-036 — Facets never receive their own AgentSpawner — no nested spawn, no parentAgent() from within a facet
+
+**Status:** open · **Area:** domain/delegation + adapters/cloudflare · **Found by:** P10 ported sub-agent tests
+
+The Cloudflare shell wires `host.spawner` only for non-facet-hosted instances:
+`...(!facetHosted ? { spawner: createFacetSpawner(...) } : {})`. Every child
+created through `createFacetSpawner` is initialized with `facetHosted: true` in
+`ensureLinked()`. That combination means a facet-hosted agent never receives an
+`AgentSpawner`.
+
+Two observable consequences fall out of this. First, calling
+`this.subAgent(...)`, `this.hasSubAgent(...)`, `this.listSubAgents(...)`,
+`this.deleteSubAgent(...)`, or `this.abortSubAgent(...)` from inside any facet
+throws because no spawner is configured; nested root → outer → inner delegation
+is not currently supported. Second, `this.parentAgent()` returns `undefined`
+from inside every facet, including a direct child, because resolving the parent
+handle also requires `host.spawner`.
+
+Fixing this needs `host.spawner` wired for facet-hosted instances too, bridged
+through the root durable object. Cloudflare facets are not independently
+recursive: only the root DO can call `ctx.facets.get()`, so a facet-of-a-facet
+must be requested via the root's spawner bridge rather than by a child facet
+trying to allocate its own platform facet directly.
