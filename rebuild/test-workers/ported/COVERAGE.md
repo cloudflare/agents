@@ -26,6 +26,10 @@ file: `ported/wrangler.jsonc`, `ported/fixtures/index.ts`, `ported/compat.ts`,
 `e2e/worker.ts`/`e2e/wrangler.jsonc` — waves must touch only their own test
 files + per-wave fixture modules; the orchestrator merges the shared files.
 
+**Dashboard.** `npm run dashboard` renders this ledger (plus ISSUES.md and
+the PROGRESS log) to `dashboard.html` — generated, never hand-edited; this
+file stays the single source of truth.
+
 **Failure triage vocabulary** (for `ported`/`rewritten` rows that fail):
 `framing` (ISSUE-026 payload mismatch) · `missing-feature ISSUE-NNN` ·
 `fixture-gap` · `divergence` (intentional behavior change — explain) · `flake`.
@@ -133,14 +137,14 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | migration.test.ts | 8 | dropped | migrates the ORIGINAL's old storage schema — meaningless for the rebuild |
 | msg-ordering.test.ts | 1 | pending | T3 |
 | observability.test.ts | 46 | blocked ISSUE-009 | ports with the adapter |
-| protocol-messages.test.ts | 18 | pending | ported 5/18 | 13 fail on original frame-vocabulary asserts — needs per-test verdicts: genuine missing frames vs deliberate `divergence` (some will become dropped rows). |
+| protocol-messages.test.ts | 18 | ported 5/18 | 13 fail on original frame-vocabulary asserts — needs per-test verdicts: genuine missing frames vs deliberate `divergence` (some will become dropped rows). |
 | queue.test.ts | 3 | pending | T3 |
 | r2-skills.test.ts | 9 | blocked ISSUE-004 | R2+codemode skills; also quarry vs domain/skills |
 | readonly-connections.test.ts | 45 | pending | T3 |
 | resumable-stream-migration.test.ts | 1 | dropped | old-architecture migration |
 | retries.test.ts | 48 | blocked ISSUE-020 | |
 | retry-integration.test.ts | 18 | blocked ISSUE-020 | |
-| routing.test.ts | 24 | pending | ported 24/24 | **GREEN — full original suite passes** (after fixing unknown-binding 400 vs 404 divergence found here). |
+| routing.test.ts | 24 | ported 24/24 | **GREEN — full original suite passes** (after fixing unknown-binding 400 vs 404 divergence found here). |
 | run-fiber.test.ts | 54 | pending | T3 |
 | schedule.test.ts | 52 | pending | T3 |
 | schema-and-state-optimization.test.ts | 31 | quarry | original SQL-schema internals |

@@ -13,7 +13,8 @@
     "test:all": "npm run test && npm run test:workers",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cloudflare.json",
     "demo": "tsx demo/cli.ts",
-    "demo:cf": "wrangler dev --config demo/cloudflare/wrangler.jsonc"
+    "demo:cf": "wrangler dev --config demo/cloudflare/wrangler.jsonc",
+    "dashboard": "node scripts/dashboard.mjs"
   },
   "dependencies": {
     "ai": "^6.0.225",
