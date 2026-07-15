@@ -81,7 +81,9 @@ export function createPendingInteractions(deps: {
   function maybeContinue(message: ChatMessage): void {
     const toolParts = message.parts.filter(isToolPart);
     if (toolParts.length === 0) return;
-    const allSettled = toolParts.every((p) => p.state === "output-available" || p.state === "output-error");
+    const allSettled = toolParts.every(
+      (p) => p.state === "output-available" || p.state === "output-error" || p.state === "output-denied",
+    );
     if (!allSettled) return;
 
     const key = message.id;
@@ -112,7 +114,17 @@ export function createPendingInteractions(deps: {
 
     const updatedParts = last.parts.map((p) => {
       if (!isToolPart(p) || p.toolCallId !== args.toolCallId) return p;
-      if (p.state !== "input-available" && p.state !== "input-streaming") return p;
+      // Results apply to awaiting-execution states — including the approval
+      // states (a result implies the client ran it) — but never to a denied
+      // or already-settled part (ISSUE-029).
+      if (
+        p.state !== "input-available" &&
+        p.state !== "input-streaming" &&
+        p.state !== "approval-requested" &&
+        p.state !== "approval-responded"
+      ) {
+        return p;
+      }
       if (args.isError) {
         return {
           ...p,
@@ -150,24 +162,31 @@ export function createPendingInteractions(deps: {
 
     let updatedPart: MessagePart;
     if (!args.approved) {
+      // ISSUE-029: denial is its own terminal state, not a generic error.
       updatedPart = {
         ...part,
-        state: "output-error",
+        state: "output-denied",
         errorText: actionRejectionErrorValue(toolName(part), args.reason).error.message,
       };
     } else {
       const tools = await deps.tools();
       const name = toolName(part);
-      const ctx: ToolExecutionContext = {
-        toolCallId: args.toolCallId,
-        requestId: deps.requestId() ?? "",
-        messages: await session.getHistory(),
-        signal: new AbortController().signal,
-      };
-      const { output, isError } = await tools.execute(name, part.input, ctx);
-      updatedPart = isError
-        ? { ...part, state: "output-error", errorText: typeof output === "string" ? output : JSON.stringify(output) }
-        : { ...part, state: "output-available", output };
+      if (tools.isClientTool(name)) {
+        // ISSUE-029: the server cannot run a client tool — mark the approval
+        // answered and wait for the client's cf_agent_tool_result.
+        updatedPart = { ...part, state: "approval-responded" };
+      } else {
+        const ctx: ToolExecutionContext = {
+          toolCallId: args.toolCallId,
+          requestId: deps.requestId() ?? "",
+          messages: await session.getHistory(),
+          signal: new AbortController().signal,
+        };
+        const { output, isError } = await tools.execute(name, part.input, ctx);
+        updatedPart = isError
+          ? { ...part, state: "output-error", errorText: typeof output === "string" ? output : JSON.stringify(output) }
+          : { ...part, state: "output-available", output };
+      }
     }
 
     const updated: ChatMessage = { ...last, parts: last.parts.map((p) => (p === part ? updatedPart : p)) };

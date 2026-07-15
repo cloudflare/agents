@@ -23,8 +23,10 @@ const STATE_RANK: Record<ToolPart["state"], number> = {
   "input-streaming": 0,
   "input-available": 1,
   "approval-requested": 2,
-  "output-available": 3,
-  "output-error": 3,
+  "approval-responded": 3,
+  "output-available": 4,
+  "output-error": 4,
+  "output-denied": 4,
 };
 
 function toolParts(message: ChatMessage): ToolPart[] {

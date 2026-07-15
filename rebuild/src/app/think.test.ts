@@ -304,7 +304,7 @@ describe("Think — action approval via resolveApproval()", () => {
     expect(toolPart).toMatchObject({ state: "output-available", output: { result: 10 } });
   });
 
-  it("reject: settles the tool part as output-error and auto-continues", async () => {
+  it("reject: settles the tool part as output-denied and auto-continues", async () => {
     const { agent } = makeApprovalAgent();
     await agent.start();
 
@@ -317,7 +317,7 @@ describe("Think — action approval via resolveApproval()", () => {
     });
     const messages = await agent.getMessages();
     const toolPart = messages[1]!.parts.find((p) => p.type === "tool-dangerous");
-    expect(toolPart).toMatchObject({ state: "output-error" });
+    expect(toolPart).toMatchObject({ state: "output-denied" });
     expect((toolPart as { errorText: string }).errorText).toContain("no");
   });
 

@@ -195,7 +195,7 @@ describe("createPendingInteractions", () => {
       expect(published).toHaveLength(1);
     });
 
-    it("rejected: settles output-error with the rejection reason, without executing", async () => {
+    it("rejected: settles output-denied with the rejection reason, without executing", async () => {
       const msg = toolMessage([{ type: "tool-dangerous", toolCallId: "call_1", state: "approval-requested", input: {} }]);
       const executeSpy = vi.fn(async () => ({ output: "should not run", isError: false }));
       const { pending, session } = harness({ session: fakeSession([msg]), tools: fakeTools(executeSpy) });
@@ -204,7 +204,8 @@ describe("createPendingInteractions", () => {
 
       expect(executeSpy).not.toHaveBeenCalled();
       const updated = await session.getLatestLeaf();
-      expect(updated!.parts[0]).toMatchObject({ state: "output-error" });
+      // ISSUE-029: denial is its own terminal state (original vocabulary).
+      expect(updated!.parts[0]).toMatchObject({ state: "output-denied" });
       expect((updated!.parts[0] as ToolPart).errorText).toContain("no thanks");
     });
 

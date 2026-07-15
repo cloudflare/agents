@@ -428,7 +428,7 @@ reconciliation semantics remain ISSUE-015.
 
 ## ISSUE-029 — Approval-state vocabulary parity (`approval-responded`, `output-denied`)
 
-**Status:** open · **Area:** Messages/Actions/Conversation
+**Status:** resolved (2026-07-15) · **Area:** Messages/Actions/Conversation
 
 The original's tool-part lifecycle includes `approval-responded` (approved,
 pre-re-execution) and `output-denied` (denied with reason) states; the
@@ -438,3 +438,10 @@ ported client-tools tests assert the richer vocabulary (they false-passed
 before the P1 fixture was fixed to use the real session). Add the two states
 to `ToolPart`, set them in the pendingInteractions approval resolution, and
 rank them in reconcile/accumulator state ordering.
+
+Resolved: `ToolPart` gained both states; client-approval resolution now sets
+`approval-responded` for approved CLIENT tools (server-executable tools still
+re-execute) and `output-denied` (with reason) for denials; tool results
+apply to `approval-requested`/`approval-responded` parts but never to denied
+ones; denied counts as settled for auto-continuation; reconcile ranks and
+repair's unsettled set updated. Native denial assertions migrated.

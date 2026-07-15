@@ -163,7 +163,7 @@ describe("e2e: actions and approvals", () => {
     expect(secondTurnCharge).toMatchObject({ state: "output-available", output: { charged: 42, orderId: "order-1" } });
   });
 
-  it("approval-gated delete_account over the WS chat transport: a cf_agent_tool_approval(toolCallId) frame approves once; a separate reject settles as output-error without executing", async () => {
+  it("approval-gated delete_account over the WS chat transport: a cf_agent_tool_approval(toolCallId) frame approves once; a separate reject settles as output-denied without executing", async () => {
     const { agent } = makeAgent();
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "delete_account", input: { confirm: true }, id: "call_1" },
@@ -216,7 +216,7 @@ describe("e2e: actions and approvals", () => {
       ),
     ).toBe(true);
 
-    // A fresh turn, rejected this time via the frame: settles as output-error, never executes.
+    // A fresh turn, rejected this time via the frame: settles as output-denied (ISSUE-029), never executes.
     const { agent: agent2 } = makeAgent();
     agent2.model = createFakeModel([
       { kind: "tool-call", toolName: "delete_account", input: { confirm: true }, id: "call_r" },
@@ -258,7 +258,7 @@ describe("e2e: actions and approvals", () => {
     });
     const messages2 = await agent2.getMessages();
     const toolPart = messages2[1]!.parts.find((p) => p.type === "tool-delete_account");
-    expect(toolPart).toMatchObject({ state: "output-error" });
+    expect(toolPart).toMatchObject({ state: "output-denied" });
     expect((toolPart as { errorText: string }).errorText).toContain("changed my mind");
     expect(agent2.actionExecuteCounts.delete_account ?? 0).toBe(0);
   });

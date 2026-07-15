@@ -14,7 +14,16 @@ export type MessagePart =
 export type ToolPart = {
   type: `tool-${string}`;
   toolCallId: string;
-  state: "input-streaming" | "input-available" | "approval-requested" | "output-available" | "output-error";
+  state:
+    | "input-streaming"
+    | "input-available"
+    | "approval-requested"
+    /** Approved, awaiting the CLIENT to execute and report (ISSUE-029). */
+    | "approval-responded"
+    | "output-available"
+    | "output-error"
+    /** Denied by the approver — terminal; results must not apply (ISSUE-029). */
+    | "output-denied";
   input?: unknown;
   output?: unknown;
   errorText?: string;

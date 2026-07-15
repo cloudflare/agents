@@ -634,7 +634,7 @@ describe("attachChatTransport — inbound frame parsing", () => {
     });
   });
 
-  it("cf_agent_tool_approval (reject) settles output-error without executing", async () => {
+  it("cf_agent_tool_approval (reject) settles output-denied without executing", async () => {
     const { agent } = makeAgent();
     agent.model = createFakeModel([
       { kind: "tool-call", toolName: "dangerous", input: { x: 5 }, id: "call_1" },
@@ -673,7 +673,7 @@ describe("attachChatTransport — inbound frame parsing", () => {
       expect(messages.some((m) => m.parts.some((p) => p.type === "text" && p.text === "Handled"))).toBe(true);
     });
     const messages = await agent.getMessages();
-    expect(messages[1]?.parts.find((p) => p.type === "tool-dangerous")).toMatchObject({ state: "output-error" });
+    expect(messages[1]?.parts.find((p) => p.type === "tool-dangerous")).toMatchObject({ state: "output-denied" });
     expect(executed).toBe(false);
   });
 

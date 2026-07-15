@@ -5,6 +5,7 @@ const UNSETTLED_STATES = new Set<ToolPart["state"]>([
   "input-streaming",
   "input-available",
   "approval-requested",
+  "approval-responded",
 ]);
 
 const DEFAULT_ERROR_TEXT = "Tool call was interrupted before completing.";
