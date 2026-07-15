@@ -130,8 +130,9 @@ external wire-compat proof and is now viable post-026.
 
 ## Suggested next moves (not committed — maintainer's call)
 
-- **Authoritative ADR-0002 rewrite** with the three-layer model, once the team
-  is ready to commit to Runtime/Agent/Think. (User leaning yes on 3 layers.)
+- **ChatAgent extraction** (the ADR-0002 migration): split Think into
+  ChatAgent + Think per the accepted allocation table; guarded by ported +
+  native suites.
 - **ISSUE-030 hosting refactor** as a `/goal` (generic host + capability-typed
   transports + AgentHost→AgentRuntime + retype attachChatTransport). Sizeable
   adapter change; full re-verify.
