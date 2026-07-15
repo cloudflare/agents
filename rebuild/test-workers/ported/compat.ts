@@ -13,6 +13,10 @@ import {
   routeAgentRequest,
 } from "../../src/adapters/cloudflare/routing.js";
 import type { TurnResult as RebuiltTurnResult } from "../../src/app/think.js";
+import type {
+  SubmissionRecord as RebuiltSubmissionRecord,
+  SubmissionStatus as RebuiltSubmissionStatus
+} from "../../src/domain/reliability/submissions/submissions.js";
 import {
   defaultContextOverflowClassifier as rebuiltDefaultContextOverflowClassifier
 } from "../../src/domain/reliability/recovery/overflow.js";
@@ -126,6 +130,14 @@ export type ChatResponseResult = {
 export type SaveMessagesResult = RebuiltTurnResult & {
   status?: "completed" | "error" | "aborted" | "skipped" | string;
   continuation?: boolean;
+};
+export type ThinkSubmissionStatus = RebuiltSubmissionStatus;
+export type ThinkSubmissionInspection = RebuiltSubmissionRecord & {
+  requestId: string;
+  completedAt?: number;
+};
+export type SubmitMessagesResult = ThinkSubmissionInspection & {
+  accepted: boolean;
 };
 export { Think } from "../../src/app/think.js";
 export { action } from "../../src/domain/actions/actions.js";

@@ -95,6 +95,10 @@
         "name": "ThinkProgrammaticTestAgent"
       },
       {
+        "class_name": "ThinkSubmissionsTestAgent",
+        "name": "ThinkSubmissionsTestAgent"
+      },
+      {
         "class_name": "ThinkAsyncHookTestAgent",
         "name": "ThinkAsyncHookTestAgent"
       },
@@ -180,6 +184,7 @@
         "ThinkLegacyConfigMigrationAgent",
         "ThinkConfigInSessionAgent",
         "ThinkProgrammaticTestAgent",
+        "ThinkSubmissionsTestAgent",
         "ThinkAsyncHookTestAgent",
         "ThinkNonRecoveryTestAgent",
         "BareAssistantAgent",
