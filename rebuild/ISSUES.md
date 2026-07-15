@@ -747,3 +747,31 @@ against re-marking the ledger `interrupted`, not against firing the hook;
 accompanying run row (crash between the two writes) is invisible to recovery
 entirely. Both demonstrated by named failing tests in
 `test-workers/ported/run-fiber.test.ts`.
+
+## ISSUE-039 — onStart failures brick the DO instead of degrading
+
+**Status:** open · **Area:** app lifecycle + adapters/cloudflare · **Found by:** P11 ported onstart-degraded tests (5 tests, one root cause)
+
+A throw inside `onStart()` (e.g. a throwing `getScheduledTasks()` during
+reconcile, or a hydration failure like SQLITE_NOMEM) is never caught: the DO
+gets marked `broken.inputGateBroken` and bricks. The original degrades
+gracefully (agent stays reachable, surfaces the startup error, retries).
+Needs a resilience wrapper around the activation path with a documented
+degraded mode. Real bug — verified in raw vitest-pool-workers output.
+
+## ISSUE-040 — No maxConcurrentAgentTools cap
+
+**Status:** open · **Area:** domain/delegation · **Found by:** P11 ported max-concurrent tests
+
+The original bounds concurrently-running agent-tool runs per parent
+(`maxConcurrentAgentTools`), queueing or rejecting beyond the cap. The
+rebuild has no cap anywhere (grep-confirmed in runs.ts/think.ts). Distinct
+from ISSUE-035 (reattach budgets) and ISSUE-037 (detached delivery).
+
+## ISSUE-041 — Schedule DSL rejects singular counted forms ("every 1 minute")
+
+**Status:** open · **Area:** domain/runtime/scheduling (DSL) · **Found by:** P11 ported scheduled-tasks tests (~10 usages)
+
+The DSL accepts `"every minute"` and `"every <n> minutes"` (plural) but
+rejects `"every 1 minute"`/`"every 1 hour"`. The original accepts singular
+counted forms; small grammar fix, explains most scheduled-tasks failures.

@@ -90,40 +90,40 @@ refreshes the snapshot in the same commit.
 | agent-tools.test.ts | 33 | PUBLIC-API | ported 11/33 | [fidelity:adapter] P9. 19 missing-feature ISSUE-035 (the whole reattach-budget/`interrupted`/startup-recovery family — one root cause; scope detail folded into the issue). 1 missing-feature structured-output-on-completed-runs (no-issue-yet). 1 divergence turn-skip vocabulary (cancel seals `aborted` vs original `error`). 1 fixture-gap request-id reverse lookup (persists, unseedable). Integrity: 3 codex false-passes reworked to fail honestly (they'll flip with ISSUE-035); 4 weak-but-genuine passes noted (live-relay settle vs restart recovery; #1589 forwarding without attach-window race timing). Verified 0 flips on merged main. |
 | assistant-agent-loop.test.ts | 23 | WIRE | ported 22/23 | [fidelity:adapter] Near-green; 1 residual to pin in the next triage pass. |
 | extension-manager.test.ts | 34 | INTERNAL | blocked ISSUE-006 | ports with the extensions lift |
-| run-turn.test.ts | 26 | PUBLIC-API | claimed P11 | T3 |
+| run-turn.test.ts | 26 | PUBLIC-API | ported 8/26 | [fidelity:adapter] P11. missing-feature: runTurn continuation mode (no-issue-yet); chat:turn observability ISSUE-009; function-input/validation-error/submit-id divergences. |
 | fetch-tools.test.ts | 32 | INTERNAL | quarry | checklist vs domain/fetch suite |
-| assistant-tools.test.ts | 30 | PUBLIC-API | claimed P11 | T3 |
-| scheduled-tasks.test.ts | 14 | PUBLIC-API | claimed P11 | T3 |
+| assistant-tools.test.ts | 34 | PUBLIC-API | ported 27/34 | [fidelity:adapter] P11 (34 tests, not 30). 7 bash tests blocked ISSUE-005; read/write/edit/list/find/grep all real and passing. |
+| scheduled-tasks.test.ts | 14 | PUBLIC-API | ported 3/14 | [fidelity:adapter] P11. Mostly ISSUE-041 (DSL rejects singular counted forms); 2 fixture-gap (sub-agent dispatcher — fix suggested in P11 report). |
 | message-reconciliation.test.ts | 8 | WIRE | ported 8/8 | [fidelity:adapter] **GREEN** — ISSUE-015 resolved: reconcileIncoming (collapse optimistic duplicates, no-downgrade merge) + pre-turn orphan write-back (preserve + flip to output-error, inputs normalized; approval-requested exempt). Also fixed the P1 fixture to seed through the real session (raw-row seeding bypassed tree bookkeeping). |
 | execute-hitl.test.ts | 10 | WIRE | ported 0/10 | [fidelity:adapter] `fixture-gap`: fixture authored on the approval-gate path (`approval-requested`); original uses ACTIONS durable-pause (paused output as normal `output-available` result + approveExecution). Rework fixture onto the rebuild's durable-pause actions. |
 | hydration-budget.test.ts | 13 | PUBLIC-API | blocked ISSUE-014 | media-eviction dependent |
-| actions-durable-pause.test.ts | 18 | PUBLIC-API | claimed P11 | T3 |
+| actions-durable-pause.test.ts | 18 | PUBLIC-API | ported 2/18 | [fidelity:adapter] P11. divergences (exec_* vs actpause_* ids, parking semantics) — pass rate anomalously low vs action-pause-recovery e2e 1/1 GREEN; needs a closer root-cause look, not blanket triage. |
 | host-embedding.test.ts | 11 | INTERNAL | blocked ISSUE-013 | framework/server-entry |
 | onconnect-broadcast.test.ts | 9 | WIRE | ported 7/9 | [fidelity:adapter] ISSUE-018 resolved: connect-time suppression + proactive STREAM_RESUMING, ACK-gated replay (from first delta), #1645 terminal retention/replay all pass. The 2 remaining tests exercise `/sub/` sub-agent URLs — `blocked ISSUE-017` (they previously 'passed' by asserting against the wrong agent). |
 | actions-attach-reply.test.ts | 12 | WIRE | ported 6/12 | [fidelity:adapter] 6 fail REAL semantics: attachment validation strictness `divergence` (rebuild accepts invalid/non-json-safe attachments the original filters/normalizes) + done-timeouts on specific flows. Candidate small actions fix. |
 | assistant-agent.test.ts | 5 | WIRE | ported 5/5 | [fidelity:light] **T0 gate GREEN** (ISSUE-026 resolved) |
-| channel-recovery.test.ts | 5 | PUBLIC-API | claimed P11 | T3 |
-| stream-cleanup.test.ts | 11 | PUBLIC-API | claimed P11 | T3; event-log retention differs — expect divergence notes |
+| channel-recovery.test.ts | 5 | PUBLIC-API | ported 1/5 | [fidelity:adapter] P11. divergence: recovery path doesn't re-resolve/re-stamp channel. |
+| stream-cleanup.test.ts | 11 | PUBLIC-API | ported 0/11 | [fidelity:adapter] P11. divergence as the ledger predicted: no alarm-driven cleanup mechanism (event-log retention model differs). |
 | media-eviction.test.ts | 9 | INTERNAL | blocked ISSUE-014 | port pure-fn tests with the impl |
 | workflows.test.ts | 3 | INTERNAL | blocked ISSUE-016 | |
 | action-pause-recovery.test.ts | 1 | ported 1/1 | [fidelity:adapter] **GREEN under real kill/restart** — fixed en route: lazy action-registry compile (approveExecution on a fresh activation, deploy-then-approve path). |
-| onstart-degraded.test.ts | 5 | PUBLIC-API | claimed P11 | T3 |
+| onstart-degraded.test.ts | 5 | PUBLIC-API | ported 0/5 | [fidelity:adapter] P11. ALL 5 pin ISSUE-039 (REAL BUG: onStart throw bricks the DO — no degraded mode). |
 | agent-tool-reattach-recovery.test.ts | 2 | WIRE | ported 2/2 | [fidelity:adapter] **PASSES** — facet spawner + delegation reattach hold against the original's assertions. |
 | streaming-message-id.test.ts | 1 | WIRE | ported 1/1 | [fidelity:light] **T0 gate GREEN** (ISSUE-026 resolved) |
-| run-turn-recovery.test.ts | 2 | PUBLIC-API | claimed P11 | T3 |
-| turn-metadata.test.ts | 4 | PUBLIC-API | claimed P11 | T3 |
+| run-turn-recovery.test.ts | 2 | PUBLIC-API | ported 1/2 | [fidelity:adapter] P11. 1 divergence. |
+| turn-metadata.test.ts | 4 | PUBLIC-API | ported 1/4 | [fidelity:adapter] P11. missing-feature no-issue-yet: no ChatOptions.metadata/activeTurnMetadata. |
 | execute-tool.test.ts | 6 | PUBLIC-API | blocked ISSUE-004 | codemode |
 | channels.test.ts | 8 | INTERNAL | quarry | vs domain/channels suite |
-| deliver-notice.test.ts | 7 | PUBLIC-API | claimed P11 | T3 |
-| fiber.test.ts | 7 | PUBLIC-API | claimed P11 | T3 |
-| max-concurrent-agent-tools.test.ts | 5 | PUBLIC-API | claimed P11 | T3 |
-| agent-tool-rebind-noop.test.ts | 3 | PUBLIC-API | claimed P11 | T3 |
-| nested-agent-tools.test.ts | 3 | PUBLIC-API | claimed P11 | T3 |
-| attachment-consumption.test.ts | 4 | PUBLIC-API | claimed P11 | T3 |
-| errored-stream-replay.test.ts | 1 | PUBLIC-API | claimed P11 | T3 |
+| deliver-notice.test.ts | 7 | PUBLIC-API | ported 2/7 | [fidelity:adapter] P11. divergence: markdown payload, informModel annotation, deliveryKind metadata unimplemented. |
+| fiber.test.ts | 7 | PUBLIC-API | ported 7/7 | [fidelity:adapter] P11 GREEN — real runFiber/ctx.stash()/fire-and-forget/recovery. |
+| max-concurrent-agent-tools.test.ts | 5 | PUBLIC-API | ported 1/5 | [fidelity:adapter] P11. missing-feature ISSUE-040 (no concurrency cap) + 1 ISSUE-035. |
+| agent-tool-rebind-noop.test.ts | 3 | PUBLIC-API | ported 0/3 | [fidelity:adapter] P11. all missing-feature ISSUE-035 (child-side rebind, named in scope detail). |
+| nested-agent-tools.test.ts | 3 | PUBLIC-API | ported 1/3 | [fidelity:adapter] P11. ISSUE-036 (facet spawner) + ISSUE-040 cascade. |
+| attachment-consumption.test.ts | 4 | PUBLIC-API | ported 1/4 | [fidelity:adapter] P11. missing-feature no-issue-yet: renderAttachment is subclass hook only, no built-in renderer. |
+| errored-stream-replay.test.ts | 1 | PUBLIC-API | rewritten 1/1 | [fidelity:rewrite] P11 GREEN — rewritten onto the real WebSocket reconnect/resume-ACK path. |
 | browser-tools.test.ts | 6 | INTERNAL | blocked ISSUE-008 | |
-| channel-threading.test.ts | 4 | PUBLIC-API | claimed P11 | T3 |
-| channel-policy.test.ts | 3 | PUBLIC-API | claimed P11 | T3 |
+| channel-threading.test.ts | 4 | PUBLIC-API | ported 2/4 | [fidelity:adapter] P11. divergence. |
+| channel-policy.test.ts | 3 | PUBLIC-API | ported 3/3 | [fidelity:light] P11 GREEN — real channel policy fully exercised. |
 | messengers.test.ts | 30 | INTERNAL+API | blocked ISSUE-011 | |
 | framework.test.ts | 25 | INTERNAL | blocked ISSUE-013 | |
 | action-types.test-d.ts / chat-options.test-d.ts / tool-call-types.test-d.ts | type | type-level | blocked ISSUE-021 | |
