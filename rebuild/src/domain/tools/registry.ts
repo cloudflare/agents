@@ -183,6 +183,31 @@ function wrapTool(name: string, original: Tool, hooks: ToolHooks | undefined, cl
   };
 }
 
+function isAsyncIterableValue(value: unknown): value is AsyncIterable<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+  );
+}
+
+/**
+ * ISSUE-031: a tool `execute` may return (or resolve to, via a Promise) an
+ * AsyncIterable/AsyncGenerator to stream preliminary results. Drain it and
+ * collapse to the LAST yielded value as the settled output — original Think
+ * semantics. A plain scalar value passes through untouched.
+ */
+async function collapseStreamingOutput(value: unknown): Promise<unknown> {
+  if (!isAsyncIterableValue(value)) return value;
+  let last: unknown;
+  let yielded = false;
+  for await (const chunk of value) {
+    last = chunk;
+    yielded = true;
+  }
+  return yielded ? last : undefined;
+}
+
 async function runTool(
   name: string,
   original: Tool,
@@ -193,24 +218,75 @@ async function runTool(
 ): Promise<{ output: unknown; isError: boolean }> {
   const stepNumber = (ctx as CtxWithStep).stepNumber ?? 0;
   const toolCallId = ctx.toolCallId;
+  const start = clock.now();
 
   let decision: ToolCallDecision | undefined;
   if (hooks?.beforeToolCall) {
-    decision =
-      (await hooks.beforeToolCall({
+    try {
+      decision =
+        (await hooks.beforeToolCall({
+          toolName: name,
+          toolCallId,
+          input,
+          stepNumber,
+          messages: ctx.messages,
+          signal: ctx.signal,
+        })) ?? undefined;
+    } catch (err) {
+      // ISSUE-033(c): a throwing beforeToolCall is observably equivalent to
+      // execute() throwing — converts to a tool-error and afterToolCall(success:false).
+      if (err instanceof AbortedError) {
+        throw err;
+      }
+      const durationMs = clock.now() - start;
+      const errorValue = toErrorValue(err);
+      if (hooks?.afterToolCall) {
+        await hooks.afterToolCall({
+          toolName: name,
+          toolCallId,
+          input,
+          stepNumber,
+          durationMs,
+          success: false,
+          error: errorValue,
+        });
+      }
+      return { output: { error: errorValue }, isError: true };
+    }
+  }
+
+  if (decision?.action === "block") {
+    // ISSUE-033(b): afterToolCall still fires on block, and the output is a
+    // bare reason string (not { blocked, reason }) — matches the original.
+    const output = decision.reason ?? `Tool call "${name}" was blocked`;
+    const durationMs = clock.now() - start;
+    if (hooks?.afterToolCall) {
+      await hooks.afterToolCall({
         toolName: name,
         toolCallId,
         input,
         stepNumber,
-        messages: ctx.messages,
-        signal: ctx.signal,
-      })) ?? undefined;
-  }
-
-  if (decision?.action === "block") {
-    return { output: { blocked: true, reason: decision.reason }, isError: false };
+        durationMs,
+        success: true,
+        output,
+      });
+    }
+    return { output, isError: false };
   }
   if (decision?.action === "substitute") {
+    // ISSUE-033(b): afterToolCall fires on substitute too.
+    const durationMs = clock.now() - start;
+    if (hooks?.afterToolCall) {
+      await hooks.afterToolCall({
+        toolName: name,
+        toolCallId,
+        input,
+        stepNumber,
+        durationMs,
+        success: true,
+        output: decision.output,
+      });
+    }
     return { output: decision.output, isError: false };
   }
 
@@ -228,15 +304,17 @@ async function runTool(
     return { output: { error: validated.error }, isError: true };
   }
 
-  const start = clock.now();
   try {
-    const output = await original.execute(validated.value, ctx);
+    const rawOutput = await original.execute(validated.value, ctx);
+    const output = await collapseStreamingOutput(rawOutput);
     const durationMs = clock.now() - start;
     if (hooks?.afterToolCall) {
       await hooks.afterToolCall({
         toolName: name,
         toolCallId,
-        input: effectiveInput,
+        // ISSUE-033(a): afterToolCall.input is what the MODEL emitted, not
+        // the substituted input execute actually ran with.
+        input,
         stepNumber,
         durationMs,
         success: true,
@@ -254,7 +332,7 @@ async function runTool(
       await hooks.afterToolCall({
         toolName: name,
         toolCallId,
-        input: effectiveInput,
+        input,
         stepNumber,
         durationMs,
         success: false,

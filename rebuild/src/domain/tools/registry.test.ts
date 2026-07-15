@@ -84,13 +84,13 @@ describe("assembleTools — before-hook decisions", () => {
     expect(result).toEqual({ output: 99, isError: false });
   });
 
-  it("block skips execute and returns { blocked: true, reason }", async () => {
+  it("block skips execute and returns the bare reason", async () => {
     const executeSpy = vi.fn((input: { v: number }) => input.v);
     const t = tool({ description: "echo", inputSchema: z.object({ v: z.number() }), execute: executeSpy });
     const hooks: ToolHooks = { beforeToolCall: () => ({ action: "block", reason: "not allowed" }) };
     const assembled = assembleTools({ builtin: { echo: t } }, { hooks, clock: createTestClock() });
     const result = await assembled.execute("echo", { v: 3 }, ctx());
-    expect(result).toEqual({ output: { blocked: true, reason: "not allowed" }, isError: false });
+    expect(result).toEqual({ output: "not allowed", isError: false });
     expect(executeSpy).not.toHaveBeenCalled();
   });
 
@@ -182,7 +182,7 @@ describe("assembleTools — after-hook", () => {
     ]);
   });
 
-  it("does not fire for block/substitute decisions (execute never ran)", async () => {
+  it("fires for block decisions even though execute never ran", async () => {
     const calls: unknown[] = [];
     const hooks: ToolHooks = {
       beforeToolCall: () => ({ action: "block", reason: "no" }),
@@ -193,7 +193,17 @@ describe("assembleTools — after-hook", () => {
     const t = tool({ description: "echo", inputSchema: z.object({}), execute: () => "x" });
     const assembled = assembleTools({ builtin: { echo: t } }, { hooks, clock: createTestClock() });
     await assembled.execute("echo", {}, ctx());
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([
+      {
+        toolName: "echo",
+        toolCallId: "call_1",
+        input: {},
+        stepNumber: 0,
+        durationMs: 0,
+        success: true,
+        output: "no",
+      },
+    ]);
   });
 
   it("a thrown AbortedError propagates out of execute() instead of becoming an error value", async () => {

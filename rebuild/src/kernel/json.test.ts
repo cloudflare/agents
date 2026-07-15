@@ -20,10 +20,18 @@ describe("normalizeJson", () => {
     expect(value.d).toBe("2020-01-01T00:00:00.000Z");
   });
 
-  it("throws on cyclic values", () => {
+  it('coerces cyclic values to "[Circular]" instead of throwing', () => {
     const obj: Record<string, unknown> = { a: 1 };
     obj["self"] = obj;
-    expect(() => normalizeJson(obj)).toThrow();
+    expect(normalizeJson(obj)).toEqual({ a: 1, self: "[Circular]" });
+  });
+
+  it('coerces BigInts to "<n>n" strings', () => {
+    expect(normalizeJson({ n: 12n })).toEqual({ n: "12n" });
+  });
+
+  it('coerces Symbols to { type: "symbol" }', () => {
+    expect(normalizeJson({ s: Symbol("s") })).toEqual({ s: { type: "symbol" } });
   });
 });
 
@@ -36,13 +44,13 @@ describe("tryNormalizeJson", () => {
     }
   });
 
-  it("returns ok:false with an ErrorValue on cyclic input", () => {
+  it("returns ok:true with a coerced value on cyclic input (normalizeJson no longer throws)", () => {
     const obj: Record<string, unknown> = {};
     obj["self"] = obj;
     const result = tryNormalizeJson(obj);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(typeof result.error.message).toBe("string");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual({ self: "[Circular]" });
     }
   });
 });

@@ -357,7 +357,14 @@ class ThinkHooksBaseImpl extends Think {
     this.afterToolCall = (ctx) => {
       const log =
         this.host.store.get<JsonRecord[]>("hooks:after-tool-log") ?? [];
-      const output = ctx.success ? ctx.output : { error: ctx.error };
+      // Fidelity: the original fixture logs `{ error: String(err) }` on
+      // failure ("Error: policy violation" — assistant-agent-loop.ts
+      // afterToolCall). Mirror that with the rebuild's ErrorValue fields.
+      // (This branch was unreachable before ISSUE-033(c): a throwing
+      // beforeToolCall used to propagate instead of firing afterToolCall.)
+      const output = ctx.success
+        ? ctx.output
+        : { error: `${ctx.error.name}: ${ctx.error.message}` };
       log.push({
         toolName: ctx.toolName,
         toolCallId: ctx.toolCallId,

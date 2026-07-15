@@ -561,7 +561,7 @@ not layers.
 
 ## ISSUE-031 — AsyncIterable tool outputs leak as `{}` (no streaming, no last-value collapse)
 
-**Status:** open · **Area:** domain/tools (registry/runTool) + turn loop · **Found by:** P7 ported hooks tests (4 tests)
+**Status:** resolved · **Area:** domain/tools (registry/runTool) + turn loop · **Found by:** P7 ported hooks tests (4 tests)
 
 A tool `execute` returning an AsyncIterable/AsyncGenerator should stream
 preliminary tool-result chunks and settle the tool part with the LAST yielded
@@ -573,7 +573,7 @@ settle on the last value.
 
 ## ISSUE-032 — Output normalization throws on cyclic values instead of coercing (cyclic/BigInt/Symbol)
 
-**Status:** open · **Area:** kernel/json (`normalizeJson`) + actions ledger · **Found by:** P7 ported hooks tests (2 tests)
+**Status:** resolved · **Area:** kernel/json (`normalizeJson`) + actions ledger · **Found by:** P7 ported hooks tests (2 tests)
 
 Original coerces un-JSON-able tool/action outputs: circular refs →
 `"[Circular]"`, BigInt → `"12n"`, Symbol → `{ type: "symbol" }` (and the
@@ -584,7 +584,7 @@ release-on-normalize behavior.
 
 ## ISSUE-033 — afterToolCall/beforeToolCall observability contract diverges on gating paths
 
-**Status:** open · **Area:** domain/tools (registry/runTool hooks) · **Found by:** P7 ported hooks tests (8 tests)
+**Status:** resolved · **Area:** domain/tools (registry/runTool hooks) · **Found by:** P7 ported hooks tests (8 tests)
 
 Three related divergences from the original hook contract, all in `runTool`:
 (a) after an `allow`-with-substituted-input decision, `afterToolCall.input`
@@ -599,7 +599,7 @@ try/catch, so the throw propagates instead of converting to a tool-error with
 
 ## ISSUE-034 — deleteSubmissions() deletes pending/running rows when explicitly requested
 
-**Status:** open · **Area:** domain/reliability/submissions · **Found by:** P8 ported submissions tests (1 test)
+**Status:** resolved · **Area:** domain/reliability/submissions · **Found by:** P8 ported submissions tests (1 test)
 
 `deleteSubmissions` filters only on the caller-supplied `statuses` (default
 `SETTLED_STATUSES`) and never enforces settled-only. Passing

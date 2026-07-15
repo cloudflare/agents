@@ -1,17 +1,40 @@
 import { toErrorValue, type ErrorValue } from "./errors.js";
 
-/**
- * Deep-converts a value to plain JSON: drops functions, converts Dates to
- * ISO strings, and returns a detached deep copy. Throws on cyclic values.
- */
-export function normalizeJson<T = unknown>(value: unknown): T {
-  const seen = new WeakSet<object>();
-  return normalize(value, seen) as T;
+export interface NormalizeReport<T> {
+  value: T;
+  /** True if normalization had to coerce a non-JSON-safe value (circular ref, BigInt, Symbol). */
+  coerced: boolean;
 }
 
-function normalize(value: unknown, seen: WeakSet<object>): unknown {
-  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+/**
+ * Deep-converts a value to plain JSON: drops functions, converts Dates to
+ * ISO strings, and returns a detached deep copy. Non-JSON-safe values are
+ * coerced rather than throwing: circular references become "[Circular]",
+ * BigInts become "<n>n" strings, and Symbols become { type: "symbol" }.
+ */
+export function normalizeJson<T = unknown>(value: unknown): T {
+  return normalizeJsonReport<T>(value).value;
+}
+
+/** Same as normalizeJson, but also reports whether coercion occurred. */
+export function normalizeJsonReport<T = unknown>(value: unknown): NormalizeReport<T> {
+  const seen = new WeakSet<object>();
+  const state = { coerced: false };
+  const result = normalize(value, seen, state) as T;
+  return { value: result, coerced: state.coerced };
+}
+
+function normalize(value: unknown, seen: WeakSet<object>, state: { coerced: boolean }): unknown {
+  if (value === undefined || typeof value === "function") {
     return undefined;
+  }
+  if (typeof value === "symbol") {
+    state.coerced = true;
+    return { type: "symbol" };
+  }
+  if (typeof value === "bigint") {
+    state.coerced = true;
+    return `${value.toString()}n`;
   }
   if (value === null || typeof value !== "object") {
     return value;
@@ -20,16 +43,17 @@ function normalize(value: unknown, seen: WeakSet<object>): unknown {
     return value.toISOString();
   }
   if (seen.has(value)) {
-    throw new Error("normalizeJson: cyclic value");
+    state.coerced = true;
+    return "[Circular]";
   }
   seen.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.map((item) => normalize(item, seen) ?? null);
+      return value.map((item) => normalize(item, seen, state) ?? null);
     }
     const result: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      const normalized = normalize(v, seen);
+      const normalized = normalize(v, seen, state);
       if (normalized !== undefined) result[k] = normalized;
     }
     return result;

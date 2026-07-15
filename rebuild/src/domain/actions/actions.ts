@@ -2,7 +2,7 @@ import { z } from "zod";
 import { NotFoundError, TimeoutError, ValidationError, toErrorValue, type ErrorValue } from "../../kernel/errors.js";
 import type { EventBus } from "../../kernel/events.js";
 import { stableHash, type IdSource } from "../../kernel/ids.js";
-import { normalizeJson, truncateForModel, tryNormalizeJson } from "../../kernel/json.js";
+import { normalizeJsonReport, truncateForModel, tryNormalizeJson } from "../../kernel/json.js";
 import type { Clock } from "../../ports/clock.js";
 import { scoped, type KeyValueStore } from "../../ports/storage.js";
 import type { ChatMessage } from "../messages/model.js";
@@ -244,14 +244,15 @@ function resolvePermissions(act: Action, input: unknown): readonly string[] {
   return act.permissions;
 }
 
-/** Normalizes to plain JSON and truncates oversized outputs to a string. */
-function normalizeOutput(raw: unknown): unknown {
-  const normalized = normalizeJson(raw) ?? null;
+/** Normalizes to plain JSON and truncates oversized outputs to a string. Reports whether coercion occurred. */
+function normalizeOutput(raw: unknown): { value: unknown; coerced: boolean } {
+  const { value: normalized0, coerced } = normalizeJsonReport(raw);
+  const normalized = normalized0 ?? null;
   const json = JSON.stringify(normalized);
   if (typeof json === "string" && json.length > MAX_OUTPUT_CHARS) {
-    return truncateForModel(json, MAX_OUTPUT_CHARS).text;
+    return { value: truncateForModel(json, MAX_OUTPUT_CHARS).text, coerced };
   }
-  return normalized;
+  return { value: normalized, coerced };
 }
 
 export function createActionService(deps: ActionServiceDeps): ActionService {
@@ -391,14 +392,21 @@ export function createActionService(deps: ActionServiceDeps): ActionService {
 
     try {
       const raw = await callWithTimeout(name, act, input, actionCtx, (reason) => controller.abort(reason));
-      const output = normalizeOutput(raw);
-      ledger.put<LedgerRow>(ledgerKey, {
-        status: "settled",
-        inputHash: stableHash(input),
-        createdAt,
-        settledAt: deps.clock.now(),
-        output,
-      });
+      const { value: output, coerced } = normalizeOutput(raw);
+      if (coerced) {
+        // Non-JSON-safe output required lossy coercion (circular/BigInt/Symbol) —
+        // not safe to cache for idempotent replay (ISSUE-032). Release the row
+        // instead of settling it so a retry re-runs cleanly, same as the error path.
+        ledger.delete(ledgerKey);
+      } else {
+        ledger.put<LedgerRow>(ledgerKey, {
+          status: "settled",
+          inputHash: stableHash(input),
+          createdAt,
+          settledAt: deps.clock.now(),
+          output,
+        });
+      }
       const committed = turnAttachments.get(toolCtx.requestId) ?? [];
       for (const attachment of buffer) {
         if (committed.length >= MAX_ATTACHMENTS_PER_TURN) break;

@@ -264,7 +264,8 @@ export function createSubmissionService(deps: {
     },
 
     deleteSubmissions(options) {
-      const statuses = options?.status ?? SETTLED_STATUSES;
+      const requested = options?.status ?? SETTLED_STATUSES;
+      const statuses = requested.filter((s) => SETTLED_STATUSES.includes(s));
       let count = 0;
       for (const row of allRows()) {
         if (!statuses.includes(row.status)) continue;
