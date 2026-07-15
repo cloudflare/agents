@@ -74,6 +74,38 @@ to special-case Think. That keeps "write your own Think in userland" true by
 construction, and keeps Agent an honest, reusable substrate rather than a
 Think implementation detail.
 
+## Corollary: adapters depend on capability interfaces, not concrete Think
+
+ADR-0002 keeps the **Think↔Agent** boundary honest (Think uses only Agent's
+public + protected surface). The same principle must hold one layer out, at
+the **transport↔agent** boundary, or the userland promise leaks: a transport
+that names the concrete `Think` class re-privileges it even though Think is a
+plain composition.
+
+**Current leak (to fix, rides with ISSUE-030).** `attachChatTransport(agent:
+Think, …)` is typed to the concrete class and `import type { Think }`. Because
+`Think` has `private` fields, TypeScript treats that parameter *nominally* —
+only a `Think` subclass is assignable, even a userland composition with
+byte-identical public methods is rejected (it lacks Think's private brand). So
+today a "write your own Think" (which extends `Agent`, per this ADR) cannot use
+the chat transport. That contradicts the ADR at the hosting layer.
+
+**Invariant (corollary): a transport/adapter depends on a published capability
+interface, never on a concrete agent class.** Type the conversation transport
+against a `ConversationSurface` interface — the methods it actually calls
+(`chat`/`history`/`applyToolResult`/`resolveApproval`/`isRecovering`/
+`activeTurn`/`pendingChatTerminal`/`clearMessages`/`cancelChat` + the
+Agent-level `events`/`setState`/`callables`/`identity`). An interface has no
+private brand, so it is structural: `Think` satisfies it *and so does any
+userland composition that implements the same methods*. The blessing moves
+from the class to the contract — and a contract is open.
+
+This narrows to exactly one transport: event-projection, state-sync, and RPC
+transports need only Agent-level capabilities (`events`/`setState`/`callables`,
+on any Agent) — they never name Think. Only the conversation transport needs
+`ConversationSurface`. So three of the four `cf_agent_*` concerns are already
+userland-open; the fourth becomes open by interface-typing.
+
 ## Consequence / open follow-up
 
 Reproducible-in-userland is **true today but not yet first-class DX.** The
