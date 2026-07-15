@@ -49,6 +49,46 @@
       {
         "class_name": "StuckThinkAgentToolChild",
         "name": "StuckThinkAgentToolChild"
+      },
+      {
+        "class_name": "BareAssistantAgent",
+        "name": "BareAssistantAgent"
+      },
+      {
+        "class_name": "LoopTestAgent",
+        "name": "LoopTestAgent"
+      },
+      {
+        "class_name": "LoopToolTestAgent",
+        "name": "LoopToolTestAgent"
+      },
+      {
+        "class_name": "OverflowRecoveryTestAgent",
+        "name": "OverflowRecoveryTestAgent"
+      },
+      {
+        "class_name": "TestProtocolMessagesAgent",
+        "name": "TestProtocolMessagesAgent"
+      },
+      {
+        "class_name": "TestStateAgent",
+        "name": "TestStateAgent"
+      },
+      {
+        "class_name": "TestScheduleAgent",
+        "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestOAuthAgent",
+        "name": "TestOAuthAgent"
+      },
+      {
+        "class_name": "TestCaseSensitiveAgent",
+        "name": "CaseSensitiveAgent"
+      },
+      {
+        "class_name": "TestUserNotificationAgent",
+        "name": "UserNotificationAgent"
       }
     ]
   },
@@ -61,7 +101,17 @@
         "ThinkTestAgent",
         "ThinkExecuteHitlAgent",
         "ThinkToolsTestAgent",
-        "ThinkRecoveryTestAgent"
+        "ThinkRecoveryTestAgent",
+        "BareAssistantAgent",
+        "LoopTestAgent",
+        "LoopToolTestAgent",
+        "OverflowRecoveryTestAgent",
+        "TestProtocolMessagesAgent",
+        "TestStateAgent",
+        "TestScheduleAgent",
+        "TestOAuthAgent",
+        "TestCaseSensitiveAgent",
+        "TestUserNotificationAgent"
       ]
     }
   ]

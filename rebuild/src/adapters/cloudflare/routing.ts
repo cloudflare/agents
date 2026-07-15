@@ -20,7 +20,9 @@ export async function routeAgentRequest(
   if (!bindingSegment || !nameSegment) return undefined;
 
   const match = findNamespace(env, bindingSegment);
-  if (!match) return undefined;
+  // A request under the agent prefix naming a binding that doesn't exist is
+  // a CLIENT error (original semantics), not a fall-through to other routes.
+  if (!match) return new Response(`Unknown agent binding: ${bindingSegment}`, { status: 400 });
 
   const name = decodeURIComponent(nameSegment);
   const id = match.namespace.idFromName(name);

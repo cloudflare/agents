@@ -12,6 +12,9 @@ import {
   getAgentByName as rebuiltGetAgentByName,
   routeAgentRequest,
 } from "../../src/adapters/cloudflare/routing.js";
+import {
+  defaultContextOverflowClassifier as rebuiltDefaultContextOverflowClassifier
+} from "../../src/domain/reliability/recovery/overflow.js";
 
 export { routeAgentRequest };
 
@@ -28,6 +31,21 @@ export function getAgentByName<T extends Rpc.DurableObjectBranded | undefined>(
 
 /** partyserver's older equivalent — same semantics for test purposes. */
 export const getServerByName = getAgentByName;
+
+export enum MessageType {
+  CF_AGENT_IDENTITY = "cf_agent_identity",
+  CF_AGENT_STATE = "cf_agent_state",
+  CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
+  RPC = "rpc"
+}
+
+export function defaultContextOverflowClassifier(
+  error: unknown
+): "context_overflow" | undefined {
+  return rebuiltDefaultContextOverflowClassifier(error) === "context_overflow"
+    ? "context_overflow"
+    : undefined;
+}
 
 /**
  * `agents/observability` subscribe. Not bridged yet (ISSUE-009) — ported

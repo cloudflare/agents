@@ -36,12 +36,12 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
-| client-tools.test.ts | 86 | WIRE | ported 30/86 | 56 fail on REAL semantics: 4 approval-vocabulary tests were FALSE-PASSES pre-fixture-fix, now `missing-feature ISSUE-029` (approval-responded/output-denied states); rest: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. |
+| client-tools.test.ts | 86 | WIRE | ported 33/86 | 53 fail on REAL semantics: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. (ISSUE-029 flipped the approval-vocabulary tests.) |
 | think-session.test.ts | 198 | WIRE+API | pending | split on port: wire half T1, api half T3 |
 | hooks.test.ts | 105 | WIRE+API | pending | split T1/T3 |
 | submissions.test.ts | 51 | PUBLIC-API | pending | T3 |
 | agent-tools.test.ts | 33 | PUBLIC-API | pending | T3 |
-| assistant-agent-loop.test.ts | 23 | WIRE | pending | T1 |
+| assistant-agent-loop.test.ts | 23 | WIRE | ported 22/23 | Near-green; 1 residual to pin in the next triage pass. |
 | extension-manager.test.ts | 34 | INTERNAL | blocked ISSUE-006 | ports with the extensions lift |
 | run-turn.test.ts | 26 | PUBLIC-API | pending | T3 |
 | fetch-tools.test.ts | 32 | INTERNAL | quarry | checklist vs domain/fetch suite |
@@ -94,8 +94,8 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | action-ledger-recovery.test.ts | 1 | ported 1/1 | **PASSES** — crash-left pending ledger lease reclaimed after real kill/restart. |
 | tool-rollback.test.ts | 1 | ported 1/1 | **GREEN** — long tool loop recovers across repeated evictions without deep rollback. |
 | persist-false-preserves.test.ts | 1 | ported 0/1 | 75s: recovery hook persist:false mapping — `divergence`/`fixture-gap`; pin with recovery-hook work. |
-| reattach-budget.test.ts | 1 | pending | T2 (sub-agent recovery fixtures) |
-| task-amplification.test.ts | 2 | pending | T2 (sub-agent recovery fixtures) |
+| reattach-budget.test.ts | 1 | ported 0/1 | `missing-feature`: re-attach budget semantics in delegation recovery (slow-but-healthy child sealed interrupted). NOTE: burns ~14 min of real eviction churn per run. |
+| task-amplification.test.ts | 2 | ported 0/2 | `missing-feature`: stable child runId across parent eviction (no whole-turn re-runs, #1630 task path). ~10 min/test runtime. |
 | messenger-recovery.test.ts | 2 | blocked ISSUE-011 | |
 | workflow-recovery.test.ts | 2 | blocked ISSUE-016 | |
 | assistant-e2e.test.ts | 4 | pending | real AI binding; out of CI like the original |
@@ -133,14 +133,14 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | migration.test.ts | 8 | dropped | migrates the ORIGINAL's old storage schema — meaningless for the rebuild |
 | msg-ordering.test.ts | 1 | pending | T3 |
 | observability.test.ts | 46 | blocked ISSUE-009 | ports with the adapter |
-| protocol-messages.test.ts | 18 | pending | T1-adjacent (wire vocabulary) |
+| protocol-messages.test.ts | 18 | pending | ported 5/18 | 13 fail on original frame-vocabulary asserts — needs per-test verdicts: genuine missing frames vs deliberate `divergence` (some will become dropped rows). |
 | queue.test.ts | 3 | pending | T3 |
 | r2-skills.test.ts | 9 | blocked ISSUE-004 | R2+codemode skills; also quarry vs domain/skills |
 | readonly-connections.test.ts | 45 | pending | T3 |
 | resumable-stream-migration.test.ts | 1 | dropped | old-architecture migration |
 | retries.test.ts | 48 | blocked ISSUE-020 | |
 | retry-integration.test.ts | 18 | blocked ISSUE-020 | |
-| routing.test.ts | 24 | pending | T3 (directly exercises our routing compat) |
+| routing.test.ts | 24 | pending | ported 24/24 | **GREEN — full original suite passes** (after fixing unknown-binding 400 vs 404 divergence found here). |
 | run-fiber.test.ts | 54 | pending | T3 |
 | schedule.test.ts | 52 | pending | T3 |
 | schema-and-state-optimization.test.ts | 31 | quarry | original SQL-schema internals |

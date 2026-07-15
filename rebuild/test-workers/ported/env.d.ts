@@ -5,6 +5,16 @@ import type {
   ThinkRecoveryTestAgent,
   ThinkToolsTestAgent,
   ThinkTestAgent,
+  BareAssistantAgent,
+  LoopTestAgent,
+  LoopToolTestAgent,
+  OverflowRecoveryTestAgent,
+  TestCaseSensitiveAgent,
+  TestOAuthAgent,
+  TestProtocolMessagesAgent,
+  TestScheduleAgent,
+  TestStateAgent,
+  TestUserNotificationAgent,
 } from "./fixtures/index.js";
 
 declare global {
@@ -16,6 +26,16 @@ declare global {
       ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
       ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
       ThinkRecoveryTestAgent: DurableObjectNamespace<ThinkRecoveryTestAgent>;
+      BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
+      LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;
+      LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
+      OverflowRecoveryTestAgent: DurableObjectNamespace<OverflowRecoveryTestAgent>;
+      TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
+      TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+      TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
+      TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
+      CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
+      UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
     }
   }
 }

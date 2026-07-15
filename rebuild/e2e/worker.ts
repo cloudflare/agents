@@ -450,6 +450,242 @@ class ThinkPersistFalseE2EAgentImpl extends ToolLoopBaseAgent {
   }
 }
 
+function createSingleTaskModel(): ModelClient {
+  let calls = 0;
+  return {
+    async *stream(request: ModelRequest): AsyncIterable<ModelChunk> {
+      calls++;
+      const hasToolResult = request.messages.some(
+        (message) => message.role === "tool"
+      );
+      if (!hasToolResult && calls === 1) {
+        yield {
+          type: "tool-call",
+          toolCallId: "task-1",
+          toolName: "runTask",
+          input: { taskId: 1 }
+        };
+        yield { type: "finish", finishReason: "tool-calls" };
+        return;
+      }
+      yield { type: "text-delta", text: "task complete" };
+      yield { type: "finish", finishReason: "stop" };
+    }
+  };
+}
+
+const CHILD_TASK_RUN_ID = "agent-tool:task-1";
+const SLOW_CHILD_TOTAL_STEPS = 60;
+const SLOW_CHILD_EXEC_DELAY_MS = 2700;
+
+type ChildLedgerStatus = {
+  totalExecutions: number;
+  uniqueIndices: number;
+  maxIndex: number;
+  duplicates: Array<{ index: number; count: number }>;
+  recoveryCount: number;
+  hasFiberRows: boolean;
+};
+
+class ThinkTaskParentE2EAgentImpl extends Think {
+  override chatRecovery = true;
+  override maxSteps = 50;
+  override workspaceTools = false;
+
+  protected override getModel(): ModelClient {
+    return createSingleTaskModel();
+  }
+
+  protected override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  protected override getTools(): ToolSet {
+    return {
+      runTask: this.agentTool("ThinkToolRollbackE2EAgent", {
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() })
+      })
+    };
+  }
+
+  override onChatRecovery = async (): Promise<void> => {
+    const n = this.host.store.get<number>("parent:recovery-count") ?? 0;
+    this.host.store.put("parent:recovery-count", n + 1);
+  };
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentTaskExecutions: number;
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    child: ChildLedgerStatus | null;
+  }> {
+    return {
+      parentTaskExecutions: this.listSubAgents("ThinkToolRollbackE2EAgent").length,
+      parentRecoveries:
+        this.host.store.get<number>("parent:recovery-count") ?? 0,
+      parentHasFiberRows: this.hasChatFiberRows(),
+      child: await this.readToolRollbackChild()
+    };
+  }
+
+  protected hasChatFiberRows(): boolean {
+    return (
+      this.listFibers({
+        name: "chat-turn",
+        status: ["pending", "running", "interrupted"]
+      }).length > 0
+    );
+  }
+
+  protected async readToolRollbackChild(): Promise<ChildLedgerStatus | null> {
+    try {
+      return await this.subAgent(
+        "ThinkToolRollbackE2EAgent",
+        CHILD_TASK_RUN_ID
+      ).call<ChildLedgerStatus>("getLedgerStatus", []);
+    } catch {
+      return null;
+    }
+  }
+}
+
+class ThinkAgentToolNaturalParentE2EAgentImpl extends ThinkTaskParentE2EAgentImpl {
+  @callable()
+  override async getTaskStatus(): Promise<{
+    parentTaskExecutions: number;
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    parentChildStatus: string | null;
+    child: ChildLedgerStatus | null;
+  }> {
+    const run = this.inspectAgentToolRun(CHILD_TASK_RUN_ID);
+    return {
+      parentTaskExecutions: this.listSubAgents("ThinkToolRollbackE2EAgent").length,
+      parentRecoveries:
+        this.host.store.get<number>("parent:recovery-count") ?? 0,
+      parentHasFiberRows: this.hasChatFiberRows(),
+      parentChildStatus: run?.status ?? null,
+      child: await this.readToolRollbackChild()
+    };
+  }
+}
+
+class ThinkSlowChildE2EAgentImpl extends ToolLoopBaseAgent {
+  protected readonly loopMode = "rollback";
+
+  protected override getModel(): ModelClient {
+    return createToolLoopMockModel(SLOW_CHILD_TOTAL_STEPS);
+  }
+
+  protected override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description: "Record a step by its index.",
+        inputSchema: z.object({ index: z.number() }),
+        execute: async ({ index }: { index: number }): Promise<{
+          recorded: number;
+        }> => {
+          const rows = this.host.store.get<number[]>("test:tool-ledger") ?? [];
+          this.host.store.put("test:tool-ledger", [...rows, index]);
+          await sleep(SLOW_CHILD_EXEC_DELAY_MS);
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  @callable()
+  async getLedgerStatus(): Promise<ChildLedgerStatus> {
+    const status = await this.loopStatus();
+    return {
+      totalExecutions: status.totalExecutions,
+      uniqueIndices: status.uniqueIndices,
+      maxIndex: status.maxIndex,
+      duplicates: status.duplicates,
+      recoveryCount: status.recoveryCount,
+      hasFiberRows: status.hasFiberRows
+    };
+  }
+}
+
+class ThinkSlowChildParentE2EAgentImpl extends Think {
+  override chatRecovery = true;
+  override maxSteps = 50;
+  override workspaceTools = false;
+
+  protected override getModel(): ModelClient {
+    return createSingleTaskModel();
+  }
+
+  protected override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  protected override getTools(): ToolSet {
+    return {
+      runTask: this.agentTool("ThinkSlowChildE2EAgent", {
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() })
+      })
+    };
+  }
+
+  override onChatRecovery = async (): Promise<void> => {
+    const n = this.host.store.get<number>("parent:recovery-count") ?? 0;
+    this.host.store.put("parent:recovery-count", n + 1);
+  };
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    parentChildStatus: string | null;
+    parentChildError: string | null;
+    child: {
+      maxIndex: number;
+      uniqueIndices: number;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    const run = this.inspectAgentToolRun(CHILD_TASK_RUN_ID);
+    const child = await this.readSlowChild();
+    return {
+      parentRecoveries:
+        this.host.store.get<number>("parent:recovery-count") ?? 0,
+      parentHasFiberRows:
+        this.listFibers({
+          name: "chat-turn",
+          status: ["pending", "running", "interrupted"]
+        }).length > 0,
+      parentChildStatus: run?.status ?? null,
+      parentChildError: run?.error ?? null,
+      child:
+        child === null
+          ? null
+          : {
+              maxIndex: child.maxIndex,
+              uniqueIndices: child.uniqueIndices,
+              recoveryCount: child.recoveryCount,
+              hasFiberRows: child.hasFiberRows
+            }
+    };
+  }
+
+  private async readSlowChild(): Promise<ChildLedgerStatus | null> {
+    try {
+      return await this.subAgent(
+        "ThinkSlowChildE2EAgent",
+        CHILD_TASK_RUN_ID
+      ).call<ChildLedgerStatus>("getLedgerStatus", []);
+    } catch {
+      return null;
+    }
+  }
+}
+
 class ThinkStallRecoveryE2EAgentImpl extends Think {
   override chatRecovery = true;
   override chatStreamStallTimeoutMs = 2000;
@@ -1175,6 +1411,22 @@ export class ThinkToolRollbackE2EAgent extends ThinkToolRollbackE2EAgentBase {}
 
 const ThinkPersistFalseE2EAgentBase = hostAgent(ThinkPersistFalseE2EAgentImpl);
 export class ThinkPersistFalseE2EAgent extends ThinkPersistFalseE2EAgentBase {}
+
+const ThinkTaskParentE2EAgentBase = hostAgent(ThinkTaskParentE2EAgentImpl);
+export class ThinkTaskParentE2EAgent extends ThinkTaskParentE2EAgentBase {}
+
+const ThinkAgentToolNaturalParentE2EAgentBase = hostAgent(
+  ThinkAgentToolNaturalParentE2EAgentImpl
+);
+export class ThinkAgentToolNaturalParentE2EAgent extends ThinkAgentToolNaturalParentE2EAgentBase {}
+
+const ThinkSlowChildE2EAgentBase = hostAgent(ThinkSlowChildE2EAgentImpl);
+export class ThinkSlowChildE2EAgent extends ThinkSlowChildE2EAgentBase {}
+
+const ThinkSlowChildParentE2EAgentBase = hostAgent(
+  ThinkSlowChildParentE2EAgentImpl
+);
+export class ThinkSlowChildParentE2EAgent extends ThinkSlowChildParentE2EAgentBase {}
 
 const ThinkStallRecoveryE2EAgentBase = hostAgent(
   ThinkStallRecoveryE2EAgentImpl

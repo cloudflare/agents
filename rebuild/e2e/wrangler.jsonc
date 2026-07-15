@@ -29,6 +29,22 @@
         "name": "ThinkPersistFalseE2EAgent"
       },
       {
+        "class_name": "ThinkTaskParentE2EAgent",
+        "name": "ThinkTaskParentE2EAgent"
+      },
+      {
+        "class_name": "ThinkAgentToolNaturalParentE2EAgent",
+        "name": "ThinkAgentToolNaturalParentE2EAgent"
+      },
+      {
+        "class_name": "ThinkSlowChildE2EAgent",
+        "name": "ThinkSlowChildE2EAgent"
+      },
+      {
+        "class_name": "ThinkSlowChildParentE2EAgent",
+        "name": "ThinkSlowChildParentE2EAgent"
+      },
+      {
         "class_name": "ThinkStallRecoveryE2EAgent",
         "name": "ThinkStallRecoveryE2EAgent"
       },
@@ -59,6 +75,10 @@
         "ThinkRecoveryHelperAgent",
         "ThinkToolRollbackE2EAgent",
         "ThinkPersistFalseE2EAgent",
+        "ThinkTaskParentE2EAgent",
+        "ThinkAgentToolNaturalParentE2EAgent",
+        "ThinkSlowChildE2EAgent",
+        "ThinkSlowChildParentE2EAgent",
         "ThinkStallRecoveryE2EAgent",
         "ThinkContextOverflowE2EAgent",
         "ThinkSubmissionRecoveryE2EAgent",
