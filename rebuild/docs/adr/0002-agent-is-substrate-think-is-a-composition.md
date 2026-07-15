@@ -1,6 +1,31 @@
 # Agent is the substrate; Think is a composition over it (no privileged access)
 
-**Status: implemented (verified 2026-07-15).** `Think` uses only `Agent`'s
+**Status: DRAFT — contested; do not treat as authoritative.** Its core framing
+("Agent is non-conversational; conversation belongs only to Think") was
+challenged and does not hold: (1) transport-free ≠ conversation-free — I
+conflated the wire (frames/connections, which Agent must not touch) with
+conversation (turns/transcript/streaming, all transport-free); (2) the claim
+that the `ConversationEventLog` is "generic, not conversational" is a
+rationalization — its events *are* `chunk`/`message:updated`/`turn:settled`,
+and it already lives on `Agent`, so the current split (outbound conversation on
+the base, inbound in Think) is incoherent, not principled. The real Agent/Think
+axis is **opinion, not conversation**. Emerging three-layer reading (matches
+the context map's own Context 3 vs 4): **Durable Runtime** = conversation-free
+substrate (non-conversational actors live here) · **Agent** = an *unopinionated
+agent that converses* (model + turn loop + transcript + event stream;
+transport-free) · **Think** = the *opinions* (compaction, recovery, delegation,
+channels, branching sessions, HITL, submissions, skills). To be re-derived with
+the maintainer before any authoritative ADR is written.
+
+Everything below reflects the OLD (contested) framing and the *mechanical*
+findings, which remain useful regardless of where the conversational boundary
+lands: the grep-verified fact that Think reaches only Agent's public+protected
+surface (no private access, no casts), and the corollary that transports must
+depend on capability interfaces, not concrete classes.
+
+---
+
+`Think` uses only `Agent`'s
 public and `protected` surface — no `private` access, no `super.*` beyond a
 normal `destroy()` override, no escape-hatch casts. Therefore Think is
 reproducible in userland: a developer can write their own Think-equivalent
