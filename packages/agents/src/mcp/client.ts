@@ -1404,6 +1404,33 @@ export class MCPClientManager {
     return id;
   }
 
+  /** Persist and emit an OAuth continuation produced by connect or discovery. */
+  private persistAuthContinuation(
+    id: string,
+    conn: MCPClientConnection
+  ): { authUrl: string; clientId?: string } | undefined {
+    const authProvider = conn.options.transport.authProvider;
+    const authUrl = authProvider?.authUrl;
+    if (!authUrl || !authProvider.redirectUrl) return undefined;
+
+    const clientId = authProvider.clientId;
+    const serverRow = this.getServersFromStorage().find((s) => s.id === id);
+    if (serverRow) {
+      this.saveServerToStorage({
+        ...serverRow,
+        auth_url: authUrl,
+        client_id: clientId ?? null
+      });
+    }
+
+    this._onObservabilityEvent.fire({
+      type: "mcp:client:authorize",
+      payload: { serverId: id, authUrl, clientId },
+      timestamp: Date.now()
+    });
+    return { authUrl, clientId };
+  }
+
   /**
    * Connect to an already registered MCP server and initialize the connection.
    *
@@ -1443,44 +1470,20 @@ export class MCPClientManager {
         };
 
       case MCPConnectionState.AUTHENTICATING: {
-        const authUrl = conn.options.transport.authProvider?.authUrl;
-        const redirectUrl = conn.options.transport.authProvider?.redirectUrl;
-
-        if (!authUrl || !redirectUrl) {
+        const auth = this.persistAuthContinuation(id, conn);
+        if (!auth) {
+          const provider = conn.options.transport.authProvider;
           return {
             state: MCPConnectionState.FAILED,
             error: `OAuth configuration incomplete: missing ${
-              !authUrl ? "authUrl" : "redirectUrl"
+              !provider?.authUrl ? "authUrl" : "redirectUrl"
             }`
           };
         }
 
-        const clientId = conn.options.transport.authProvider?.clientId;
-
-        // Update storage with auth URL and client ID
-        const servers = this.getServersFromStorage();
-        const serverRow = servers.find((s) => s.id === id);
-        if (serverRow) {
-          this.saveServerToStorage({
-            ...serverRow,
-            auth_url: authUrl,
-            client_id: clientId ?? null
-          });
-          // Broadcast again so clients receive the auth_url
-          this._onServerStateChanged.fire();
-        }
-
-        this._onObservabilityEvent.fire({
-          type: "mcp:client:authorize",
-          payload: { serverId: id, authUrl, clientId },
-          timestamp: Date.now()
-        });
-
-        return {
-          state: conn.connectionState,
-          authUrl,
-          clientId
-        };
+        // Broadcast again after auth_url is durable so clients can serve it.
+        this._onServerStateChanged.fire();
+        return { state: conn.connectionState, ...auth };
       }
 
       case MCPConnectionState.CONNECTED:
@@ -1743,6 +1746,9 @@ export class MCPClientManager {
     const result = await conn.discover(options);
     if (!result.success && result.reason === "stale-session") {
       return this._recoverStaleSession(conn, serverId, options);
+    }
+    if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
+      this.persistAuthContinuation(serverId, conn);
     }
     this._onServerStateChanged.fire();
 

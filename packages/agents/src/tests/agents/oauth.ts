@@ -814,6 +814,48 @@ export class TestOAuthAgent extends Agent {
     return { defaultBefore, withChallengeBefore, after };
   }
 
+  async testSaveTokensClearsRedirectDiscovery(): Promise<{
+    discoveryBefore: boolean;
+    discoveryAfter: boolean;
+    tokenRoundTrips: boolean;
+    clientRoundTrips: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const issuer = "https://auth-one.example.com";
+    await provider.saveDiscoveryState({
+      authorizationServerUrl: issuer,
+      authorizationServerMetadata: {
+        issuer,
+        authorization_endpoint: `${issuer}/authorize`,
+        token_endpoint: `${issuer}/token`,
+        response_types_supported: ["code"]
+      }
+    });
+    const discoveryBefore = (await provider.discoveryState()) !== undefined;
+    await provider.saveClientInformation(
+      {
+        client_id: provider.clientId,
+        redirect_uris: [String(provider.redirectUrl)],
+        issuer
+      },
+      { issuer }
+    );
+
+    await provider.saveTokens(
+      { access_token: "token", token_type: "Bearer", issuer },
+      { issuer }
+    );
+
+    return {
+      discoveryBefore,
+      discoveryAfter: (await provider.discoveryState()) !== undefined,
+      tokenRoundTrips: (await provider.tokens())?.access_token === "token",
+      clientRoundTrips:
+        (await provider.clientInformation({ issuer }))?.client_id ===
+        provider.clientId
+    };
+  }
+
   async testDiscoveryStateAndIssuerInvalidation(): Promise<{
     discoveryRoundTrips: boolean;
     discoveryCleared: boolean;

@@ -503,6 +503,27 @@ describe("MCP Client Connection Integration", () => {
   });
 
   describe("Discovery Failure Handling", () => {
+    it("should preserve authenticating state when discovery requires OAuth", async () => {
+      const connection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http" },
+          client: {}
+        }
+      );
+      connection.connectionState = "connected";
+      connection.discoverAndRegister = vi
+        .fn()
+        .mockRejectedValue(new Error("Unauthorized: authorization required"));
+
+      const result = await connection.discover();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Unauthorized");
+      expect(connection.connectionState).toBe("authenticating");
+    });
+
     it("should fail discovery when any capability fails", async () => {
       const connection = new MCPClientConnection(
         new URL(serverUrl),

@@ -213,8 +213,12 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     tokens: StoredOAuthTokens,
     _context?: OAuthClientInformationContext
   ): Promise<void> {
-    // Keep the SDK-owned issuer stamp intact for SEP-2352 validation.
+    // Keep the SDK-owned issuer stamp intact for SEP-2352 validation. Discovery
+    // is needed across the browser redirect, but once token issuance succeeds
+    // it must not pin later re-authorization to this AS: a subsequent 401 must
+    // re-read PRM so an authorization-server migration can be observed.
     await this.storage.put(this.tokenKey(this.clientId), tokens);
+    await this.storage.delete(this.discoveryStateKey());
   }
 
   get authUrl() {
