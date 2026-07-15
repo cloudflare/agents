@@ -17,9 +17,15 @@
     "dashboard": "node scripts/dashboard.mjs"
   },
   "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@x402/core": "^2.17.0",
+    "@x402/evm": "^2.17.0",
     "ai": "^6.0.225",
     "mimetext": "^3.0.28",
-    "zod": "^3.24.0"
+    "nanoid": "^5.1.16",
+    "zod": "^3.24.0",
+    "zod-v4": "npm:zod@^4.4.3"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
