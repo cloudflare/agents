@@ -193,6 +193,12 @@ export interface ActionServiceDeps {
   /** Reclaim lease for stale pending rows with an explicit key; false disables. */
   pendingRetryLeaseMs?: number | false;
   onResolved?: (executionId: string, resolution: ParkedResolution) => void | Promise<void>;
+  /**
+   * The host's declared actions, for lazy compile: a fresh activation can
+   * receive approveExecution() before any turn has assembled (the
+   * deploy-then-approve durable-pause path), when the registry is empty.
+   */
+  declaredActions?: () => Record<string, Action>;
   /** Injectable for deterministic timeout tests. */
   timers?: ActionTimers;
 }
@@ -528,7 +534,15 @@ export function createActionService(deps: ActionServiceDeps): ActionService {
       if (row.status === "approved") return row.output;
       if (row.status === "rejected") return undefined;
 
-      const act = registry.get(row.descriptor.action);
+      let act = registry.get(row.descriptor.action);
+      if (!act && deps.declaredActions) {
+        // Lazy compile: this activation hasn't run a turn yet (approve after
+        // a deploy) — populate the registry from the declared actions.
+        for (const [mapKey, declared] of Object.entries(deps.declaredActions())) {
+          if (isAction(declared)) registry.set(declared.name ?? mapKey, declared);
+        }
+        act = registry.get(row.descriptor.action);
+      }
       if (!act) {
         throw new NotFoundError(`Action "${row.descriptor.action}" is not registered; call compile() first`);
       }

@@ -20,7 +20,7 @@ import type { TurnOutcome } from "../../turn/loop.js";
 /** Fiber name every recoverable turn runs under (see module doc above). */
 const FIBER_NAME = "chat-turn";
 
-const DEFAULT_MAX_ATTEMPTS = 6;
+const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_TERMINAL_MESSAGE =
   "Sorry, I wasn't able to finish that response after multiple attempts. Please try again.";
 
@@ -44,9 +44,38 @@ export interface RecoveryPolicy {
 export interface Incident {
   incidentId: string;
   requestId: string;
+  recoveryRootRequestId: string;
   attempt: number;
   maxAttempts: number;
   recoveryKind: "retry" | "continue";
+  status?: "attempting" | "scheduled" | "completed" | "skipped" | "failed" | "exhausted";
+  reason?: string;
+  partialText?: string;
+  streamId?: string;
+  createdAt?: number;
+  recoveryData?: unknown;
+  terminalMessage?: string;
+}
+
+export interface ChatRecoveryContext extends Incident {
+  status: "attempting";
+  recoveryRootRequestId: string;
+  partialText: string;
+  streamId: string;
+  createdAt: number;
+}
+
+export interface ChatRecoveryDecision {
+  persist?: boolean;
+  continue?: boolean;
+}
+
+interface RecoveryMetadata {
+  partialText?: string;
+  streamId?: string;
+  createdAt?: number;
+  recoveryData?: unknown;
+  status?: "completed" | "error" | "interrupted";
 }
 
 export interface RecoverySchedule {
@@ -122,6 +151,7 @@ export function createChatRecovery(deps: {
     /** App-level terminal notification (onChatError etc.); the terminal
         message is already persisted when this fires. */
     onTerminal?(incident: Incident, terminalText: string): void | Promise<void>;
+    onRecovery?(ctx: ChatRecoveryContext): void | ChatRecoveryDecision | Promise<void | ChatRecoveryDecision>;
   };
 }): ChatRecovery {
   const { fibers, bus, ids, conversation } = deps;
@@ -133,6 +163,7 @@ export function createChatRecovery(deps: {
   const incidentKey = (requestId: string): string => `incident:${requestId}`;
   const inputKey = (requestId: string): string => `input:${requestId}`;
   const recoveringKey = (requestId: string): string => `recovering:${requestId}`;
+  const contextKey = (requestId: string): string => `context:${requestId}`;
   let stableWaiters: Array<() => void> = [];
 
   function getIncident(requestId: string): Incident | undefined {
@@ -219,18 +250,42 @@ export function createChatRecovery(deps: {
    * composition root only gets notified. Recording it as the request's
    * partial keeps `partialFor` consistent for late observers.
    */
-  async function terminalize(incident: Incident): Promise<void> {
+  function textOf(message: ChatMessage | undefined): string {
+    if (!message) return "";
+    return message.parts
+      .filter((part): part is Extract<MessagePart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+  }
+
+  function hasSettledToolWork(message: ChatMessage | undefined): boolean {
+    if (!message) return false;
+    return message.parts.some((part) => {
+      if (!part.type.startsWith("tool-")) return false;
+      const record = part as ToolPart & { output?: unknown; state?: unknown };
+      return record.output !== undefined || record.state === "output-available";
+    });
+  }
+
+  function recoveryMetadata(requestId: string): RecoveryMetadata {
+    const raw = kv.get<unknown>(contextKey(requestId));
+    return typeof raw === "object" && raw !== null ? (raw as RecoveryMetadata) : {};
+  }
+
+  async function terminalize(incident: Incident, reason = "max_attempts_exceeded"): Promise<void> {
     const session = await conversation.session();
     const terminalMsg = assistantMessage([{ type: "text", text: terminalMessage }], ids.newId("msg"));
     await session.appendMessage(terminalMsg);
     conversation.turnState.recordPartial(incident.requestId, terminalMsg);
     conversation.publish({ type: "message:updated", message: terminalMsg, requestId: incident.requestId });
-    if (conversation.onTerminal) await conversation.onTerminal(incident, terminalMessage);
+    const exhausted = { ...incident, status: "exhausted" as const, reason, terminalMessage };
+    if (conversation.onTerminal) await conversation.onTerminal(exhausted, terminalMessage);
+    putIncident(exhausted);
   }
 
   async function decide(
     requestId: string,
-    opts: { forceContinue?: boolean },
+    opts: { forceContinue?: boolean; createdAt?: number; recoveryData?: unknown; recoveryRootRequestId?: string },
   ): Promise<"scheduled" | "exhausted" | "skipped"> {
     bus.emit("chat:recovery:detected", { requestId });
 
@@ -244,20 +299,37 @@ export function createChatRecovery(deps: {
 
     const existing = getIncident(requestId);
     const attempt = (existing?.attempt ?? 0) + 1;
-    const incidentId = existing?.incidentId ?? ids.newId("incident");
+    const recoveryRootRequestId = opts.recoveryRootRequestId ?? existing?.recoveryRootRequestId ?? requestId;
+    const incidentId = existing?.incidentId ?? `${recoveryRootRequestId}:`;
+    const metadata = recoveryMetadata(requestId);
+    const partial = conversation.turnState.partialFor(requestId);
+    const partialText = metadata.partialText ?? textOf(partial);
+    const streamId = metadata.streamId ?? "";
+    const createdAt = metadata.createdAt ?? opts.createdAt ?? deps.clock.now();
+    const recoveryData = opts.recoveryData ?? metadata.recoveryData;
 
     if (attempt > maxAttempts) {
       const incident: Incident = {
         incidentId,
         requestId,
+        recoveryRootRequestId,
         attempt,
         maxAttempts,
         recoveryKind: existing?.recoveryKind ?? "retry",
+        partialText,
+        streamId,
+        createdAt,
+        recoveryData,
       };
       await terminalize(incident);
-      if (policy.onExhausted) await policy.onExhausted(incident);
+      if (policy.onExhausted) {
+        try {
+          await policy.onExhausted({ ...incident, status: "exhausted", reason: "max_attempts_exceeded", terminalMessage });
+        } catch (err) {
+          bus.emit("chat:recovery:on_exhausted_failed", { requestId, incidentId, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
       bus.emit("chat:recovery:exhausted", { requestId, incidentId, attempt, maxAttempts });
-      clearIncident(requestId);
       clearInput(requestId);
       setRecovering(requestId, false);
       return "exhausted";
@@ -265,11 +337,39 @@ export function createChatRecovery(deps: {
 
     const hasPartial = opts.forceContinue === true || conversation.turnState.partialFor(requestId) !== undefined;
     const recoveryKind: Incident["recoveryKind"] = hasPartial ? "continue" : "retry";
-    const incident: Incident = { incidentId, requestId, attempt, maxAttempts, recoveryKind };
+    const incident: Incident = {
+      incidentId,
+      requestId,
+      recoveryRootRequestId,
+      attempt,
+      maxAttempts,
+      recoveryKind,
+      status: "attempting",
+      partialText,
+      streamId,
+      createdAt,
+      recoveryData,
+    };
     putIncident(incident);
     setRecovering(incident, true);
 
-    if (recoveryKind === "continue") {
+    let decision: ChatRecoveryDecision | void = undefined;
+    if (conversation.onRecovery) {
+      try {
+        decision = await conversation.onRecovery({ ...incident, status: "attempting", partialText, streamId, createdAt });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        putIncident({ ...incident, status: "failed", reason });
+        setRecovering(requestId, false);
+        bus.emit("chat:recovery:failed", { requestId, incidentId, attempt, reason });
+        return "skipped";
+      }
+    }
+
+    const shouldPersist = decision?.persist !== false || hasSettledToolWork(partial);
+    const shouldContinue = decision?.continue !== false && metadata.status !== "completed";
+
+    if (recoveryKind === "continue" && shouldPersist) {
       // What "continue" MEANS lives here: the interrupted partial only exists
       // in turn-state scratch (the turn never reached its normal persist), so
       // commit the repaired partial to history first — otherwise the re-run
@@ -284,6 +384,18 @@ export function createChatRecovery(deps: {
         conversation.publish({ type: "message:updated", message: repaired, requestId });
       }
     }
+    if (!shouldContinue) {
+      const reason = decision?.continue === false ? "chat recovery was disabled" : "stream_completed";
+      putIncident({ ...incident, status: "skipped", reason });
+      if (decision?.continue === false && conversation.onTerminal) {
+        await conversation.onTerminal(incident, reason);
+      }
+      setRecovering(requestId, false);
+      bus.emit("chat:recovery:skipped", { requestId, incidentId, reason });
+      return "skipped";
+    }
+    incident.status = "scheduled";
+    putIncident(incident);
     await conversation.scheduleTurn(incident);
 
     bus.emit("chat:recovery:scheduled", { requestId, incidentId, attempt, recoveryKind });
@@ -337,7 +449,12 @@ export function createChatRecovery(deps: {
     if (ctx.name !== FIBER_NAME) return undefined;
     if (!isChatTurnSnapshot(ctx.snapshot)) return undefined;
 
-    await decide(ctx.snapshot.requestId, {});
+    const snapshot = ctx.snapshot as ChatTurnSnapshot & { recoveryRootRequestId?: string; recoveryData?: unknown };
+    await decide(snapshot.requestId, {
+      createdAt: ctx.createdAt,
+      ...(snapshot.recoveryRootRequestId !== undefined ? { recoveryRootRequestId: snapshot.recoveryRootRequestId } : {}),
+      ...(snapshot.recoveryData !== undefined ? { recoveryData: snapshot.recoveryData } : {}),
+    });
     return undefined;
   }
 

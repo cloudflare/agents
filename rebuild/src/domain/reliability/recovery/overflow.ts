@@ -63,17 +63,26 @@ const DEFAULT_MAX_RETRIES = 1;
 const DEFAULT_MAX_COMPACTIONS = 1;
 const PROACTIVE_THRESHOLD_RATIO = 0.9;
 
+type OverflowConfig = { reactive?: boolean; maxRetries?: number; proactive?: { maxInputTokens: number; maxCompactions?: number } };
+
 export function createOverflowGuard(deps: {
-  config?: { reactive?: boolean; maxRetries?: number; proactive?: { maxInputTokens: number; maxCompactions?: number } };
+  /**
+   * Static config, or a getter — Think's configuration surface is mutable
+   * ("plain overridable values"), so hosts may flip overflow handling after
+   * construction; the guard must observe the CURRENT value per decision.
+   */
+  config?: OverflowConfig | (() => OverflowConfig | undefined);
   classify?: (e: unknown) => ChatErrorClassification | void;
   compact: () => Promise<{ shortened: boolean }>;
   bus: EventBus;
 }): OverflowGuard {
   const classify = deps.classify ?? defaultContextOverflowClassifier;
-  const reactiveEnabled = deps.config?.reactive ?? false;
-  const maxRetries = deps.config?.maxRetries ?? DEFAULT_MAX_RETRIES;
-  const proactiveConfig = deps.config?.proactive;
-  const maxCompactions = proactiveConfig?.maxCompactions ?? DEFAULT_MAX_COMPACTIONS;
+  const currentConfig = (): OverflowConfig | undefined =>
+    typeof deps.config === "function" ? deps.config() : deps.config;
+  const reactiveEnabled = (): boolean => currentConfig()?.reactive ?? false;
+  const maxRetries = (): number => currentConfig()?.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const proactiveConfig = (): OverflowConfig["proactive"] => currentConfig()?.proactive;
+  const maxCompactions = (): number => proactiveConfig()?.maxCompactions ?? DEFAULT_MAX_COMPACTIONS;
 
   /** Reactive retry attempts used, keyed by requestId. */
   const reactiveAttempts = new Map<string, number>();
@@ -84,13 +93,14 @@ export function createOverflowGuard(deps: {
     usage: { inputTokens?: number } | undefined,
     requestId: string,
   ): Promise<boolean> {
-    if (!proactiveConfig) return false;
+    const proactive = proactiveConfig();
+    if (!proactive) return false;
     if (usage?.inputTokens === undefined) return false;
 
     const used = proactiveCounts.get(requestId) ?? 0;
-    if (used >= maxCompactions) return false;
+    if (used >= maxCompactions()) return false;
 
-    const threshold = proactiveConfig.maxInputTokens * PROACTIVE_THRESHOLD_RATIO;
+    const threshold = proactive.maxInputTokens * PROACTIVE_THRESHOLD_RATIO;
     if (usage.inputTokens < threshold) return false;
 
     const { shortened } = await deps.compact();
@@ -101,13 +111,13 @@ export function createOverflowGuard(deps: {
   }
 
   async function handleTurnError(error: unknown, requestId: string): Promise<"retry" | "terminal" | "unhandled"> {
-    if (!reactiveEnabled) return "unhandled";
+    if (!reactiveEnabled()) return "unhandled";
 
     const classification = classify(error) ?? "unknown";
     if (classification !== "context_overflow") return "unhandled";
 
     const used = reactiveAttempts.get(requestId) ?? 0;
-    if (used >= maxRetries) return "terminal";
+    if (used >= maxRetries()) return "terminal";
 
     const { shortened } = await deps.compact();
     const attempt = used + 1;

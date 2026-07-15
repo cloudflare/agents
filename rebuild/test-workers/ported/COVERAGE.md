@@ -37,7 +37,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
 | client-tools.test.ts | 86 | WIRE | ported 33/86 | 53 fail on REAL semantics: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. (ISSUE-029 flipped the approval-vocabulary tests.) |
-| think-session.test.ts | 198 | WIRE+API | rewritten 57/198 (7 dropped-with-pointer) | R1 landed waitUntilStable (block 9/9) + recovery inspection accessors (chatRecoveryIncidents/chatRecoverySchedule): +3 flips (recovering-status hydration #1620, attempt-budget reset on progress, HITL no-seal). Remaining failures keep NAMED missing-feature reasons — next: recovery injection seams + onChatRecovery hook core (R2). |
+| think-session.test.ts | 198 | WIRE+API | rewritten 71/198 (7 dropped-with-pointer) | R1+R2: waitUntilStable block 9/9; onChatRecovery hook (ctx + persist:false/continue:false decisions) + injection seams landed +17 flips total. Remaining failures keep NAMED missing-feature reasons (in-band stream errors, abort/stall injection, sanitization/row-size, saveMessages/addMessages, submission seams). |
 | hooks.test.ts | 105 | WIRE+API | pending | split T1/T3 |
 | submissions.test.ts | 51 | PUBLIC-API | pending | T3 |
 | agent-tools.test.ts | 33 | PUBLIC-API | pending | T3 |
@@ -59,7 +59,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | stream-cleanup.test.ts | 11 | PUBLIC-API | pending | T3; event-log retention differs — expect divergence notes |
 | media-eviction.test.ts | 9 | INTERNAL | blocked ISSUE-014 | port pure-fn tests with the impl |
 | workflows.test.ts | 3 | INTERNAL | blocked ISSUE-016 | |
-| action-pause-recovery.test.ts | 3 | PUBLIC-API | pending | T3 |
+| action-pause-recovery.test.ts | 1 | ported 1/1 | **GREEN under real kill/restart** — fixed en route: lazy action-registry compile (approveExecution on a fresh activation, deploy-then-approve path). |
 | onstart-degraded.test.ts | 5 | PUBLIC-API | pending | T3 |
 | agent-tool-reattach-recovery.test.ts | 2 | WIRE | ported 2/2 | **PASSES** — facet spawner + delegation reattach hold against the original's assertions. |
 | streaming-message-id.test.ts | 1 | WIRE | ported 1/1 | **T0 gate GREEN** (ISSUE-026 resolved) |
@@ -88,12 +88,12 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 |---|--:|---|---|
 | chat-recovery.test.ts | 5 | ported 5/5 | **GREEN** — all five kill/restart scenarios recover (chat via persisted alarm, restart churn, post-persist failure surface, sub-agent recovery, agent-tool re-attach #1630). ISSUE-026 resolution unlocked the three chat-frame scenarios. |
 | stall-recovery.test.ts | 1 | ported 1/1 | **GREEN** — stalled turn recovers via scheduled continuation (#1626) under a real kill. |
-| context-overflow-recovery.test.ts | 3 | ported 0/3 | fast-fails ~4s pre-chat: `fixture-gap`/config mismatch between fixture's overflow options and the rebuild's ContextOverflowConfig — pin next. |
-| submission-recovery.test.ts | 3 | ported 0/3 | long timeouts on submission transitions — likely `divergence` in submission surface/RPC names vs original; pin next. |
+| context-overflow-recovery.test.ts | 3 | ported 3/3 | **GREEN under real kill/restart** — fixed en route: lazy overflow config (Think's mutable config contract), post-compaction retry re-assembles history + re-resolves getModel() per attempt, and the reactive retry discards the overflowing attempt's partial (the recovered answer IS the message). |
+| submission-recovery.test.ts | 3 | ported 0/3 | Blocked on two still-throwing fixture seams (`submission row injection`, `submission startup recovery trigger`) — the test cannot set up; recovery-goal stretch work. |
 | action-pause-recovery.test.ts | 1 | ported 0/1 | fails ~8s: same durable-pause fixture mechanism question as execute-hitl (`fixture-gap`). |
 | action-ledger-recovery.test.ts | 1 | ported 1/1 | **PASSES** — crash-left pending ledger lease reclaimed after real kill/restart. |
 | tool-rollback.test.ts | 1 | ported 1/1 | **GREEN** — long tool loop recovers across repeated evictions without deep rollback. |
-| persist-false-preserves.test.ts | 1 | ported 0/1 | 75s: recovery hook persist:false mapping — `divergence`/`fixture-gap`; pin with recovery-hook work. |
+| persist-false-preserves.test.ts | 1 | ported 0/1 | Progressed: settled results now preserved; remaining failure is `{continue:false}` not HALTING the recovered turn in the real-kill path (ran all 30 steps) — recovery-goal stretch work. |
 | reattach-budget.test.ts | 1 | ported 0/1 | `missing-feature`: re-attach budget semantics in delegation recovery (slow-but-healthy child sealed interrupted). NOTE: burns ~14 min of real eviction churn per run. |
 | task-amplification.test.ts | 2 | ported 0/2 | `missing-feature`: stable child runId across parent eviction (no whole-turn re-runs, #1630 task path). ~10 min/test runtime. |
 | messenger-recovery.test.ts | 2 | blocked ISSUE-011 | |

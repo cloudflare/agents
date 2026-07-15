@@ -13,7 +13,14 @@ import { assistantMessage, textOf } from "../../messages/model.js";
 import type { ChatMessage } from "../../messages/model.js";
 import type { Session } from "../../session/session.js";
 import type { TurnOutcome } from "../../turn/loop.js";
-import { createChatRecovery, type ChatRecovery, type Incident, type RecoveryPolicy } from "./recovery.js";
+import {
+  createChatRecovery,
+  type ChatRecovery,
+  type ChatRecoveryContext,
+  type ChatRecoveryDecision,
+  type Incident,
+  type RecoveryPolicy,
+} from "./recovery.js";
 
 function counterIds(prefix = ""): IdSource {
   let n = 0;
@@ -37,9 +44,10 @@ interface ConversationFake {
   publish: Mock<(...args: unknown[]) => unknown>;
   scheduleTurn: Mock<(...args: unknown[]) => Promise<void>>;
   onTerminal: Mock<(...args: unknown[]) => Promise<void>>;
+  onRecovery: Mock<(ctx: ChatRecoveryContext) => Promise<void | ChatRecoveryDecision> | void | ChatRecoveryDecision>;
 }
 
-function conversationFake(): ConversationFake {
+function conversationFake(onRecovery?: ConversationFake["onRecovery"]): ConversationFake {
   const history: ChatMessage[] = [];
   const turnState = createConversationTurnState({ store: createMemoryKeyValueStore() });
   const session = {
@@ -55,6 +63,7 @@ function conversationFake(): ConversationFake {
     publish: vi.fn(),
     scheduleTurn: vi.fn(),
     onTerminal: vi.fn(async () => {}),
+    onRecovery: onRecovery ?? vi.fn(),
   };
 }
 
@@ -68,7 +77,7 @@ interface Harness {
   ids: IdSource;
 }
 
-function harness(policy?: RecoveryPolicy): Harness {
+function harness(policy?: RecoveryPolicy, onRecovery?: ConversationFake["onRecovery"]): Harness {
   const store = createMemoryKeyValueStore();
   const clock = createTestClock(0);
   const alarm = createMemoryAlarmTimer(clock);
@@ -98,7 +107,7 @@ function harness(policy?: RecoveryPolicy): Harness {
     onRecovered: async (ctx) => recovery.onFiberRecovered(ctx),
   });
 
-  const conversation = conversationFake();
+  const conversation = conversationFake(onRecovery);
 
   const recovery: ChatRecovery = createChatRecovery({
     store,
@@ -113,6 +122,7 @@ function harness(policy?: RecoveryPolicy): Harness {
       publish: (e) => conversation.publish(e),
       scheduleTurn: (incident) => conversation.scheduleTurn(incident),
       onTerminal: (incident, text) => conversation.onTerminal(incident, text),
+      onRecovery: (ctx) => conversation.onRecovery(ctx),
     },
   });
 
@@ -216,6 +226,88 @@ describe("createChatRecovery", () => {
       expect(publishOrder).toBeLessThan(scheduleOrder);
     });
 
+    it("calls onRecovery with the full context before scheduling", async () => {
+      const onRecovery = vi.fn();
+      const h = harness(undefined, onRecovery);
+      h.conversation.turnState.setLastRequestId("req-1");
+      h.conversation.turnState.recordPartial("req-1", assistantMessage([{ type: "text", text: "partial..." }], "msg-partial"));
+
+      await h.recovery.onFiberRecovered({ ...interruptedCtx(), createdAt: 1234 });
+
+      expect(onRecovery).toHaveBeenCalledTimes(1);
+      expect(onRecovery.mock.calls[0]![0]).toMatchObject({
+        requestId: "req-1",
+        recoveryRootRequestId: "req-1",
+        incidentId: "req-1:",
+        attempt: 1,
+        maxAttempts: 10,
+        recoveryKind: "continue",
+        partialText: "partial...",
+        streamId: "",
+        createdAt: 1234,
+        status: "attempting",
+      });
+      expect(h.conversation.scheduleTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("honors { persist: false, continue: false } for text-only partials", async () => {
+      const h = harness(undefined, vi.fn(() => ({ persist: false, continue: false })));
+      h.conversation.turnState.setLastRequestId("req-1");
+      h.conversation.turnState.recordPartial("req-1", assistantMessage([{ type: "text", text: "discard me" }], "msg-partial"));
+
+      await h.recovery.onFiberRecovered(interruptedCtx());
+
+      expect(h.conversation.history).toHaveLength(0);
+      expect(h.conversation.scheduleTurn).not.toHaveBeenCalled();
+      expect(h.conversation.onTerminal).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: "req-1" }),
+        "chat recovery was disabled",
+      );
+    });
+
+    it("preserves settled tool results even when persist is false", async () => {
+      const h = harness(undefined, vi.fn(() => ({ persist: false, continue: false })));
+      h.conversation.turnState.setLastRequestId("req-1");
+      h.conversation.turnState.recordPartial(
+        "req-1",
+        assistantMessage(
+          [
+            {
+              type: "tool-calc",
+              toolCallId: "tc1",
+              state: "output-available",
+              input: { x: 1 },
+              output: { result: 2 },
+            },
+          ],
+          "msg-partial",
+        ),
+      );
+
+      await h.recovery.onFiberRecovered(interruptedCtx());
+
+      expect(h.conversation.history.map((m) => m.id)).toEqual(["msg-partial"]);
+      expect(h.conversation.scheduleTurn).not.toHaveBeenCalled();
+    });
+
+    it("marks the incident failed when onRecovery throws", async () => {
+      const h = harness(undefined, vi.fn(() => {
+        throw new Error("onChatRecovery boom");
+      }));
+      h.conversation.turnState.setLastRequestId("req-1");
+      h.conversation.turnState.recordPartial("req-1", assistantMessage([{ type: "text", text: "partial..." }], "msg-partial"));
+
+      await h.recovery.onFiberRecovered(interruptedCtx());
+
+      expect(h.conversation.scheduleTurn).not.toHaveBeenCalled();
+      expect(h.recovery.incidents()[0]).toMatchObject({
+        requestId: "req-1",
+        status: "failed",
+        reason: "onChatRecovery boom",
+      });
+      expect(h.events.some((e) => e.type === "chat:recovery:failed")).toBe(true);
+    });
+
     it("attempt increments across two interruptions, same incident", async () => {
       const h = harness();
       h.conversation.turnState.setLastRequestId("req-1");
@@ -261,6 +353,27 @@ describe("createChatRecovery", () => {
       expect(onExhausted.mock.calls[0]![0]).toMatchObject({ requestId: "req-1" });
       expect(h.events.some((e) => e.type === "chat:recovery:exhausted")).toBe(true);
       expect(h.recovery.isRecovering()).toBe(false);
+    });
+
+    it("still terminalizes when onExhausted throws", async () => {
+      const onExhausted = vi.fn(() => {
+        throw new Error("onExhausted failed");
+      });
+      const h = harness({ maxAttempts: 1, terminalMessage: "Give up now.", onExhausted });
+      h.conversation.turnState.setLastRequestId("req-1");
+      h.conversation.turnState.recordPartial("req-1", assistantMessage([{ type: "text", text: "partial..." }], "m1"));
+
+      await h.recovery.onFiberRecovered(interruptedCtx());
+      await h.recovery.onFiberRecovered(interruptedCtx());
+
+      expect(textOf(h.conversation.history.at(-1)!)).toBe("Give up now.");
+      expect(onExhausted).toHaveBeenCalledTimes(1);
+      expect(h.conversation.onTerminal).toHaveBeenCalledTimes(1);
+      expect(h.recovery.incidents()[0]).toMatchObject({
+        requestId: "req-1",
+        status: "exhausted",
+        reason: "max_attempts_exceeded",
+      });
     });
   });
 

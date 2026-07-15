@@ -69,6 +69,8 @@ import {
 } from "../domain/reliability/scheduled-tasks/tasks.js";
 import {
   createChatRecovery,
+  type ChatRecoveryContext,
+  type ChatRecoveryDecision,
   type ChatRecovery,
   type Incident,
   type RecoverySchedule,
@@ -77,6 +79,7 @@ import {
 } from "../domain/reliability/recovery/recovery.js";
 import {
   createOverflowGuard,
+  defaultContextOverflowClassifier,
   type ChatErrorClassification,
   type OverflowGuard,
 } from "../domain/reliability/recovery/overflow.js";
@@ -212,7 +215,7 @@ export class Think<State = unknown> extends Agent<State> {
   authorizeTurn?: (ctx: ActionTurnContext) => AuthorizationDecision | Promise<AuthorizationDecision>;
   authorizeAction?: (ctx: ActionAuthorizationContext) => AuthorizationDecision | Promise<AuthorizationDecision>;
   repairInterruptedToolPart?: (part: ToolPart) => MessagePart;
-  onChatRecovery?: (ctx: { requestId: string; incidentId: string; attempt: number }) => void | Promise<void>;
+  onChatRecovery?: (ctx: ChatRecoveryContext) => void | ChatRecoveryDecision | Promise<void | ChatRecoveryDecision>;
   renderAttachment?: (att: ReplyAttachment) => unknown;
   onAgentToolStart?: (run: AgentToolRun) => void;
   onAgentToolFinish?: (run: AgentToolRun) => void;
@@ -221,7 +224,7 @@ export class Think<State = unknown> extends Agent<State> {
   // --- eagerly-built services (safe: only capture callbacks, never bare config values) ---
   private readonly turnQueue: TurnQueue;
   private readonly turnEngine: TurnEngine;
-  private readonly turnState: ConversationTurnState;
+  protected readonly turnState: ConversationTurnState;
   private readonly submissionService: SubmissionService;
   private readonly channelService: ChannelService;
   private readonly scheduledTaskService: ScheduledTaskService;
@@ -394,11 +397,12 @@ export class Think<State = unknown> extends Agent<State> {
       ...(this.authorizeAction ? { authorizeAction: (ctx: ActionAuthorizationContext) => this.authorizeAction!(ctx) } : {}),
       pendingRetryLeaseMs: this.actionLedgerPendingRetryLeaseMs,
       onResolved: (executionId, resolution) => this.pendingInteractions.onExecutionResolved(executionId, resolution),
+      declaredActions: () => this.getActions(),
     });
 
     this.overflowGuardService = createOverflowGuard({
-      ...(this.contextOverflow ? { config: this.contextOverflow } : {}),
-      ...(this.classifyChatError ? { classify: this.classifyChatError } : {}),
+      config: () => this.contextOverflow,
+      classify: (e) => this.classifyChatError?.(e) ?? defaultContextOverflowClassifier(e),
       compact: () => this.compactSession(),
       bus: this.bus,
     });
@@ -425,6 +429,7 @@ export class Think<State = unknown> extends Agent<State> {
             await this.onChatError(new Error(terminalText), { requestId: incident.requestId, stage: "recovery" });
           }
         },
+        onRecovery: (ctx) => this.onChatRecovery?.(ctx),
       },
     });
 
@@ -652,7 +657,7 @@ export class Think<State = unknown> extends Agent<State> {
       });
       this.activeTurnInfo = { requestId: spec.requestId, startOffset: started.offset };
 
-      const accumulator = createAccumulator();
+      let accumulator = createAccumulator();
       const emit = (chunk: UiChunk): void => {
         accumulator.push(chunk);
         this.publishEvent({ type: "chunk", requestId: spec.requestId, chunk });
@@ -723,6 +728,23 @@ export class Think<State = unknown> extends Agent<State> {
       } else if (outcome.kind === "error") {
         const action = await this.overflowGuardService.handleTurnError(outcome.error, spec.requestId);
         if (action === "retry") {
+          // The guard compacted: the retry must see the POST-compaction
+          // transcript (retrying the stale prompt would overflow again with
+          // a real provider) and re-resolve the model — getModel() is a
+          // per-attempt hook, mirroring the per-turn configuration contract.
+          turnCtx.messages = await session.getHistory();
+          // The retry's answer IS the message: discard the overflowing
+          // attempt's partial chunks rather than concatenating them into the
+          // final assistant text (original semantics — the truncated partial
+          // is not persisted as a separate orphan either).
+          accumulator = createAccumulator();
+          this.turnState.clearPartial(spec.requestId);
+          try {
+            model = this.getModel();
+          } catch {
+            // Keep the previously-resolved model; resolution errors were
+            // already routed through the error pipeline on first resolve.
+          }
           outcome = await runRecoverably();
         }
       }
@@ -813,13 +835,6 @@ export class Think<State = unknown> extends Agent<State> {
    * deadlock the turn queue.
    */
   private scheduleRecoveryTurn(incident: Incident): void {
-    if (this.onChatRecovery) {
-      void this.onChatRecovery({
-        requestId: incident.requestId,
-        incidentId: incident.incidentId,
-        attempt: incident.attempt,
-      });
-    }
     void this.executeTurn({
       requestId: incident.requestId,
       trigger: "continuation",

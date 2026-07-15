@@ -32,6 +32,8 @@ type ShellWithAgent = {
 
 type RecoveryConfig = Exclude<Think["chatRecovery"], boolean>;
 type RecoveryIncident = Parameters<NonNullable<RecoveryConfig["onExhausted"]>>[0];
+type RecoveryHookContext = Parameters<NonNullable<Think["onChatRecovery"]>>[0];
+type RecoveryHookDecision = Exclude<Awaited<ReturnType<NonNullable<Think["onChatRecovery"]>>>, void>;
 
 const rpcMethodNames = [
   "addMessages",
@@ -192,6 +194,14 @@ function recordFrom(value: unknown): JsonRecord | null {
   return typeof value === "object" && value !== null ? (value as JsonRecord) : null;
 }
 
+function safeJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 function coerceMessages(input: unknown, ids: { newId(prefix: string): string }): ChatMessage[] {
   if (typeof input === "string") return [userMessage(input, ids.newId("msg"))];
   if (!Array.isArray(input)) return [];
@@ -250,6 +260,8 @@ class ThinkSessionPortAgentImpl extends Think {
   private capturedClientToolNames: string[][] = [];
   private recoveryContexts: Array<{ requestId: string; incidentId: string; attempt: number }> = [];
   private exhaustedContexts: RecoveryIncident[] = [];
+  private recoveryOverride: RecoveryHookDecision | undefined;
+  private recoveryShouldThrow = false;
   private clientToolNames = new Set<string>();
   private streamingAssistantParts: ChatMessage["parts"] = [];
   private forceStableTimeout = false;
@@ -311,8 +323,10 @@ class ThinkSessionPortAgentImpl extends Think {
     this.chatErrors.push(error instanceof Error ? error.message : String(error));
   };
 
-  override onChatRecovery = (ctx: { requestId: string; incidentId: string; attempt: number }): void => {
+  override onChatRecovery = (ctx: RecoveryHookContext): RecoveryHookDecision | void => {
+    if (this.recoveryShouldThrow) throw new Error("onChatRecovery boom");
     this.recoveryContexts.push(ctx);
+    return this.recoveryOverride;
   };
 
   async __dispatchPorted(method: string, args: unknown[]): Promise<unknown> {
@@ -759,7 +773,8 @@ class ThinkSessionPortAgentImpl extends Think {
   }
 
   async setRecoveryOverride(_options: unknown): Promise<void> {
-    missingFeature("recovery override control");
+    const record = recordFrom(_options);
+    this.recoveryOverride = record ? (record as RecoveryHookDecision) : undefined;
   }
 
   async setChatRecoveryConfigForTest(options: unknown): Promise<void> {
@@ -772,7 +787,7 @@ class ThinkSessionPortAgentImpl extends Think {
   }
 
   async setRecoveryShouldThrowForTest(_value: boolean): Promise<void> {
-    missingFeature("chat recovery failure injection");
+    this.recoveryShouldThrow = _value === true;
   }
 
   async enableExhaustedCaptureForTest(maxAttempts?: unknown, terminalMessage?: unknown): Promise<void> {
@@ -806,7 +821,7 @@ class ThinkSessionPortAgentImpl extends Think {
     const maxAttempts =
       typeof record.maxAttempts === "number"
         ? record.maxAttempts
-        : this.currentRecoveryPolicy().maxAttempts ?? 6;
+        : this.currentRecoveryPolicy().maxAttempts ?? 10;
     const existing = this.recoveryIncidentRows().find(
       (row) => row.record.requestId === requestId || row.record.incidentId === record.incidentId,
     )?.record;
@@ -854,6 +869,11 @@ class ThinkSessionPortAgentImpl extends Think {
       (entry) => entry.record.incidentId === incidentId || entry.record.requestId === incidentId,
     );
     if (!row) return;
+    if (status === "completed") {
+      this.host.store.delete(row.key);
+      this.syncRecoveringRow({ ...row.record, status });
+      return;
+    }
     row.record.status = status;
     if (typeof reason === "string") row.record.reason = reason;
     this.host.store.put(row.key, row.record);
@@ -867,7 +887,7 @@ class ThinkSessionPortAgentImpl extends Think {
       incidentId: typeof record.incidentId === "string" ? record.incidentId : `${record.requestId}:`,
       requestId: record.requestId,
       attempt: typeof record.attempt === "number" ? record.attempt : 1,
-      maxAttempts: typeof record.maxAttempts === "number" ? record.maxAttempts : this.currentRecoveryPolicy().maxAttempts ?? 6,
+      maxAttempts: typeof record.maxAttempts === "number" ? record.maxAttempts : this.currentRecoveryPolicy().maxAttempts ?? 10,
       recoveryKind: record.recoveryKind === "continue" ? "continue" : "retry",
       ...record,
     };
@@ -878,22 +898,117 @@ class ThinkSessionPortAgentImpl extends Think {
   async bumpRecoveryProgressForTest(): Promise<void> {
     this.host.store.put("test:recovery-progress", (this.host.store.get<number>("test:recovery-progress") ?? 0) + 1);
   }
-  async dropAssistantMessagesForTest(): Promise<void> { missingFeature("chat recovery transcript mutation"); }
+  async dropAssistantMessagesForTest(): Promise<void> {
+    const session = await this.ensureSession();
+    const messages = await session.getHistory();
+    await session.deleteMessages(messages.filter((message) => message.role === "assistant").map((message) => message.id));
+  }
   async clearInMemoryClientToolsForTest(): Promise<void> { missingFeature("durable client-tool registry"); }
   async seedDurableClientToolsForTest(): Promise<void> { missingFeature("durable client-tool registry"); }
   async seedRunningSubmissionForTest(): Promise<void> { missingFeature("submission row injection"); }
   async recoverSubmissionsOnStartForTest(): Promise<void> { missingFeature("submission startup recovery trigger"); }
-  async preScheduleRecoveryRetryForTest(): Promise<void> { missingFeature("chat recovery scheduling injection"); }
-  async preScheduleRecoveryContinueForTest(): Promise<void> { missingFeature("chat recovery scheduling injection"); }
-  async runScheduledRecoveryRetryForTest(): Promise<void> { missingFeature("chat recovery scheduling trigger"); }
-  async runScheduledRecoveryContinueForTest(): Promise<void> { missingFeature("chat recovery scheduling trigger"); }
-  async runChatRecoveryRetryForTestWith(): Promise<void> { missingFeature("chat recovery retry trigger"); }
-  async runChatRecoveryContinueForTestWith(): Promise<void> { missingFeature("chat recovery continue trigger"); }
-  async triggerFiberRecovery(): Promise<void> { missingFeature("fiber recovery trigger"); }
-  async insertInterruptedFiber(): Promise<void> { missingFeature("interrupted fiber injection"); }
-  async insertInterruptedStream(): Promise<void> { missingFeature("interrupted stream injection"); }
+  async preScheduleRecoveryRetryForTest(data?: unknown): Promise<void> {
+    this.preScheduleRecoveryForTest("retry", data);
+  }
+  async preScheduleRecoveryContinueForTest(data?: unknown): Promise<void> {
+    this.preScheduleRecoveryForTest("continue", data);
+  }
+  async runScheduledRecoveryRetryForTest(): Promise<void> { await this.waitUntilStableForTest(5_000); }
+  async runScheduledRecoveryContinueForTest(): Promise<void> { await this.waitUntilStableForTest(5_000); }
+  async runChatRecoveryRetryForTestWith(): Promise<void> { await this.waitUntilStableForTest(5_000); }
+  async runChatRecoveryContinueForTestWith(): Promise<void> { await this.waitUntilStableForTest(5_000); }
+  async triggerFiberRecovery(): Promise<void> { await this.fiberService.checkInterrupted(); }
+  async insertInterruptedFiber(name?: unknown, stashedData?: unknown): Promise<void> {
+    const now = Date.now();
+    const baseRequestId =
+      typeof name === "string" && name.includes(":") ? name.slice(name.lastIndexOf(":") + 1) : this.ids.newId("req");
+    const stashed = recordFrom(stashedData);
+    const snapshotRecord = recordFrom(stashed?.__cfThinkChatFiberSnapshot);
+    const requestId = typeof snapshotRecord?.requestId === "string" ? snapshotRecord.requestId : baseRequestId;
+    const recoveryRootRequestId =
+      typeof snapshotRecord?.recoveryRootRequestId === "string" ? snapshotRecord.recoveryRootRequestId : requestId;
+    const recoveryData = stashed && "__cfThinkChatFiberSnapshot" in stashed ? stashed.user : stashedData;
+    this.turnState.setLastRequestId(requestId);
+    const fiberId = `test-${requestId}-${now}`;
+    this.host.store.put(`fiber:run:${fiberId}`, {
+      id: fiberId,
+      name: "chat-turn",
+      managed: false,
+      snapshot: {
+        requestId,
+        recoveryRootRequestId,
+        ...(recoveryData !== undefined ? { recoveryData } : {}),
+      },
+      metadata: null,
+      createdAt: now,
+    });
+  }
+  async insertInterruptedStream(streamId?: unknown, requestId?: unknown, chunks?: unknown, status?: unknown): Promise<void> {
+    if (typeof requestId !== "string") return;
+    const parts: ChatMessage["parts"] = [];
+    let messageId = this.ids.newId("msg");
+    let text = "";
+    for (const entry of Array.isArray(chunks) ? chunks : []) {
+      const record = recordFrom(entry);
+      if (typeof record?.body !== "string") continue;
+      const chunk = recordFrom(safeJson(record.body));
+      if (!chunk || typeof chunk.type !== "string") continue;
+      if (chunk.type === "start" && typeof chunk.messageId === "string") {
+        messageId = chunk.messageId;
+      } else if (chunk.type === "text-delta" && typeof chunk.delta === "string") {
+        text += chunk.delta;
+      } else if (chunk.type === "tool-input-available" && typeof chunk.toolCallId === "string" && typeof chunk.toolName === "string") {
+        parts.push({
+          type: `tool-${chunk.toolName}`,
+          toolCallId: chunk.toolCallId,
+          state: "input-available",
+          input: chunk.input,
+        });
+      } else if (chunk.type === "tool-output-available" && typeof chunk.toolCallId === "string") {
+        const existing = parts.find((part) => part.type.startsWith("tool-") && (part as { toolCallId?: unknown }).toolCallId === chunk.toolCallId);
+        if (existing) {
+          (existing as { state: string; output?: unknown }).state = "output-available";
+          (existing as { output?: unknown }).output = chunk.output;
+        }
+      }
+    }
+    if (text.length > 0) parts.push({ type: "text", text });
+    this.turnState.recordPartial(requestId, { id: messageId, role: "assistant", parts });
+    this.host.store.put(`think:recover:context:${requestId}`, {
+      streamId: typeof streamId === "string" ? streamId : "",
+      partialText: text,
+      createdAt: Date.now(),
+      status: status === "completed" ? "completed" : status === "error" ? "error" : "interrupted",
+    });
+  }
   async setForceStableTimeoutForTest(value?: unknown): Promise<void> {
     this.forceStableTimeout = value !== false;
+  }
+
+  private preScheduleRecoveryForTest(kind: "retry" | "continue", data?: unknown): void {
+    const record = recordFrom(data) ?? {};
+    const requestId =
+      typeof record.recoveredRequestId === "string"
+        ? record.recoveredRequestId
+        : typeof record.originalRequestId === "string"
+          ? record.originalRequestId
+          : this.ids.newId("req");
+    const incident = this.recoveryIncidentRows().find(
+      (row) => row.record.requestId === requestId || row.record.incidentId === record.incidentId,
+    )?.record;
+    this.host.store.put(`think:recover:recovering:${requestId}`, {
+      requestId,
+      incidentId:
+        typeof record.incidentId === "string"
+          ? record.incidentId
+          : typeof incident?.incidentId === "string"
+            ? incident.incidentId
+            : `${requestId}:`,
+      attempt: typeof incident?.attempt === "number" ? incident.attempt : 1,
+      maxAttempts: typeof incident?.maxAttempts === "number" ? incident.maxAttempts : this.currentRecoveryPolicy().maxAttempts ?? 10,
+      recoveryKind: kind,
+      scheduledAt: Date.now(),
+    });
   }
 
   private recoveryIncidentRows(): Array<{ key: string; record: JsonRecord }> {
