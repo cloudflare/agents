@@ -51,6 +51,7 @@ import {
   type WorkflowService,
   type WorkflowStatus,
 } from "../domain/workflows/workflows.js";
+import type { AgentCoreApi } from "./capabilities.js";
 
 /** Internal schedule/callback names are namespaced under this prefix (see scheduler.ts). */
 const INTERNAL_PREFIX = "$internal:";
@@ -100,7 +101,7 @@ export type AgentHost = AgentRuntime;
  * concern: this class only ever publishes typed `ConversationEvent`s to its
  * own event log and exposes typed methods for adapters to call.
  */
-export class Agent<State = unknown> {
+export class Agent<State = unknown> implements AgentCoreApi {
   readonly host: AgentRuntime;
   /** Telemetry bus: fire-and-forget diagnostics, distinct from ConversationEvents. */
   readonly bus: EventBus;

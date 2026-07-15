@@ -4,15 +4,31 @@ import type { ConversationEvent, StoredEvent } from "../../domain/events/log.js"
 import type { RpcRequest, RpcResponse } from "../../domain/runtime/rpc/callable.js";
 import type { ChatMessage } from "../../domain/messages/model.js";
 import type { ToolSet } from "../../domain/tools/types.js";
-import type { Think } from "../../app/think.js";
+import type {
+  AgentCoreApi,
+  ApprovalApi,
+  ConversationApi,
+  RecoveryIntrospection,
+} from "../../app/capabilities.js";
 
 /**
  * WS chat adapter (audit 25 §4): translates the `cf_agent_*` frame
- * vocabulary onto a `Think` instance's typed public methods and its
- * `ConversationEventLog`. This is the only module in the codebase allowed
- * to know either exists together — `src/app/` never imports `Connection`
- * or serializes a frame (see `src/app/no-transport.test.ts`).
+ * vocabulary onto a capability-typed agent's typed public methods and its
+ * `ConversationEventLog` (ISSUE-030 W-A: never a concrete agent class — see
+ * `ChatTransportAgent` below). This is the only module in the codebase
+ * allowed to know both the agent's capability surface and `Connection`
+ * exist together — `src/app/` never imports `Connection` or serializes a
+ * frame (see `src/app/no-transport.test.ts`).
  */
+
+/**
+ * The exact intersection this transport speaks (ADR-0002; ISSUE-030 W-A):
+ * the conversing essence, both opinion extensions, and the Agent-level
+ * substrate (events/state/identity/rpc). Any composition — `Think`, a
+ * userland equivalent, or a test double — that structurally satisfies this
+ * works here; the adapter never imports `Think` or `ChatAgent`.
+ */
+export type ChatTransportAgent = ConversationApi & ApprovalApi & RecoveryIntrospection & AgentCoreApi;
 
 export interface AttachChatTransportOptions {
   /** Per-connection kill switch for *server-initiated* protocol frames (connect sync + event fan-out). Default: always on. */
@@ -102,7 +118,7 @@ function parseChatRequest(frame: Record<string, unknown>): ParsedChatRequest {
  *    received them under a per-connection subscription either).
  */
 export function attachChatTransport(
-  agent: Think,
+  agent: ChatTransportAgent,
   registry: ConnectionRegistry,
   options: AttachChatTransportOptions = {},
 ): ChatTransport {

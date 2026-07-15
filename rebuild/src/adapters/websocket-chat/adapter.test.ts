@@ -11,7 +11,7 @@ import type { ConversationEventLog } from "../../domain/events/log.js";
 import type { ToolSet } from "../../domain/tools/types.js";
 import type { AgentRuntime } from "../../app/agent.js";
 import { Think } from "../../app/think.js";
-import { attachChatTransport } from "./adapter.js";
+import { attachChatTransport, type ChatTransportAgent } from "./adapter.js";
 import { connectChatClient } from "./test-helpers.js";
 
 /**
@@ -479,7 +479,7 @@ describe("attachChatTransport — resume handshake", () => {
       activeTurn: () => ({ requestId: "req_gap", startOffset: 0 }),
       pendingChatTerminal: () => null,
       history: async () => [{ id: "m1", role: "user" as const, parts: [{ type: "text" as const, text: "hi" }] }],
-    } as unknown as Think;
+    } as unknown as ChatTransportAgent;
 
     const registry = createMemoryConnectionRegistry();
     const transport = attachChatTransport(gapAgent, registry);
