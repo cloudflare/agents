@@ -149,6 +149,115 @@ describe("createAISDKV7Telemetry", () => {
     ]);
   });
 
+  it("stores full messages and tool calls on chat", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({
+      options: { storeMessages: true },
+      tracer: tracing
+    });
+    const messages = [
+      { role: "user", content: "hello" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            input: { prior: true },
+            toolCallId: "prior-call",
+            toolName: "save"
+          }
+        ]
+      }
+    ];
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onLanguageModelCallStart?.({ callId: "call-1", messages });
+    telemetry.onLanguageModelCallEnd?.({
+      callId: "call-1",
+      content: [
+        { type: "text", text: "done" },
+        {
+          type: "tool-call",
+          input: { value: 42 },
+          toolCallId: "call-1",
+          toolName: "save"
+        }
+      ]
+    });
+    telemetry.onEnd?.({ callId: "call-1", operationId: "ai.generateText" });
+
+    expect(tracing.spans[0]?.attributes).not.toHaveProperty([
+      "gen_ai.input.messages"
+    ]);
+    expect(tracing.spans[0]?.attributes).not.toHaveProperty([
+      "gen_ai.output.messages"
+    ]);
+    const allAttributes = JSON.stringify(
+      tracing.spans.map((span) => span.attributes)
+    );
+    expect(allAttributes).not.toContain("storeMessages");
+    expect(allAttributes).not.toContain("storeTools");
+    expect(tracing.spans[1]?.attributes["gen_ai.input.messages"]).toBe(
+      JSON.stringify(messages)
+    );
+    expect(
+      JSON.parse(
+        tracing.spans[1]?.attributes["gen_ai.output.messages"] as string
+      )
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "done" },
+          {
+            type: "tool-call",
+            input: { value: 42 },
+            toolCallId: "call-1",
+            toolName: "save"
+          }
+        ]
+      }
+    ]);
+  });
+
+  it("stores tool payloads only on execute_tool", () => {
+    const tracing = new RecordingTracer();
+    const telemetry = createAISDKV7Telemetry({
+      options: { storeTools: true },
+      tracer: tracing
+    });
+
+    telemetry.onStart?.({ callId: "call-1", operationId: "ai.generateText" });
+    telemetry.onToolExecutionStart?.({
+      callId: "call-1",
+      toolCall: {
+        input: { value: 42 },
+        toolCallId: "tool-1",
+        toolName: "save"
+      }
+    });
+    telemetry.onToolExecutionEnd?.({
+      callId: "call-1",
+      toolCall: { toolCallId: "tool-1", toolName: "save" },
+      toolOutput: { output: { saved: true }, type: "tool-result" }
+    });
+    telemetry.onEnd?.({ callId: "call-1", operationId: "ai.generateText" });
+
+    const chat = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    const toolSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
+    expect(chat).toBeUndefined();
+    expect(toolSpan?.attributes["gen_ai.tool.call.arguments"]).toBe(
+      JSON.stringify({ value: 42 })
+    );
+    expect(toolSpan?.attributes["gen_ai.tool.call.result"]).toBe(
+      JSON.stringify({ saved: true })
+    );
+  });
+
   it("runs provider work under the v7 model-call span", async () => {
     const tracing = new RecordingTracer();
     const telemetry = createAISDKV7Telemetry({ tracer: tracing });

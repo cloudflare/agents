@@ -35,14 +35,17 @@ export type AISDKV7OperationEvent = AISDKV7TelemetryOptions & {
 /** AI SDK v7 language-model lifecycle event shape consumed by this adapter. */
 export type AISDKV7LanguageModelCallEvent = AISDKV7TelemetryOptions & {
   readonly callId: string;
+  readonly content?: unknown;
   readonly finishReason?: unknown;
   readonly frequencyPenalty?: unknown;
   readonly headers?: unknown;
   readonly maxOutputTokens?: unknown;
   readonly maxTokens?: unknown;
+  readonly messages?: unknown;
   readonly modelId?: string | undefined;
   readonly performance?: unknown;
   readonly presencePenalty?: unknown;
+  readonly prompt?: unknown;
   readonly provider?: string | undefined;
   readonly providerMetadata?: unknown;
   readonly response?: unknown;

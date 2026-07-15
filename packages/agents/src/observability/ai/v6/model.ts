@@ -5,6 +5,7 @@ import {
   captureAIGatewayLogFromModel,
   extractAIGatewayLogId
 } from "../ai-gateway";
+import { inputMessageAttributes, outputMessageAttributes } from "../content";
 import {
   extractModelInfo,
   extractRequestSummary,
@@ -18,7 +19,8 @@ export function wrapModel(
   tracer: AgentTracer,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   model: unknown,
-  parentOperation: string
+  parentOperation: string,
+  storeMessages: boolean
 ): unknown {
   if (!wrapLanguageModel) {
     return model;
@@ -40,7 +42,8 @@ export function wrapModel(
           "doGenerate",
           modelInfo,
           params,
-          parentOperation
+          parentOperation,
+          storeMessages
         );
         return tracer.withSpan(
           span.name,
@@ -49,13 +52,14 @@ export function wrapModel(
             aiGatewayLog.reset();
             try {
               const result = await doGenerate();
-              modelCall.finish(
-                finishAttributesFromResult(result, {
+              modelCall.finish({
+                ...finishAttributesFromResult(result, {
                   aiGatewayLogId:
                     extractAIGatewayLogId(result) ?? aiGatewayLog.get(),
                   includeResponse: true
-                })
-              );
+                }),
+                ...outputMessageAttributes(result, storeMessages)
+              });
               return result;
             } catch (cause: unknown) {
               recordAIGatewayLogOnError(modelCall, cause, aiGatewayLog.get());
@@ -69,7 +73,8 @@ export function wrapModel(
           "doStream",
           modelInfo,
           params,
-          parentOperation
+          parentOperation,
+          storeMessages
         );
         // The provider call runs INSIDE the activation callback so its work
         // (fetch subrequests, etc.) nests under the chat span; the span stays
@@ -87,6 +92,7 @@ export function wrapModel(
                   extractAIGatewayLogId(result) ?? aiGatewayLog.get(),
                 includeAIGatewayLog: true,
                 includeResponse: true,
+                storeMessages,
                 startedAtMs
               });
             } catch (cause: unknown) {
@@ -116,19 +122,25 @@ function modelCallSpanForModel(
   operation: string,
   model: ModelInfo | undefined,
   params: unknown,
-  parentOperation: string
+  parentOperation: string,
+  storeMessages: boolean
 ): ReturnType<typeof modelCallSpan> {
-  return modelCallSpan({
+  const record =
+    typeof params === "object" && params !== null
+      ? (params as Record<string, unknown>)
+      : {};
+  const span = modelCallSpan({
     integration: "ai-sdk",
     model: model?.modelId,
     operation,
     provider: model?.provider,
-    request: extractRequestSummary(
-      // SAFETY: AI SDK middleware params are records; only known numeric fields are read via readNumber.
-      typeof params === "object" && params !== null
-        ? (params as Record<string, unknown>)
-        : {},
-      parentOperation
-    )
+    request: extractRequestSummary(record, parentOperation)
   });
+  return {
+    ...span,
+    attributes: {
+      ...span.attributes,
+      ...inputMessageAttributes(record, storeMessages)
+    }
+  };
 }

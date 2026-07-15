@@ -1,4 +1,7 @@
-import type { AISDKInstrumentationOptions } from "../options";
+import type {
+  AISDKInstrumentationOptions,
+  ResolvedAISDKStorageOptions
+} from "../options";
 import { readString } from "../read";
 import {
   metadataAttributes,
@@ -123,6 +126,11 @@ function createOperationWrapper(
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   instrumentation: AISDKV6Instrumentation
 ): AISDKV6Operation {
+  const storage: ResolvedAISDKStorageOptions = {
+    storeMessages: instrumentation.options?.storeMessages === true,
+    storeTools: instrumentation.options?.storeTools === true
+  };
+
   // Only the span NAME is computed before the sampling check (it is required
   // to open a span at all, and needs a single metadata property the SDK reads
   // anyway). The full attribute spec — metadata enumeration, request fields,
@@ -159,7 +167,8 @@ function createOperationWrapper(
               params,
               operationName,
               wrapLanguageModel,
-              instrumentation.tracer
+              instrumentation.tracer,
+              storage
             ),
             ...args
           );
@@ -197,7 +206,8 @@ function createOperationWrapper(
             params,
             operationName,
             wrapLanguageModel,
-            instrumentation.tracer
+            instrumentation.tracer,
+            storage
           ),
           ...args
         );
@@ -239,12 +249,13 @@ function operationParamsForCall(
   params: AISDKV6CallParams,
   operationName: AISDKV6OperationName,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
-  tracer: AgentTracer
+  tracer: AgentTracer,
+  storage: ResolvedAISDKStorageOptions
 ): AISDKV6CallParams {
   return {
     ...params,
     ...(shouldWrapTools(operationName) && params.tools !== undefined
-      ? { tools: wrapTools(tracer, params.tools) }
+      ? { tools: wrapTools(tracer, params.tools, storage.storeTools) }
       : {}),
     ...(params.model !== undefined
       ? {
@@ -252,7 +263,8 @@ function operationParamsForCall(
             tracer,
             wrapLanguageModel,
             params.model,
-            operationName
+            operationName,
+            storage.storeMessages
           )
         }
       : {})

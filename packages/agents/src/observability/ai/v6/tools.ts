@@ -1,12 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { toolApprovalSpan, toolCallSpan } from "../../genai/telemetry";
+import { toolInputAttributes, toolOutputAttributes } from "../content";
 import { readString } from "../read";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 
 /** Context snapshot type returned by AsyncLocalStorage.snapshot(). */
 type ContextSnapshot = <R>(fn: () => R) => R;
 
-export function wrapTools(tracer: AgentTracer, tools: unknown): unknown {
+export function wrapTools(
+  tracer: AgentTracer,
+  tools: unknown,
+  storeTools: boolean
+): unknown {
   if (typeof tools !== "object" || tools === null) {
     return tools;
   }
@@ -15,7 +20,7 @@ export function wrapTools(tracer: AgentTracer, tools: unknown): unknown {
   const toolRecord = tools as Record<string, unknown>;
   const wrappedTools: Record<string, unknown> = {};
   for (const [toolName, tool] of Object.entries(toolRecord)) {
-    wrappedTools[toolName] = wrapTool(tracer, toolName, tool);
+    wrappedTools[toolName] = wrapTool(tracer, toolName, tool, storeTools);
   }
   return wrappedTools;
 }
@@ -23,7 +28,8 @@ export function wrapTools(tracer: AgentTracer, tools: unknown): unknown {
 function wrapTool(
   tracer: AgentTracer,
   toolName: string,
-  tool: unknown
+  tool: unknown,
+  storeTools: boolean
 ): unknown {
   if (typeof tool !== "object" || tool === null) {
     return tool;
@@ -67,9 +73,13 @@ function wrapTool(
       toolCallId: extractToolCallId(args[1]),
       toolName
     });
+    const attributes = {
+      ...span.attributes,
+      ...toolInputAttributes(args[0], storeTools)
+    };
     // The span may outlive this call frame (streaming tools yield after
     // returning), so the wrapper owns the span lifetime via openSpan.
-    return tracer.openSpan(span.name, span.attributes, (toolSpan) => {
+    return tracer.openSpan(span.name, attributes, (toolSpan) => {
       // Captured inside the activation so generator bodies (which resume at
       // the consumer's next() call sites) can be re-entered into the tool
       // span's async context.
@@ -85,7 +95,8 @@ function wrapTool(
 
       if (isPromiseLike(result)) {
         return Promise.resolve(result).then(
-          (resolved) => settleToolResult(resolved, toolSpan, inSpanContext),
+          (resolved) =>
+            settleToolResult(resolved, toolSpan, inSpanContext, storeTools),
           (cause: unknown) => {
             toolSpan.fail(cause);
             throw cause;
@@ -93,7 +104,7 @@ function wrapTool(
         );
       }
 
-      return settleToolResult(result, toolSpan, inSpanContext);
+      return settleToolResult(result, toolSpan, inSpanContext, storeTools);
     });
   };
 
@@ -270,20 +281,22 @@ function approvalResponses(messagesValue: unknown): Array<{
 function settleToolResult(
   result: unknown,
   span: AgentSpan,
-  inSpanContext: ContextSnapshot
+  inSpanContext: ContextSnapshot,
+  storeTools: boolean
 ): unknown {
   if (isAsyncIterable(result)) {
-    return finishWhenIterableCompletes(result, span, inSpanContext);
+    return finishWhenIterableCompletes(result, span, inSpanContext, storeTools);
   }
 
-  span.finish();
+  span.finish(toolOutputAttributes(result, storeTools));
   return result;
 }
 
 function finishWhenIterableCompletes(
   iterable: AsyncIterable<unknown>,
   span: AgentSpan,
-  inSpanContext: ContextSnapshot
+  inSpanContext: ContextSnapshot,
+  storeTools: boolean
 ): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -292,11 +305,13 @@ function finishWhenIterableCompletes(
       // runs — and creates any nested spans — under the tool span.
       const iterator = inSpanContext(() => iterable[Symbol.asyncIterator]());
       let exhausted = false;
+      let returnValue: unknown;
       try {
         while (true) {
           const step = await inSpanContext(() => iterator.next());
           if (step.done) {
             exhausted = true;
+            returnValue = step.value;
             return step.value;
           }
           yield step.value;
@@ -318,7 +333,7 @@ function finishWhenIterableCompletes(
         }
         // Covers normal completion and early consumer return; a no-op after
         // fail() since span closure is idempotent.
-        span.finish();
+        span.finish(toolOutputAttributes(returnValue, storeTools));
       }
     }
   };

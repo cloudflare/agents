@@ -1,4 +1,7 @@
-import type { AISDKInstrumentationOptions } from "./options";
+import type {
+  AISDKInstrumentationOptions,
+  AISDKStorageOptions
+} from "./options";
 import { createAISDKV6Wrapper } from "./v6/wrap";
 import { createAISDKV7Telemetry } from "./v7/telemetry";
 import type { AISDKV7Telemetry } from "./v7/types";
@@ -21,8 +24,13 @@ export function wrapAISDK<T extends Record<string, unknown>>(
  * Creates an AI SDK v7 telemetry adapter for use with `registerTelemetry` or
  * per-call telemetry configuration.
  */
-export function createAISDKTelemetry(): AISDKV7Telemetry {
-  return createAISDKV7Telemetry({ tracer });
+export function createAISDKTelemetry(
+  options: AISDKStorageOptions = {}
+): AISDKV7Telemetry {
+  return createAISDKV7Telemetry({ options, tracer });
 }
 
-export type { AISDKInstrumentationOptions } from "./options";
+export type {
+  AISDKInstrumentationOptions,
+  AISDKStorageOptions
+} from "./options";

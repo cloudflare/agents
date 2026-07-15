@@ -1,4 +1,11 @@
 import { extractAIGatewayLogId } from "../ai-gateway";
+import {
+  inputMessageAttributes,
+  outputMessageAttributes,
+  toolInputAttributes,
+  toolOutputAttributes
+} from "../content";
+import type { AISDKStorageOptions } from "../options";
 import { readString } from "../read";
 import {
   aiGatewayLogAttributes,
@@ -48,6 +55,7 @@ type ToolState = {
 
 /** Tracing configuration for the AI SDK v7 telemetry adapter. */
 export type AISDKV7Instrumentation = {
+  readonly options?: AISDKStorageOptions | undefined;
   readonly tracer: AgentTracer;
 };
 
@@ -58,6 +66,8 @@ export type AISDKV7Instrumentation = {
 export function createAISDKV7Telemetry(
   instrumentation: AISDKV7Instrumentation
 ): AISDKV7Telemetry {
+  const storeMessages = instrumentation.options?.storeMessages === true;
+  const storeTools = instrumentation.options?.storeTools === true;
   const operations = new Map<string, OperationState>();
   const modelSpans = new Map<string, ModelState[]>();
   // Keyed by `${callId}:${toolCallId}` — concurrent operations can reuse a
@@ -129,7 +139,10 @@ export function createAISDKV7Telemetry(
       }
 
       const span = modelCallSpan({
-        attributes: correlationAttributes({ callId: event.callId }),
+        attributes: {
+          ...correlationAttributes({ callId: event.callId }),
+          ...inputMessageAttributes(event, storeMessages)
+        },
         integration: "ai-sdk",
         model: readString(event.modelId),
         operation: isStreamOperation(state.operationName)
@@ -156,13 +169,14 @@ export function createAISDKV7Telemetry(
           state.spanSpec.attributes,
           (activeSpan) => activeSpan
         );
-      span.finish(
-        finishAttributesFromEvent(event, {
+      span.finish({
+        ...finishAttributesFromEvent(event, {
           includeAIGatewayLog: true,
           includePerformance: true,
           includeResponse: true
-        })
-      );
+        }),
+        ...outputMessageAttributes(event, storeMessages)
+      });
     },
 
     onToolExecutionStart(event) {
@@ -184,6 +198,7 @@ export function createAISDKV7Telemetry(
           attributes: {
             ...span.attributes,
             ...correlationAttributes({ callId: event.callId, toolCallId }),
+            ...toolInputAttributes(event.toolCall.input, storeTools),
             ...toolContextAttributes(toolName, event.toolContext)
           }
         }
@@ -211,7 +226,7 @@ export function createAISDKV7Telemetry(
       if (event.toolOutput?.type === "tool-error") {
         span.fail(event.toolOutput.error);
       } else {
-        span.finish();
+        span.finish(toolOutputAttributes(event.toolOutput?.output, storeTools));
       }
       toolSpans.delete(toolSpanKey(event.callId, toolCallId));
     },

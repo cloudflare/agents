@@ -288,8 +288,9 @@ spans, and `execute_tool {tool}` spans. Think always supplies its durable
 identity: `gen_ai.agent.name` is the class name, `gen_ai.agent.id` is the named
 instance, and `gen_ai.conversation.id` is the opaque Durable Object ID. These
 are defaults; `beforeTurn` can override `functionId` or the corresponding
-metadata fields for applications with a different identity model. Think never
-attaches prompts, model output, or tool inputs/outputs to spans.
+metadata fields for applications with a different identity model. Payload
+storage is off by default. Set `storeMessages` and/or `storeTools` on the Think
+agent to opt in; these are wrapper settings, not span attributes.
 
 ### AI SDK v6
 
@@ -315,6 +316,17 @@ They never remain open while waiting for a human across invocations. Stream
 spans close on completion, cancellation, an in-band error, or early consumer
 return. Async-generator tools stay open until iteration ends.
 
+Pass `storeMessages: true` to write full input/output message arrays (including
+tool-call parts) to `chat`; pass `storeTools: true` to write tool arguments and
+results to `execute_tool`:
+
+```ts
+const traced = wrapAISDK(ai, {
+  storeMessages: true,
+  storeTools: true
+});
+```
+
 ### AI SDK v7
 
 AI SDK v7 ships a first-class telemetry lifecycle. Register the adapter once and
@@ -325,7 +337,9 @@ instrumented:
 import { registerTelemetry } from "ai";
 import { createAISDKTelemetry } from "agents/observability/ai";
 
-registerTelemetry(createAISDKTelemetry());
+registerTelemetry(
+  createAISDKTelemetry({ storeMessages: true, storeTools: true })
+);
 ```
 
 Or scope it to a single call through `experimental_telemetry`:
@@ -430,6 +444,8 @@ await generateText({
 | `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
 | `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID also correlates approval lifecycle segments                           |
 | `cloudflare.agents.tool.approval.state`                                            | AI SDK v6 approval lifecycle segment: `requested`, `approved`, or `denied`                   |
+| `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in full model messages on `chat`, including tool-call parts                              |
+| `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                            | Opt-in tool arguments/results on `execute_tool`                                              |
 | `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
 | `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
 
@@ -460,12 +476,19 @@ an attribute: failures emit `error.type`, but the adapter does not invent an
 
 ### Context and safety
 
-The adapters never attach prompts, messages, model output, tool arguments, tool
-results, the dedicated `system` parameter, schemas, request headers, provider
-options, or raw error messages to spans. The optional AI Gateway reference is a
-single bounded opaque log ID read from the actual response; response headers
-and provider metadata themselves are not recorded. Metadata and context values must
-be scalar; objects and arrays are dropped.
+Payload storage is explicit and off by default. `storeMessages` writes only
+`gen_ai.input.messages` / `gen_ai.output.messages` on `chat`; when the message
+attribute exceeds its budget, the adapter repeatedly drops the oldest
+unprotected message (index 2), preserving the first two messages and newest
+tail. `storeTools` writes only `gen_ai.tool.call.arguments` /
+`gen_ai.tool.call.result` on `execute_tool`. The flags themselves are never
+written to telemetry metadata or spans.
+
+The dedicated `system` parameter, schemas, request headers, provider options,
+and raw error messages are never recorded. The optional AI Gateway reference is
+a bounded opaque log ID; response headers and provider metadata themselves are
+not recorded. Metadata and context values must be scalar; objects and arrays
+are dropped.
 
 For v6, only `experimental_context` exists. Configure its allowlist on the
 wrapper:

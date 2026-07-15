@@ -1391,15 +1391,6 @@ const admittedTurnContext = new AsyncLocalStorage<{
   generation?: number | undefined;
 }>();
 
-// Route Think's inference through the always-on Cloudflare-native tracing
-// wrapper: every turn's streamText call becomes an `invoke_agent` root span
-// with `chat`/`execute_tool` children in Workers Observability. No-op on
-// runtimes without the `tracing` API.
-const { streamText: tracedStreamText } = wrapAISDK({
-  streamText,
-  wrapLanguageModel
-});
-
 // Drains the underlying model stream when a drain loop exits early (in-stream
 // error break, stall abort, user abort). The AI SDK tees its base stream, so
 // an abandoned tee branch would otherwise leave the tracing wrapper's
@@ -2533,6 +2524,12 @@ export class Think<
    * for a custom timeout. Defaults to `false` (no waiting).
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
+
+  /** Store model input/output on `chat` spans. */
+  storeMessages = false;
+
+  /** Store tool input/output on `execute_tool` spans. */
+  storeTools = false;
 
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();
@@ -5461,6 +5458,10 @@ export class Think<
           : [])
     ];
 
+    const tracedStreamText = wrapAISDK(
+      { streamText, wrapLanguageModel },
+      { storeMessages: this.storeMessages, storeTools: this.storeTools }
+    ).streamText;
     const result = tracedStreamText({
       model: finalModel,
       system: turnSystem,

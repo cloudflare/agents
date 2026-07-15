@@ -1514,65 +1514,165 @@ describe("createAISDKV6Wrapper", () => {
   });
 });
 
-describe("createAISDKV6Wrapper content safety", () => {
-  it("never records prompt, model output, tool input, or tool output", async () => {
-    const tracing = new RecordingTracer();
-    const secretValues = [
-      "secret prompt",
-      "secret message",
-      "secret model output",
-      "secret tool input",
-      "secret tool output"
-    ];
+describe("createAISDKV6Wrapper payload storage", () => {
+  function fixture() {
+    const tool = { execute: async (_input: unknown) => ({ saved: true }) };
     const model: TestModel = {
-      modelId: "safe-model",
-      provider: "safe-provider",
+      modelId: "payload-model",
+      provider: "payload-provider",
       doGenerate: async () => ({
-        finishReason: "stop",
-        text: "secret model output"
+        content: [
+          { type: "text", text: "done" },
+          {
+            type: "tool-call",
+            input: { value: 42 },
+            toolCallId: "call-1",
+            toolName: "save"
+          }
+        ],
+        finishReason: "stop"
       })
-    };
-    const tool = {
-      execute: async (_input: string) => "secret tool output"
     };
     const ai: AISDKV6Namespace = {
       generateText: async (params) => {
-        await (params.model as TestModel).doGenerate();
-        await (params.tools as { unsafe: typeof tool }).unsafe.execute(
-          "secret tool input"
-        );
+        await (params.model as TestModel).doGenerate({
+          prompt: params.messages ?? params.prompt
+        });
+        await (params.tools as { save: typeof tool }).save.execute({
+          value: 42
+        });
         return { finishReason: "stop" };
       },
       wrapLanguageModel({ model: rawModel, middleware }) {
         const original = rawModel as TestModel;
         return {
           ...original,
-          doGenerate: async () =>
+          doGenerate: async (params?: unknown) =>
             middleware.wrapGenerate
               ? middleware.wrapGenerate({
-                  doGenerate: () => original.doGenerate(),
-                  params: {}
+                  doGenerate: () => original.doGenerate(params),
+                  params: params ?? {}
                 })
-              : original.doGenerate()
+              : original.doGenerate(params)
         };
       }
     };
+    return { ai, model, tool };
+  }
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
-      messages: [{ content: "secret message", role: "user" }],
+  it("stores full messages, including tool calls, on chat", async () => {
+    const tracing = new RecordingTracer();
+    const { ai, model, tool } = fixture();
+    const messages = [
+      { role: "system", content: "head-0" },
+      { role: "user", content: "head-1" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            input: { prior: true },
+            toolCallId: "prior-call",
+            toolName: "save"
+          }
+        ]
+      }
+    ];
+
+    await createAISDKV6Wrapper(ai, {
+      options: { storeMessages: true },
+      tracer: tracing
+    }).generateText({ messages, model, tools: { save: tool } });
+
+    const root = tracing.rootSpans[0];
+    const chat = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.input.messages"]);
+    expect(root?.attributes).not.toHaveProperty(["gen_ai.output.messages"]);
+    const allAttributes = JSON.stringify(
+      tracing.spans.map((span) => span.attributes)
+    );
+    expect(allAttributes).not.toContain("storeMessages");
+    expect(allAttributes).not.toContain("storeTools");
+    expect(chat?.attributes["gen_ai.input.messages"]).toBe(
+      JSON.stringify(messages)
+    );
+    expect(
+      JSON.parse(chat?.attributes["gen_ai.output.messages"] as string)
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "done" },
+          {
+            type: "tool-call",
+            input: { value: 42 },
+            toolCallId: "call-1",
+            toolName: "save"
+          }
+        ]
+      }
+    ]);
+  });
+
+  it("drops oldest messages after two protected head messages", async () => {
+    const tracing = new RecordingTracer();
+    const { ai, model, tool } = fixture();
+    const messages = [
+      { role: "system", content: "head-0" },
+      { role: "user", content: "head-1" },
+      { role: "assistant", content: `old-${"x".repeat(20_000)}` },
+      { role: "user", content: `middle-${"y".repeat(20_000)}` },
+      { role: "user", content: "newest" }
+    ];
+
+    await createAISDKV6Wrapper(ai, {
+      options: { storeMessages: true },
+      tracer: tracing
+    }).generateText({ messages, model, tools: { save: tool } });
+
+    const chat = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    const stored = JSON.parse(
+      chat?.attributes["gen_ai.input.messages"] as string
+    ) as typeof messages;
+    expect(stored.map((message) => message.content)).toEqual([
+      "head-0",
+      "head-1",
+      messages[3]?.content,
+      "newest"
+    ]);
+  });
+
+  it("stores tool input/output only on execute_tool", async () => {
+    const tracing = new RecordingTracer();
+    const { ai, model, tool } = fixture();
+
+    await createAISDKV6Wrapper(ai, {
+      options: { storeTools: true },
+      tracer: tracing
+    }).generateText({
+      messages: [{ role: "user", content: "save" }],
       model,
-      prompt: "secret prompt",
-      tools: { unsafe: tool }
+      tools: { save: tool }
     });
 
-    const recordedValues = tracing.spans.flatMap((span) =>
-      Object.values(span.attributes).map(String)
+    const chat = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
     );
-    for (const secret of secretValues) {
-      expect(recordedValues.every((value) => !value.includes(secret))).toBe(
-        true
-      );
-    }
+    const toolSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
+    expect(chat?.attributes).not.toHaveProperty(["gen_ai.input.messages"]);
+    expect(chat?.attributes).not.toHaveProperty(["gen_ai.output.messages"]);
+    expect(toolSpan?.attributes["gen_ai.tool.call.arguments"]).toBe(
+      JSON.stringify({ value: 42 })
+    );
+    expect(toolSpan?.attributes["gen_ai.tool.call.result"]).toBe(
+      JSON.stringify({ saved: true })
+    );
   });
 });
 

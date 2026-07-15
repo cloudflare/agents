@@ -49,7 +49,10 @@ function textStreamModel(): MockLanguageModelV3 {
 describe("createAISDKV6Wrapper with the real AI SDK", () => {
   it("traces a streamText call end to end", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKV6Wrapper(ai, {
+      options: { storeMessages: true },
+      tracer: tracing
+    });
 
     const result = wrapped.streamText({
       model: textStreamModel(),
@@ -88,6 +91,12 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     expect(chatSpan?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "doStream",
       "cloudflare.agents.usage.total_tokens": 12,
+      "gen_ai.output.messages": JSON.stringify([
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Hello world" }]
+        }
+      ]),
       // Populated from the provider-level response-metadata stream part.
       "gen_ai.response.id": "resp-1",
       "gen_ai.response.model": "mock-model-served"
