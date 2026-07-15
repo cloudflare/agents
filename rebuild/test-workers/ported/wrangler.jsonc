@@ -35,6 +35,30 @@
         "name": "ThinkToolsTestAgent"
       },
       {
+        "class_name": "ThinkHooksAgent",
+        "name": "ThinkHooksAgent"
+      },
+      {
+        "class_name": "ThinkHooksProgrammaticAgent",
+        "name": "ThinkHooksProgrammaticAgent"
+      },
+      {
+        "class_name": "ThinkHooksToolsAgent",
+        "name": "ThinkHooksToolsAgent"
+      },
+      {
+        "class_name": "ThinkHooksLoopToolAgent",
+        "name": "ThinkHooksLoopToolAgent"
+      },
+      {
+        "class_name": "ThinkHooksSessionAgent",
+        "name": "ThinkHooksSessionAgent"
+      },
+      {
+        "class_name": "ThinkHooksExtensionAgent",
+        "name": "ThinkHooksExtensionAgent"
+      },
+      {
         "class_name": "ThinkRecoveryTestAgent",
         "name": "ThinkRecoveryTestAgent"
       },
@@ -141,6 +165,12 @@
         "ThinkTestAgent",
         "ThinkExecuteHitlAgent",
         "ThinkToolsTestAgent",
+        "ThinkHooksAgent",
+        "ThinkHooksProgrammaticAgent",
+        "ThinkHooksToolsAgent",
+        "ThinkHooksLoopToolAgent",
+        "ThinkHooksSessionAgent",
+        "ThinkHooksExtensionAgent",
         "ThinkRecoveryTestAgent",
         "ThinkSessionThinkTestAgent",
         "ThinkSessionRecoveryAgent",

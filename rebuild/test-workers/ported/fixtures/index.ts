@@ -9,3 +9,4 @@ export * from "./agent-tool-reattach-recovery-agent.js";
 export * from "./assistant-agent-loop-agents.js";
 export * from "./protocol-routing-agents.js";
 export * from "./think-session-agents.js";
+export * from "./hooks-agents.js";
