@@ -3,6 +3,7 @@ import { scoped } from "../ports/storage.js";
 import type { ModelChunk, ModelClient, ModelMessage } from "../ports/model.js";
 
 import { Agent, type AgentHost } from "./agent.js";
+import type { ConversationApi } from "./capabilities.js";
 
 import { createTurnQueue, type TurnQueue } from "../domain/turn/admission.js";
 import {
@@ -144,7 +145,7 @@ export interface AdmittedTurnSpec {
  * extending ChatAgent directly, with none of Think's opinions along for the
  * ride.
  */
-export class ChatAgent<State = unknown> extends Agent<State> {
+export class ChatAgent<State = unknown> extends Agent<State> implements ConversationApi {
   // --- configuration surface: plain overridable values -----------------------
   maxSteps = 10;
   sendReasoning = true;

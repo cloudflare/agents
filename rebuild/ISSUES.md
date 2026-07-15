@@ -609,3 +609,23 @@ active rows even when requested (returns 1, rebuild returns 3). Deleting a
 no row and silently drops the outcome; a deleted `pending` row silently
 vanishes from the FIFO. Fix: intersect the requested statuses with
 settled-only (or explicitly skip active rows), matching the original.
+
+## ISSUE-035 — Re-implement delegation reattach/no-progress budgets (parity, as a swappable policy)
+
+**Status:** open · **Area:** domain/delegation · **Found by:** P9 agent-tools port (~14/33 tests) + earlier reattach-budget/task-amplification e2e (0/1, 0/2)
+
+The original gives agent-tool runs an `interrupted` status and a reattach
+budget: a parent re-attaches to an orphaned child run bounded-many times
+(`noProgressTimeoutMs`, `maxWindowMs` on AgentStaticOptions) before
+terminalizing. The rebuild has none of it (`RunStatus` lacks `interrupted`;
+no budget config anywhere).
+
+**Decision (maintainer, 2026-07-15): build parity — but scoped as a
+swappable policy, mirroring chat recovery's `RecoveryPolicy` precedent.**
+Mechanism (status vocabulary, reattach bookkeeping) lives in
+`domain/delegation/runs.ts`; the budget decisions live in an injected
+`ReattachPolicy` object with the parity implementation as default, so users
+can replace it with a simpler policy (or disable) without touching the
+mechanism or the Think surface. Acceptance: the P9 reattach family +
+reattach-budget/task-amplification e2e flip. Schedule before/alongside port
+wave P13 (delegation-recovery files).

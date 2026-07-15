@@ -87,7 +87,7 @@ refreshes the snapshot in the same commit.
 | think-session.test.ts | 198 | WIRE+API | rewritten 103/198 (7 dropped-with-pointer) | [fidelity:rewrite] R3 landed in-band stream errors (new `error` ModelChunk variant, threaded through providers/loop/wire) + abort/stall injection seams: +32 flips, zero regressions. Remaining failures keep NAMED missing-feature reasons (sanitization/row-size, saveMessages/addMessages variants, submission seams, child-stream forwarding, keep-recovering override). |
 | hooks.test.ts | 105 | WIRE+API | ported 48/105 | [fidelity:adapter] P7. 25 missing-feature (15 host-bridge/`_insideInferenceLoop`, no-issue-yet; 4 extensions ISSUE-006; 6 small knobs: TurnConfig output/experimental_transform, presence/frequency penalties + timeout, lease-config surface, reasoning lifecycle chunks). 30 divergence (11 suspended-stream-stays-open family; 8 tool-hook gating contract ISSUE-033; 4 async-iterable outputs ISSUE-031; 2 normalize coercion ISSUE-032; 4 error-text wording; 1 ledger replay-by-key, documented). 2 fixture-gap (service-level concurrency — native actions.test.ts covers). Verified 0 per-test flips across the ChatAgent extraction. |
 | submissions.test.ts | 51 | PUBLIC-API | ported 23/51 | [fidelity:adapter] P8. 19 missing-feature (10 running-row recovery tracking `messagesAppliedAt`/`messageIds`; 4 workflow-notification store, adjacent ISSUE-016; 3 `think_final_answer` structured-output tool; 2 misc: async acceptance hook, configurable stale window — all no-issue-yet). 9 divergence (1 bulk-delete deletes ACTIVE rows ISSUE-034 — real bug; 4 cancel reason not persisted to row.error; 2 list ordering oldest-first vs newest-first; 1 conflict-pair detection; 1 dedup retry doesn't rewake drain). |
-| agent-tools.test.ts | 33 | PUBLIC-API | pending | T3 |
+| agent-tools.test.ts | 33 | PUBLIC-API | claimed P9 | T3 |
 | assistant-agent-loop.test.ts | 23 | WIRE | ported 22/23 | [fidelity:adapter] Near-green; 1 residual to pin in the next triage pass. |
 | extension-manager.test.ts | 34 | INTERNAL | blocked ISSUE-006 | ports with the extensions lift |
 | run-turn.test.ts | 26 | PUBLIC-API | pending | T3 |
@@ -196,7 +196,7 @@ refreshes the snapshot in the same commit.
 | spike-sub-agent-routing.test.ts | 16 | blocked ISSUE-017 | |
 | state.test.ts | 22 | pending | T3 |
 | sub-agent-routing.test.ts | 22 | blocked ISSUE-017 | |
-| sub-agent.test.ts | 97 | pending | T3 (delegation surface — big) |
+| sub-agent.test.ts | 97 | claimed P10 | T3 (delegation surface — big) |
 | workflow-error-reporting.test.ts | 7 | blocked ISSUE-016 | |
 | workflow-integration.test.ts | 7 | blocked ISSUE-016 | |
 | workflow-prototype.test.ts | 14 | blocked ISSUE-016 | |

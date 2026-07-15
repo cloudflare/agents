@@ -14,6 +14,7 @@ import {
   type TurnResult,
   type WaitUntilStableOptions,
 } from "./chat-agent.js";
+import type { ApprovalApi, RecoveryIntrospection } from "./capabilities.js";
 
 import type { StepResult, TurnContext, TurnOutcome } from "../domain/turn/loop.js";
 import { assistantMessage, type ChatMessage } from "../domain/messages/model.js";
@@ -114,7 +115,7 @@ export type { SessionBuilder } from "../domain/session/builder.js";
  * module; Think only decides which ones compose and plugs them into
  * ChatAgent's turn-pipeline seams.
  */
-export class Think<State = unknown> extends ChatAgent<State> {
+export class Think<State = unknown> extends ChatAgent<State> implements ApprovalApi, RecoveryIntrospection {
   // --- configuration surface: plain overridable values (audit 23 table) ----
   chatRecovery: boolean | RecoveryPolicy = true;
   contextOverflow: ContextOverflowConfig | undefined;
