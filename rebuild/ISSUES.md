@@ -514,7 +514,7 @@ author picks from, composition primary:
    }
    ```
    `rpcProtocol()`/`stateProtocol()` type-check against any `Agent`;
-   `conversationProtocol()` type-checks against a `ConversationSurface`
+   `conversationProtocol()` type-checks against a `ConversationApi`
    **interface** (the turn methods it calls), NOT the concrete `Think` class —
    an interface has no private brand, so a userland composition implementing
    those methods satisfies it too (ADR-0002 corollary). Today

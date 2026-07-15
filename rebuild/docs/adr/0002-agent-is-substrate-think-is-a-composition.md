@@ -92,7 +92,7 @@ the chat transport. That contradicts the ADR at the hosting layer.
 
 **Invariant (corollary): a transport/adapter depends on a published capability
 interface, never on a concrete agent class.** Type the conversation transport
-against a `ConversationSurface` interface — the methods it actually calls
+against a `ConversationApi` interface — the methods it actually calls
 (`chat`/`history`/`applyToolResult`/`resolveApproval`/`isRecovering`/
 `activeTurn`/`pendingChatTerminal`/`clearMessages`/`cancelChat` + the
 Agent-level `events`/`setState`/`callables`/`identity`). An interface has no
@@ -103,17 +103,17 @@ from the class to the contract — and a contract is open.
 This narrows to exactly one transport: event-projection, state-sync, and RPC
 transports need only Agent-level capabilities (`events`/`setState`/`callables`,
 on any Agent) — they never name Think. Only the conversation transport needs
-`ConversationSurface`. So three of the four `cf_agent_*` concerns are already
+`ConversationApi`. So three of the four `cf_agent_*` concerns are already
 userland-open; the fourth becomes open by interface-typing.
 
-`ConversationSurface` is the **wire-independent inbound contract** of "an agent
+`ConversationApi` is the **wire-independent inbound contract** of "an agent
 you can converse with" — what a transport *calls*. The outbound stream is the
 generic event log (`events()`), deliberately NOT part of this surface, so the
 conversation transport pulls in only conversation, and state/rpc transports
 pull in only their own capability.
 
 ```ts
-interface ConversationSurface {
+interface ConversationApi {
   // drive a turn
   chat(input: string | ChatMessage[], callback?: StreamCallback,
        opts?: { channel?: string; requestId?: string; clientTools?: ToolSet }): Promise<TurnResult>;
@@ -133,7 +133,20 @@ interface ConversationSurface {
 
 Callers are transports/drivers, never end users: the WS chat adapter, a future
 HTTP/SSE adapter, the CLI demo, and the delegation relay (a parent driving a
-child's `chat`) are all bindings of one protocol onto this one surface.
+child's `chat`) are all bindings of one protocol onto this one contract.
+
+**Naming + relation to Channels (source-of-truth check, 2026-07-15).** This
+interface is the INBOUND transport seam — the mirror of the OUTBOUND
+`ConversationEventLog` the context map already names ("the transport seam").
+Together, in seam (`ConversationApi`) + out seam (`ConversationEventLog`) = the
+boundary that keeps the app transport-free. It is NOT the Channels context:
+Channels/Surfaces (context 12) models *which surface a turn arrives on* +
+per-surface policy + out-of-band delivery; `ConversationApi` is *how you drive
+a turn*, surface-agnostic (a turn's channel is just its `chat({ channel })`
+argument). Do NOT call this `ConversationSurface` — "Surface" is already
+Channels' synonym in the map (context 12 is "Channels / Surfaces"); reusing it
+would add a third "surface" meaning to the overloaded-term watchlist. A
+transport *realizes a Channel on a wire* and drives it via `ConversationApi`.
 
 ## Consequence / open follow-up
 
