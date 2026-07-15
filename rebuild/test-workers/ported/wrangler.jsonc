@@ -39,6 +39,46 @@
         "name": "ThinkRecoveryTestAgent"
       },
       {
+        "class_name": "ThinkSessionThinkTestAgent",
+        "name": "ThinkSessionThinkTestAgent"
+      },
+      {
+        "class_name": "ThinkSessionRecoveryAgent",
+        "name": "ThinkSessionRecoveryAgent"
+      },
+      {
+        "class_name": "ThinkSessionTestAgent",
+        "name": "ThinkSessionTestAgent"
+      },
+      {
+        "class_name": "ThinkAsyncConfigSessionAgent",
+        "name": "ThinkAsyncConfigSessionAgent"
+      },
+      {
+        "class_name": "ThinkConfigTestAgent",
+        "name": "ThinkConfigTestAgent"
+      },
+      {
+        "class_name": "ThinkLegacyConfigMigrationAgent",
+        "name": "ThinkLegacyConfigMigrationAgent"
+      },
+      {
+        "class_name": "ThinkConfigInSessionAgent",
+        "name": "ThinkConfigInSessionAgent"
+      },
+      {
+        "class_name": "ThinkProgrammaticTestAgent",
+        "name": "ThinkProgrammaticTestAgent"
+      },
+      {
+        "class_name": "ThinkAsyncHookTestAgent",
+        "name": "ThinkAsyncHookTestAgent"
+      },
+      {
+        "class_name": "ThinkNonRecoveryTestAgent",
+        "name": "ThinkNonRecoveryTestAgent"
+      },
+      {
         "class_name": "ThinkAgentToolParent",
         "name": "ThinkAgentToolParent"
       },
@@ -102,6 +142,16 @@
         "ThinkExecuteHitlAgent",
         "ThinkToolsTestAgent",
         "ThinkRecoveryTestAgent",
+        "ThinkSessionThinkTestAgent",
+        "ThinkSessionRecoveryAgent",
+        "ThinkSessionTestAgent",
+        "ThinkAsyncConfigSessionAgent",
+        "ThinkConfigTestAgent",
+        "ThinkLegacyConfigMigrationAgent",
+        "ThinkConfigInSessionAgent",
+        "ThinkProgrammaticTestAgent",
+        "ThinkAsyncHookTestAgent",
+        "ThinkNonRecoveryTestAgent",
         "BareAssistantAgent",
         "LoopTestAgent",
         "LoopToolTestAgent",

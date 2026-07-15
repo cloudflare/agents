@@ -12,6 +12,7 @@ import {
   getAgentByName as rebuiltGetAgentByName,
   routeAgentRequest,
 } from "../../src/adapters/cloudflare/routing.js";
+import type { TurnResult as RebuiltTurnResult } from "../../src/app/think.js";
 import {
   defaultContextOverflowClassifier as rebuiltDefaultContextOverflowClassifier
 } from "../../src/domain/reliability/recovery/overflow.js";
@@ -75,6 +76,7 @@ export type {
   TurnResult,
   StreamCallback,
   ChatErrorContext,
+  SessionBuilder,
 } from "../../src/app/think.js";
 export type { ChatMessage as RebuiltChatMessage } from "../../src/domain/messages/model.js";
 export type ChatResponseResult = {
@@ -83,6 +85,10 @@ export type ChatResponseResult = {
   continuation: boolean;
   message?: import("../../src/domain/messages/model.js").ChatMessage;
   attachments?: Array<Record<string, unknown>>;
+};
+export type SaveMessagesResult = RebuiltTurnResult & {
+  status?: "completed" | "error" | "aborted" | "skipped" | string;
+  continuation?: boolean;
 };
 export { Think } from "../../src/app/think.js";
 export { action } from "../../src/domain/actions/actions.js";
