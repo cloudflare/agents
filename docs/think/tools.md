@@ -12,11 +12,11 @@ A default Think turn exposes four built-in tools:
 | `read`  | Read line-numbered text or multimodal workspace content            |
 | `write` | Write a workspace file and create parent directories               |
 | `edit`  | Apply a focused find-and-replace edit                              |
-| `bash`  | Run JavaScript against namespaced capabilities in a Dynamic Worker |
+| `code`  | Run JavaScript against namespaced capabilities in a Dynamic Worker |
 
 Application-owned tools from `getTools()`, actions from `getActions()`, and
 client tools keep their existing direct model-tool behavior in this release.
-The following Think platform capabilities move inside `bash`:
+The following Think platform capabilities move inside `code`:
 
 | Namespace         | Source                                                    |
 | ----------------- | --------------------------------------------------------- |
@@ -37,11 +37,11 @@ Tools belong to the agent running the turn. For parent-child orchestration, use
 [Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md)
 instead of passing one-off tools through `chat()`.
 
-## Built-in Code Mode bash
+## Built-in code tool
 
-The built-in `bash` name preserves Think's familiar four-tool coding surface,
-but it accepts `{ code: string }` and runs JavaScript rather than POSIX shell
-syntax or the old `{ script, cwd }` payload:
+The built-in `code` tool makes its JavaScript execution contract explicit. It
+accepts `{ code: string }` and runs JavaScript rather than POSIX shell syntax or
+the old `{ script, cwd }` payload:
 
 ```js
 async () => {
@@ -70,12 +70,14 @@ for generated entries. A custom Worker entry must export it:
 export { CodemodeRuntime } from "@cloudflare/think/server-entry";
 ```
 
-Set `workspaceBash = false` when the application provides a custom `bash`, such
-as a container shell. Think then keeps workspace, context, skills, extensions,
-and fetch tools direct for compatibility. An explicit `createExecuteTool(this)`
-runtime gets the same compatibility treatment until it is migrated.
-`workspaceBash` is now boolean; configure the legacy snapshot tool explicitly
-through `createWorkspaceTools()` if an application still needs it.
+Set `codeTool = false` when the application does not want the built-in code
+tool. Returning a custom `bash` or `code` from `getTools()` also opts out
+automatically. Think then keeps workspace, context, skills, extensions, and
+fetch tools direct for compatibility. The deprecated `workspaceBash = false` spelling remains an alias
+for this release. An explicit `createExecuteTool(this)` runtime gets the same
+compatibility treatment until it is migrated. Configure the legacy snapshot
+tool explicitly through `createWorkspaceTools()` if an application still needs
+it.
 
 The standalone `createWorkspaceTools()` factory still includes its legacy
 `just-bash` snapshot tool. This change applies to Think's built-in assembly, not
@@ -162,7 +164,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Custom tools stay direct and are merged after the four built-ins. If a custom tool uses the same name as a built-in, the custom tool wins. A custom `bash` also opts out of Code Mode folding for that turn.
+Custom tools stay direct and are merged after the four built-ins. If a custom tool uses the same name as a built-in, the custom tool wins. A custom `code` tool also opts out of Code Mode folding for that turn.
 
 ### Tool Approval
 
@@ -209,7 +211,7 @@ Think inherits MCP client support from the `Agent` base class. Connecting an MCP
 server does not expose its catalog as direct model tools. Each server becomes a
 Code Mode namespace based on its registered name.
 
-Set `waitForMcpConnections` to wait for discovery before Think builds `bash`:
+Set `waitForMcpConnections` to wait for discovery before Think builds `code`:
 
 ```typescript
 export class MyAgent extends Think<Env> {
@@ -244,7 +246,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Inside `bash`, discover and call the server directly:
+Inside `code`, discover and call the server directly:
 
 ```js
 async () => {
@@ -263,7 +265,7 @@ See [Connecting to MCP Servers](https://github.com/cloudflare/agents/blob/main/d
 
 ## Explicit code execution tool
 
-The built-in `bash` is the default Code Mode runtime for new Think agents.
+The built-in `code` tool is the default Code Mode runtime for new Think agents.
 `createExecuteTool()` remains available for custom layouts and migration. It
 lets the LLM write and run JavaScript in a sandboxed Worker, recorded on a
 durable runtime with approvals, audit history, and reusable snippets.
@@ -275,7 +277,7 @@ npm install @cloudflare/codemode
 The one-liner infers `state.*` from `this.workspace`, the executor from
 `env.LOADER`, and a live browser (`cdp.*`) from `env.BROWSER` if bound. Using it
 opts the turn into the legacy explicit-runtime layout, so do not add it when the
-built-in `bash` is sufficient:
+built-in `code` tool is sufficient:
 
 ```typescript
 import { Think } from "@cloudflare/think";

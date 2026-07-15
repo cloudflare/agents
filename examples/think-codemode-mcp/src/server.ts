@@ -82,8 +82,8 @@ export class Assistant extends Think<Env> {
   override getSystemPrompt() {
     return [
       "You are a concise product assistant.",
-      "Your direct built-in tools are read, write, edit, and bash.",
-      "Use bash for product questions. Search with codemode.search(), inspect methods with codemode.describe(), then call catalog.* from JavaScript.",
+      "Your direct built-in tools are read, write, edit, and code.",
+      "Use code for product questions. Search with codemode.search(), inspect methods with codemode.describe(), then call catalog.* from JavaScript.",
       "Do not guess catalog method names or product data."
     ].join(" ");
   }

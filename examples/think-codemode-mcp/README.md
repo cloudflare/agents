@@ -2,8 +2,8 @@
 
 This example shows the default Think tool model:
 
-- the model sees `read`, `write`, `edit`, and `bash` as built-in tools;
-- `bash` runs JavaScript in a durable Code Mode sandbox;
+- the model sees `read`, `write`, `edit`, and `code` as built-in tools;
+- `code` runs JavaScript in a durable Code Mode sandbox;
 - a connected MCP server appears as the `catalog.*` namespace;
 - MCP schemas are discovered through `codemode.search()` and
   `codemode.describe()` instead of becoming direct model tools.
@@ -43,7 +43,7 @@ async () => {
 ## What matters
 
 `addMcpServer("catalog", ...)` establishes the connection. Think builds the
-`catalog` connector when it creates `bash`; it does not call `mcp.getAITools()`.
+`catalog` connector when it creates `code`; it does not call `mcp.getAITools()`.
 Adding a large MCP catalog therefore does not expand the model request's direct
 tool schemas.
 

@@ -3,8 +3,8 @@
 A [Think](https://www.npmjs.com/package/@cloudflare/think) coding agent on
 Cloudflare Workers, with a small React chat UI.
 
-The model sees four built-in tools: `read`, `write`, `edit`, and `bash`. The
-first three handle focused changes. `bash` runs JavaScript in a durable Code
+The model sees four built-in tools: `read`, `write`, `edit`, and `code`. The
+first three handle focused changes. `code` runs JavaScript in a durable Code
 Mode sandbox for multi-step work, with the persistent filesystem under
 `workspace.*`, skills under `skills.*`, and discovery through `codemode.*`.
 The colocated `code-review` skill is loaded on demand without adding another
@@ -35,7 +35,7 @@ npm run deploy
 
 ## Code Mode namespaces
 
-Inside `bash`, code can discover and call capabilities without expanding the
+Inside `code`, code can discover and call capabilities without expanding the
 model's direct tool list:
 
 ```js
@@ -52,6 +52,6 @@ namespace (for example, `github.search_issues(...)`).
 
 ## Next steps
 
-- Register an MCP server with `addMcpServer()`; it appears automatically inside `bash`
+- Register an MCP server with `addMcpServer()`; it appears automatically inside `code`
 - Give the model persistent memory with `configureSession()`
 - Try the other starters: `npm create think -- --template coding-agent`

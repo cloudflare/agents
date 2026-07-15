@@ -21,7 +21,7 @@ export interface Skill {
 }
 
 export class SkillsAgent extends Think<Env> {
-  override workspaceBash = false;
+  override codeTool = false;
 
   getModel() {
     return "@cf/moonshotai/kimi-k2.7-code";

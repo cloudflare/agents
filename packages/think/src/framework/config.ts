@@ -317,7 +317,7 @@ export function inferRequiredBindings(
     requirements.unshift({
       kind: "worker_loader",
       binding: "LOADER",
-      reason: "Think's built-in Code Mode bash needs a Worker Loader binding."
+      reason: "Think's built-in code tool needs a Worker Loader binding."
     });
   }
   const seen = new Set<string>();

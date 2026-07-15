@@ -2,16 +2,16 @@ import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 
-describe("Think Code Mode bash", () => {
+describe("Think Code Mode code tool", () => {
   it("exposes MCP through the server namespace without direct MCP tools", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    await expect(agent.runMcpBashTurn()).resolves.toEqual({
+    await expect(agent.runMcpCodeTurn()).resolves.toEqual({
       done: true,
-      modelToolNames: ["bash", "edit", "read", "write"],
+      modelToolNames: ["code", "edit", "read", "write"],
       mcpToolCount: 313,
       getAIToolsCalls: 0,
       sawMcpResult: true
@@ -20,67 +20,67 @@ describe("Think Code Mode bash", () => {
 
   it("exposes session tools under context without direct context tools", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    await expect(agent.runContextBashTurn()).resolves.toEqual({
+    await expect(agent.runContextCodeTurn()).resolves.toEqual({
       done: true,
-      modelToolNames: ["bash", "edit", "read", "write"],
+      modelToolNames: ["code", "edit", "read", "write"],
       sawContextResult: true
     });
   });
 
   it("exposes skill tools under skills without direct skill tools", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    await expect(agent.runSkillBashTurn()).resolves.toEqual({
+    await expect(agent.runSkillCodeTurn()).resolves.toEqual({
       done: true,
-      modelToolNames: ["bash", "edit", "read", "write"],
+      modelToolNames: ["code", "edit", "read", "write"],
       sawSkillResult: true
     });
     await expect(agent.getSkillCatalogPrompt()).resolves.toContain(
-      "skills.activate_skill({ name }) inside the built-in bash"
+      "skills.activate_skill({ name }) inside the built-in code tool"
     );
   });
 
   it("exposes the durable filesystem under workspace", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    await expect(agent.runWorkspaceBashTurn()).resolves.toEqual({
+    await expect(agent.runWorkspaceCodeTurn()).resolves.toEqual({
       done: true,
-      modelToolNames: ["bash", "edit", "read", "write"],
+      modelToolNames: ["code", "edit", "read", "write"],
       sawWorkspaceResult: true
     });
   });
 
   it("exposes loaded extension tools under extensions", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    await expect(agent.runExtensionBashTurn()).resolves.toEqual({
+    await expect(agent.runExtensionCodeTurn()).resolves.toEqual({
       done: true,
-      modelToolNames: ["bash", "edit", "read", "write"],
+      modelToolNames: ["code", "edit", "read", "write"],
       sawExtensionResult: true
     });
   });
 
-  it("keeps platform tools direct when the built-in bash is disabled", async () => {
+  it("keeps platform tools direct when the built-in code tool is disabled", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    const names = await agent.captureDirectOptOutTools();
-    expect(names).not.toContain("bash");
+    const names = await agent.captureCodeOptOutTools();
+    expect(names).not.toContain("code");
     expect(names).toEqual(
       expect.arrayContaining([
         "read",
@@ -99,25 +99,25 @@ describe("Think Code Mode bash", () => {
     );
   });
 
-  it("rebuilds the built-in bash runtime after losing the in-memory handle", async () => {
+  it("rebuilds the built-in code runtime after losing the in-memory handle", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    await agent.runWorkspaceBashTurn();
-    await expect(agent.rebuildBuiltinBashRuntime()).resolves.toBe(true);
+    await agent.runWorkspaceCodeTurn();
+    await expect(agent.rebuildBuiltinCodeRuntime()).resolves.toBe(true);
   });
 
   it("exposes configured fetch tools under fetch", async () => {
     const agent = await getAgentByName(
-      env.ThinkCodemodeBashAgent,
+      env.ThinkCodemodeCodeAgent,
       crypto.randomUUID()
     );
 
-    await expect(agent.runFetchBashTurn()).resolves.toEqual({
+    await expect(agent.runFetchCodeTurn()).resolves.toEqual({
       done: true,
-      modelToolNames: ["bash", "edit", "read", "write"],
+      modelToolNames: ["code", "edit", "read", "write"],
       sawFetchResult: true
     });
   });

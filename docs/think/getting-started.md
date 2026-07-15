@@ -225,7 +225,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Now the model sees a `MEMORY` section in its system prompt. It can call `context.set_context()` inside the built-in `bash` tool to update it. Facts written to memory persist in SQLite and survive Durable Object hibernation and restarts.
+Now the model sees a `MEMORY` section in its system prompt. It can call `context.set_context()` inside the built-in `code` tool to update it. Facts written to memory persist in SQLite and survive Durable Object hibernation and restarts.
 
 When you use `configureSession`, the system prompt is built from context blocks rather than `getSystemPrompt()`. The `"soul"` block above acts as the system identity — it is read-only and always appears first. The `"memory"` block is writable, and the model proactively updates it when it learns something useful.
 
@@ -266,9 +266,9 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-A default turn has four built-ins: `read`, `write`, `edit`, and `bash`.
+A default turn has four built-ins: `read`, `write`, `edit`, and `code`.
 Application tools from `getTools()` and browser client tools remain direct. Think
-puts its broader platform capabilities behind namespaces inside `bash`:
+puts its broader platform capabilities behind namespaces inside `code`:
 
 1. `workspace.*` for the persistent filesystem
 2. `context.*` for session context

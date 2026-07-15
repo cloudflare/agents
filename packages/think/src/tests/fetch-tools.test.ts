@@ -602,7 +602,7 @@ describe("Think — fetchTools integration", () => {
     await a.enableFetch();
     const { toolNames, system } = await a.captureTurn();
     expect(toolNames).not.toContain("fetch_url");
-    expect(toolNames).toContain("bash");
-    expect(system).toContain("`fetch` namespace inside `bash`");
+    expect(toolNames).toContain("code");
+    expect(system).toContain("`fetch` namespace inside `code`");
   });
 });

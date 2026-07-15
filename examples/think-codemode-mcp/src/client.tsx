@@ -179,7 +179,7 @@ function App() {
                 </Text>
                 <span className="mt-1 block">
                   <Text size="xs" variant="secondary">
-                    Ask a product question. The model uses the built-in bash
+                    Ask a product question. The model uses the built-in code
                     tool to discover and call catalog.* without receiving each
                     MCP schema as a direct model tool.
                   </Text>

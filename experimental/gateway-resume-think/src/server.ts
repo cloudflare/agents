@@ -46,7 +46,7 @@ type AgentState = {
 const STASH_EVERY = 8;
 
 export class GatewayResumeAgent extends Think<Env, AgentState> {
-  override workspaceBash = false;
+  override codeTool = false;
 
   /** When set, the next getModel() returns a re-attach model and clears this. */
   private _pendingReattach: { runId: string; fromEvent: number } | null = null;

@@ -12,7 +12,7 @@ import type { WorkspaceLike } from "./workspace";
 import { createExecuteRuntime, type ExecuteRuntime } from "./execute";
 import { resolveWorkspaceFs } from "./workspace-fs";
 
-export interface ThinkBashMcpManager {
+export interface ThinkCodeMcpManager {
   listServers(): Array<{ id: string; name: string }>;
   mcpConnections: Record<string, McpConnectionLike | undefined>;
 }
@@ -50,7 +50,7 @@ const RESERVED_NAMESPACES = new Map([
 
 function mcpConnectors(
   ctx: DurableObjectState,
-  manager: ThinkBashMcpManager
+  manager: ThinkCodeMcpManager
 ): LiveMcpConnector[] {
   const connectors: LiveMcpConnector[] = [];
   const namespaces = new Map<string, string>();
@@ -82,18 +82,18 @@ function mcpConnectors(
   return connectors;
 }
 
-export interface ThinkBashToolSet {
+export interface ThinkCodeToolSet {
   name: string;
   tools: ToolSet;
   instructions?: string;
 }
 
-export interface CreateThinkBashRuntimeOptions {
+export interface CreateThinkCodeRuntimeOptions {
   ctx: DurableObjectState;
   loader: WorkerLoader;
   workspace: WorkspaceLike;
-  mcp: ThinkBashMcpManager;
-  toolSets?: ThinkBashToolSet[];
+  mcp: ThinkCodeMcpManager;
+  toolSets?: ThinkCodeToolSet[];
 }
 
 /**
@@ -101,8 +101,8 @@ export interface CreateThinkBashRuntimeOptions {
  * by server name (for example `github.searchIssues(...)`) without converting
  * their JSON Schemas into direct AI SDK tools.
  */
-export function createThinkBashRuntime(
-  options: CreateThinkBashRuntimeOptions
+export function createThinkCodeRuntime(
+  options: CreateThinkCodeRuntimeOptions
 ): ExecuteRuntime {
   const fs = resolveWorkspaceFs(options.workspace);
   const connectors: CodemodeConnector[] = mcpConnectors(
@@ -130,6 +130,6 @@ export function createThinkBashRuntime(
     ctx: options.ctx,
     loader: options.loader,
     connectors,
-    name: "bash"
+    name: "code"
   });
 }

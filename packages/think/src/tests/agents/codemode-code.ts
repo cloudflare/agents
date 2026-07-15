@@ -17,7 +17,7 @@ const usage = {
   outputTokens: { total: 5, text: 5, reasoning: 0 }
 };
 
-function createBashCallingModel(options: {
+function createCodeCallingModel(options: {
   code: string;
   resultMarker: string;
   onTools: (names: string[]) => void;
@@ -26,7 +26,7 @@ function createBashCallingModel(options: {
   return {
     specificationVersion: "v3",
     provider: "test",
-    modelId: "codemode-bash-mcp",
+    modelId: "codemode-code-mcp",
     supportedUrls: {},
     doGenerate() {
       throw new Error("doGenerate not implemented in test model");
@@ -53,22 +53,22 @@ function createBashCallingModel(options: {
           if (!hasResult) {
             controller.enqueue({
               type: "tool-input-start",
-              id: "bash-call",
-              toolName: "bash"
+              id: "code-call",
+              toolName: "code"
             });
             controller.enqueue({
               type: "tool-input-delta",
-              id: "bash-call",
+              id: "code-call",
               delta: JSON.stringify({ code: options.code })
             });
             controller.enqueue({
               type: "tool-input-end",
-              id: "bash-call"
+              id: "code-call"
             });
             controller.enqueue({
               type: "tool-call",
-              toolCallId: "bash-call",
-              toolName: "bash",
+              toolCallId: "code-call",
+              toolName: "code",
               input: JSON.stringify({ code: options.code })
             });
             controller.enqueue({
@@ -112,7 +112,7 @@ class CollectingCallback implements StreamCallback {
   }
 }
 
-export class ThinkCodemodeBashMcpServer extends McpAgent {
+export class ThinkCodemodeCodeMcpServer extends McpAgent {
   server = new McpServer({ name: "catalog", version: "1.0.0" });
 
   async init(): Promise<void> {
@@ -174,7 +174,7 @@ export class ThinkCodemodeBashMcpServer extends McpAgent {
   }
 }
 
-export type CodemodeBashTurnResult = {
+export type CodemodeCodeTurnResult = {
   done: boolean;
   error?: string;
   modelToolNames: string[];
@@ -182,7 +182,7 @@ export type CodemodeBashTurnResult = {
 };
 
 const testSkillSource: SkillSource = {
-  id: "codemode-bash-test",
+  id: "codemode-code-test",
   fingerprint: "v1",
   async list() {
     return [
@@ -214,16 +214,16 @@ const TEST_EXTENSION_SOURCE = `{
   }
 }`;
 
-export class ThinkCodemodeBashAgent extends Think {
+export class ThinkCodemodeCodeAgent extends Think {
   override extensionLoader = this.env.LOADER;
   override fetchTools = {
     bindings: {
       fixture: {
         binding: (
           this.ctx.exports as unknown as {
-            ThinkCodemodeBashFetchBinding: Fetcher;
+            ThinkCodemodeCodeFetchBinding: Fetcher;
           }
-        ).ThinkCodemodeBashFetchBinding,
+        ).ThinkCodemodeCodeFetchBinding,
         allowlist: ["/test/**"],
         baseUrl: "https://fixture.local"
       }
@@ -231,7 +231,7 @@ export class ThinkCodemodeBashAgent extends Think {
   };
 
   private modelToolNames: string[] = [];
-  private bashCode = `async () => {
+  private codeSource = `async () => {
     const matches = await codemode.search("Echo a value");
     if (!matches.results.some((match) => match.path === "catalog.echo")) {
       throw new Error("catalog.echo was not discoverable");
@@ -270,14 +270,14 @@ export class ThinkCodemodeBashAgent extends Think {
   }
 
   override async onStart(): Promise<void> {
-    await this.addMcpServer("catalog", this.env.ThinkCodemodeBashMcpServer, {
+    await this.addMcpServer("catalog", this.env.ThinkCodemodeCodeMcpServer, {
       id: "catalog"
     });
   }
 
   override getModel(): LanguageModel {
-    return createBashCallingModel({
-      code: this.bashCode,
+    return createCodeCallingModel({
+      code: this.codeSource,
       resultMarker: this.resultMarker,
       onTools: (names) => {
         this.modelToolNames = names;
@@ -288,7 +288,7 @@ export class ThinkCodemodeBashAgent extends Think {
     });
   }
 
-  private async runBashTurn(message: string): Promise<CodemodeBashTurnResult> {
+  private async runCodeTurn(message: string): Promise<CodemodeCodeTurnResult> {
     this.modelToolNames = [];
     this.sawResult = false;
     const callback = new CollectingCallback();
@@ -301,7 +301,7 @@ export class ThinkCodemodeBashAgent extends Think {
     };
   }
 
-  async runMcpBashTurn(): Promise<{
+  async runMcpCodeTurn(): Promise<{
     done: boolean;
     error?: string;
     modelToolNames: string[];
@@ -309,7 +309,7 @@ export class ThinkCodemodeBashAgent extends Think {
     getAIToolsCalls: number;
     sawMcpResult: boolean;
   }> {
-    this.bashCode = `async () => {
+    this.codeSource = `async () => {
       const matches = await codemode.search("Echo a value");
       if (!matches.results.some((match) => match.path === "catalog.echo")) {
         throw new Error("catalog.echo was not discoverable");
@@ -327,9 +327,9 @@ export class ThinkCodemodeBashAgent extends Think {
       getAIToolsCalls++;
       throw new Error("Think must not materialize direct MCP AI tools");
     };
-    let result: CodemodeBashTurnResult;
+    let result: CodemodeCodeTurnResult;
     try {
-      result = await this.runBashTurn("Call the catalog echo capability");
+      result = await this.runCodeTurn("Call the catalog echo capability");
     } finally {
       this.mcp.getAITools = originalGetAITools;
     }
@@ -343,16 +343,16 @@ export class ThinkCodemodeBashAgent extends Think {
     };
   }
 
-  async runContextBashTurn(): Promise<{
+  async runContextCodeTurn(): Promise<{
     done: boolean;
     error?: string;
     modelToolNames: string[];
     sawContextResult: boolean;
   }> {
-    this.bashCode =
+    this.codeSource =
       'async () => await context.set_context({ label: "memory", content: "remember this" })';
     this.resultMarker = "Written to memory";
-    const result = await this.runBashTurn("Write to durable context");
+    const result = await this.runCodeTurn("Write to durable context");
     return {
       done: result.done,
       ...(result.error ? { error: result.error } : {}),
@@ -365,16 +365,16 @@ export class ThinkCodemodeBashAgent extends Think {
     return this.session.freezeSystemPrompt();
   }
 
-  async runSkillBashTurn(): Promise<{
+  async runSkillCodeTurn(): Promise<{
     done: boolean;
     error?: string;
     modelToolNames: string[];
     sawSkillResult: boolean;
   }> {
-    this.bashCode =
+    this.codeSource =
       'async () => await skills.activate_skill({ name: "test-skill" })';
     this.resultMarker = "Follow the test skill instructions.";
-    const result = await this.runBashTurn("Activate the matching skill");
+    const result = await this.runCodeTurn("Activate the matching skill");
     return {
       done: result.done,
       ...(result.error ? { error: result.error } : {}),
@@ -383,17 +383,17 @@ export class ThinkCodemodeBashAgent extends Think {
     };
   }
 
-  async runWorkspaceBashTurn(): Promise<{
+  async runWorkspaceCodeTurn(): Promise<{
     done: boolean;
     error?: string;
     modelToolNames: string[];
     sawWorkspaceResult: boolean;
   }> {
     await this.workspace.writeFile("/workspace-test.txt", "workspace-value");
-    this.bashCode =
+    this.codeSource =
       'async () => await workspace.readFile({ path: "/workspace-test.txt" })';
     this.resultMarker = "workspace-value";
-    const result = await this.runBashTurn("Read a workspace file");
+    const result = await this.runCodeTurn("Read a workspace file");
     return {
       done: result.done,
       ...(result.error ? { error: result.error } : {}),
@@ -402,16 +402,16 @@ export class ThinkCodemodeBashAgent extends Think {
     };
   }
 
-  async runExtensionBashTurn(): Promise<{
+  async runExtensionCodeTurn(): Promise<{
     done: boolean;
     error?: string;
     modelToolNames: string[];
     sawExtensionResult: boolean;
   }> {
-    this.bashCode =
+    this.codeSource =
       'async () => await extensions.test_extension_echo({ value: "hello" })';
     this.resultMarker = "extension:hello";
-    const result = await this.runBashTurn("Call a loaded extension");
+    const result = await this.runCodeTurn("Call a loaded extension");
     return {
       done: result.done,
       ...(result.error ? { error: result.error } : {}),
@@ -420,41 +420,41 @@ export class ThinkCodemodeBashAgent extends Think {
     };
   }
 
-  async rebuildBuiltinBashRuntime(): Promise<boolean> {
+  async rebuildBuiltinCodeRuntime(): Promise<boolean> {
     this.codemode = undefined;
     await this.pendingExecutions();
     return this.codemode !== undefined;
   }
 
-  async captureDirectOptOutTools(): Promise<string[]> {
-    const previous = this.workspaceBash;
-    this.workspaceBash = false;
+  async captureCodeOptOutTools(): Promise<string[]> {
+    const previous = this.codeTool;
+    this.codeTool = false;
     let names: string[] = [];
-    const previousCode = this.bashCode;
+    const previousCode = this.codeSource;
     const previousMarker = this.resultMarker;
-    this.bashCode = "async () => null";
+    this.codeSource = "async () => null";
     this.resultMarker = "__never__";
     try {
-      const result = await this.runBashTurn("Capture direct opt-out tools");
+      const result = await this.runCodeTurn("Capture direct opt-out tools");
       names = result.modelToolNames;
     } finally {
-      this.workspaceBash = previous;
-      this.bashCode = previousCode;
+      this.codeTool = previous;
+      this.codeSource = previousCode;
       this.resultMarker = previousMarker;
     }
     return names;
   }
 
-  async runFetchBashTurn(): Promise<{
+  async runFetchCodeTurn(): Promise<{
     done: boolean;
     error?: string;
     modelToolNames: string[];
     sawFetchResult: boolean;
   }> {
-    this.bashCode =
+    this.codeSource =
       'async () => await fetch.fetch_fixture({ path: "/test/resource" })';
     this.resultMarker = "fetch:/test/resource";
-    const result = await this.runBashTurn("Fetch an allowlisted resource");
+    const result = await this.runCodeTurn("Fetch an allowlisted resource");
     return {
       done: result.done,
       ...(result.error ? { error: result.error } : {}),

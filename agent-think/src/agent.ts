@@ -142,13 +142,8 @@ export class ThinkAgent extends ThinkBase {
   /** repro/pr can be long: clone, install, deploy or fix, verify. */
   override maxSteps = AGENT_THINK_MAX_STEPS;
 
-  /**
-   * We expose our own container-backed `bash` tool; skip Think's built-in
-   * just-bash. Note: even if this flag is ever flipped back,
-   * getTools() spreads after the workspace tools, so our `bash` would
-   * silently shadow Think's — desired, but worth knowing.
-   */
-  override workspaceBash = false;
+  /** We expose our own container-backed `bash`; omit Think's `code` tool. */
+  override codeTool = false;
 
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
   #workspaceReady: Promise<RemoteWorkspace> | null = null;

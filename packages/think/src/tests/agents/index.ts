@@ -33,9 +33,9 @@ export { ThinkFetchToolsTestAgent } from "./fetch-tools";
 export { ThinkExecuteToolAgent } from "./execute-tool";
 export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export {
-  ThinkCodemodeBashAgent,
-  ThinkCodemodeBashMcpServer
-} from "./codemode-bash";
+  ThinkCodemodeCodeAgent,
+  ThinkCodemodeCodeMcpServer
+} from "./codemode-code";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";

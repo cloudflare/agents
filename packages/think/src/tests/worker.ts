@@ -35,8 +35,8 @@ export {
   ThinkExtensionHookAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
-  ThinkCodemodeBashAgent,
-  ThinkCodemodeBashMcpServer,
+  ThinkCodemodeCodeAgent,
+  ThinkCodemodeCodeMcpServer,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkOnStartReconcileFailureAgent,
@@ -74,8 +74,8 @@ import type {
   ThinkExtensionHookAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
-  ThinkCodemodeBashAgent,
-  ThinkCodemodeBashMcpServer,
+  ThinkCodemodeCodeAgent,
+  ThinkCodemodeCodeMcpServer,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkOnStartReconcileFailureAgent,
@@ -89,7 +89,7 @@ type BrowserRunTestBinding = Fetcher & {
   quickAction(action: string, options: unknown): Promise<Response>;
 };
 
-export class ThinkCodemodeBashFetchBinding extends WorkerEntrypoint<Env> {
+export class ThinkCodemodeCodeFetchBinding extends WorkerEntrypoint<Env> {
   fetch(request: Request): Response {
     const url = new URL(request.url);
     return new Response(`fetch:${url.pathname}`);
@@ -225,8 +225,8 @@ export type Env = {
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
-  ThinkCodemodeBashAgent: DurableObjectNamespace<ThinkCodemodeBashAgent>;
-  ThinkCodemodeBashMcpServer: DurableObjectNamespace<ThinkCodemodeBashMcpServer>;
+  ThinkCodemodeCodeAgent: DurableObjectNamespace<ThinkCodemodeCodeAgent>;
+  ThinkCodemodeCodeMcpServer: DurableObjectNamespace<ThinkCodemodeCodeMcpServer>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;
   ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;
   ThinkOnStartHydrationFailureAgent: DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>;

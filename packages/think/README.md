@@ -174,16 +174,16 @@ the child facet until `clearAgentToolRuns()` deletes retained runs.
 See the full [Agent Tools guide](../../docs/agents/agent-tools.md) for rendering,
 drill-in, and cleanup patterns.
 
-## Built-in workspace and Code Mode bash
+## Built-in workspace and code tool
 
 Every Think agent gets `this.workspace`, a virtual filesystem backed by the
 Durable Object's SQLite storage. The model sees four built-in tools:
 
 - `read`, `write`, and `edit` for focused file operations
-- `bash` for multi-step work in a durable Code Mode sandbox
+- `code` for multi-step work in a durable Code Mode sandbox
 
-Despite its name, the built-in `bash` accepts `{ code: string }` and executes
-JavaScript, not POSIX shell syntax or the old `{ script, cwd }` payload. Code
+The built-in `code` tool accepts `{ code: string }` and executes JavaScript,
+not POSIX shell syntax or the old `{ script, cwd }` payload. Code
 runs in an isolated Dynamic Worker with outbound network access blocked. Think
 injects these globals when their capabilities are configured:
 
@@ -216,10 +216,12 @@ automatically. With a custom Worker entry, also export the runtime:
 export { CodemodeRuntime } from "@cloudflare/think/server-entry";
 ```
 
-Set `workspaceBash = false` when the application supplies its own `bash` tool,
-such as a container shell. That opt-out keeps the other tool families direct
-for compatibility. `workspaceBash` is now boolean; move legacy snapshot options
-to an explicitly created `createWorkspaceTools()` tool set.
+Set `codeTool = false` when the application does not want the built-in code
+tool. Returning a custom `bash` or `code` from `getTools()` also opts out
+automatically. That keeps the other tool families direct for compatibility. The deprecated
+`workspaceBash = false` spelling remains an alias for this release. Move legacy
+bash snapshot options to an explicitly created `createWorkspaceTools()` tool
+set.
 
 ```ts
 export class MyAgent extends Think<Env> {
@@ -245,7 +247,7 @@ export class MyAgent extends Think<Env> {
 Think supports the [Agent Skills](https://agentskills.io/) directory format as
 a first-class API. Return one or more `SkillSource` objects from `getSkills()`.
 Think adds the skill catalog to the prompt and exposes the registry under
-`skills.*` inside the built-in `bash` tool.
+`skills.*` inside the built-in `code` tool.
 
 ```ts
 import { Think, skills } from "@cloudflare/think";
@@ -303,12 +305,12 @@ are returned directly; binary assets are returned as base64.
 from other skills.
 
 Skills are on-demand instructions, not always-on system prompt text. The model
-sees the catalog first, then calls `skills.activate_skill()` inside `bash` when
+sees the catalog first, then calls `skills.activate_skill()` inside `code` when
 a task matches a skill description. Use `getSystemPrompt()` or a Session context
 block for behavior that should apply to every turn.
 
 Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
-enables `skills.run_skill_script()` inside `bash`, which can run JavaScript,
+enables `skills.run_skill_script()` inside `code`, which can run JavaScript,
 TypeScript, Python, and Bash scripts under `scripts/`.
 
 JavaScript and TypeScript scripts are function-style:
@@ -381,13 +383,13 @@ Script execution requires a Worker Loader binding:
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
-| `workspaceBash`            | `true`                             | Include the durable Code Mode `bash`; set `false` when supplying a custom bash                                                                                                                                               |
-| `fetchTools`               | `false`                            | Opt-in allowlisted HTTP reads exposed as `fetch.*` inside the built-in `bash`                                                                                                                                                |
+| `codeTool`                 | `true`                             | Include the durable JavaScript `code` tool                                                                                                                                                                                   |
+| `fetchTools`               | `false`                            | Opt-in allowlisted HTTP reads exposed as `fetch.*` inside the built-in `code` tool                                                                                                                                           |
 | `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
 | `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
 | `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
 
-On each turn, Think appends a small capability block to the assembled system prompt. The block describes the direct tools and tells the model when namespaced Code Mode capabilities are available inside `bash`.
+On each turn, Think appends a small capability block to the assembled system prompt. The block describes the direct tools and tells the model when namespaced Code Mode capabilities are available inside `code`.
 
 Think enables Durable Object eviction recovery by default. This is separate from client resumable streaming: resumable streaming handles browser disconnect/reconnect while the object keeps running, while `chatRecovery` recovers turns interrupted by process restarts, deploys, or object eviction.
 
@@ -801,7 +803,7 @@ configureSession(session: Session) {
 
 Think inherits MCP client support from the Agent base class. Registering a server
 creates a connection; it does not add hundreds of direct model tools. Each
-connected server appears inside the built-in `bash` under its sanitized server
+connected server appears inside the built-in `code` tool under its sanitized server
 name:
 
 ```ts
@@ -929,7 +931,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 ## Workspace tools
 
 Think directly exposes `read`, `write`, and `edit`. Richer filesystem operations
-live under `workspace.*` inside `bash`. The standalone workspace tool factory is
+live under `workspace.*` inside `code`. The standalone workspace tool factory is
 still available for custom agents and legacy direct-tool layouts:
 
 ```ts
@@ -942,11 +944,11 @@ const toolsWithoutLegacyBash = createWorkspaceTools(myCustomStorage, {
 ```
 
 `createWorkspaceTools()` still returns its standalone `just-bash` tool. Think's
-built-in `bash` uses the durable Code Mode runtime instead.
+built-in `code` uses the durable Code Mode runtime instead.
 
 ## Explicit code execution tool
 
-New Think agents should use the built-in `bash`, which already owns one durable
+New Think agents should use the built-in `code`, which already owns one durable
 Code Mode runtime. `createExecuteTool()` remains available for custom layouts.
 An agent that returns an explicit execute runtime from `getTools()` keeps that
 runtime and the legacy direct platform-tool layout for compatibility:
@@ -959,13 +961,13 @@ getTools() {
 }
 ```
 
-Do not create a second execute runtime when the built-in `bash` is sufficient.
+Do not create a second execute runtime when the built-in `code` tool is sufficient.
 
 ## Fetch tool
 
 Give the model a conservative, read-only way to read HTTP resources. It is off
 by default. Static `fetchTools` configuration appears under `fetch.*` inside the
-built-in `bash`: `fetch.fetch_url()` for a public allowlist and
+built-in `code` tool: `fetch.fetch_url()` for a public allowlist and
 `fetch.fetch_<name>()` for each binding target. Calling `createFetchTools()`
 inside `getTools()` remains the direct-tool escape hatch for dynamic or
 per-tenant configuration.
@@ -1053,7 +1055,7 @@ getTools() {
 | `ai`                         | Vercel AI SDK v6 peer dependency                        |
 | `zod`                        | Schema validation peer dependency                       |
 | `@cloudflare/shell`          | Workspace filesystem and `workspace.*` connector        |
-| `@cloudflare/codemode`       | Durable built-in `bash` and explicit execution runtimes |
+| `@cloudflare/codemode`       | Durable built-in `code` and explicit execution runtimes |
 | `@cloudflare/worker-bundler` | TypeScript skill script compilation                     |
 | `just-bash`                  | Bash skill scripts and standalone workspace tools       |
 | `@chat-adapter/telegram`     | Required for Telegram messengers                        |

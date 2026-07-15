@@ -4,8 +4,8 @@ import bundledSkills from "agents:skills";
 /**
  * A coding agent.
  *
- * Think exposes `read`, `write`, `edit`, and a durable Code Mode `bash` tool.
- * Inside `bash`, the model gets `workspace.*`, `skills.*`, and `codemode.*`
+ * Think exposes `read`, `write`, `edit`, and a durable Code Mode `code` tool.
+ * Inside `code`, the model gets `workspace.*`, `skills.*`, and `codemode.*`
  * globals. The colocated `skills/` directory is bundled via `agents:skills`;
  * the skill runner executes bundled scripts in an isolate.
  */
@@ -21,8 +21,8 @@ export class Coder extends Think<Env> {
     return [
       "You are a coding agent.",
       "Use read, write, and edit for focused file changes.",
-      "Use bash for multi-file work: it runs JavaScript in a durable Code Mode sandbox.",
-      "Inside bash, discover capabilities with codemode.search() and codemode.describe(); use workspace.* for filesystem operations and skills.* for on-demand instructions.",
+      "Use code for multi-file work: it runs JavaScript in a durable Code Mode sandbox.",
+      "Inside code, discover capabilities with codemode.search() and codemode.describe(); use workspace.* for filesystem operations and skills.* for on-demand instructions.",
       "Briefly explain your plan, then make focused, correct changes."
     ].join(" ");
   }

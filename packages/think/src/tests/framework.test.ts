@@ -425,7 +425,7 @@ describe("Think framework discovery", () => {
     expect(diagnostics[0]?.message).toContain(`agents/support.ts`);
   });
 
-  it("requires the Worker Loader used by the built-in Code Mode bash", () => {
+  it("requires the Worker Loader used by the built-in code tool", () => {
     const manifest = discoverThinkApp({
       files: { "agents/support.ts": "export class SupportAgent {}" }
     });

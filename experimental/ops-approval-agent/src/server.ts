@@ -48,7 +48,7 @@ type RefundLedgerRow = {
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
 export class OpsApprovalAgent extends Think<Env, OpsState> {
-  override workspaceBash = false;
+  override codeTool = false;
 
   async onStart() {
     this._ensureLedger();
