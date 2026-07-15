@@ -423,3 +423,18 @@ refreshes content in place without re-parenting, and `rawHistory` gained a
 seen-set cycle guard (corruption degrades to truncated history, never a
 hang). Regression test in `domain/session/session.test.ts`. Full
 reconciliation semantics remain ISSUE-015.
+
+---
+
+## ISSUE-029 — Approval-state vocabulary parity (`approval-responded`, `output-denied`)
+
+**Status:** open · **Area:** Messages/Actions/Conversation
+
+The original's tool-part lifecycle includes `approval-responded` (approved,
+pre-re-execution) and `output-denied` (denied with reason) states; the
+rebuild's `ToolPart` union stops at `approval-requested` ->
+`output-available`/`output-error`, mapping denials onto `output-error`. Four
+ported client-tools tests assert the richer vocabulary (they false-passed
+before the P1 fixture was fixed to use the real session). Add the two states
+to `ToolPart`, set them in the pendingInteractions approval resolution, and
+rank them in reconcile/accumulator state ordering.

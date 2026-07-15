@@ -37,7 +37,17 @@ export interface RepairReport {
  */
 export function repairTranscript(
   messages: ChatMessage[],
-  options?: { repairPart?: (part: ToolPart) => MessagePart }
+  options?: {
+    repairPart?: (part: ToolPart) => MessagePart;
+    /**
+     * Which states count as repairable. Defaults to every unsettled state;
+     * the pre-turn PERSISTENCE pass narrows this to the interrupted-execution
+     * states only (`input-streaming`/`input-available`) — `approval-requested`
+     * is a deliberately parked state with its own resolution path
+     * (resolveApproval), not an orphan.
+     */
+    repairStates?: ReadonlySet<ToolPart["state"]>;
+  }
 ): RepairReport {
   let removedToolCalls = 0;
   let normalizedInputs = 0;
@@ -67,7 +77,16 @@ export function repairTranscript(
         }
       }
 
-      if (UNSETTLED_STATES.has(working.state)) {
+      // Providers require tool inputs to be JSON OBJECTS: a missing input or
+      // an array 400s (Anthropic rejects non-object input). Normalize both
+      // to {} so persisted transcripts always replay (ISSUE-015 suite).
+      if (working.input === undefined || Array.isArray(working.input)) {
+        working = { ...working, input: {} };
+        normalizedInputs++;
+        messageChanged = true;
+      }
+
+      if ((options?.repairStates ?? UNSETTLED_STATES).has(working.state)) {
         const repairFn = options?.repairPart ?? defaultRepair;
         const result = repairFn(working);
         messageChanged = true;

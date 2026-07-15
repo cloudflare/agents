@@ -24,6 +24,7 @@ import {
   type ToolPart,
 } from "../domain/messages/model.js";
 import { repairTranscript } from "../domain/messages/repair.js";
+import { reconcileIncoming } from "../domain/messages/reconcile.js";
 import { createAccumulator, type UiChunk } from "../domain/conversation/chunks.js";
 import { createConversationTurnState, type ConversationTurnState } from "../domain/conversation/turn-state.js";
 import { relayTurn } from "../domain/events/relay.js";
@@ -468,7 +469,7 @@ export class Think<State = unknown> extends Agent<State> {
   // Session / skills (lazy)
   // ==========================================================================
 
-  private async ensureSession(): Promise<Session> {
+  protected async ensureSession(): Promise<Session> {
     if (this.sessionInstance) return this.sessionInstance;
     const builder = new SessionBuilderImpl();
     const configured = (this.configureSession(builder) ?? builder) as SessionBuilderImpl;
@@ -594,8 +595,33 @@ export class Think<State = unknown> extends Agent<State> {
     const channelCtx = this.channelService.resolve(spec.channelId);
 
     return this.channelService.runWithActive(channelCtx, async () => {
-      for (const m of spec.newMessages) {
-        await session.appendMessage(m);
+      if (spec.newMessages.length > 0) {
+        // ISSUE-015: clients round-trip full arrays — collapse optimistic
+        // duplicates of server-owned tool calls and never let a stale copy
+        // downgrade a settled row.
+        const history = await session.getHistory();
+        const plan = reconcileIncoming(history, spec.newMessages);
+        for (const m of plan.toUpdate) await session.updateMessage(m);
+        for (const m of plan.toAppend) await session.appendMessage(m);
+      }
+
+      if (!spec.continuation) {
+        // ISSUE-015: a NEW turn supersedes any still-unsettled tool call in
+        // the transcript (an orphan from a crash or an abandoned interaction)
+        // — repair it IN PLACE (preserved, flipped to output-error, inputs
+        // normalized) so providers never 400 on replay. Continuations skip
+        // this: they resume the interaction that owns those parts.
+        const preTurn = await session.getHistory();
+        const report = repairTranscript(preTurn, {
+          repairPart: this.repairInterruptedToolPart,
+          // approval-requested is parked, not orphaned: resolveApproval owns it.
+          repairStates: new Set(["input-streaming", "input-available"]),
+        });
+        if (report.changed) {
+          for (let i = 0; i < preTurn.length; i++) {
+            if (report.messages[i] !== preTurn[i]) await session.updateMessage(report.messages[i]!);
+          }
+        }
       }
 
       const { system, tools: assembled, policy } = await this.buildAssembly(spec.channelId, spec.clientTools);

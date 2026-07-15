@@ -344,19 +344,12 @@ class ThinkClientToolsAgentImpl extends Think {
   }
 
   async persistToolCallMessage(messages: unknown[]): Promise<void> {
+    // Seed through the REAL session (tree bookkeeping included) — raw store
+    // writes bypass leaf/children rows and desynchronize reconciliation.
+    const session = await this.ensureSession();
     for (const message of messages) {
-      appendStoredMessage(this.host, message as ChatMessage);
+      await session.appendMessage(message as ChatMessage);
     }
-  }
-
-  override async getMessages(): Promise<ChatMessage[]> {
-    const order = this.host.store.get<string[]>(sessionKey("order"));
-    if (order !== undefined) {
-      return order
-        .map((id) => this.host.store.get<StoredMessage>(sessionKey(`msg:${id}`))?.message)
-        .filter((message): message is ChatMessage => message !== undefined);
-    }
-    return super.getMessages();
   }
 
   private applyStoredToolUpdate(

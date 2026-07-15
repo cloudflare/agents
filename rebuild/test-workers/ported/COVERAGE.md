@@ -36,7 +36,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 
 | File | ~Tests | Class | Status | Notes |
 |---|--:|---|---|---|
-| client-tools.test.ts | 86 | WIRE | ported 34/86 | 52 fail on REAL semantics now: client-tool part-state details, auto-continue/debounce `divergence`, observability asserts on the ISSUE-009 shim, regenerate/branching `missing-feature` (session branching), ~4 residual done-timeouts to pin. Per-test triage continues with stretch tiers. |
+| client-tools.test.ts | 86 | WIRE | ported 30/86 | 56 fail on REAL semantics: 4 approval-vocabulary tests were FALSE-PASSES pre-fixture-fix, now `missing-feature ISSUE-029` (approval-responded/output-denied states); rest: auto-continue/debounce divergences, ISSUE-009 observability shim, regenerate/branching missing-feature, residual done-timeouts. |
 | think-session.test.ts | 198 | WIRE+API | pending | split on port: wire half T1, api half T3 |
 | hooks.test.ts | 105 | WIRE+API | pending | split T1/T3 |
 | submissions.test.ts | 51 | PUBLIC-API | pending | T3 |
@@ -47,7 +47,7 @@ files + per-wave fixture modules; the orchestrator merges the shared files.
 | fetch-tools.test.ts | 32 | INTERNAL | quarry | checklist vs domain/fetch suite |
 | assistant-tools.test.ts | 30 | PUBLIC-API | pending | T3 |
 | scheduled-tasks.test.ts | 14 | PUBLIC-API | pending | T3 |
-| message-reconciliation.test.ts | 8 | WIRE | ported 2/8 | 6 fail `missing-feature ISSUE-015` (merge/repair semantics — clean fast assertions now). This file also found ISSUE-028 (session append cycle -> isolate-wedging infinite loop; fixed). |
+| message-reconciliation.test.ts | 8 | WIRE | ported 8/8 | **GREEN** — ISSUE-015 resolved: reconcileIncoming (collapse optimistic duplicates, no-downgrade merge) + pre-turn orphan write-back (preserve + flip to output-error, inputs normalized; approval-requested exempt). Also fixed the P1 fixture to seed through the real session (raw-row seeding bypassed tree bookkeeping). |
 | execute-hitl.test.ts | 10 | WIRE | ported 0/10 | `fixture-gap`: fixture authored on the approval-gate path (`approval-requested`); original uses ACTIONS durable-pause (paused output as normal `output-available` result + approveExecution). Rework fixture onto the rebuild's durable-pause actions. |
 | hydration-budget.test.ts | 13 | PUBLIC-API | blocked ISSUE-014 | media-eviction dependent |
 | actions-durable-pause.test.ts | 18 | PUBLIC-API | pending | T3 |
