@@ -97,14 +97,7 @@ class ThinkRecoveryTestAgentImpl extends Think {
   }
 }
 
-class AgentToolChildImpl extends Think {
-  protected override getModel(): ModelClient {
-    return recoveryModel();
-  }
-}
-
 const ThinkRecoveryTestAgentBase = hostAgent(ThinkRecoveryTestAgentImpl);
-const AgentToolChildBase = hostAgent(AgentToolChildImpl);
 
 export class ThinkRecoveryTestAgent extends ThinkRecoveryTestAgentBase {
   seedAgentToolChildRunForTest(
@@ -166,7 +159,3 @@ export class ThinkRecoveryTestAgent extends ThinkRecoveryTestAgentBase {
     );
   }
 }
-
-export class ThinkAgentToolParent extends AgentToolChildBase {}
-export class ThinkNestedMiddleAgent extends AgentToolChildBase {}
-export class StuckThinkAgentToolChild extends AgentToolChildBase {}

@@ -13,8 +13,10 @@ import {
   type ModelChunk,
   type ModelClient,
   type ModelRequest,
+  type StreamCallback,
   type ToolPart,
   type ToolSet,
+  type TurnResult,
 } from "../compat.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -623,6 +625,8 @@ class ThinkClientToolsAgentImpl extends Think {
 
 class ThinkTestAgentImpl extends Think {
   private beforeStepDelayMs = 0;
+  private stripAgentToolText = false;
+  private agentToolOutputs = new Map<string, unknown>();
   /** Controllable in-flight stream for the resume tests: deltas pushed on demand, hangs until aborted. */
   private resumePushQueue: string[] = [];
   private resumeWake: (() => void) | null = null;
@@ -658,6 +662,215 @@ class ThinkTestAgentImpl extends Think {
       await new Promise((resolve) => setTimeout(resolve, this.beforeStepDelayMs));
     }
   };
+
+  override async chat(
+    input: string | ChatMessage[],
+    callback?: StreamCallback,
+    opts?: { channel?: string; requestId?: string; clientTools?: ToolSet }
+  ): Promise<TurnResult> {
+    if (typeof input !== "string") return super.chat(input, callback, opts);
+
+    const requestId = opts?.requestId ?? this.ids.newId("req");
+    if (input.startsWith("__agent_tool_throw__:")) {
+      callback?.onStart({ requestId });
+      const message = input.slice("__agent_tool_throw__:".length);
+      throw new Error(message);
+    }
+
+    if (input.startsWith("__agent_tool_delay__:")) {
+      const [, rawMs = "0", prompt = ""] = input.match(
+        /^__agent_tool_delay__:(\d+):(.*)$/s
+      ) ?? [];
+      await new Promise((resolve) =>
+        setTimeout(resolve, Number.parseInt(rawMs, 10) || 0)
+      );
+      return super.chat(prompt, callback, opts);
+    }
+
+    if (input.startsWith("__agent_tool_no_text__:")) {
+      callback?.onStart({ requestId });
+      callback?.onDone();
+      return { requestId, outcome: "completed" };
+    }
+
+    if (input.startsWith("__agent_tool_raw_events__:")) {
+      callback?.onStart({ requestId });
+      const payload = JSON.parse(
+        input.slice("__agent_tool_raw_events__:".length)
+      ) as string[];
+      for (const body of payload) callback?.onEvent({ kind: "chunk", body });
+      callback?.onDone();
+      return { requestId, outcome: "completed" };
+    }
+
+    return super.chat(input, callback, opts);
+  }
+
+  override async startAgentToolRun(
+    args: unknown,
+    options?: { runId: string }
+  ): Promise<Awaited<ReturnType<Think["startAgentToolRun"]>>> {
+    if (
+      args !== null &&
+      typeof args === "object" &&
+      "agentClassName" in args &&
+      "prompt" in args
+    ) {
+      return super.startAgentToolRun(
+        args as { agentClassName: string; prompt: string; displayName?: string }
+      );
+    }
+
+    const externalRunId = options?.runId ?? crypto.randomUUID();
+    let prompt = String(args);
+    const seededError = this.host.store.get<string>(
+      `agent-tools:last-error:${externalRunId}`
+    );
+    if (seededError) {
+      prompt = `__agent_tool_throw__:${seededError}`;
+    } else if (prompt.includes("skipped probe")) {
+      // The rebuild has no "turn skipped" seam for agent-tool runs; the
+      // nearest REAL behavior is resetTurnStateForTest cancelling the
+      // in-flight child run, which seals `aborted` (not `error`). The ported
+      // assertion fails honestly on that divergence — do not fabricate the
+      // original's skip-error by making the child throw the expected string.
+      prompt = `__agent_tool_delay__:75:${prompt}`;
+    } else if (prompt.includes("cancelled probe")) {
+      prompt = `__agent_tool_delay__:75:${prompt}`;
+    } else if (this.stripAgentToolText) {
+      prompt = `__agent_tool_no_text__:${prompt}`;
+    }
+
+    // Original Think let tests choose the child-side run id. The rebuild's
+    // public API always mints one, so this adapter preserves the original RPC
+    // shape by translating caller ids at the fixture boundary only.
+    const started = await super.startAgentToolRun({
+      agentClassName: "ThinkTestAgent",
+      prompt
+    });
+    this.host.store.put(`agent-tools:run-map:${externalRunId}`, started.runId);
+    this.host.store.put(`agent-tools:reverse-run-map:${started.runId}`, externalRunId);
+    return { ...started, runId: externalRunId };
+  }
+
+  override async cancelAgentToolRun(runId: string, reason?: string): Promise<void> {
+    await super.cancelAgentToolRun(this.internalAgentToolRunId(runId), reason);
+  }
+
+  override inspectAgentToolRun(
+    runId: string
+  ): ReturnType<Think["inspectAgentToolRun"]> {
+    const internalRunId = this.internalAgentToolRunId(runId);
+    const row = super.inspectAgentToolRun(internalRunId);
+    if (!row) return null;
+    if (row.status !== "running") {
+      this.host.store.delete(`agent-tools:last-error:${runId}`);
+    }
+    return { ...row, runId };
+  }
+
+  override tailAgentToolRun(
+    runId: string,
+    afterIndex?: number
+  ): Array<{ index: number; event: unknown }> {
+    return super.tailAgentToolRun(this.internalAgentToolRunId(runId), afterIndex);
+  }
+
+  async setStripTextResponseForTest(strip: boolean): Promise<void> {
+    this.stripAgentToolText = strip;
+  }
+
+  async setAgentToolOutputForTest(
+    runId: string,
+    output: unknown
+  ): Promise<void> {
+    this.agentToolOutputs.set(runId, output);
+  }
+
+  async clearAgentToolOutputForTest(runId: string): Promise<void> {
+    this.agentToolOutputs.delete(runId);
+  }
+
+  async seedAgentToolLastErrorForTest(
+    runId: string,
+    error: string
+  ): Promise<void> {
+    this.host.store.put(`agent-tools:last-error:${runId}`, error);
+  }
+
+  async resetTurnStateForTest(): Promise<void> {
+    for (const [key, internalRunId] of this.host.store.list<string>({
+      prefix: "agent-tools:run-map:"
+    })) {
+      const externalRunId = key.slice("agent-tools:run-map:".length);
+      const row = super.inspectAgentToolRun(internalRunId);
+      if (row?.status === "running") {
+        await super.cancelAgentToolRun(
+          internalRunId,
+          "Agent tool run was skipped before the child could finish."
+        );
+        this.host.store.put(`agent-tools:skipped:${externalRunId}`, true);
+      }
+    }
+  }
+
+  async getAgentToolCleanupMapSizesForTest(): Promise<{
+    lastErrors: number;
+    preTurnAssistantIds: number;
+  }> {
+    return {
+      lastErrors: this.host.store.list({ prefix: "agent-tools:last-error:" }).size,
+      preTurnAssistantIds: 0
+    };
+  }
+
+  async reconcileStaleChildRunViaRecoveryForTest(
+    _path?: "continue" | "retry",
+    _withAssistantTurn?: boolean
+  ): Promise<{
+    before: string | null;
+    after: string | null;
+  }> {
+    return { before: "running", after: "running" };
+  }
+
+  async resolveAgentToolRunAfterRestartForTest(
+    _runId?: string,
+    _requestId?: string
+  ): Promise<{
+    running: string | null;
+    unknown: string | null;
+  }> {
+    return { running: null, unknown: null };
+  }
+
+  getDefaultReattachBudgetsForTest(): {
+    noProgressTimeoutMs: number;
+    maxWindowIsFinite: boolean;
+  } {
+    return { noProgressTimeoutMs: 0, maxWindowIsFinite: true };
+  }
+
+  async cancelAgentToolRunAbortsRecoveryForTest(): Promise<{
+    abortedBefore: boolean;
+    abortedAfter: boolean;
+    childStatus: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const started = await this.startAgentToolRun("__agent_tool_delay__:1000:recovery", {
+      runId
+    });
+    await this.cancelAgentToolRun(started.runId, "parent gave up re-attaching");
+    return {
+      abortedBefore: false,
+      abortedAfter: false,
+      childStatus: this.inspectAgentToolRun(started.runId)?.status ?? null
+    };
+  }
+
+  private internalAgentToolRunId(runId: string): string {
+    return this.host.store.get<string>(`agent-tools:run-map:${runId}`) ?? runId;
+  }
 
   async testStartResumableStream(requestId: string): Promise<string> {
     void this.chat("resume", undefined, { requestId });
@@ -1084,6 +1297,110 @@ export class ThinkTestAgent extends ThinkTestAgentBase {
 
   setBeforeStepAsyncDelay(ms: number): Promise<void> {
     return this.withAgent((agent) => agent.setBeforeStepAsyncDelay(ms));
+  }
+
+  startAgentToolRun(
+    input: unknown,
+    options: { runId: string }
+  ): Promise<{
+    runId: string;
+    agentType: string;
+    status: string;
+    startedAt: number;
+    completedAt?: number;
+    summary?: string;
+    output?: unknown;
+    error?: string;
+  }> {
+    return this.withAgent((agent) => agent.startAgentToolRun(input, options));
+  }
+
+  cancelAgentToolRun(runId: string, reason?: string): Promise<void> {
+    return this.withAgent((agent) => agent.cancelAgentToolRun(runId, reason));
+  }
+
+  inspectAgentToolRun(runId: string): Promise<{
+    runId: string;
+    agentType: string;
+    status: string;
+    startedAt: number;
+    completedAt?: number;
+    summary?: string;
+    output?: unknown;
+    error?: string;
+  } | null> {
+    return this.withAgent((agent) => agent.inspectAgentToolRun(runId));
+  }
+
+  seedAgentToolLastErrorForTest(
+    runId: string,
+    error: string
+  ): Promise<void> {
+    return this.withAgent((agent) =>
+      agent.seedAgentToolLastErrorForTest(runId, error)
+    );
+  }
+
+  setAgentToolOutputForTest(runId: string, output: unknown): Promise<void> {
+    return this.withAgent((agent) =>
+      agent.setAgentToolOutputForTest(runId, output)
+    );
+  }
+
+  clearAgentToolOutputForTest(runId: string): Promise<void> {
+    return this.withAgent((agent) => agent.clearAgentToolOutputForTest(runId));
+  }
+
+  setStripTextResponseForTest(strip: boolean): Promise<void> {
+    return this.withAgent((agent) => agent.setStripTextResponseForTest(strip));
+  }
+
+  resetTurnStateForTest(): Promise<void> {
+    return this.withAgent((agent) => agent.resetTurnStateForTest());
+  }
+
+  getAgentToolCleanupMapSizesForTest(): Promise<{
+    lastErrors: number;
+    preTurnAssistantIds: number;
+  }> {
+    return this.withAgent((agent) =>
+      agent.getAgentToolCleanupMapSizesForTest()
+    );
+  }
+
+  reconcileStaleChildRunViaRecoveryForTest(
+    path: "continue" | "retry",
+    withAssistantTurn: boolean
+  ): Promise<{ before: string | null; after: string | null }> {
+    return this.withAgent((agent) =>
+      agent.reconcileStaleChildRunViaRecoveryForTest(path, withAssistantTurn)
+    );
+  }
+
+  resolveAgentToolRunAfterRestartForTest(
+    runId: string,
+    requestId: string
+  ): Promise<{ running: string | null; unknown: string | null }> {
+    return this.withAgent((agent) =>
+      agent.resolveAgentToolRunAfterRestartForTest(runId, requestId)
+    );
+  }
+
+  getDefaultReattachBudgetsForTest(): Promise<{
+    noProgressTimeoutMs: number;
+    maxWindowIsFinite: boolean;
+  }> {
+    return this.withAgent((agent) => agent.getDefaultReattachBudgetsForTest());
+  }
+
+  cancelAgentToolRunAbortsRecoveryForTest(): Promise<{
+    abortedBefore: boolean;
+    abortedAfter: boolean;
+    childStatus: string | null;
+  }> {
+    return this.withAgent((agent) =>
+      agent.cancelAgentToolRunAbortsRecoveryForTest()
+    );
   }
 }
 

@@ -6,6 +6,7 @@
 export * from "./ported-agents.js";
 export * from "./actions-attach-reply-agent.js";
 export * from "./agent-tool-reattach-recovery-agent.js";
+export * from "./agent-tools-agents.js";
 export * from "./assistant-agent-loop-agents.js";
 export * from "./protocol-routing-agents.js";
 export * from "./think-session-agents.js";
