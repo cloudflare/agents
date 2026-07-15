@@ -448,7 +448,7 @@ repair's unsettled set updated. Native denial assertions migrated.
 
 ---
 
-## ISSUE-030 — Layer `hostAgent`: minimal DO host vs chat host
+## ISSUE-030 — Hosting refactor: one generic DO host + composed capability-typed transports
 
 **Status:** open · **Area:** Cloudflare adapter / hosting (audit 30 §composition-tiers)
 
@@ -474,7 +474,7 @@ author picks from, composition primary:
    an ordinary DO that owns a lifecycle *driver* which owns the agent:
    ```ts
    export class MyDO extends DurableObject {
-     #rt = createAgentRuntime(this.ctx, this.env, (rt) => new MyAgent(rt), { chat: true });
+     #rt = createAgentRuntime(this.ctx, this.env, (rt) => new MyAgent(rt), { transports: [conversationProtocol()] });
      fetch = this.#rt.fetch; alarm = this.#rt.alarm;
      webSocketMessage = this.#rt.webSocketMessage; webSocketClose = this.#rt.webSocketClose;
    }

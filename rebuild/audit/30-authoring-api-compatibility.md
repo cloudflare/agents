@@ -248,10 +248,13 @@ it is currently typed `<A extends Think>` and *always* wires
 `attachChatTransport` (the `cf_agent_*` WS protocol). So it conflates the
 UNIVERSAL adapter role (every hosted agent needs it) with the CHAT-specific
 transport wiring (only chat agents need it) — which means tier 2/3
-(`extends Agent`, no chat) has no hosting path today. Fix: **layer the host** —
-a minimal `hostAgent<A extends Agent>` (lifecycle + ports + alarm/RPC) and a
-`hostChatAgent` variant/option that adds chat transport (ISSUE-030). This is
-not a shim to remove; it's the platform adapter to split. **Two honest gaps
+(`extends Agent`, no chat) has no hosting path today. Fix (superseding this
+audit's original "layer the host into `hostAgent`/`hostChatAgent` variants" —
+that host-type-per-tier shape was rejected 2026-07-15): ONE generic host that
+routes platform I/O to **composed transport adapters**, each typed to the
+capability interface it needs, never a class check — see ISSUE-030 (corrected
+spec) and ADR-0002. This is not a shim to remove; it's the platform adapter to
+refactor. **Two honest gaps
 then:** (a) the layering above; (b) the module factories are structurally
 public and test-proven, but their `{store, clock, ids, bus, …}` dep
 signatures are internal-facing — no "build-a-lite-agent" cookbook or ergonomic

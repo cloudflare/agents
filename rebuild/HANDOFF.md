@@ -103,12 +103,14 @@ the DO *has-a* Agent. One generic host that routes platform I/O to **composed
 transport adapters**; NO "chat" agent type / no `instanceof Think` (3 of the 4
 `cf_agent_*` concerns — event projection, state sync, RPC — are Agent-level;
 only conversation needs the turn surface). Transports typed to capability
-interfaces: the **inbound seam is `ConversationApi`** (renamed from
-`ConversationSurface` to avoid colliding with the map's Channels/**Surfaces**),
-the **outbound seam is `ConversationEventLog`** (exists). Also: rename
-`AgentHost` → `AgentRuntime` (signal capabilities, not a `this` handle). Fold
-in the current leak: `attachChatTransport(agent: Think)` is nominally coupled
-(Think's private brand) — retype to `ConversationApi`. DX comparison in
+interfaces: the **inbound seam is `ConversationApi` + the opinion extensions a
+transport actually speaks** (`ApprovalApi`, `RecoveryIntrospection` — split per
+ADR-0002; don't call it `ConversationSurface`, which collides with the map's
+Channels/**Surfaces**), the **outbound seam is `ConversationEventLog`**
+(exists). Also: rename `AgentHost` → `AgentRuntime` (signal capabilities, not
+a `this` handle). Fold in the current leak: `attachChatTransport(agent: Think)`
+is nominally coupled (Think's private brand) — retype to the interface
+intersection it speaks. DX comparison in
 `docs/hosting-dx-sketch.md` (published artifact); direction = composition is
 the documented model, one generic base class is the everyday shortcut,
 `hostAgent()` survives as terse sugar.

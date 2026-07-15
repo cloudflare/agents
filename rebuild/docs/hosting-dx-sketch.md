@@ -4,7 +4,12 @@ A prototype to *feel* the ergonomics of each packaging for wiring a
 transport-free agent onto a Cloudflare Durable Object (ISSUE-030). Same agent
 in every case — only the wiring differs. **Option A exists today; B/C/D are
 sketches of proposed helpers.** Sketches assume the ISSUE-030 rename
-`AgentHost → AgentRuntime`.
+`AgentHost → AgentRuntime` and the ADR-0002 model: ONE generic host, and what
+the DO speaks is a list of **composed transport adapters**, each typed to the
+capability interface it needs (`rpcProtocol()`/`stateProtocol()` work on any
+`Agent`; `conversationProtocol()` requires the `ConversationApi` core plus
+whichever opinion extensions it speaks — never a concrete class, never
+`instanceof`).
 
 ---
 
@@ -60,31 +65,39 @@ export const SupportAgentDO = hostAgent(SupportAgent);
 - **The magic is total and opaque:** a function returns a class; you can't see
   that the DO *has-a* agent, or where `fetch`/`alarm` go. To learn what
   `SupportAgentDO` even is, you read the factory.
-- Typed `<A extends Think>` — a non-chat `extends Agent` agent can't use it.
+- Typed `<A extends Think>` — a conversation-free `extends Agent` agent can't
+  use it.
 
 ## Option B — intermediate base class
 
 ```ts
-export class SupportAgentDO extends ChatAgentDurableObject<SupportAgent> {
+export class SupportAgentDO extends AgentDurableObject<SupportAgent> {
   createAgent(rt: AgentRuntime) {
     return new SupportAgent(rt);
+  }
+  transports() {
+    return [conversationProtocol()];   // requires ConversationApi (+ extensions it speaks)
   }
 }
 ```
 
 - **Ordinary inheritance** — reads like every other DO an author has written.
-- **One visible seam** (`createAgent`) that names the has-a relationship: this
-  DO *makes* a `SupportAgent`. The lifecycle is inherited, out of the way.
-- Layering is the type you extend: `AgentDurableObject` (no chat) vs
-  `ChatAgentDurableObject`.
-- Cost: ~3 lines instead of 1, and the lifecycle is still "somewhere in the
+- **Two visible seams**: `createAgent` names the has-a relationship (this DO
+  *makes* a `SupportAgent`); `transports()` names what the DO speaks. The
+  lifecycle is inherited, out of the way.
+- ONE generic base for every agent — no chat host type. What varies is the
+  composed transport list, and each transport's parameter type enforces its
+  capability requirement structurally (ADR-0002).
+- Cost: ~5 lines instead of 1, and the lifecycle is still "somewhere in the
   base" — but it's a *normal base class you can open*, not a synthesized one.
 
 ## Option C — plain composition + a lifecycle driver
 
 ```ts
 export class SupportAgentDO extends DurableObject {
-  #rt = createAgentRuntime(this.ctx, this.env, (rt) => new SupportAgent(rt), { chat: true });
+  #rt = createAgentRuntime(this.ctx, this.env, (rt) => new SupportAgent(rt), {
+    transports: [conversationProtocol()],
+  });
 
   fetch = this.#rt.fetch;
   alarm = this.#rt.alarm;
@@ -99,8 +112,8 @@ export class SupportAgentDO extends DurableObject {
   what the DO delegates) or noise (four lines of plumbing), depending on taste.
 - `createAgentRuntime` owns only the *subtle* part (next section); the
   composition stays legible.
-- Drop `{ chat: true }` and don't forward the WS methods → a non-chat agent.
-  Same helper, no separate type.
+- Compose only `rpcProtocol()` and don't forward the WS methods → a
+  conversation-free agent. Same helper, no separate type.
 
 ## Option D — fully manual  *(no helper — to show what the others save)*
 
@@ -178,13 +191,13 @@ how it's packaged.
 
 ---
 
-## The lean case — a non-chat agent (`extends Agent`)
+## The lean case — a conversation-free agent (`extends Agent`)
 
 Where the options diverge most. A reminder agent that only schedules and
-exposes RPC — no chat, no WebSockets:
+exposes RPC — no conversation, no WebSockets:
 
 ```ts
-class ReminderAgent extends Agent {           // the lighter base, no chat
+class ReminderAgent extends Agent {           // the conversation-free substrate
   @callable() async setReminder(at: string, text: string) { /* this.schedule(...) */ }
   fireReminder(payload: { text: string }) { /* … */ }
 }
@@ -192,25 +205,28 @@ class ReminderAgent extends Agent {           // the lighter base, no chat
 
 | Option | Lean wiring | Note |
 |---|---|---|
-| **A** factory | `hostAgent(ReminderAgent)` | **Fails today** — typed `<A extends Think>`. Needs the layered factory. |
-| **B** base class | `class ReminderDO extends AgentDurableObject<ReminderAgent> { createAgent(rt){ return new ReminderAgent(rt); } }` | **Same host as a chat agent** — it detects `instanceof Think` and skips the chat transport; a WS upgrade gets a clean 400. No separate type. |
-| **C** driver | `#rt = createAgentRuntime(this.ctx, this.env, rt => new ReminderAgent(rt)); alarm = this.#rt.alarm;` | Omit `{ chat: true }`, forward only `alarm`. |
+| **A** factory | `hostAgent(ReminderAgent)` | **Fails today** — typed `<A extends Think>`. Fixed by rebuilding the factory as sugar over the generic host (B/C). |
+| **B** base class | `class ReminderDO extends AgentDurableObject<ReminderAgent> { createAgent(rt){ return new ReminderAgent(rt); } transports(){ return [rpcProtocol()]; } }` | **Same generic host as a conversing agent** — it simply composes no conversation transport; a WS chat upgrade gets a clean 400. No separate type, no class check. |
+| **C** driver | `#rt = createAgentRuntime(this.ctx, this.env, rt => new ReminderAgent(rt), { transports: [rpcProtocol()] }); alarm = this.#rt.alarm;` | Compose only `rpcProtocol()`, forward only `alarm`. |
 
-**Note (2026-07-15): there is no "chat" agent type — transports are composed.**
-Of the four concerns the `cf_agent_*` adapter handles, three are already
-Agent-level (grep-confirmed): event-log→wire projection (`events()`), state
-sync (`setState`), and RPC (`callables`); only the conversation-turn surface
-(`chat`/`history`/tool-result/approval/recovery) is Think-specific. So "chat"
-is a client-protocol *bundle*, not a boundary, and the host must not gate on
+**There is no "chat" agent type — transports are composed (2026-07-15; now
+part of ADR-0002 + ISSUE-030).** Of the four concerns the `cf_agent_*` adapter
+handles, three are already Agent-level (grep-confirmed): event-log→wire
+projection (`events()`), state sync (`setState`), and RPC (`callables`); the
+fourth, the conversation-turn surface, is the `ConversationApi` capability
+(essence: `chat`/`cancelChat`/`applyToolResult`/`history`/`clearMessages` —
+implemented by the ChatAgent layer per ADR-0002) plus opinion extensions
+(`ApprovalApi`, `RecoveryIntrospection` — Think's). So "chat" is a
+client-protocol *bundle*, not a boundary, and the host must not gate on
 `instanceof Think` (that would deny a plain `extends Agent` its generic
-streaming/RPC transports). The corrected model: ONE generic host that routes
-platform I/O to **composed transport adapters**, each requiring its
-capabilities structurally —
+streaming/RPC transports). The model: ONE generic host that routes platform
+I/O to **composed transport adapters**, each requiring its capabilities
+structurally —
 
 ```ts
 class SupportAgentDO extends AgentDurableObject<SupportAgent> {
   createAgent(rt) { return new SupportAgent(rt); }
-  transports() { return [conversationProtocol()]; }   // needs the turn surface (Think)
+  transports() { return [conversationProtocol()]; }   // needs ConversationApi & ApprovalApi & RecoveryIntrospection
 }
 class ReminderDO extends AgentDurableObject<ReminderAgent> {
   createAgent(rt) { return new ReminderAgent(rt); }
@@ -219,9 +235,11 @@ class ReminderDO extends AgentDurableObject<ReminderAgent> {
 ```
 
 The author composes what their agent speaks; the capability requirement is
-enforced by each transport's parameter type, not a class check. `Think` isn't a
-different kind of thing — it's `Agent` + composed conversation modules, on the
-same host. See ISSUE-030.
+enforced by each transport's parameter type, not a class check. An interface
+has no private brand, so a userland composition implementing the same methods
+satisfies it too. `Think` isn't a different kind of thing — it's the
+opinionated composition atop ChatAgent, on the same host. See ISSUE-030 and
+ADR-0002.
 
 ## Side by side
 
@@ -230,8 +248,8 @@ same host. See ISSUE-030.
 | Author lines | 1 | ~3 | ~6 | ~40 |
 | Reads as… | a spell | ordinary inheritance | explicit has-a | raw platform code |
 | Where's the magic | all of it, in a fn | in the base you can open | only the lifecycle helper | none |
-| Non-chat agent | ✗ (today) | ✓ (`AgentDurableObject`) | ✓ (omit `chat`) | ✓ |
-| Layering shows as | — | the type you extend | a config flag | hand-wired |
+| Conversation-free agent | ✗ (today) | ✓ (compose no conversation transport) | ✓ (same) | ✓ |
+| What the DO speaks shows as | — | `transports()` override | `transports:` option | hand-wired |
 | Codegen can emit it | ✓ | ✓ | ✓ | n/a |
 
 ## A read, not a verdict
