@@ -7,11 +7,11 @@ per-context `CONTEXT.md` (the maintainer's canonical model), `ISSUES.md`,
 `test-workers/ported/COVERAGE.md` (the port ledger), `PROGRESS.md` (log).
 Dashboard: `npm run dashboard` → `dashboard.html`.
 
-Numbers as of this handoff: ported board **217/396 passing by vitest count**
-(the ledger's 228/416 sums row estimates — the checked-in
-`test-workers/ported/BOARD-SNAPSHOT.txt` is now the canonical per-test
-record) · native **1082 node + 42 workerd**, typecheck clean · **6 issues
-resolved, 24 open**.
+Numbers as of this handoff: ported board **288/552 passing by vitest count**
+(`test-workers/ported/BOARD-SNAPSHOT.txt` is the canonical per-test record;
+ledger row estimates differ slightly) · native **1082 node + 42 workerd**,
+typecheck clean · **6 issues resolved, 28 open** (031–034 new, found by the
+P7/P8 ports).
 
 **Verification economy (new discipline, 2026-07-15):** subagents hand off
 vitest `--reporter=json` artifacts (orchestrator reads, never re-runs); board
@@ -29,16 +29,18 @@ Plan is audit 29; ledger is `test-workers/ported/COVERAGE.md` (single source;
 dashboard is generated from it). Status vocabulary + fidelity tags
 (`[fidelity:move|light|adapter|rewrite]`) are documented at the ledger top.
 
-**Done:** waves P1–P6. P1 first 5 wire files; P2 `chat-recovery` e2e (kill/
+**Done:** waves P1–P8 (P7 `hooks` 48/105 + P8 `submissions` 23/51 ran in
+parallel worktrees during the ChatAgent extraction; both 0-flip verified
+against the merged tree; real bugs found → ISSUES 031–034). P1 first 5 wire files; P2 `chat-recovery` e2e (kill/
 restart harness); P3 wire remainder; P4 e2e recovery batch; P5
 `assistant-agent-loop`/`protocol-messages`/`routing`(24/24 — first full
 original suite green)/`reattach-budget`/`task-amplification`; P6
 `think-session` (198 tests → 103 pass, **33 named `missing-feature` reasons**
 in its fixtures — a ready-made implementation worklist).
 
-**Remaining (biggest lever = T3 PUBLIC-API waves):** `hooks` (105),
-`submissions`, `agent-tools`, `schedule`, `sub-agent` (97), the
-`agents/src/tests` Think-relevant subset, plus remaining T1/T2 files. The
+**Remaining (biggest lever = T3 PUBLIC-API waves):** `agent-tools` (33),
+`schedule`, `sub-agent` (97), the `agents/src/tests` Think-relevant subset,
+plus remaining T1/T2 files. The
 `quarry` set (`agents/chat/__tests__`, ~477) is never ported — it's the spec
 checklist for our native suites.
 
