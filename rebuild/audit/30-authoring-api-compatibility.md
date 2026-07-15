@@ -157,16 +157,33 @@ when their issues are done.
 | `readonly mcp` (MCPClientManager) | — | UNBUILT→ISSUE-003 | match-on-build |
 | `destroy` / `get name` / `keepAlive` / `startFiber` / `stash` / `runFiber` | present | SAME | keep |
 
-**The `this.sql` decision.** The original gives authors a raw tagged-template
-SQL accessor over DO storage. The rebuild deliberately hides storage behind
-the `KeyValueStore` port (hexagonal boundary), so there is no `this.sql`. This
-is the one *philosophically* loaded removal: it's not an oversight, it's the
-architecture. Options: (a) **accept-break** and document that direct SQL is
-gone (cleanest, but strands authors who wrote custom queries); (b) expose a
-narrow `this.sql` **compat accessor** in the Cloudflare adapter only (over
-`ctx.storage.sql`), clearly marked as an escape hatch outside the port model.
-Recommend (b) as an adapter-level escape hatch so the port model stays pure in
-the domain while migration stays cheap. **Flag for your decision.**
+**The `this.sql` decision — RESOLVED (2026-07-15).** The original gives authors
+a raw tagged-template SQL accessor over DO storage. The rebuild hides storage
+behind the `KeyValueStore` port so the *domain modules* never see SQL. The key
+reframing: **raw SQL is a Durable-Object concern, not an agent concern.** In
+the transport-free split the author's `Think` subclass is pure conversation
+logic (it holds only `host`, a port bundle — deliberately no `ctx`), while the
+platform surface — raw SQL, extra bindings, custom fetch routes — lives on the
+**DO shell** that `hostAgent` produces. That shell is a real, subclassable
+`DurableObject` with `this.ctx` (verified: `HostedAgentDO extends
+HostedAgentDurableObject`, `this.ctx.storage` in scope). So an author who wants
+their own tables writes:
+
+```ts
+class MyAgent extends Think<Env> { /* conversation logic; no SQL here */ }
+export class MyAgentDO extends hostAgent(MyAgent) {
+  myOwnQuery(id: string) { return this.ctx.storage.sql.exec("SELECT …", id); }
+}
+```
+
+This is **not** a compat compromise — it's a *cleaner* placement than the
+original's everything-on-one-class: SQL for the agent's own machinery is gone
+(correctly, behind the port), and SQL for the author's *other* needs is fully
+available, just at the layer it belongs to (the DO). No `this.sql` on the
+agent; the DO shell is the seam. Cheap ergonomic follow-up: give `hostAgent`'s
+returned base a documented `protected ctx`/`storage` accessor and a one-liner
+in the migration guide. **Decision: accept-break on `this.sql`-on-the-agent;
+SQL stays available at the DO-shell layer.**
 
 ## 4. Package-level exports
 
@@ -199,6 +216,39 @@ original; `ChatResponseResult` carries a `status` the rebuild omits). Types
 follow their members — fix on the same passes.
 
 ---
+
+## The composition-tier story (why "authors compose their own" is the thesis)
+
+The original Think was a ~15k-line god class: an author could only *subclass
+it and configure via hooks* — never "I want the turn loop + session but not
+submissions/actions/delegation/skills/channels/workflows." The rebuild
+dissolved that into ~40 factory-composed domain modules over ports, so a
+simpler agent is just a different composition root. Three tiers are available
+to authors today, each a real (verified) base — this is a *product* strength,
+not just an internal refactor:
+
+1. **`extends Think`** — batteries-included conversational agent; configure via
+   the §2 hooks. The common path.
+2. **`extends Agent`** — the lighter base (`Agent` is a standalone `export
+   class`, not an internal): you get scheduling, fibers, durable queue,
+   observable state, RPC, and the event log over `AgentHost`, and you compose
+   *only* the domain modules you actually want in your constructor. This is the
+   "simpler needs" tier — impossible against the original god class.
+3. **compose modules from scratch** — every domain service is an exported
+   `create*(deps)` factory over ports; the in-memory adapters + the entire
+   domain test suite are existence proofs that they run standalone. Best
+   expressed as tier 2 (extend `Agent` for the platform lifecycle, add
+   modules) rather than rebuilding the DO shell by hand.
+
+Hosting is uniform across all three: `hostAgent(YourClass)` works for any
+`Agent` subclass, so a custom composition gets the DO lifecycle (start-once,
+alarms, WS, facets) for free. **Honest gap:** the module factories are
+structurally public and test-proven, but their `{store, clock, ids, bus, …}`
+dep signatures are internal-facing — there's no "build-a-lite-agent" cookbook
+or ergonomic surface yet. That's a docs/DX gap, not an architectural one, and
+it's the natural companion to the compat-alias wave. The publish framing this
+unlocks is stronger than "a compatible Think": **Think is the default
+composition; `Agent` is the base you compose your own on.**
 
 ## Bottom line for the publish decision
 
