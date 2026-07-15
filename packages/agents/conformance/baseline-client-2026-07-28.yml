@@ -1,0 +1,41 @@
+# SDK v2 client against the latest published conformance protocol revision.
+# Every entry is executed by alpha.9; run-suite.mjs rejects unseen entries.
+client:
+  # SHOULD-level only: the built-in provider uses Dynamic Client Registration
+  # instead of a URL-based Client ID Metadata Document.
+  # Impact if unchanged: servers that require CIMD rather than DCR need a
+  # custom OAuth provider.
+  - auth/basic-cimd
+
+  # The default scope step-up budget produces four authorization attempts;
+  # alpha.9's SHOULD-level limit is three or fewer.
+  # Impact if unchanged: a permanently unsatisfiable insufficient_scope
+  # challenge can send the user through one additional OAuth round-trip before
+  # the client stops retrying.
+  - auth/scope-retry-limit
+
+  # SEP-2352 authorization-server migration does not complete its second OAuth
+  # round against the alpha.9 referee.
+  # Impact if unchanged: an MCP resource that changes authorization server
+  # while connected may fail to recover automatically and require reconnect.
+  - auth/authorization-server-migration
+
+  # Alpha.9 requires absent resultType to default to complete. Beta.4 instead
+  # rejects the final modern tool result after all five MRTR wire assertions
+  # pass.
+  # Impact if unchanged: otherwise-conformant 2026 servers relying on the
+  # default-to-complete rule fail calls that omit resultType.
+  - sep-2322-client-request-state
+
+  # Alpha.9 advertises resources but returns an invalid empty result for
+  # resources/templates/list. MCPClientManager eagerly discovers templates and
+  # therefore fails before the scenario's remaining operations.
+  # Impact if unchanged: none for conformant servers; malformed capability
+  # implementations fail connection eagerly instead of degrading partially.
+  - http-standard-headers
+
+  # Alpha.9's fixture delegates tools/list to SDK v1 after modern discovery;
+  # SDK v1 rejects protocol version 2026-07-28 before the security check runs.
+  # Impact if unchanged: none demonstrated by this fixture; separate unit tests
+  # cover that Agents does not dereference network JSON Schema references.
+  - json-schema-ref-no-deref

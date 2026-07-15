@@ -1,0 +1,14 @@
+# SDK v2 client against 2025-11-25 stateful servers.
+client:
+  # SHOULD-level only: the built-in provider uses Dynamic Client Registration
+  # instead of a URL-based Client ID Metadata Document.
+  # Impact if unchanged: servers that require CIMD rather than DCR need a
+  # custom OAuth provider.
+  - auth/basic-cimd
+
+  # The default scope step-up budget produces four authorization attempts;
+  # alpha.9's SHOULD-level limit is three or fewer.
+  # Impact if unchanged: a permanently unsatisfiable insufficient_scope
+  # challenge can send the user through one additional OAuth round-trip before
+  # the client stops retrying.
+  - auth/scope-retry-limit

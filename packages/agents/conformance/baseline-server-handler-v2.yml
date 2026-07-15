@@ -1,20 +1,8 @@
-# Expected failures for the SDK v2 createMcpHandler endpoint at 2026-07-28.
-# Kept separate from every legacy baseline because scenario names and protocol
-# semantics differ. Remove entries as they start passing; stale entries fail CI.
+# SDK v2 createMcpHandler endpoint at 2026-07-28.
+# Every entry is executed by alpha.9; run-suite.mjs rejects unseen entries.
 server:
-  # Host/Origin validation is an explicit upstream security middleware choice;
-  # Workers deployments sit behind Cloudflare host validation and do not enable
-  # the SDK's localhost-only defaults.
+  # Agents does not add the SDK's localhost-only Host/Origin middleware.
+  # Impact if unchanged: deployments rely on Cloudflare routing/edge controls;
+  # users exposing an endpoint through a host that accepts arbitrary Host or
+  # Origin values must add their own validation middleware.
   - dns-rebinding-protection
-
-  # The exact beta does not yet implement the optional tasks extension. These
-  # extension scenarios are selected only by the alpha conformance `all` suite.
-  - tasks-lifecycle
-  - tasks-capability-negotiation
-  - tasks-wire-fields
-  - tasks-request-state-removal
-  - tasks-mrtr-input
-  - tasks-request-headers
-  - tasks-dispatch-and-envelope
-  - tasks-required-task-error
-  - tasks-mrtr-composition
