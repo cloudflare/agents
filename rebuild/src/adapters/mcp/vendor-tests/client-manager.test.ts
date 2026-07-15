@@ -1,0 +1,4628 @@
+// Vendored test from packages/agents/src/tests/mcp/client-manager.test.ts @ 762998da, ISSUE-003 (phase 3).
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+import type { DurableObjectStorage, SqlStorageValue } from "@cloudflare/workers-types";
+import { MCPClientManager } from "../vendor/mcp/client.js";
+import {
+  MCPClientConnection,
+  type MCPConnectionState
+} from "../vendor/mcp/client-connection.js";
+import type { MCPServerRow } from "../vendor/mcp/client-storage.js";
+import type { ToolCallOptions } from "ai";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { MCPObservabilityEvent } from "../vendor/observability/mcp.js";
+import { nanoid } from "nanoid";
+
+function createMockStateStorage() {
+  const storage = new Map<string, { serverId: string; createdAt: number }>();
+  return {
+    storage,
+    createState(serverId: string): string {
+      const nonce = nanoid();
+      storage.set(nonce, { serverId, createdAt: Date.now() });
+      return `${nonce}.${serverId}`;
+    },
+    createExpiredState(serverId: string): string {
+      const nonce = nanoid();
+      // Create state that's 11 minutes old (expired - TTL is 10 minutes)
+      const expiredTime = Date.now() - 11 * 60 * 1000;
+      storage.set(nonce, { serverId, createdAt: expiredTime });
+      return `${nonce}.${serverId}`;
+    }
+  };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createMockAuthProvider(
+  stateStorage: ReturnType<typeof createMockStateStorage>
+) {
+  return {
+    authUrl: undefined as string | undefined,
+    clientId: undefined as string | undefined,
+    serverId: undefined as string | undefined,
+    redirectUrl: "http://localhost:3000/callback",
+    clientMetadata: {
+      client_name: "test-client",
+      client_uri: "http://localhost:3000",
+      redirect_uris: ["http://localhost:3000/callback"]
+    },
+    tokens: vi.fn(),
+    saveTokens: vi.fn(),
+    clientInformation: vi.fn(),
+    saveClientInformation: vi.fn(),
+    redirectToAuthorization: vi.fn(),
+    saveCodeVerifier: vi.fn(),
+    codeVerifier: vi.fn(),
+    async checkState(
+      state: string
+    ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
+      const parts = state.split(".");
+      if (parts.length !== 2) {
+        return { valid: false, error: "Invalid state format" };
+      }
+      const [nonce, serverId] = parts as [string, string];
+      const stored = stateStorage.storage.get(nonce);
+      if (!stored) {
+        return { valid: false, error: "State not found or already used" };
+      }
+      // Note: checkState does NOT consume the state - that's done by consumeState
+      if (stored.serverId !== serverId) {
+        return { valid: false, error: "State serverId mismatch" };
+      }
+      // Check expiration (10 minute TTL)
+      const age = Date.now() - stored.createdAt;
+      if (age > 10 * 60 * 1000) {
+        return { valid: false, error: "State expired" };
+      }
+      return { valid: true, serverId };
+    },
+    async consumeState(state: string): Promise<void> {
+      const parts = state.split(".");
+      if (parts.length !== 2) {
+        return;
+      }
+      const [nonce] = parts as [string];
+      stateStorage.storage.delete(nonce);
+    },
+    async deleteCodeVerifier(): Promise<void> {
+      // No-op for tests
+    }
+  };
+}
+
+/**
+ * Test subclass that exposes protected members for testing.
+ */
+class TestMCPClientManager extends MCPClientManager {
+  fireObservabilityEvent(event: MCPObservabilityEvent) {
+    this._onObservabilityEvent.fire(event);
+  }
+
+  trackConnection(serverId: string, promise: Promise<void>): void {
+    type HasTrackConnection = {
+      _trackConnection: (id: string, p: Promise<void>) => void;
+    };
+    (this as unknown as HasTrackConnection)._trackConnection(serverId, promise);
+  }
+}
+
+describe("MCPClientManager OAuth Integration", () => {
+  let manager: TestMCPClientManager;
+  let mockStorageData: Map<string, MCPServerRow>;
+  let mockKVData: Map<string, unknown>;
+
+  // Helper to save a server directly to mock storage (simulates registerServer's storage effect)
+  let saveServerToMock: (server: MCPServerRow) => void;
+  // Helper to clear auth URL (simulates clearAuthUrl's storage effect)
+  let clearAuthUrlInMock: (serverId: string) => void;
+
+  beforeEach(() => {
+    mockStorageData = new Map();
+    mockKVData = new Map();
+
+    // Initialize helpers
+    saveServerToMock = (server: MCPServerRow) => {
+      mockStorageData.set(server.id, server);
+    };
+
+    clearAuthUrlInMock = (serverId: string) => {
+      const server = mockStorageData.get(serverId);
+      if (server) {
+        server.auth_url = null;
+        mockStorageData.set(serverId, server);
+      }
+    };
+
+    // Create a mock SqlStorage with exec method
+    const mockSqlExec = <T extends Record<string, SqlStorageValue>>(
+      query: string,
+      ...values: SqlStorageValue[]
+    ) => {
+      const results: T[] = [];
+
+      if (query.includes("INSERT OR REPLACE")) {
+        const id = values[0] as string;
+        mockStorageData.set(id, {
+          id: values[0] as string,
+          name: values[1] as string,
+          server_url: values[2] as string,
+          client_id: values[3] as string | null,
+          auth_url: values[4] as string | null,
+          callback_url: values[5] as string,
+          server_options: values[6] as string | null
+        });
+      } else if (query.includes("DELETE")) {
+        const id = values[0] as string;
+        mockStorageData.delete(id);
+      } else if (
+        query.includes("UPDATE") &&
+        query.includes("auth_url = NULL")
+      ) {
+        // clearAuthUrl query - only clears auth_url, preserves callback_url
+        const id = values[0] as string;
+        const server = mockStorageData.get(id);
+        if (server) {
+          server.auth_url = null;
+          mockStorageData.set(id, server);
+        }
+      } else if (query.includes("SELECT")) {
+        if (query.includes("WHERE callback_url")) {
+          const url = values[0] as string;
+          for (const server of mockStorageData.values()) {
+            if (server.callback_url === url) {
+              results.push(server as unknown as T);
+              break;
+            }
+          }
+        } else {
+          results.push(
+            ...(Array.from(mockStorageData.values()) as unknown as T[])
+          );
+        }
+      }
+
+      return results[Symbol.iterator]();
+    };
+
+    // Create a mock DurableObjectStorage
+    const mockDOStorage = {
+      sql: {
+        exec: mockSqlExec
+      },
+      get: async <T>(key: string) => mockKVData.get(key) as T | undefined,
+      put: async (key: string, value: unknown) => {
+        mockKVData.set(key, value);
+      },
+      kv: {
+        get: <T>(key: string) => mockKVData.get(key) as T | undefined,
+        put: (key: string, value: unknown) => {
+          mockKVData.set(key, value);
+        },
+        list: vi.fn(),
+        delete: vi.fn()
+      }
+    } as unknown as DurableObjectStorage;
+
+    manager = new TestMCPClientManager("test-client", "1.0.0", {
+      storage: mockDOStorage
+    });
+  });
+
+  describe("Connection Reuse During OAuth", () => {
+    it("should test OAuth reconnect logic through connection reuse condition", async () => {
+      const serverId = "test-server-id";
+
+      // Create a real connection and mock its methods
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+
+      // Mock connection methods to avoid real HTTP calls
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      // Set up connection state
+      connection.connectionState = "authenticating";
+
+      // Pre-populate manager with existing connection
+      manager.mcpConnections[serverId]! = connection;
+
+      // Test the OAuth reconnect path by checking the condition logic
+      const hasExistingConnection = !!manager.mcpConnections[serverId]!;
+      const isOAuthReconnect = true; // simulating OAuth code being present
+
+      // This tests our connection reuse logic: !options.reconnect?.oauthCode || !this.mcpConnections[id]!
+      const shouldReuseConnection = isOAuthReconnect && hasExistingConnection;
+
+      expect(shouldReuseConnection).toBe(true);
+      expect(manager.mcpConnections[serverId]!).toBe(connection);
+      expect(connection.connectionState).toBe("authenticating");
+    });
+
+    it("should clean up verifier after deprecated OAuth reconnect completion", async () => {
+      const serverId = "test-server-id";
+      const authProvider = {
+        authUrl: undefined,
+        clientId: "test-client-id",
+        serverId,
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          client_uri: "http://localhost:3000",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto", authProvider }, client: {} }
+      );
+      connection.connectionState = "authenticating";
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connected";
+        });
+      manager.mcpConnections[serverId]! = connection;
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const result = await manager.connect("http://example.com", {
+        reconnect: {
+          id: serverId,
+          oauthClientId: "test-client-id",
+          oauthCode: "test-auth-code"
+        },
+        transport: { type: "auto", authProvider }
+      });
+
+      expect(result.id).toBe(serverId);
+      expect(connection.completeAuthorization).toHaveBeenCalledWith(
+        "test-auth-code"
+      );
+      expect(authProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Worker-safe JSON Schema validator defaults", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("connect() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const { id } = await manager.connect("http://example.com", {
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]!?.options.client?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("connect() preserves a caller-supplied jsonSchemaValidator", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      const { id } = await manager.connect("http://example.com", {
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]!?.options.client?.jsonSchemaValidator
+      ).toBe(customValidator);
+    });
+
+    it("registerServer() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      await manager.registerServer("validator-default-id", {
+        url: "http://example.com",
+        name: "validator-default",
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections["validator-default-id"]!?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("registerServer() does not persist a caller-supplied jsonSchemaValidator", async () => {
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      await manager.registerServer("validator-persist-id", {
+        url: "http://example.com",
+        name: "validator-persist",
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      // The live connection keeps the caller's validator...
+      expect(
+        manager.mcpConnections["validator-persist-id"]!?.options.client
+          ?.jsonSchemaValidator
+      ).toBe(customValidator);
+
+      // ...but a validator instance cannot survive JSON serialization, so it
+      // must not be written to storage at all.
+      const row = mockStorageData.get("validator-persist-id");
+      const persisted = JSON.parse(row?.server_options ?? "{}");
+      expect(persisted.client).not.toHaveProperty("jsonSchemaValidator");
+    });
+
+    it("restore falls back to the Worker-safe default when persisted options contain a serialization-degraded validator", async () => {
+      // Simulate a row written by a caller that passed a custom validator:
+      // JSON.stringify degrades the instance to a plain object.
+      saveServerToMock({
+        id: "restored-degraded-validator",
+        name: "Degraded Validator Server",
+        server_url: "http://example.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: "https://auth.example.com/authorize",
+        server_options: JSON.stringify({
+          transport: { type: "auto" },
+          client: { jsonSchemaValidator: {} }
+        })
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      expect(
+        manager.mcpConnections["restored-degraded-validator"]!?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+  });
+
+  describe("Callback URL Management", () => {
+    it("should recognize callback URLs from database", async () => {
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: "server1",
+        name: "Test Server 1",
+        server_url: "http://test1.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+      saveServerToMock({
+        id: "server2",
+        name: "Test Server 2",
+        server_url: "http://test2.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const state1 = stateStorage.createState("server1");
+      const state2 = stateStorage.createState("server2");
+
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${callbackUrl}?code=test&state=${state1}`)
+        )
+      ).toBe(true);
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${callbackUrl}?code=test&state=${state2}`)
+        )
+      ).toBe(true);
+      expect(
+        manager.isCallbackRequest(
+          new Request("http://other.com/callback?code=test&state=invalid")
+        )
+      ).toBe(false);
+
+      await manager.removeServer("server1");
+
+      const state1New = stateStorage.createState("server1");
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${callbackUrl}?code=test&state=${state1New}`)
+        )
+      ).toBe(false);
+
+      const state2New = stateStorage.createState("server2");
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${callbackUrl}?code=test&state=${state2New}`)
+        )
+      ).toBe(true);
+    });
+
+    it("should handle callback request processing", async () => {
+      const serverId = "test-server";
+      const clientId = "test-client-id";
+      const authCode = "test-auth-code";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: clientId,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      // Simulate clientId being set during dynamic client registration (before callback)
+      mockAuthProvider.clientId = clientId;
+
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "authenticating";
+
+      manager.mcpConnections[serverId]! = connection;
+
+      const completeAuthSpy = vi
+        .spyOn(connection, "completeAuthorization")
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=${authCode}&state=${state}`
+      );
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.serverId).toBe(serverId);
+      expect(result.authSuccess).toBe(true);
+      expect(completeAuthSpy).toHaveBeenCalledWith(authCode, {
+        alreadyAccepted: true
+      });
+      // Verify auth provider has correct serverId and preserved clientId
+      expect(connection.options.transport.authProvider?.serverId).toBe(
+        serverId
+      );
+      expect(connection.options.transport.authProvider?.clientId).toBe(
+        clientId
+      );
+    });
+
+    it("should return auth error for callback without matching URL", async () => {
+      const callbackRequest = new Request(
+        "http://localhost:3000/unknown?code=test&state=invalid.format"
+      );
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("No server found with id");
+    });
+
+    it("should handle OAuth error response from provider", async () => {
+      const serverId = "server1";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access&state=${state}`
+      );
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.serverId).toBe(serverId);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("User denied access");
+    });
+
+    it("should fail connection for callback without code or error", async () => {
+      const serverId = "server1";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(`${callbackUrl}?state=${state}`);
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("Unauthorized: no code provided");
+    });
+
+    it("should return auth error for callback without state", async () => {
+      const callbackUrl = "http://localhost:3000/callback";
+      const callbackRequest = new Request(`${callbackUrl}?code=test`);
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("Unauthorized: no state provided");
+    });
+
+    it("should return auth error for callback with non-existent server", async () => {
+      const stateStorage = createMockStateStorage();
+      const state = stateStorage.createState("non-existent");
+      const callbackRequest = new Request(
+        `http://localhost:3000/callback?code=test&state=${state}`
+      );
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("No server found with id");
+    });
+
+    it("should handle duplicate callback when already in ready state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "ready";
+
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test&state=${state}`
+      );
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(true);
+      expect(result.serverId).toBe(serverId);
+    });
+
+    it("should fail connection when callback received for connection in failed state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "failed";
+
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test&state=${state}`
+      );
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe(
+        'Failed to authenticate: the client is in "failed" state, expected "authenticating"'
+      );
+    });
+
+    it("should recognize custom callback paths that do not contain '/callback'", async () => {
+      const customCallbackUrl = "http://localhost:3000/mcp-oauth-return";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: "server1",
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: customCallbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const state = stateStorage.createState("server1");
+
+      // Custom path should be recognized via state param, not URL path
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customCallbackUrl}?code=test&state=${state}`)
+        )
+      ).toBe(true);
+
+      // Invalid state should still be rejected
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customCallbackUrl}?code=test&state=invalid`)
+        )
+      ).toBe(false);
+
+      // Missing state should still be rejected
+      expect(
+        manager.isCallbackRequest(new Request(`${customCallbackUrl}?code=test`))
+      ).toBe(false);
+    });
+  });
+
+  describe("OAuth Security", () => {
+    it("should clear auth_url but preserve callback_url after successful authentication", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const authUrl = "https://auth.example.com/authorize";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: authUrl,
+        server_options: null
+      });
+
+      let server = mockStorageData.get(serverId);
+      expect(server).toBeDefined();
+      expect(server?.callback_url).toBe(callbackUrl);
+      expect(server?.auth_url).toBe(authUrl);
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test-code&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(true);
+
+      server = mockStorageData.get(serverId);
+      expect(server).toBeDefined();
+      expect(server?.callback_url).toBe(callbackUrl);
+      expect(server?.auth_url).toBe(null);
+    });
+
+    it("should prevent second callback attempt with reused state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+
+      const callbackRequest1 = new Request(
+        `${callbackUrl}?code=test-code&state=${state}`
+      );
+      const result1 = await manager.handleCallbackRequest(callbackRequest1);
+      expect(result1.authSuccess).toBe(true);
+
+      connection.connectionState = "authenticating";
+
+      const callbackRequest2 = new Request(
+        `${callbackUrl}?code=malicious-code&state=${state}`
+      );
+      const result2 = await manager.handleCallbackRequest(callbackRequest2);
+      expect(result2.authSuccess).toBe(false);
+      expect(result2.authError).toBe("State not found or already used");
+    });
+
+    it("should reject expired state (10 minute TTL)", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      manager.mcpConnections[serverId]! = connection;
+
+      // Create an expired state (11 minutes old, TTL is 10 minutes)
+      const expiredState = stateStorage.createExpiredState(serverId);
+
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test-code&state=${expiredState}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("State expired");
+    });
+
+    it("should only match callbacks with valid state for existing servers", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const validState = stateStorage.createState(serverId);
+
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${callbackUrl}?code=test&state=${validState}`)
+        )
+      ).toBe(true);
+
+      expect(
+        manager.isCallbackRequest(
+          new Request(
+            `${callbackUrl}?code=test&state=${nanoid()}.different-server`
+          )
+        )
+      ).toBe(false);
+
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${callbackUrl}?code=test&state=invalid`)
+        )
+      ).toBe(false);
+
+      expect(
+        manager.isCallbackRequest(new Request(`${callbackUrl}?code=test`))
+      ).toBe(false);
+    });
+
+    it("should match callback requests by state param and registered pathname", async () => {
+      const serverId = "test-server";
+      const customPath = "http://localhost:3000/my-custom-oauth-return";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: customPath,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const validState = stateStorage.createState(serverId);
+
+      // Should match when pathname matches the registered callback URL
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customPath}?code=test&state=${validState}`)
+        )
+      ).toBe(true);
+
+      // Should NOT match on a different pathname even with valid state (defense-in-depth)
+      expect(
+        manager.isCallbackRequest(
+          new Request(
+            `http://localhost:3000/anything?code=test&state=${validState}`
+          )
+        )
+      ).toBe(false);
+
+      // POST should still be rejected
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customPath}?code=test&state=${validState}`, {
+            method: "POST"
+          })
+        )
+      ).toBe(false);
+    });
+
+    it("should gracefully handle OAuth callback when connection is already in connected state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const authUrl = "https://auth.example.com/authorize";
+      const stateStorage = createMockStateStorage();
+
+      // Save server with auth_url and callback_url
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: authUrl,
+        server_options: null
+      });
+
+      // Create connection that's already in CONNECTED state
+      // This can happen if OAuth completed and connection established before callback was processed
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.connectionState = "connected"; // Already connected!
+      connection.lastConnectedTransport = "sse";
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId]! = connection;
+
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      // Handle callback - should not throw error
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test-code&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      // Should succeed
+      expect(result.authSuccess).toBe(true);
+      expect(result.serverId).toBe(serverId);
+
+      // auth_url should be cleared
+      const server = mockStorageData.get(serverId);
+      expect(server?.auth_url).toBe(null);
+    });
+
+    it("should handle OAuth error from authorization server", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: "http://auth.example.com/authorize",
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      // OAuth server returns error instead of code
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.serverId).toBe(serverId);
+      expect(result.authError).toBe("User denied access");
+      // Verify error is stored on connection for UI display
+      expect(connection.connectionState).toBe("failed");
+      expect(connection.connectionError).toBe("User denied access");
+    });
+
+    it("should handle OAuth error without description", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      // OAuth server returns error without description
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=server_error&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("server_error");
+    });
+
+    it("should pass through raw error_description without escaping", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const xssPayload = "</script><img src=x onerror=alert(1)>";
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=access_denied&error_description=${encodeURIComponent(xssPayload)}&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe(xssPayload);
+      expect(connection.connectionError).toBe(xssPayload);
+    });
+
+    it("should pass through raw error parameter without escaping when description is absent", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const xssPayload = "<script>alert('xss')</script>";
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=${encodeURIComponent(xssPayload)}&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe(xssPayload);
+      expect(connection.connectionError).toBe(xssPayload);
+    });
+
+    it("should handle token exchange failure", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      // Mock completeAuthorization to fail (simulating token exchange failure)
+      connection.completeAuthorization = vi
+        .fn()
+        .mockRejectedValue(new Error("Token exchange failed: invalid_grant"));
+      manager.mcpConnections[serverId]! = connection;
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=valid-code&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("invalid_grant");
+    });
+
+    it("should handle concurrent OAuth attempts (second attempt while first in progress)", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      manager.mcpConnections[serverId]! = connection;
+
+      // Create two different states (simulating user starting OAuth twice)
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+
+      // First callback succeeds
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+
+      // Reset connection state for second attempt
+      connection.connectionState = "authenticating";
+
+      // Second callback also succeeds (different state, not reused)
+      const result2 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code2&state=${state2}`)
+      );
+      expect(result2.authSuccess).toBe(true);
+    });
+
+    it("should ignore stale valid callback after auth is already progressing", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId]! = connection;
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state2Nonce] = state2.split(".");
+      if (!state2Nonce) {
+        throw new Error("Test setup failed to create an OAuth state nonce");
+      }
+
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code2&state=${state2}`)
+      );
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+    });
+
+    it("should ignore callback that becomes stale while state validation is pending", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state2Nonce] = state2.split(".");
+      if (!state2Nonce) {
+        throw new Error("Test setup failed to create an OAuth state nonce");
+      }
+
+      const state2CheckStarted = createDeferred<void>();
+      const releaseState2Check = createDeferred<void>();
+      const baseAuthProvider = createMockAuthProvider(stateStorage);
+      const mockAuthProvider = {
+        ...baseAuthProvider,
+        async checkState(
+          state: string
+        ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
+          if (state === state2) {
+            state2CheckStarted.resolve(undefined);
+            await releaseState2Check.promise;
+          }
+          return baseAuthProvider.checkState(state);
+        }
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId]! = connection;
+
+      const result2Promise = manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code2&state=${state2}`)
+      );
+      await state2CheckStarted.promise;
+
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+
+      releaseState2Check.resolve(undefined);
+      const result2 = await result2Promise;
+
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+    });
+
+    it("should ignore stale OAuth error callback after auth is already progressing", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId]! = connection;
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state2Nonce] = state2.split(".");
+      if (!state2Nonce) {
+        throw new Error("Test setup failed to create an OAuth state nonce");
+      }
+
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(
+          `${callbackUrl}?error=access_denied&state=${state2}&error_description=denied`
+        )
+      );
+
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+    });
+
+    it("should not consume an invalid stale OAuth error callback state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const baseAuthProvider = createMockAuthProvider(stateStorage);
+      const mockAuthProvider = {
+        ...baseAuthProvider,
+        consumeState: vi.fn(baseAuthProvider.consumeState)
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "connecting";
+      manager.mcpConnections[serverId]! = connection;
+
+      const result = await manager.handleCallbackRequest(
+        new Request(
+          `${callbackUrl}?error=access_denied&state=forged-nonce.${serverId}`
+        )
+      );
+
+      expect(result.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(mockAuthProvider.consumeState).not.toHaveBeenCalled();
+    });
+
+    it("should ignore stale OAuth error callback after auth is accepted but before state cleanup finishes", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state1Nonce] = state1.split(".");
+      const [state2Nonce] = state2.split(".");
+      if (!state1Nonce || !state2Nonce) {
+        throw new Error("Test setup failed to create OAuth state nonces");
+      }
+
+      const consumeStateStarted = createDeferred<void>();
+      const releaseConsumeState = createDeferred<void>();
+      const baseAuthProvider = createMockAuthProvider(stateStorage);
+      const mockAuthProvider = {
+        ...baseAuthProvider,
+        async consumeState(state: string): Promise<void> {
+          if (state === state1) {
+            consumeStateStarted.resolve(undefined);
+            await releaseConsumeState.promise;
+          }
+          await baseAuthProvider.consumeState(state);
+        }
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId]! = connection;
+
+      const result1Promise = manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      await consumeStateStarted.promise;
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(
+          `${callbackUrl}?error=access_denied&state=${state2}&error_description=denied`
+        )
+      );
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+
+      releaseConsumeState.resolve(undefined);
+      const result1 = await result1Promise;
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state1Nonce)).toBe(false);
+    });
+
+    it("should not delete active verifier for duplicate callback with same state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state = stateStorage.createState(serverId);
+      const completeAuthorizationStarted = createDeferred<void>();
+      const releaseCompleteAuthorization = createDeferred<void>();
+      const mockAuthProvider = {
+        ...createMockAuthProvider(stateStorage),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          completeAuthorizationStarted.resolve(undefined);
+          await releaseCompleteAuthorization.promise;
+        });
+      manager.mcpConnections[serverId]! = connection;
+
+      const result1Promise = manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state}`)
+      );
+      await completeAuthorizationStarted.promise;
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state}`)
+      );
+      expect(result2.authSuccess).toBe(true);
+      expect(mockAuthProvider.deleteCodeVerifier).not.toHaveBeenCalled();
+
+      releaseCompleteAuthorization.resolve(undefined);
+      const result1 = await result1Promise;
+      expect(result1.authSuccess).toBe(true);
+      expect(mockAuthProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+    });
+
+    it("should run token exchange with callback state for PKCE lookup", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state = stateStorage.createState(serverId);
+      const runWithCodeVerifierStateSpy = vi.fn();
+      const mockAuthProvider = {
+        ...createMockAuthProvider(stateStorage),
+        async runWithCodeVerifierState<T>(
+          stateArg: string,
+          callback: () => Promise<T>
+        ): Promise<T> {
+          runWithCodeVerifierStateSpy(stateArg);
+          expect(stateArg).toBe(state);
+          return callback();
+        }
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      manager.mcpConnections[serverId]! = connection;
+
+      const result = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state}`)
+      );
+
+      expect(result.authSuccess).toBe(true);
+      expect(runWithCodeVerifierStateSpy).toHaveBeenCalledTimes(1);
+      expect(runWithCodeVerifierStateSpy.mock.calls[0]!?.[0]).toBe(state);
+    });
+  });
+
+  describe("OAuth Connection Restoration", () => {
+    it("should restore OAuth connections from storage", async () => {
+      const serverId = "oauth-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const clientId = "stored-client-id";
+      const authUrl = "https://auth.example.com/authorize";
+
+      // Save OAuth server to storage with auth_url set (OAuth flow in progress)
+      saveServerToMock({
+        id: serverId,
+        name: "OAuth Server",
+        server_url: "http://oauth-server.com",
+        callback_url: callbackUrl,
+        client_id: clientId,
+        auth_url: authUrl,
+        server_options: JSON.stringify({
+          transport: { type: "auto" },
+          client: {}
+        })
+      });
+
+      // Spy on connectToServer - should NOT be called when auth_url is set
+      const connectSpy = vi.spyOn(manager, "connectToServer");
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Verify connection was created but connectToServer was NOT called
+      // (auth_url means OAuth flow is in progress, so we skip connection attempt)
+      const connection = manager.mcpConnections[serverId]!;
+      expect(connection).toBeDefined();
+      expect(connectSpy).not.toHaveBeenCalled();
+      expect(connection.connectionState).toBe("authenticating");
+
+      // Verify auth provider was set up
+      expect(connection.options.transport.authProvider).toBeDefined();
+      expect(connection.options.transport.authProvider?.serverId).toBe(
+        serverId
+      );
+      expect(connection.options.transport.authProvider?.clientId).toBe(
+        clientId
+      );
+    });
+
+    it("should restore non-OAuth connections from storage", async () => {
+      const serverId = "regular-server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      // Save non-OAuth server (no auth_url)
+      saveServerToMock({
+        id: serverId,
+        name: "Regular Server",
+        server_url: "http://regular-server.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null, // No OAuth
+        server_options: JSON.stringify({
+          transport: { type: "sse", headers: { "X-Custom": "value" } },
+          client: {}
+        })
+      });
+
+      // Mock connectToServer to avoid real HTTP calls
+      vi.spyOn(manager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Verify connection was registered and connected
+      const connection = manager.mcpConnections[serverId]!;
+      expect(connection).toBeDefined();
+
+      // Verify auth provider was created (required for all connections)
+      expect(connection.options.transport.authProvider).toBeDefined();
+    });
+
+    it("should handle empty server list gracefully", async () => {
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Should not throw and should have no connections
+      expect(Object.keys(manager.mcpConnections)).toHaveLength(0);
+    });
+
+    it("should restore mixed OAuth and non-OAuth servers", async () => {
+      // Save OAuth server
+      saveServerToMock({
+        id: "oauth-server",
+        name: "OAuth Server",
+        server_url: "http://oauth.com",
+        callback_url: "http://localhost:3000/callback/oauth",
+        client_id: "oauth-client",
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      // Save regular server
+      saveServerToMock({
+        id: "regular-server",
+        name: "Regular Server",
+        server_url: "http://regular.com",
+        callback_url: "http://localhost:3000/callback/regular",
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      // Mock connectToServer to return appropriate states
+      vi.spyOn(manager, "connectToServer").mockImplementation(async (id) => {
+        const conn = manager.mcpConnections[id]!;
+        if (id === "oauth-server" && conn) {
+          conn.init = vi.fn().mockImplementation(async () => {
+            conn.connectionState = "authenticating";
+          });
+          await conn.init();
+          return {
+            state: "authenticating",
+            authUrl: "https://auth.example.com/authorize",
+            clientId: "oauth-client"
+          };
+        }
+        return { state: "connected" };
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Verify OAuth server is in authenticating state
+      expect(manager.mcpConnections["oauth-server"]!).toBeDefined();
+      expect(manager.mcpConnections["oauth-server"]!.connectionState).toBe(
+        "authenticating"
+      );
+
+      // Verify regular server was connected
+      expect(manager.mcpConnections["regular-server"]!).toBeDefined();
+    });
+  });
+
+  describe("registerServer() and connectToServer()", () => {
+    it("should register a server and save to storage", () => {
+      const id = "test-server-1";
+      const url = "http://example.com/mcp";
+      const name = "Test Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Verify connection was created
+      expect(manager.mcpConnections[id]!).toBeDefined();
+      expect(manager.mcpConnections[id]!.url.toString()).toBe(url);
+
+      // Verify saved to storage
+      const servers = mockStorageData.get(id);
+      expect(servers).toBeDefined();
+      expect(servers?.name).toBe(name);
+      expect(servers?.server_url).toBe(url);
+      expect(servers?.callback_url).toBe(callbackUrl);
+    });
+
+    it("should skip registering if server already exists", () => {
+      const id = "existing-server";
+      const url = "http://example.com/mcp";
+      const name = "Existing Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      // Register once
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+      const firstConnection = manager.mcpConnections[id]!;
+
+      // Try to register again
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+      const secondConnection = manager.mcpConnections[id]!;
+
+      // Should be the same connection object
+      expect(secondConnection).toBe(firstConnection);
+    });
+
+    it("should save auth URL and client ID when registering OAuth server", () => {
+      const id = "oauth-server";
+      const url = "http://oauth.example.com/mcp";
+      const name = "OAuth Server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const authUrl = "https://auth.example.com/authorize";
+      const clientId = "test-client-id";
+
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" },
+        authUrl,
+        clientId
+      });
+
+      // Verify OAuth info saved to storage
+      const server = mockStorageData.get(id);
+      expect(server?.auth_url).toBe(authUrl);
+      expect(server?.client_id).toBe(clientId);
+    });
+
+    it("should throw error when connecting to non-registered server", async () => {
+      await expect(
+        manager.connectToServer("non-existent-server")
+      ).rejects.toThrow(
+        "Server non-existent-server is not registered. Call registerServer() first."
+      );
+    });
+
+    it("should update storage with OAuth info after connection", async () => {
+      const id = "test-oauth-server";
+      const url = "http://oauth.example.com/mcp";
+      const name = "OAuth Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      // Create a mock auth provider that returns auth URL
+      const mockAuthProvider = {
+        serverId: id,
+        clientId: "mock-client-id",
+        authUrl: "https://auth.example.com/authorize",
+        redirectUrl: callbackUrl,
+        clientMetadata: {
+          client_name: "test-client",
+          redirect_uris: [callbackUrl]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn((url) => {
+          mockAuthProvider.authUrl = url.toString();
+        }),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+
+      // Register server with auth provider
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: {
+          type: "auto",
+          authProvider: mockAuthProvider
+        }
+      });
+
+      // Mock the connection to return authenticating state
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "authenticating";
+      });
+
+      // Connect to server
+      const result = await manager.connectToServer(id);
+
+      // Verify auth URL is returned with authenticating state
+      expect(result.state).toBe("authenticating");
+      if (result.state === "authenticating") {
+        expect(result.authUrl).toBe(mockAuthProvider.authUrl);
+        expect(result.clientId).toBe(mockAuthProvider.clientId);
+      }
+
+      // Verify storage was updated with OAuth info
+      const server = mockStorageData.get(id);
+      expect(server?.auth_url).toBe(mockAuthProvider.authUrl);
+      expect(server?.client_id).toBe(mockAuthProvider.clientId);
+    });
+
+    it("should persist streamable-http session IDs after connecting", async () => {
+      const id = "session-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Session Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "streamable-http" }
+      });
+
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+      });
+      Object.defineProperty(conn, "sessionId", {
+        configurable: true,
+        get: () => "persisted-session-id"
+      });
+
+      const result = await manager.connectToServer(id);
+      expect(result.state).toBe("connected");
+
+      const server = mockStorageData.get(id);
+      expect(server).toBeDefined();
+      expect(server?.server_options).not.toBeNull();
+      const serverOptions = JSON.parse(server?.server_options ?? "{}");
+      expect(serverOptions.transport?.sessionId).toBe("persisted-session-id");
+    });
+
+    it("should terminate streamable-http sessions before closing a connection", async () => {
+      const id = "streamable-http-close-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Session Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "streamable-http" }
+      });
+
+      const conn = manager.mcpConnections[id]!;
+      let transportUsed:
+        | {
+            terminateSession: () => Promise<void>;
+            sessionId?: string;
+          }
+        | undefined;
+      conn.client.connect = vi.fn().mockImplementation(async (transport) => {
+        transportUsed = transport as {
+          terminateSession: () => Promise<void>;
+          sessionId?: string;
+        };
+      });
+      const closeSpy = vi
+        .spyOn(conn.client, "close")
+        .mockResolvedValue(undefined);
+
+      const connectResult = await manager.connectToServer(id);
+      expect(connectResult.state).toBe("connected");
+      expect(transportUsed).toBeDefined();
+
+      Object.defineProperty(transportUsed!, "sessionId", {
+        configurable: true,
+        get: () => "live-session-id"
+      });
+      const terminateSpy = vi
+        .spyOn(transportUsed!, "terminateSession")
+        .mockResolvedValue(undefined);
+
+      const server = mockStorageData.get(id);
+      expect(server?.server_options).not.toBeNull();
+      server!.server_options = JSON.stringify({
+        transport: {
+          type: "streamable-http",
+          sessionId: "live-session-id"
+        },
+        client: {}
+      });
+      mockStorageData.set(id, server!);
+
+      await manager.closeConnection(id);
+
+      expect(terminateSpy).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(terminateSpy.mock.invocationCallOrder[0]!).toBeLessThan(
+        closeSpy.mock.invocationCallOrder[0]!
+      );
+
+      const updatedServer = mockStorageData.get(id);
+      expect(updatedServer?.server_options).not.toBeNull();
+      const serverOptions = JSON.parse(updatedServer?.server_options ?? "{}");
+      expect(serverOptions.transport?.sessionId).toBeUndefined();
+    });
+
+    it("should terminate all streamable-http sessions during closeAllConnections", async () => {
+      const ids = [
+        "streamable-http-close-all-1",
+        "streamable-http-close-all-2"
+      ];
+      const terminateSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+
+      for (const id of ids) {
+        await manager.registerServer(id, {
+          url: `http://example.com/${id}`,
+          name: id,
+          callbackUrl: "http://localhost:3000/callback",
+          client: {},
+          transport: { type: "streamable-http" }
+        });
+
+        const conn = manager.mcpConnections[id]!;
+        let transportUsed:
+          | {
+              terminateSession: () => Promise<void>;
+              sessionId?: string;
+            }
+          | undefined;
+
+        conn.client.connect = vi.fn().mockImplementation(async (transport) => {
+          transportUsed = transport as {
+            terminateSession: () => Promise<void>;
+            sessionId?: string;
+          };
+        });
+        vi.spyOn(conn.client, "close").mockResolvedValue(undefined);
+
+        const connectResult = await manager.connectToServer(id);
+        expect(connectResult.state).toBe("connected");
+        expect(transportUsed).toBeDefined();
+
+        Object.defineProperty(transportUsed!, "sessionId", {
+          configurable: true,
+          get: () => `${id}-session-id`
+        });
+        terminateSpies.push(
+          vi
+            .spyOn(transportUsed!, "terminateSession")
+            .mockResolvedValue(undefined)
+        );
+
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        server!.server_options = JSON.stringify({
+          transport: {
+            type: "streamable-http",
+            sessionId: `${id}-session-id`
+          },
+          client: {}
+        });
+        mockStorageData.set(id, server!);
+      }
+
+      await manager.closeAllConnections();
+
+      for (const terminateSpy of terminateSpies) {
+        expect(terminateSpy).toHaveBeenCalledTimes(1);
+      }
+
+      for (const id of ids) {
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        const serverOptions = JSON.parse(server?.server_options ?? "{}");
+        expect(serverOptions.transport?.sessionId).toBeUndefined();
+      }
+    });
+
+    it("should clean up local connection state even if client close fails", async () => {
+      const id = "streamable-http-close-error-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Close Error Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "streamable-http" }
+      });
+
+      const conn = manager.mcpConnections[id]!;
+      vi.spyOn(conn.client, "close").mockRejectedValue(
+        new Error("close failed")
+      );
+
+      const server = mockStorageData.get(id);
+      expect(server?.server_options).not.toBeNull();
+      server!.server_options = JSON.stringify({
+        transport: {
+          type: "streamable-http",
+          sessionId: "live-session-id"
+        },
+        client: {}
+      });
+      mockStorageData.set(id, server!);
+
+      await expect(manager.closeConnection(id)).rejects.toThrow("close failed");
+      expect(manager.mcpConnections[id]!).toBeUndefined();
+
+      const updatedServer = mockStorageData.get(id);
+      expect(updatedServer?.server_options).not.toBeNull();
+      const serverOptions = JSON.parse(updatedServer?.server_options ?? "{}");
+      expect(serverOptions.transport?.sessionId).toBeUndefined();
+    });
+
+    it("should clean up every connection during closeAllConnections even if one close fails", async () => {
+      const ids = ["close-all-error-1", "close-all-error-2"];
+
+      for (const id of ids) {
+        await manager.registerServer(id, {
+          url: `http://example.com/${id}`,
+          name: id,
+          callbackUrl: "http://localhost:3000/callback",
+          client: {},
+          transport: { type: "streamable-http" }
+        });
+
+        const conn = manager.mcpConnections[id]!;
+        vi.spyOn(conn.client, "close").mockImplementation(async () => {
+          if (id === ids[0]) {
+            throw new Error("close all failed");
+          }
+        });
+
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        server!.server_options = JSON.stringify({
+          transport: {
+            type: "streamable-http",
+            sessionId: `${id}-session-id`
+          },
+          client: {}
+        });
+        mockStorageData.set(id, server!);
+      }
+
+      await expect(manager.closeAllConnections()).rejects.toThrow(
+        "close all failed"
+      );
+
+      for (const id of ids) {
+        expect(manager.mcpConnections[id]!).toBeUndefined();
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        const serverOptions = JSON.parse(server?.server_options ?? "{}");
+        expect(serverOptions.transport?.sessionId).toBeUndefined();
+      }
+    });
+
+    it("should fire onServerStateChanged when registering a server", async () => {
+      const id = "test-server";
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("should fire onServerStateChanged when connecting to non-OAuth server (ready state)", async () => {
+      const id = "non-oauth-server";
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Non-OAuth Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Mock connection to reach connected state
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+      });
+
+      // Clear previous calls from registerServer
+      onStateChangedSpy.mockClear();
+
+      await manager.connectToServer(id);
+
+      // Should fire once: after init() when state changes
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("should fire onServerStateChanged when connecting to OAuth server (authenticating state)", async () => {
+      const id = "oauth-server";
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      const mockAuthProvider = {
+        serverId: id,
+        clientId: "mock-client-id",
+        authUrl: "https://auth.example.com/authorize",
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+
+      await manager.registerServer(id, {
+        url: "http://oauth.example.com/mcp",
+        name: "OAuth Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: {
+          type: "auto",
+          authProvider: mockAuthProvider
+        }
+      });
+
+      // Mock connection to stay in authenticating state
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "authenticating";
+      });
+
+      // Clear previous calls from registerServer
+      onStateChangedSpy.mockClear();
+
+      await manager.connectToServer(id);
+
+      // Should fire twice: once after init(), once after saving auth_url to storage
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("should have auth_url in storage after onServerStateChanged fires for OAuth server", async () => {
+      const id = "oauth-server-auth-url";
+      const expectedAuthUrl =
+        "https://auth.example.com/authorize?client_id=test";
+      const authUrlsAtEachBroadcast: (string | null)[] = [];
+
+      const mockAuthProvider = {
+        serverId: id,
+        clientId: "mock-client-id",
+        authUrl: expectedAuthUrl,
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+
+      await manager.registerServer(id, {
+        url: "http://oauth.example.com/mcp",
+        name: "OAuth Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: {
+          type: "auto",
+          authProvider: mockAuthProvider
+        }
+      });
+
+      // Mock connection to stay in authenticating state
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "authenticating";
+      });
+
+      // Track auth_url at each state change broadcast
+      manager.onServerStateChanged(() => {
+        const servers = manager.listServers();
+        const server = servers.find((s) => s.id === id);
+        authUrlsAtEachBroadcast.push(server?.auth_url ?? null);
+      });
+
+      await manager.connectToServer(id);
+
+      // Should have 2 broadcasts
+      expect(authUrlsAtEachBroadcast).toHaveLength(2);
+      // Second broadcast should have auth_url populated
+      expect(authUrlsAtEachBroadcast[1]).toBe(expectedAuthUrl);
+    });
+
+    it("should fire onServerStateChanged when OAuth callback succeeds", async () => {
+      const id = "oauth-callback-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      // Setup server in storage
+      saveServerToMock({
+        id,
+        name: "OAuth Server",
+        server_url: "http://oauth.example.com/mcp",
+        callback_url: callbackUrl,
+        client_id: "test-client",
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      // Create connection with auth provider
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+
+      const connection = new MCPClientConnection(
+        new URL("http://oauth.example.com/mcp"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+
+      manager.mcpConnections[id]! = connection;
+
+      // Clear previous calls
+      onStateChangedSpy.mockClear();
+
+      const state = stateStorage.createState(id);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test-code&state=${state}`
+      );
+      await manager.handleCallbackRequest(callbackRequest);
+
+      // Should fire on successful callback
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("should fire onServerStateChanged when OAuth callback fails", async () => {
+      const id = "oauth-fail-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      // Setup server in storage
+      saveServerToMock({
+        id,
+        name: "OAuth Server",
+        server_url: "http://oauth.example.com/mcp",
+        callback_url: callbackUrl,
+        client_id: "test-client",
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      // Create connection with auth provider
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+
+      const connection = new MCPClientConnection(
+        new URL("http://oauth.example.com/mcp"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockRejectedValue(new Error("OAuth failed"));
+
+      manager.mcpConnections[id]! = connection;
+
+      // Clear previous calls
+      onStateChangedSpy.mockClear();
+
+      const state = stateStorage.createState(id);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test-code&state=${state}`
+      );
+      await manager.handleCallbackRequest(callbackRequest);
+
+      // Should fire even on failed callback
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("should fire onServerStateChanged when establishConnection succeeds", async () => {
+      const id = "establish-success-server";
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+      });
+      // Mock discover() instead of discoverAndRegister() since that's what discoverIfConnected calls
+      conn.discover = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "ready";
+        return { success: true };
+      });
+
+      // Clear previous calls from registerServer
+      onStateChangedSpy.mockClear();
+
+      await manager.establishConnection(id);
+
+      // Should fire 3 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 1 from discoverIfConnected (state changed)
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it("should fire onServerStateChanged when establishConnection fails", async () => {
+      const id = "establish-fail-server";
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+      });
+      // Mock discover() to simulate failure - state doesn't change (stays connected)
+      conn.discover = vi.fn().mockImplementation(async () => {
+        // State stays as "connected" on failure
+        return { success: false, error: "Discovery failed" };
+      });
+
+      // Clear previous calls from registerServer
+      onStateChangedSpy.mockClear();
+
+      await manager.establishConnection(id);
+
+      // Should fire 3 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 1 from discoverIfConnected
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it("should self-track so waitForConnections() includes it", async () => {
+      const id = "self-track-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      let resolveInit!: () => void;
+      const conn = manager.mcpConnections[id]!;
+      conn.init = vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveInit = resolve;
+          })
+      );
+
+      // Fire-and-forget (don't await)
+      const connectionPromise = manager.establishConnection(id);
+
+      // waitForConnections should block because establishConnection tracked itself
+      let waited = false;
+      const waitPromise = manager.waitForConnections().then(() => {
+        waited = true;
+      });
+
+      expect(waited).toBe(false);
+
+      // Let init complete (with failed state so discover is skipped)
+      conn.connectionState = "failed";
+      resolveInit();
+
+      await connectionPromise;
+      await waitPromise;
+      expect(waited).toBe(true);
+    });
+
+    it("should fire onServerStateChanged when removing a server", async () => {
+      const id = "remove-server";
+      const onStateChangedSpy = vi.fn();
+      manager.onServerStateChanged(onStateChangedSpy);
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Clear previous calls from registerServer
+      onStateChangedSpy.mockClear();
+
+      await manager.removeServer(id);
+
+      // Should fire when server is removed
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("getAITools() integration", () => {
+    it("should return AI SDK tools after registering and connecting to server", async () => {
+      const id = "test-mcp-server";
+      const url = "http://example.com/mcp";
+      const name = "Test MCP Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      // Register server
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Mock the connection to simulate a successful connection with tools
+      const conn = manager.mcpConnections[id]!;
+
+      // Mock init to reach ready state
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "ready";
+
+        // Simulate discovered tools
+        conn.tools = [
+          {
+            name: "test_tool",
+            description: "A test tool",
+            inputSchema: {
+              type: "object",
+              properties: {
+                message: {
+                  type: "string",
+                  description: "Test message"
+                }
+              },
+              required: ["message"]
+            }
+          }
+        ];
+      });
+
+      // Mock callTool
+      conn.client.callTool = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "Tool result" }]
+      });
+
+      // Connect to server
+      await manager.connectToServer(id);
+
+      // Verify connection is ready
+      expect(conn.connectionState).toBe("ready");
+      expect(conn.tools).toHaveLength(1);
+
+      // Get AI tools
+      const tools = manager.getAITools();
+
+      // Verify tools are properly formatted for AI SDK
+      expect(tools).toBeDefined();
+
+      // Tool name should be namespaced with server ID
+      const toolKey = `tool_${id.replace(/-/g, "")}_test_tool`;
+      expect(tools[toolKey]!).toBeDefined();
+
+      // Verify tool structure
+      const tool = tools[toolKey]!;
+      expect(tool.description).toBe("A test tool");
+      expect(tool.execute).toBeDefined();
+      expect(tool.inputSchema).toBeDefined();
+
+      // Test tool execution
+      const result = await tool.execute!(
+        { message: "test" },
+        {} as ToolCallOptions
+      );
+      expect(result).toBeDefined();
+      expect(conn.client.callTool).toHaveBeenCalledWith(
+        {
+          name: "test_tool",
+          arguments: { message: "test" }
+        },
+        undefined,
+        undefined
+      );
+    });
+
+    it("should aggregate tools from multiple connected servers", async () => {
+      const server1Id = "server-1";
+      const server2Id = "server-2";
+
+      // Register and connect first server
+      manager.registerServer(server1Id, {
+        url: "http://server1.com/mcp",
+        name: "Server 1",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn1 = manager.mcpConnections[server1Id]!;
+      conn1.init = vi.fn().mockImplementation(async () => {
+        conn1.connectionState = "ready";
+        conn1.tools = [
+          {
+            name: "tool_one",
+            description: "Tool from server 1",
+            inputSchema: { type: "object", properties: {} }
+          }
+        ];
+      });
+      conn1.client.callTool = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "Result 1" }]
+      });
+
+      await manager.connectToServer(server1Id);
+
+      // Register and connect second server
+      manager.registerServer(server2Id, {
+        url: "http://server2.com/mcp",
+        name: "Server 2",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn2 = manager.mcpConnections[server2Id]!;
+      conn2.init = vi.fn().mockImplementation(async () => {
+        conn2.connectionState = "ready";
+        conn2.tools = [
+          {
+            name: "tool_two",
+            description: "Tool from server 2",
+            inputSchema: { type: "object", properties: {} }
+          }
+        ];
+      });
+      conn2.client.callTool = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "Result 2" }]
+      });
+
+      await manager.connectToServer(server2Id);
+
+      // Get AI tools
+      const tools = manager.getAITools();
+
+      // Verify both tools are available
+      const tool1Key = `tool_${server1Id.replace(/-/g, "")}_tool_one`;
+      const tool2Key = `tool_${server2Id.replace(/-/g, "")}_tool_two`;
+
+      expect(tools[tool1Key]!).toBeDefined();
+      expect(tools[tool2Key]!).toBeDefined();
+      expect(tools[tool1Key]!.description).toBe("Tool from server 1");
+      expect(tools[tool2Key]!.description).toBe("Tool from server 2");
+
+      // Test both tools execute correctly
+      await tools[tool1Key]!.execute!({}, {} as ToolCallOptions);
+      expect(conn1.client.callTool).toHaveBeenCalledWith(
+        {
+          name: "tool_one",
+          arguments: {}
+        },
+        undefined,
+        undefined
+      );
+
+      await tools[tool2Key]!.execute!({}, {} as ToolCallOptions);
+      expect(conn2.client.callTool).toHaveBeenCalledWith(
+        {
+          name: "tool_two",
+          arguments: {}
+        },
+        undefined,
+        undefined
+      );
+    });
+
+    describe("MCPServerFilter", () => {
+      type ServerSpec = {
+        id: string;
+        name: string;
+        toolName: string;
+        state: MCPConnectionState;
+      };
+
+      async function setupServers(specs: ServerSpec[]) {
+        for (const spec of specs) {
+          manager.registerServer(spec.id, {
+            url: `http://${spec.id}.example.com/mcp`,
+            name: spec.name,
+            callbackUrl: "http://localhost:3000/callback",
+            client: {},
+            transport: { type: "auto" }
+          });
+          const conn = manager.mcpConnections[spec.id]!;
+          conn.init = vi.fn().mockImplementation(async () => {
+            conn.connectionState = spec.state;
+            conn.tools = [
+              {
+                name: spec.toolName,
+                description: `${spec.toolName} from ${spec.name}`,
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    input: { type: "string" }
+                  }
+                }
+              }
+            ];
+            conn.prompts = [
+              {
+                name: `prompt_${spec.toolName}`,
+                description: `Prompt from ${spec.name}`
+              }
+            ];
+            conn.resources = [
+              {
+                uri: `resource://${spec.id}/data`,
+                name: `resource_${spec.toolName}`
+              }
+            ];
+            conn.resourceTemplates = [
+              {
+                uriTemplate: `template://${spec.id}/{id}`,
+                name: `template_${spec.toolName}`
+              }
+            ];
+          });
+          conn.client.callTool = vi.fn().mockResolvedValue({
+            content: [{ type: "text", text: `Result from ${spec.id}` }]
+          });
+          await manager.connectToServer(spec.id);
+        }
+      }
+
+      function toolKey(serverId: string, toolName: string) {
+        return `tool_${serverId.replace(/-/g, "")}_${toolName}`;
+      }
+
+      const threeServers: ServerSpec[] = [
+        {
+          id: "server-1",
+          name: "Stripe",
+          toolName: "create_charge",
+          state: "ready"
+        },
+        {
+          id: "server-2",
+          name: "Sentry",
+          toolName: "list_issues",
+          state: "ready"
+        },
+        {
+          id: "server-3",
+          name: "Stripe",
+          toolName: "list_charges",
+          state: "connecting"
+        }
+      ];
+
+      describe("serverId filter", () => {
+        it("should filter by single serverId", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverId: "server-1" });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should filter by serverId array", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-3"]
+          });
+          const keys = Object.keys(tools);
+          expect(keys).toHaveLength(2);
+          expect(keys).toContain(toolKey("server-1", "create_charge"));
+          expect(keys).toContain(toolKey("server-3", "list_charges"));
+          expect(keys).not.toContain(toolKey("server-2", "list_issues"));
+        });
+
+        it("should return empty when serverId matches nothing", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverId: "nonexistent" });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("serverName filter", () => {
+        it("should filter by single serverName", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverName: "Sentry" });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-2", "list_issues")
+          ]);
+        });
+
+        it("should match multiple servers with the same name", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverName: "Stripe" });
+          const keys = Object.keys(tools);
+          expect(keys).toHaveLength(2);
+          expect(keys).toContain(toolKey("server-1", "create_charge"));
+          expect(keys).toContain(toolKey("server-3", "list_charges"));
+        });
+
+        it("should filter by serverName array", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverName: ["Stripe", "Sentry"]
+          });
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+
+        it("should return empty when serverName matches nothing", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverName: "GitHub" });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("state filter", () => {
+        it("should filter by single state", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ state: "ready" });
+          const keys = Object.keys(tools);
+          expect(keys).toHaveLength(2);
+          expect(keys).toContain(toolKey("server-1", "create_charge"));
+          expect(keys).toContain(toolKey("server-2", "list_issues"));
+          expect(keys).not.toContain(toolKey("server-3", "list_charges"));
+        });
+
+        it("should filter by state array", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            state: ["ready", "connecting"]
+          });
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+
+        it("should return empty when state matches nothing", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ state: "authenticating" });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("combined filters (AND logic)", () => {
+        it("should AND serverId + state", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-3"],
+            state: "ready"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should AND serverName + state", async () => {
+          await setupServers(threeServers);
+
+          // "Stripe" matches server-1 (ready) and server-3 (connecting)
+          const tools = manager.getAITools({
+            serverName: "Stripe",
+            state: "ready"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should AND serverId + serverName", async () => {
+          await setupServers(threeServers);
+
+          // server-1 is "Stripe", server-2 is "Sentry"
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-2"],
+            serverName: "Stripe"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should AND all three criteria", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-2", "server-3"],
+            serverName: "Stripe",
+            state: "ready"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should return empty when AND criteria exclude everything", async () => {
+          await setupServers(threeServers);
+
+          // server-2 is "Sentry", not "Stripe"
+          const tools = manager.getAITools({
+            serverId: "server-2",
+            serverName: "Stripe"
+          });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("backward compatibility", () => {
+        it("should return all tools when no filter is provided", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools();
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+
+        it("should return all tools with empty filter object", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({});
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+      });
+
+      describe("filtered tool execution", () => {
+        it("should correctly execute tools returned by a filtered getAITools", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverId: "server-1" });
+          const key = toolKey("server-1", "create_charge");
+          const result = await tools[key]!.execute!(
+            { input: "test" },
+            {} as ToolCallOptions
+          );
+
+          expect(result).toBeDefined();
+          const conn1 = manager.mcpConnections["server-1"]!;
+          expect(conn1.client.callTool).toHaveBeenCalledWith(
+            { name: "create_charge", arguments: { input: "test" } },
+            undefined,
+            undefined
+          );
+
+          // server-2's callTool should not have been called
+          const conn2 = manager.mcpConnections["server-2"]!;
+          expect(conn2.client.callTool).not.toHaveBeenCalled();
+        });
+      });
+
+      describe("listTools filter", () => {
+        it("should filter listTools by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listTools();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listTools({ serverId: "server-1" });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0]!.name).toBe("create_charge");
+          expect(filtered[0]!.serverId).toBe("server-1");
+        });
+
+        it("should filter listTools by state", async () => {
+          await setupServers(threeServers);
+
+          const ready = manager.listTools({ state: "ready" });
+          expect(ready).toHaveLength(2);
+          expect(ready.every((t) => t.serverId !== "server-3")).toBe(true);
+        });
+      });
+
+      describe("listPrompts filter", () => {
+        it("should filter listPrompts by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listPrompts();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listPrompts({ serverId: "server-2" });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0]!.name).toBe("prompt_list_issues");
+          expect(filtered[0]!.serverId).toBe("server-2");
+        });
+
+        it("should filter listPrompts by serverName", async () => {
+          await setupServers(threeServers);
+
+          const filtered = manager.listPrompts({ serverName: "Stripe" });
+          expect(filtered).toHaveLength(2);
+        });
+      });
+
+      describe("listResources filter", () => {
+        it("should filter listResources by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listResources();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listResources({
+            serverId: "server-1"
+          });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0]!.name).toBe("resource_create_charge");
+          expect(filtered[0]!.serverId).toBe("server-1");
+        });
+
+        it("should filter listResources by state", async () => {
+          await setupServers(threeServers);
+
+          const filtered = manager.listResources({ state: "connecting" });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0]!.serverId).toBe("server-3");
+        });
+      });
+
+      describe("listResourceTemplates filter", () => {
+        it("should filter listResourceTemplates by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listResourceTemplates();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listResourceTemplates({
+            serverId: "server-3"
+          });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0]!.name).toBe("template_list_charges");
+          expect(filtered[0]!.serverId).toBe("server-3");
+        });
+
+        it("should filter listResourceTemplates by serverName and state", async () => {
+          await setupServers(threeServers);
+
+          const filtered = manager.listResourceTemplates({
+            serverName: "Stripe",
+            state: "ready"
+          });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0]!.serverId).toBe("server-1");
+        });
+      });
+    });
+  });
+
+  describe("clearAuthUrl()", () => {
+    it("should clear auth_url after successful OAuth", async () => {
+      const serverId = "oauth-server-clearauth";
+      const callbackUrl = "http://localhost:3000/callback";
+      const authUrl = "https://auth.example.com/authorize";
+
+      // Save server with auth_url
+      saveServerToMock({
+        id: serverId,
+        name: "OAuth Server",
+        server_url: "http://oauth.example.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: authUrl,
+        server_options: null
+      });
+
+      // Verify initial state
+      let server = mockStorageData.get(serverId);
+      expect(server?.auth_url).toBe(authUrl);
+      expect(server?.callback_url).toBe(callbackUrl);
+
+      // Clear auth URL
+      clearAuthUrlInMock(serverId);
+
+      // Verify auth_url cleared but callback_url preserved
+      server = mockStorageData.get(serverId);
+      expect(server?.auth_url).toBe(null);
+      expect(server?.callback_url).toBe(callbackUrl); // ✅ Preserved!
+      expect(server?.name).toBe("OAuth Server"); // ✅ Other fields preserved
+      expect(server?.client_id).toBe("test-client-id");
+    });
+
+    it("should preserve all fields except auth_url", async () => {
+      const serverId = "test-server-preserve";
+      const serverData: MCPServerRow = {
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: "my-client",
+        auth_url: "https://auth.example.com",
+        server_options: JSON.stringify({ transport: { type: "auto" } })
+      };
+
+      saveServerToMock(serverData);
+      clearAuthUrlInMock(serverId);
+
+      const server = mockStorageData.get(serverId);
+      expect(server?.auth_url).toBe(null); // Only this changed
+      expect(server?.id).toBe(serverData.id);
+      expect(server?.name).toBe(serverData.name);
+      expect(server?.server_url).toBe(serverData.server_url);
+      expect(server?.callback_url).toBe(serverData.callback_url);
+      expect(server?.client_id).toBe(serverData.client_id);
+      expect(server?.server_options).toBe(serverData.server_options);
+    });
+  });
+
+  describe("restoreConnectionsFromStorage() - Edge Cases", () => {
+    it("should skip servers already in ready state", async () => {
+      const serverId = "already-ready";
+
+      // Save server to storage
+      saveServerToMock({
+        id: serverId,
+        name: "Ready Server",
+        server_url: "http://ready.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      // Pre-populate with a connection in ready state
+      const existingConnection = new MCPClientConnection(
+        new URL("http://ready.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      existingConnection.connectionState = "ready";
+      existingConnection.init = vi.fn();
+      existingConnection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId]! = existingConnection;
+
+      // Spy on connectToServer to verify it's not called
+      const connectSpy = vi.spyOn(manager, "connectToServer");
+
+      // Restore connections
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Verify connection was NOT recreated
+      expect(manager.mcpConnections[serverId]!).toBe(existingConnection);
+      expect(connectSpy).not.toHaveBeenCalledWith(serverId);
+    });
+
+    it("should skip servers in connecting state", async () => {
+      const serverId = "in-flight-connecting";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Connecting Server",
+        server_url: "http://connecting.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      // Pre-populate with connection in "connecting" state
+      const existingConnection = new MCPClientConnection(
+        new URL("http://connecting.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      existingConnection.connectionState = "connecting";
+      existingConnection.init = vi.fn();
+      existingConnection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId]! = existingConnection;
+
+      const connectSpy = vi.spyOn(manager, "connectToServer");
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Should not recreate - let existing flow complete
+      expect(manager.mcpConnections[serverId]!).toBe(existingConnection);
+      expect(connectSpy).not.toHaveBeenCalledWith(serverId);
+    });
+
+    it("should skip servers in authenticating state", async () => {
+      const serverId = "in-flight-auth";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Authenticating Server",
+        server_url: "http://auth.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: "test-client",
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      // Pre-populate with connection in "authenticating" state
+      const existingConnection = new MCPClientConnection(
+        new URL("http://auth.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      existingConnection.connectionState = "authenticating";
+      existingConnection.init = vi.fn();
+      existingConnection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId]! = existingConnection;
+
+      const connectSpy = vi.spyOn(manager, "connectToServer");
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Should not recreate - OAuth flow in progress
+      expect(manager.mcpConnections[serverId]!).toBe(existingConnection);
+      expect(connectSpy).not.toHaveBeenCalledWith(serverId);
+    });
+
+    it("should skip servers in discovering state", async () => {
+      const serverId = "discovering";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Discovering Server",
+        server_url: "http://discover.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const existingConnection = new MCPClientConnection(
+        new URL("http://discover.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      existingConnection.connectionState = "discovering";
+      existingConnection.init = vi.fn();
+      existingConnection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId]! = existingConnection;
+
+      const connectSpy = vi.spyOn(manager, "connectToServer");
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      expect(manager.mcpConnections[serverId]!).toBe(existingConnection);
+      expect(connectSpy).not.toHaveBeenCalledWith(serverId);
+    });
+
+    it("should recreate failed connections", async () => {
+      const serverId = "failed-server";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Failed Server",
+        server_url: "http://failed.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: JSON.stringify({ transport: { type: "auto" } })
+      });
+
+      // Pre-populate with a failed connection
+      const failedConnection = new MCPClientConnection(
+        new URL("http://failed.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      failedConnection.connectionState = "failed";
+      failedConnection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId]! = failedConnection;
+
+      // Track the old connection reference
+      const oldConnection = manager.mcpConnections[serverId]!;
+
+      // Mock connectToServer to avoid real HTTP calls
+      vi.spyOn(manager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Should have created a new connection (different object)
+      // The old failed connection should have been replaced
+      expect(manager.mcpConnections[serverId]!).toBeDefined();
+      expect(manager.mcpConnections[serverId]!).not.toBe(oldConnection);
+    });
+
+    it("should only restore once (idempotent)", async () => {
+      const serverId = "idempotent-test";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      // Mock connectToServer to avoid real HTTP calls
+      vi.spyOn(manager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      // First restoration
+      await manager.restoreConnectionsFromStorage("test-agent");
+      const firstConnection = manager.mcpConnections[serverId]!;
+
+      // Second restoration (should be no-op)
+      await manager.restoreConnectionsFromStorage("test-agent");
+      const secondConnection = manager.mcpConnections[serverId]!;
+
+      // Should be the same connection
+      expect(secondConnection).toBe(firstConnection);
+    });
+  });
+
+  describe("restoreConnectionsFromStorage() - OAuth Token Reuse", () => {
+    it("should attempt connection for OAuth server with stored tokens", async () => {
+      const serverId = "oauth-with-tokens";
+      const clientId = "stored-client-id";
+
+      // Save OAuth server to storage (auth_url = null means we completed auth previously)
+      saveServerToMock({
+        id: serverId,
+        name: "OAuth Server",
+        server_url: "http://oauth.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: clientId,
+        auth_url: null, // ✅ No auth_url - previously authenticated
+        server_options: JSON.stringify({ transport: { type: "auto" } })
+      });
+
+      // Store valid OAuth tokens in KV (simulating previous successful auth)
+      const tokenKey = `/test-client/${serverId}/${clientId}/token`;
+      mockKVData.set(tokenKey, {
+        access_token: "valid-token",
+        token_type: "bearer"
+      });
+
+      // Spy on connectToServer to verify it's called
+      const connectSpy = vi
+        .spyOn(manager, "connectToServer")
+        .mockResolvedValue({ state: "connected" });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Verify connection was created and connectToServer was called
+      const conn = manager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+      expect(connectSpy).toHaveBeenCalledWith(serverId);
+    });
+
+    it("should skip connectToServer for OAuth servers with auth_url (OAuth in progress)", async () => {
+      const serverId = "oauth-needs-auth";
+      const clientId = "needs-auth-client";
+
+      // Save OAuth server with auth_url (indicates OAuth flow is in progress)
+      saveServerToMock({
+        id: serverId,
+        name: "OAuth Server",
+        server_url: "http://oauth.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: clientId,
+        auth_url: "https://auth.example.com/authorize", // ✅ Has auth_url - OAuth in progress
+        server_options: JSON.stringify({ transport: { type: "auto" } })
+      });
+
+      // Spy on connectToServer - should NOT be called
+      const connectSpy = vi.spyOn(manager, "connectToServer");
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      const conn = manager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+
+      // Should NOT call connectToServer when auth_url is set (OAuth flow in progress)
+      expect(connectSpy).not.toHaveBeenCalled();
+      // State should be set to authenticating directly
+      expect(conn.connectionState).toBe("authenticating");
+    });
+  });
+
+  describe("restoreConnectionsFromStorage() - createAuthProvider factory", () => {
+    it("should use the injected factory when restoring connections", async () => {
+      const serverId = "factory-test";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Factory Test Server",
+        server_url: "http://factory.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledWith(callbackUrl);
+      const conn = factoryManager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+      expect(conn.options.transport.authProvider).toBe(mockProvider);
+    });
+
+    it("should set serverId and clientId on the provider returned by the factory", async () => {
+      const serverId = "factory-ids-test";
+      const clientId = "custom-client-123";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "IDs Test Server",
+        server_url: "http://ids-test.com",
+        callback_url: callbackUrl,
+        client_id: clientId,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(mockProvider.serverId).toBe(serverId);
+      expect(mockProvider.clientId).toBe(clientId);
+    });
+
+    it("should fall back to default createAuthProvider when no factory is provided", async () => {
+      const serverId = "no-factory-test";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "No Factory Server",
+        server_url: "http://no-factory.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      vi.spyOn(manager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      const conn = manager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+      expect(conn.options.transport.authProvider).toBeDefined();
+      expect(conn.options.transport.authProvider?.serverId).toBe(serverId);
+    });
+
+    it("should use the factory for OAuth servers with auth_url set", async () => {
+      const serverId = "factory-oauth-test";
+      const callbackUrl = "http://localhost:3000/callback";
+      const clientId = "oauth-client-id";
+
+      saveServerToMock({
+        id: serverId,
+        name: "OAuth Factory Server",
+        server_url: "http://oauth-factory.com",
+        callback_url: callbackUrl,
+        client_id: clientId,
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledWith(callbackUrl);
+      const conn = factoryManager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+      expect(conn.connectionState).toBe("authenticating");
+      expect(mockProvider.serverId).toBe(serverId);
+      expect(mockProvider.clientId).toBe(clientId);
+    });
+
+    it("should use the factory when recreating failed connections", async () => {
+      const serverId = "factory-failed-test";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Failed Server",
+        server_url: "http://failed-factory.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      // Pre-populate with a failed connection
+      const failedConnection = new MCPClientConnection(
+        new URL("http://failed-factory.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      failedConnection.connectionState = "failed";
+      failedConnection.client.close = vi.fn().mockResolvedValue(undefined);
+      factoryManager.mcpConnections[serverId]! = failedConnection;
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledWith(callbackUrl);
+      expect(factoryManager.mcpConnections[serverId]!).not.toBe(
+        failedConnection
+      );
+    });
+
+    it("should call the factory once per server in mixed restore", async () => {
+      const callbackUrl1 = "http://localhost:3000/callback/s1";
+      const callbackUrl2 = "http://localhost:3000/callback/s2";
+
+      saveServerToMock({
+        id: "server-1",
+        name: "Server 1",
+        server_url: "http://s1.com",
+        callback_url: callbackUrl1,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      saveServerToMock({
+        id: "server-2",
+        name: "Server 2",
+        server_url: "http://s2.com",
+        callback_url: callbackUrl2,
+        client_id: "client-2",
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      const mockProvider1 = createMockAuthProvider(createMockStateStorage());
+      const mockProvider2 = createMockAuthProvider(createMockStateStorage());
+      const factory = vi
+        .fn()
+        .mockReturnValueOnce(mockProvider1)
+        .mockReturnValueOnce(mockProvider2);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(factory).toHaveBeenCalledWith(callbackUrl1);
+      expect(factory).toHaveBeenCalledWith(callbackUrl2);
+    });
+  });
+
+  describe("connectToServer() - Connection States", () => {
+    it("should return connected state for successful non-OAuth connection", async () => {
+      const serverId = "non-oauth-connect-test";
+
+      await manager.registerServer(serverId, {
+        url: "http://test.com",
+        name: "Non-OAuth Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn = manager.mcpConnections[serverId]!;
+
+      // Mock successful connection - init returns connected state, discovery happens separately
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+        return undefined; // no error
+      });
+
+      const result = await manager.connectToServer(serverId);
+
+      expect(result.state).toBe("connected");
+      expect(conn.init).toHaveBeenCalled();
+    });
+
+    it("should return authenticating state and authUrl when OAuth needed", async () => {
+      const serverId = "oauth-needed-server-test";
+      const authUrl = "https://auth.example.com/authorize";
+
+      const mockAuthProvider = {
+        serverId,
+        clientId: "test-client-id",
+        authUrl,
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn().mockResolvedValue(undefined),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+
+      await manager.registerServer(serverId, {
+        url: "http://oauth.com",
+        name: "OAuth Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto", authProvider: mockAuthProvider }
+      });
+
+      const conn = manager.mcpConnections[serverId]!;
+
+      // Mock connection that needs OAuth
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "authenticating";
+      });
+
+      const result = await manager.connectToServer(serverId);
+
+      expect(result.state).toBe("authenticating");
+      if (result.state === "authenticating") {
+        expect(result.authUrl).toBe(authUrl);
+        expect(result.clientId).toBe("test-client-id");
+      }
+
+      // Verify auth_url saved to storage
+      const server = mockStorageData.get(serverId);
+      expect(server?.auth_url).toBe(authUrl);
+      expect(server?.client_id).toBe("test-client-id");
+    });
+
+    it("should update storage with auth URL only when needed", async () => {
+      const serverId = "storage-update-test-2";
+
+      await manager.registerServer(serverId, {
+        url: "http://test.com",
+        name: "Test Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn = manager.mcpConnections[serverId]!;
+
+      // Mock non-OAuth connection (no auth URL)
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "ready";
+      });
+
+      await manager.connectToServer(serverId);
+
+      // Storage should not have auth_url
+      const server = mockStorageData.get(serverId);
+      expect(server?.auth_url).toBe(null);
+    });
+  });
+
+  describe("Integration: Full Reconnect Flows", () => {
+    it("should automatically reconnect non-OAuth server on restore", async () => {
+      const serverId = "auto-reconnect";
+
+      // Simulate previous session: server was registered
+      saveServerToMock({
+        id: serverId,
+        name: "Auto Reconnect Server",
+        server_url: "http://auto.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: JSON.stringify({ transport: { type: "auto" } })
+      });
+
+      // Mock connectToServer
+      const connectSpy = vi
+        .spyOn(manager, "connectToServer")
+        .mockResolvedValue({ state: "connected" });
+
+      // Simulate DO restart - restore connections
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Verify connection exists and was connected
+      const conn = manager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+      expect(conn.url.toString()).toBe("http://auto.com/");
+      expect(connectSpy).toHaveBeenCalledWith(serverId);
+    });
+
+    it("should restore OAuth server in authenticating state when auth_url exists", async () => {
+      const serverId = "oauth-reauth-flow";
+      const authUrl = "https://auth.example.com/authorize";
+
+      // Simulate previous session: OAuth flow was in progress (auth_url is set)
+      saveServerToMock({
+        id: serverId,
+        name: "OAuth Reauth Server",
+        server_url: "http://oauth.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: "old-client-id",
+        auth_url: authUrl, // ✅ Has auth_url - OAuth flow in progress
+        server_options: JSON.stringify({ transport: { type: "auto" } })
+      });
+
+      // Spy on connectToServer - should NOT be called
+      const connectSpy = vi.spyOn(manager, "connectToServer");
+
+      // Restore connections
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      const conn = manager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+
+      // Should NOT call connectToServer - just set state to authenticating
+      expect(connectSpy).not.toHaveBeenCalled();
+      expect(conn.connectionState).toBe("authenticating");
+
+      // auth_url should still be preserved in storage for the callback handler
+      const servers = manager.listServers();
+      const server = servers.find((s) => s.id === serverId);
+      expect(server?.auth_url).toBe(authUrl);
+    });
+  });
+
+  describe("discoverIfConnected()", () => {
+    it("should skip discovery when connection not found", async () => {
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      const result = await manager.discoverIfConnected("non-existent-server");
+
+      // Should return undefined when skipped
+      expect(result).toBeUndefined();
+
+      // Should fire observability event about missing connection
+      expect(observabilitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "mcp:client:discover"
+        })
+      );
+    });
+
+    it("should skip discovery when connection is not in CONNECTED or READY state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connecting";
+
+      manager.mcpConnections[serverId]! = connection;
+
+      // Set up event piping from connection to manager (normally done by createConnection)
+      connection.onObservabilityEvent((event) => {
+        manager.fireObservabilityEvent(event);
+      });
+
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should fire observability event about skipping
+      expect(observabilitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "mcp:client:discover",
+          payload: expect.objectContaining({
+            state: "connecting"
+          })
+        })
+      );
+
+      // Should not have changed state
+      expect(connection.connectionState).toBe("connecting");
+    });
+
+    it("should successfully discover when connection is in CONNECTED state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connected";
+
+      // Mock discoverAndRegister to succeed
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId]! = connection;
+
+      // Set up event piping from connection to manager (normally done by createConnection)
+      connection.onObservabilityEvent((event) => {
+        manager.fireObservabilityEvent(event);
+      });
+
+      const stateChangedSpy = vi.fn();
+      manager.onServerStateChanged(stateChangedSpy);
+
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should have called discoverAndRegister (via discover)
+      expect(connection.discoverAndRegister).toHaveBeenCalledTimes(1);
+
+      // Should have transitioned through discovering to ready
+      expect(connection.connectionState).toBe("ready");
+
+      // Should have fired state changed once (only when state actually changes)
+      expect(stateChangedSpy).toHaveBeenCalledTimes(1);
+
+      // Should have fired completion observability event
+      expect(observabilitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "mcp:client:discover",
+          payload: expect.objectContaining({
+            url: expect.any(String)
+          })
+        })
+      );
+    });
+
+    it("should re-discover when connection is already in READY state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "ready";
+
+      // Mock discoverAndRegister to succeed
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId]! = connection;
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should allow re-discovery even when already ready
+      expect(connection.discoverAndRegister).toHaveBeenCalledTimes(1);
+      expect(connection.connectionState).toBe("ready");
+    });
+
+    it("should handle discovery failure and maintain failed state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connected";
+
+      // Mock discoverAndRegister to fail
+      const error = new Error("Discovery failed");
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        throw error;
+      });
+
+      manager.mcpConnections[serverId]! = connection;
+
+      // Should return result with success: false (not throw)
+      const result = await manager.discoverIfConnected(serverId);
+      expect(result).toEqual({
+        success: false,
+        state: "connected",
+        error: "Discovery failed"
+      });
+
+      // Connection should return to connected state (not failed) so user can retry
+      expect(connection.connectionState).toBe("connected");
+    });
+
+    it("should fire observability events in correct order", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connected";
+
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId]! = connection;
+
+      // Set up event piping from connection to manager (normally done by createConnection)
+      connection.onObservabilityEvent((event) => {
+        manager.fireObservabilityEvent(event);
+      });
+
+      const observabilityTypes: string[] = [];
+      manager.onObservabilityEvent((event) => {
+        observabilityTypes.push(event.type);
+      });
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should have completion event
+      expect(observabilityTypes).toContain("mcp:client:discover");
+    });
+
+    it("should work as a manual refresh for tools (discover)", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "ready";
+      connection.tools = [
+        { name: "old-tool", inputSchema: { type: "object" } } as Tool
+      ];
+
+      // Mock discoverAndRegister to update tools
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.tools = [
+          { name: "new-tool", inputSchema: { type: "object" } } as Tool
+        ];
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId]! = connection;
+
+      await manager.discoverIfConnected(serverId);
+
+      // Tools should be refreshed
+      expect(connection.tools).toHaveLength(1);
+      expect(connection.tools[0]!.name).toBe("new-tool");
+    });
+  });
+
+  describe("SSRF URL validation", () => {
+    it("should allow localhost URLs with ports for local development", async () => {
+      await expect(
+        manager.registerServer("s1", {
+          url: "http://localhost:8080/mcp",
+          name: "local"
+        })
+      ).resolves.toBe("s1");
+    });
+
+    it("should allow 127.0.0.1 loopback URLs", async () => {
+      await expect(
+        manager.registerServer("s2", {
+          url: "http://127.0.0.1/mcp",
+          name: "local-loopback"
+        })
+      ).resolves.toBe("s2");
+    });
+
+    it("should allow other 127.x.x.x loopback URLs with custom ports", async () => {
+      await expect(
+        manager.registerServer("s2b", {
+          url: "http://127.12.34.56:9999/mcp",
+          name: "local-loopback-port"
+        })
+      ).resolves.toBe("s2b");
+    });
+
+    it("should reject RFC 1918 10.x.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s3", {
+          url: "http://10.0.0.1/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject RFC 1918 172.16-31.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s4", {
+          url: "http://172.16.0.1/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject RFC 1918 192.168.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s5", {
+          url: "http://192.168.1.1/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject link-local / metadata 169.254.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s6", {
+          url: "http://169.254.169.254/latest/meta-data",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject metadata.google.internal", async () => {
+      await expect(
+        manager.registerServer("s7", {
+          url: "http://metadata.google.internal/computeMetadata/v1/",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject 0.0.0.0", async () => {
+      await expect(
+        manager.registerServer("s8", {
+          url: "http://0.0.0.0/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should allow IPv6 loopback", async () => {
+      await expect(
+        manager.registerServer("s9", {
+          url: "http://[::1]:8080/mcp",
+          name: "local-ipv6"
+        })
+      ).resolves.toBe("s9");
+    });
+
+    it("should reject IPv6 unique local (fc00::/7) URLs", async () => {
+      await expect(
+        manager.registerServer("s-fc", {
+          url: "http://[fc00::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 unique local (fd00::) URLs", async () => {
+      await expect(
+        manager.registerServer("s-fd", {
+          url: "http://[fd12:3456::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    // Uses an unadorned fe80:: address so the URL parser accepts it and
+    // this test actually exercises the link-local regex rule, not the
+    // malformed-URL catch path. The zone-ID variant is covered separately
+    // below to avoid a single test that could pass for either reason.
+    it("should reject IPv6 link-local (fe80::/10) URLs", async () => {
+      await expect(
+        manager.registerServer("s-fe80", {
+          url: "http://[fe80::1]:8080/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    // IPv6 zone identifiers (RFC 6874) in URLs are a spec gray area and
+    // are rejected outright by the WHATWG URL parser in both Node and
+    // Workers. The malformed-URL catch in isBlockedUrl turns that into a
+    // "Blocked URL" error, which is the desired outcome either way.
+    it("should reject IPv6 link-local zone-ID URLs (malformed-URL path)", async () => {
+      await expect(
+        manager.registerServer("s-fe80-zone", {
+          url: "http://[fe80::1%25eth0]:8080/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    // Regression: fe80::/10 spans fe80..febf in the first hextet. The
+    // previous startsWith("fe80") check only covered fe80::/16 and let
+    // the rest of the /10 range through (issue #1325).
+    it("should reject IPv6 link-local fe81:: (previously leaked)", async () => {
+      await expect(
+        manager.registerServer("s-fe81", {
+          url: "http://[fe81::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 link-local feab:: (middle of /10, previously leaked)", async () => {
+      await expect(
+        manager.registerServer("s-feab", {
+          url: "http://[feab::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 link-local febf:: (upper /10 boundary, previously leaked)", async () => {
+      await expect(
+        manager.registerServer("s-febf", {
+          url: "http://[febf::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 link-local uppercase FE8F:: (canonicalized to lowercase by URL parser)", async () => {
+      await expect(
+        manager.registerServer("s-FE8F", {
+          url: "http://[FE8F::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    // Negative: addresses that visually look close to the /10 range but
+    // are outside it must NOT be blocked by the link-local rule.
+    // These resolve at the connection layer (no real server), which is
+    // exercised by the public-URL test below; here we only need to
+    // confirm that we do NOT throw "Blocked URL".
+    it("should allow IPv6 fe7f:: (just below fe80::/10)", async () => {
+      await expect(
+        manager.registerServer("s-fe7f", {
+          url: "http://[fe7f::1]/mcp",
+          name: "ok"
+        })
+      ).resolves.toBe("s-fe7f");
+    });
+
+    it("should allow IPv6 fec0:: (deprecated site-local, outside /10)", async () => {
+      // RFC 3879 deprecated fec0::/10 site-local; it is not link-local
+      // and is out of scope for this specific SSRF rule.
+      await expect(
+        manager.registerServer("s-fec0", {
+          url: "http://[fec0::1]/mcp",
+          name: "ok"
+        })
+      ).resolves.toBe("s-fec0");
+    });
+
+    it("should reject IPv4-mapped IPv6 RFC 1918 10.x (hex form)", async () => {
+      await expect(
+        manager.registerServer("s-mapped-10", {
+          url: "http://[::ffff:a00:1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv4-mapped IPv6 RFC 1918 192.168.x (hex form)", async () => {
+      await expect(
+        manager.registerServer("s-mapped-192", {
+          url: "http://[::ffff:c0a8:101]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv4-mapped IPv6 RFC 1918 172.16.x (hex form)", async () => {
+      await expect(
+        manager.registerServer("s-mapped-172", {
+          url: "http://[::ffff:ac10:1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv4-mapped IPv6 metadata endpoint (hex form)", async () => {
+      await expect(
+        manager.registerServer("s-mapped-meta", {
+          url: "http://[::ffff:a9fe:a9fe]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should allow valid public URLs", async () => {
+      // This will fail at the connection level (no real server),
+      // but should NOT throw a "Blocked URL" error
+      await expect(
+        manager.registerServer("s10", {
+          url: "https://mcp.example.com/v1",
+          name: "public"
+        })
+      ).resolves.toBe("s10");
+    });
+
+    it("should allow non-private IP addresses", async () => {
+      await expect(
+        manager.registerServer("s11", {
+          url: "http://8.8.8.8/mcp",
+          name: "public-ip"
+        })
+      ).resolves.toBe("s11");
+    });
+  });
+
+  describe("waitForConnections()", () => {
+    it("should resolve immediately when no pending connections", async () => {
+      await manager.waitForConnections();
+      // Should not hang or throw
+    });
+
+    it("should wait for tracked connections to settle", async () => {
+      let resolveConnection!: () => void;
+      const connectionPromise = new Promise<void>((resolve) => {
+        resolveConnection = resolve;
+      });
+
+      manager.trackConnection("server1", connectionPromise);
+
+      let waited = false;
+      const waitPromise = manager.waitForConnections().then(() => {
+        waited = true;
+      });
+
+      // Should not have resolved yet
+      expect(waited).toBe(false);
+
+      // Resolve the connection
+      resolveConnection();
+      await waitPromise;
+
+      expect(waited).toBe(true);
+    });
+
+    it("should handle mixed success and failure", async () => {
+      let resolveSuccess!: () => void;
+      let rejectFailure!: (err: Error) => void;
+
+      const successPromise = new Promise<void>((resolve) => {
+        resolveSuccess = resolve;
+      });
+      const failurePromise = new Promise<void>((_resolve, reject) => {
+        rejectFailure = reject;
+      });
+
+      manager.trackConnection("server-ok", successPromise);
+      manager.trackConnection("server-fail", failurePromise);
+
+      resolveSuccess();
+      rejectFailure(new Error("connection failed"));
+
+      // waitForConnections uses Promise.allSettled, so it should not reject
+      await manager.waitForConnections();
+    });
+
+    it("should clean up settled promises from the map", async () => {
+      let resolveConnection!: () => void;
+      const connectionPromise = new Promise<void>((resolve) => {
+        resolveConnection = resolve;
+      });
+
+      manager.trackConnection("server1", connectionPromise);
+      resolveConnection();
+
+      await manager.waitForConnections();
+
+      // A second call should resolve immediately (no stale entries)
+      await manager.waitForConnections();
+    });
+
+    it("should respect timeout and return early", async () => {
+      // Create a promise that never resolves
+      const neverResolves = new Promise<void>(() => {});
+      manager.trackConnection("slow-server", neverResolves);
+
+      const start = Date.now();
+      await manager.waitForConnections({ timeout: 100 });
+      const elapsed = Date.now() - start;
+
+      // Should have returned after ~100ms, not hung forever
+      expect(elapsed).toBeGreaterThanOrEqual(80);
+      expect(elapsed).toBeLessThan(2000);
+    });
+
+    it("should return immediately with timeout: 0", async () => {
+      const neverResolves = new Promise<void>(() => {});
+      manager.trackConnection("blocked-server", neverResolves);
+
+      const start = Date.now();
+      await manager.waitForConnections({ timeout: 0 });
+      const elapsed = Date.now() - start;
+
+      // Should return instantly, not block
+      expect(elapsed).toBeLessThan(50);
+    });
+
+    it("should return immediately with negative timeout", async () => {
+      const neverResolves = new Promise<void>(() => {});
+      manager.trackConnection("blocked-server", neverResolves);
+
+      const start = Date.now();
+      await manager.waitForConnections({ timeout: -1 });
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(50);
+    });
+
+    it("should resolve before timeout if connections finish early", async () => {
+      let resolveConnection!: () => void;
+      const connectionPromise = new Promise<void>((resolve) => {
+        resolveConnection = resolve;
+      });
+
+      manager.trackConnection("fast-server", connectionPromise);
+
+      // Resolve after 50ms
+      setTimeout(() => resolveConnection(), 50);
+
+      const start = Date.now();
+      await manager.waitForConnections({ timeout: 5000 });
+      const elapsed = Date.now() - start;
+
+      // Should have resolved in ~50ms, not waited the full 5s
+      expect(elapsed).toBeLessThan(1000);
+    });
+
+    it("should handle multiple concurrent callers", async () => {
+      let resolveConnection!: () => void;
+      const connectionPromise = new Promise<void>((resolve) => {
+        resolveConnection = resolve;
+      });
+
+      manager.trackConnection("server1", connectionPromise);
+
+      // Two concurrent callers
+      let waited1 = false;
+      let waited2 = false;
+      const wait1 = manager.waitForConnections().then(() => {
+        waited1 = true;
+      });
+      const wait2 = manager.waitForConnections().then(() => {
+        waited2 = true;
+      });
+
+      // Neither should have resolved yet
+      await new Promise((r) => setTimeout(r, 10));
+      expect(waited1).toBe(false);
+      expect(waited2).toBe(false);
+
+      // Resolve the connection — both callers should unblock
+      resolveConnection();
+      await Promise.all([wait1, wait2]);
+
+      expect(waited1).toBe(true);
+      expect(waited2).toBe(true);
+    });
+
+    it("should not delete a replaced promise when the old one settles", async () => {
+      let resolveOld!: () => void;
+      const oldPromise = new Promise<void>((resolve) => {
+        resolveOld = resolve;
+      });
+
+      let resolveNew!: () => void;
+      const newPromise = new Promise<void>((resolve) => {
+        resolveNew = resolve;
+      });
+
+      // Track old, then replace with new
+      manager.trackConnection("server1", oldPromise);
+      manager.trackConnection("server1", newPromise);
+
+      // Old promise settles — should NOT remove the newer tracked promise
+      resolveOld();
+      await new Promise((r) => setTimeout(r, 10));
+
+      // waitForConnections should still wait for newPromise
+      let waited = false;
+      const waitPromise = manager.waitForConnections().then(() => {
+        waited = true;
+      });
+
+      // Should not have resolved yet (new promise is still pending)
+      await new Promise((r) => setTimeout(r, 10));
+      expect(waited).toBe(false);
+
+      // Resolve the new promise
+      resolveNew();
+      await waitPromise;
+      expect(waited).toBe(true);
+    });
+  });
+
+  describe("restoreConnectionsFromStorage() + waitForConnections() integration", () => {
+    it("should allow waiting for restore-initiated connections", async () => {
+      // Set up a stored server that will be restored
+      const serverId = "restore-wait-test";
+      mockStorageData.set(serverId, {
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.example.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      // Added to prevent DNS Lookup errors from workerd
+      vi.spyOn(manager, "connectToServer").mockRejectedValue(
+        new Error("test: mock connection failure")
+      );
+
+      // Restore — this fires _restoreServer in the background via _trackConnection
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // waitForConnections should resolve (the restore attempt will fail since
+      // there's no real server, but _trackConnection captures the promise
+      // and waitForConnections uses allSettled which handles rejections)
+      await manager.waitForConnections({ timeout: 5000 });
+
+      // After waiting, the connection should be in a terminal state (failed or connecting)
+      // rather than still pending
+      const conn = manager.mcpConnections[serverId]!;
+      expect(conn).toBeDefined();
+    });
+
+    it("should resolve immediately for servers that skip restore (authenticating)", async () => {
+      const serverId = "auth-skip-test";
+      mockStorageData.set(serverId, {
+        id: serverId,
+        name: "OAuth Server",
+        server_url: "http://oauth.example.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: "client-123",
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      // Should resolve immediately — auth_url servers are set to authenticating
+      // and are NOT tracked as pending connections
+      const start = Date.now();
+      await manager.waitForConnections();
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(100);
+      expect(manager.mcpConnections[serverId]!.connectionState).toBe(
+        "authenticating"
+      );
+    });
+  });
+});
