@@ -193,8 +193,18 @@ class ReminderAgent extends Agent {           // the lighter base, no chat
 | Option | Lean wiring | Note |
 |---|---|---|
 | **A** factory | `hostAgent(ReminderAgent)` | **Fails today** — typed `<A extends Think>`. Needs the layered factory. |
-| **B** base class | `class ReminderDO extends AgentDurableObject<ReminderAgent> { createAgent(rt){ return new ReminderAgent(rt); } }` | Extend the *minimal* base — no chat plumbing. Clean. |
-| **C** driver | `#rt = createAgentRuntime(this.ctx, this.env, rt => new ReminderAgent(rt)); alarm = this.#rt.alarm;` | Omit `{ chat: true }`, forward only `alarm`. Clean. |
+| **B** base class | `class ReminderDO extends AgentDurableObject<ReminderAgent> { createAgent(rt){ return new ReminderAgent(rt); } }` | **Same host as a chat agent** — it detects `instanceof Think` and skips the chat transport; a WS upgrade gets a clean 400. No separate type. |
+| **C** driver | `#rt = createAgentRuntime(this.ctx, this.env, rt => new ReminderAgent(rt)); alarm = this.#rt.alarm;` | Omit `{ chat: true }`, forward only `alarm`. |
+
+**Note (2026-07-15): chat and non-chat need not diverge for the author.** The
+host is *chat-aware*, not chat-specific: it attaches `attachChatTransport` only
+when the hosted agent is a `Think`, and rejects WebSocket upgrades otherwise.
+So B/C are the *same* type whether or not the agent chats — the lean case is a
+runtime detail, not a choice the author makes. "Always attach chat, no-op the
+listeners" would instead need chat stubs on `Agent` (re-coupling) or would
+expose the `cf_agent_*` protocol on agents that never opted in — see ISSUE-030.
+A minimal-only host survives only as a bundle-size optimization for lean
+deployments.
 
 ---
 

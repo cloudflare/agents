@@ -481,10 +481,22 @@ author picks from, composition primary:
    ```
    The has-a relationship is fully visible; `createAgentRuntime` owns only the
    subtle, identical-across-agents part (see below), not the composition.
-2. **Optional convenience base class** for zero forwarding lines
-   (`AgentDurableObject<A extends Agent>` → `ChatAgentDurableObject<A extends
-   Think>`, `createAgent(rt)` the one seam) — a shortcut over #1, not the
-   mandated structure.
+2. **Optional convenience base class** for zero forwarding lines — ONE
+   chat-aware host, not a two-class split. `AgentDurableObject<A extends Agent>`
+   with `createAgent(rt)` as the one seam; it attaches the chat transport
+   *conditionally* (iff `agent instanceof Think`) and a non-chat agent cleanly
+   REJECTS WS upgrades (clear 400) rather than exposing the `cf_agent_*`
+   protocol it never opted into. Rationale (surfaced 2026-07-15): "always
+   attach chat / no-op the listeners" is NOT safe — `attachChatTransport`
+   structurally needs Think's methods (`chat`/`history`/`applyToolResult`/…,
+   confirmed), so making it work on a bare `Agent` would either re-couple the
+   base with chat stubs (undoing the split) or expose the chat protocol on
+   agents that didn't want it (a footgun, not a no-op). The conditional host
+   gives the author ONE type regardless of chat-ness, keeps `Agent` chat-free
+   (the conditional lives in the adapter), and handles the lean case at runtime.
+   A minimal-only host may still exist as a **bundle-size optimization** (avoids
+   pulling the chat adapter into lean deployments) — an optimization, not a
+   correctness fork.
 3. **`hostAgent(A)` factory** kept as the tersest one-line sugar.
 
 Why the driver/helper is more than "forward 4 methods": the lifecycle wiring is
