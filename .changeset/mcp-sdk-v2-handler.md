@@ -10,3 +10,5 @@ Add MCP SDK v2 support to `createMcpHandler`. Pass a factory returning `McpServe
 The stateless 2025 fallback continues to use Agents' `WorkerTransport`, including fail-fast handling for unsupported server-to-client requests. `createLegacyMcpHandler` is now an explicit public API for SDK v1 servers and complete WorkerTransport options. `WorkerTransport` and `createLegacyMcpHandler` are retained; only passing an SDK v1 server to the overloaded `createMcpHandler` is deprecated for removal in the next major release. `McpAgent` remains available as a deprecated, feature-frozen stateful SDK v1 path.
 
 The v2 callable handler also maps verified provider-issued metadata from compatible `@cloudflare/workers-oauth-provider` releases to standard MCP `AuthInfo` while preserving `getMcpAuthContext().props`.
+
+The handler now validates present `Origin` headers against localhost-class hostnames by default, while continuing to accept non-browser requests without `Origin`. Configure `allowedOriginHostnames` for browser clients on other hosts. Default CORS preflights now allow the modern `Mcp-Method` and `Mcp-Name` request headers.

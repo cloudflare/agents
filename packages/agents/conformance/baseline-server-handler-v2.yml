@@ -1,8 +1,3 @@
 # SDK v2 createMcpHandler endpoint at 2026-07-28.
 # Every entry is executed by alpha.9; run-suite.mjs rejects unseen entries.
-server:
-  # Agents does not add the SDK's localhost-only Host/Origin middleware.
-  # Impact if unchanged: deployments rely on Cloudflare routing/edge controls;
-  # users exposing an endpoint through a host that accepts arbitrary Host or
-  # Origin values must add their own validation middleware.
-  - dns-rebinding-protection
+server: []

@@ -173,7 +173,8 @@ describe("createMcpHandler SDK v2", () => {
   it("applies route and CORS behavior through callable and fetch faces", async () => {
     const handler = createMcpHandler(() => createServer(), {
       route: "/custom",
-      corsOptions: { origin: "https://client.example" }
+      corsOptions: { origin: "https://client.example" },
+      allowedOriginHostnames: ["client.example"]
     });
     const ctx = createExecutionContext();
 
@@ -183,7 +184,10 @@ describe("createMcpHandler SDK v2", () => {
       ctx
     );
     const preflight = await handler.fetch(
-      new Request("http://example.com/custom", { method: "OPTIONS" }),
+      new Request("http://example.com/custom", {
+        method: "OPTIONS",
+        headers: { Origin: "https://client.example" }
+      }),
       env,
       ctx
     );
@@ -193,6 +197,82 @@ describe("createMcpHandler SDK v2", () => {
     expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe(
       "https://client.example"
     );
+  });
+
+  it("allows modern standard request headers in CORS preflight", async () => {
+    const handler = createMcpHandler(() => createServer());
+
+    const response = await handler.fetch(
+      new Request("http://localhost/mcp", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "http://localhost:3000",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "mcp-method, mcp-name"
+        }
+      })
+    );
+    const allowedHeaders = response.headers
+      .get("Access-Control-Allow-Headers")
+      ?.toLowerCase()
+      .split(/,\s*/);
+
+    expect(response.status).toBe(200);
+    expect(allowedHeaders).toEqual(
+      expect.arrayContaining(["mcp-method", "mcp-name"])
+    );
+  });
+
+  it("rejects a non-local Origin before serving a request", async () => {
+    let factoryCalled = false;
+    const handler = createMcpHandler(() => {
+      factoryCalled = true;
+      return createServer();
+    });
+    const request = modernRequest("server/discover");
+    request.headers.set("Host", "evil.example.com");
+    request.headers.set("Origin", "http://evil.example.com");
+
+    const response = await handler.fetch(request);
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: -32000,
+        message: expect.stringContaining("Invalid Origin")
+      },
+      id: null,
+      jsonrpc: "2.0"
+    });
+    expect(factoryCalled).toBe(false);
+  });
+
+  it("rejects a malformed or opaque Origin", async () => {
+    const handler = createMcpHandler(() => createServer());
+    const request = modernRequest("server/discover");
+    request.headers.set("Origin", "null");
+
+    const response = await handler.fetch(request);
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: -32000,
+        message: expect.stringContaining("Invalid Origin header")
+      }
+    });
+  });
+
+  it("accepts a present Origin on the configured hostname allowlist", async () => {
+    const handler = createMcpHandler(() => createServer(), {
+      allowedOriginHostnames: ["client.example"]
+    });
+    const request = modernRequest("server/discover");
+    request.headers.set("Origin", "https://client.example:8443");
+
+    const response = await handler.fetch(request);
+
+    expect(response.status).toBe(200);
   });
 
   it("exposes the upstream close, notify, and bus controls", () => {
