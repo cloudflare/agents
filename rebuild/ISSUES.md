@@ -462,34 +462,49 @@ RPC-only) has no hosting path, and if forced through `hostAgent` would carry
 chat plumbing it never uses. So the "compose your own on `Agent`" tier
 (audit 30) is real at the composition layer but missing its hosting layer.
 
-Fix (chosen shape — intermediate class, not a factory): express the adapter as
-a normal DO **base class** the author extends, replacing the `hostAgent`
-factory + its throwing-stub base (`HostedAgentDurableObject`, whose methods all
+Fix (chosen shape — COMPOSITION-first, helpers are opt-in). The truest model
+is plain composition: **the DO has-a Agent** (nested), not the agent being/
+extending the DO, and not a factory hiding the has-a. Replace the `hostAgent`
+factory + its throwing-stub base (`HostedAgentDurableObject`, whose methods
 throw "hostAgent did not install …" until the factory subclass overrides them —
-a two-level indirection more mysterious than a mixin). The layering becomes the
-class hierarchy:
+a two-level indirection more mysterious than a mixin) with a spectrum the
+author picks from, composition primary:
 
-```ts
-abstract class AgentDurableObject<A extends Agent> extends DurableObject {
-  protected abstract createAgent(host: AgentHost): A;   // the one seam
-  // real lifecycle here: ensure()/start-once, alarm→onAlarm, fetch, __call/__init/__destroy
-}
-abstract class ChatAgentDurableObject<A extends Think> extends AgentDurableObject<A> {
-  // adds attachChatTransport (cf_agent_* WS) + WS entry points
-}
-// author:
-export class MyAgentDO extends ChatAgentDurableObject<MyAgent> {
-  protected createAgent(host) { return new MyAgent(host); }
-}
-```
+1. **Plain composition (the documented conceptual model).** The author writes
+   an ordinary DO that owns a lifecycle *driver* which owns the agent:
+   ```ts
+   export class MyDO extends DurableObject {
+     #rt = createAgentRuntime(this.ctx, this.env, (rt) => new MyAgent(rt), { chat: true });
+     fetch = this.#rt.fetch; alarm = this.#rt.alarm;
+     webSocketMessage = this.#rt.webSocketMessage; webSocketClose = this.#rt.webSocketClose;
+   }
+   ```
+   The has-a relationship is fully visible; `createAgentRuntime` owns only the
+   subtle, identical-across-agents part (see below), not the composition.
+2. **Optional convenience base class** for zero forwarding lines
+   (`AgentDurableObject<A extends Agent>` → `ChatAgentDurableObject<A extends
+   Think>`, `createAgent(rt)` the one seam) — a shortcut over #1, not the
+   mandated structure.
+3. **`hostAgent(A)` factory** kept as the tersest one-line sugar.
 
-Invariant to preserve: the AGENT class stays separate and constructed over
-`host` (port-pure, node-testable) — the base class is the DO, the agent is
-NOT the DO. Keep `hostAgent(A)` as optional one-line sugar over the base
-(`class extends ChatAgentDurableObject { createAgent = h => new A(h) }`) so
-both styles exist. Net effect: removes the throwing-stub base, expresses the
-minimal-vs-chat layering as plain inheritance, and gives primitives-first
-(`extends Agent`) agents a hosting path via `AgentDurableObject`. Pairs with a
-"build-a-lite-agent" DX pass (the domain factories are public + test-proven but
+Why the driver/helper is more than "forward 4 methods": the lifecycle wiring is
+**activation-scoped async setup that's identical everywhere and easy to get
+subtly wrong** — `start()` exactly once per activation inside
+`blockConcurrencyWhile` AND lazily (identity can arrive on the first request
+header, not at construction); alarm-mirror restore from `getAlarm()` + flush;
+WS hibernation re-attaching the transport on wake. That subtlety is what the
+helper owns so the visible composition stays trivial. (This is why a naive
+`#agent = new MyAgent(...)` field alone is insufficient — start is async and
+activation-scoped.)
+
+Two invariants: (a) the AGENT stays a separate class constructed over a NARROW
+capability object (port-pure, node-testable) — never the DO, never handed
+`this`/`ctx`; (b) rename `AgentHost` → something signalling
+capabilities-not-runtime-handle (candidate: `AgentRuntime`; it is identity +
+capability-ports, and its type must obviously be an *assembled set*, so "pass
+`this`" never reads as valid). The bundle is already narrow today (no `ctx`/
+`this`); the fix is naming + the driver split. Layering (minimal vs chat) and
+the primitives-first hosting path fall out of #1/#2. Pairs with a
+"build-a-lite-agent" DX pass (domain factories are public + test-proven but
 their dep signatures are internal-facing) and the framework/Vite codegen
-(ISSUE-013) that would generate the subclass away.
+(ISSUE-013) that generates #2/#3 away.
