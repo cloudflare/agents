@@ -166,35 +166,35 @@ refreshes the snapshot in the same commit.
 | agent-tool-replay.test.ts | 5 | blocked ISSUE-035 | P13: all 5 need interrupted-status/replay machinery. |
 | agent-tools-failure.test.ts | 5 | ported 1/5 | [fidelity:adapter] P13. 4 fails cite ISSUE-035 (no failure-envelope ok/status/retryable; no toolCallId-derived stable runId). |
 | alarms.test.ts | 3 | native test-workers/alarm.test.ts | verify overlap when convenient |
-| basepath.test.ts | 21 | claimed P12 | T3 (routing prefix option) |
+| basepath.test.ts | 21 | ported 6/11 | [fidelity:adapter] P12 (11 its). Fails: identity-frame vocabulary (className vs kebab slug — ISSUE-026 family) + identity-only opt-out missing (shouldSendProtocolMessages suppresses identity AND state). |
 | browser-connector.test.ts | 34 | blocked ISSUE-008 | ports with the browser lift |
 | browser-quick-actions.test.ts | 20 | blocked ISSUE-008 | |
-| callable.test.ts | 21 | claimed P12 | T3 |
+| callable.test.ts | 21 | ported 1/3 | [fidelity:adapter] P12. 18 dropped native callable.test.ts (registry level). 2 fails = ISSUE-046 (no stream.error()). |
 | chat-sdk.test.ts | 9 | blocked ISSUE-011 | messengers depend on chat-sdk Adapter |
-| client-timeout.test.ts | 5 | claimed P12 | T3 |
-| deferred-destroy.test.ts | 6 | claimed P12 | T3 (shell __destroy semantics) |
+| client-timeout.test.ts | 5 | ported 4/5 | [fidelity:adapter] P12. 1 fail = ISSUE-046 (stream.error()). |
+| deferred-destroy.test.ts | 6 | quarry | P12: 5/6 poke original internals by name; 6th blocked ISSUE-003/022. Behavioral checklist extracted → ISSUE-042 (REAL BUG: __destroy runs teardown inline with no durable condemned marker — half-torn child on mid-teardown cancel, original #1625 failure mode). |
 | email-headers.test.ts | 10 | blocked ISSUE-023 | |
 | email-routing.test.ts | 46 | blocked ISSUE-023 | |
-| keep-alive.test.ts | 14 | claimed P12 | T3 |
-| message-handling.test.ts | 10 | claimed P12 | T3 |
+| keep-alive.test.ts | 14 | dropped native src/domain/runtime/scheduling/keep-alive.test.ts | P12: all 14 map 1:1 (verified by hand against the native file). |
+| message-handling.test.ts | 10 | ported 7/10 | [fidelity:adapter] P12. Fails: identity vocabulary + identity-only opt-out + no cf_agent_mcp_servers connect frame (ISSUE-003 adjacency). |
 | migration.test.ts | 8 | dropped | migrates the ORIGINAL's old storage schema — meaningless for the rebuild |
-| msg-ordering.test.ts | 1 | claimed P12 | T3 |
+| msg-ordering.test.ts | 1 | dropped (no-equivalent) | P12: no raw onConnect/onMessage override surface (P10 precedent); ordering is structural in the shell. |
 | observability.test.ts | 46 | blocked ISSUE-009 | ports with the adapter |
 | protocol-messages.test.ts | 18 | ported 5/18 | [fidelity:adapter] 13 fail on original frame-vocabulary asserts — needs per-test verdicts: genuine missing frames vs deliberate `divergence` (some will become dropped rows). |
-| queue.test.ts | 3 | claimed P12 | T3 |
+| queue.test.ts | 3 | dropped native src/domain/runtime/queue/queue.test.ts + src/app/agent.test.ts | P12. In-file note: original dequeues failing items immediately, rebuild retries 3x then drops — 'never blocks later items' holds in both. |
 | r2-skills.test.ts | 9 | blocked ISSUE-004 | R2+codemode skills; also quarry vs domain/skills |
-| readonly-connections.test.ts | 45 | claimed P12 | T3 |
+| readonly-connections.test.ts | 45 | ported 5/17 | [fidelity:adapter] P12 (17 its / 45 asserts). Nothing native covers readonly; 12 fails = ISSUE-043 (dead shouldConnectionBeReadonly, rpc bypasses readonly predicate, no connection.setState). |
 | resumable-stream-migration.test.ts | 1 | dropped | old-architecture migration |
 | retries.test.ts | 48 | blocked ISSUE-020 | |
 | retry-integration.test.ts | 18 | blocked ISSUE-020 | |
 | routing.test.ts | 24 | ported 24/24 | [fidelity:light] **GREEN — full original suite passes** (after fixing unknown-binding 400 vs 404 divergence found here). |
 | run-fiber.test.ts | 48 | ported 34/41 | [fidelity:adapter] P13 (original has 48 tests, not 54). 41 on the board: 34 pass; 3 fails pin ISSUE-038 (fiber recovery scan gaps — real bugs); 4 other fails honest. 5 quarry (4 recovery follow-up alarm → native fibers.test.ts backoff/eviction by name; 1 old-arch SQL UNIQUE). 1 blocked ISSUE-003/022 (MCP wake-ordering). 1 missing-feature no-issue-yet (dedupe by caller-supplied fiberId — startFiber has only idempotencyKey). |
-| schedule.test.ts | 52 | claimed P12 | T3 |
+| schedule.test.ts | 52 | ported 10/20 | [fidelity:adapter] P12. 32 dropped: ~17 native scheduler.test.ts (CRUD/interval/filter/cancel/re-arm/dispatcher-failure); ~15 old-arch alarm-boundary internals whose replacement semantics the native suite covers (per-test pointers in-file). 10 fails = ISSUE-044 (no idempotent option, no onStart duplicate warning). |
 | schema-and-state-optimization.test.ts | 31 | quarry | original SQL-schema internals |
 | skill-runner.test.ts | 31 | blocked ISSUE-004 | |
 | skills.test.ts | 13 | blocked ISSUE-004 | quarry vs domain/skills meanwhile |
 | spike-sub-agent-routing.test.ts | 16 | blocked ISSUE-017 | |
-| state.test.ts | 22 | claimed P12 | T3 |
+| state.test.ts | 22 | ported 7/10 | [fidelity:adapter] P12. 12 dropped native state.test.ts. 3 fails = ISSUE-045 (throw-after-persist REAL-BUG flavored; error text; both-hooks guard). |
 | sub-agent-routing.test.ts | 22 | blocked ISSUE-017 | |
 | sub-agent.test.ts | 97 | ported 36/97 | [fidelity:adapter] P10. 38 on the board (36 pass; 2 real divergences: null-char name accepted, `Sub_` escapes the reserved-`sub` guard). 20 blocked: 13 ISSUE-036 (facets get no AgentSpawner — no nested spawn, no parentAgent() in a facet), 6 ISSUE-017 (/sub/ routing), 1 ISSUE-009. 20 quarry (old-arch internals: raw schedule rows, fiber-lease delegation, bundler heuristics, legacy migration). 6 dropped: 4 no-equivalent (raw onMessage, broadcast(), getConnections()), 2 native test-workers/delegation.test.ts. Divergence to confirm: parentAgent() on non-facet returns undefined vs original throw. |
 | workflow-error-reporting.test.ts | 7 | blocked ISSUE-016 | |

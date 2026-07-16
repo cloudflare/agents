@@ -7,11 +7,12 @@ per-context `CONTEXT.md` (the maintainer's canonical model), `ISSUES.md`,
 `test-workers/ported/COVERAGE.md` (the port ledger), `PROGRESS.md` (log).
 Dashboard: `npm run dashboard` → `dashboard.html`.
 
-Numbers as of this handoff: ported workerd board **359/623 passing by vitest
-count** (`BOARD-SNAPSHOT.txt` is the canonical per-test record) + **286 MCP
-vendor-tests green in the node suite** · native **1082+ node + 42 workerd**,
-typecheck clean · **11 issues resolved (incl. 003, 030, 031–034 today), 24
-open** (new today: 035 reattach budgets, 036 facet spawner).
+Numbers as of this handoff (2026-07-16, T3 COMPLETE): ported workerd board
+**497/1006 passing by vitest count** (`BOARD-SNAPSHOT.txt` canonical) +
+**286 MCP vendor-tests green in the node suite** · native **1082+ node + 42
+workerd**, typecheck clean · **11 issues resolved, 30 open** (035–046 filed
+from wave triage — several REAL bugs; see `BACKLOG.md` for the complete
+claimable completion plan).
 
 **Verification economy (new discipline, 2026-07-15):** subagents hand off
 vitest `--reporter=json` artifacts (orchestrator reads, never re-runs); board
@@ -151,7 +152,12 @@ external wire-compat proof and is now viable post-026.
 
 ---
 
-## Suggested next moves (not committed — maintainer's call)
+## Next moves
+
+**SUPERSEDED: see [`BACKLOG.md`](./BACKLOG.md)** — the complete, claimable
+migration-completion backlog (73 task ids, collision domains, claim
+protocol), written for parallel independent agents. The list below is the
+pre-backlog historical snapshot.
 
 - ~~ChatAgent extraction~~ — DONE 2026-07-15 (see §3).
 - **ISSUE-030 hosting refactor** as a `/goal` (generic host + capability-typed

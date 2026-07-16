@@ -816,3 +816,40 @@ behavioral checklist for the fix:
 Acceptance: native shell tests covering the four properties above (the
 quarried original file is the spec source; its 6th test is MCP-side and rides
 ISSUE-003/022).
+
+## ISSUE-043 — Readonly-connection enforcement gaps
+
+**Status:** open · **Area:** app + adapters/websocket-chat + ports/transport · **Found by:** P12 ported readonly-connections tests (12 tests)
+
+Three gaps: (a) `shouldConnectionBeReadonly` on Agent is dead code — never
+called; (b) `rpc` frames bypass the WS adapter's `options.readonly`
+predicate (other frame kinds respect it); (c) `Connection.state` is
+immutable — no `connection.setState`. Full draft with line refs in the P12
+round-B codex report. All pinned by honestly-failing ported tests.
+
+## ISSUE-044 — Scheduler: no `idempotent` option, no onStart duplicate-schedule warning
+
+**Status:** open · **Area:** domain/runtime/scheduling · **Found by:** P12 ported schedule tests (10 tests — the wave's largest family)
+
+Original `schedule()`/`scheduleEvery()` accept `idempotent` (same-key
+re-schedule is a no-op) and onStart warns on duplicate declarative
+schedules. Rebuild has neither.
+
+## ISSUE-045 — State hooks: throw-after-persist, error-text, both-hooks guard
+
+**Status:** open · **Area:** domain/runtime/state · **Found by:** P12 ported state tests (3 tests)
+
+(a) REAL-BUG flavored: a throwing `onStateChanged` propagates out of
+`setState` AFTER persistence — state is persisted but never broadcast and
+the caller sees an error for a change that happened; original swallows to
+`onError` and still broadcasts. (b) State-rejection error text is the raw
+validation message vs original constant "State update rejected". (c) No
+guard error when both `onStateUpdate` and `onStateChanged` are overridden.
+
+## ISSUE-046 — StreamingResponse has no `error()` channel
+
+**Status:** open · **Area:** domain/runtime/rpc · **Found by:** P12 ported callable/client-timeout tests (3 tests)
+
+Rebuild streaming RPC supports only `send`/`end`; the original's
+`stream.error()` (graceful in-band error terminal) has no equivalent, so
+userland streaming callables have no migration path for error signaling.
