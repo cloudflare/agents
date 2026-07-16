@@ -17,3 +17,7 @@ export * from "./submissions-agents.js";
 export * from "./sub-agent-agents.js";
 export * from "./p13-fibers-agents.js";
 export * from "./scheduled-onstart-agents.js";
+export * from "./p12-scheduling-agents.js";
+export * from "./p12-state-agents.js";
+export * from "./p12-callable-agents.js";
+export * from "./p12-connections-agents.js";

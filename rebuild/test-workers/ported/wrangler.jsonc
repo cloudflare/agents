@@ -205,6 +205,66 @@
       {
         "class_name": "Sub_",
         "name": "SubTrailingUnderscore"
+      },
+      {
+        "class_name": "TestP12ScheduleAgent",
+        "name": "TestP12ScheduleAgent"
+      },
+      {
+        "class_name": "TestP12OnStartScheduleWarnAgent",
+        "name": "TestP12OnStartScheduleWarnAgent"
+      },
+      {
+        "class_name": "TestP12OnStartScheduleExplicitFalseAgent",
+        "name": "TestP12OnStartScheduleExplicitFalseAgent"
+      },
+      {
+        "class_name": "TestP12OnStartScheduleNoWarnAgent",
+        "name": "TestP12OnStartScheduleNoWarnAgent"
+      },
+      {
+        "class_name": "TestP12KeepAliveAgent",
+        "name": "TestP12KeepAliveAgent"
+      },
+      {
+        "class_name": "TestP12StateAgent",
+        "name": "TestP12StateAgent"
+      },
+      {
+        "class_name": "TestP12StateAgentNoInitial",
+        "name": "TestP12StateAgentNoInitial"
+      },
+      {
+        "class_name": "TestP12ThrowingStateAgent",
+        "name": "TestP12ThrowingStateAgent"
+      },
+      {
+        "class_name": "TestP12PersistedStateAgent",
+        "name": "TestP12PersistedStateAgent"
+      },
+      {
+        "class_name": "TestP12BothHooksAgent",
+        "name": "TestP12BothHooksAgent"
+      },
+      {
+        "class_name": "TestP12CallableAgent",
+        "name": "TestP12CallableAgent"
+      },
+      {
+        "class_name": "TestP12ChildAgent",
+        "name": "TestP12ChildAgent"
+      },
+      {
+        "class_name": "TestReadonlyAgent",
+        "name": "TestReadonlyAgent"
+      },
+      {
+        "class_name": "TestCallableAgent",
+        "name": "TestCallableAgent"
+      },
+      {
+        "class_name": "TestNoIdentityAgent",
+        "name": "TestNoIdentityAgent"
       }
     ]
   },
@@ -255,7 +315,22 @@
         "TestUserNotificationAgent",
         "TestRunFiberAgent",
         "TestSubAgentParent",
-        "ReservedClassParent"
+        "ReservedClassParent",
+        "TestP12ScheduleAgent",
+        "TestP12OnStartScheduleWarnAgent",
+        "TestP12OnStartScheduleExplicitFalseAgent",
+        "TestP12OnStartScheduleNoWarnAgent",
+        "TestP12KeepAliveAgent",
+        "TestP12StateAgent",
+        "TestP12StateAgentNoInitial",
+        "TestP12ThrowingStateAgent",
+        "TestP12PersistedStateAgent",
+        "TestP12BothHooksAgent",
+        "TestP12CallableAgent",
+        "TestP12ChildAgent",
+        "TestReadonlyAgent",
+        "TestCallableAgent",
+        "TestNoIdentityAgent"
       ]
     }
   ]

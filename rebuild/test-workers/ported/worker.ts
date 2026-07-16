@@ -33,6 +33,24 @@ export default {
         return stub.fetch(new Request(request, { headers }));
       }
     }
+    if (url.pathname === "/user") {
+      const namespace = env.TestStateAgent;
+      if (
+        typeof namespace === "object" &&
+        namespace !== null &&
+        "idFromName" in namespace &&
+        "get" in namespace
+      ) {
+        const name = "auth-user";
+        const stub = await getAgentByName(
+          namespace as DurableObjectNamespace,
+          name
+        );
+        const headers = new Headers(request.headers);
+        headers.set("x-agent-name", name);
+        return stub.fetch(new Request(request, { headers }));
+      }
+    }
     return (await routeAgentRequest(request, env)) ?? new Response(null, { status: 404 });
   },
 };

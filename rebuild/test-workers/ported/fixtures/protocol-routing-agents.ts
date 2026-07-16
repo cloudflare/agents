@@ -127,6 +127,26 @@ class TestStateAgentImpl extends Think<RoutingState> {
   async getState(): Promise<RoutingState> {
     return this.state;
   }
+
+  @callable()
+  async updateState(state: RoutingState): Promise<void> {
+    this.setState(state);
+  }
+
+  override async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname.split("/").pop() ?? "";
+
+    if (path === "state") {
+      return Response.json({ state: this.state });
+    }
+    if (path === "echo") {
+      const body = await request.text();
+      return Response.json({ method: request.method, body, path });
+    }
+
+    return new Response("Not found", { status: 404 });
+  }
 }
 
 class SimpleRoutingAgentImpl extends Think {
@@ -188,10 +208,16 @@ export class TestProtocolMessagesAgent extends TestProtocolMessagesAgentBase {
   }
 }
 
-const TestStateAgentBase = hostAgent(TestStateAgentImpl);
+const TestStateAgentBase = hostAgent(TestStateAgentImpl, {
+  onRequest: (request, agent) => agent.onRequest(request)
+});
 export class TestStateAgent extends TestStateAgentBase {
   getState(): Promise<RoutingState> {
     return this.withAgent((agent) => agent.getState());
+  }
+
+  updateState(state: RoutingState): Promise<void> {
+    return this.withAgent((agent) => agent.updateState(state));
   }
 }
 

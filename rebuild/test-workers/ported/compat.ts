@@ -40,7 +40,9 @@ export const getServerByName = getAgentByName;
 export enum MessageType {
   CF_AGENT_IDENTITY = "cf_agent_identity",
   CF_AGENT_STATE = "cf_agent_state",
+  CF_AGENT_STATE_ERROR = "cf_agent_state_error",
   CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
+  CF_AGENT_CHAT_MESSAGES = "cf_agent_chat_messages",
   RPC = "rpc"
 }
 
@@ -145,6 +147,7 @@ export { Think } from "../../src/app/think.js";
 export { action } from "../../src/domain/actions/actions.js";
 export type { Action } from "../../src/domain/actions/actions.js";
 export { callable } from "../../src/domain/runtime/rpc/callable.js";
+export type { StreamingResponse } from "../../src/domain/runtime/rpc/callable.js";
 export { tool } from "../../src/domain/tools/types.js";
 export {
   agentTool,

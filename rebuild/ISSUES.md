@@ -775,3 +775,44 @@ from ISSUE-035 (reattach budgets) and ISSUE-037 (detached delivery).
 The DSL accepts `"every minute"` and `"every <n> minutes"` (plural) but
 rejects `"every 1 minute"`/`"every 1 hour"`. The original accepts singular
 counted forms; small grammar fix, explains most scheduled-tasks failures.
+
+---
+
+<!-- NOTE: ISSUE-037 through ISSUE-041 are taken in the main tree (detached
+delivery ledger / fiber recovery scan / onStart bricking /
+maxConcurrentAgentTools / DSL singular forms) — this worktree branched before
+they were filed. Numbering here continues at 042. -->
+
+## ISSUE-042 — `__destroy` runs the whole teardown inline in the caller's RPC — no durable marker, half-torn state cannot converge
+
+**Status:** open · **Area:** adapters/cloudflare (shell) + app lifecycle · **Found by:** P12 deferred-destroy quarry analysis
+
+`AgentDurableObject.__destroy()` (`src/adapters/cloudflare/shell.ts`, ~line
+298) awaits `activation.agent.destroy()` inline inside the caller's RPC and
+then drops the activation. `Agent.destroy()` is multi-step (cancel schedules,
+clear alarm, `store.deleteAll()`, emit, `onDestroyed` connection teardown). If
+the initiating call is canceled mid-teardown — caller request canceled,
+isolate reset, eviction — the child is left HALF-TORN (some rows deleted, no
+alarm) with **nothing durable to converge on next wake**: no condemned
+marker, no immediate self-alarm, and the next activation happily rebuilds
+over the partial state.
+
+This is exactly the failure mode the ORIGINAL fixed as #1625 (its
+`deferred-destroy.test.ts`, quarried by P12 rather than ported): teardown
+must not ride the initiating request's grace window. The original's shape —
+persist a durable "condemned" marker + arm an immediate alarm, run the real
+teardown in the alarm invocation with its own budget, marker removed only by
+the final delete so any interruption converges on the next wake — is the
+behavioral checklist for the fix:
+
+1. `destroy()`/`__destroy` should persist a condemned marker + immediate
+   alarm and return; the alarm invocation performs the teardown.
+2. A pending destroy pre-empts normal alarm work and converges from a
+   half-torn state.
+3. Alarm rescheduling must never clear or delay the destroy alarm (no-work
+   branch; keepAlive horizon).
+4. Clean completion leaves no marker behind.
+
+Acceptance: native shell tests covering the four properties above (the
+quarried original file is the spec source; its 6th test is MCP-side and rides
+ISSUE-003/022).
