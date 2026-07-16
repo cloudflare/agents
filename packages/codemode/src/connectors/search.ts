@@ -83,6 +83,7 @@ type SearchableItem = {
   connector: string;
   method: string;
   description?: string;
+  requiresApproval?: boolean;
   kind: "method" | "snippet";
 };
 
@@ -153,6 +154,7 @@ function scoreMatch(item: SearchableItem, query: string): SearchResult | null {
     connector: item.connector,
     method: item.method,
     description: item.description,
+    ...(item.requiresApproval ? { requiresApproval: true } : {}),
     kind: item.kind,
     score
   };
@@ -172,6 +174,9 @@ export function searchConnectors(
         connector: desc.name,
         method: methodName,
         description: descriptor?.description,
+        ...(desc.annotations?.[methodName]?.requiresApproval
+          ? { requiresApproval: true }
+          : {}),
         kind: "method"
       });
     }

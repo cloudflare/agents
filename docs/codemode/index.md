@@ -135,7 +135,7 @@ export class Chat extends AIChatAgent<Env> {
 }
 ```
 
-That's the whole developer surface: a connector class, `createCodemodeRuntime`, and the runtime handle. The handle is the control plane — `tool()` for the model, `pending()`/`approve()`/`reject()`/`rollback()` for approvals, `executions()` for the audit trail, and `saveSnippet()`/`snippets()`/`deleteSnippet()` for curating what the model gets to reuse.
+That's the whole developer surface: a connector class, `createCodemodeRuntime`, and the runtime handle. The handle is the control plane — `tool()` for an AI SDK model; `execute()`/`search()`/`describe()` for direct hosts such as MCP servers; `pending()`/`approve()`/`reject()`/`rollback()` for approvals; `executions()` for the audit trail; and `saveSnippet()`/`snippets()`/`deleteSnippet()` for curating what the model gets to reuse.
 
 ## Use it (what the model writes)
 
