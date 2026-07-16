@@ -298,6 +298,11 @@ CD: new test project. Size M. Real `agents/react` useAgentChat against the
 rebuild over a real socket — the external wire-compat proof; also
 stream-resume.test.tsx (T0 third gate) + studio-chat.test.tsx.
 
+### B-065b [OPEN] assistant-e2e (4) — real-AI-binding suite
+CD: e2e. Size S/M. Port the 4 assistant-e2e tests; keep OUT of CI like the
+original (documented run instructions + a real model binding). The last
+pending non-T3 ledger row besides B-060/B-065.
+
 ### B-066 [OPEN] e2e red sweep
 CD: e2e. Size M. Remaining e2e reds not owned by an issue above: re-triage
 each to an owning backlog task or flip it (persist-false semantics,
@@ -338,7 +343,9 @@ nine agents, no overlaps. Then the C-section delegation sequence (B-030 →
 
 ## Definition of done (the whole migration)
 
-1. Every COVERAGE.md row non-pending with zero `claimed` leftovers; every
+1. Every COVERAGE.md row non-pending with zero `claimed` leftovers (as of
+   2026-07-16 four remain: T2b e2e → B-060, react client → B-065,
+   assistant-e2e → B-065b); every
    `blocked ISSUE-NNN` row's issue resolved or explicitly deferred by the
    maintainer; quarry rows carry completed checklist outcomes.
 2. Every ISSUES.md entry resolved or maintainer-deferred.
