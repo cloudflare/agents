@@ -305,16 +305,19 @@ Once connected, access the server's capabilities:
 
 ### Getting Available Tools
 
-```typescript
-const state = this.getMcpServers();
+Use `listTools()` when you need to discover or inspect the raw MCP catalog without preparing tools for an AI SDK model call:
 
-// All tools from all connected servers
-for (const tool of state.tools) {
+```typescript
+const tools = this.mcp.listTools();
+
+for (const tool of tools) {
   console.log(`Tool: ${tool.name}`);
   console.log(`  From server: ${tool.serverId}`);
   console.log(`  Description: ${tool.description}`);
 }
 ```
+
+`getMcpServers().tools` exposes the same raw tool shape as part of the full client state sent to connected applications. Neither API converts JSON Schemas to Zod.
 
 ### Resources and Prompts
 
@@ -361,7 +364,15 @@ async function chat(prompt: string) {
 }
 ```
 
-> **Note:** `getMcpServers().tools` returns raw MCP `Tool` objects for inspection. Use `this.mcp.getAITools()` when passing tools to the AI SDK.
+> **Note:** Use `this.mcp.listTools()` or `getMcpServers().tools` for discovery and inspection. Call `this.mcp.getAITools()` only when preparing tools for the AI SDK because it converts each MCP input and output JSON Schema to Zod.
+
+### AI tool schema conversion lifetime
+
+`getAITools()` caches converted schemas by the live connection object and the exact `connection.tools` catalog array. Catalog arrays are weakly keyed, so the cache does not keep a superseded catalog alive. Repeated filtered or unfiltered calls reuse schemas, while each call still returns a fresh tool record and execute closure. Filters do not create cache variants, and connections excluded by a filter are not converted.
+
+Discovery and `tools/list_changed` updates replace the catalog array, so the next `getAITools()` call recompiles that connection's schemas. Replacing the live connection also recompiles them. Renaming a server id reuses the server-independent schemas but rebuilds tool keys and execute closures with the current id. Execution continues to route through the manager's current connection mapping. A failed conversion is also cached for its unchanged source, avoiding repeated conversion attempts and warnings until the source changes.
+
+For custom integrations that edit an existing catalog array, replacing, reordering, or splicing tool objects and replacing a tool's `inputSchema` or `outputSchema` object recompiles the affected slots. Mutating a nested property of the same schema object does not invalidate the cache; assign a new schema object (or a new `connection.tools` array) after such a change. MCP discovery already replaces catalogs as part of its normal lifecycle.
 
 ## Managing Servers
 

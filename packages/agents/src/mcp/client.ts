@@ -51,6 +51,27 @@ export type MCPAITool = {
  */
 export type MCPAIToolSet = Record<string, MCPAITool>;
 
+type MCPAIConvertedSchemas = {
+  inputSchema: z.ZodType;
+  outputSchema?: z.ZodType;
+};
+
+type MCPAISchemaSource = {
+  tool: Tool;
+  inputSchema: Tool["inputSchema"] | undefined;
+  outputSchema: Tool["outputSchema"] | undefined;
+};
+
+type MCPAISchemaCacheSlot = MCPAISchemaSource &
+  (
+    | { status: "converted"; converted: MCPAIConvertedSchemas }
+    | { status: "failed"; error: string }
+  );
+
+type MCPAISchemaCacheEntry = {
+  converted: Array<MCPAISchemaCacheSlot | undefined>;
+};
+
 /** Maximum length of a normalized MCP server id. */
 export const MCP_SERVER_ID_MAX_LENGTH = 64;
 
@@ -347,6 +368,11 @@ export type MCPServerFilter = {
  */
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
+  /** Weak catalog keys avoid retaining schemas from superseded tool lists. */
+  private readonly _aiToolSchemas = new WeakMap<
+    MCPClientConnection,
+    WeakMap<Tool[], MCPAISchemaCacheEntry>
+  >();
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
@@ -1789,70 +1815,135 @@ export class MCPClientManager {
   }
 
   /**
+   * Convert connected MCP tools for the AI SDK. Converted schemas are reused
+   * while a live connection retains the same catalog array and schema-source
+   * identities; tool records and execute closures are rebuilt on every call.
+   *
    * @param filter - Optional filter to scope results to specific servers
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(filter?: MCPServerFilter): MCPAIToolSet {
     const connections = this.filterConnections(filter);
+    const entries: [string, MCPAITool][] = [];
 
-    for (const [id, conn] of Object.entries(connections)) {
+    for (const [serverId, conn] of Object.entries(connections)) {
       if (
         conn.connectionState !== MCPConnectionState.READY &&
         conn.connectionState !== MCPConnectionState.AUTHENTICATING
       ) {
         console.warn(
-          `[getAITools] WARNING: Reading tools from connection ${id} in state "${conn.connectionState}". Tools may not be loaded yet.`
+          `[getAITools] WARNING: Reading tools from connection ${serverId} in state "${conn.connectionState}". Tools may not be loaded yet.`
         );
       }
+
+      const catalog = conn.tools;
+      let catalogCaches = this._aiToolSchemas.get(conn);
+      if (!catalogCaches) {
+        catalogCaches = new WeakMap();
+        this._aiToolSchemas.set(conn, catalogCaches);
+      }
+      let cache = catalogCaches.get(catalog);
+      if (!cache) {
+        cache = { converted: [] };
+        catalogCaches.set(catalog, cache);
+      }
+
+      for (const [index, tool] of catalog.entries()) {
+        const toolName = tool.name;
+        try {
+          const sourceInputSchema = tool.inputSchema;
+          const sourceOutputSchema = tool.outputSchema;
+          let slot = cache.converted[index];
+          if (
+            !slot ||
+            slot.tool !== tool ||
+            slot.inputSchema !== sourceInputSchema ||
+            slot.outputSchema !== sourceOutputSchema
+          ) {
+            try {
+              slot = {
+                status: "converted",
+                tool,
+                inputSchema: sourceInputSchema,
+                outputSchema: sourceOutputSchema,
+                converted: {
+                  inputSchema: sourceInputSchema
+                    ? z.fromJSONSchema(
+                        sourceInputSchema as Parameters<
+                          typeof z.fromJSONSchema
+                        >[0]
+                      )
+                    : z.fromJSONSchema({ type: "object" }),
+                  outputSchema: sourceOutputSchema
+                    ? z.fromJSONSchema(
+                        sourceOutputSchema as Parameters<
+                          typeof z.fromJSONSchema
+                        >[0]
+                      )
+                    : undefined
+                }
+              };
+            } catch (error) {
+              const errorText = String(error);
+              cache.converted[index] = {
+                status: "failed",
+                tool,
+                inputSchema: sourceInputSchema,
+                outputSchema: sourceOutputSchema,
+                error: errorText
+              };
+              console.warn(
+                `[getAITools] Skipping tool "${toolName}" from "${serverId}": ${errorText}`
+              );
+              continue;
+            }
+            cache.converted[index] = slot;
+          }
+
+          if (slot.status === "failed") continue;
+
+          const toolKey = `tool_${serverId.replace(/-/g, "")}_${toolName}`;
+          const title = tool.title ?? tool.annotations?.title;
+          const description = tool.description;
+          entries.push([
+            toolKey,
+            {
+              description,
+              title,
+              execute: async (args) => {
+                const result = await this.callTool({
+                  arguments: args,
+                  name: toolName,
+                  serverId
+                });
+                if (result.isError) {
+                  const content = result.content as
+                    | Array<{ type: string; text?: string }>
+                    | undefined;
+                  const textContent = content?.[0];
+                  const message =
+                    textContent?.type === "text" && textContent.text
+                      ? textContent.text
+                      : "Tool call failed";
+                  throw new Error(message);
+                }
+                return result;
+              },
+              inputSchema: slot.converted.inputSchema,
+              outputSchema: slot.converted.outputSchema
+            }
+          ]);
+        } catch (error) {
+          console.warn(
+            `[getAITools] Skipping tool "${toolName}" from "${serverId}": ${error}`
+          );
+        }
+      }
+
+      // Release removed slots when a public catalog array is spliced in place.
+      cache.converted.length = catalog.length;
     }
 
-    const entries: [string, MCPAITool][] = [];
-    for (const tool of getNamespacedData(connections, "tools")) {
-      try {
-        const toolKey = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
-        const title = tool.title ?? tool.annotations?.title;
-        entries.push([
-          toolKey,
-          {
-            description: tool.description,
-            title,
-            execute: async (args) => {
-              const result = await this.callTool({
-                arguments: args,
-                name: tool.name,
-                serverId: tool.serverId
-              });
-              if (result.isError) {
-                const content = result.content as
-                  | Array<{ type: string; text?: string }>
-                  | undefined;
-                const textContent = content?.[0];
-                const message =
-                  textContent?.type === "text" && textContent.text
-                    ? textContent.text
-                    : "Tool call failed";
-                throw new Error(message);
-              }
-              return result;
-            },
-            inputSchema: tool.inputSchema
-              ? z.fromJSONSchema(
-                  tool.inputSchema as Parameters<typeof z.fromJSONSchema>[0]
-                )
-              : z.fromJSONSchema({ type: "object" }),
-            outputSchema: tool.outputSchema
-              ? z.fromJSONSchema(
-                  tool.outputSchema as Parameters<typeof z.fromJSONSchema>[0]
-                )
-              : undefined
-          }
-        ]);
-      } catch (e) {
-        console.warn(
-          `[getAITools] Skipping tool "${tool.name}" from "${tool.serverId}": ${e}`
-        );
-      }
-    }
     return Object.fromEntries(entries);
   }
 
