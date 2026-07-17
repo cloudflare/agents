@@ -142,6 +142,10 @@ export class ThinkAgent extends ThinkBase {
   /** repro/pr can be long: clone, install, deploy or fix, verify. */
   override maxSteps = AGENT_THINK_MAX_STEPS;
 
+  /** Capture full model/tool payloads while validating the tracing preview. */
+  override storeMessages = true;
+  override storeTools = true;
+
   /**
    * We expose our own container-backed `bash` tool; skip Think's built-in
    * just-bash. Note: even if this flag is ever flipped back,
