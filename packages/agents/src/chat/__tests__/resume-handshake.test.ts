@@ -8,6 +8,7 @@ import {
 import { ContinuationState } from "../continuation-state";
 import type { ResumableStream } from "../resumable-stream";
 import { PreStreamTurns } from "../pre-stream-turns";
+import { STREAM_RESUME_NONE_REASONS } from "../protocol";
 import {
   replayDoneFrame,
   streamPendingFrame,
@@ -161,14 +162,14 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     const handshake = new ResumeHandshake(makeHost({ resumableStream }));
     const conn = makeConnection("c1", frames);
 
-    // Proactive notify (idle-connect) followed by the client's explicit request:
-    // both must emit a byte-identical STREAM_RESUMING for the same connection.
+    // Proactive notify has no probe id; the explicit response echoes its
+    // correlation id while preserving the same stream request id.
     handshake.notifyStreamResuming(conn);
-    await handshake.handleResumeRequest(conn);
+    await handshake.handleResumeRequest(conn, "probe-1");
 
     expect(frames).toEqual([
       streamResumingFrame("req-1"),
-      streamResumingFrame("req-1")
+      streamResumingFrame("req-1", "probe-1")
     ]);
   });
 
@@ -185,9 +186,17 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       makeHost({ resumableStream, continuation })
     );
 
-    await handshake.handleResumeRequest(makeConnection("c1", frames));
+    await handshake.handleResumeRequest(
+      makeConnection("c1", frames),
+      "probe-owned"
+    );
 
-    expect(frames).toEqual([streamResumeNoneFrame()]);
+    expect(frames).toEqual([
+      streamResumeNoneFrame(
+        STREAM_RESUME_NONE_REASONS.CONTINUATION_OWNED,
+        "probe-owned"
+      )
+    ]);
   });
 
   it("REQUEST with no active stream but a matching pending continuation parks + keeps waiting (#1784)", async () => {
@@ -228,14 +237,19 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     expect(frames).toEqual([streamResumingFrame("req-term")]);
   });
 
-  it("REQUEST with nothing to resume → RESUME_NONE", async () => {
+  it("REQUEST with nothing to resume → correlated idle RESUME_NONE", async () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({ active: false });
     const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
-    await handshake.handleResumeRequest(makeConnection("c1", frames));
+    await handshake.handleResumeRequest(
+      makeConnection("c1", frames),
+      "probe-idle"
+    );
 
-    expect(frames).toEqual([streamResumeNoneFrame()]);
+    expect(frames).toEqual([
+      streamResumeNoneFrame(STREAM_RESUME_NONE_REASONS.IDLE, "probe-idle")
+    ]);
   });
 
   it("REQUEST with no active stream but a pre-stream turn in flight parks + keeps waiting (#1784)", async () => {
@@ -310,7 +324,9 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
     await handshake.handleResumeRequest(makeConnection("c1", frames));
 
-    expect(frames).toEqual([streamResumeNoneFrame()]);
+    expect(frames).toEqual([
+      streamResumeNoneFrame(STREAM_RESUME_NONE_REASONS.CONTINUATION_OWNED)
+    ]);
   });
 
   // ── handleResumeAck ────────────────────────────────────────────────

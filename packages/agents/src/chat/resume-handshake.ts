@@ -20,7 +20,11 @@
 
 import type { Connection } from "agents";
 import { sendIfOpen } from "./connection";
-import { CHAT_MESSAGE_TYPES } from "./protocol";
+import {
+  CHAT_MESSAGE_TYPES,
+  STREAM_RESUME_NONE_REASONS,
+  type StreamResumeNoneReason
+} from "./protocol";
 import type { ContinuationState } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ResumableStream } from "./resumable-stream";
@@ -90,15 +94,17 @@ export class ResumeHandshake {
    * `reconnectToStream` hangs to its timeout with no replay), and the proactive
    * notify is required for clients that never send a request. The notify is one
    * tiny frame; the client dedupes its ACK so the buffer is not replayed twice.
+   * Direct responses echo the opaque probe id; proactive notifications omit it.
    */
-  notifyStreamResuming(connection: Connection): void {
+  notifyStreamResuming(connection: Connection, probeId?: string): void {
     const { resumableStream, pendingResumeConnections } = this.host;
     if (!resumableStream.hasActiveStream()) return;
     const sent = sendIfOpen(
       connection,
       JSON.stringify({
         type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
-        id: resumableStream.activeRequestId
+        id: resumableStream.activeRequestId,
+        ...(probeId ? { probeId } : {})
       })
     );
     if (sent) {
@@ -113,7 +119,10 @@ export class ResumeHandshake {
    * message handler is registered, avoiding the race where a proactive
    * `STREAM_RESUMING` from onConnect arrives before the handler is ready.
    */
-  async handleResumeRequest(connection: Connection): Promise<void> {
+  async handleResumeRequest(
+    connection: Connection,
+    probeId?: string
+  ): Promise<void> {
     const { resumableStream, continuation, preStream } = this.host;
     if (resumableStream.hasActiveStream()) {
       if (
@@ -122,12 +131,13 @@ export class ResumeHandshake {
         continuation.activeConnectionId !== connection.id &&
         this._ownerStillPresent(continuation.activeConnectionId)
       ) {
-        sendIfOpen(
+        this._sendResumeNone(
           connection,
-          JSON.stringify({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE })
+          STREAM_RESUME_NONE_REASONS.CONTINUATION_OWNED,
+          probeId
         );
       } else {
-        this.notifyStreamResuming(connection);
+        this.notifyStreamResuming(connection, probeId);
       }
     } else if (
       continuation.pending !== null &&
@@ -139,32 +149,62 @@ export class ResumeHandshake {
       // probe does not time out before the continuation stream begins; the host
       // flushes `awaitingConnections` into `STREAM_RESUMING` on stream start.
       continuation.awaitingConnections.set(connection.id, connection);
-      this._sendStreamPending(connection, continuation.pending.requestId);
-    } else if (await this._replayTerminalOnResume(connection)) {
+      this._sendStreamPending(
+        connection,
+        continuation.pending.requestId,
+        probeId
+      );
+    } else if (await this._replayTerminalOnResume(connection, probeId)) {
       // A turn terminalized while no client was connected (#1645): drive the
       // resume handshake so the terminal error frame can be delivered on the
       // resumed stream (the only path that surfaces as an error on the client)
       // once this connection ACKs — see `_replayTerminalOnAck`.
-    } else if (preStream?.park(connection)) {
+    } else if (preStream?.park(connection, probeId)) {
       // A normal turn is accepted but its resumable stream has not started yet
       // (#1784). `park` enrolled the connection and sent `STREAM_PENDING`; the
       // host flushes it into `STREAM_RESUMING` on stream start, or releases it
       // with `STREAM_RESUME_NONE` if the turn settles without streaming.
     } else {
-      sendIfOpen(
+      // This is the only direct response that proves global inactivity: every
+      // active, pending, terminal-replay, and pre-stream branch was exhausted.
+      // The reason is backward-compatible (older clients ignore it) and lets a
+      // reconnecting hook reconcile fallback streaming state without confusing
+      // continuation-affinity denial for idle (#1914).
+      this._sendResumeNone(
         connection,
-        JSON.stringify({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE })
+        STREAM_RESUME_NONE_REASONS.IDLE,
+        probeId
       );
     }
   }
 
+  private _sendResumeNone(
+    connection: Connection,
+    reason: StreamResumeNoneReason,
+    probeId?: string
+  ): void {
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
+        reason,
+        ...(probeId ? { probeId } : {})
+      })
+    );
+  }
+
   /** Send a keep-waiting `STREAM_PENDING` frame (#1784). */
-  private _sendStreamPending(connection: Connection, requestId?: string): void {
+  private _sendStreamPending(
+    connection: Connection,
+    requestId?: string,
+    probeId?: string
+  ): void {
     sendIfOpen(
       connection,
       JSON.stringify({
         type: CHAT_MESSAGE_TYPES.STREAM_PENDING,
-        ...(requestId ? { id: requestId } : {})
+        ...(requestId ? { id: requestId } : {}),
+        ...(probeId ? { probeId } : {})
       })
     );
   }
@@ -230,7 +270,8 @@ export class ResumeHandshake {
    * `true` if a terminal was pending (and `STREAM_RESUMING` was sent).
    */
   private async _replayTerminalOnResume(
-    connection: Connection
+    connection: Connection,
+    probeId?: string
   ): Promise<boolean> {
     const pending = await this.host.pendingChatTerminal();
     if (!pending) return false;
@@ -238,7 +279,8 @@ export class ResumeHandshake {
       connection,
       JSON.stringify({
         type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
-        id: pending.requestId
+        id: pending.requestId,
+        ...(probeId ? { probeId } : {})
       })
     );
     return true;

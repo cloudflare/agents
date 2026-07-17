@@ -1162,7 +1162,10 @@ export class AIChatAgent<
         // avoiding the race condition where CF_AGENT_STREAM_RESUMING sent
         // in onConnect arrives before the client's handler is ready.
         if (event.type === "stream-resume-request") {
-          await this._resumeHandshake().handleResumeRequest(connection);
+          await this._resumeHandshake().handleResumeRequest(
+            connection,
+            event.probeId
+          );
           return;
         }
 

@@ -52,7 +52,11 @@ export {
   type ClientToolExecutor
 } from "./client-tools";
 
-export { CHAT_MESSAGE_TYPES } from "./protocol";
+export {
+  CHAT_MESSAGE_TYPES,
+  STREAM_RESUME_NONE_REASONS,
+  type StreamResumeNoneReason
+} from "./protocol";
 
 export { MessageType } from "./wire-types";
 export type { OutgoingMessage, IncomingMessage } from "./wire-types";

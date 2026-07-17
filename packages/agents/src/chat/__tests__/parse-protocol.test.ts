@@ -118,10 +118,14 @@ describe("parseProtocolMessage", () => {
     });
   });
 
-  it("parses stream-resume-request", () => {
+  it("parses stream-resume-request with optional probe correlation", () => {
     const msg = { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST };
-    const event = parseProtocolMessage(JSON.stringify(msg));
-    expect(event).toEqual({ type: "stream-resume-request" });
+    expect(parseProtocolMessage(JSON.stringify(msg))).toEqual({
+      type: "stream-resume-request"
+    });
+    expect(
+      parseProtocolMessage(JSON.stringify({ ...msg, probeId: "probe-1" }))
+    ).toEqual({ type: "stream-resume-request", probeId: "probe-1" });
   });
 
   it("parses stream-resume-ack", () => {
