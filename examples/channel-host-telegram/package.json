@@ -1,0 +1,27 @@
+{
+  "name": "@cloudflare/agents-channel-host-telegram",
+  "description": "Channel-host inversion demo: a worker-owned Chat SDK Telegram bot (state in its own DO) driving Think agents as callees",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@chat-adapter/telegram": "^4.31.0",
+    "@cloudflare/think": "*",
+    "agents": "*",
+    "ai": "^6.0.202",
+    "chat": "^4.31.0",
+    "chat-state-cloudflare-do": "^0.2.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260629.1",
+    "@types/node": "^26.0.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.105.0"
+  }
+}

@@ -297,6 +297,10 @@ export type {
 export type { DeliveryKind, DeliveryTag } from "./messengers";
 export { Session } from "agents/experimental/memory/session";
 export type { SessionMessage } from "agents/experimental/memory/session";
+import { createIngestStream, textFromUIMessage } from "./ingest";
+import type { IngestInput } from "./ingest";
+export { collectIngestReply, decodeIngestStream } from "./ingest";
+export type { IngestInput, IngestReply, IngestStreamEvent } from "./ingest";
 export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export type { WorkspaceLike } from "./tools/workspace";
@@ -3814,7 +3818,17 @@ export class Think<
     return {};
   }
 
-  /** Return messenger integrations that should be routed through this Think agent. */
+  /**
+   * Return messenger integrations that should be routed through this Think
+   * agent.
+   *
+   * @deprecated The Think-owned messenger runtime is being superseded by
+   * user-owned hosts: run the Chat SDK in your worker (with its own state DO)
+   * and drive agents via {@link Think.ingest} over RPC — see
+   * `examples/channel-host-telegram` and `docs/think/channels.md`. Existing
+   * messenger apps keep working, but new integrations should use the host
+   * pattern.
+   */
   getMessengers(): ThinkMessengers {
     return {};
   }
@@ -3919,13 +3933,13 @@ export class Think<
       type: "channel:resolved",
       payload: {
         channel,
-        kind: definition.kind,
+        kind: definition.kind ?? "custom",
         requestId: admittedTurnContext.getStore()?.requestId
       }
     });
     return {
       channelId: channel,
-      kind: definition.kind,
+      kind: definition.kind ?? "custom",
       capabilities: definition.capabilities,
       messenger:
         definition.kind === "messenger" ? this.getMessengerContext() : undefined
@@ -4055,9 +4069,11 @@ export class Think<
             options?.thread
           ));
         if (!surface) {
-          const kindOf = this._channels?.get(channelId)?.kind;
+          const registered = this._channels?.get(channelId);
+          const kindOf =
+            registered?.kind ?? (registered ? "custom" : undefined);
           let hint: string;
-          if (kindOf === undefined) {
+          if (registered === undefined) {
             hint = `; channel "${channelId}" is not registered`;
           } else if (kindOf === "messenger") {
             hint = options?.thread
@@ -6844,6 +6860,54 @@ export class Think<
       detachExternal();
       this._aborts.remove(requestId);
     }
+  }
+
+  /**
+   * Ingest an external channel event and run a Think turn with the channel's
+   * behaviour policy applied. This is the primary invocation route for
+   * host-owned transports: hosts call it over Workers RPC via
+   * `getAgentByName(...)` and consume the returned NDJSON byte stream
+   * (`decodeIngestStream` / `collectIngestReply`).
+   *
+   * The returned byte stream is an observation tap. The turn is started
+   * eagerly and runs to completion even if the caller never reads or cancels
+   * the stream.
+   *
+   * Invariant: this is a thin, RPC-serializable facade over {@link runTurn} —
+   * it validates the channel and adapts the stream callback to NDJSON frames,
+   * nothing more. It must never grow its own turn semantics (queueing,
+   * recovery, continuation, tool handling all belong to the one turn pipeline
+   * behind `runTurn`). If a change here needs to know how turns run, it is in
+   * the wrong place.
+   *
+   * @experimental
+   */
+  async ingest(input: IngestInput): Promise<ReadableStream<Uint8Array>> {
+    // Unlike recovery-path channel resolution (which warns), an RPC caller
+    // naming an unknown channel is a caller bug — fail loudly.
+    if (!this._channels?.has(input.channelId)) {
+      throw new Error(
+        `ingest: channel "${input.channelId}" is not registered (configureChannels()/getMessengers())`
+      );
+    }
+    const message = "message" in input ? input.message : undefined;
+    const text = "text" in input ? input.text : textFromUIMessage(message);
+    return createIngestStream(
+      (callback) =>
+        this.runTurn({
+          mode: "stream",
+          input: message ?? text ?? "",
+          callback,
+          channel: input.channelId
+        }),
+      () =>
+        this.messages
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.role === "assistant") as
+          | SessionMessage
+          | undefined
+    );
   }
 
   /**

@@ -754,6 +754,40 @@ importers:
         specifier: ^4.105.0
         version: 4.105.0(@cloudflare/workers-types@4.20260629.1)
 
+  examples/channel-host-telegram:
+    dependencies:
+      '@chat-adapter/telegram':
+        specifier: ^4.31.0
+        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^6.0.202
+        version: 6.0.208(zod@4.4.3)
+      chat:
+        specifier: ^4.31.0
+        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+      chat-state-cloudflare-do:
+        specifier: ^0.2.0
+        version: 0.2.0(chat@4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3))
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260629.1
+        version: 4.20260629.1
+      '@types/node':
+        specifier: ^26.0.1
+        version: 26.0.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.105.0
+        version: 4.105.0(@cloudflare/workers-types@4.20260629.1)
+
   examples/chat-sdk-messenger:
     dependencies:
       '@chat-adapter/telegram':
@@ -8281,6 +8315,11 @@ packages:
 
   chardet@2.2.0:
     resolution: {integrity: sha512-rddelWYNPRrXq6PtNEN2S3f6t9ILzvqaN5pVgi4kqt9jHQaXIial9PznB5iSPVlQSLNaaH22ItWz3EJtQ10+OA==}
+
+  chat-state-cloudflare-do@0.2.0:
+    resolution: {integrity: sha512-ZBOwJXcj5p0fduzRwgVeiH/I7/QFyXFt2ObffSvdMg492j8ulLa+1dzOaiMJlE8isIfxgY9sJkC3b5hNlvURSA==}
+    peerDependencies:
+      chat: ^4.26.0
 
   chat@4.31.0:
     resolution: {integrity: sha512-F6oJq9JUraLFkITS96/NKgwZwBfZX8aOwOj5qMs5NNwnOGHrSXZ5+osK+EA4HjzfyUEDfFTNiOSmyzgtFLpuWg==}
@@ -15898,6 +15937,10 @@ snapshots:
   character-reference-invalid@2.0.1: {}
 
   chardet@2.2.0: {}
+
+  chat-state-cloudflare-do@0.2.0(chat@4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)):
+    dependencies:
+      chat: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
 
   chat@4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3):
     dependencies:
