@@ -339,10 +339,10 @@ function parseImportsRegex(code: string): string[] {
   // import { foo } from 'bar'
   // import * as foo from 'bar'
   // import 'bar'
-  // Token-separated clause form — see rewriteImports in transformer.ts; the
-  // `[\w*{}\s,]+\s+` shape backtracks polynomially on near-matches (#1537).
+  // Token-separated, keyword-bounded clause form — see rewriteImports in
+  // transformer.ts. Both properties are required for linear matching (#1537).
   const importRegex =
-    /import\s+(?:[\w*{},]+(?:\s+[\w*{},]+)*\s+from\s+)?['"]([^'"]+)['"]/g;
+    /\bimport\b\s+(?:(?:(?!\b(?:import|export)\b)[\w*{},])+(?:\s+(?:(?!\b(?:import|export)\b)[\w*{},])+)*\s+from\s+)?['"]([^'"]+)['"]/g;
   for (const match of code.matchAll(importRegex)) {
     const specifier = match[1];
     if (specifier) {
@@ -365,7 +365,7 @@ function parseImportsRegex(code: string): string[] {
   // export { foo } from 'bar'
   // export * from 'bar'
   const exportFromRegex =
-    /export\s+(?:[\w*{},]+(?:\s+[\w*{},]+)*\s+)?from\s+['"]([^'"]+)['"]/g;
+    /\bexport\b\s+(?:(?:(?!\b(?:import|export)\b)[\w*{},])+(?:\s+(?:(?!\b(?:import|export)\b)[\w*{},])+)*\s+)?from\s+['"]([^'"]+)['"]/g;
   for (const match of code.matchAll(exportFromRegex)) {
     const specifier = match[1];
     if (specifier) {

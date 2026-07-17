@@ -7,16 +7,29 @@ import { transformAndResolve } from "../transformer";
 // fallback parser used `[\w*{}\s,]+` followed by `\s+`, where both
 // quantifiers can consume the same whitespace. On near-match inputs like
 // `import <many spaces> X` the engine backtracked polynomially —
-// ~175s for 10k spaces. The clause is now matched as non-whitespace tokens
-// separated by whitespace, which is linear. The timing bounds below are
-// deliberately generous (the fixed code runs in milliseconds); the old code
-// exceeds them by orders of magnitude.
+// ~175s for 10k spaces. Separating tokens from whitespace removes that
+// overlap; bounding each candidate at the next import/export keyword also
+// prevents stacked near-matches from repeatedly scanning the same suffix. The
+// timing bounds below are deliberately generous (the fixed code runs in
+// milliseconds); the old patterns exceed them by orders of magnitude.
 
 const WHITESPACE_BOMB = `import ${" ".repeat(50_000)}X`;
+const STACKED_NEAR_MATCH_BOMB = `${"import value ".repeat(15_000)}X`;
 
 describe("import rewriting is ReDoS-safe (#1537)", () => {
   it("transformAndResolve completes quickly on a whitespace-bomb module", async () => {
     const files = new InMemoryFileSystem({ "index.js": WHITESPACE_BOMB });
+    const start = performance.now();
+    const result = await transformAndResolve(files, "index.js", []);
+    const elapsed = performance.now() - start;
+    expect(result.mainModule).toBe("index.js");
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  it("does not rescan the suffix for stacked near-matches", async () => {
+    const files = new InMemoryFileSystem({
+      "index.js": STACKED_NEAR_MATCH_BOMB
+    });
     const start = performance.now();
     const result = await transformAndResolve(files, "index.js", []);
     const elapsed = performance.now() - start;
