@@ -1,0 +1,14 @@
+{
+  "name": "repro-1965-mcp-h2-stall",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-07-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/mcp"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "ReproMcp", "class_name": "ReproMcp" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ReproMcp"] }]
+}
