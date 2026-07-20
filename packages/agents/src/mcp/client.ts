@@ -909,7 +909,7 @@ export class MCPClientManager {
       client_id: null,
       auth_url: null,
       callback_url: "",
-      server_options: JSON.stringify({
+      server_options: encodeMcpServerOptions({
         bindingName,
         props,
         capabilities: this.advertisedHandlerCapabilities()

@@ -6,11 +6,11 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 
 | Approach                                       | Stateful? | Requires Durable Objects? | Best for                                          |
 | ---------------------------------------------- | --------- | ------------------------- | ------------------------------------------------- |
-| `createMcpHandler()`                           | No        | No                        | New servers and the latest MCP protocol           |
+| `createMcpHandler()`                           | No        | No                        | New servers and the draft MCP protocol            |
 | `McpAgent` (deprecated legacy path)            | Yes       | Yes                       | Existing stateful SDK v1 deployments              |
 | Raw `WebStandardStreamableHTTPServerTransport` | No        | No                        | Low-level control without the Agents HTTP wrapper |
 
-- **`createMcpHandler()`** is the current server-development path. It serves MCP `2026-07-28` and supports stateless 2025 clients by default.
+- **`createMcpHandler()`** is the current server-development path. It serves draft MCP `2026-07-28` and supports stateless published 2025 clients by default.
 - **`McpAgent`** is a retained, feature-frozen SDK v1 path for existing stateful deployments. New servers should use `createMcpHandler()`.
 - **Raw transport** gives you low-level control if the standard handler lifecycle is not suitable.
 
@@ -60,7 +60,7 @@ createMcpHandler(() => createServer(), {
   corsOptions: {
     origin: "https://app.example.com"
   },
-  allowedOriginHostnames: ["app.example.com"], // hostnames only
+  allowedHostnames: ["mcp.example.com"], // custom-domain Host policy
   authContext: { props: {} }, // optional application props override
   legacy: "stateless", // upstream default; use "reject" for modern-only
   responseMode: "auto" // upstream SDK response shaping
@@ -69,9 +69,9 @@ createMcpHandler(() => createServer(), {
 
 All upstream SDK v2 handler options pass through. Use `createLegacyMcpHandler` for WorkerTransport, storage, session, and event-store options.
 
-The handler validates every present `Origin` header before serving the request. It allows `localhost`, `127.0.0.1`, and `[::1]` by default; requests without `Origin` remain valid for non-browser MCP clients. Browser clients on any other hostname require an explicit `allowedOriginHostnames` entry. Values are hostnames without a scheme or port, and matching ignores the request Origin's scheme and port. `corsOptions.origin` controls the response's CORS header but is not a security allowlist, so configure both options for a cross-origin browser client.
+The handler validates every present `Origin` header before serving the request. It rejects malformed, opaque, and non-HTTP origins. Requests without `Origin` remain valid for non-browser MCP clients.
 
-Origin validation meets the Streamable HTTP requirement and protects browser traffic. The handler does not infer a trusted `Host` allowlist from `request.url`: Workers construct that URL from the incoming Host header. If your deployment accepts arbitrary Host values, validate them at the edge or wrap the handler with `hostHeaderValidationResponse` from `@modelcontextprotocol/server` and an explicit deployment-specific allowlist.
+Its default allowlist includes localhost-class origins and the endpoint's `workers.dev` hostname. A concrete `corsOptions.origin` adds that hostname automatically. The handler also applies matching Host checks to localhost and `workers.dev` endpoints. For a custom domain with wildcard CORS, configure `allowedHostnames` and `allowedOriginHostnames` explicitly. Values are hostnames without a scheme or port, and matching ignores the Origin's scheme and port.
 
 ### 2025 compatibility and elicitation
 
