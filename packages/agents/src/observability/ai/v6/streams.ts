@@ -434,7 +434,9 @@ function createStreamState(
         streamSummaryFromParts({
           aiGatewayLogId,
           finishReason,
-          outputMessages: storeMessages ? output.messages() : undefined,
+          outputMessages: storeMessages
+            ? output.messages(finishReason)
+            : undefined,
           response,
           timeToFirstChunkSeconds:
             firstChunkAtMs === undefined || startedAtMs === undefined

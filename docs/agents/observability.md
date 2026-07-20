@@ -316,9 +316,11 @@ They never remain open while waiting for a human across invocations. Stream
 spans close on completion, cancellation, an in-band error, or early consumer
 return. Async-generator tools stay open until iteration ends.
 
-Pass `storeMessages: true` to write full input/output message arrays (including
-tool-call parts) to `chat`; pass `storeTools: true` to write tool arguments and
-results to `execute_tool`:
+Pass `storeMessages: true` to write full input/output message arrays to `chat`.
+The JSON follows the OpenTelemetry GenAI schemas: messages use `{ role, parts }`,
+text and reasoning parts use `{ type, content }`, tool parts use `tool_call` /
+`tool_call_response`, and every output message includes `finish_reason`. Pass
+`storeTools: true` to write tool arguments and results to `execute_tool`:
 
 ```ts
 const traced = wrapAISDK(ai, {
@@ -444,7 +446,7 @@ await generateText({
 | `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
 | `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID also correlates approval lifecycle segments                           |
 | `cloudflare.agents.tool.approval.state`                                            | AI SDK v6 approval lifecycle segment: `requested`, `approved`, or `denied`                   |
-| `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in full model messages on `chat`, including tool-call parts                              |
+| `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in OTel-schema model messages on `chat`, including tool parts and output finish reasons  |
 | `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                            | Opt-in tool arguments/results on `execute_tool`                                              |
 | `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
 | `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
@@ -484,11 +486,14 @@ tail. `storeTools` writes only `gen_ai.tool.call.arguments` /
 `gen_ai.tool.call.result` on `execute_tool`. The flags themselves are never
 written to telemetry metadata or spans.
 
-The dedicated `system` parameter, schemas, request headers, provider options,
-and raw error messages are never recorded. The optional AI Gateway reference is
-a bounded opaque log ID; response headers and provider metadata themselves are
-not recorded. Metadata and context values must be scalar; objects and arrays
-are dropped.
+System instructions that the AI SDK presents to the model as a system-role chat
+message remain in `gen_ai.input.messages`, which OTel explicitly permits for
+instructions that are part of chat history. The adapter does not separately
+copy the raw `system` parameter into `gen_ai.system_instructions`. Schemas,
+request headers, provider options, and raw error messages are never recorded.
+The optional AI Gateway reference is a bounded opaque log ID; response headers
+and provider metadata themselves are not recorded. Metadata and context values
+must be scalar; objects and arrays are dropped.
 
 For v6, only `experimental_context` exists. Configure its allowlist on the
 wrapper:

@@ -1595,23 +1595,44 @@ describe("createAISDKV6Wrapper payload storage", () => {
     );
     expect(allAttributes).not.toContain("storeMessages");
     expect(allAttributes).not.toContain("storeTools");
-    expect(chat?.attributes["gen_ai.input.messages"]).toBe(
-      JSON.stringify(messages)
-    );
+    expect(
+      JSON.parse(chat?.attributes["gen_ai.input.messages"] as string)
+    ).toEqual([
+      {
+        parts: [{ type: "text", content: "head-0" }],
+        role: "system"
+      },
+      {
+        parts: [{ type: "text", content: "head-1" }],
+        role: "user"
+      },
+      {
+        parts: [
+          {
+            type: "tool_call",
+            id: "prior-call",
+            name: "save",
+            arguments: { prior: true }
+          }
+        ],
+        role: "assistant"
+      }
+    ]);
     expect(
       JSON.parse(chat?.attributes["gen_ai.output.messages"] as string)
     ).toEqual([
       {
         role: "assistant",
-        content: [
-          { type: "text", text: "done" },
+        parts: [
+          { type: "text", content: "done" },
           {
-            type: "tool-call",
-            input: { value: 42 },
-            toolCallId: "call-1",
-            toolName: "save"
+            type: "tool_call",
+            id: "call-1",
+            name: "save",
+            arguments: { value: 42 }
           }
-        ]
+        ],
+        finish_reason: "stop"
       }
     ]);
   });
@@ -1637,8 +1658,10 @@ describe("createAISDKV6Wrapper payload storage", () => {
     );
     const stored = JSON.parse(
       chat?.attributes["gen_ai.input.messages"] as string
-    ) as typeof messages;
-    expect(stored.map((message) => message.content)).toEqual([
+    ) as Array<{
+      parts: Array<{ content?: string }>;
+    }>;
+    expect(stored.map((message) => message.parts[0]?.content)).toEqual([
       "head-0",
       "head-1",
       messages[3]?.content,

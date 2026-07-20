@@ -174,6 +174,7 @@ describe("createAISDKV7Telemetry", () => {
     telemetry.onLanguageModelCallStart?.({ callId: "call-1", messages });
     telemetry.onLanguageModelCallEnd?.({
       callId: "call-1",
+      finishReason: "stop",
       content: [
         { type: "text", text: "done" },
         {
@@ -197,9 +198,27 @@ describe("createAISDKV7Telemetry", () => {
     );
     expect(allAttributes).not.toContain("storeMessages");
     expect(allAttributes).not.toContain("storeTools");
-    expect(tracing.spans[1]?.attributes["gen_ai.input.messages"]).toBe(
-      JSON.stringify(messages)
-    );
+    expect(
+      JSON.parse(
+        tracing.spans[1]?.attributes["gen_ai.input.messages"] as string
+      )
+    ).toEqual([
+      {
+        parts: [{ type: "text", content: "hello" }],
+        role: "user"
+      },
+      {
+        parts: [
+          {
+            type: "tool_call",
+            id: "prior-call",
+            name: "save",
+            arguments: { prior: true }
+          }
+        ],
+        role: "assistant"
+      }
+    ]);
     expect(
       JSON.parse(
         tracing.spans[1]?.attributes["gen_ai.output.messages"] as string
@@ -207,15 +226,16 @@ describe("createAISDKV7Telemetry", () => {
     ).toEqual([
       {
         role: "assistant",
-        content: [
-          { type: "text", text: "done" },
+        parts: [
+          { type: "text", content: "done" },
           {
-            type: "tool-call",
-            input: { value: 42 },
-            toolCallId: "call-1",
-            toolName: "save"
+            type: "tool_call",
+            id: "call-1",
+            name: "save",
+            arguments: { value: 42 }
           }
-        ]
+        ],
+        finish_reason: "stop"
       }
     ]);
   });

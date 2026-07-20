@@ -56,7 +56,8 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
     const result = wrapped.streamText({
       model: textStreamModel(),
-      prompt: "Say hello"
+      prompt: "Say hello",
+      system: "Answer concisely"
     });
 
     let text = "";
@@ -91,10 +92,21 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     expect(chatSpan?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "doStream",
       "cloudflare.agents.usage.total_tokens": 12,
+      "gen_ai.input.messages": JSON.stringify([
+        {
+          role: "system",
+          parts: [{ type: "text", content: "Answer concisely" }]
+        },
+        {
+          role: "user",
+          parts: [{ type: "text", content: "Say hello" }]
+        }
+      ]),
       "gen_ai.output.messages": JSON.stringify([
         {
           role: "assistant",
-          content: [{ type: "text", text: "Hello world" }]
+          parts: [{ type: "text", content: "Hello world" }],
+          finish_reason: "stop"
         }
       ]),
       // Populated from the provider-level response-metadata stream part.
@@ -243,7 +255,10 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("traces tool execution with the SDK-provided tool call id", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKV6Wrapper(ai, {
+      options: { storeMessages: true },
+      tracer: tracing
+    });
     const executions: Array<readonly [number, number]> = [];
     const parts: ProviderStreamPart[] = [
       { type: "stream-start", warnings: [] },
@@ -309,6 +324,26 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
       "gen_ai.tool.type": "function"
     });
     expect(toolSpan?.ended).toBe(true);
+
+    const chatSpan = tracing.spans.find(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(
+      JSON.parse(chatSpan?.attributes["gen_ai.output.messages"] as string)
+    ).toEqual([
+      {
+        role: "assistant",
+        parts: [
+          {
+            type: "tool_call",
+            id: "call-1",
+            name: "multiply",
+            arguments: { a: 6, b: 7 }
+          }
+        ],
+        finish_reason: "tool_call"
+      }
+    ]);
     expect(tracing.rootSpans[0]?.ended).toBe(true);
   });
 
