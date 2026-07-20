@@ -69,6 +69,7 @@ type MCPAISchemaCacheSlot = MCPAISchemaSource &
   );
 
 type MCPAISchemaCacheEntry = {
+  catalog: Tool[];
   converted: Array<MCPAISchemaCacheSlot | undefined>;
 };
 
@@ -368,10 +369,10 @@ export type MCPServerFilter = {
  */
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
-  /** Weak catalog keys avoid retaining schemas from superseded tool lists. */
+  /** Cache only the current catalog so old schema graphs are not retained. */
   private readonly _aiToolSchemas = new WeakMap<
     MCPClientConnection,
-    WeakMap<Tool[], MCPAISchemaCacheEntry>
+    MCPAISchemaCacheEntry
   >();
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
@@ -1837,15 +1838,10 @@ export class MCPClientManager {
       }
 
       const catalog = conn.tools;
-      let catalogCaches = this._aiToolSchemas.get(conn);
-      if (!catalogCaches) {
-        catalogCaches = new WeakMap();
-        this._aiToolSchemas.set(conn, catalogCaches);
-      }
-      let cache = catalogCaches.get(catalog);
-      if (!cache) {
-        cache = { converted: [] };
-        catalogCaches.set(catalog, cache);
+      let cache = this._aiToolSchemas.get(conn);
+      if (!cache || cache.catalog !== catalog) {
+        cache = { catalog, converted: [] };
+        this._aiToolSchemas.set(conn, cache);
       }
 
       for (const [index, tool] of catalog.entries()) {

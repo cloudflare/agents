@@ -368,11 +368,9 @@ async function chat(prompt: string) {
 
 ### AI tool schema conversion lifetime
 
-`getAITools()` caches converted schemas by the live connection object and the exact `connection.tools` catalog array. Catalog arrays are weakly keyed, so the cache does not keep a superseded catalog alive. Repeated filtered or unfiltered calls reuse schemas, while each call still returns a fresh tool record and execute closure. Filters do not create cache variants, and connections excluded by a filter are not converted.
+`getAITools()` reuses converted schemas while a live connection keeps the same current catalog. Repeated filtered or unfiltered calls still return fresh tool records and execute closures. Connections excluded by a filter are not converted.
 
-Discovery and `tools/list_changed` updates replace the catalog array, so the next `getAITools()` call recompiles that connection's schemas. Replacing the live connection also recompiles them. Renaming a server id reuses the server-independent schemas but rebuilds tool keys and execute closures with the current id. Execution continues to route through the manager's current connection mapping. A failed conversion is also cached for its unchanged source, avoiding repeated conversion attempts and warnings until the source changes.
-
-For custom integrations that edit an existing catalog array, replacing, reordering, or splicing tool objects and replacing a tool's `inputSchema` or `outputSchema` object recompiles the affected slots. Mutating a nested property of the same schema object does not invalidate the cache; assign a new schema object (or a new `connection.tools` array) after such a change. MCP discovery already replaces catalogs as part of its normal lifecycle.
+The next call converts schemas again after discovery replaces a catalog or the live connection changes. If a custom integration mutates a schema, assign a new `inputSchema` or `outputSchema` object, or replace the catalog array, so `getAITools()` detects the change.
 
 ## Managing Servers
 

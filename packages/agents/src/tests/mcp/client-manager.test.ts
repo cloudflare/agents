@@ -2999,8 +2999,9 @@ describe("MCPClientManager OAuth Integration", () => {
         expect(conversionSpy).toHaveBeenCalledTimes(4);
       });
 
-      it("recompiles when the catalog array is replaced", () => {
-        const connection = makeConnection([makeTool("old_tool")]);
+      it("drops superseded catalog revisions", () => {
+        const firstCatalog = [makeTool("old_tool")];
+        const connection = makeConnection(firstCatalog);
         manager.mcpConnections.server = connection;
         const conversionSpy = vi.spyOn(z, "fromJSONSchema");
 
@@ -3012,7 +3013,11 @@ describe("MCPClientManager OAuth Integration", () => {
         expect(conversionSpy).toHaveBeenCalledTimes(4);
         expect(second.tool_server_new_tool).toBeDefined();
         expect(second.tool_server_old_tool).toBeUndefined();
-        expect(second.tool_server_new_tool.inputSchema).not.toBe(
+
+        connection.tools = firstCatalog;
+        const revisited = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(6);
+        expect(revisited.tool_server_old_tool.inputSchema).not.toBe(
           first.tool_server_old_tool.inputSchema
         );
       });
