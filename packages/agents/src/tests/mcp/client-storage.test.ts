@@ -64,7 +64,7 @@ describe("MCP client storage codec", () => {
     });
   });
 
-  it("adds and clears modern session state atomically", () => {
+  it("round-trips modern session state with its discovery advertisement", () => {
     const connected = withMcpSession(
       { transport: { type: "streamable-http" } },
       {
@@ -73,7 +73,9 @@ describe("MCP client storage codec", () => {
         discoverResult: modernDiscovery
       }
     );
-    expect(connected).toMatchObject({
+    const restored = decodeMcpServerOptions(encodeMcpServerOptions(connected));
+
+    expect(restored).toMatchObject({
       transport: {
         type: "streamable-http",
         sessionId: "session",
@@ -81,8 +83,27 @@ describe("MCP client storage codec", () => {
       },
       discoverResult: modernDiscovery
     });
-    expect(withMcpSession(connected)).toEqual({
-      transport: { type: "streamable-http" }
+    expect(withMcpSession(restored)).toEqual({
+      client: undefined,
+      transport: { type: "streamable-http" },
+      retry: undefined,
+      capabilities: undefined
+    });
+  });
+
+  it("preserves RPC restore metadata when rewriting durable options", () => {
+    const decoded = decodeMcpServerOptions(
+      JSON.stringify({
+        bindingName: "MCP_OBJECT",
+        props: { userId: "user-1" },
+        capabilities: { elicitation: { form: {} } }
+      })
+    );
+    decoded.capabilities = undefined;
+
+    expect(JSON.parse(encodeMcpServerOptions(decoded))).toEqual({
+      bindingName: "MCP_OBJECT",
+      props: { userId: "user-1" }
     });
   });
 });

@@ -112,6 +112,31 @@ describe("createMcpHandler SDK v2", () => {
     expect(await response.text()).toContain('"protocolVersion":"2025-11-25"');
   });
 
+  it("rejects session methods without constructing a stateless legacy server", async () => {
+    let factoryCalls = 0;
+    const handler = createMcpHandler(() => {
+      factoryCalls++;
+      return createServer();
+    });
+
+    for (const method of ["GET", "DELETE"]) {
+      const response = await handler.fetch(
+        new Request("http://example.com/mcp", {
+          method,
+          headers: { Accept: "text/event-stream" }
+        })
+      );
+
+      expect(response.status).toBe(405);
+      expect(await response.json()).toMatchObject({
+        error: { code: -32000, message: "Method not allowed." },
+        id: null,
+        jsonrpc: "2.0"
+      });
+    }
+    expect(factoryCalls).toBe(0);
+  });
+
   it("fails fast when stateless legacy code attempts a reverse request", async () => {
     const handler = createMcpHandler(() => {
       const server = createServer();
@@ -206,6 +231,7 @@ describe("createMcpHandler SDK v2", () => {
       new Request("http://localhost/mcp", {
         method: "OPTIONS",
         headers: {
+          Host: "localhost",
           Origin: "http://localhost:3000",
           "Access-Control-Request-Method": "POST",
           "Access-Control-Request-Headers": "mcp-method, mcp-name"
@@ -223,14 +249,64 @@ describe("createMcpHandler SDK v2", () => {
     );
   });
 
-  it("rejects a non-local Origin before serving a request", async () => {
-    let factoryCalled = false;
-    const handler = createMcpHandler(() => {
-      factoryCalled = true;
-      return createServer();
+  it("accepts the endpoint workers.dev Origin by default", async () => {
+    const handler = createMcpHandler(() => createServer());
+    const request = modernRequest("server/discover");
+    const workersDevRequest = new Request(
+      request.url.replace("example.com", "server.account.workers.dev"),
+      request
+    );
+    workersDevRequest.headers.set("Host", "server.account.workers.dev");
+    workersDevRequest.headers.set(
+      "Origin",
+      "https://server.account.workers.dev"
+    );
+
+    const response = await handler.fetch(workersDevRequest);
+
+    expect(response.status).toBe(200);
+  });
+
+  it("derives a custom-domain Origin allowlist from concrete CORS config", async () => {
+    const handler = createMcpHandler(() => createServer(), {
+      corsOptions: { origin: "https://app.example.com" }
     });
     const request = modernRequest("server/discover");
-    request.headers.set("Host", "evil.example.com");
+    request.headers.set("Origin", "https://app.example.com:8443");
+
+    const response = await handler.fetch(request);
+
+    expect(response.status).toBe(200);
+  });
+
+  it("keeps the SDK localhost Host and Origin guards for local endpoints", async () => {
+    const handler = createMcpHandler(() => createServer());
+    const request = modernRequest("server/discover");
+    const localRequest = new Request(
+      request.url.replace("example.com", "localhost"),
+      request
+    );
+    localRequest.headers.set("Origin", "https://evil.example.com");
+
+    const originResponse = await handler.fetch(localRequest);
+    expect(originResponse.status).toBe(403);
+
+    localRequest.headers.set("Origin", "http://localhost:3000");
+    localRequest.headers.set("Host", "evil.example.com");
+    const hostResponse = await handler.fetch(localRequest);
+    expect(hostResponse.status).toBe(403);
+  });
+
+  it("rejects an Origin outside an explicit deployment allowlist", async () => {
+    let factoryCalled = false;
+    const handler = createMcpHandler(
+      () => {
+        factoryCalled = true;
+        return createServer();
+      },
+      { allowedOriginHostnames: ["client.example"] }
+    );
+    const request = modernRequest("server/discover");
     request.headers.set("Origin", "http://evil.example.com");
 
     const response = await handler.fetch(request);

@@ -36,7 +36,9 @@ describe("legacy MCP handler warning", () => {
     expect(warn).toHaveBeenCalledTimes(2);
     expect(warn.mock.calls.map(([message]) => String(message))).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("experimental_createMcpHandler is deprecated"),
+        expect.stringMatching(
+          /experimental_createMcpHandler is deprecated.*createLegacyMcpHandler/
+        ),
         expect.stringContaining(
           "Passing an MCP SDK v1 server to createMcpHandler is deprecated"
         )

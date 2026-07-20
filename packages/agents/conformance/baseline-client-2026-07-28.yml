@@ -14,11 +14,11 @@ client:
   # the client stops retrying.
   - auth/scope-retry-limit
 
-  # Alpha.9 requires absent resultType to default to complete. Beta.4 instead
-  # rejects the final modern tool result after all five MRTR wire assertions
-  # pass.
-  # Impact if unchanged: otherwise-conformant 2026 servers relying on the
-  # default-to-complete rule fail calls that omit resultType.
+  # Alpha.9 omits resultType after negotiating 2026-07-28. The final draft
+  # requires servers implementing that revision to include it; the
+  # absent-means-complete bridge applies only to earlier revisions. All five
+  # MRTR wire assertions pass before the fixture's invalid final result.
+  # Impact if unchanged: none for conforming 2026-07-28 servers.
   - sep-2322-client-request-state
 
   # Alpha.9 advertises resources but returns an invalid empty result for

@@ -60,7 +60,8 @@ export function createMcpHandler(
 let didWarnAboutExperimentalCreateMcpHandler = false;
 
 /**
- * @deprecated This has been renamed to createMcpHandler, and experimental_createMcpHandler will be removed in the next major version
+ * @deprecated Use createLegacyMcpHandler for an SDK v1 server.
+ * experimental_createMcpHandler will be removed in the next major version.
  */
 export function experimental_createMcpHandler(
   server: LegacyMcpServer | LegacyServer,
@@ -69,7 +70,9 @@ export function experimental_createMcpHandler(
   if (!didWarnAboutExperimentalCreateMcpHandler) {
     didWarnAboutExperimentalCreateMcpHandler = true;
     console.warn(
-      "experimental_createMcpHandler is deprecated, use createMcpHandler instead. experimental_createMcpHandler will be removed in the next major version."
+      "experimental_createMcpHandler is deprecated and will be removed in " +
+        "the next major version. Use createLegacyMcpHandler for an MCP SDK " +
+        "v1 server."
     );
   }
   return createLegacyMcpHandler(server, options);

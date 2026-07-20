@@ -1,6 +1,8 @@
 import {
   createMcpHandler as createSdkMcpHandler,
+  hostHeaderValidationResponse,
   isLegacyRequest,
+  localhostAllowedHostnames,
   localhostAllowedOrigins,
   originValidationResponse,
   type AuthInfo,
@@ -24,9 +26,16 @@ export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOpt
   /** CORS headers applied by the Worker wrapper. Pass `false` to disable. */
   corsOptions?: CORSOptions | false;
   /**
-   * Hostnames accepted from a present `Origin` header. Requests without an
-   * Origin (including non-browser MCP clients) remain valid.
-   * @default ["localhost", "127.0.0.1", "[::1]"]
+   * Restrict `Host` headers to these hostnames. Localhost and `workers.dev`
+   * endpoints receive matching defaults; custom domains rely on Cloudflare
+   * routing unless this option is set.
+   */
+  allowedHostnames?: string[];
+  /**
+   * Restrict present browser `Origin` headers to these hostnames. Requests
+   * without an Origin (including non-browser MCP clients) remain valid. The
+   * default includes localhost-class Origins, the endpoint's `workers.dev`
+   * hostname, and a concrete `corsOptions.origin` hostname.
    */
   allowedOriginHostnames?: string[];
   /** Application props exposed through {@link getMcpAuthContext}. */
@@ -152,7 +161,8 @@ export function createStatelessMcpHandler(
   const {
     route = "/mcp",
     corsOptions = {},
-    allowedOriginHostnames = localhostAllowedOrigins(),
+    allowedHostnames,
+    allowedOriginHostnames,
     authContext,
     legacy = "stateless",
     ...sdkOptions
@@ -175,13 +185,56 @@ export function createStatelessMcpHandler(
   ): Promise<Response> => {
     if (closed) throw new Error("This MCP handler has been closed");
 
-    if (new URL(request.url).pathname !== route) {
+    const requestUrl = new URL(request.url);
+    if (requestUrl.pathname !== route) {
       return withCors(new Response("Not Found", { status: 404 }), corsOptions);
     }
 
+    // The SDK app factories can distinguish their bind address from an
+    // attacker-controlled Host header. A bare Worker cannot. Use defaults we
+    // can establish independently: localhost-class names, a standard
+    // workers.dev route, and any concrete CORS Origin the application chose.
+    // Custom-domain deployments can provide explicit Host and Origin lists.
+    const localEndpoint = localhostAllowedHostnames().includes(
+      requestUrl.hostname
+    );
+    const workersDevEndpoint = requestUrl.hostname.endsWith(".workers.dev");
+    const acceptedHostnames =
+      allowedHostnames ??
+      (localEndpoint
+        ? localhostAllowedHostnames()
+        : workersDevEndpoint
+          ? [requestUrl.hostname]
+          : undefined);
+    const hostRejection = acceptedHostnames
+      ? hostHeaderValidationResponse(request, acceptedHostnames)
+      : undefined;
+    if (hostRejection) {
+      return withCors(hostRejection, corsOptions);
+    }
+    let acceptedOriginHostnames = allowedOriginHostnames;
+    if (acceptedOriginHostnames === undefined) {
+      const defaults = new Set(localhostAllowedOrigins());
+      if (workersDevEndpoint) defaults.add(requestUrl.hostname);
+      if (corsOptions !== false && corsOptions.origin !== undefined) {
+        try {
+          const configuredOrigin = new URL(corsOptions.origin);
+          if (
+            (configuredOrigin.protocol === "http:" ||
+              configuredOrigin.protocol === "https:") &&
+            configuredOrigin.hostname
+          ) {
+            defaults.add(configuredOrigin.hostname);
+          }
+        } catch {
+          // A wildcard or malformed CORS value does not expand the allowlist.
+        }
+      }
+      acceptedOriginHostnames = [...defaults];
+    }
     const originRejection = originValidationResponse(
       request,
-      allowedOriginHostnames
+      acceptedOriginHostnames ?? []
     );
     if (originRejection) {
       return withCors(originRejection, corsOptions);

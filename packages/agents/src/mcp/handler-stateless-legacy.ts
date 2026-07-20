@@ -39,6 +39,20 @@ export function createStatelessLegacyRequestHandler(
     authContext: McpAuthContext | undefined,
     workerCtx: ExecutionContext
   ): Promise<Response> => {
+    // Match the upstream stateless fallback: 2025 GET and DELETE are session
+    // operations and cannot be served by a fresh per-request transport. Reject
+    // them before running a factory with application-visible side effects.
+    if (request.method.toUpperCase() !== "POST") {
+      return Response.json(
+        {
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed." },
+          id: null
+        },
+        { status: 405 }
+      );
+    }
+
     let product: McpServer | Server | undefined;
     let transport: WorkerTransport | undefined;
     let markResourcesReady!: () => void;

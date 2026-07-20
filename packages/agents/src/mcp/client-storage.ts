@@ -50,6 +50,10 @@ export type PersistedMcpServerOptions = {
   transport?: PersistedMcpTransportOptions;
   discoverResult?: DiscoverResult;
   retry?: RetryOptions;
+  /** Durable Object binding used to restore an RPC MCP connection. */
+  bindingName?: string;
+  /** Application props passed back to a restored RPC MCP connection. */
+  props?: Record<string, unknown>;
   /** One-wake capability seed; handler functions remain memory-only. */
   capabilities?: ClientCapabilities;
 };
@@ -64,7 +68,10 @@ type PersistableTransportOptions = PersistedMcpTransportOptions & {
 type PersistableRegistration = {
   client?: McpClientOptions;
   transport?: PersistableTransportOptions;
+  discoverResult?: DiscoverResult;
   retry?: RetryOptions;
+  bindingName?: string;
+  props?: Record<string, unknown>;
   capabilities?: ClientCapabilities;
 };
 
@@ -108,7 +115,10 @@ export function encodeMcpServerOptions(
   return JSON.stringify({
     client: persistClientOptions(options.client),
     transport: persistTransportOptions(options.transport),
+    discoverResult: options.discoverResult,
     retry: options.retry,
+    bindingName: options.bindingName,
+    props: options.props,
     capabilities: options.capabilities
   } satisfies PersistedMcpServerOptions);
 }
@@ -134,6 +144,10 @@ export function decodeMcpServerOptions(
     transport,
     discoverResult: parsed.discoverResult,
     retry: parsed.retry,
+    ...(parsed.bindingName !== undefined && {
+      bindingName: parsed.bindingName
+    }),
+    ...(parsed.props !== undefined && { props: parsed.props }),
     capabilities: parsed.capabilities
   };
 }
