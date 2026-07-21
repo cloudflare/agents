@@ -60,6 +60,10 @@
         "name": "ThinkSessionTestAgent"
       },
       {
+        "class_name": "ThinkSystemPromptSkillsWarningAgent",
+        "name": "ThinkSystemPromptSkillsWarningAgent"
+      },
+      {
         "class_name": "ThinkAsyncConfigSessionAgent",
         "name": "ThinkAsyncConfigSessionAgent"
       },
@@ -181,6 +185,7 @@
         "ThinkFiberTestAgent",
         "ThinkClientToolsAgent",
         "ThinkSessionTestAgent",
+        "ThinkSystemPromptSkillsWarningAgent",
         "ThinkAsyncConfigSessionAgent",
         "ThinkConfigTestAgent",
         "ThinkLegacyConfigMigrationAgent",

@@ -7,6 +7,7 @@ import type {
   ThinkTestAgent,
   ThinkPropsTestAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -1053,6 +1054,27 @@ describe("Think — context blocks", () => {
 
     expect(systemPrompt).toContain("MEMORY");
     expect(systemPrompt).toContain("[writable]");
+  });
+
+  it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const agent = await getServerByName(
+      env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
+      "skills-system-prompt-warning"
+    );
+
+    try {
+      await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
+        done: true
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured"
+        )
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
