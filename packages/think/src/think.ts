@@ -2485,8 +2485,8 @@ export class Think<
    * Whether Think automatically converts connected MCP tools to AI SDK tools
    * and merges them into each model turn.
    *
-   * Set this to `false` when MCP tools are available through a transport-only
-   * path such as a Code Mode `McpConnector`. Connections, discovery,
+   * Set this to `false` when MCP tools are exposed through Code Mode or another
+   * mechanism outside Think's automatic tool set. Connections, discovery,
    * `waitForMcpConnections`, raw tool listing and calls, and explicit
    * `this.mcp.getAITools()` calls are unaffected.
    *

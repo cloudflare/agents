@@ -197,7 +197,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-If the model reaches MCP through a transport-only path, such as a Code Mode `McpConnector`, disable the direct AI SDK exposure:
+If you expose MCP tools through Code Mode or another mechanism outside Think's automatic tool set, disable direct AI SDK tool exposure:
 
 ```typescript
 export class MyAgent extends Think<Env> {

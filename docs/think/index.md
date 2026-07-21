@@ -863,9 +863,9 @@ path.
 | `chatStreamStallTimeoutMs` | `0` (off)                        | Opt-in inactivity watchdog: abort a turn whose model stream produces no chunk for this long (measures the gap between chunks, including tool execution — set above your slowest model TTFT + tool, e.g. `120_000`). Emits a `chat:stream:stalled` event; with `chatRecovery` on (the default) the stall routes into bounded recovery (see below) instead of an infinite spinner, and only terminalizes once the budget is exhausted. Override per-turn via `TurnConfig.chatStreamStallTimeoutMs` (returned from `beforeTurn`) for a turn with a known-slow tool. |
 | `contextOverflow`          | `undefined`                      | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery).                                                                                                                                                                                                                                                                                                                                    |
 
-### Transport-only MCP access
+### MCP tools exposed outside the harness
 
-Think normally calls `this.mcp.getAITools()` while assembling every turn. If MCP tools are exposed through a transport layer instead, such as a Code Mode `McpConnector`, set `includeMcpTools = false` to avoid direct JSON Schema-to-Zod materialization:
+Think normally calls `this.mcp.getAITools()` while assembling every turn. If you expose MCP tools through Code Mode or another mechanism outside Think's automatic tool set, set `includeMcpTools = false` to avoid direct JSON Schema-to-Zod materialization:
 
 ```typescript
 export class MyAgent extends Think<Env> {
@@ -876,7 +876,7 @@ export class MyAgent extends Think<Env> {
 
 This setting affects only Think's automatic AI SDK tool merge. Connections still register, restore, discover, and wait normally; raw tool listing and calls, Code Mode access, and explicit `this.mcp.getAITools()` calls are unchanged. Returning `activeTools: []` from `beforeTurn` does not provide the same behavior because tool conversion occurs before that hook.
 
-See [Tools](./tools.md#mcp-tools) for MCP setup and transport-only usage.
+See [Tools](./tools.md#mcp-tools) for MCP setup and alternative exposure paths.
 
 ## Agent Skills
 

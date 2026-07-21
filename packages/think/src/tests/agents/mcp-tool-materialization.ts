@@ -142,7 +142,7 @@ export class ThinkMcpToolMaterializationAgent extends Think {
     this._connector = new BulkMcpConnector(this.ctx, this.env, connection);
   }
 
-  async runTransportOnlyMaterializationTurn(): Promise<MaterializationTurnResult> {
+  async runWithoutDirectMcpTools(): Promise<MaterializationTurnResult> {
     return this._runMaterializationTurn(false);
   }
 
@@ -167,7 +167,7 @@ export class ThinkMcpToolMaterializationAgent extends Think {
 
     const result = await this.runTurn({
       mode: "wait",
-      input: "Use transport-only MCP access"
+      input: "Use MCP through the connector"
     });
     if (!this._connector) throw new Error("MCP connector was not initialized");
     const rawConnectorResult = (await this._connector.executeTool(

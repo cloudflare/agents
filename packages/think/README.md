@@ -775,7 +775,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-For transport-only MCP access, such as a Code Mode `McpConnector`, disable direct exposure to the model:
+If you expose MCP tools through Code Mode or another mechanism outside Think's automatic tool set, disable direct exposure to the model:
 
 ```ts
 export class MyAgent extends Think<Env> {
@@ -784,7 +784,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-This suppresses only Think's automatic `this.mcp.getAITools()` merge. Connection registration, restoration, discovery, waiting, raw listing and calls, Code Mode access, and explicit `this.mcp.getAITools()` calls are unchanged. It also avoids converting a large MCP catalog to Zod when only the transport connector uses it. `activeTools: []` is not an equivalent optimization because Think assembles and converts tools before `beforeTurn` runs.
+This suppresses only Think's automatic `this.mcp.getAITools()` merge. Connection registration, restoration, discovery, waiting, raw listing and calls, Code Mode access, and explicit `this.mcp.getAITools()` calls are unchanged. It also avoids converting a large MCP catalog to Zod when another mechanism exposes the tools. `activeTools: []` is not an equivalent optimization because Think assembles and converts tools before `beforeTurn` runs.
 
 ### Choosing a turn API
 
@@ -876,7 +876,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
 - **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
-- **MCP integration** — MCP tools auto-merged by default, with a transport-only opt-out
+- **MCP integration** — MCP tools auto-merged by default, with an opt-out for alternative exposure paths
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
 - **Multi-tab broadcast** — all connected clients see the stream (resume-aware exclusions)
 - **Partial persistence** — on error, the partial assistant message is saved

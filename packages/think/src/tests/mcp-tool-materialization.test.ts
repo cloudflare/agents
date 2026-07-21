@@ -7,10 +7,10 @@ async function freshAgent(name: string) {
 }
 
 describe("Think MCP tool materialization", () => {
-  it("skips automatic AI tool conversion in transport-only mode while preserving raw connector calls", async () => {
-    const agent = await freshAgent(`transport-only-${crypto.randomUUID()}`);
+  it("skips automatic AI tool conversion while preserving MCP connector access", async () => {
+    const agent = await freshAgent(`without-direct-mcp-${crypto.randomUUID()}`);
 
-    const result = await agent.runTransportOnlyMaterializationTurn();
+    const result = await agent.runWithoutDirectMcpTools();
 
     expect(result).toEqual({
       status: "completed",
