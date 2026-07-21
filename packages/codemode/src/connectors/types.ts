@@ -79,6 +79,8 @@ export type SearchResult = {
   connector: string;
   method: string;
   description?: string;
+  /** Whether invoking this method pauses for approval. */
+  requiresApproval?: boolean;
   kind: "method" | "snippet";
   score: number;
 };
@@ -96,6 +98,8 @@ export type SearchOutput = {
 export type DescribeOutput = {
   path: string;
   description?: string;
+  /** Whether invoking this method pauses for approval. */
+  requiresApproval?: boolean;
   types: string;
   kind: "connector" | "method" | "snippet";
 };
