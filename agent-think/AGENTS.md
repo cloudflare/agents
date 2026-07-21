@@ -188,9 +188,14 @@ npm run seed:r2  # push skills/** to the R2 bucket (add -- --local for dev)
   the full agent path without gh-app or webhooks.
 - Deploys target the `agents` Cloudflare account
   (`CLOUDFLARE_ACCOUNT_ID=b8afc92c7a87f699592038b756153d22`).
-- Model: `gpt-5.5` with medium reasoning through the team AI Gateway token,
-  with a client-side fallback to `claude-opus-4-8` when the primary dispatch
-  fails. Production reads `CLOUDFLARE_AIG_TOKEN` from a Worker secret and
+- Model: `gpt-5.6-sol` with max reasoning through the OpenAI Responses API
+  and team AI Gateway token, with a client-side fallback to
+  `claude-opus-4-8` when the primary dispatch fails. Responses use
+  `store: false`, so agent-think does not persist provider reasoning state.
+- The observability-preview packages are pinned to PR #1860 commit
+  `be4f7abc`. Agent-think opts into full message/tool payload spans while this
+  preview is validated in production. The turn safety cap is 250 steps.
+  Production reads `CLOUDFLARE_AIG_TOKEN` from a Worker secret and
   attributes every request to the `agents-team-agent-think` project. Local
   agent turns read the same variable from `.env`.
 

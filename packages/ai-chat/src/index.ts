@@ -132,6 +132,50 @@ export type {
   SaveMessagesResult
 } from "agents/chat";
 
+type AgentSpanAttributes = Readonly<
+  Record<string, string | number | boolean | undefined>
+>;
+
+type UpdateAgentSpan = (attributes: AgentSpanAttributes) => void;
+
+type AgentSpanHost = {
+  _withAgentSpan<T>(
+    operation: string,
+    storagePhase: string,
+    attributes: AgentSpanAttributes,
+    run: (update: UpdateAgentSpan) => T | Promise<T>
+  ): T | Promise<T>;
+};
+
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => Promise<T>
+): Promise<T>;
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => T
+): T;
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => T | Promise<T>
+): T | Promise<T> {
+  return (host as AgentSpanHost)._withAgentSpan(
+    operation,
+    storagePhase,
+    attributes,
+    run
+  );
+}
+
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
@@ -754,37 +798,72 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
-    this.sql`create table if not exists cf_ai_chat_agent_messages (
-      id text primary key,
-      message text not null,
-      created_at datetime default current_timestamp
-    )`;
+    withAgentSpan(
+      this,
+      "chat_initialization",
+      "initialization",
+      { "cloudflare.agents.component": "ai_chat" },
+      (update) => {
+        withAgentSpan(
+          this,
+          "initialize_chat_storage",
+          "initialization",
+          { "cloudflare.agents.component": "ai_chat" },
+          () => {
+            this.sql`create table if not exists cf_ai_chat_agent_messages (
+              id text primary key,
+              message text not null,
+              created_at datetime default current_timestamp
+            )`;
 
-    // Key-value table for request context that must survive hibernation
-    // (e.g., custom body fields, client tools from the last chat request).
-    this.sql`create table if not exists cf_ai_chat_request_context (
-      key text primary key,
-      value text not null
-    )`;
+            // Key-value table for request context that must survive hibernation
+            // (e.g., custom body fields, client tools from the last chat request).
+            this.sql`create table if not exists cf_ai_chat_request_context (
+              key text primary key,
+              value text not null
+            )`;
 
-    this._ensureAgentToolTables();
+            this._ensureAgentToolTables();
+          }
+        );
 
-    // Restore request context from SQLite (survives hibernation)
-    this._restoreRequestContext();
+        // Restore request context from SQLite (survives hibernation)
+        withAgentSpan(
+          this,
+          "restore_chat_request_context",
+          "initialization",
+          { "cloudflare.agents.component": "ai_chat" },
+          () => this._restoreRequestContext()
+        );
 
-    // Initialize resumable stream manager (creates its own tables + restores state)
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
+        // Initialize resumable stream manager (creates its own tables + restores state)
+        withAgentSpan(
+          this,
+          "initialize_resumable_stream",
+          "initialization",
+          { "cloudflare.agents.component": "ai_chat" },
+          () => {
+            this._resumableStream = new ResumableStream(this.sql.bind(this));
+          }
+        );
 
-    // Load messages and automatically transform them to v5 format.
-    // Note: _loadMessagesFromDb() runs structural validation which requires
-    // `parts` to be an array. Legacy v4 messages (with `content` instead of
-    // `parts`) would fail this check — but that's fine because autoTransformMessages
-    // already migrated them on a previous load, and persistMessages wrote them back.
-    // Any message still without `parts` at this point is genuinely corrupt.
-    const rawMessages = this._loadMessagesFromDb();
+        const rawMessages = withAgentSpan(
+          this,
+          "load_chat_messages",
+          "initialization",
+          { "cloudflare.agents.component": "ai_chat" },
+          () => this._loadMessagesFromDb()
+        );
 
-    // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-    this.messages = autoTransformMessages(rawMessages);
+        // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
+        this.messages = autoTransformMessages(rawMessages);
+        update({
+          "cloudflare.agents.chat.messages.loaded": rawMessages.length,
+          "cloudflare.agents.chat.active_stream.restored":
+            this._resumableStream.hasActiveStream()
+        });
+      }
+    );
 
     this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
@@ -837,7 +916,10 @@ export class AIChatAgent<
 
     // Wrap onMessage
     const _onMessage = this.onMessage.bind(this);
-    this.onMessage = async (connection: Connection, message: WSMessage) => {
+    const handleMessage = async (
+      connection: Connection,
+      message: WSMessage
+    ) => {
       if (this._cf_connectionTargetsSubAgent(connection)) {
         return _onMessage(connection, message);
       }
@@ -909,7 +991,17 @@ export class AIChatAgent<
           // A genuinely-new turn supersedes any pending terminal record (#1645)
           // so a stale exhaustion can't replay on a later reconnect once the
           // user has moved on.
-          await this._clearChatTerminal();
+          await withAgentSpan(
+            this,
+            "clear_previous_chat_state",
+            "interaction",
+            {
+              "cloudflare.agents.component": "ai_chat",
+              "cloudflare.agents.turn.request_id": chatMessageId,
+              "cloudflare.agents.turn.trigger": requestTrigger
+            },
+            () => this._clearChatTerminal()
+          );
 
           // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client
           // that reconnects/re-mounts before the stream starts is parked and
@@ -938,21 +1030,35 @@ export class AIChatAgent<
               // queue so other tabs see the new message immediately and so
               // overlapping submits under latest/merge/debounce can inspect
               // the full message list when their turn starts.
-              this._broadcastChatMessage(
+              await withAgentSpan(
+                this,
+                "persist_incoming_messages",
+                "interaction",
                 {
-                  messages: transformedMessages,
-                  type: MessageType.CF_AGENT_CHAT_MESSAGES
+                  "cloudflare.agents.component": "ai_chat",
+                  "cloudflare.agents.turn.request_id": chatMessageId,
+                  "cloudflare.agents.turn.trigger": requestTrigger
                 },
-                [connection.id]
+                async () => {
+                  this._broadcastChatMessage(
+                    {
+                      messages: transformedMessages,
+                      type: MessageType.CF_AGENT_CHAT_MESSAGES
+                    },
+                    [connection.id]
+                  );
+
+                  await this.persistMessages(
+                    transformedMessages,
+                    [connection.id],
+                    { _deleteStaleRows: true }
+                  );
+
+                  if (concurrencyDecision.strategy === "merge") {
+                    await this._mergeQueuedUserMessages(epoch);
+                  }
+                }
               );
-
-              await this.persistMessages(transformedMessages, [connection.id], {
-                _deleteStaleRows: true
-              });
-
-              if (concurrencyDecision.strategy === "merge") {
-                await this._mergeQueuedUserMessages(epoch);
-              }
             } finally {
               releasePendingEnqueue();
             }
@@ -991,7 +1097,19 @@ export class AIChatAgent<
                 // Re-merge inside the lock: more overlapping submits may have
                 // persisted additional user messages while this turn was queued.
                 if (concurrencyDecision.strategy === "merge") {
-                  await this._mergeQueuedUserMessages(epoch);
+                  await withAgentSpan(
+                    this,
+                    "merge_queued_messages",
+                    "turn",
+                    {
+                      "cloudflare.agents.component": "ai_chat",
+                      "cloudflare.agents.turn.request_id": chatMessageId,
+                      "cloudflare.agents.turn.trigger": requestTrigger,
+                      "cloudflare.agents.turn.admission": "queue",
+                      "cloudflare.agents.turn.generation": epoch
+                    },
+                    () => this._mergeQueuedUserMessages(epoch)
+                  );
 
                   if (this._turnQueue.generation !== epoch) {
                     this._completeSkippedRequest(connection, chatMessageId);
@@ -1008,19 +1126,33 @@ export class AIChatAgent<
                   }
                 }
 
-                // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
-                // so that getAITools() returns the full set of tools in onChatMessage
-                if (this.waitForMcpConnections) {
-                  const timeout =
-                    typeof this.waitForMcpConnections === "object"
-                      ? this.waitForMcpConnections.timeout
-                      : undefined;
-                  await this.mcp.waitForConnections(
-                    timeout != null ? { timeout } : undefined
-                  );
-                }
+                await withAgentSpan(
+                  this,
+                  "prepare_chat_context",
+                  "turn",
+                  {
+                    "cloudflare.agents.component": "ai_chat",
+                    "cloudflare.agents.turn.request_id": chatMessageId,
+                    "cloudflare.agents.turn.trigger": requestTrigger,
+                    "cloudflare.agents.turn.admission": "queue",
+                    "cloudflare.agents.turn.generation": epoch
+                  },
+                  async () => {
+                    // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
+                    // so that getAITools() returns the full set of tools in onChatMessage
+                    if (this.waitForMcpConnections) {
+                      const timeout =
+                        typeof this.waitForMcpConnections === "object"
+                          ? this.waitForMcpConnections.timeout
+                          : undefined;
+                      await this.mcp.waitForConnections(
+                        timeout != null ? { timeout } : undefined
+                      );
+                    }
 
-                this._setRequestContext(requestClientTools, requestBody);
+                    this._setRequestContext(requestClientTools, requestBody);
+                  }
+                );
 
                 this._emit("message:request");
 
@@ -1040,7 +1172,20 @@ export class AIChatAgent<
                     async () => {
                       const chatTurnBody = async () => {
                         try {
-                          await this._repairInterruptedToolsBeforeTurn();
+                          await withAgentSpan(
+                            this,
+                            "repair_interrupted_tools",
+                            "turn",
+                            {
+                              "cloudflare.agents.component": "ai_chat",
+                              "cloudflare.agents.turn.request_id":
+                                chatMessageId,
+                              "cloudflare.agents.turn.trigger": requestTrigger,
+                              "cloudflare.agents.turn.admission": "queue",
+                              "cloudflare.agents.turn.generation": epoch
+                            },
+                            () => this._repairInterruptedToolsBeforeTurn()
+                          );
                           const response = await this.onChatMessage(
                             async (_finishResult) => {
                               // User-provided hook. Cleanup is now handled by _reply,
@@ -1056,13 +1201,26 @@ export class AIChatAgent<
                           );
 
                           if (response) {
-                            await this._reply(
-                              chatMessageId,
-                              response,
-                              [connection.id],
+                            await withAgentSpan(
+                              this,
+                              "persist_chat_result",
+                              "turn",
                               {
-                                chatMessageId
-                              }
+                                "cloudflare.agents.component": "ai_chat",
+                                "cloudflare.agents.turn.request_id":
+                                  chatMessageId,
+                                "cloudflare.agents.turn.trigger":
+                                  requestTrigger,
+                                "cloudflare.agents.turn.admission": "queue",
+                                "cloudflare.agents.turn.generation": epoch
+                              },
+                              () =>
+                                this._reply(
+                                  chatMessageId,
+                                  response,
+                                  [connection.id],
+                                  { chatMessageId }
+                                )
                             );
                           } else {
                             console.warn(
@@ -1162,7 +1320,10 @@ export class AIChatAgent<
         // avoiding the race condition where CF_AGENT_STREAM_RESUMING sent
         // in onConnect arrives before the client's handler is ready.
         if (event.type === "stream-resume-request") {
-          await this._resumeHandshake().handleResumeRequest(connection);
+          await this._resumeHandshake().handleResumeRequest(
+            connection,
+            event.probeId
+          );
           return;
         }
 
@@ -1248,6 +1409,23 @@ export class AIChatAgent<
 
       // Forward unhandled messages to consumer's onMessage
       return _onMessage(connection, message);
+    };
+    this.onMessage = (connection: Connection, message: WSMessage) => {
+      const event =
+        typeof message === "string" ? parseProtocolMessage(message) : null;
+      if (event?.type === "chat-request") {
+        return withAgentSpan(
+          this,
+          "chat_interaction",
+          "interaction",
+          {
+            "cloudflare.agents.component": "ai_chat",
+            "cloudflare.agents.turn.request_id": event.id
+          },
+          () => handleMessage(connection, message)
+        );
+      }
+      return handleMessage(connection, message);
     };
 
     const _onRequest = this.onRequest.bind(this);
@@ -2468,9 +2646,23 @@ export class AIChatAgent<
     const generation = options?.epoch;
     let result: TurnResult<T>;
     try {
-      result = await this._turnQueue.enqueue(requestId, fn, {
-        generation
-      });
+      result = await this._turnQueue.enqueue(
+        requestId,
+        () =>
+          withAgentSpan(
+            this,
+            "chat_turn",
+            "turn",
+            {
+              "cloudflare.agents.component": "ai_chat",
+              "cloudflare.agents.turn.request_id": requestId,
+              "cloudflare.agents.turn.admission": "queue",
+              "cloudflare.agents.turn.generation": generation
+            },
+            fn
+          ),
+        { generation }
+      );
     } finally {
       // Clean merge map when all turns for a generation complete
       const gen = generation ?? this._turnQueue.generation;

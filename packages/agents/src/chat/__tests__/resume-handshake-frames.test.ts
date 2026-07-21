@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { CHAT_MESSAGE_TYPES } from "../protocol";
+import { CHAT_MESSAGE_TYPES, STREAM_RESUME_NONE_REASONS } from "../protocol";
 import {
   HANDSHAKE_INVARIANTS,
   recoveringFrame,
@@ -24,10 +24,26 @@ describe("resume-handshake golden frames", () => {
     });
   });
 
-  it("STREAM_RESUME_NONE carries no id", () => {
-    const frame = streamResumeNoneFrame();
-    expect(frame).toEqual({ type: "cf_agent_stream_resume_none" });
-    expect("id" in frame).toBe(false);
+  it("STREAM_RESUME_NONE distinguishes authoritative idle from affinity denial", () => {
+    const idle = streamResumeNoneFrame();
+    expect(idle).toEqual({
+      type: "cf_agent_stream_resume_none",
+      reason: "idle"
+    });
+    expect("id" in idle).toBe(false);
+    expect(
+      streamResumeNoneFrame(STREAM_RESUME_NONE_REASONS.CONTINUATION_OWNED)
+    ).toEqual({
+      type: "cf_agent_stream_resume_none",
+      reason: "continuation-owned"
+    });
+    expect(
+      streamResumeNoneFrame(STREAM_RESUME_NONE_REASONS.IDLE, "probe-1")
+    ).toEqual({
+      type: "cf_agent_stream_resume_none",
+      reason: "idle",
+      probeId: "probe-1"
+    });
   });
 
   it("replay-done frame is a clean close: replay:true, no error", () => {

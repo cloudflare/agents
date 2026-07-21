@@ -94,7 +94,7 @@ All options are passed as a single object to `new Workspace(options)`.
 
 ### Lazy name resolution
 
-In Durable Objects, `this.name` is not available at class field initialization time. Pass a function to defer evaluation:
+In Durable Objects, `this.name` may not be resolvable at class field initialization time (for example, reading it throws when the object was addressed by raw id instead of by name). Pass a function to defer evaluation:
 
 ```typescript
 class MyAgent extends Agent<Env> {

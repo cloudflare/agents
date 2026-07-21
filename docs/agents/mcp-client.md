@@ -305,16 +305,19 @@ Once connected, access the server's capabilities:
 
 ### Getting Available Tools
 
-```typescript
-const state = this.getMcpServers();
+Use `listTools()` when you need to discover or inspect the raw MCP catalog without preparing tools for an AI SDK model call:
 
-// All tools from all connected servers
-for (const tool of state.tools) {
+```typescript
+const tools = this.mcp.listTools();
+
+for (const tool of tools) {
   console.log(`Tool: ${tool.name}`);
   console.log(`  From server: ${tool.serverId}`);
   console.log(`  Description: ${tool.description}`);
 }
 ```
+
+`getMcpServers().tools` exposes the same raw tool shape as part of the full client state sent to connected applications. Neither API converts JSON Schemas to Zod.
 
 ### Resources and Prompts
 
@@ -361,7 +364,13 @@ async function chat(prompt: string) {
 }
 ```
 
-> **Note:** `getMcpServers().tools` returns raw MCP `Tool` objects for inspection. Use `this.mcp.getAITools()` when passing tools to the AI SDK.
+> **Note:** Use `this.mcp.listTools()` or `getMcpServers().tools` for discovery and inspection. Call `this.mcp.getAITools()` only when preparing tools for the AI SDK because it converts each MCP input and output JSON Schema to Zod.
+
+### AI tool schema conversion lifetime
+
+`getAITools()` reuses converted schemas while a live connection keeps the same current catalog. Repeated filtered or unfiltered calls still return fresh tool records and execute closures. Connections excluded by a filter are not converted.
+
+The next call converts schemas again after discovery replaces a catalog or the live connection changes. If a custom integration mutates a schema, assign a new `inputSchema` or `outputSchema` object, or replace the catalog array, so `getAITools()` detects the change.
 
 ## Managing Servers
 

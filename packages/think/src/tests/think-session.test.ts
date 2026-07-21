@@ -400,16 +400,29 @@ describe("Think — core", () => {
     expect(turnLog[0].toolNames).not.toContain("ignoredRuntimeTool");
   });
 
-  it("should forward turn telemetry to the AI SDK", async () => {
-    const agent = await freshAgent("chat-telemetry");
+  it("should supply default Think identity to the AI SDK", async () => {
+    const agent = await freshAgent("chat-telemetry-defaults");
+
+    await agent.setDefaultTurnTelemetryCapture();
+    const result = await agent.testChat("Trace this turn");
+
+    expect(result.done).toBe(true);
+    await expect(agent.getTelemetryEvents()).resolves.toEqual([
+      "start:ThinkTestAgent:::chat-telemetry-defaults:true",
+      "finish:ThinkTestAgent:::chat-telemetry-defaults:true"
+    ]);
+  });
+
+  it("should let beforeTurn override default Think identity", async () => {
+    const agent = await freshAgent("chat-telemetry-overrides");
 
     await agent.setTurnConfigTelemetry();
     const result = await agent.testChat("Trace this turn");
 
     expect(result.done).toBe(true);
     await expect(agent.getTelemetryEvents()).resolves.toEqual([
-      "start:think-test-turn:think-test",
-      "finish:think-test-turn:think-test"
+      "start:caller-function:think-test:CallerAgent:caller-agent-id:false",
+      "finish:caller-function:think-test:CallerAgent:caller-agent-id:false"
     ]);
   });
 

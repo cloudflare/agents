@@ -259,3 +259,285 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | --------------- | ------------------------ | --------------------- |
 | `email:receive` | `{ from, to, subject? }` | An email is received  |
 | `email:reply`   | `{ from, to, subject? }` | A reply email is sent |
+
+## Agent initialization span
+
+When Worker traces are enabled, every `Agent` constructor runs its setup —
+method wrapping, schema creation, and MCP client manager initialization —
+inside an `agent_initialization` span. Constructor-time child spans group under
+this one stable parent instead of appearing as top-level clutter. The span
+carries `cloudflare.agents.agent.name` (the agent class),
+`cloudflare.agents.agent.id` (the named instance, omitted when the name is not
+yet readable during construction), and `cloudflare.agents.operation.name`
+(`agent_initialization`). Like the rest of the tracing in this package, it is a
+no-op when the runtime has no native tracing capability.
+
+## AI SDK tracing
+
+`agents/observability/ai` instruments the Vercel AI SDK with Workers' native
+custom spans. It projects the scalar subset supported by the Workers `Span` API
+onto the current
+[OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai).
+Spans flow to Workers Observability and configured OTLP destinations. The
+integration is a no-op when the runtime has no native tracing capability.
+
+**Think agents are traced out of the box.** Enable
+`observability.traces.enabled` in `wrangler.jsonc`; no Think option is required.
+A turn gets an `invoke_agent {agent class}` operation span, `chat {model}` model
+spans, and `execute_tool {tool}` spans. Think always supplies its durable
+identity: `gen_ai.agent.name` is the class name, `gen_ai.agent.id` is the named
+instance, and `gen_ai.conversation.id` is the opaque Durable Object ID. These
+are defaults; `beforeTurn` can override `functionId` or the corresponding
+metadata fields for applications with a different identity model. Payload
+storage is off by default. Set `storeMessages` and/or `storeTools` on the Think
+agent to opt in; these are wrapper settings, not span attributes.
+
+### AI SDK v6
+
+Wrap the SDK namespace:
+
+```ts
+import * as ai from "ai";
+import { wrapAISDK } from "agents/observability/ai";
+
+const { generateText, streamText } = wrapAISDK(ai);
+```
+
+`wrapAISDK` instruments `generateText`, `streamText`, `generateObject`, and
+`streamObject`. Span names use `{operation} {target}` and fall back to the bare
+operation past 64 UTF-8 bytes; the full target remains on its semantic
+attribute. A model object is wrapped with the SDK's `wrapLanguageModel` helper,
+so provider work is a `chat {model}` child of the operation span. Tool
+execution is wrapped as `execute_tool {tool}`. AI SDK v6 approval lifecycle
+segments appear as bounded `tool_approval {tool}` children of an
+`execute_tool {tool}` span, correlated by `gen_ai.tool.call.id` and carrying
+`cloudflare.agents.tool.approval.state` (`requested`, `approved`, or `denied`).
+They never remain open while waiting for a human across invocations. Stream
+spans close on completion, cancellation, an in-band error, or early consumer
+return. Async-generator tools stay open until iteration ends.
+
+Pass `storeMessages: true` to write full input/output message arrays to `chat`.
+The JSON follows the OpenTelemetry GenAI schemas: messages use `{ role, parts }`,
+text and reasoning parts use `{ type, content }`, tool parts use `tool_call` /
+`tool_call_response`, and every output message includes `finish_reason`. Pass
+`storeTools: true` to write tool arguments and results to `execute_tool`:
+
+```ts
+const traced = wrapAISDK(ai, {
+  storeMessages: true,
+  storeTools: true
+});
+```
+
+### AI SDK v7
+
+AI SDK v7 ships a first-class telemetry lifecycle. Register the adapter once and
+every `generateText`, `streamText`, `generateObject`, and `streamObject` call is
+instrumented:
+
+```ts
+import { registerTelemetry } from "ai";
+import { createAISDKTelemetry } from "agents/observability/ai";
+
+registerTelemetry(
+  createAISDKTelemetry({ storeMessages: true, storeTools: true })
+);
+```
+
+Or scope it to a single call through `experimental_telemetry`:
+
+```ts
+import { createAISDKTelemetry } from "agents/observability/ai";
+
+await generateText({
+  model,
+  prompt: "...",
+  experimental_telemetry: {
+    integrations: [createAISDKTelemetry()]
+  }
+});
+```
+
+The v7 adapter uses `cloudflare.agents.call.id` to correlate operation, model,
+and tool spans. Its execution hooks keep provider work under the `chat` span and
+nested work performed by a tool under the `execute_tool` span. It handles both
+`onEnd` and `onAbort` terminal paths. `wrapAISDK` and `createAISDKTelemetry`
+project into the same span schema, so the two SDK versions are dashboard-
+compatible.
+
+When a gateway-backed provider exposes its AI Gateway log ID through response
+headers, provider metadata, or the Workers AI binding, the corresponding
+`chat` span includes `cloudflare.ai_gateway.log.id`. The attribute is omitted
+when no actual response exposes an ID; the adapter does not infer one or make an
+extra request.
+
+### Identity
+
+The AI SDK's canonical OpenTelemetry integration maps `functionId` to
+`gen_ai.agent.name`. For direct `wrapAISDK` calls, `functionId` should therefore
+be a low-cardinality logical agent name, not a request, user, session, or
+Durable Object identifier. In v6, the other identity values are read from
+`experimental_telemetry.metadata`; an explicit `agentName` takes precedence
+over `functionId`.
+
+Think sets all three fields automatically on every inference:
+
+```text
+gen_ai.agent.name      = this.constructor.name
+gen_ai.agent.id        = this.name
+gen_ai.conversation.id = this.ctx.id.toString()
+```
+
+For direct v6 wrapper calls, supply identity explicitly:
+
+```ts
+await generateText({
+  model,
+  prompt: "...",
+  experimental_telemetry: {
+    functionId: "booking-agent",
+    metadata: {
+      // Stable agent resource/instance identifier.
+      agentId: "asst_123",
+      agentVersion: "2026-07-01",
+      conversationId: "conversation-123"
+    }
+  }
+});
+```
+
+AI SDK v7 has no telemetry metadata bag. Put additional identity in
+`runtimeContext` and explicitly include those fields:
+
+```ts
+await generateText({
+  model,
+  prompt: "...",
+  runtimeContext: {
+    conversationId: "conversation-123"
+  },
+  telemetry: {
+    functionId: "booking-agent",
+    includeRuntimeContext: {
+      conversationId: true
+    }
+  }
+});
+```
+
+### Emitted data
+
+| Standard attributes                                                                | Source and scope                                                                             |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `gen_ai.operation.name`                                                            | `invoke_agent`, `chat`, or `execute_tool` on every span                                      |
+| `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.agent.version`                     | Explicit operation identity; Think defaults ID and name, but not version                     |
+| `gen_ai.conversation.id`                                                           | Explicit operation conversation; Think defaults to its opaque Durable Object ID              |
+| `gen_ai.provider.name`                                                             | Normalized provider on operation/model spans when known                                      |
+| `gen_ai.output.type`                                                               | Requested `text` or `json` output on operation/model spans                                   |
+| `gen_ai.request.model`                                                             | Requested model when known                                                                   |
+| `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`              | Numeric request settings when supplied                                                       |
+| `gen_ai.request.max_tokens`, `gen_ai.request.seed`, `gen_ai.request.top_k`         | Integer request settings when supplied                                                       |
+| `gen_ai.request.stream`                                                            | `true` on streaming operations; omitted otherwise                                            |
+| `gen_ai.request.temperature`, `gen_ai.request.top_p`                               | Numeric request settings when supplied                                                       |
+| `gen_ai.response.id`, `gen_ai.response.model`                                      | Model-call response metadata when actually reported; never inferred from the requested model |
+| `gen_ai.response.time_to_first_chunk`                                              | Model-call streaming latency in seconds                                                      |
+| `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`                          | Aggregate usage on operations and per-call usage on model spans                              |
+| `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.cache_read.input_tokens` | Provider cache usage when reported                                                           |
+| `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
+| `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID also correlates approval lifecycle segments                           |
+| `cloudflare.agents.tool.approval.state`                                            | AI SDK v6 approval lifecycle segment: `requested`, `approved`, or `denied`                   |
+| `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in OTel-schema model messages on `chat`, including tool parts and output finish reasons  |
+| `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                            | Opt-in tool arguments/results on `execute_tool`                                              |
+| `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
+| `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
+
+The adapter also emits a small vendor namespace where no standard equivalent
+exists:
+
+| Attribute                                                                               | Meaning                                                                 |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `cloudflare.ai_gateway.log.id`                                                          | AI Gateway log reference on `chat`, when exposed by the actual response |
+| `cloudflare.agents.integration.name`                                                    | Instrumentation source (`ai-sdk`)                                       |
+| `cloudflare.agents.operation.name`                                                      | Original SDK operation (`streamText`, `doStream`, `tool.execute`, etc.) |
+| `cloudflare.agents.call.id`                                                             | AI SDK v7 callback correlation ID                                       |
+| `cloudflare.agents.response.finish_reason`                                              | One finish reason as a scalar                                           |
+| `cloudflare.agents.tool.count`                                                          | Precomputed tool-call count for dashboards                              |
+| `cloudflare.agents.usage.total_tokens`                                                  | Provider total, or input plus output when both are known                |
+| `cloudflare.agents.runtime_context.{key}`                                               | Explicitly included scalar runtime context                              |
+| `cloudflare.agents.tool_context.{tool}.{key}`                                           | Explicitly included scalar context on the executed tool span            |
+| `cloudflare.agents.metadata.{key}`                                                      | Other scalar v6 telemetry metadata                                      |
+| `cloudflare.agents.turn.{request_id,trigger,admission,channel,continuation,generation}` | Think turn context                                                      |
+| `cloudflare.agents.canceled`                                                            | Recognized cancellation, not a failure                                  |
+
+`gen_ai.response.finish_reasons` and `gen_ai.request.stop_sequences` are arrays
+in OTel. Workers' custom `Span.setAttribute` currently accepts only a string,
+number, or boolean, so the adapter omits those attributes rather than placing
+JSON text under an array-typed key. Similarly, span status is state rather than
+an attribute: failures emit `error.type`, but the adapter does not invent an
+`otel.status_code` attribute when Workers exposes no custom-span status setter.
+
+### Context and safety
+
+Payload storage is explicit and off by default. `storeMessages` writes only
+`gen_ai.input.messages` / `gen_ai.output.messages` on `chat`; when the message
+attribute exceeds its budget, the adapter repeatedly drops the oldest
+unprotected message (index 2), preserving the first two messages and newest
+tail. `storeTools` writes only `gen_ai.tool.call.arguments` /
+`gen_ai.tool.call.result` on `execute_tool`. The flags themselves are never
+written to telemetry metadata or spans.
+
+System instructions that the AI SDK presents to the model as a system-role chat
+message remain in `gen_ai.input.messages`, which OTel explicitly permits for
+instructions that are part of chat history. The adapter does not separately
+copy the raw `system` parameter into `gen_ai.system_instructions`. Schemas,
+request headers, provider options, and raw error messages are never recorded.
+The optional AI Gateway reference is a bounded opaque log ID; response headers
+and provider metadata themselves are not recorded. Metadata and context values
+must be scalar; objects and arrays are dropped.
+
+For v6, only `experimental_context` exists. Configure its allowlist on the
+wrapper:
+
+```ts
+const traced = wrapAISDK(ai, {
+  includeRuntimeContext: ["requestId", "tenantId"]
+});
+
+await traced.generateText({
+  model,
+  prompt: "Will I need an umbrella?",
+  experimental_context: {
+    requestId: "req-123",
+    tenantId: "tenant-42"
+  }
+});
+```
+
+For v7, the AI SDK filters runtime and per-tool context before the adapter sees
+it. Its allowlists are boolean maps, not arrays:
+
+```ts
+await generateText({
+  model,
+  prompt: "Will I need an umbrella?",
+  runtimeContext: { requestId: "req-123", tenantId: "tenant-42" },
+  toolsContext: {
+    weather: { defaultUnit: "celsius", cacheHit: true }
+  },
+  telemetry: {
+    includeRuntimeContext: {
+      requestId: true,
+      tenantId: true
+    },
+    includeToolsContext: {
+      weather: {
+        defaultUnit: true,
+        cacheHit: true
+      }
+    }
+  }
+});
+```
+
+Do not include tokens, credentials, user input, or other secrets. Context
+filtering reduces accidental exposure; it is not a security boundary.

@@ -43,15 +43,15 @@ export function createAgentThinkModel(
     baseURL: `${AI_GATEWAY_BASE_URL}/anthropic`,
     fetch: gatewayFetch
   });
-  const primary = withProviderOptions(openai.chat("gpt-5.5"), {
-    openai: { reasoningEffort: "medium" }
+  const primary = withProviderOptions(openai.responses("gpt-5.6-sol"), {
+    openai: { reasoningEffort: "max", store: false }
   });
   const fallback = withProviderOptions(anthropic("claude-opus-4-8"), {
     anthropic: { thinking: { type: "adaptive" }, effort: "medium" }
   });
 
   return createClientFallbackModel([
-    { slug: "openai/gpt-5.5", model: primary, transport: "gateway" },
+    { slug: "openai/gpt-5.6-sol", model: primary, transport: "gateway" },
     {
       slug: "anthropic/claude-opus-4-8",
       model: fallback,

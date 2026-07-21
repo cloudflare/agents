@@ -1,4 +1,5 @@
 import type { JSONSchema7, UIMessage } from "ai";
+import type { StreamResumeNoneReason } from "./protocol";
 
 /**
  * Enum for message types to improve type safety and maintainability
@@ -82,6 +83,8 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_RESUMING;
       /** The request ID of the stream being resumed */
       id: string;
+      /** Present when this offer directly answers a client resume probe. */
+      probeId?: string;
     }
   | {
       /** Server notifies client that a message was updated (e.g., tool result applied) */
@@ -90,8 +93,15 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       message: ChatMessage;
     }
   | {
-      /** Server responds to resume request when no active stream exists */
+      /** Server responds to a resume request with no stream for this client. */
       type: MessageType.CF_AGENT_STREAM_RESUME_NONE;
+      /**
+       * Why no stream was offered. Only `idle` proves global inactivity;
+       * omitted by older servers and by non-authoritative delayed releases.
+       */
+      reason?: StreamResumeNoneReason;
+      /** Correlates an authoritative response to its client resume probe. */
+      probeId?: string;
     }
   | {
       /**
@@ -102,6 +112,8 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_PENDING;
       /** The accepted request id, when known. */
       id?: string;
+      /** Correlates a direct keep-waiting response to its client probe. */
+      probeId?: string;
     }
   | {
       /**
@@ -165,6 +177,8 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
   | {
       /** Client requests stream resume check after message handler is registered */
       type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST;
+      /** Opaque correlation id echoed by direct server responses. */
+      probeId?: string;
     }
   | {
       /** Client sends tool result to server (for client-side tools) */
