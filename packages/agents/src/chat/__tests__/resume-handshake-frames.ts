@@ -23,7 +23,11 @@
  * (paired with a client + changeset).
  */
 
-import { CHAT_MESSAGE_TYPES } from "../protocol";
+import {
+  CHAT_MESSAGE_TYPES,
+  STREAM_RESUME_NONE_REASONS,
+  type StreamResumeNoneReason
+} from "../protocol";
 
 /**
  * Server -> client `STREAM_RESUMING` notify: there is a resumable stream (or a
@@ -34,23 +38,30 @@ import { CHAT_MESSAGE_TYPES } from "../protocol";
  * Load-bearing (#1733): a single connection can legitimately receive this twice
  * for one request — proactively from idle-connect AND in response to its
  * explicit `STREAM_RESUME_REQUEST`. The server must NOT dedupe; the client
- * dedupes its ACK. Both sends are byte-identical to this frame.
+ * dedupes its ACK. The explicit response additionally echoes the probe id.
  */
-export function streamResumingFrame(requestId: string) {
+export function streamResumingFrame(requestId: string, probeId?: string) {
   return {
     type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
-    id: requestId
+    id: requestId,
+    ...(probeId ? { probeId } : {})
   };
 }
 
 /**
- * Server -> client `STREAM_RESUME_NONE`: nothing to resume — no active stream
- * (and no pending continuation / terminal), or a DIFFERENT connection owns the
- * active continuation. Carries no `id`. Emitted by both REQUEST `else` branches.
+ * Server -> client `STREAM_RESUME_NONE`: no stream can be attached to this
+ * connection. `reason: idle` is authoritative global inactivity; a different
+ * live connection owning an active continuation uses `continuation-owned`.
+ * Carries no request/stream `id`.
  */
-export function streamResumeNoneFrame() {
+export function streamResumeNoneFrame(
+  reason: StreamResumeNoneReason = STREAM_RESUME_NONE_REASONS.IDLE,
+  probeId?: string
+) {
   return {
-    type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE
+    type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
+    reason,
+    ...(probeId ? { probeId } : {})
   };
 }
 
@@ -61,10 +72,11 @@ export function streamResumeNoneFrame() {
  * timeout and waits for a later `STREAM_RESUMING` or `STREAM_RESUME_NONE`.
  * Emitted by `PreStreamTurns.park`.
  */
-export function streamPendingFrame(requestId?: string) {
+export function streamPendingFrame(requestId?: string, probeId?: string) {
   return {
     type: CHAT_MESSAGE_TYPES.STREAM_PENDING,
-    ...(requestId ? { id: requestId } : {})
+    ...(requestId ? { id: requestId } : {}),
+    ...(probeId ? { probeId } : {})
   };
 }
 

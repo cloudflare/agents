@@ -6695,7 +6695,7 @@ describe("useAgentChat transparent reconnect re-probe (#1784)", () => {
 
   const RESUME_REQUEST = "cf_agent_stream_resume_request";
 
-  it("re-probes the stream on a SUBSEQUENT socket open, but not the first", async () => {
+  it("re-probes on a close-to-open transition, but not a bare initial open", async () => {
     const { agent, target, sentMessages } = createAgentWithTarget({
       name: "reconnect-reprobe",
       url: "ws://localhost:3000/agents/chat/reconnect-reprobe?_pk=abc"
@@ -6729,22 +6729,26 @@ describe("useAgentChat transparent reconnect re-probe (#1784)", () => {
 
     // Settle any mount-time resume probe so the transport is no longer awaiting.
     await act(async () => {
-      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      dispatch(target, {
+        type: "cf_agent_stream_resume_none",
+        reason: "idle"
+      });
       await sleep(20);
     });
 
     const baseline = resumeRequests();
 
-    // First "open" is treated as the initial connect — no re-probe.
+    // A bare open with no observed close is the initial connect — no re-probe.
     await act(async () => {
       target.dispatchEvent(new Event("open"));
       await sleep(20);
     });
     expect(resumeRequests()).toBe(baseline);
 
-    // A SUBSEQUENT open is a transparent reconnect (e.g. 1006) that does NOT
+    // A close→open is a transparent reconnect (e.g. 1006) that does NOT
     // remount the component → the hook must re-probe so AI SDK status recovers.
     await act(async () => {
+      target.dispatchEvent(new Event("close"));
       target.dispatchEvent(new Event("open"));
       await sleep(20);
     });

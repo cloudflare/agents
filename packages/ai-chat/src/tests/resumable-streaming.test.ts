@@ -873,7 +873,8 @@ describe("Resumable Streaming", () => {
       // Send resume request when there's no active stream
       ws.send(
         JSON.stringify({
-          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+          probeId: "probe-idle-ai-chat"
         })
       );
 
@@ -891,7 +892,10 @@ describe("Resumable Streaming", () => {
           "type" in m &&
           m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
       );
-      expect(noneMsg).toBeDefined();
+      expect(noneMsg).toMatchObject({
+        reason: "idle",
+        probeId: "probe-idle-ai-chat"
+      });
 
       ws.close(1000);
     });

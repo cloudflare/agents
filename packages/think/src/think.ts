@@ -10962,7 +10962,7 @@ export class Think<
   ): Promise<void> {
     switch (event.type) {
       case "stream-resume-request":
-        await this._handleStreamResumeRequest(connection);
+        await this._handleStreamResumeRequest(connection, event.probeId);
         break;
 
       case "stream-resume-ack":
@@ -11035,9 +11035,10 @@ export class Think<
   }
 
   private async _handleStreamResumeRequest(
-    connection: Connection
+    connection: Connection,
+    probeId?: string
   ): Promise<void> {
-    await this._resumeHandshake().handleResumeRequest(connection);
+    await this._resumeHandshake().handleResumeRequest(connection, probeId);
   }
 
   private async _handleStreamResumeAck(
