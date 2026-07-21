@@ -94,7 +94,6 @@ import type {
   PrepareStepResult,
   StreamTextOnChunkCallback,
   GenerateTextOnStepFinishCallback,
-  OnToolExecutionEndCallback,
   StopCondition,
   ToolSet,
   TypedToolCall,
@@ -104,11 +103,21 @@ import {
   convertToModelMessages,
   hasToolCall,
   jsonSchema,
-  isStepCount,
+  // `stepCountIs` exists in both AI SDK v6 and v7 (v7 keeps it as an alias of
+  // `isStepCount`). Using it keeps Think compatible with both majors.
+  stepCountIs,
   streamText,
-  toUIMessageStream,
   tool
 } from "ai";
+
+/**
+ * Callback type for the AI SDK tool-execution-finished hook, derived from
+ * `streamText`'s options so it resolves under both AI SDK v6 and v7 (the
+ * exported `OnToolExecutionEndCallback` type is v7-only).
+ */
+type ToolCallFinishCallback = NonNullable<
+  Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
+>;
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
@@ -389,6 +398,68 @@ function streamErrorToString(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+/**
+ * Normalizes the AI SDK tool-execution-finished event across major versions.
+ *
+ * Think registers a single `experimental_onToolCallFinish` callback, which is
+ * the native option in AI SDK v6 and a supported alias for `onToolExecutionEnd`
+ * in AI SDK v7 (resolved internally — see `ai`'s `streamText`). The two majors
+ * hand the callback different event shapes:
+ *
+ * - v6: `{ toolCall, messages, success, output, error, durationMs, stepNumber }`
+ * - v7: `{ toolCall, messages, toolExecutionMs, toolOutput: { type, output|error } }`
+ *   (no `stepNumber`)
+ *
+ * This collapses both into one shape so the rest of Think stays version-agnostic.
+ */
+function normalizeToolFinishEvent(event: unknown): {
+  toolCall: TypedToolCall<ToolSet>;
+  messages: ModelMessage[];
+  toolExecutionMs: number;
+  stepNumber: number | undefined;
+  success: boolean;
+  output: unknown;
+  error: unknown;
+} {
+  const e = event as {
+    toolCall: TypedToolCall<ToolSet>;
+    messages: ModelMessage[];
+    // v7
+    toolExecutionMs?: number;
+    toolOutput?: { type: string; output?: unknown; error?: unknown };
+    // v6
+    durationMs?: number;
+    success?: boolean;
+    output?: unknown;
+    error?: unknown;
+    stepNumber?: number;
+  };
+  const toolExecutionMs = e.toolExecutionMs ?? e.durationMs ?? 0;
+  if (e.toolOutput) {
+    const success = e.toolOutput.type === "tool-result";
+    return {
+      toolCall: e.toolCall,
+      messages: e.messages,
+      toolExecutionMs,
+      // v7 does not provide a step number on this event.
+      stepNumber: undefined,
+      success,
+      output: success ? e.toolOutput.output : undefined,
+      error: success ? undefined : e.toolOutput.error
+    };
+  }
+  const success = e.success ?? false;
+  return {
+    toolCall: e.toolCall,
+    messages: e.messages,
+    toolExecutionMs,
+    stepNumber: e.stepNumber,
+    success,
+    output: success ? e.output : undefined,
+    error: success ? undefined : e.error
+  };
 }
 
 async function* readableStreamToAsyncIterable<T>(
@@ -2012,10 +2083,17 @@ export interface TurnConfig {
   headers?: Parameters<typeof streamText>[0]["headers"];
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
-  /** Optional AI SDK telemetry configuration for this turn. */
-  telemetry?: Parameters<typeof streamText>[0]["telemetry"];
+  /**
+   * Optional AI SDK telemetry configuration for this turn.
+   *
+   * Typed via the `experimental_telemetry` key, which exists in both AI SDK v6
+   * and v7 (`telemetry` is v7-only), so this type resolves under either major.
+   */
+  telemetry?: Parameters<typeof streamText>[0]["experimental_telemetry"];
   /** @deprecated Prefer `telemetry`. */
-  experimental_telemetry?: Parameters<typeof streamText>[0]["telemetry"];
+  experimental_telemetry?: Parameters<
+    typeof streamText
+  >[0]["experimental_telemetry"];
   /**
    * Optional AI SDK stream transform(s) for this turn (`experimental_transform`).
    * Forwarded to `streamText` so callers can inspect/rewrite the stream — e.g.
@@ -5376,7 +5454,7 @@ export class Think<
           : { type: "tool" as const, toolName: finalAnswerToolName }))
       : config.toolChoice;
     const finalStopWhen = [
-      isStepCount(finalMaxSteps),
+      stepCountIs(finalMaxSteps),
       // Stop as soon as the model calls `final_answer` so the structured turn
       // terminates at the answer instead of continuing to stream more steps.
       ...(wantsStructuredOutput ? [hasToolCall(finalAnswerToolName)] : []),
@@ -5389,7 +5467,10 @@ export class Think<
 
     const result = streamText({
       model: finalModel,
-      instructions: turnSystem,
+      // `system` is accepted by both AI SDK v6 and v7 (v7 also accepts the
+      // renamed `instructions`, but v6 does not). Use `system` for cross-major
+      // compatibility.
+      system: turnSystem,
       messages: finalMessages,
       tools: finalTools,
       // Keep the synthetic final-answer tool callable even when a caller
@@ -5415,7 +5496,9 @@ export class Think<
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
-      telemetry: config.telemetry ?? config.experimental_telemetry,
+      // `experimental_telemetry` is the option name in both AI SDK v6 and v7
+      // (v7 also accepts `telemetry`, but v6 does not). Use the shared name.
+      experimental_telemetry: config.telemetry ?? config.experimental_telemetry,
       // Forward the per-turn stream transform(s) from TurnConfig so callers
       // can inspect/rewrite the stream (e.g. emit `source` parts derived from
       // tool results) without owning the stream pipeline themselves.
@@ -5488,7 +5571,10 @@ export class Think<
         await this.onChunk(event);
         await this._pipelineExtensionChunk(event);
       },
-      onStepEnd: async (event) => {
+      // `onStepFinish` is the step callback name in both AI SDK v6 and v7 (v7
+      // also accepts the renamed `onStepEnd`, but v6 does not). Use the shared
+      // name; it still dispatches to Think's `onStepEnd` hook.
+      onStepFinish: async (event) => {
         // Pass the full StepResult through — gives users access to
         // reasoning, sources, files, providerMetadata (cache tokens),
         // request/response, warnings, and the full LanguageModelUsage
@@ -5500,38 +5586,24 @@ export class Think<
       // `_wrapToolsWithDecision` above) so the returned `ToolCallDecision`
       // can actually intercept the call. `afterToolCall` is wired through
       // the AI SDK's `experimental_onToolCallFinish` callback so we get
-      // accurate `durationMs` and the discriminated `success`/`error`
+      // accurate execution time and the discriminated `success`/`error`
       // outcome — including failures that propagate out of `execute`.
-      onToolExecutionEnd: (async (event) => {
+      //
+      // We register `experimental_onToolCallFinish` (rather than the v7-only
+      // `onToolExecutionEnd`) because it is the native option in AI SDK v6 and
+      // a supported alias in v7 — `ai` resolves it to `onToolExecutionEnd`
+      // internally and fires it exactly once. `normalizeToolFinishEvent`
+      // reconciles the differing event shapes between the two majors.
+      experimental_onToolCallFinish: (async (event) => {
         // The synthetic final-answer tool is internal plumbing for structured
         // workflow turns — do not surface it to user `afterToolCall` hooks or
         // extensions.
-        //
-        // AI SDK v7 renamed experimental_onToolCallFinish -> onToolExecutionEnd
-        // and reshaped the event:
-        //   - success/output/error -> toolOutput (type: tool-result | tool-error)
-        //   - durationMs -> toolExecutionMs
-        //   - stepNumber is no longer on this event (undefined)
-        const e = event as unknown as {
-          toolCall: TypedToolCall<ToolSet>;
-          messages: ModelMessage[];
-          toolExecutionMs: number;
-          toolOutput:
-            | { type: "tool-result"; output: unknown }
-            | { type: "tool-error"; error: unknown }
-            | { type: string; output?: unknown; error?: unknown };
-        };
+        const e = normalizeToolFinishEvent(event);
         if (e.toolCall.toolName === finalAnswerToolName) return;
-        const success = e.toolOutput?.type === "tool-result";
-        const output =
-          e.toolOutput?.type === "tool-result"
-            ? e.toolOutput.output
-            : undefined;
-        const error =
-          e.toolOutput?.type === "tool-error" ? e.toolOutput.error : undefined;
+        const { success, output, error } = e;
         const base = {
           ...e.toolCall,
-          stepNumber: undefined as number | undefined,
+          stepNumber: e.stepNumber,
           messages: e.messages,
           toolExecutionMs: e.toolExecutionMs,
           durationMs: e.toolExecutionMs
@@ -5552,13 +5624,13 @@ export class Think<
         await this.afterToolCall(ctx);
         await this._pipelineExtensionToolCallFinish({
           toolCall: e.toolCall,
-          stepNumber: undefined,
+          stepNumber: e.stepNumber,
           durationMs: e.toolExecutionMs,
           success,
           output,
           error
         });
-      }) as OnToolExecutionEndCallback<ToolSet>
+      }) as ToolCallFinishCallback
     });
 
     const outputPromise = wantsStructuredOutput
@@ -5589,14 +5661,24 @@ export class Think<
     }
 
     const streamResult = {
-      toUIMessageStream: (options) =>
-        readableStreamToAsyncIterable(
-          toUIMessageStream({
-            stream: result.stream,
-            sendReasoning: options?.sendReasoning ?? finalSendReasoning,
-            onError: options?.onError ?? streamErrorToString
-          })
-        ),
+      toUIMessageStream: (options) => {
+        const sendReasoning = options?.sendReasoning ?? finalSendReasoning;
+        const onError = options?.onError ?? streamErrorToString;
+        // Use the result's own `toUIMessageStream()` method rather than the
+        // standalone `toUIMessageStream({ stream })` helper: the method exists
+        // in both AI SDK v6 and v7 (deprecated in v7 but functional), whereas
+        // the standalone helper and the `result.stream` property it needs are
+        // v7-only.
+        const uiStream = (
+          result as {
+            toUIMessageStream: (o: {
+              sendReasoning?: boolean;
+              onError?: (error: unknown) => string;
+            }) => ReadableStream;
+          }
+        ).toUIMessageStream({ sendReasoning, onError });
+        return readableStreamToAsyncIterable(uiStream);
+      },
       output: outputPromise
     } satisfies StreamableResult;
 

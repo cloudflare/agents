@@ -3865,7 +3865,7 @@ importers:
   packages/ai-chat:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^4.0.0
+        specifier: ^3.0.0 || ^4.0.0
         version: 4.0.19(react@19.2.7)(zod@4.4.3)
       agents:
         specifier: '>=0.17.1 <1.0.0'

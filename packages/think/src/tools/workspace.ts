@@ -417,8 +417,12 @@ export function createReadTool(options: ReadToolOptions): Tool {
         value: [
           { type: "text", text: note },
           {
-            type: "file",
-            data: { type: "data", data },
+            // `file-data` (base64 string `data`) is accepted by both AI SDK v6
+            // and v7. v7 also offers the newer `{ type: "file", data: { type:
+            // "data", data } }` shape, but that does not exist in v6, so we use
+            // the cross-major form here.
+            type: "file-data",
+            data,
             mediaType: replayOutput.mediaType,
             filename: replayOutput.name
           }

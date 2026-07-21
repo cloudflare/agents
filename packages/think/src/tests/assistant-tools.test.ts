@@ -96,8 +96,8 @@ describe("assistant tools — read", () => {
     };
     expect(modelOutput.type).toBe("content");
     expect(modelOutput.value).toContainEqual({
-      type: "file",
-      data: { type: "data", data: "iVBORw0KGgo=" },
+      type: "file-data",
+      data: "iVBORw0KGgo=",
       mediaType: "image/png",
       filename: "screenshot"
     });
@@ -152,8 +152,8 @@ describe("assistant tools — read", () => {
     };
     expect(modelOutput.type).toBe("content");
     expect(modelOutput.value).toContainEqual({
-      type: "file",
-      data: { type: "data", data: "JVBERi0xLjQK" },
+      type: "file-data",
+      data: "JVBERi0xLjQK",
       mediaType: "application/pdf",
       filename: "doc"
     });
