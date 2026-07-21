@@ -848,22 +848,44 @@ export class ThinkTestAgent extends Think {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
   }
 
+  async setDefaultTurnTelemetryCapture(): Promise<void> {
+    this._telemetryEvents = [];
+    this._turnConfigOverride = {
+      experimental_telemetry: {
+        isEnabled: true,
+        integrations: {
+          onStart: (event) => {
+            this._telemetryEvents.push(this._telemetryIdentity("start", event));
+          },
+          onFinish: (event) => {
+            this._telemetryEvents.push(
+              this._telemetryIdentity("finish", event)
+            );
+          }
+        }
+      }
+    };
+  }
+
   async setTurnConfigTelemetry(): Promise<void> {
     this._telemetryEvents = [];
     this._turnConfigOverride = {
       experimental_telemetry: {
         isEnabled: true,
-        functionId: "think-test-turn",
-        metadata: { source: "think-test" },
+        functionId: "caller-function",
+        metadata: {
+          agentId: "caller-agent-id",
+          agentName: "CallerAgent",
+          conversationId: "caller-conversation",
+          source: "think-test"
+        },
         integrations: {
           onStart: (event) => {
-            this._telemetryEvents.push(
-              `start:${event.functionId}:${event.metadata?.source ?? ""}`
-            );
+            this._telemetryEvents.push(this._telemetryIdentity("start", event));
           },
           onFinish: (event) => {
             this._telemetryEvents.push(
-              `finish:${event.functionId}:${event.metadata?.source ?? ""}`
+              this._telemetryIdentity("finish", event)
             );
           }
         }
@@ -974,6 +996,23 @@ export class ThinkTestAgent extends Think {
 
   async getTelemetryEvents(): Promise<string[]> {
     return this._telemetryEvents;
+  }
+
+  private _telemetryIdentity(
+    phase: string,
+    event: {
+      functionId?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): string {
+    return [
+      phase,
+      event.functionId ?? "",
+      event.metadata?.source ?? "",
+      event.metadata?.agentName ?? "",
+      event.metadata?.agentId ?? "",
+      event.metadata?.conversationId === this.ctx.id.toString()
+    ].join(":");
   }
 
   async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {
@@ -5422,6 +5461,47 @@ export class ThinkProgrammaticTestAgent extends Think {
       ],
       options
     );
+  }
+
+  async probeSubmissionAlarmOwnershipForTest(): Promise<{
+    readonly alarmDrainCalls: number;
+    readonly inlineDrainCalls: number;
+    readonly submission: SubmitMessagesResult;
+  }> {
+    const submissionId = `alarm-owned-${crypto.randomUUID()}`;
+    const internal = this as unknown as {
+      _cf_executingScheduleRowId?: string;
+      _drainSubmissions(): Promise<void>;
+      _scheduleSubmissionDrain(): Promise<void>;
+    };
+    const originalDrain = internal._drainSubmissions;
+    let alarmDrainCalls = 0;
+    let inlineDrainCalls = 0;
+    internal._drainSubmissions = async () => {
+      if (internal._cf_executingScheduleRowId === undefined) {
+        inlineDrainCalls += 1;
+      } else {
+        alarmDrainCalls += 1;
+      }
+    };
+
+    try {
+      const submission = await this.testSubmitMessages("alarm owned", {
+        submissionId
+      });
+      // A DO alarm may interleave while this RPC awaits. The base Agent sets
+      // _cf_executingScheduleRowId only around an awaited schedule callback,
+      // which distinguishes the correct owner from the old inline starter.
+      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return { alarmDrainCalls, inlineDrainCalls, submission };
+    } finally {
+      internal._drainSubmissions = originalDrain;
+      // The probe's no-op alarm consumed its schedule row while leaving the
+      // submission pending. Re-arm the real drain for the eventual assertion.
+      await internal._scheduleSubmissionDrain();
+    }
   }
 
   private async _waitForSubmissionForTest(

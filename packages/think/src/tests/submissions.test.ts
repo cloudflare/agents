@@ -58,6 +58,11 @@ type ThinkSubmissionTestStub = {
       event: { type: string; payload?: unknown };
     }>
   >;
+  probeSubmissionAlarmOwnershipForTest(): Promise<{
+    readonly alarmDrainCalls: number;
+    readonly inlineDrainCalls: number;
+    readonly submission: SubmitMessagesResult;
+  }>;
   testSubmitMessages(
     text: string,
     options?: {
@@ -261,6 +266,24 @@ function textParts(messages: Array<{ parts?: unknown[] }>): string[] {
 }
 
 describe("Think durable submissions", () => {
+  it("runs accepted submissions only from the scheduled alarm invocation", async () => {
+    const agent = await freshAgent();
+
+    const probe = await agent.probeSubmissionAlarmOwnershipForTest();
+
+    expect(probe.inlineDrainCalls).toBe(0);
+    expect(probe.alarmDrainCalls).toBe(1);
+    expect(probe.submission).toMatchObject({
+      accepted: true,
+      status: "pending"
+    });
+    await waitForSubmission(
+      agent,
+      probe.submission.submissionId,
+      (submission) => submission.status === "completed"
+    );
+  });
+
   it("accepts a submission quickly and completes it through the normal turn path", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["slow ", "response"], 50);
