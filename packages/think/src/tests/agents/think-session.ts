@@ -5403,6 +5403,14 @@ export class ThinkToolsTestAgent extends Think {
     this._useDurablePauseAction = false;
   }
 
+  async getDurablePauseModelCallCount(): Promise<number> {
+    return this._durablePausePrompts.length;
+  }
+
+  async waitUntilStableForTest(): Promise<boolean> {
+    return this.waitUntilStable({ timeout: 5_000 });
+  }
+
   async getDurablePauseExecCount(): Promise<number> {
     return this._durablePauseExecCount;
   }
@@ -5483,9 +5491,10 @@ export class ThinkToolsTestAgent extends Think {
 
   async rejectExecutionForTest(
     executionId: string,
-    reason?: string
+    reason?: string,
+    options?: { autoContinue?: boolean }
   ): Promise<unknown> {
-    return this.rejectExecution(executionId, reason);
+    return this.rejectExecution(executionId, reason, options);
   }
 
   async approveExecutionTwiceForTest(executionId: string): Promise<unknown[]> {
