@@ -2482,8 +2482,22 @@ export class Think<
     "skillsFingerprint"
   ] as const;
   /**
-   * Wait for MCP server connections to be ready before the inference
-   * loop. MCP tools are auto-merged into the tool set.
+   * Whether Think automatically converts connected MCP tools to AI SDK tools
+   * and merges them into each model turn.
+   *
+   * Set this to `false` when MCP tools are exposed through Code Mode or another
+   * mechanism outside Think's automatic tool set. Connections, discovery,
+   * `waitForMcpConnections`, raw tool listing and calls, and explicit
+   * `this.mcp.getAITools()` calls are unaffected.
+   *
+   * @default true
+   */
+  includeMcpTools = true;
+
+  /**
+   * Wait for MCP server connections to be ready before the inference loop.
+   * When {@link includeMcpTools} is enabled, their tools are then auto-merged
+   * into the tool set.
    *
    * Set to `true` for a default 10s timeout, or `{ timeout: ms }`
    * for a custom timeout. Defaults to `false` (no waiting).
@@ -5126,6 +5140,9 @@ export class Think<
    * for interception, and calls streamText.
    */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
+    // Keep one exposure policy for this inference attempt even if subclass
+    // code changes the instance property while asynchronous setup is running.
+    const includeMcpTools = this.includeMcpTools;
     // Reset the per-turn watchdog override; `beforeTurn` may set it below. A
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
@@ -5179,7 +5196,7 @@ export class Think<
       ...extensionTools,
       ...contextTools,
       ...skillTools,
-      ...(this.mcp?.getAITools?.() ?? {}),
+      ...(includeMcpTools ? (this.mcp?.getAITools?.() ?? {}) : {}),
       ...clientToolSet
     };
 

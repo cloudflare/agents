@@ -349,6 +349,8 @@ Script execution requires a Worker Loader binding:
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
 | `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
 | `fetchTools`               | `false`                            | Opt-in allowlisted HTTP read tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                         |
+| `includeMcpTools`          | `true`                             | Automatically convert connected MCP tools to AI SDK tools and merge them into model turns                                                                                                                                    |
+| `waitForMcpConnections`    | `false`                            | Wait for MCP connections to settle before inference                                                                                                                                                                          |
 | `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
 | `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
 | `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
@@ -765,13 +767,24 @@ configureSession(session: Session) {
 
 ### MCP integration
 
-Think inherits MCP client support from the Agent base class. MCP tools are automatically merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
+Think inherits MCP client support from the Agent base class. MCP tools are automatically converted to AI SDK tools and merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
 
 ```ts
 export class MyAgent extends Think<Env> {
   waitForMcpConnections = true; // or { timeout: 10_000 }
 }
 ```
+
+If you expose MCP tools through Code Mode or another mechanism outside Think's automatic tool set, disable direct exposure to the model:
+
+```ts
+export class MyAgent extends Think<Env> {
+  includeMcpTools = false;
+  waitForMcpConnections = true;
+}
+```
+
+This suppresses only Think's automatic `this.mcp.getAITools()` merge. Connection registration, restoration, discovery, waiting, raw listing and calls, Code Mode access, and explicit `this.mcp.getAITools()` calls are unchanged. It also avoids converting a large MCP catalog to Zod when another mechanism exposes the tools. `activeTools: []` is not an equivalent optimization because Think assembles and converts tools before `beforeTurn` runs.
 
 ### Choosing a turn API
 
@@ -863,7 +876,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
 - **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
-- **MCP integration** — MCP tools auto-merged, wait for connections before inference
+- **MCP integration** — MCP tools auto-merged by default, with an opt-out for alternative exposure paths
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
 - **Multi-tab broadcast** — all connected clients see the stream (resume-aware exclusions)
 - **Partial persistence** — on error, the partial assistant message is saved
