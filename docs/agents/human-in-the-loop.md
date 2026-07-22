@@ -25,13 +25,14 @@ Human-in-the-loop (HITL) patterns allow agents to pause execution and wait for h
 
 Agents SDK supports multiple human-in-the-loop patterns. Choose based on your use case:
 
-| Use Case               | Pattern           | Best For                                           | Example                                                                                                      |
-| ---------------------- | ----------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Long-running workflows | Workflow Approval | Multi-step processes, durable approval gates       | [examples/workflows/](https://github.com/cloudflare/agents/tree/main/examples/workflows)                     |
-| AIChatAgent tools      | `needsApproval`   | Chat-based tool calls with `@cloudflare/ai-chat`   | [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)         |
-| OpenAI Agents SDK      | `needsApproval`   | Using OpenAI's agent SDK with conditional approval | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop) |
-| Client-side tools      | `onToolCall`      | Tools that need browser APIs or user interaction   | Pattern below                                                                                                |
-| MCP Servers            | Elicitation       | MCP tools requesting structured user input         | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)         |
+| Use Case               | Pattern               | Best For                                           | Example                                                                                                        |
+| ---------------------- | --------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Long-running workflows | Workflow Approval     | Multi-step processes, durable approval gates       | [examples/workflows/](https://github.com/cloudflare/agents/tree/main/examples/workflows)                       |
+| AIChatAgent tools      | `needsApproval`       | Chat-based tool calls with `@cloudflare/ai-chat`   | [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)           |
+| OpenAI Agents SDK      | `needsApproval`       | Using OpenAI's agent SDK with conditional approval | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop)   |
+| Client-side tools      | `onToolCall`          | Tools that need browser APIs or user interaction   | Pattern below                                                                                                  |
+| Stateless servers      | Stateless Elicitation | Current MCP tools requesting structured input      | [examples/mcp-elicitation-mrtr/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr) |
+| Legacy servers         | Legacy Elicitation    | Existing sessionful MCP deployments                | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)           |
 
 ### Decision Guide
 
@@ -452,85 +453,56 @@ See the complete example: [openai-sdk/human-in-the-loop/](https://github.com/clo
 
 ### MCP Elicitation
 
-When building MCP servers with `McpAgent`, you can request additional user input during tool execution using **elicitation**. The MCP client (like Claude Desktop) renders a form based on your JSON Schema and returns the user's response.
+**Stateless Elicitation** uses multi-round-trip requests (MRTR). A handler returns `inputRequired(...)`; the client gathers the requested input and retries with SDK-managed state. No Worker remains suspended while the user responds.
 
 ```typescript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Agent } from "agents";
+import {
+  McpServer,
+  acceptedContent,
+  inputRequired
+} from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
+import { z } from "zod";
 
-export class MyMcpAgent extends Agent<Env, State> {
-  server = new McpServer({
-    name: "my-mcp-server",
-    version: "1.0.0"
-  });
-
-  onStart() {
-    this.server.registerTool(
-      "increase-counter",
-      {
-        description: "Increase the counter by a user-specified amount",
-        inputSchema: {
-          confirm: z.boolean().describe("Do you want to increase the counter?")
-        }
-      },
-      async ({ confirm }, extra) => {
-        if (!confirm) {
-          return { content: [{ type: "text", text: "Cancelled." }] };
-        }
-
-        // Request additional input from the user
-        const userInput = await this.server.server.elicitInput(
-          {
-            message: "By how much do you want to increase the counter?",
-            requestedSchema: {
-              type: "object",
-              properties: {
-                amount: {
-                  type: "number",
-                  title: "Amount",
-                  description: "The amount to increase the counter by"
-                }
-              },
-              required: ["amount"]
-            }
-          },
-          { relatedRequestId: extra.requestId }
-        );
-
-        // Check if user accepted or cancelled
-        if (userInput.action !== "accept" || !userInput.content) {
-          return { content: [{ type: "text", text: "Cancelled." }] };
-        }
-
-        // Use the input
-        const amount = Number(userInput.content.amount);
-        this.setState({
-          ...this.state,
-          counter: this.state.counter + amount
+function createServer() {
+  const server = new McpServer({ name: "my-server", version: "1.0.0" });
+  server.registerTool(
+    "ask-name",
+    { inputSchema: z.object({}) },
+    async (_args, context) => {
+      const answer = acceptedContent(
+        context.mcpReq.inputResponses,
+        "name",
+        z.object({ name: z.string() })
+      );
+      if (!answer) {
+        return inputRequired({
+          inputRequests: {
+            name: inputRequired.elicit({
+              message: "What is your name?",
+              requestedSchema: {
+                type: "object",
+                properties: { name: { type: "string" } },
+                required: ["name"]
+              }
+            })
+          }
         });
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Counter increased by ${amount}, now at ${this.state.counter}`
-            }
-          ]
-        };
       }
-    );
-  }
+      return { content: [{ type: "text", text: `Hello ${answer.name}` }] };
+    }
+  );
+  return server;
 }
+
+export default createMcpHandler(createServer, { legacy: "reject" });
 ```
 
-**Key differences from other patterns:**
+The MCP client renders the JSON Schema form and the original operation remains pending from the application's perspective while the SDK completes the rounds.
 
-- Used by **MCP servers** exposing tools to clients, not agents calling tools
-- Uses **JSON Schema** for structured form-based input
-- The **MCP client** (Claude Desktop, etc.) handles UI rendering
-- Returns `{ action: "accept" | "decline", content: {...} }`
+See the [Stateless Elicitation example](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr).
 
-See the complete example: [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)
+**Legacy Elicitation** in existing Legacy deployments uses pushed `elicitation/create` requests over a stateful transport. See the explicitly legacy [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation) example when retaining `McpAgent` or `createLegacyMcpHandler` with `WorkerTransport`.
 
 ## State Patterns for Approvals
 
@@ -647,15 +619,16 @@ async submitForApproval(request: ApprovalRequest): Promise<string> {
 
 ## Complete Examples
 
-| Pattern           | Location                                                                                                     | Description                                        |
-| ----------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
-| Workflow approval | [examples/workflows/](https://github.com/cloudflare/agents/tree/main/examples/workflows)                     | Multi-step task processing with approval gate      |
-| AIChatAgent tools | [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)         | Chat tool approval with needsApproval + onToolCall |
-| OpenAI Agents SDK | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop) | Conditional tool approval with modal               |
-| MCP Elicitation   | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)         | MCP server requesting structured user input        |
+| Pattern               | Location                                                                                                       | Description                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Workflow approval     | [examples/workflows/](https://github.com/cloudflare/agents/tree/main/examples/workflows)                       | Multi-step task processing with approval gate      |
+| AIChatAgent tools     | [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)           | Chat tool approval with needsApproval + onToolCall |
+| OpenAI Agents SDK     | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop)   | Conditional tool approval with modal               |
+| Stateless Elicitation | [examples/mcp-elicitation-mrtr/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr) | Stateless multi-round input                        |
+| Legacy Elicitation    | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)           | Stateful pushed input requests                     |
 
 For detailed API documentation, see:
 
 - [Workflows](./workflows.md) - `waitForApproval()`, `approveWorkflow()`, `rejectWorkflow()`
-- [MCP Servers](./mcp-servers.md) - `elicitInput()` for MCP elicitation
+- [MCP Servers](./mcp-servers.md) - `inputRequired()` and legacy `elicitInput()`
 - [Callable Methods](./callable-methods.md) - `@callable()` decorator for approval endpoints

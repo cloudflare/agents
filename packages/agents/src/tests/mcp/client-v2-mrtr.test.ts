@@ -21,8 +21,8 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function modernServer() {
-  const server = new McpServer({ name: "modern-test", version: "1.0.0" });
+function statelessServer() {
+  const server = new McpServer({ name: "stateless-test", version: "1.0.0" });
   server.registerTool(
     "ask",
     { inputSchema: z.object({}) },
@@ -111,7 +111,7 @@ function modernServer() {
 describe("MCP v2 client MRTR", () => {
   it("keeps callTool pending while SDK auto-fulfils input_required", async () => {
     const gate = deferred<{ action: "accept"; content: { answer: string } }>();
-    const handler = createMcpHandler(() => modernServer());
+    const handler = createMcpHandler(() => statelessServer());
     const methods: string[] = [];
     const connection = new MCPClientConnection(
       new URL("https://example.com/mcp"),
@@ -160,7 +160,7 @@ describe("MCP v2 client MRTR", () => {
       content: { answer: string };
     }>();
     let handlerCalls = 0;
-    const handler = createMcpHandler(() => modernServer());
+    const handler = createMcpHandler(() => statelessServer());
     const connection = new MCPClientConnection(
       new URL("https://example.com/mcp"),
       { name: "agents-test", version: "1.0.0" },
@@ -208,7 +208,7 @@ describe("MCP v2 client MRTR", () => {
 
   it("aborts a pending elicitation handler with the originating call", async () => {
     const gate = deferred<{ action: "accept"; content: { answer: string } }>();
-    const handler = createMcpHandler(() => modernServer());
+    const handler = createMcpHandler(() => statelessServer());
     const connection = new MCPClientConnection(
       new URL("https://example.com/mcp"),
       { name: "agents-test", version: "1.0.0" },
@@ -275,8 +275,8 @@ describe("MCP v2 client MRTR", () => {
     ).resolves.toEqual([{ uri: "test://resource" }, options]);
   });
 
-  it("restores modern negotiation state before resuming a saved session", async () => {
-    const handler = createMcpHandler(() => modernServer());
+  it("restores Stateless negotiation state before resuming a saved session", async () => {
+    const handler = createMcpHandler(() => statelessServer());
     const fetch = async (input: RequestInfo | URL, init?: RequestInit) =>
       handler.fetch(new Request(input, init));
     const first = new MCPClientConnection(

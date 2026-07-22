@@ -1,3 +1,4 @@
+import { SERVER_INFO_META_KEY } from "@modelcontextprotocol/client";
 import { describe, expect, it, vi } from "vitest";
 import {
   decodeMcpServerOptions,
@@ -5,10 +6,12 @@ import {
   withMcpSession
 } from "../../mcp/client-storage";
 
-const modernDiscovery = {
+const statelessDiscovery = {
   supportedVersions: ["2026-07-28"],
   capabilities: { tools: {} },
-  serverInfo: { name: "server", version: "1.0.0" },
+  _meta: {
+    [SERVER_INFO_META_KEY]: { name: "server", version: "1.0.0" }
+  },
   resultType: "complete" as const
 };
 
@@ -44,7 +47,7 @@ describe("MCP client storage codec", () => {
     });
   });
 
-  it("drops an unsafe modern session that has no discovery advertisement", () => {
+  it("drops an unsafe Stateless session that has no discovery advertisement", () => {
     expect(
       decodeMcpServerOptions(
         JSON.stringify({
@@ -64,13 +67,13 @@ describe("MCP client storage codec", () => {
     });
   });
 
-  it("round-trips modern session state with its discovery advertisement", () => {
+  it("round-trips Stateless session state with its discovery advertisement", () => {
     const connected = withMcpSession(
       { transport: { type: "streamable-http" } },
       {
         id: "session",
         protocolVersion: "2026-07-28",
-        discoverResult: modernDiscovery
+        discoverResult: statelessDiscovery
       }
     );
     const restored = decodeMcpServerOptions(encodeMcpServerOptions(connected));
@@ -81,7 +84,7 @@ describe("MCP client storage codec", () => {
         sessionId: "session",
         protocolVersion: "2026-07-28"
       },
-      discoverResult: modernDiscovery
+      discoverResult: statelessDiscovery
     });
     expect(withMcpSession(restored)).toEqual({
       client: undefined,

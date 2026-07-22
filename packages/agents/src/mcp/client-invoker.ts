@@ -90,15 +90,15 @@ export function bindMcpClient(
       "function";
 
   if (isV2) {
-    const modern = client as Client;
-    const listTools = modern.listTools.bind(modern);
-    const callTool = modern.callTool.bind(modern);
+    const v2Client = client as Client;
+    const listTools = v2Client.listTools.bind(v2Client);
+    const callTool = v2Client.callTool.bind(v2Client);
     return {
       listTools: (params, options) => listTools(params, options),
       callTool: (params, schemaOrOptions, options) => {
         const normalized = normalizeCallToolArguments(schemaOrOptions, options);
         const pending = normalized.schema
-          ? modern.request(
+          ? v2Client.request(
               { method: "tools/call", params },
               normalized.schema as never,
               normalized.options

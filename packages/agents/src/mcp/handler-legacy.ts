@@ -4,25 +4,15 @@ import {
   WorkerTransport,
   type WorkerTransportOptions
 } from "./worker-transport";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
 
+/** Options for the retained SDK v1, sessionful handler. */
 export interface CreateLegacyMcpHandlerOptions extends WorkerTransportOptions {
-  /**
-   * The route path that this MCP handler should respond to.
-   * If specified, the handler will only process requests that match this route.
-   * @default "/mcp"
-   */
+  /** Exact route handled by this handler. @default "/mcp" */
   route?: string;
-  /**
-   * An optional auth context to use for handling MCP requests.
-   * If not provided, the handler will look for props in the execution context.
-   */
+  /** Application props exposed through {@link getMcpAuthContext}. */
   authContext?: McpAuthContext;
-  /**
-   * An optional transport to use for handling MCP requests.
-   * If not provided, a WorkerTransport will be created with the provided WorkerTransportOptions.
-   */
+  /** Pre-created sessionful transport. */
   transport?: WorkerTransport;
 }
 
@@ -34,23 +24,15 @@ export type LegacyMcpHandler = (
   ctx: ExecutionContext
 ) => Promise<Response>;
 
-type LegacyMcpHandlerInternalOptions = {
-  authInfo?: AuthInfo;
-  parsedBody?: unknown;
-};
-
+/**
+ * Create a sessionful Legacy MCP handler backed by SDK v1.
+ *
+ * New Stateless servers should use `createMcpHandler` from
+ * `agents/mcp/server` instead.
+ */
 export function createLegacyMcpHandler(
   server: McpServer | Server,
   options: CreateLegacyMcpHandlerOptions = {}
-): LegacyMcpHandler {
-  return createLegacyMcpHandlerInternal(server, options);
-}
-
-/** @internal Used by the SDK v2 handler's stateless 2025 fallback. */
-export function createLegacyMcpHandlerInternal(
-  server: McpServer | Server,
-  options: CreateLegacyMcpHandlerOptions,
-  internal?: LegacyMcpHandlerInternalOptions
 ): LegacyMcpHandler {
   const route = options.route ?? "/mcp";
   const {
@@ -72,65 +54,37 @@ export function createLegacyMcpHandlerInternal(
 
     const transport =
       providedTransport ?? new WorkerTransport(transportOptions);
+    const resolvedAuthContext =
+      authContext ??
+      (ctx.props && Object.keys(ctx.props).length > 0
+        ? { props: ctx.props as Record<string, unknown> }
+        : undefined);
 
-    const buildAuthContext = () => {
-      if (authContext) {
-        return authContext;
-      }
-
-      if (ctx.props && Object.keys(ctx.props).length > 0) {
-        return {
-          props: ctx.props as Record<string, unknown>
-        };
-      }
-
-      return undefined;
-    };
-
-    const handleRequest = async () => {
-      return await transport.handleRequest(request, {
-        ...(internal?.authInfo !== undefined && {
-          authInfo: internal.authInfo
-        }),
-        ...(internal?.parsedBody !== undefined && {
-          parsedBody: internal.parsedBody
-        })
-      });
-    };
-
-    const resolvedAuthContext = buildAuthContext();
-
-    // Guard for stateful usage where a pre-connected transport is passed via options.
-    // If someone passes a transport that's already connected to this server, skip reconnecting.
-    // Note: If a developer incorrectly uses a global server with per-request transports,
-    // the MCP SDK 1.26.0+ will throw an error when trying to connect an already-connected server.
+    // A supplied sessionful transport may already be connected. A newly
+    // created transport must never attach to a server owned by another
+    // session/request.
     if (!transport.started) {
-      // Check if server is already connected (McpServer has isConnected(), Server uses transport getter)
       const isServerConnected =
         server instanceof McpServer
           ? server.isConnected()
           : server.transport !== undefined;
-
       if (isServerConnected) {
         throw new Error(
           "Server is already connected to a transport. Create a new McpServer instance per request for stateless handlers."
         );
       }
-
       await server.connect(transport);
     }
 
+    const handleRequest = () => transport.handleRequest(request);
     try {
-      if (resolvedAuthContext) {
-        return await runWithAuthContext(resolvedAuthContext, handleRequest);
-      } else {
-        return await handleRequest();
-      }
+      return resolvedAuthContext
+        ? await runWithAuthContext(resolvedAuthContext, handleRequest)
+        : await handleRequest();
     } catch (error) {
       console.error("MCP handler error:", error);
-
-      return new Response(
-        JSON.stringify({
+      return Response.json(
+        {
           jsonrpc: "2.0",
           error: {
             code: -32603,
@@ -138,8 +92,8 @@ export function createLegacyMcpHandlerInternal(
               error instanceof Error ? error.message : "Internal server error"
           },
           id: null
-        }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
+        },
+        { status: 500 }
       );
     }
   };

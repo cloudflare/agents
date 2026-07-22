@@ -33,7 +33,7 @@ The `OAuthProvider` wraps the entire Worker. It intercepts OAuth endpoints (`/au
 
 ```typescript
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 
 const apiHandler = createMcpHandler(createServer);
 

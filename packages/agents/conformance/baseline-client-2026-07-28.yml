@@ -28,7 +28,7 @@ client:
   # implementations fail connection eagerly instead of degrading partially.
   - http-standard-headers
 
-  # Alpha.9's fixture delegates tools/list to SDK v1 after modern discovery;
+  # Alpha.9's fixture delegates tools/list to SDK v1 after Stateless discovery;
   # SDK v1 rejects protocol version 2026-07-28 before the security check runs.
   # Impact if unchanged: none demonstrated by this fixture; separate unit tests
   # cover that Agents does not dereference network JSON Schema references.

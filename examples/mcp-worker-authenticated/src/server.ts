@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { AuthHandler } from "./auth-handler";

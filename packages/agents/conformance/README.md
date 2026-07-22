@@ -5,7 +5,7 @@ Runs the newest published MCP referee,
 workerd via `wrangler dev`.
 
 The harness is exact-pinned. All client and server lanes use this same version;
-we do not mix counts from the older stable referee with modern results.
+we do not mix counts from the older stable referee with Stateless results.
 
 ## Truthful result model
 
@@ -35,12 +35,12 @@ are therefore neither ghost entries nor hidden passes.
 ## Client lanes
 
 Every lane tests the same Agents `MCPClientManager` backed by the SDK v2 client.
-The dated lanes prove that the modern client still interoperates with older
-servers; compatibility is not inferred from the modern lane.
+The Legacy lanes prove that the SDK v2 client still interoperates with older
+servers; compatibility is not inferred from the Stateless lane.
 
 | Command                              | Server protocol/referee selection | Scenarios | Current result                 |
 | ------------------------------------ | --------------------------------- | --------- | ------------------------------ |
-| `test:conformance:client:modern`     | `2026-07-28`                      | 32        | 27 clean / 5 expected failures |
+| `test:conformance:client:stateless`  | `2026-07-28`                      | 32        | 27 clean / 5 expected failures |
 | `test:conformance:client:2025-11-25` | `2025-11-25`                      | 18        | 16 clean / 2 expected failures |
 | `test:conformance:client:2025-06-18` | `2025-06-18`                      | 5         | 5 clean                        |
 | `test:conformance:client:2025-03-26` | `2025-03-26` OAuth/backcompat     | 2         | 2 clean                        |
@@ -53,17 +53,17 @@ not a production-code branch.
 
 ## Server lanes
 
-| Command                                            | Protocol/lifecycle      | Endpoint              | Current result                        |
-| -------------------------------------------------- | ----------------------- | --------------------- | ------------------------------------- |
-| `test:conformance:server:handler`                  | `2026-07-28` stateless  | `/mcp-handler`        | 40 clean                              |
-| `test:conformance:server:handler:stateless-legacy` | `2025-11-25` stateless  | `/mcp-handler`        | 26 clean / 6 expected failures        |
-| `test:conformance:server:handler:legacy`           | `2025-11-25` sessionful | `/mcp-handler-legacy` | 29 clean / 3 expected failures        |
-| `test:conformance:server:mcp-agent`                | `2025-11-25` sessionful | `/mcp-agent`          | 29 clean / 3 expected failures        |
-| `test:conformance:server:handler:extensions`       | modern optional tasks   | `/mcp-handler`        | 9 expected failures / 1 not exercised |
+| Command                                         | Protocol/lifecycle              | Endpoint              | Current result                         |
+| ----------------------------------------------- | ------------------------------- | --------------------- | -------------------------------------- |
+| `test:conformance:server:handler`               | Stateless (`2026-07-28`)        | `/mcp-handler`        | 39 clean / 1 expected referee mismatch |
+| `test:conformance:server:handler:legacy-compat` | Legacy compatibility, stateless | `/mcp-handler`        | 26 clean / 6 expected failures         |
+| `test:conformance:server:handler:legacy`        | Legacy, sessionful              | `/mcp-handler-legacy` | 29 clean / 3 expected failures         |
+| `test:conformance:server:mcp-agent`             | Legacy, sessionful              | `/mcp-agent`          | 29 clean / 3 expected failures         |
+| `test:conformance:server:handler:extensions`    | Stateless optional tasks        | `/mcp-handler`        | 9 expected failures / 1 not exercised  |
 
-The stateless legacy lane runs all 32 applicable scenarios, not alpha.9's
-smaller `active` subset. The two sessionful lanes remain because SDK v1 server
-behavior is intentionally retained while consumers migrate.
+The Legacy compatibility lane runs all 32 applicable scenarios, not alpha.9's
+smaller `active` subset. The two sessionful Legacy lanes remain because SDK v1
+server behavior is intentionally retained while consumers migrate.
 
 ## Baselines and impact
 
@@ -72,7 +72,7 @@ impact of leaving the behavior unchanged. A consolidated release-impact review
 is in [`KNOWN_FAILURES.md`](./KNOWN_FAILURES.md).
 
 Core protocol and optional extensions are separate. Unsupported optional tasks
-never appear in the modern core baseline or reduce its stated clean count.
+never appear in the Stateless core baseline or reduce its stated clean count.
 
 ## Running locally
 
@@ -83,7 +83,7 @@ cd packages/agents
 pnpm run test:conformance
 
 # Client protocol matrix
-pnpm run test:conformance:client:modern
+pnpm run test:conformance:client:stateless
 pnpm run test:conformance:client:2025-11-25
 pnpm run test:conformance:client:2025-06-18
 pnpm run test:conformance:client:2025-03-26
@@ -91,21 +91,21 @@ pnpm run test:conformance:client:extensions
 
 # Server lifecycle matrix
 pnpm run test:conformance:server:handler
-pnpm run test:conformance:server:handler:stateless-legacy
+pnpm run test:conformance:server:handler:legacy-compat
 pnpm run test:conformance:server:handler:legacy
 pnpm run test:conformance:server:mcp-agent
 pnpm run test:conformance:server:handler:extensions
 
 # Focus one scenario (uses the lane baseline but relaxes full-lane coverage)
-bash conformance/run.sh client-modern --scenario sep-2322-client-request-state
+bash conformance/run.sh client-stateless --scenario sep-2322-client-request-state
 bash conformance/run.sh server-handler --scenario server-stateless
 ```
 
 The runner refuses to use an occupied Worker or inspector port and tears down
 the complete Wrangler/workerd process tree on exit.
 
-## Vendored modern server fixture
+## Vendored Stateless server fixture
 
-The modern fixture is separate from the frozen SDK v1 fixture. Its exact source
+The Stateless fixture is separate from the frozen SDK v1 fixture. Its exact source
 commit, source hash, local workerd adaptation, and update checker are documented
 in [`vendor/README.md`](./vendor/README.md).

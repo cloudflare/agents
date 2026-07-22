@@ -15,6 +15,7 @@ import type {
   ResourceTemplateType as ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/client";
+export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
 import { type RetryOptions, tryN } from "../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";

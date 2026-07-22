@@ -1,5 +1,5 @@
 import { Agent, callable, routeAgentRequest } from "agents";
-import type { ElicitRequest, ElicitResult } from "agents/mcp";
+import type { ElicitRequest, ElicitResult } from "agents/mcp/client";
 
 /**
  * An elicitation forwarded to the browser, awaiting a human response.

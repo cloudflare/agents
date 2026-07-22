@@ -22,7 +22,7 @@ describe("legacy MCP handler warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const [{ McpServer }, handlerModule, transportModule] = await Promise.all([
       import("@modelcontextprotocol/sdk/server/mcp.js"),
-      import("../../mcp/handler"),
+      import("../../mcp/handler-compat"),
       import("../../mcp/worker-transport")
     ]);
 

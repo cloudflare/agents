@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const COMMIT = "e81758caed29f6568ce8873f7f9a3bd65b017d9c";
+const COMMIT = "1e1392e3f91583884fe82a0b4b91335875c3fba6";
 const EXPECTED_SHA256 =
   "3a94417774fa20b17971e8162f9865b1cefd2650c7d88fdcd17f971d91213852";
 const SOURCE_URL = `https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/${COMMIT}/test/conformance/src/everythingServer.ts`;

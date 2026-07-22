@@ -1,13 +1,15 @@
-# MCP Elicitation: modern MRTR and legacy sessions
+# Legacy Elicitation
 
-This example serves two MCP generations on one `/mcp` endpoint:
+> This example intentionally demonstrates the retained **Legacy / SDK v1** stateful path. For new Stateless servers, use the [`mcp-elicitation-mrtr`](../mcp-elicitation-mrtr/) **Stateless Elicitation** example.
 
-- **MCP 2026-07-28** goes directly to a stateless SDK v2 `createMcpHandler`. Its `increase-counter` tool returns `inputRequired(...)`; a current client collects the amount and retries the tool with that response.
-- **MCP 2025-era traffic** keeps the existing SDK v1 server, Durable Object session, persistent `WorkerTransport`, and push-style `elicitation/create` requests. It demonstrates both form-mode (`increase-counter`) and URL-mode (`connect-account`) elicitation.
+The MCP endpoint is `/mcp` (for example, `http://localhost:8787/mcp` under `wrangler dev`). A Durable Object owns each MCP session, `WorkerTransport` persists its initialization state, and `DurableObjectEventStore` supports SSE reconnection.
 
-The Worker calls `isLegacyRequest(request)` before any Durable Object lookup. Modern requests therefore do not create or wake `MyAgent`.
+Two tools demonstrate pushed 2025 `elicitation/create` requests:
 
-The [`mcp-client`](../mcp-client/) example remains a 2025-era client and renders both legacy elicitation modes in a browser UI. Client-side MRTR support is outside this example.
+- **`increase-counter`** — form-mode elicitation asks for an amount and updates Durable Object state.
+- **`connect-account`** — URL-mode elicitation sends a sensitive link to the user out-of-band.
+
+Pair it with the [`mcp-client`](../mcp-client/) example, which renders both elicitation modes in a browser UI.
 
 ## Run
 
@@ -16,26 +18,15 @@ pnpm install
 pnpm run dev
 ```
 
-Connect a current MCP client to `http://localhost:8787/mcp` for the modern path, or pair the example with [`mcp-client`](../mcp-client/) for the legacy path.
+## Why this example remains
 
-## Key routing pattern
+Existing deployments may require session-addressed server-to-client requests, persistent initialization state, and SSE replay. Those behaviors are not provided by a stateless compatibility handler. The example therefore uses the explicit legacy APIs:
 
 ```ts
-const modernHandler = createMcpHandler(createModernServer, {
-  route: "/mcp",
-  legacy: "reject"
-});
-
-export default {
-  async fetch(request, env, ctx) {
-    if (!(await isLegacyRequest(request))) {
-      return modernHandler(request, env, ctx);
-    }
-
-    const sessionId =
-      request.headers.get("mcp-session-id") ?? crypto.randomUUID();
-    const agent = await getAgentByName(bindings.MyAgent, sessionId);
-    return agent.onMcpRequest(request);
-  }
-};
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  createLegacyMcpHandler,
+  DurableObjectEventStore,
+  WorkerTransport
+} from "agents/mcp";
 ```

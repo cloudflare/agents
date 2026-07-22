@@ -29,5 +29,5 @@ function createServer() {
 }
 
 // A fresh server is created for each request. By default, the same handler
-// serves both MCP 2026-07-28 and stateless 2025-era clients.
+// serves Stateless clients and the Legacy compatibility lane.
 export default createMcpHandler(createServer);

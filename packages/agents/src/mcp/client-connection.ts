@@ -178,7 +178,7 @@ export class MCPClientConnection {
        * the source of truth. Explicit `client.capabilities` win per key.
        */
       capabilitySeed?: ClientCapabilities;
-      /** SDK discovery result paired with a resumed modern HTTP session. */
+      /** SDK discovery result paired with a resumed Stateless HTTP session. */
       discoverResult?: DiscoverResult;
     } = { client: {}, transport: {} }
   ) {
@@ -940,7 +940,7 @@ export class MCPClientConnection {
           transport instanceof StreamableHTTPClientTransport &&
           transport.sessionId &&
           this.options.discoverResult
-            ? this.options.discoverResult
+            ? { kind: "modern" as const, discover: this.options.discoverResult }
             : undefined;
         await this.client.connect(transport, prior ? { prior } : undefined);
         this._transport = transport;
