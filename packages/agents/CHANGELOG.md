@@ -1,5 +1,29 @@
 # @cloudflare/agents
 
+## 0.18.0
+
+### Minor Changes
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Group SDK-managed initialization, startup, chat interactions, turns, and durable submissions into semantic phases. Storage-heavy setup, hydration, recovery, request persistence, and response persistence each receive a named bucket, keeping inference and tool spans visible without discarding lower-level Durable Object SQLite spans. Each span records agent identity, storage phase, a stable marker for UI grouping, and operation-specific metadata. No-op on runtimes without the `tracing` API.
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `agents/observability/ai` with `wrapAISDK` for AI SDK v6 and `createAISDKTelemetry` for AI SDK v7. Both project Cloudflare-native `invoke_agent {agent}`, `chat {model}`, and `execute_tool {tool}` spans using scalar OpenTelemetry GenAI attributes, including request settings, token usage, finish reasons, tool-call IDs, model-call time to first chunk, bounded AI SDK v6 approval lifecycle spans, and conditional AI Gateway log references. Payload storage is opt-in: `storeMessages` writes OTel-schema input/output message arrays to `chat` (`{ role, parts }`, canonical text/reasoning/tool parts, and output `finish_reason`; oldest messages are dropped past the budget while protecting the first two), and `storeTools` writes arguments/results to `execute_tool`. The flags themselves are never emitted as span attributes. Schemas, request headers, provider options, and raw errors remain excluded.
+
+### Patch Changes
+
+- [#1959](https://github.com/cloudflare/agents/pull/1959) [`a3cbed1`](https://github.com/cloudflare/agents/commit/a3cbed1d9944690cf856238f1466940def9a3101) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Cache MCP JSON Schema conversion for the current catalog on each live connection, and let Think agents skip direct MCP AI-tool exposure when those tools are exposed through Code Mode or another mechanism outside Think's automatic tool set.
+
+- [#1963](https://github.com/cloudflare/agents/pull/1963) [`3ce98ff`](https://github.com/cloudflare/agents/commit/3ce98ff084fcd5f0f8433e1f20352f0a170e3e4a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Reconcile stale `useAgentChat` server-streaming state after an errored client reconnects.
+
+  Reconnect probes now include correlation IDs, and `STREAM_RESUME_NONE` distinguishes globally idle agents from active continuations owned by another connection. The hook clears fallback streaming state only for a correlated idle response. Reconnect opens are retained while a prior resume or status transition settles, in-flight handshakes are retransmitted on replacement sockets, and all AI SDK resume entry points share one serialization gate.
+
+- [#1944](https://github.com/cloudflare/agents/pull/1944) [`fff4131`](https://github.com/cloudflare/agents/commit/fff413112915cfafcbca013a764065abc6105db1) Thanks [@cjol](https://github.com/cjol)! - Make the `agents/vite` `turndown` stub fail with a diagnostic error when app code calls it directly, and document the `stubTurndown: false` opt-out for applications that use `turndown` themselves.
+
+- [#1926](https://github.com/cloudflare/agents/pull/1926) [`6861933`](https://github.com/cloudflare/agents/commit/6861933da2a73d699b6cc26a283cc1fee597f155) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Verify MCP OAuth callback state before changing a connection. Forged, expired, and replayed callbacks no longer disrupt the genuine authorization flow, and `addMcpServer()` refreshes auth URLs whose embedded state has expired.
+
+- [#1924](https://github.com/cloudflare/agents/pull/1924) [`c19d58a`](https://github.com/cloudflare/agents/commit/c19d58aeef5dbf18e6382de9dd773775aafdb6c8) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden MCP connection recovery: honor retry budgets for resolved connection failures, finish in-flight restore work before stable-id migration, and close connections replaced by the legacy `connect()` path.
+
+- [#1923](https://github.com/cloudflare/agents/pull/1923) [`33e59c4`](https://github.com/cloudflare/agents/commit/33e59c4af9a120fafea2d9dd7ceb1181d5813267) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Recover streamable HTTP connections when a server rejects a persisted session with HTTP 404. The client clears the stale session from memory and storage, initializes a new session, and rediscovers capabilities once.
+
 ## 0.17.4
 
 ### Patch Changes
