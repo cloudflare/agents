@@ -680,7 +680,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.serverId).toBe(serverId);
     });
 
-    it("should fail connection when callback received for connection in failed state", async () => {
+    it("should complete a genuine callback received for a connection in failed state", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -708,6 +708,12 @@ describe("MCPClientManager OAuth Integration", () => {
       connection.init = vi.fn().mockResolvedValue(undefined);
       connection.client.close = vi.fn().mockResolvedValue(undefined);
       connection.connectionState = "failed";
+      connection.connectionError = "spurious failure";
+      const completeAuthSpy = vi
+        .spyOn(connection, "completeAuthorization")
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
 
       manager.mcpConnections[serverId] = connection;
 
@@ -717,10 +723,11 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       const result = await manager.handleCallbackRequest(callbackRequest);
-      expect(result.authSuccess).toBe(false);
-      expect(result.authError).toBe(
-        'Failed to authenticate: the client is in "failed" state, expected "authenticating"'
-      );
+      expect(result.authSuccess).toBe(true);
+      expect(completeAuthSpy).toHaveBeenCalledWith("test", {
+        alreadyAccepted: true
+      });
+      expect(connection.connectionError).toBe(null);
     });
 
     it("should recognize custom callback paths that do not contain '/callback'", async () => {
@@ -757,6 +764,83 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(
         manager.isCallbackRequest(new Request(`${customCallbackUrl}?code=test`))
       ).toBe(false);
+    });
+  });
+
+  describe("OAuth Callback Robustness", () => {
+    const serverId = "test-server";
+    const callbackUrl = "http://localhost:3000/callback";
+    const authUrl = "https://auth.example.com/authorize";
+
+    function setupAuthenticatingConnection(
+      stateStorage: ReturnType<typeof createMockStateStorage>
+    ) {
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: authUrl,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId] = connection;
+      return connection;
+    }
+
+    it("ignores an error callback whose state nonce was never issued", async () => {
+      const stateStorage = createMockStateStorage();
+      const connection = setupAuthenticatingConnection(stateStorage);
+
+      const strayState = `${nanoid()}.${serverId}`;
+      const result = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?error=access_denied&state=${strayState}`)
+      );
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("access_denied");
+      expect(connection.connectionState).toBe("authenticating");
+      expect(mockStorageData.get(serverId)?.auth_url).toBe(authUrl);
+    });
+
+    it("completes a genuine callback after a stray code callback", async () => {
+      const stateStorage = createMockStateStorage();
+      const connection = setupAuthenticatingConnection(stateStorage);
+      const completeAuthSpy = vi
+        .spyOn(connection, "completeAuthorization")
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+
+      const state = stateStorage.createState(serverId);
+
+      const strayResult = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=x&state=${nanoid()}.${serverId}`)
+      );
+      expect(strayResult.authSuccess).toBe(false);
+      expect(connection.connectionState).toBe("authenticating");
+
+      const result = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=auth-code&state=${state}`)
+      );
+
+      expect(result.authSuccess).toBe(true);
+      expect(completeAuthSpy).toHaveBeenCalledWith("auth-code", {
+        alreadyAccepted: true
+      });
     });
   });
 
@@ -858,6 +942,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const result2 = await manager.handleCallbackRequest(callbackRequest2);
       expect(result2.authSuccess).toBe(false);
       expect(result2.authError).toBe("State not found or already used");
+      expect(connection.connectionState).toBe("authenticating");
     });
 
     it("should reject expired state (10 minute TTL)", async () => {
@@ -897,6 +982,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const result = await manager.handleCallbackRequest(callbackRequest);
       expect(result.authSuccess).toBe(false);
       expect(result.authError).toBe("State expired");
+      expect(connection.connectionState).toBe("authenticating");
     });
 
     it("should only match callbacks with valid state for existing servers", async () => {

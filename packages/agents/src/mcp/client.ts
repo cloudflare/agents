@@ -755,6 +755,29 @@ export class MCPClientManager {
     return callback();
   }
 
+  private async hasRedeemableOAuthState(
+    serverId: string,
+    authProvider: AgentMcpOAuthProvider,
+    state: string
+  ): Promise<boolean> {
+    authProvider.serverId = serverId;
+    try {
+      return (await authProvider.checkState(state)).valid;
+    } catch {
+      return false;
+    }
+  }
+
+  private ignoreUnverifiedCallback(
+    serverId: string,
+    error: string
+  ): MCPOAuthCallbackResult {
+    console.warn(
+      `[MCPClientManager] Ignoring OAuth callback with unverified state for server "${serverId}": ${error}`
+    );
+    return { serverId, authSuccess: false, authError: error };
+  }
+
   private async consumeStaleOAuthState(
     serverId: string,
     authProvider: AgentMcpOAuthProvider,
@@ -1558,6 +1581,24 @@ export class MCPClientManager {
           }
           return this.oauthCallbackSuccess(validation.serverId, conn);
         }
+        // Only a callback carrying a genuine state nonce may fail the
+        // connection; a stray or invalid callback must not alter the
+        // connection state machine.
+        const authProvider = conn.options.transport.authProvider;
+        if (
+          validation.state &&
+          authProvider &&
+          !(await this.hasRedeemableOAuthState(
+            validation.serverId,
+            authProvider,
+            validation.state
+          ))
+        ) {
+          return this.ignoreUnverifiedCallback(
+            validation.serverId,
+            validation.error
+          );
+        }
         return this.failConnection(validation.serverId, validation.error);
       }
 
@@ -1589,7 +1630,12 @@ export class MCPClientManager {
           await this.consumeStaleOAuthState(serverId, authProvider, state);
           return this.oauthCallbackSuccess(serverId, conn);
         }
-        throw new Error(stateValidation.error || "Invalid state");
+        // Same rule as the invalid branch above: a callback whose nonce
+        // cannot be verified must not alter the connection state machine.
+        return this.ignoreUnverifiedCallback(
+          serverId,
+          stateValidation.error || "Invalid state"
+        );
       }
 
       // A stale popup can complete after another callback already exchanged tokens.
@@ -1599,12 +1645,16 @@ export class MCPClientManager {
         return this.oauthCallbackSuccess(serverId, conn);
       }
 
-      if (conn.connectionState !== MCPConnectionState.AUTHENTICATING) {
+      if (
+        conn.connectionState !== MCPConnectionState.AUTHENTICATING &&
+        conn.connectionState !== MCPConnectionState.FAILED
+      ) {
         throw new Error(
-          `Failed to authenticate: the client is in "${conn.connectionState}" state, expected "authenticating"`
+          `Failed to authenticate from "${conn.connectionState}" state`
         );
       }
 
+      // A genuine callback can recover a flow that previously entered FAILED.
       conn.connectionState = MCPConnectionState.CONNECTING;
       await authProvider.consumeState(state);
       await this.completeAuthorizationAndCleanupVerifier(

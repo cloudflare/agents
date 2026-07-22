@@ -155,6 +155,24 @@ export class TestOAuthAgent extends Agent {
     this.mockStateStorage.set(nonce, { serverId, createdAt: Date.now() });
   }
 
+  async seedPersistedOAuthState(
+    serverId: string,
+    nonce: string,
+    ageMs = 0
+  ): Promise<void> {
+    const provider = new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      "http://example.com/oauth/callback"
+    );
+    provider.serverId = serverId;
+    await this.ctx.storage.put(provider.stateKey(nonce), {
+      nonce,
+      serverId,
+      createdAt: Date.now() - ageMs
+    });
+  }
+
   setupMockMcpConnection(
     serverId: string,
     serverName: string,

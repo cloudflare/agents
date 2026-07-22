@@ -12426,12 +12426,18 @@ export class Agent<
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
       if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
-        const liveAuthUrl = conn.options.transport.authProvider?.authUrl;
+        const authProvider = conn.options.transport.authProvider;
         const authUrl =
-          liveAuthUrl ||
-          (this._isAbsoluteHttpUrl(existingServer.auth_url)
-            ? existingServer.auth_url
-            : undefined);
+          (await this._redeemableAuthUrl(
+            existingServer.id,
+            authProvider?.authUrl,
+            authProvider
+          )) ??
+          (await this._redeemableAuthUrl(
+            existingServer.id,
+            existingServer.auth_url,
+            authProvider
+          ));
         if (authUrl) {
           return {
             id: existingServer.id,
@@ -12681,6 +12687,23 @@ export class Agent<
     }
 
     return { id, state: MCPConnectionState.READY };
+  }
+
+  private async _redeemableAuthUrl(
+    serverId: string,
+    authUrl: string | null | undefined,
+    authProvider: AgentMcpOAuthProvider | undefined
+  ): Promise<string | undefined> {
+    if (!this._isAbsoluteHttpUrl(authUrl) || !authProvider) return;
+    const state = new URL(authUrl).searchParams.get("state");
+    if (!state) return authUrl;
+
+    authProvider.serverId = serverId;
+    try {
+      return (await authProvider.checkState(state)).valid ? authUrl : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private _isAbsoluteHttpUrl(
