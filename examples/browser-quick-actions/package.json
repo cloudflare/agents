@@ -10,6 +10,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",

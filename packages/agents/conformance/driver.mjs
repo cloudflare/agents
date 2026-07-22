@@ -14,6 +14,58 @@
  * resulting redirect into the worker's real OAuth callback route.
  */
 
+// Keep this manifest explicit. run.sh compares it with every selected upstream
+// suite before starting; a newly published scenario therefore fails coverage
+// validation instead of being mistaken for a client conformance failure (or,
+// worse, passing because the referee observed incidental connection traffic).
+const SUPPORTED_SCENARIOS = [
+  "initialize",
+  "tools_call",
+  "elicitation-sep1034-client-defaults",
+  "sse-retry",
+  "request-metadata",
+  "auth/metadata-default",
+  "auth/metadata-var1",
+  "auth/metadata-var2",
+  "auth/metadata-var3",
+  "auth/basic-cimd",
+  "auth/scope-from-www-authenticate",
+  "auth/scope-from-scopes-supported",
+  "auth/scope-omitted-when-undefined",
+  "auth/scope-step-up",
+  "auth/scope-retry-limit",
+  "auth/token-endpoint-auth-basic",
+  "auth/token-endpoint-auth-post",
+  "auth/token-endpoint-auth-none",
+  "auth/pre-registration",
+  "auth/2025-03-26-oauth-metadata-backcompat",
+  "auth/2025-03-26-oauth-endpoint-fallback",
+  "auth/resource-mismatch",
+  "auth/offline-access-scope",
+  "auth/offline-access-not-supported",
+  "auth/authorization-server-migration",
+  "auth/iss-supported",
+  "auth/iss-not-advertised",
+  "auth/iss-supported-missing",
+  "auth/iss-wrong-issuer",
+  "auth/iss-unexpected",
+  "auth/iss-normalized",
+  "auth/metadata-issuer-mismatch",
+  "auth/client-credentials-jwt",
+  "auth/client-credentials-basic",
+  "auth/enterprise-managed-authorization",
+  "sep-2322-client-request-state",
+  "http-standard-headers",
+  "http-custom-headers",
+  "http-invalid-tool-headers",
+  "json-schema-ref-no-deref"
+];
+
+if (process.argv[2] === "--list-scenarios") {
+  console.log(SUPPORTED_SCENARIOS.join("\n"));
+  process.exit(0);
+}
+
 const scenario = process.env.MCP_CONFORMANCE_SCENARIO;
 const serverUrl = process.argv[2];
 const workerOrigin =
@@ -25,6 +77,17 @@ if (!scenario || !serverUrl) {
   );
   process.exit(1);
 }
+if (!SUPPORTED_SCENARIOS.includes(scenario)) {
+  console.error(`Unsupported conformance scenario: ${scenario}`);
+  process.exit(1);
+}
+
+const EXPECTED_CALLBACK_REJECTIONS = new Set([
+  "auth/iss-supported-missing",
+  "auth/iss-wrong-issuer",
+  "auth/iss-unexpected",
+  "auth/iss-normalized"
+]);
 
 // One agent instance (Durable Object) per scenario run so parallel scenarios
 // never share state.
@@ -62,22 +125,34 @@ async function authorize(authUrl) {
     );
   }
   const callbackResponse = await fetch(location, { redirect: "manual" });
-  if (callbackResponse.status >= 400) {
-    throw new Error(
-      `OAuth callback ${location} failed with ${callbackResponse.status}: ${await callbackResponse.text()}`
-    );
+  if (callbackResponse.status < 400) return false;
+
+  const body = await callbackResponse.text();
+  if (
+    EXPECTED_CALLBACK_REJECTIONS.has(scenario) &&
+    body.includes("Issuer mismatch in authorization response")
+  ) {
+    // These scenarios require rejection before token exchange. The upstream
+    // referee independently verifies that no forbidden token request occurred;
+    // a rejected callback is therefore the expected terminal client action.
+    return true;
   }
+
+  throw new Error(
+    `OAuth callback ${location} failed with ${callbackResponse.status}: ${body}`
+  );
 }
 
-// Allow a few auth round-trips: initial authorization plus scope step-ups.
-// The cap also keeps misbehaving-server scenarios (e.g. scope-retry-limit)
-// from looping forever.
-const MAX_AUTH_ROUND_TRIPS = 3;
+// Allow normal authorization plus scope step-ups, and follow one request beyond
+// the referee's permitted maximum of three. That fourth redirect is essential:
+// it lets scope-retry-limit observe and fail an over-retrying client instead of
+// letting this browser shim hide the extra authorization URL.
+const MAX_AUTH_ROUND_TRIPS = 4;
 
 try {
   let result = await run();
   for (let i = 0; i < MAX_AUTH_ROUND_TRIPS && result.status === "auth"; i++) {
-    await authorize(result.authUrl);
+    if (await authorize(result.authUrl)) process.exit(0);
     result = await run();
   }
 

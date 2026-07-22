@@ -1,4 +1,4 @@
-import { createMcpHandler } from "agents/mcp";
+import { createLegacyMcpHandler } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { codeMcpServer } from "@cloudflare/codemode/mcp";
@@ -92,7 +92,11 @@ export default {
     // /mcp — the original upstream MCP server (raw tools)
     if (url.pathname === "/mcp") {
       const upstream = createUpstreamServer();
-      return createMcpHandler(upstream, { route: "/mcp" })(request, env, ctx);
+      return createLegacyMcpHandler(upstream, { route: "/mcp" })(
+        request,
+        env,
+        ctx
+      );
     }
 
     // /codemode — the codemode-wrapped server (single code tool)
@@ -100,7 +104,7 @@ export default {
       const upstream = createUpstreamServer();
       const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
       const server = await codeMcpServer({ server: upstream, executor });
-      return createMcpHandler(server, { route: "/codemode" })(
+      return createLegacyMcpHandler(server, { route: "/codemode" })(
         request,
         env,
         ctx

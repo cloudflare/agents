@@ -1,22 +1,23 @@
 {
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mcp-elicitation-legacy-demo",
+  "main": "src/index.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "MyAgent",
-        "name": "MyAgent"
+        "name": "LegacyElicitationAgent",
+        "class_name": "LegacyElicitationAgent"
       }
     ]
   },
-  "main": "src/index.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["MyAgent"],
-      "tag": "v1"
+      "tag": "v1",
+      "new_sqlite_classes": ["LegacyElicitationAgent"]
     }
   ],
-  "name": "mcp-elicitation-demo",
   "observability": {
     "logs": {
       "enabled": true

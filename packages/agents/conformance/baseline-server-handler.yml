@@ -1,18 +1,18 @@
-# Expected failures for the createMcpHandler + WorkerTransport server
-# conformance suite.
-# Each entry documents a known gap — remove entries as gaps are fixed.
+# createLegacyMcpHandler + WorkerTransport at 2025-11-25.
 server:
-  # The pinned MCP SDK's zod → JSON Schema conversion does not preserve
-  # JSON Schema 2020-12 keywords ($schema, $defs, additionalProperties)
-  # verbatim in tools/list (SEP-1613).
+  # SDK v1's Zod conversion emits draft-07 and strips JSON Schema 2020-12
+  # $defs/additionalProperties fields.
+  # Impact if unchanged: clients cannot rely on those keywords being advertised
+  # verbatim by SDK v1 server registrations.
   - json-schema-2020-12
-  # Localhost Host/Origin validation guards local stdio/loopback servers
-  # against DNS rebinding; Workers deployments sit behind real hostnames.
-  - dns-rebinding-protection
-  # SHOULD-level warnings only for pre-2025-11-25 clients: the harness
-  # probes with protocol version 2025-03-26, and the pinned MCP SDK
-  # deliberately suppresses SEP-1699 priming events for old clients (they
-  # cannot handle empty SSE data). WorkerTransport does emit priming events
-  # for 2025-11-25 clients. Context in
-  # https://github.com/cloudflare/agents/issues/1723
+
+  # WorkerTransport emits the 2025-11-25 priming event, but alpha.9 reports no
+  # retry hint and no pending tool response after Last-Event-ID reconnection.
+  # Impact if unchanged: reconnecting SSE clients may use their own retry delay,
+  # and a disconnected in-flight response may not resume on the new stream.
   - server-sse-polling
+
+  # Workers deployments do not enable localhost-only Host/Origin middleware.
+  # Impact if unchanged: arbitrary Host/Origin rejection must be supplied by
+  # deployment routing or application middleware.
+  - dns-rebinding-protection

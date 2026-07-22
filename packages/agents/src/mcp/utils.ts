@@ -3,6 +3,7 @@ import {
   type JSONRPCMessage,
   type MessageExtraInfo,
   InitializeRequestSchema,
+  SUPPORTED_PROTOCOL_VERSIONS,
   isJSONRPCResultResponse,
   isJSONRPCNotification
 } from "@modelcontextprotocol/sdk/types.js";
@@ -28,6 +29,32 @@ export const MCP_HTTP_METHOD_HEADER = "cf-mcp-method";
 export const MCP_MESSAGE_HEADER = "cf-mcp-message";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
+
+function unsupportedProtocolVersionResponse(
+  request: Request
+): Response | undefined {
+  const protocolVersion = request.headers.get("mcp-protocol-version");
+  if (
+    protocolVersion === null ||
+    SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)
+  ) {
+    return undefined;
+  }
+
+  return Response.json(
+    {
+      error: {
+        code: -32000,
+        message:
+          `Bad Request: Unsupported protocol version: ${protocolVersion}` +
+          ` (supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")})`
+      },
+      id: null,
+      jsonrpc: "2.0"
+    },
+    { status: 400 }
+  );
+}
 
 export const createStreamingHttpHandler = (
   basePath: string,
@@ -171,6 +198,16 @@ export const createStreamingHttpHandler = (
             jsonrpc: "2.0"
           });
           return new Response(body, { status: 400 });
+        }
+
+        // McpAgent's WebSocket bridge bypasses the SDK v1 HTTP transport's
+        // protocol-version header check. Apply that one ingress validation
+        // before looking up or waking a session; initialize negotiation itself
+        // remains entirely owned by SDK v1.
+        if (!maybeInitializeRequest) {
+          const unsupportedVersion =
+            unsupportedProtocolVersionResponse(request);
+          if (unsupportedVersion) return unsupportedVersion;
         }
 
         // If an Mcp-Session-Id is returned by the server during initialization,
@@ -382,6 +419,9 @@ export const createStreamingHttpHandler = (
             { status: 400 }
           );
 
+        const unsupportedVersion = unsupportedProtocolVersionResponse(request);
+        if (unsupportedVersion) return unsupportedVersion;
+
         // Create SSE stream
         const { readable, writable } = new TransformStream();
         const writer = writable.getWriter();
@@ -471,6 +511,9 @@ export const createStreamingHttpHandler = (
           status: 200
         });
       } else if (request.method === "DELETE") {
+        const unsupportedVersion = unsupportedProtocolVersionResponse(request);
+        if (unsupportedVersion) return unsupportedVersion;
+
         const sessionId = request.headers.get("mcp-session-id");
         if (!sessionId) {
           return new Response(

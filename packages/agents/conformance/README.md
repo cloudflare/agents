@@ -1,60 +1,111 @@
 # MCP conformance tests
 
-Runs the official [MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
-(`@modelcontextprotocol/conformance`) against the MCP implementations in this
-package, the same way the
-[MCP TypeScript SDK does](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/test/conformance).
+Runs the newest published MCP referee,
+`@modelcontextprotocol/conformance@0.2.0-alpha.9`, against Agents inside
+workerd via `wrangler dev`.
 
-Everything under test runs inside workerd (via `wrangler dev`), so the
-implementations are exercised as they actually run in production — Durable
-Object storage, real routes, real transports — not a Node approximation.
+The harness is exact-pinned. All client and server lanes use this same version;
+we do not mix counts from the older stable referee with Stateless results.
 
-## What is tested
+## Truthful result model
 
-| Suite    | Implementation under test                                                               | Entry point                      |
-| -------- | --------------------------------------------------------------------------------------- | -------------------------------- |
-| `client` | `Agent` + `MCPClientManager` (+ `DurableObjectOAuthClientProvider` for OAuth scenarios) | `ConformanceHost` in `worker.ts` |
-| `server` | `McpAgent`                                                                              | `/mcp-agent` in `worker.ts`      |
-| `server` | `createMcpHandler` + `WorkerTransport` inside an `Agent`                                | `/mcp-handler` in `worker.ts`    |
+`conformance/run-suite.mjs` invokes the official referee once per official
+scenario, but owns selection and reporting because alpha.9 has two aggregation
+gaps:
 
-Both server variants register the same feature set (`everything-server.ts`,
-ported from the TypeScript SDK's conformance "everything server").
+1. its suite baseline ignores entries for scenarios that were not selected;
+2. its client suite can report a scenario as passing even when the client
+   process exits non-zero after the observed wire assertions.
 
-## How it works
+Each lane reports four disjoint states:
 
-```
-conformance CLI ──spawns per scenario──▶ driver.mjs (Node, plays "browser")
-                                            │ POST /agents/conformance-host/<uuid>/run
-                                            ▼
-wrangler dev ──▶ ConformanceHost (Agent DO) ──addMcpServer()──▶ conformance test server
-                       ▲ real OAuth callback route ◀── driver follows authUrl redirect
-```
+- `✓ clean` — no failed/warning assertions and the client process exited
+  successfully; any non-applicable `SKIPPED` assertions remain counted in the
+  check totals;
+- `~ expected failure` — the scenario ran and failed exactly as documented in
+  that lane's baseline;
+- `✗ unexpected failure` — a regression not present in the baseline;
+- `- not exercised` — the upstream referee selected the scenario but emitted
+  only `SKIPPED` assertions.
 
-- **Client suite**: the conformance CLI starts a reference MCP server per
-  scenario and spawns `driver.mjs` to connect to it. The driver forwards the
-  scenario to a fresh `ConformanceHost` agent instance, which connects out via
-  `addMcpServer()`. For OAuth scenarios the worker returns the authorization
-  URL and the driver simulates the user's browser: it follows the redirect
-  chain into the worker's real `/callback` route, then resumes the scenario.
-- **Server suites**: the conformance CLI acts as a reference MCP client and
-  talks directly to the two server endpoints on the worker.
+A baseline entry not selected by its full lane is an error. New upstream
+scenarios missing from the driver manifest are also an error. Expected failures
+are therefore neither ghost entries nor hidden passes.
+
+## Client lanes
+
+Every lane tests the same Agents `MCPClientManager` backed by the SDK v2 client.
+The Legacy lanes prove that the SDK v2 client still interoperates with older
+servers; compatibility is not inferred from the Stateless lane.
+
+| Command                              | Server protocol/referee selection | Scenarios | Current result                 |
+| ------------------------------------ | --------------------------------- | --------- | ------------------------------ |
+| `test:conformance:client:stateless`  | `2026-07-28`                      | 32        | 27 clean / 5 expected failures |
+| `test:conformance:client:2025-11-25` | `2025-11-25`                      | 18        | 16 clean / 2 expected failures |
+| `test:conformance:client:2025-06-18` | `2025-06-18`                      | 5         | 5 clean                        |
+| `test:conformance:client:2025-03-26` | `2025-03-26` OAuth/backcompat     | 2         | 2 clean                        |
+| `test:conformance:client:extensions` | off-timeline optional extensions  | 3         | 3 expected failures            |
+
+The driver has an explicit upstream-scenario manifest and performs the same
+scenario operations as the referee's reference client while routing MCP calls
+through the real Agents manager. Scenario-specific behavior is driver behavior,
+not a production-code branch.
+
+## Server lanes
+
+| Command                                         | Protocol/lifecycle              | Endpoint              | Current result                         |
+| ----------------------------------------------- | ------------------------------- | --------------------- | -------------------------------------- |
+| `test:conformance:server:handler`               | Stateless (`2026-07-28`)        | `/mcp-handler`        | 39 clean / 1 expected referee mismatch |
+| `test:conformance:server:handler:legacy-compat` | Legacy compatibility, stateless | `/mcp-handler`        | 26 clean / 6 expected failures         |
+| `test:conformance:server:handler:legacy`        | Legacy, sessionful              | `/mcp-handler-legacy` | 29 clean / 3 expected failures         |
+| `test:conformance:server:mcp-agent`             | Legacy, sessionful              | `/mcp-agent`          | 29 clean / 3 expected failures         |
+| `test:conformance:server:handler:extensions`    | Stateless optional tasks        | `/mcp-handler`        | 9 expected failures / 1 not exercised  |
+
+The Legacy compatibility lane runs all 32 applicable scenarios, not alpha.9's
+smaller `active` subset. The two sessionful Legacy lanes remain because SDK v1
+server behavior is intentionally retained while consumers migrate.
+
+## Baselines and impact
+
+Each lane has its own baseline. Comments beside every entry state the practical
+impact of leaving the behavior unchanged. A consolidated release-impact review
+is in [`KNOWN_FAILURES.md`](./KNOWN_FAILURES.md).
+
+Core protocol and optional extensions are separate. Unsupported optional tasks
+never appear in the Stateless core baseline or reduce its stated clean count.
 
 ## Running locally
 
 ```sh
 cd packages/agents
-pnpm run test:conformance                    # all three suites
-pnpm run test:conformance:client             # client only
-pnpm run test:conformance:server:mcp-agent   # McpAgent server only
-pnpm run test:conformance:server:handler     # createMcpHandler server only
 
-# Single scenario:
-bash conformance/run.sh client --scenario initialize
-bash conformance/run.sh server-mcp-agent --scenario tools-call-simple-text
+# Everything, serially
+pnpm run test:conformance
+
+# Client protocol matrix
+pnpm run test:conformance:client:stateless
+pnpm run test:conformance:client:2025-11-25
+pnpm run test:conformance:client:2025-06-18
+pnpm run test:conformance:client:2025-03-26
+pnpm run test:conformance:client:extensions
+
+# Server lifecycle matrix
+pnpm run test:conformance:server:handler
+pnpm run test:conformance:server:handler:legacy-compat
+pnpm run test:conformance:server:handler:legacy
+pnpm run test:conformance:server:mcp-agent
+pnpm run test:conformance:server:handler:extensions
+
+# Focus one scenario (uses the lane baseline but relaxes full-lane coverage)
+bash conformance/run.sh client-stateless --scenario sep-2322-client-request-state
+bash conformance/run.sh server-handler --scenario server-stateless
 ```
 
-## Baselines (expected failures)
+The runner refuses to use an occupied Worker or inspector port and tears down
+the complete Wrangler/workerd process tree on exit.
 
-Known gaps are recorded in `baseline-*.yml` so CI stays green while still
-catching regressions and new failures. Each entry documents why the scenario
-fails — remove entries as the gaps get fixed.
+## Vendored Stateless server fixture
+
+The Stateless fixture is separate from the frozen SDK v1 fixture. Its exact source
+commit, source hash, local workerd adaptation, and update checker are documented
+in [`vendor/README.md`](./vendor/README.md).

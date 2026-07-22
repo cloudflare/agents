@@ -10,6 +10,7 @@ type RecordedRequest = {
   url: string;
   sessionId: string | null;
   accept: string | null;
+  body?: string;
 };
 
 function createManagerStorage() {
@@ -101,7 +102,8 @@ function createRecordedFetch(options?: { rejectSessionId?: string }): {
       method: request.method,
       url: request.url,
       sessionId,
-      accept: request.headers.get("accept")
+      accept: request.headers.get("accept"),
+      body: request.method === "POST" ? await request.clone().text() : undefined
     });
 
     if (sessionId === options?.rejectSessionId) {
@@ -314,7 +316,11 @@ describe("MCP streamable-http session lifecycle integration", () => {
       await manager1.registerServer(serverId, {
         url: "http://example.com/mcp",
         name: "Stale Session Server",
-        transport: { type: "streamable-http", sessionId: staleSessionId }
+        transport: {
+          type: "streamable-http",
+          sessionId: staleSessionId,
+          protocolVersion: "2025-11-25"
+        }
       });
 
       manager2 = new MCPClientManager("test-client", "1.0.0", { storage });
@@ -332,11 +338,15 @@ describe("MCP streamable-http session lifecycle integration", () => {
           (request) => request.sessionId === staleSessionId
         )
       ).toBe(true);
-      expect(
-        restoredFetch.requests.filter(
-          (request) => request.method === "POST" && !request.sessionId
-        )
-      ).toHaveLength(1);
+      const sessionlessInitializations = restoredFetch.requests.filter(
+        (request) =>
+          request.method === "POST" &&
+          !request.sessionId &&
+          request.body &&
+          (JSON.parse(request.body) as { method?: string }).method ===
+            "initialize"
+      );
+      expect(sessionlessInitializations).toHaveLength(1);
 
       const options = JSON.parse(rows.get(serverId)?.server_options ?? "{}");
       expect(options.transport.sessionId).toEqual(expect.any(String));

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { MCPClientManager } from "../../mcp/client";
 import {
   MCPClientConnection,
@@ -7,7 +7,7 @@ import {
 } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/client";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -61,6 +61,16 @@ function createMockAuthProvider(
     redirectToAuthorization: vi.fn(),
     saveCodeVerifier: vi.fn(),
     codeVerifier: vi.fn(),
+    saveDiscoveryState: vi.fn(),
+    discoveryState: vi.fn().mockReturnValue({
+      authorizationServerUrl: "http://test.com",
+      authorizationServerMetadata: {
+        issuer: "http://test.com",
+        authorization_endpoint: "http://test.com/authorize",
+        token_endpoint: "http://test.com/token",
+        response_types_supported: ["code"]
+      }
+    }),
     async checkState(
       state: string
     ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
@@ -533,9 +543,19 @@ describe("MCPClientManager OAuth Integration", () => {
 
       expect(result.serverId).toBe(serverId);
       expect(result.authSuccess).toBe(true);
-      expect(completeAuthSpy).toHaveBeenCalledWith(authCode, {
-        alreadyAccepted: true
-      });
+      expect(completeAuthSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          get: expect.any(Function)
+        }),
+        { alreadyAccepted: true }
+      );
+      const callbackParams = completeAuthSpy.mock.calls[0]?.[0];
+      expect(callbackParams).toBeInstanceOf(URLSearchParams);
+      expect(
+        callbackParams instanceof URLSearchParams
+          ? callbackParams.get("code")
+          : undefined
+      ).toBe(authCode);
       // Verify auth provider has correct serverId and preserved clientId
       expect(connection.options.transport.authProvider?.serverId).toBe(
         serverId
@@ -736,9 +756,13 @@ describe("MCPClientManager OAuth Integration", () => {
 
       const result = await manager.handleCallbackRequest(callbackRequest);
       expect(result.authSuccess).toBe(true);
-      expect(completeAuthSpy).toHaveBeenCalledWith("test", {
-        alreadyAccepted: true
-      });
+      expect(completeAuthSpy).toHaveBeenCalledWith(
+        expect.any(URLSearchParams),
+        { alreadyAccepted: true }
+      );
+      expect(completeAuthSpy.mock.calls[0]?.[0]).toEqual(
+        new URLSearchParams({ code: "test", state })
+      );
       expect(connection.connectionError).toBe(null);
     });
 
@@ -850,9 +874,13 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       expect(result.authSuccess).toBe(true);
-      expect(completeAuthSpy).toHaveBeenCalledWith("auth-code", {
-        alreadyAccepted: true
-      });
+      expect(completeAuthSpy).toHaveBeenCalledWith(
+        expect.any(URLSearchParams),
+        { alreadyAccepted: true }
+      );
+      expect(completeAuthSpy.mock.calls[0]?.[0]).toEqual(
+        new URLSearchParams({ code: "auth-code", state })
+      );
     });
   });
 
@@ -1247,7 +1275,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const state = stateStorage.createState(serverId);
       const xssPayload = "</script><img src=x onerror=alert(1)>";
       const callbackRequest = new Request(
-        `${callbackUrl}?error=access_denied&error_description=${encodeURIComponent(xssPayload)}&state=${state}`
+        `${callbackUrl}?error=access_denied&error_description=${encodeURIComponent(
+          xssPayload
+        )}&state=${state}`
       );
       const result = await manager.handleCallbackRequest(callbackRequest);
 
@@ -2103,9 +2133,15 @@ describe("MCPClientManager OAuth Integration", () => {
       conn.init = vi.fn().mockImplementation(async () => {
         conn.connectionState = "connected";
       });
-      Object.defineProperty(conn, "sessionId", {
-        configurable: true,
-        get: () => "persisted-session-id"
+      Object.defineProperties(conn, {
+        sessionId: {
+          configurable: true,
+          get: () => "persisted-session-id"
+        },
+        protocolVersion: {
+          configurable: true,
+          get: () => "2025-11-25"
+        }
       });
 
       const result = await manager.connectToServer(id);
@@ -2115,7 +2151,10 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(server).toBeDefined();
       expect(server?.server_options).not.toBeNull();
       const serverOptions = JSON.parse(server?.server_options ?? "{}");
-      expect(serverOptions.transport?.sessionId).toBe("persisted-session-id");
+      expect(serverOptions.transport).toMatchObject({
+        sessionId: "persisted-session-id",
+        protocolVersion: "2025-11-25"
+      });
     });
 
     it("should terminate streamable-http sessions before closing a connection", async () => {
@@ -2805,7 +2844,6 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "test_tool",
           arguments: { message: "test" }
         },
-        undefined,
         undefined
       );
     });
@@ -2885,7 +2923,6 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "tool_one",
           arguments: {}
         },
-        undefined,
         undefined
       );
 
@@ -2895,7 +2932,6 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "tool_two",
           arguments: {}
         },
-        undefined,
         undefined
       );
     });
@@ -3139,7 +3175,6 @@ describe("MCPClientManager OAuth Integration", () => {
         expect(oldConnection.client.callTool).not.toHaveBeenCalled();
         expect(currentConnection.client.callTool).toHaveBeenCalledWith(
           { name: "route_tool", arguments: { value: "current" } },
-          undefined,
           undefined
         );
       });
@@ -3170,7 +3205,6 @@ describe("MCPClientManager OAuth Integration", () => {
         await afterRename[newKey].execute({ value: "renamed" });
         expect(connection.client.callTool).toHaveBeenCalledWith(
           { name: "renamed_tool", arguments: { value: "renamed" } },
-          undefined,
           undefined
         );
       });
@@ -3451,7 +3485,6 @@ describe("MCPClientManager OAuth Integration", () => {
           const conn1 = manager.mcpConnections["server-1"];
           expect(conn1.client.callTool).toHaveBeenCalledWith(
             { name: "create_charge", arguments: { input: "test" } },
-            undefined,
             undefined
           );
 
@@ -4282,6 +4315,46 @@ describe("MCPClientManager OAuth Integration", () => {
   });
 
   describe("discoverIfConnected()", () => {
+    it("should persist a new auth URL when discovery requires OAuth", async () => {
+      const serverId = "discovery-oauth-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const authUrl = "https://auth-two.example.com/authorize";
+      saveServerToMock({
+        id: serverId,
+        name: "Migrating OAuth Server",
+        server_url: "http://example.com/mcp",
+        callback_url: callbackUrl,
+        client_id: "client-two",
+        auth_url: null,
+        server_options: null
+      });
+
+      const authProvider = createMockAuthProvider(createMockStateStorage());
+      authProvider.serverId = serverId;
+      authProvider.clientId = "client-two";
+      authProvider.authUrl = authUrl;
+      const connection = new MCPClientConnection(
+        new URL("http://example.com/mcp"),
+        { name: "test", version: "1.0" },
+        {
+          transport: { type: "streamable-http", authProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "connected";
+      connection.discover = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "authenticating";
+        return { success: false, error: "Unauthorized" };
+      });
+      manager.mcpConnections[serverId] = connection;
+
+      const result = await manager.discoverIfConnected(serverId);
+
+      expect(result?.state).toBe("authenticating");
+      expect(mockStorageData.get(serverId)?.auth_url).toBe(authUrl);
+      expect(mockStorageData.get(serverId)?.client_id).toBe("client-two");
+    });
+
     it("should skip discovery when connection not found", async () => {
       const observabilitySpy = vi.fn();
       manager.onObservabilityEvent(observabilitySpy);

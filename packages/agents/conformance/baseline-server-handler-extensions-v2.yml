@@ -1,0 +1,20 @@
+# Optional Stateless server extensions. These run without --spec-version because
+# extensions are deliberately off the core protocol timeline.
+server:
+  # @modelcontextprotocol/server@2.0.0-beta.5 does not implement SEP-2663's
+  # tasks extension or advertise io.modelcontextprotocol/tasks.
+  # Impact if unchanged: tools execute synchronously/MRTR-only; callers cannot
+  # create, inspect, update, or cancel durable MCP tasks through this handler.
+  - tasks-lifecycle
+  - tasks-capability-negotiation
+  - tasks-wire-fields
+  - tasks-request-state-removal
+  - tasks-mrtr-input
+  - tasks-request-headers
+  - tasks-dispatch-and-envelope
+  - tasks-required-task-error
+  - tasks-mrtr-composition
+
+# tasks-status-notifications also runs, but alpha.9 marks every assertion
+# SKIPPED pending a subscriptions/listen referee rewrite. run-suite.mjs reports
+# it as "not exercised" rather than as a pass or a baselined failure.

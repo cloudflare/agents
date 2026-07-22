@@ -3,15 +3,15 @@ import { createExecutionContext } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { JSONRPCError } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import { createMcpHandler } from "../../mcp/handler";
+import { createLegacyMcpHandler } from "../../mcp/handler-compat";
 import { z } from "zod";
 
 /**
- * Tests for createMcpHandler
+ * Tests for createLegacyMcpHandler
  * The handler primarily passes options to WorkerTransport and handles routing
  * Detailed CORS and protocol version behavior is tested in worker-transport.test.ts
  */
-describe("createMcpHandler", () => {
+describe("createLegacyMcpHandler", () => {
   const createTestServer = () => {
     const server = new McpServer(
       { name: "test-server", version: "1.0.0" },
@@ -35,7 +35,7 @@ describe("createMcpHandler", () => {
   describe("Route matching", () => {
     it("should only handle requests matching the configured route", async () => {
       const server = createTestServer();
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/custom-mcp"
       });
 
@@ -58,7 +58,7 @@ describe("createMcpHandler", () => {
 
     it("should use default route /mcp when not specified", async () => {
       const server = createTestServer();
-      const handler = createMcpHandler(server);
+      const handler = createLegacyMcpHandler(server);
 
       const ctx = createExecutionContext();
       const request = new Request("http://example.com/mcp", {
@@ -74,7 +74,7 @@ describe("createMcpHandler", () => {
   describe("Options passing - verification via behavior", () => {
     it("should apply custom CORS options", async () => {
       const server = createTestServer();
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         corsOptions: {
           origin: "https://example.com",
@@ -102,7 +102,7 @@ describe("createMcpHandler", () => {
   describe("Integration - Basic functionality", () => {
     it("should handle initialization request end-to-end", async () => {
       const server = createTestServer();
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp"
       });
 
@@ -141,7 +141,7 @@ describe("createMcpHandler", () => {
         corsOptions: { origin: "https://custom-transport.com" }
       });
 
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         transport: customTransport
       });
@@ -168,7 +168,7 @@ describe("createMcpHandler", () => {
       await server.connect(customTransport);
       expect(customTransport.started).toBe(true);
 
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         transport: customTransport
       });
@@ -195,7 +195,7 @@ describe("createMcpHandler", () => {
         return "custom-session-id";
       };
 
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         sessionIdGenerator: customSessionIdGenerator
       });
@@ -230,7 +230,7 @@ describe("createMcpHandler", () => {
       const server = createTestServer();
       let capturedSessionId: string | undefined;
 
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         sessionIdGenerator: () => "callback-test-session",
         onsessioninitialized: (sessionId: string) => {
@@ -266,7 +266,7 @@ describe("createMcpHandler", () => {
 
     it("should pass enableJsonResponse to transport", async () => {
       const server = createTestServer();
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         enableJsonResponse: true
       });
@@ -303,7 +303,7 @@ describe("createMcpHandler", () => {
         set: async () => {}
       };
 
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         storage: mockStorage
       });
@@ -334,7 +334,7 @@ describe("createMcpHandler", () => {
 
     it("should pass SDK transport options through to WorkerTransport", async () => {
       const server = createTestServer();
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         enableDnsRebindingProtection: true,
         allowedHosts: ["allowed.example.com"]
@@ -368,7 +368,7 @@ describe("createMcpHandler", () => {
 
     it("should not pass handler-specific options to transport", async () => {
       const server = createTestServer();
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/custom-route",
         authContext: { props: { userId: "123" } },
         corsOptions: { origin: "https://example.com" }
@@ -392,7 +392,7 @@ describe("createMcpHandler", () => {
     it("should throw when trying to reuse a connected McpServer across requests", async () => {
       // This tests the CVE fix - reusing a global server instance should fail
       const server = createTestServer();
-      const handler = createMcpHandler(server);
+      const handler = createLegacyMcpHandler(server);
 
       const ctx = createExecutionContext();
       const createInitRequest = () =>
@@ -449,7 +449,7 @@ describe("createMcpHandler", () => {
       // Simulate correct pattern: new server per request
       for (let i = 0; i < 3; i++) {
         const server = createTestServer();
-        const handler = createMcpHandler(server);
+        const handler = createLegacyMcpHandler(server);
         const response = await handler(createInitRequest(), env, ctx);
         expect(response.status).toBe(200);
       }
@@ -467,7 +467,7 @@ describe("createMcpHandler", () => {
         throw new Error("Transport error");
       };
 
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         transport: errorTransport
       });
@@ -512,7 +512,7 @@ describe("createMcpHandler", () => {
         throw "String error";
       };
 
-      const handler = createMcpHandler(server, {
+      const handler = createLegacyMcpHandler(server, {
         route: "/mcp",
         transport: errorTransport
       });

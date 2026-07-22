@@ -1,100 +1,148 @@
 #!/usr/bin/env bash
-# Runs the MCP conformance suite against the implementations in this package.
-#
-# 1. Starts the conformance worker (workerd via wrangler dev) hosting:
-#      - the MCP client under test (Agent + MCPClientManager)
-#      - two MCP servers under test (McpAgent at /mcp-agent,
-#        createMcpHandler + WorkerTransport at /mcp-handler)
-# 2. Runs the @modelcontextprotocol/conformance CLI in the requested mode.
-#
-# Usage:
-#   conformance/run.sh client          [extra conformance CLI args]
-#   conformance/run.sh server-mcp-agent [extra conformance CLI args]
-#   conformance/run.sh server-handler   [extra conformance CLI args]
+# Runs the newest published MCP conformance referee (alpha.9) against Agents
+# implementations inside workerd. Protocol revisions and optional extensions
+# are separate lanes; run-suite.mjs makes baseline coverage fail-closed and
+# reports clean, expected-failure, unexpected-failure, and not-exercised states.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-MODE="${1:?Usage: run.sh <client|server-mcp-agent|server-handler> [conformance CLI args]}"
+MODE="${1:?Usage: run.sh <client-*|server-*> [--scenario name]}"
 shift
 
 PORT="${CONFORMANCE_WORKER_PORT:-8788}"
+INSPECTOR_PORT="${CONFORMANCE_INSPECTOR_PORT:-$((PORT + 10000))}"
+WORKER_ORIGIN="http://127.0.0.1:$PORT"
+CONFORMANCE="node_modules/@modelcontextprotocol/conformance-v2/dist/index.js"
+DRIVER="conformance/driver.mjs"
 
-pnpm exec wrangler dev --config conformance/wrangler.jsonc --port "$PORT" --ip 127.0.0.1 &
+if (: > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  echo "Conformance port $PORT is already in use; refusing to test against a stale worker" >&2
+  exit 1
+fi
+if (: > "/dev/tcp/127.0.0.1/$INSPECTOR_PORT") 2>/dev/null; then
+  echo "Conformance inspector port $INSPECTOR_PORT is already in use" >&2
+  exit 1
+fi
+
+PERSIST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agents-mcp-conformance.XXXXXX")"
+
+pnpm exec wrangler dev \
+  --config conformance/wrangler.jsonc \
+  --port "$PORT" \
+  --inspector-port "$INSPECTOR_PORT" \
+  --persist-to "$PERSIST_DIR" \
+  --ip 127.0.0.1 &
 WRANGLER_PID=$!
-trap 'kill "$WRANGLER_PID" 2>/dev/null || true' EXIT
+
+kill_process_tree() {
+  local parent="$1" child
+  while read -r child; do
+    [ -n "$child" ] && kill_process_tree "$child"
+  done < <(pgrep -P "$parent" 2>/dev/null || true)
+  kill "$parent" 2>/dev/null || true
+}
+
+cleanup() {
+  kill_process_tree "$WRANGLER_PID"
+  wait "$WRANGLER_PID" 2>/dev/null || true
+  rm -rf "$PERSIST_DIR"
+}
+trap cleanup EXIT
 
 echo "Waiting for conformance worker on port $PORT..."
+ready=0
 for _ in $(seq 1 60); do
-  if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
+  if curl -s -o /dev/null "$WORKER_ORIGIN/"; then
+    ready=1
     break
   fi
   sleep 1
 done
-
-if ! curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
+if [ "$ready" -ne 1 ]; then
   echo "Conformance worker failed to start" >&2
   exit 1
 fi
 
-# Run every server scenario as its own conformance invocation. `--suite`
-# runs scenarios in parallel against the worker, which makes the timing-
-# sensitive SSE scenarios (server-sse-polling) record different results on
-# fast vs slow machines; sequential single-scenario runs are deterministic.
-run_server_scenarios() {
-  local url="$1" baseline="$2"
+run_client() {
+  local version="$1" baseline="$2"
   shift 2
+  CONFORMANCE_WORKER_ORIGIN="$WORKER_ORIGIN" node conformance/run-suite.mjs client \
+    --conformance "$CONFORMANCE" \
+    --baseline "$baseline" \
+    --spec-version "$version" \
+    --driver "$DRIVER" \
+    --concurrency 6 \
+    --client-timeout 90000 \
+    --scenario-timeout 150000 \
+    "$@"
+}
 
-  if [ "$#" -gt 0 ]; then
-    pnpm exec conformance server --url "$url" --expected-failures "$baseline" "$@"
-    return
-  fi
-
-  local scenarios failed=0
-  scenarios=$(pnpm exec conformance list 2>/dev/null |
-    awk '/^Server scenarios/{f=1;next} /^Client scenarios/{f=0} f && /^  - /{print $2}')
-  if [ -z "$scenarios" ]; then
-    echo "Failed to list server scenarios" >&2
-    return 1
-  fi
-
-  local out
-  out=$(mktemp)
-  for scenario in $scenarios; do
-    if pnpm exec conformance server --url "$url" --scenario "$scenario" \
-      --expected-failures "$baseline" > "$out" 2>&1; then
-      echo "✓ $scenario"
-    else
-      echo "✗ $scenario"
-      tail -30 "$out"
-      failed=1
-    fi
-  done
-  rm -f "$out"
-  return "$failed"
+run_server() {
+  local url="$1" version="$2" baseline="$3"
+  shift 3
+  node conformance/run-suite.mjs server \
+    --conformance "$CONFORMANCE" \
+    --baseline "$baseline" \
+    --url "$url" \
+    --spec-version "$version" \
+    --concurrency 1 \
+    --scenario-timeout 150000 \
+    "$@"
 }
 
 case "$MODE" in
-  client)
-    # --timeout: scenarios that exercise SSE reconnection legitimately take
-    # >30s (default) on slow CI runners once the SDK's retry interval and
-    # connection backoff stack up.
-    CONFORMANCE_WORKER_ORIGIN="http://127.0.0.1:$PORT" pnpm exec conformance client \
-      --command "node conformance/driver.mjs" \
-      --expected-failures conformance/baseline-client.yml \
-      --timeout 90000 \
+  client-stateless)
+    run_client 2026-07-28 conformance/baseline-client-2026-07-28.yml "$@"
+    ;;
+  client-2025-11-25)
+    run_client 2025-11-25 conformance/baseline-client-2025-11-25.yml "$@"
+    ;;
+  client-2025-06-18)
+    run_client 2025-06-18 conformance/baseline-client-2025-06-18.yml "$@"
+    ;;
+  client-2025-03-26)
+    run_client 2025-03-26 conformance/baseline-client-2025-03-26.yml "$@"
+    ;;
+  client-extensions)
+    CONFORMANCE_WORKER_ORIGIN="$WORKER_ORIGIN" node conformance/run-suite.mjs client \
+      --conformance "$CONFORMANCE" \
+      --baseline conformance/baseline-client-extensions.yml \
+      --suite extensions \
+      --driver "$DRIVER" \
+      --concurrency 3 \
+      --client-timeout 90000 \
+      --scenario-timeout 150000 \
       "$@"
     ;;
-  server-mcp-agent)
-    run_server_scenarios "http://127.0.0.1:$PORT/mcp-agent" \
-      conformance/baseline-server-mcp-agent.yml "$@"
-    ;;
   server-handler)
-    run_server_scenarios "http://127.0.0.1:$PORT/mcp-handler" \
+    run_server "$WORKER_ORIGIN/mcp-handler" 2026-07-28 \
+      conformance/baseline-server-handler-v2.yml "$@"
+    ;;
+  server-handler-legacy-compat)
+    run_server "$WORKER_ORIGIN/mcp-handler" 2025-11-25 \
+      conformance/baseline-server-handler-legacy-compat.yml "$@"
+    ;;
+  server-handler-legacy)
+    run_server "$WORKER_ORIGIN/mcp-handler-legacy" 2025-11-25 \
       conformance/baseline-server-handler.yml "$@"
     ;;
+  server-mcp-agent)
+    run_server "$WORKER_ORIGIN/mcp-agent" 2025-11-25 \
+      conformance/baseline-server-mcp-agent.yml "$@"
+    ;;
+  server-handler-extensions)
+    node conformance/run-suite.mjs server \
+      --conformance "$CONFORMANCE" \
+      --baseline conformance/baseline-server-handler-extensions-v2.yml \
+      --url "$WORKER_ORIGIN/mcp-handler" \
+      --suite extensions \
+      --concurrency 1 \
+      --scenario-timeout 150000 \
+      "$@"
+    ;;
   *)
-    echo "Unknown mode: $MODE (expected client, server-mcp-agent, or server-handler)" >&2
+    echo "Unknown conformance mode: $MODE" >&2
     exit 1
     ;;
 esac

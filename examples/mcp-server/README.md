@@ -1,20 +1,45 @@
-# MCP Server Example (Raw Transport)
+# Minimal MCP server on Cloudflare Workers
 
-This example demonstrates how to create an unauthenticated stateless MCP server using `WebStandardStreamableHTTPServerTransport` from the `@modelcontextprotocol/sdk` directly, **without** the Agents SDK helpers.
+A stateless MCP server using the MCP SDK directly, without the Agents SDK. One factory and one handler serve Stateless clients and Legacy compatibility requests.
 
-This gives you full control over the transport layer. If you want a simpler approach, see [`mcp-worker`](../mcp-worker) which uses `createMcpHandler()` from the Agents SDK.
+```ts
+import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { z } from "zod";
 
-## Usage
+function createServer() {
+  const server = new McpServer({
+    name: "hello-server",
+    version: "1.0.0"
+  });
 
-```bash
+  server.registerTool(
+    "hello",
+    {
+      description: "Returns a greeting",
+      inputSchema: z.object({ name: z.string().optional() })
+    },
+    async ({ name }) => ({
+      content: [{ type: "text", text: `Hello, ${name ?? "World"}!` }]
+    })
+  );
+
+  return server;
+}
+
+export default createMcpHandler(createServer);
+```
+
+`createMcpHandler` creates a fresh server for every request. Its default `legacy: "stateless"` behavior provides 2025 wire compatibility without sessions, Durable Objects, storage, or a second tool definition.
+
+## Run
+
+```sh
 npm install
 npm run dev
 ```
 
-## Testing
+Connect an MCP client or the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) to `http://localhost:8787/mcp`.
 
-You can test the MCP server using the MCP Inspector or any MCP client that supports the `streamable-http` transport.
+Use `createMcpHandler(createServer, { legacy: "reject" })` instead if the endpoint should accept only MCP `2026-07-28`.
 
-## Adding State
-
-To create a stateful MCP server, use `McpAgent` with a Durable Object. See the [`mcp`](../mcp) example for a stateful server, or [`mcp-elicitation`](../mcp-elicitation) for stateful sessions with user input elicitation.
+For Agents-owned route matching, CORS, OAuth context bridging, and temporary SDK v1 application compatibility, see [`mcp-worker`](../mcp-worker/).

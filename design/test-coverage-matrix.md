@@ -71,6 +71,16 @@ Legend: ✅ covered · ⚠️ partial / indirect · — none · 🚫 gated (opt-
 | Think fetch tool (allowlist, SSRF, limits, redirects, auto-merge)        |      ✅       |                                            ✅                                             |                  ✅ `think/src/tests/fetch-tools.test.ts` (+ `agents/fetch-tools.ts` fixture)                   |                                                                                             —                                                                                             |                                   —                                    |                        —                         |            —             |
 | Shared-engine genericity (pi / tanstack adapters)                        |      ✅       |                                            ✅                                             |                                                       ✅                                                        |                                                                                             —                                                                                             | ✅ `experimental/pi-recovery`, `tanstack-recovery` (workers-ai leg 🚫) |                        —                         |     ✅ tanstack leg      |
 
+### MCP coverage detail
+
+MCP has a dedicated official-referee matrix outside the layer table. It covers
+Stateless client and server behavior, Legacy compatibility, the Legacy handler,
+and `McpAgent`. `packages/agents/src/tests/mcp/v2-lifecycle.test.ts` also walks
+discovery or initialization, catalogs, a tool call, a prompt, a resource, and
+close through both the Stateless and Legacy compatibility client paths. Refer
+to [`packages/agents/conformance/README.md`](../packages/agents/conformance/README.md)
+for scenario counts and expected-failure rationale.
+
 ### Accepted coverage gaps
 
 - **Chat recovery orphan-persist (c) tool-approval dedup:** no real-SIGKILL L4

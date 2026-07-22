@@ -1,58 +1,33 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 
-const createServer = () => {
+function createServer() {
   const server = new McpServer({
-    name: "Hello MCP Server",
+    name: "hello-server",
     version: "1.0.0"
   });
 
   server.registerTool(
     "hello",
     {
-      description: "Returns a greeting message",
-      inputSchema: { name: z.string().optional() }
+      description: "Returns a greeting",
+      inputSchema: z.object({
+        name: z.string().optional()
+      })
     },
-    async ({ name }) => {
-      return {
-        content: [
-          {
-            text: `Hello, ${name ?? "World"}!`,
-            type: "text"
-          }
-        ]
-      };
-    }
+    async ({ name }) => ({
+      content: [
+        {
+          type: "text",
+          text: `Hello, ${name ?? "World"}!`
+        }
+      ]
+    })
   );
 
   return server;
-};
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "Content-Type, Accept, mcp-session-id, mcp-protocol-version",
-  "Access-Control-Expose-Headers": "mcp-session-id",
-  "Access-Control-Max-Age": "86400"
-};
-
-function withCors(response: Response): Response {
-  for (const [key, value] of Object.entries(corsHeaders)) {
-    response.headers.set(key, value);
-  }
-  return response;
 }
 
-export default {
-  fetch: async (request: Request, _env: Env, _ctx: ExecutionContext) => {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
-    const transport = new WebStandardStreamableHTTPServerTransport();
-    const server = createServer();
-    server.connect(transport);
-    return withCors(await transport.handleRequest(request));
-  }
-};
+// A fresh server is created for each request. By default, the same handler
+// serves Stateless clients and the Legacy compatibility lane.
+export default createMcpHandler(createServer);

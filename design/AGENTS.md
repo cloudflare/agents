@@ -98,6 +98,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-workers-ai-gateway-merge.md`       | RFC        | Merge ai-gateway-provider into workers-ai-provider — registry routing, universal run API, resume (proposed)                                                                     |
 | `rfc-coding-agent.md`                   | RFC        | `CodingAgent` — new `@cloudflare/coding-agent` package (extends AIChatAgent), CLI coding agents in Sandbox, pluggable engine (Cli/Harness), two-lifecycle durability (proposed) |
 | `test-coverage-matrix.md`               | design doc | Feature × test-layer coverage rollup, CI→layer mapping, skipped-test debt, nightly hygiene                                                                                      |
+| `mcp.md`                                | design doc | Stateless, Legacy compatibility, Legacy sessionful, client, package boundary, and conformance architecture                                                                      |
 
 ## Relationship to `/docs`
 

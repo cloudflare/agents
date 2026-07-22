@@ -12,7 +12,8 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
 | `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
-| `agents/mcp`                 | `src/mcp/index.ts`           | `McpAgent` base class for building MCP servers                               |
+| `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
+| `agents/mcp/server`          | `src/mcp/server.ts`          | Isolated Agents wrapper for SDK v2 stateless servers                         |
 | `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
@@ -55,9 +56,14 @@ src/
     ...                 # Sanitization, tool-state, continuation, etc.
 
   mcp/                  # MCP (Model Context Protocol) subsystem
-    index.ts            # McpAgent base class
-    handler.ts          # HTTP/SSE/WebSocket MCP transport handler
-    transport.ts        # SSE + Streamable HTTP transports
+    index.ts            # Compatibility barrel; public legacy imports stay stable
+    server.ts           # Isolated SDK v2 stateless server entry
+    handler-stateless.ts # SDK v2 Worker wrapper (Stateless + Legacy compatibility)
+    handler-legacy-compat.ts # SDK v2 transport for Legacy compatibility
+    handler-compat.ts   # v1/v2 compatibility overload retained on agents/mcp
+    legacy-agent.ts     # Deprecated SDK v1 McpAgent implementation
+    handler-legacy.ts   # Explicit SDK v1 handler
+    transport.ts        # McpAgent SSE + Streamable HTTP transports
     client.ts           # MCPClientManager for connecting to remote MCP servers
     client-connection.ts
     client-storage.ts
@@ -219,7 +225,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - **RPC is reflection-based** — public methods on Agent subclasses are automatically callable from clients via `agent.call("methodName", ...args)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
 - **Scheduling uses cron-schedule** — `this.schedule()` accepts delays, Dates, or cron strings. Schedules persist in SQLite and survive hibernation.
-- **MCP has two sides** — `McpAgent` (in `mcp/index.ts`) lets you _build_ an MCP server. `MCPClientManager` (in `mcp/client.ts`) lets an Agent _connect to_ external MCP servers.
+- **MCP has separate package boundaries** — `mcp/server.ts` is the Stateless Worker wrapper; `mcp/client.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/legacy-agent.ts`.
 
 ## Boundaries
 

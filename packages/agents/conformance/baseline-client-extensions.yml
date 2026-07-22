@@ -1,0 +1,15 @@
+# Optional protocol extensions exercised by alpha.9 without a dated
+# --spec-version. These failures do not reduce core protocol conformance.
+client:
+  # The built-in Durable Object provider implements authorization_code and
+  # refresh_token, not the optional client_credentials extension.
+  # Impact if unchanged: service-to-service MCP servers requiring either
+  # private_key_jwt or client_secret_basic client_credentials need a custom
+  # OAuth provider.
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+
+  # Requires RFC 8693 token exchange followed by RFC 7523 JWT bearer grant.
+  # Impact if unchanged: enterprise-managed cross-app authorization needs a
+  # custom provider/flow instead of the built-in OAuth provider.
+  - auth/enterprise-managed-authorization

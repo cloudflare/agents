@@ -1,6 +1,6 @@
 # Stateful MCP Server
 
-A stateful MCP server using `McpAgent` backed by a Durable Object. State persists across requests — the built-in UI lets you call tools and read resources to see it in action.
+A retained legacy stateful MCP server using the deprecated `McpAgent` path backed by a Durable Object. State persists across requests — the built-in UI lets you call tools and read resources to see it in action. New servers should use the stateless SDK v2 `createMcpHandler` path unless they explicitly need this legacy lifecycle.
 
 ## What it demonstrates
 

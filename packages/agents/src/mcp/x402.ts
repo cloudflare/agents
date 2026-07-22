@@ -11,16 +11,22 @@ import type {
   RegisteredTool,
   ToolCallback
 } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js";
 import type {
-  CallToolResultSchema,
-  CompatibilityCallToolResultSchema,
   CallToolRequest,
+  CallToolRequestOptions,
+  Client as MCPClient
+} from "@modelcontextprotocol/client";
+import type {
   CallToolResult,
   ToolAnnotations
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  bindMcpClient,
+  type CallToolSchemaOrOptions,
+  type CompatibleMcpClient,
+  type LegacyCallToolResultSchema
+} from "./client-invoker";
 import type { ZodRawShape } from "zod";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 
 // v2 imports from @x402/core
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
@@ -303,10 +309,16 @@ export interface X402AugmentedClient {
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
       | null,
     params: CallToolRequest["params"],
-    resultSchema?:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
-    options?: RequestOptions
+    options?: CallToolRequestOptions
+  ): Promise<CallToolResult>;
+  /** @deprecated The result schema argument is used only with SDK v1 clients. */
+  callTool(
+    x402ConfirmationCallback:
+      | ((payment: PaymentRequirements[]) => Promise<boolean>)
+      | null,
+    params: CallToolRequest["params"],
+    resultSchema: LegacyCallToolResultSchema,
+    options?: CallToolRequestOptions
   ): Promise<CallToolResult>;
 }
 
@@ -331,10 +343,11 @@ export type X402ClientConfig = {
   confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
 };
 
-export function withX402Client<T extends MCPClient>(
+export function withX402Client<T extends CompatibleMcpClient>(
   client: T,
   x402Config: X402ClientConfig
 ): X402AugmentedClient & T {
+  const invoker = bindMcpClient(client);
   const { account } = x402Config;
 
   const maxPaymentValue = x402Config.maxPaymentValue ?? BigInt(100_000); // 0.10 USDC
@@ -352,11 +365,11 @@ export function withX402Client<T extends MCPClient>(
     });
   }
 
-  const _listTools = client.listTools.bind(client);
-
-  // Wrap the original method to include payment information in the description
-  const listTools: typeof _listTools = async (params, options) => {
-    const toolsRes = await _listTools(params, options);
+  const listTools = async (
+    params?: Parameters<MCPClient["listTools"]>[0],
+    options?: Parameters<MCPClient["listTools"]>[1]
+  ) => {
+    const toolsRes = await invoker.listTools(params, options);
     return {
       ...toolsRes,
       tools: toolsRes.tools.map((tool) => {
@@ -376,20 +389,17 @@ export function withX402Client<T extends MCPClient>(
     };
   };
 
-  const _callTool = client.callTool.bind(client);
-
   const callToolWithPayment = async (
     x402ConfirmationCallback:
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
       | null,
     params: CallToolRequest["params"],
-    resultSchema?:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
-    options?: RequestOptions
-  ): ReturnType<typeof client.callTool> => {
-    // Call the tool
-    const res = await _callTool(params, resultSchema, options);
+    schemaOrOptions?: CallToolSchemaOrOptions,
+    options?: CallToolRequestOptions
+  ): ReturnType<MCPClient["callTool"]> => {
+    const invoke = (callParams: CallToolRequest["params"]) =>
+      invoker.callTool(callParams, schemaOrOptions, options);
+    const res = await invoke(params);
 
     // Check for x402 payment required error in response metadata
     const maybeX402Error = res._meta?.["x402/error"] as
@@ -468,17 +478,13 @@ export function withX402Client<T extends MCPClient>(
       const token = btoa(JSON.stringify(paymentPayload));
 
       // Retry the tool call with the payment token
-      return _callTool(
-        {
-          ...params,
-          _meta: {
-            ...params._meta,
-            "x402/payment": token
-          }
-        },
-        resultSchema,
-        options
-      );
+      return invoke({
+        ...params,
+        _meta: {
+          ...params._meta,
+          "x402/payment": token
+        }
+      });
     }
 
     return res;

@@ -1,0 +1,3 @@
+# SDK v2 client against 2025-03-26 OAuth/backcompat servers.
+# No expected failures with alpha.9's RFC-correct legacy metadata fixture.
+client: []

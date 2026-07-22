@@ -142,7 +142,15 @@ export class TestOAuthAgent extends Agent {
           }
         }
       },
-      completeAuthorization: async (_code: string) => {
+      completeAuthorization: async (callback: string | URLSearchParams) => {
+        const params =
+          typeof callback === "string"
+            ? new URLSearchParams({ code: callback })
+            : callback;
+        const error = params.get("error");
+        if (error) {
+          throw new Error(params.get("error_description") ?? error);
+        }
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       },
       establishConnection: async () => {
@@ -222,7 +230,17 @@ export class TestOAuthAgent extends Agent {
     } else if (this.mcp.mcpConnections[serverId]) {
       const conn = this.mcp.mcpConnections[serverId];
       conn.connectionState = "authenticating";
-      conn.completeAuthorization = async (_code: string) => {
+      conn.completeAuthorization = async (
+        callback: string | URLSearchParams
+      ) => {
+        const params =
+          typeof callback === "string"
+            ? new URLSearchParams({ code: callback })
+            : callback;
+        const error = params.get("error");
+        if (error) {
+          throw new Error(params.get("error_description") ?? error);
+        }
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       };
     }
@@ -794,6 +812,106 @@ export class TestOAuthAgent extends Agent {
       })
     ).length;
     return { defaultBefore, withChallengeBefore, after };
+  }
+
+  async testSaveTokensClearsRedirectDiscovery(): Promise<{
+    discoveryBefore: boolean;
+    discoveryAfter: boolean;
+    tokenRoundTrips: boolean;
+    clientRoundTrips: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const issuer = "https://auth-one.example.com";
+    await provider.saveDiscoveryState({
+      authorizationServerUrl: issuer,
+      authorizationServerMetadata: {
+        issuer,
+        authorization_endpoint: `${issuer}/authorize`,
+        token_endpoint: `${issuer}/token`,
+        response_types_supported: ["code"]
+      }
+    });
+    const discoveryBefore = (await provider.discoveryState()) !== undefined;
+    await provider.saveClientInformation(
+      {
+        client_id: provider.clientId,
+        redirect_uris: [String(provider.redirectUrl)],
+        issuer
+      },
+      { issuer }
+    );
+
+    await provider.saveTokens(
+      { access_token: "token", token_type: "Bearer", issuer },
+      { issuer }
+    );
+
+    return {
+      discoveryBefore,
+      discoveryAfter: (await provider.discoveryState()) !== undefined,
+      tokenRoundTrips: (await provider.tokens())?.access_token === "token",
+      clientRoundTrips:
+        (await provider.clientInformation({ issuer }))?.client_id ===
+        provider.clientId
+    };
+  }
+
+  async testDiscoveryStateAndIssuerInvalidation(): Promise<{
+    discoveryRoundTrips: boolean;
+    discoveryCleared: boolean;
+    scopedTokenBefore: boolean;
+    scopedTokenAfter: boolean;
+    scopedClientBefore: boolean;
+    scopedClientAfter: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const issuer = "https://auth.example.com";
+    await provider.saveDiscoveryState({
+      authorizationServerUrl: issuer,
+      authorizationServerMetadata: {
+        issuer,
+        authorization_endpoint: `${issuer}/authorize`,
+        token_endpoint: `${issuer}/token`,
+        response_types_supported: ["code"]
+      }
+    });
+    const discoveryRoundTrips =
+      (await provider.discoveryState())?.authorizationServerUrl === issuer;
+
+    await provider.saveClientInformation(
+      {
+        client_id: provider.clientId,
+        redirect_uris: [String(provider.redirectUrl)],
+        issuer
+      },
+      { issuer }
+    );
+    await provider.saveTokens(
+      { access_token: "token", token_type: "Bearer", issuer },
+      { issuer }
+    );
+    const scopedTokenBefore =
+      (await provider.tokens({ issuer }))?.access_token === "token";
+    const scopedClientBefore =
+      (await provider.clientInformation({ issuer }))?.client_id ===
+      provider.clientId;
+
+    await provider.invalidateCredentials("tokens");
+    const scopedTokenAfter = (await provider.tokens({ issuer })) !== undefined;
+    await provider.invalidateCredentials("client");
+    const scopedClientAfter =
+      (await provider.clientInformation({ issuer })) !== undefined;
+    await provider.invalidateCredentials("discovery");
+    const discoveryCleared = (await provider.discoveryState()) === undefined;
+
+    return {
+      discoveryRoundTrips,
+      discoveryCleared,
+      scopedTokenBefore,
+      scopedTokenAfter,
+      scopedClientBefore,
+      scopedClientAfter
+    };
   }
 
   async testSaveCodeVerifierDeletesExpiredChallengeOrphans(): Promise<{
