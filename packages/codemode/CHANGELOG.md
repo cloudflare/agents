@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.4.4
+
+### Patch Changes
+
+- [#1969](https://github.com/cloudflare/agents/pull/1969) [`80ad8de`](https://github.com/cloudflare/agents/commit/80ad8deecfe9606d8ef1d505ad0115bbdb8e7073) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add framework-neutral `execute`, `search`, and `describe` methods to the durable Code Mode runtime handle so MCP servers and other non-AI-SDK hosts can invoke execution and discovery directly. Search and describe results now identify methods that require approval.
+
 ## 0.4.3
 
 ### Patch Changes
