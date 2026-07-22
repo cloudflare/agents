@@ -1,0 +1,19 @@
+pnpm-lock.yaml
+  s_a5e02b86b981f6::t_0f178c607d24a6 163-164,166-167,175-176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "acb22f8f6e003d56cb635e350bb2504db2ba1bd9",
+  "prompts": {},
+  "sessions": {
+    "s_a5e02b86b981f6": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f8a6e-04f3-7205-a3f5-770086a6ab25",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
