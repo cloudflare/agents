@@ -343,6 +343,34 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
     ).toBe("OAuth configuration incomplete: missing authUrl");
   });
 
+  it("reconnects when a persisted auth URL embeds expired state", async () => {
+    const agentName = `test-stale-oauth-url-${nanoid(8)}`;
+    const agentStub = env.TestOAuthAgent.getByName(agentName);
+    const serverId = nanoid(8);
+    const serverUrl = "http://example.com/mcp";
+    const nonce = nanoid();
+    const staleUrl = `https://auth.example.com/authorize?state=${nonce}.${serverId}`;
+    const freshUrl = `https://auth.example.com/fresh/${serverId}`;
+
+    await restoreOAuthConnection(
+      agentStub,
+      agentName,
+      serverId,
+      serverUrl,
+      staleUrl
+    );
+    await agentStub.seedPersistedOAuthState(serverId, nonce, 11 * 60 * 1000);
+    await agentStub.configureMcpReconnect(serverId, "authenticating", freshUrl);
+
+    expect(
+      await agentStub.testAddMcpServer("test-oauth-server", serverUrl)
+    ).toEqual({
+      id: serverId,
+      state: "authenticating",
+      authUrl: freshUrl
+    });
+  });
+
   it("reconnects instead of returning unusable persisted auth URLs", async () => {
     const unusableAuthUrls = [
       "::::",
