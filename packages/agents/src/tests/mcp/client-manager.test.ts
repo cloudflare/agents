@@ -756,9 +756,13 @@ describe("MCPClientManager OAuth Integration", () => {
 
       const result = await manager.handleCallbackRequest(callbackRequest);
       expect(result.authSuccess).toBe(true);
-      expect(completeAuthSpy).toHaveBeenCalledWith("test", {
-        alreadyAccepted: true
-      });
+      expect(completeAuthSpy).toHaveBeenCalledWith(
+        expect.any(URLSearchParams),
+        { alreadyAccepted: true }
+      );
+      expect(completeAuthSpy.mock.calls[0]?.[0]).toEqual(
+        new URLSearchParams({ code: "test", state })
+      );
       expect(connection.connectionError).toBe(null);
     });
 
@@ -870,9 +874,13 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       expect(result.authSuccess).toBe(true);
-      expect(completeAuthSpy).toHaveBeenCalledWith("auth-code", {
-        alreadyAccepted: true
-      });
+      expect(completeAuthSpy).toHaveBeenCalledWith(
+        expect.any(URLSearchParams),
+        { alreadyAccepted: true }
+      );
+      expect(completeAuthSpy.mock.calls[0]?.[0]).toEqual(
+        new URLSearchParams({ code: "auth-code", state })
+      );
     });
   });
 
@@ -3167,7 +3175,6 @@ describe("MCPClientManager OAuth Integration", () => {
         expect(oldConnection.client.callTool).not.toHaveBeenCalled();
         expect(currentConnection.client.callTool).toHaveBeenCalledWith(
           { name: "route_tool", arguments: { value: "current" } },
-          undefined,
           undefined
         );
       });
@@ -3198,7 +3205,6 @@ describe("MCPClientManager OAuth Integration", () => {
         await afterRename[newKey].execute({ value: "renamed" });
         expect(connection.client.callTool).toHaveBeenCalledWith(
           { name: "renamed_tool", arguments: { value: "renamed" } },
-          undefined,
           undefined
         );
       });

@@ -1178,7 +1178,7 @@ export class MCPClientManager {
         delete this.mcpConnections[id];
         // Once removed from the map, nothing else can close this transport.
         await replaced.close().catch(() => {});
-        this.updateStoredSessionId(id, undefined);
+        this.updateStoredSession(id, undefined);
       }
       this.createConnection(id, url, {
         client: options.client,
@@ -1670,7 +1670,10 @@ export class MCPClientManager {
         // cannot be verified must not alter the connection state machine.
         return this.ignoreUnverifiedCallback(
           serverId,
-          stateValidation.error || "Invalid state"
+          callbackParams.get("error_description") ??
+            callbackParams.get("error") ??
+            stateValidation.error ??
+            "Invalid state"
         );
       }
 
@@ -1771,7 +1774,7 @@ export class MCPClientManager {
     options: { timeoutMs?: number }
   ): Promise<MCPDiscoverResult> {
     conn.clearResumedSession();
-    this.updateStoredSessionId(serverId, undefined);
+    this.updateStoredSession(serverId, undefined);
 
     let connectResult: MCPConnectionResult;
     try {
