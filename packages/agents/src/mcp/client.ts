@@ -23,6 +23,7 @@ import {
   elicitationCapabilitiesFromHandlers,
   MCPClientConnection,
   MCPConnectionState,
+  type MCPDiscoveryResult,
   type MCPElicitationHandlers,
   type MCPTransportOptions
 } from "./client-connection";
@@ -1654,12 +1655,57 @@ export class MCPClientManager {
 
     // Delegate to connection's discover method which handles cancellation and timeout
     const result = await conn.discover(options);
+    if (!result.success && result.reason === "stale-session") {
+      return this._recoverStaleSession(conn, serverId, options);
+    }
     this._onServerStateChanged.fire();
 
-    return {
-      ...result,
-      state: conn.connectionState
-    };
+    return this._toDiscoverResult(conn, result);
+  }
+
+  private _toDiscoverResult(
+    conn: MCPClientConnection,
+    result: MCPDiscoveryResult
+  ): MCPDiscoverResult {
+    return result.success
+      ? { success: true, state: conn.connectionState }
+      : { success: false, error: result.error, state: conn.connectionState };
+  }
+
+  private async _recoverStaleSession(
+    conn: MCPClientConnection,
+    serverId: string,
+    options: { timeoutMs?: number }
+  ): Promise<MCPDiscoverResult> {
+    conn.clearResumedSession();
+    this.updateStoredSessionId(serverId, undefined);
+
+    let connectResult: MCPConnectionResult;
+    try {
+      connectResult = await this.connectToServer(serverId);
+    } catch (error) {
+      return {
+        success: false,
+        error: toErrorMessage(error),
+        state: conn.connectionState
+      };
+    }
+
+    if (connectResult.state !== MCPConnectionState.CONNECTED) {
+      return {
+        success: false,
+        error:
+          connectResult.state === MCPConnectionState.FAILED
+            ? connectResult.error
+            : `Connection in ${connectResult.state} state after session re-initialization`,
+        state: conn.connectionState
+      };
+    }
+
+    const result = await conn.discover(options);
+    this._onServerStateChanged.fire();
+
+    return this._toDiscoverResult(conn, result);
   }
 
   /**

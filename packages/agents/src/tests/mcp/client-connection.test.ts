@@ -1,6 +1,9 @@
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import {
+  McpError,
+  type ServerCapabilities
+} from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
@@ -266,6 +269,43 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.prompts).toEqual([]);
       expect(connection.resourceTemplates).toEqual([]);
     });
+
+    it("does not classify a JSON-RPC error code 404 as a stale session", async () => {
+      const connection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http", sessionId: "restored-session" },
+          client: {}
+        }
+      );
+      const transport = new StreamableHTTPClientTransport(new URL(serverUrl), {
+        sessionId: "restored-session"
+      });
+      Object.defineProperty(connection, "_transport", { value: transport });
+      connection.connectionState = "connected";
+      connection.client.getServerCapabilities = vi.fn();
+      connection.client.getInstructions = vi.fn();
+      connection.client.listTools = vi
+        .fn()
+        .mockRejectedValue(new McpError(404, "Application resource missing"));
+      connection.client.listResources = vi
+        .fn()
+        .mockResolvedValue({ resources: [] });
+      connection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
+      connection.client.setNotificationHandler = vi.fn();
+
+      expect(await connection.discover()).toMatchObject({
+        success: false,
+        reason: "error",
+        error: expect.stringContaining("Application resource missing")
+      });
+    });
   });
 
   describe("Capability Discovery", () => {
@@ -523,8 +563,10 @@ describe("MCP Client Connection Integration", () => {
       // Trigger discovery - should fail and return error result
       const result = await connection.discover();
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Instructions service down");
+      expect(result).toMatchObject({
+        success: false,
+        error: expect.stringContaining("Instructions service down")
+      });
 
       // Connection should return to connected state (not failed) so user can retry
       expect(connection.connectionState).toBe("connected");
@@ -624,8 +666,10 @@ describe("MCP Client Connection Integration", () => {
       // Trigger discovery - should fail
       const result = await connection.discover();
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("All services down");
+      expect(result).toMatchObject({
+        success: false,
+        error: expect.stringContaining("All services down")
+      });
 
       // Connection should return to connected state (not failed) so user can retry
       expect(connection.connectionState).toBe("connected");
