@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install
-      - run: pnpm --filter agents run test:conformance:client:modern
+      - run: pnpm --filter agents run test:conformance:client:stateless
 
   client-compatibility:
     timeout-minutes: 15
@@ -50,7 +50,7 @@ jobs:
         variant:
           - mcp-agent
           - handler
-          - handler:stateless-legacy
+          - handler:legacy-compat
           - handler:legacy
           - handler:extensions
     steps:

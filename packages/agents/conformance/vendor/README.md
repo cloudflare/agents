@@ -3,8 +3,8 @@
 `everything-server-v2.ts` is the workerd adaptation of:
 
 - repository: `https://github.com/modelcontextprotocol/typescript-sdk`
-- tag: `@modelcontextprotocol/server@2.0.0-beta.4`
-- commit: `e81758caed29f6568ce8873f7f9a3bd65b017d9c`
+- tag: `@modelcontextprotocol/server@2.0.0-beta.5`
+- commit: `1e1392e3f91583884fe82a0b4b91335875c3fba6`
 - source: `test/conformance/src/everythingServer.ts`
 - source SHA-256: `3a94417774fa20b17971e8162f9865b1cefd2650c7d88fdcd17f971d91213852`
 

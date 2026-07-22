@@ -2,13 +2,13 @@ import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/server";
 import { describe, expect, it, vi } from "vitest";
-import { createMcpHandler } from "../../mcp/handler";
+import { createMcpHandler } from "../../mcp/handler-compat";
 
 describe("SDK v2 stateless fallback warning", () => {
   it("does not warn for a 2025 request", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const handler = createMcpHandler(
-      () => new McpServer({ name: "modern", version: "1.0.0" })
+      () => new McpServer({ name: "stateless", version: "1.0.0" })
     );
 
     const response = await handler(

@@ -1,9 +1,9 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
 import { McpServer as LegacyMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpServer } from "@modelcontextprotocol/server";
+import { McpServer, SERVER_INFO_META_KEY } from "@modelcontextprotocol/server";
 import { createMcpHandler, getMcpAuthContext } from "../../mcp";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const VERIFIED_OAUTH_CONTEXT = Symbol.for(
   "cloudflare.workers-oauth-provider.verified-context.v1"
@@ -45,7 +45,10 @@ function legacyToolRequest(name: string) {
   });
 }
 
-function modernRequest(method: string, params: Record<string, unknown> = {}) {
+function statelessRequest(
+  method: string,
+  params: Record<string, unknown> = {}
+) {
   const name = typeof params.name === "string" ? params.name : undefined;
   return new Request("http://example.com/mcp", {
     method: "POST",
@@ -80,11 +83,16 @@ function createServer() {
 }
 
 describe("createMcpHandler SDK v2", () => {
-  it("serves the modern protocol from an upstream server", async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("serves the Stateless protocol from an upstream server", async () => {
     const handler = createMcpHandler(() => createServer());
 
     const response = await handler(
-      modernRequest("server/discover"),
+      statelessRequest("server/discover"),
       env,
       createExecutionContext()
     );
@@ -93,13 +101,15 @@ describe("createMcpHandler SDK v2", () => {
     expect(await response.json()).toMatchObject({
       result: {
         supportedVersions: ["2026-07-28"],
-        serverInfo: { name: "test", version: "1.0.0" }
+        _meta: {
+          [SERVER_INFO_META_KEY]: { name: "test", version: "1.0.0" }
+        }
       }
     });
     expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 
-  it("preserves upstream stateless legacy serving by default", async () => {
+  it("preserves upstream Legacy compatibility serving by default", async () => {
     const handler = createMcpHandler(() => createServer());
 
     const response = await handler(
@@ -112,7 +122,7 @@ describe("createMcpHandler SDK v2", () => {
     expect(await response.text()).toContain('"protocolVersion":"2025-11-25"');
   });
 
-  it("rejects session methods without constructing a stateless legacy server", async () => {
+  it("rejects session methods without constructing a Legacy compatibility server", async () => {
     let factoryCalls = 0;
     const handler = createMcpHandler(() => {
       factoryCalls++;
@@ -137,7 +147,7 @@ describe("createMcpHandler SDK v2", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("fails fast when stateless legacy code attempts a reverse request", async () => {
+  it("fails fast when Legacy compatibility code attempts a reverse request", async () => {
     const handler = createMcpHandler(() => {
       const server = createServer();
       server.registerTool("push", { inputSchema: {} }, async (_args, ctx) => {
@@ -181,7 +191,66 @@ describe("createMcpHandler SDK v2", () => {
     expect(body).toContain("sessionful transport");
   });
 
-  it("supports strict modern-only serving", async () => {
+  it("keeps long-running Legacy compatibility POST streams alive", async () => {
+    let releaseTool!: () => void;
+    const toolReleased = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const handler = createMcpHandler(() => {
+      const server = createServer();
+      server.registerTool("hang", { inputSchema: {} }, async () => {
+        await toolReleased;
+        return { content: [{ type: "text" as const, text: "done" }] };
+      });
+      return server;
+    });
+
+    vi.useFakeTimers();
+    const response = await handler.fetch(legacyToolRequest("hang"));
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    const drain = (async () => {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffered += decoder.decode(value, { stream: true });
+      }
+    })();
+
+    await vi.advanceTimersByTimeAsync(51_000);
+    releaseTool();
+    await drain;
+
+    expect(buffered).toContain(": keepalive\n\n");
+    expect(buffered).not.toContain("event: ping");
+    await handler.close();
+  });
+
+  it("clears a Legacy compatibility keepalive when the response is cancelled", async () => {
+    let releaseTool!: () => void;
+    const toolReleased = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const clearInterval = vi.spyOn(globalThis, "clearInterval");
+    const handler = createMcpHandler(() => {
+      const server = createServer();
+      server.registerTool("hang", { inputSchema: {} }, async () => {
+        await toolReleased;
+        return { content: [{ type: "text" as const, text: "done" }] };
+      });
+      return server;
+    });
+    const response = await handler.fetch(legacyToolRequest("hang"));
+
+    await response.body!.cancel();
+
+    expect(clearInterval).toHaveBeenCalled();
+    releaseTool();
+    await handler.close();
+  });
+
+  it("supports strict Stateless-only serving", async () => {
     const handler = createMcpHandler(() => createServer(), {
       legacy: "reject"
     });
@@ -224,7 +293,7 @@ describe("createMcpHandler SDK v2", () => {
     );
   });
 
-  it("allows modern standard request headers in CORS preflight", async () => {
+  it("allows Stateless standard request headers in CORS preflight", async () => {
     const handler = createMcpHandler(() => createServer());
 
     const response = await handler.fetch(
@@ -251,7 +320,7 @@ describe("createMcpHandler SDK v2", () => {
 
   it("accepts the endpoint workers.dev Origin by default", async () => {
     const handler = createMcpHandler(() => createServer());
-    const request = modernRequest("server/discover");
+    const request = statelessRequest("server/discover");
     const workersDevRequest = new Request(
       request.url.replace("example.com", "server.account.workers.dev"),
       request
@@ -271,7 +340,7 @@ describe("createMcpHandler SDK v2", () => {
     const handler = createMcpHandler(() => createServer(), {
       corsOptions: { origin: "https://app.example.com" }
     });
-    const request = modernRequest("server/discover");
+    const request = statelessRequest("server/discover");
     request.headers.set("Origin", "https://app.example.com:8443");
 
     const response = await handler.fetch(request);
@@ -281,7 +350,7 @@ describe("createMcpHandler SDK v2", () => {
 
   it("keeps the SDK localhost Host and Origin guards for local endpoints", async () => {
     const handler = createMcpHandler(() => createServer());
-    const request = modernRequest("server/discover");
+    const request = statelessRequest("server/discover");
     const localRequest = new Request(
       request.url.replace("example.com", "localhost"),
       request
@@ -306,7 +375,7 @@ describe("createMcpHandler SDK v2", () => {
       },
       { allowedOriginHostnames: ["client.example"] }
     );
-    const request = modernRequest("server/discover");
+    const request = statelessRequest("server/discover");
     request.headers.set("Origin", "http://evil.example.com");
 
     const response = await handler.fetch(request);
@@ -325,7 +394,7 @@ describe("createMcpHandler SDK v2", () => {
 
   it("rejects a malformed or opaque Origin", async () => {
     const handler = createMcpHandler(() => createServer());
-    const request = modernRequest("server/discover");
+    const request = statelessRequest("server/discover");
     request.headers.set("Origin", "null");
 
     const response = await handler.fetch(request);
@@ -343,13 +412,28 @@ describe("createMcpHandler SDK v2", () => {
     const handler = createMcpHandler(() => createServer(), {
       allowedOriginHostnames: ["client.example"]
     });
-    const request = modernRequest("server/discover");
+    const request = statelessRequest("server/discover");
     request.headers.set("Origin", "https://client.example:8443");
 
     const response = await handler.fetch(request);
 
     expect(response.status).toBe(200);
   });
+
+  it.each(["https://any.example", "null", "not a url"])(
+    "allows Origin %s when validation is explicitly disabled",
+    async (origin) => {
+      const handler = createMcpHandler(() => createServer(), {
+        allowedOriginHostnames: "*"
+      });
+      const request = statelessRequest("server/discover");
+      request.headers.set("Origin", origin);
+
+      const response = await handler.fetch(request);
+
+      expect(response.status).toBe(200);
+    }
+  );
 
   it("exposes the upstream close, notify, and bus controls", () => {
     const handler = createMcpHandler(() => createServer());
@@ -359,7 +443,24 @@ describe("createMcpHandler SDK v2", () => {
     expect(typeof handler.bus.publish).toBe("function");
   });
 
-  it("does not serve stateless legacy requests after close", async () => {
+  it("does not construct a Legacy compatibility server for an aborted request", async () => {
+    let factoryCalls = 0;
+    const handler = createMcpHandler(() => {
+      factoryCalls++;
+      return createServer();
+    });
+    const controller = new AbortController();
+    const request = legacyInitializeRequest();
+    const aborted = new Request(request, { signal: controller.signal });
+    controller.abort();
+
+    const response = await handler.fetch(aborted);
+
+    expect(response.status).toBe(499);
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("does not serve Legacy compatibility requests after close", async () => {
     let factoryCalls = 0;
     const handler = createMcpHandler(() => {
       factoryCalls++;
@@ -416,7 +517,7 @@ describe("createMcpHandler SDK v2", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("closes active stateless legacy servers", async () => {
+  it("closes active Legacy compatibility servers", async () => {
     let serverClosed = false;
     const handler = createMcpHandler(() => {
       const server = createServer();
@@ -433,7 +534,7 @@ describe("createMcpHandler SDK v2", () => {
     await response.body?.cancel();
   });
 
-  it("closes a stateless legacy server whose factory resolves during close", async () => {
+  it("closes a Legacy compatibility server whose factory resolves during close", async () => {
     let resolveFactory!: (server: McpServer) => void;
     let markFactoryStarted!: () => void;
     const factoryStarted = new Promise<void>((resolve) => {
@@ -477,8 +578,16 @@ describe("createMcpHandler SDK v2", () => {
     });
 
     const [first, second] = await Promise.all([
-      handler(modernRequest("server/discover"), env, createExecutionContext()),
-      handler(modernRequest("server/discover"), env, createExecutionContext())
+      handler(
+        statelessRequest("server/discover"),
+        env,
+        createExecutionContext()
+      ),
+      handler(
+        statelessRequest("server/discover"),
+        env,
+        createExecutionContext()
+      )
     ]);
 
     expect(first.status).toBe(200);
@@ -498,7 +607,7 @@ describe("createMcpHandler SDK v2", () => {
       scopes: ["read"]
     };
 
-    const response = await handler.fetch(modernRequest("server/discover"), {
+    const response = await handler.fetch(statelessRequest("server/discover"), {
       authInfo
     });
 
@@ -541,7 +650,7 @@ describe("createMcpHandler SDK v2", () => {
     });
 
     const response = await handler(
-      modernRequest("tools/call", { name: "whoami", arguments: {} }),
+      statelessRequest("tools/call", { name: "whoami", arguments: {} }),
       env,
       ctx
     );
@@ -636,7 +745,11 @@ describe("createMcpHandler SDK v2", () => {
       return createServer();
     });
 
-    const response = await handler(modernRequest("server/discover"), env, ctx);
+    const response = await handler(
+      statelessRequest("server/discover"),
+      env,
+      ctx
+    );
 
     expect(response.status).toBe(500);
     expect(factoryCalled).toBe(false);
@@ -655,7 +768,11 @@ describe("createMcpHandler SDK v2", () => {
       return createServer();
     });
 
-    const response = await handler(modernRequest("server/discover"), env, ctx);
+    const response = await handler(
+      statelessRequest("server/discover"),
+      env,
+      ctx
+    );
 
     expect(response.status).toBe(200);
     expect(seenFactoryContext).not.toHaveProperty("authInfo");

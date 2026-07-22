@@ -1,10 +1,10 @@
-# SDK v2 handler's explicit stateless 2025-11-25 compatibility path.
+# SDK v2 handler's explicit Legacy compatibility path.
 # All 32 scenarios execute; this is not the alpha harness's smaller `active`
 # subset. Complete sessionful compatibility is tested in the legacy lanes.
 server:
   # A stateless request has no return channel for server-to-client requests.
-  # Impact if unchanged: 2025 clients needing sampling or elicitation must use
-  # createLegacyMcpHandler/McpAgent or migrate the server flow to modern MRTR.
+  # Impact if unchanged: Legacy clients needing sampling or elicitation must use
+  # createLegacyMcpHandler/McpAgent or migrate to Stateless Elicitation.
   - tools-call-sampling
   - tools-call-elicitation
   - elicitation-sep1034-defaults

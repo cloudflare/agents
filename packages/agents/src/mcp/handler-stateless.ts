@@ -17,7 +17,7 @@ import {
   type McpAuthContext
 } from "./auth-context";
 import { internalErrorResponse, reportHandlerError } from "./handler-errors";
-import { createStatelessLegacyRequestHandler } from "./handler-stateless-legacy";
+import { createLegacyCompatibilityRequestHandler } from "./handler-legacy-compat";
 import type { CORSOptions } from "./types";
 
 export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOptions {
@@ -35,9 +35,10 @@ export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOpt
    * Restrict present browser `Origin` headers to these hostnames. Requests
    * without an Origin (including non-browser MCP clients) remain valid. The
    * default includes localhost-class Origins, the endpoint's `workers.dev`
-   * hostname, and a concrete `corsOptions.origin` hostname.
+   * hostname, and a concrete `corsOptions.origin` hostname. Pass `"*"` only
+   * when equivalent Origin validation runs in trusted middleware upstream.
    */
-  allowedOriginHostnames?: string[];
+  allowedOriginHostnames?: string[] | "*";
   /** Application props exposed through {@link getMcpAuthContext}. */
   authContext?: McpAuthContext;
 }
@@ -90,14 +91,6 @@ function withCors(response: Response, options: CORSOptions | false): Response {
     statusText: response.statusText,
     headers
   });
-}
-
-function emptyExecutionContext(): ExecutionContext {
-  return {
-    props: {},
-    waitUntil() {},
-    passThroughOnException() {}
-  } as unknown as ExecutionContext;
 }
 
 function wrapResponseBodyWithAuthContext(
@@ -172,9 +165,9 @@ export function createStatelessMcpHandler(
     ...sdkOptions,
     legacy: "reject"
   });
-  const statelessLegacyHandler =
+  const legacyCompatibilityHandler =
     legacy === "stateless"
-      ? createStatelessLegacyRequestHandler(factory, route, sdkOptions.onerror)
+      ? createLegacyCompatibilityRequestHandler(factory, sdkOptions.onerror)
       : undefined;
   let closed = false;
 
@@ -212,32 +205,34 @@ export function createStatelessMcpHandler(
     if (hostRejection) {
       return withCors(hostRejection, corsOptions);
     }
-    let acceptedOriginHostnames = allowedOriginHostnames;
-    if (acceptedOriginHostnames === undefined) {
-      const defaults = new Set(localhostAllowedOrigins());
-      if (workersDevEndpoint) defaults.add(requestUrl.hostname);
-      if (corsOptions !== false && corsOptions.origin !== undefined) {
-        try {
-          const configuredOrigin = new URL(corsOptions.origin);
-          if (
-            (configuredOrigin.protocol === "http:" ||
-              configuredOrigin.protocol === "https:") &&
-            configuredOrigin.hostname
-          ) {
-            defaults.add(configuredOrigin.hostname);
+    if (allowedOriginHostnames !== "*") {
+      let acceptedOriginHostnames = allowedOriginHostnames;
+      if (acceptedOriginHostnames === undefined) {
+        const defaults = new Set(localhostAllowedOrigins());
+        if (workersDevEndpoint) defaults.add(requestUrl.hostname);
+        if (corsOptions !== false && corsOptions.origin !== undefined) {
+          try {
+            const configuredOrigin = new URL(corsOptions.origin);
+            if (
+              (configuredOrigin.protocol === "http:" ||
+                configuredOrigin.protocol === "https:") &&
+              configuredOrigin.hostname
+            ) {
+              defaults.add(configuredOrigin.hostname);
+            }
+          } catch {
+            // A wildcard or malformed CORS value does not expand the allowlist.
           }
-        } catch {
-          // A wildcard or malformed CORS value does not expand the allowlist.
         }
+        acceptedOriginHostnames = [...defaults];
       }
-      acceptedOriginHostnames = [...defaults];
-    }
-    const originRejection = originValidationResponse(
-      request,
-      acceptedOriginHostnames ?? []
-    );
-    if (originRejection) {
-      return withCors(originRejection, corsOptions);
+      const originRejection = originValidationResponse(
+        request,
+        acceptedOriginHostnames ?? []
+      );
+      if (originRejection) {
+        return withCors(originRejection, corsOptions);
+      }
     }
 
     if (request.method === "OPTIONS" && corsOptions !== false) {
@@ -245,7 +240,7 @@ export function createStatelessMcpHandler(
     }
 
     const legacyRequest =
-      statelessLegacyHandler !== undefined &&
+      legacyCompatibilityHandler !== undefined &&
       (await isLegacyRequest(request, requestOptions?.parsedBody));
     if (closed) throw new Error("This MCP handler has been closed");
 
@@ -276,13 +271,8 @@ export function createStatelessMcpHandler(
           ? { ...requestOptions, ...(authInfo && { authInfo }) }
           : undefined;
       const invoke = async () => {
-        if (legacyRequest && statelessLegacyHandler) {
-          return statelessLegacyHandler.fetch(
-            request,
-            upstreamOptions,
-            resolvedAuthContext,
-            workerCtx ?? emptyExecutionContext()
-          );
+        if (legacyRequest && legacyCompatibilityHandler) {
+          return legacyCompatibilityHandler.fetch(request, upstreamOptions);
         }
         return sdkHandler.fetch(request, upstreamOptions);
       };
@@ -316,7 +306,10 @@ export function createStatelessMcpHandler(
     bus: sdkHandler.bus,
     close: async () => {
       closed = true;
-      await Promise.all([sdkHandler.close(), statelessLegacyHandler?.close()]);
+      await Promise.all([
+        sdkHandler.close(),
+        legacyCompatibilityHandler?.close()
+      ]);
     }
   }) as StatelessMcpHandler;
 }

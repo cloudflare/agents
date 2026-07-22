@@ -1,23 +1,22 @@
 {
-  "name": "@cloudflare/agents-codemode-mcp-example",
-  "description": "Wrap any MCP server with codemode search + execute tools",
+  "name": "@cloudflare/agents-mcp-elicitation-mrtr",
+  "description": "Stateless Elicitation with MCP multi-round-trip requests",
   "private": true,
   "type": "module",
+  "version": "0.0.0",
   "scripts": {
-    "start": "wrangler dev",
+    "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/codemode": "*",
-    "@modelcontextprotocol/sdk": "1.29.0",
     "@modelcontextprotocol/server": "2.0.0-beta.5",
     "agents": "*",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260629.1",
-    "@types/node": "^26.0.1",
     "typescript": "^6.0.3",
     "wrangler": "^4.105.0"
   }

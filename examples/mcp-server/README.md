@@ -1,6 +1,6 @@
 # Minimal MCP server on Cloudflare Workers
 
-A stateless MCP server using the MCP SDK directly, without the Agents SDK. One factory and one handler serve both MCP `2026-07-28` and stateless 2025-era clients.
+A stateless MCP server using the MCP SDK directly, without the Agents SDK. One factory and one handler serve Stateless clients and Legacy compatibility requests.
 
 ```ts
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";

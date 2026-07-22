@@ -129,11 +129,11 @@ export function decodeMcpServerOptions(
   if (!value) return {};
   const parsed = JSON.parse(value) as PersistedMcpServerOptions;
   const transport = persistTransportOptions(parsed.transport);
-  const modernWithoutPrior =
+  const statelessWithoutPrior =
     transport?.protocolVersion === "2026-07-28" && !parsed.discoverResult;
   if (
     transport?.sessionId &&
-    (!transport.protocolVersion || modernWithoutPrior)
+    (!transport.protocolVersion || statelessWithoutPrior)
   ) {
     delete transport.sessionId;
     delete transport.protocolVersion;

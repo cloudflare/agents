@@ -3,7 +3,7 @@ import { createExecutionContext } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { JSONRPCError } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import { createLegacyMcpHandler } from "../../mcp/handler";
+import { createLegacyMcpHandler } from "../../mcp/handler-compat";
 import { z } from "zod";
 
 /**

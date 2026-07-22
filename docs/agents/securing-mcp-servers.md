@@ -7,7 +7,7 @@ Cloudflare's `workers-oauth-provider` lets you secure your MCP Server (or any ap
 ```typescript
 import { OAuthProvider, OAuthError } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler } from "agents/mcp";
+import { createMcpHandler } from "agents/mcp/server";
 
 // A Worker that exposes an MCP server
 function createServer() {

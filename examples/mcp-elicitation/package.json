@@ -2,6 +2,7 @@
   "author": "Matt Carey <mcarey@cloudflare.com>",
   "keywords": [],
   "name": "@cloudflare/agents-mcp-elicitation",
+  "description": "Legacy Elicitation for stateful MCP servers",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
@@ -11,7 +12,6 @@
   "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@modelcontextprotocol/server": "2.0.0-beta.4",
     "agents": "*",
     "zod": "^4.4.3"
   }

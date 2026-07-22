@@ -26,7 +26,6 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^8.0.2",
     "@cfworker/json-schema": "^4.1.1",
-    "@cloudflare/codemode": ">=0.4.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
@@ -39,10 +38,11 @@
   },
   "devDependencies": {
     "@ai-sdk/react": "^3.0.204",
-    "@modelcontextprotocol/client": "2.0.0-beta.4",
+    "@cloudflare/codemode": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0-beta.5",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.9",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@modelcontextprotocol/server": "2.0.0-beta.4",
+    "@modelcontextprotocol/server": "2.0.0-beta.5",
     "@tanstack/ai": "0.38.0",
     "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
@@ -59,9 +59,10 @@
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.204",
-    "@modelcontextprotocol/client": "2.0.0-beta.4",
+    "@cloudflare/codemode": ">=0.4.0",
+    "@modelcontextprotocol/client": "2.0.0-beta.5",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@modelcontextprotocol/server": "2.0.0-beta.4",
+    "@modelcontextprotocol/server": "2.0.0-beta.5",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
@@ -74,6 +75,9 @@
   },
   "peerDependenciesMeta": {
     "@ai-sdk/react": {
+      "optional": true
+    },
+    "@cloudflare/codemode": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -134,6 +138,11 @@
       "types": "./dist/mcp/client.d.ts",
       "import": "./dist/mcp/client.js",
       "require": "./dist/mcp/client.js"
+    },
+    "./mcp/server": {
+      "types": "./dist/mcp/server.d.ts",
+      "import": "./dist/mcp/server.js",
+      "require": "./dist/mcp/server.js"
     },
     "./mcp/do-oauth-client-provider": {
       "types": "./dist/mcp/do-oauth-client-provider.d.ts",
@@ -299,16 +308,16 @@
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
     "test:conformance": "pnpm run test:conformance:client && pnpm run test:conformance:server",
-    "test:conformance:client": "pnpm run test:conformance:client:modern && pnpm run test:conformance:client:2025-11-25 && pnpm run test:conformance:client:2025-06-18 && pnpm run test:conformance:client:2025-03-26 && pnpm run test:conformance:client:extensions",
-    "test:conformance:client:modern": "bash conformance/run.sh client-modern",
+    "test:conformance:client": "pnpm run test:conformance:client:stateless && pnpm run test:conformance:client:2025-11-25 && pnpm run test:conformance:client:2025-06-18 && pnpm run test:conformance:client:2025-03-26 && pnpm run test:conformance:client:extensions",
+    "test:conformance:client:stateless": "bash conformance/run.sh client-stateless",
     "test:conformance:client:2025-11-25": "bash conformance/run.sh client-2025-11-25",
     "test:conformance:client:2025-06-18": "bash conformance/run.sh client-2025-06-18",
     "test:conformance:client:2025-03-26": "bash conformance/run.sh client-2025-03-26",
     "test:conformance:client:extensions": "bash conformance/run.sh client-extensions",
-    "test:conformance:server": "pnpm run test:conformance:server:handler && pnpm run test:conformance:server:handler:stateless-legacy && pnpm run test:conformance:server:handler:legacy && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler:extensions",
+    "test:conformance:server": "pnpm run test:conformance:server:handler && pnpm run test:conformance:server:handler:legacy-compat && pnpm run test:conformance:server:handler:legacy && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler:extensions",
     "test:conformance:server:mcp-agent": "bash conformance/run.sh server-mcp-agent",
     "test:conformance:server:handler": "bash conformance/run.sh server-handler",
-    "test:conformance:server:handler:stateless-legacy": "bash conformance/run.sh server-handler-stateless-legacy",
+    "test:conformance:server:handler:legacy-compat": "bash conformance/run.sh server-handler-legacy-compat",
     "test:conformance:server:handler:legacy": "bash conformance/run.sh server-handler-legacy",
     "test:conformance:server:handler:extensions": "bash conformance/run.sh server-handler-extensions"
   }

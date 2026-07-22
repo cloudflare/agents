@@ -92,7 +92,7 @@ run_server() {
 }
 
 case "$MODE" in
-  client-modern)
+  client-stateless)
     run_client 2026-07-28 conformance/baseline-client-2026-07-28.yml "$@"
     ;;
   client-2025-11-25)
@@ -119,9 +119,9 @@ case "$MODE" in
     run_server "$WORKER_ORIGIN/mcp-handler" 2026-07-28 \
       conformance/baseline-server-handler-v2.yml "$@"
     ;;
-  server-handler-stateless-legacy)
+  server-handler-legacy-compat)
     run_server "$WORKER_ORIGIN/mcp-handler" 2025-11-25 \
-      conformance/baseline-server-handler-stateless-legacy-v2.yml "$@"
+      conformance/baseline-server-handler-legacy-compat.yml "$@"
     ;;
   server-handler-legacy)
     run_server "$WORKER_ORIGIN/mcp-handler-legacy" 2025-11-25 \

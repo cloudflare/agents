@@ -1,7 +1,7 @@
-# Optional modern server extensions. These run without --spec-version because
+# Optional Stateless server extensions. These run without --spec-version because
 # extensions are deliberately off the core protocol timeline.
 server:
-  # @modelcontextprotocol/server@2.0.0-beta.4 does not implement SEP-2663's
+  # @modelcontextprotocol/server@2.0.0-beta.5 does not implement SEP-2663's
   # tasks extension or advertise io.modelcontextprotocol/tasks.
   # Impact if unchanged: tools execute synchronously/MRTR-only; callers cannot
   # create, inspect, update, or cancel durable MCP tasks through this handler.

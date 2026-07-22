@@ -1,3 +1,10 @@
-# SDK v2 createMcpHandler endpoint at 2026-07-28.
+# Stateless createMcpHandler endpoint.
 # Every entry is executed by alpha.9; run-suite.mjs rejects unseen entries.
-server: []
+server:
+  # Alpha.9 asserts the pre-final SDK beta.4 wire: it requires clientInfo in
+  # every request envelope and serverInfo in the DiscoverResult body. SDK
+  # beta.5 follows the final wire instead: clientInfo is optional and server
+  # identity is stamped in result _meta. The scenario's other 27 checks pass.
+  # Impact if unchanged: none for conforming clients; reverting would break
+  # interoperability with SDKs implementing the final Stateless wire.
+  - server-stateless

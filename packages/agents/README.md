@@ -427,29 +427,30 @@ Features:
 
 Agents integrate with MCP to act as servers (providing tools to AI assistants) or clients (using tools from other services).
 
-### Creating an MCP Server
+### Creating a Stateless MCP server
 
 ```typescript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
+import { z } from "zod";
 
-export class MyMCP extends McpAgent<Env, State, {}> {
-  server = new McpServer({ name: "my-tools", version: "1.0.0" });
-
-  async init() {
-    this.server.registerTool(
-      "lookup",
-      { description: "Look up data", inputSchema: { query: z.string() } },
-      async ({ query }) => {
-        const result = await this.search(query);
-        return { content: [{ type: "text", text: result }] };
-      }
-    );
-  }
+function createServer() {
+  const server = new McpServer({ name: "my-tools", version: "1.0.0" });
+  server.registerTool(
+    "lookup",
+    { description: "Look up data", inputSchema: { query: z.string() } },
+    async ({ query }) => ({
+      content: [{ type: "text", text: await lookup(query) }]
+    })
+  );
+  return server;
 }
 
-export default MyMCP.serve("/mcp", { binding: "MyMCP" });
+export default createMcpHandler(createServer);
 ```
+
+Use `McpAgent`, `createLegacyMcpHandler`, and `WorkerTransport` from
+`agents/mcp` only when retaining Legacy session behavior.
 
 ### Using MCP Tools
 
@@ -466,7 +467,7 @@ await this.addMcpServer(
 // Use with AI SDK
 const result = await generateText({
   model: openai("gpt-4o"),
-  tools: this.mcp.getTools(),
+  tools: this.mcp.getAITools(),
   prompt: "What's the weather in Tokyo?"
 });
 ```

@@ -634,6 +634,9 @@ importers:
 
   examples/browser-live-view:
     dependencies:
+      '@cloudflare/codemode':
+        specifier: '*'
+        version: link:../../packages/codemode
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -698,6 +701,9 @@ importers:
 
   examples/browser-quick-actions:
     dependencies:
+      '@cloudflare/codemode':
+        specifier: '*'
+        version: link:../../packages/codemode
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -1052,8 +1058,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -1083,8 +1089,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -1727,15 +1733,34 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
-      '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
       agents:
         specifier: '*'
         version: link:../../packages/agents
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+
+  examples/mcp-elicitation-mrtr:
+    dependencies:
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260629.1
+        version: 4.20260629.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.105.0
+        version: 4.105.0(@cloudflare/workers-types@4.20260629.1)
 
   examples/mcp-rpc-transport:
     dependencies:
@@ -1810,8 +1835,8 @@ importers:
   examples/mcp-server:
     dependencies:
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -1835,8 +1860,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -1899,8 +1924,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -2045,8 +2070,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -3781,8 +3806,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       '@vitejs/plugin-react':
         specifier: ^6.0.3
         version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -3837,9 +3862,6 @@ importers:
       '@cfworker/json-schema':
         specifier: ^4.1.1
         version: 4.1.1
-      '@cloudflare/codemode':
-        specifier: '>=0.4.0'
-        version: link:../codemode
       '@rolldown/plugin-babel':
         specifier: ^0.2.3
         version: 0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -3874,9 +3896,12 @@ importers:
       '@ai-sdk/react':
         specifier: ^3.0.204
         version: 3.0.210(react@19.2.7)(zod@4.4.3)
+      '@cloudflare/codemode':
+        specifier: workspace:*
+        version: link:../codemode
       '@modelcontextprotocol/client':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       '@modelcontextprotocol/conformance-v2':
         specifier: npm:@modelcontextprotocol/conformance@0.2.0-alpha.9
         version: '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)'
@@ -3884,8 +3909,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       '@tanstack/ai':
         specifier: 0.38.0
         version: 0.38.0(@opentelemetry/api@1.9.1)
@@ -4192,8 +4217,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-beta.4
-        version: 2.0.0-beta.4
+        specifier: 2.0.0-beta.5
+        version: 2.0.0-beta.5
       '@orama/orama':
         specifier: ^3.1.18
         version: 3.1.18
@@ -6352,16 +6377,16 @@ packages:
   '@mixmark-io/domino@2.2.0':
     resolution: {integrity: sha512-Y28PR25bHXUg88kCV7nivXrP2Nj2RueZ3/l/jdx6J9f8J4nsEGcgX0Qe6lt7Pa+J79+kPiJU3LguR6O/6zrLOw==}
 
-  '@modelcontextprotocol/client@2.0.0-beta.4':
-    resolution: {integrity: sha512-VNHA/UXDk7mCpVl+jOg5B4WMRRD2OEl+it360Lhi6HiCbrIB2f6pZ0cqSDKXQVUtZvqnhdQHzZAM9h8EKWhq/A==}
+  '@modelcontextprotocol/client@2.0.0-beta.5':
+    resolution: {integrity: sha512-YuuNm5f2TMoFQRje1UqVP8TJRjijCXMz4ckvoVpx1cUXuBEmykWQ2d8R536pek6UKcXT41T5nWc4qR1JFIbEmg==}
     engines: {node: '>=20'}
 
   '@modelcontextprotocol/conformance@0.2.0-alpha.9':
     resolution: {integrity: sha512-Bi5P5TQlOQGPJxCT7UAHbpG7wsR7sNZskHGtCoZBo6vDu416D2FXPgM4wKbg91teIgj4HjGkhnzlvP7U2dszfQ==}
     hasBin: true
 
-  '@modelcontextprotocol/core@2.0.0-beta.4':
-    resolution: {integrity: sha512-nsMXd4wQBKzmph6r+WOhum+mXjDYljTAqwY/XUg3hLtvNOQ8+JVqBSJOVCMJvx9lXhTpTOPrGZ3BuNiaNPjSvg==}
+  '@modelcontextprotocol/core@2.0.0-beta.5':
+    resolution: {integrity: sha512-HKbY9XTbsDy1Y6r2I55TGE3JEapM0vg96e1MUmBIF9LGjos5gjhcIrTz1yvBPLg2aFKHjwhUAQfRdrCEnPxNew==}
     engines: {node: '>=20'}
 
   '@modelcontextprotocol/sdk@1.29.0':
@@ -6374,8 +6399,8 @@ packages:
       '@cfworker/json-schema':
         optional: true
 
-  '@modelcontextprotocol/server@2.0.0-beta.4':
-    resolution: {integrity: sha512-pjMZcNEt1dOq0aJCcY3b7w1Ayh+qmQN2xlfTELcGV9yiAjEGIczBPBLWWW0k0zzo5T8kiv15jtKPsWeHGxLvLg==}
+  '@modelcontextprotocol/server@2.0.0-beta.5':
+    resolution: {integrity: sha512-i1E5l75rQKsgY/AKAIspgMBH1vEL7dqiK7tHr0L+raYcb0SWOziqNGJXGIG6NY4AlXDWIKGJQGB7Nqfs3oUi5g==}
     engines: {node: '>=20'}
 
   '@mongodb-js/zstd@7.0.0':
@@ -14035,9 +14060,9 @@ snapshots:
 
   '@mixmark-io/domino@2.2.0': {}
 
-  '@modelcontextprotocol/client@2.0.0-beta.4':
+  '@modelcontextprotocol/client@2.0.0-beta.5':
     dependencies:
-      '@modelcontextprotocol/core': 2.0.0-beta.4
+      '@modelcontextprotocol/core': 2.0.0-beta.5
       cross-spawn: 7.0.6
       eventsource: 3.0.7
       eventsource-parser: 3.1.0
@@ -14060,7 +14085,7 @@ snapshots:
       - '@cfworker/json-schema'
       - supports-color
 
-  '@modelcontextprotocol/core@2.0.0-beta.4':
+  '@modelcontextprotocol/core@2.0.0-beta.5':
     dependencies:
       zod: 4.4.3
 
@@ -14088,9 +14113,9 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@modelcontextprotocol/server@2.0.0-beta.4':
+  '@modelcontextprotocol/server@2.0.0-beta.5':
     dependencies:
-      '@modelcontextprotocol/core': 2.0.0-beta.4
+      '@modelcontextprotocol/core': 2.0.0-beta.5
       zod: 4.4.3
 
   '@mongodb-js/zstd@7.0.0':

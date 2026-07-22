@@ -1,18 +1,8 @@
-import { McpServer as LegacyMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
-import {
-  acceptedContent,
-  inputRequired,
-  inputResponse,
-  isLegacyRequest,
-  McpServer,
-  type CallToolResult,
-  type InputRequiredResult
-} from "@modelcontextprotocol/server";
 import { Agent, getAgentByName } from "agents";
 import {
   createLegacyMcpHandler,
-  createMcpHandler,
   DurableObjectEventStore,
   type TransportState,
   WorkerTransport
@@ -22,91 +12,19 @@ import * as z from "zod";
 
 const STATE_KEY = "mcp_transport_state";
 
-const AMOUNT_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    amount: {
-      type: "number" as const,
-      title: "Amount",
-      description: "The amount to increase the counter by"
-    }
-  },
-  required: ["amount"]
-};
-
-function createServer(): McpServer {
-  const server = new McpServer({
-    name: "elicitation-demo",
-    version: "2.0.0"
-  });
-
-  // The modern path is stateless: callers provide the current value, and the
-  // tool returns the next value after a multi-round-trip elicitation.
-  server.registerTool(
-    "increase-counter",
-    {
-      description: "Calculate a counter increase after asking for the amount",
-      inputSchema: z.object({
-        current: z.number().describe("Current counter value"),
-        confirm: z.boolean().describe("Do you want to increase the counter?")
-      })
-    },
-    async (
-      { current, confirm },
-      context
-    ): Promise<CallToolResult | InputRequiredResult> => {
-      if (!confirm) {
-        return {
-          content: [{ type: "text", text: "Counter increase cancelled." }]
-        };
-      }
-
-      const response = inputResponse(context.mcpReq.inputResponses, "amount");
-      if (response.kind === "elicit" && response.action !== "accept") {
-        return {
-          content: [{ type: "text", text: "Counter increase cancelled." }]
-        };
-      }
-
-      const accepted = acceptedContent(
-        context.mcpReq.inputResponses,
-        "amount",
-        z.object({ amount: z.number() })
-      );
-      if (!accepted) {
-        return inputRequired({
-          inputRequests: {
-            amount: inputRequired.elicit({
-              message: "By how much do you want to increase the counter?",
-              requestedSchema: AMOUNT_SCHEMA
-            })
-          }
-        });
-      }
-
-      const next = current + accepted.amount;
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Counter increased by ${accepted.amount}, next value is ${next}`
-          }
-        ]
-      };
-    }
-  );
-
-  return server;
-}
-
 interface State {
   counter: number;
 }
 
-export class MyAgent extends Agent<Cloudflare.Env, State> {
-  server = new LegacyMcpServer(
+/**
+ * Retained Legacy stateful elicitation example.
+ *
+ * New stateless servers should use examples/mcp-elicitation-mrtr instead.
+ */
+export class LegacyElicitationAgent extends Agent<Cloudflare.Env, State> {
+  server = new McpServer(
     {
-      name: "elicitation-demo-legacy",
+      name: "legacy-elicitation-demo",
       version: "1.0.0"
     },
     {
@@ -122,47 +40,61 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
         this.ctx.storage.kv.put<TransportState>(STATE_KEY, state);
       }
     },
+    // Persist SSE events so 2025 clients can reconnect with Last-Event-ID.
     eventStore: new DurableObjectEventStore(this.ctx.storage)
   });
 
   handler = createLegacyMcpHandler(this.server, {
+    route: "/mcp",
     transport: this.transport
   });
 
   initialState = { counter: 0 };
 
   onStart(): void {
-    // Existing 2025 clients keep their push-style elicitation and persistent
-    // session unchanged on the SDK v1 server and WorkerTransport.
+    this.registerFormElicitationTool();
     this.registerUrlElicitationTool();
+  }
+
+  private registerFormElicitationTool() {
     this.server.registerTool(
       "increase-counter",
       {
-        description: "Increase the persistent counter",
+        description: "Increase a persistent counter after asking for an amount",
         inputSchema: {
           confirm: z.boolean().describe("Do you want to increase the counter?")
         }
       },
       async ({ confirm }, extra) => {
-        if (!confirm) return this.cancelled();
+        if (!confirm) return this.cancelled("Counter increase");
 
         const result = await this.server.server.elicitInput(
           {
             message: "By how much do you want to increase the counter?",
-            requestedSchema: AMOUNT_SCHEMA
+            requestedSchema: {
+              type: "object",
+              properties: {
+                amount: {
+                  type: "number",
+                  title: "Amount",
+                  description: "The amount to increase the counter by"
+                }
+              },
+              required: ["amount"]
+            }
           },
           { relatedRequestId: extra.requestId }
         );
 
         if (result.action !== "accept" || !result.content) {
-          return this.cancelled();
+          return this.cancelled("Counter increase");
         }
         const amount = Number(result.content.amount);
         if (!Number.isFinite(amount)) {
           return {
             content: [
               {
-                type: "text",
+                type: "text" as const,
                 text: "Counter increase failed, invalid amount."
               }
             ]
@@ -174,7 +106,7 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text: `Counter increased by ${amount}, current value is ${counter}`
             }
           ]
@@ -188,9 +120,7 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
       "connect-account",
       {
         description:
-          "Pretends to link an external account. Demonstrates url-mode " +
-          "elicitation: the sensitive URL goes to the user out-of-band " +
-          "instead of into tool-result text.",
+          "Pretends to link an external account using 2025 url-mode elicitation",
         inputSchema: {}
       },
       async (_args, extra) => {
@@ -206,14 +136,12 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
         );
 
         if (result.action !== "accept") {
-          return {
-            content: [{ type: "text", text: "Account connection cancelled." }]
-          };
+          return this.cancelled("Account connection");
         }
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text: "Account connection page opened. Complete it in your browser."
             }
           ]
@@ -222,9 +150,9 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
     );
   }
 
-  private cancelled() {
+  private cancelled(action: string) {
     return {
-      content: [{ type: "text" as const, text: "Counter increase cancelled." }]
+      content: [{ type: "text" as const, text: `${action} cancelled.` }]
     };
   }
 
@@ -233,20 +161,14 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
   }
 }
 
-const modernHandler = createMcpHandler(createServer, {
-  route: "/mcp",
-  legacy: "reject"
-});
-
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    if (!(await isLegacyRequest(request))) {
-      return modernHandler(request, env, ctx);
-    }
-
+  async fetch(request: Request) {
     const sessionId =
       request.headers.get("mcp-session-id") ?? crypto.randomUUID();
-    const agent = await getAgentByName(bindings.MyAgent, sessionId);
+    const agent = await getAgentByName(
+      bindings.LegacyElicitationAgent,
+      sessionId
+    );
     return agent.onMcpRequest(request);
   }
 };

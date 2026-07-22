@@ -301,7 +301,8 @@ export function AdvancedMcpDemo() {
             <div className="space-y-2">
               {[
                 ["RPC transport", "examples/mcp-rpc-transport"],
-                ["Elicitation", "examples/mcp-elicitation"],
+                ["Stateless Elicitation", "examples/mcp-elicitation-mrtr"],
+                ["Legacy Elicitation", "examples/mcp-elicitation"],
                 ["OAuth server", "examples/mcp-worker-authenticated"],
                 ["Codemode MCP", "examples/codemode-mcp"],
                 ["OpenAPI MCP", "examples/codemode-mcp-openapi"],
