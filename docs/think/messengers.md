@@ -1,5 +1,11 @@
 # Think Messengers
 
+> **Deprecated.** The Think-owned messenger runtime is being superseded by
+> user-owned hosts: run the Chat SDK in your worker (with its own state DO)
+> and drive agents via [`ingest()`](./channels.md) over Workers RPC — see
+> `examples/channel-host-telegram`. Existing messenger apps keep working, but
+> new integrations should use the host pattern.
+
 Use messengers when a Think agent should receive and reply to Chat SDK webhooks
 directly. Think owns the webhook route, durable reply fiber, conversation
 routing, and streamed delivery back to the provider.

@@ -1,0 +1,4 @@
+# Copy to .dev.vars (local) and `wrangler secret put` each for deploys.
+TELEGRAM_BOT_TOKEN=123456:ABC-your-botfather-token
+TELEGRAM_WEBHOOK_SECRET_TOKEN=any-random-string-you-choose
+TELEGRAM_BOT_USERNAME=your_bot_username

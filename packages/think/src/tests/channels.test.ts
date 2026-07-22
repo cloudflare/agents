@@ -15,7 +15,7 @@ describe("resolveChannels", () => {
     const { channels } = resolveChannels({}, {});
     const web = channels.get("web");
     expect(web?.kind).toBe("web");
-    expect(web?.ingress.transport).toBe("websocket");
+    expect(web?.ingress?.transport).toBe("websocket");
   });
 
   it("absorbs getMessengers() entries as messenger channels and feeds the runtime", () => {
@@ -24,7 +24,7 @@ describe("resolveChannels", () => {
       { telegram: telegram() }
     );
     expect(channels.get("telegram")?.kind).toBe("messenger");
-    expect(channels.get("telegram")?.ingress.transport).toBe("webhook");
+    expect(channels.get("telegram")?.ingress?.transport).toBe("webhook");
     expect(Object.keys(messengers)).toEqual(["telegram"]);
   });
 
@@ -50,7 +50,6 @@ describe("resolveChannels", () => {
     const configured = {
       web: {
         kind: "web",
-        ingress: { transport: "websocket" },
         instructions: "be concise"
       }
     } as const;
@@ -86,6 +85,31 @@ describe("resolveChannels", () => {
     } as const;
     expect(() => resolveChannels(configured, { telegram: telegram() })).toThrow(
       /channel ids must be unique/
+    );
+  });
+
+  it("allows policy-only non-messenger channels", () => {
+    const configured = {
+      telegram: {
+        kind: "custom",
+        instructions: "Telegram policy only"
+      }
+    } as const;
+
+    const { channels, messengers } = resolveChannels(configured, {});
+
+    expect(channels.get("telegram")?.kind).toBe("custom");
+    expect(channels.get("telegram")?.ingress).toBeUndefined();
+    expect(Object.keys(messengers)).toEqual([]);
+  });
+
+  it("throws for messenger-kind channels without webhook ingress", () => {
+    const configured = {
+      telegram: { kind: "messenger", instructions: "missing ingress" }
+    } as const;
+
+    expect(() => resolveChannels(configured, {})).toThrow(
+      /requires webhook ingress/
     );
   });
 });

@@ -50,6 +50,11 @@ import {
   StreamAccumulator
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
+import type {
+  MessengerContext,
+  MessengerDeliverySurface
+} from "../../messengers";
+import type { ThinkChannels } from "../../channels";
 import type { Schedule } from "agents";
 import { Session } from "agents/experimental/memory/session";
 import { z } from "zod";
@@ -264,6 +269,20 @@ function createReasoningMockModel(
       return Promise.resolve({ stream });
     }
   } as LanguageModel;
+}
+
+function messengerContextForTest(messengerId: string): MessengerContext {
+  return {
+    capabilities: { canStream: true },
+    kind: "direct-message",
+    messengerId,
+    provider: "fake",
+    thread: {
+      id: `${messengerId}:thread`,
+      isDirectMessage: true,
+      providerThreadId: `${messengerId}:thread`
+    }
+  };
 }
 
 /** Mock model that emits multiple text-delta chunks for abort testing */
@@ -514,6 +533,7 @@ export class ThinkTestAgent extends Think {
   private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
+  private _useLoopToolModelForTest = false;
 
   override onChatError(error: unknown): unknown {
     const msg = error instanceof Error ? error.message : String(error);
@@ -698,9 +718,13 @@ export class ThinkTestAgent extends Think {
   }> = [];
   private _beforeTurnMessagesJson: string[] = [];
   private _capturedTurnChannels: string[] = [];
+  private _capturedMessengerContexts: string[] = [];
   private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
+  private _runNestedMessengerContextInBeforeTurn = false;
+  private _deliverNoticeInBeforeTurn = false;
+  private _noticePostsForTest: string[] = [];
 
-  override configureChannels() {
+  override configureChannels(): ThinkChannels {
     return {
       voice: {
         kind: "voice" as const,
@@ -708,6 +732,11 @@ export class ThinkTestAgent extends Think {
         instructions: "VOICE MODE",
         tools: () => ({}),
         maxTurns: 3
+      },
+      telegram: {
+        kind: "custom" as const,
+        instructions: "TELEGRAM MODE",
+        maxTurns: 1
       }
     };
   }
@@ -746,7 +775,7 @@ export class ThinkTestAgent extends Think {
     return this._agentToolOutputForTest.get(runId);
   }
 
-  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+  override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
     this._beforeTurnLog.push({
       system: ctx.system,
       toolNames: Object.keys(ctx.tools),
@@ -755,7 +784,44 @@ export class ThinkTestAgent extends Think {
     });
     this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
+    this._capturedMessengerContexts.push(
+      this.getMessengerContext()?.messengerId ?? ""
+    );
     this._capturedTurnMetadata.push(this.activeTurnMetadata);
+    if (this._runNestedMessengerContextInBeforeTurn) {
+      this._runNestedMessengerContextInBeforeTurn = false;
+      this._capturedMessengerContexts.push(
+        `outer-before:${this.getMessengerContext()?.messengerId ?? ""}`
+      );
+      await (
+        this as unknown as {
+          _admitTurn(spec: {
+            admission: "submit";
+            trigger: "programmatic";
+            runtimeContext: { messengerContext: MessengerContext };
+            execute(): Promise<void>;
+          }): Promise<void>;
+        }
+      )._admitTurn({
+        admission: "submit",
+        trigger: "programmatic",
+        runtimeContext: {
+          messengerContext: messengerContextForTest("inner")
+        },
+        execute: async () => {
+          this._capturedMessengerContexts.push(
+            `inner:${this.getMessengerContext()?.messengerId ?? ""}`
+          );
+        }
+      });
+      this._capturedMessengerContexts.push(
+        `outer-after:${this.getMessengerContext()?.messengerId ?? ""}`
+      );
+    }
+    if (this._deliverNoticeInBeforeTurn) {
+      this._deliverNoticeInBeforeTurn = false;
+      await this.deliverNotice("notice from messenger turn");
+    }
     if (this._turnConfigOverride) return this._turnConfigOverride;
   }
 
@@ -763,10 +829,21 @@ export class ThinkTestAgent extends Think {
     return this._capturedTurnChannels;
   }
 
+  async getCapturedMessengerContextsForTest(): Promise<string[]> {
+    return this._capturedMessengerContexts;
+  }
+
   async getCapturedTurnMetadataForTest(): Promise<
     (Record<string, unknown> | undefined)[]
   > {
     return this._capturedTurnMetadata;
+  }
+
+  async ingestTextForTest(input: {
+    channelId: "web" | "voice" | "custom" | "telegram";
+    text: string;
+  }): Promise<ReadableStream<Uint8Array>> {
+    return this.ingest(input);
   }
 
   async getActiveTurnMetadataForTest(): Promise<
@@ -784,6 +861,47 @@ export class ThinkTestAgent extends Think {
       channel: options.channel,
       metadata: options.metadata
     });
+  }
+
+  async runNestedMessengerContextTurnForTest(): Promise<string[]> {
+    this._runNestedMessengerContextInBeforeTurn = true;
+    await this.chatWithMessengerContext(
+      "outer",
+      new TestCollectingCallback(),
+      messengerContextForTest("outer")
+    );
+    return this._capturedMessengerContexts;
+  }
+
+  async runMessengerNoticeTurnForTest(): Promise<string[]> {
+    this._noticePostsForTest = [];
+    this._deliverNoticeInBeforeTurn = true;
+    const surface: MessengerDeliverySurface = {
+      post: async (message) => {
+        if (typeof message === "string") {
+          this._noticePostsForTest.push(message);
+          return;
+        }
+        if (Symbol.asyncIterator in message) {
+          for await (const chunk of message) {
+            this._noticePostsForTest.push(chunk);
+          }
+          return;
+        }
+        this._noticePostsForTest.push(message.markdown);
+      }
+    };
+    const restore = this.bindActiveDeliverySurface(surface);
+    try {
+      await this.chatWithMessengerContext(
+        "notice",
+        new TestCollectingCallback(),
+        messengerContextForTest("fake")
+      );
+    } finally {
+      restore();
+    }
+    return this._noticePostsForTest;
   }
 
   async persistIncomingMessageForTest(msg: UIMessage): Promise<void> {
@@ -1886,6 +2004,10 @@ export class ThinkTestAgent extends Think {
     this._response = response;
   }
 
+  async useLoopToolModelForTest(): Promise<void> {
+    this._useLoopToolModelForTest = true;
+  }
+
   async setStripTextResponseForTest(strip: boolean): Promise<void> {
     this._stripTextResponseForTest = strip;
   }
@@ -1919,6 +2041,9 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): LanguageModel {
+    if (this._useLoopToolModelForTest) {
+      return createToolCallingMockModel();
+    }
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -1939,6 +2064,19 @@ export class ThinkTestAgent extends Think {
         this._lastModelCallSettings = settings;
       }
     });
+  }
+
+  override getTools(): ToolSet {
+    if (!this._useLoopToolModelForTest) {
+      return {};
+    }
+    return {
+      echo: tool({
+        description: "Echo a message.",
+        inputSchema: z.object({ message: z.string() }),
+        execute: async ({ message }) => message
+      })
+    };
   }
 
   async getChatErrorLog(): Promise<string[]> {
