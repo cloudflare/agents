@@ -5,7 +5,9 @@ import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
 import type {
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -25,6 +27,13 @@ const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 async function freshAgent(name: string) {
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+    name
+  );
+}
+
+async function freshPropsAgent(name: string) {
+  return getServerByName(
+    env.ThinkPropsTestAgent as unknown as DurableObjectNamespace<ThinkPropsTestAgent>,
     name
   );
 }
@@ -151,6 +160,25 @@ async function freshLegacyConfigMigrationAgent(name: string) {
 // ── Core chat functionality ──────────────────────────────────────
 
 describe("Think — core", () => {
+  it("should forward routed props to onStart", async () => {
+    const room = `props-${crypto.randomUUID()}`;
+    const response = await exports.default.fetch(
+      `http://example.com/agents/think-props-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    expect(ws).toBeDefined();
+    ws.accept();
+
+    try {
+      const agent = await freshPropsAgent(room);
+      expect(await agent.getStartProps()).toEqual({ tenantId: "tenant-1" });
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it("should run a chat turn and persist messages", async () => {
     const agent = await freshAgent("chat-basic");
     const result = await agent.testChat("Hello!");
@@ -1000,6 +1028,27 @@ describe("Think — context blocks", () => {
 
     expect(systemPrompt).toContain("MEMORY");
     expect(systemPrompt).toContain("[writable]");
+  });
+
+  it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const agent = await getServerByName(
+      env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
+      "skills-system-prompt-warning"
+    );
+
+    try {
+      await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
+        done: true
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured"
+        )
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -4776,6 +4825,38 @@ describe("Think — onChatRecovery", () => {
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
     expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-storage-reset");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage:
+        "Internal error in Durable Object storage caused object to be reset",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+    expect(result.submissionStatus).toBe("running");
+  });
+
+  it("terminalizes an ordinary application SQL error", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-application-sql");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "constraint failed: application records.slug",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(false);
+    expect(result.incidentStatus).toBe("exhausted");
+    expect(result.exhaustedContexts).toBe(1);
+    expect(result.submissionStatus).toBe("error");
   });
 
   it("re-throws a retryable-flagged platform error and does NOT terminalize (#1730)", async () => {

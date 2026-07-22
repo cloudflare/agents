@@ -22,6 +22,10 @@ function result(
 }
 
 describe("classifyTurnOutcome", () => {
+  it("allows 250 steps for long review and demo runs", () => {
+    expect(AGENT_THINK_MAX_STEPS).toBe(250);
+  });
+
   it("reports max-step exhaustion when the final step ends with a tool call", () => {
     const outcome = classifyTurnOutcome(
       result(toolSteps(AGENT_THINK_MAX_STEPS)),

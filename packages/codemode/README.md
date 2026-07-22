@@ -220,6 +220,18 @@ const result = streamText({
 });
 ```
 
+For non-AI-SDK hosts such as MCP servers, use the same runtime directly:
+
+```ts
+const matches = await runtime.search("create issue");
+const docs = await runtime.describe(matches.results[0].path);
+const outcome = await runtime.execute({
+  code: `async () => github.create_issue({ title: "Bug" })`
+});
+```
+
+Search and describe results include `requiresApproval: true` for protected connector methods. A paused `execute()` outcome can be resolved with the same `approve()` and `reject()` methods used by an approval UI.
+
 Inside the sandbox, each connector is available as a global named after the connector. The `codemode` platform SDK provides discovery:
 
 ```ts

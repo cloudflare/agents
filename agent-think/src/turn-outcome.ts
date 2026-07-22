@@ -1,4 +1,4 @@
-export const AGENT_THINK_MAX_STEPS = 100;
+export const AGENT_THINK_MAX_STEPS = 250;
 
 export type TurnOutcomeReason =
   | "completed"

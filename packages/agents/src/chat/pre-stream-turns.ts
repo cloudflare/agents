@@ -88,14 +88,15 @@ export class PreStreamTurns<
    * `pendingResumeConnections` — they must keep receiving any live broadcast —
    * until the host flushes them through `notifyStreamResuming` on stream start.
    */
-  park(connection: TConnection): boolean {
+  park(connection: TConnection, probeId?: string): boolean {
     if (!this.hasInFlight()) return false;
     this.awaitingConnections.set(connection.id, connection);
     sendIfOpen(
       connection,
       JSON.stringify({
         type: MSG_STREAM_PENDING,
-        ...(this._latestRequestId ? { id: this._latestRequestId } : {})
+        ...(this._latestRequestId ? { id: this._latestRequestId } : {}),
+        ...(probeId ? { probeId } : {})
       })
     );
     return true;

@@ -24,22 +24,23 @@
  */
 
 import { getAgentByName, routeAgentRequest } from "agents";
+import { type AgentThinkEnv, ThinkAgent } from "./agent";
 import {
-  type AgentThinkEnv,
-  ThinkAgent,
+  WorkspaceAgent,
   WorkspaceProxy,
   WorkspaceServiceProxy
-} from "./agent";
+} from "./workspace-agent";
 import { CommandCenterAgent } from "./command-center";
 import { Sandbox } from "./sandbox";
 import { WarmPool } from "./warm-pool";
 import { primePool } from "./pool";
 
-// ThinkAgent owns the Workspace; Sandbox is the container-host DO the warm
-// pool hands out; WarmPool keeps one container pre-warmed. The proxies let
-// wsd's /ws callback route back into the Agent DO that owns the workspace.
+// WorkspaceAgent owns Workspace/VFS and its backend connection; ThinkAgent
+// owns only turn/transcript state. Sandbox is the container host the warm pool
+// hands out. The proxies route wsd's /ws callback to WorkspaceAgent.
 export {
   ThinkAgent,
+  WorkspaceAgent,
   CommandCenterAgent,
   Sandbox,
   WarmPool,
@@ -205,11 +206,11 @@ export default {
         /^\/dev\/workspace-sync\/([^/]+)$/
       );
       if (request.method === "GET" && workspaceSync) {
-        const agent = await getAgentByName<AgentThinkEnv, ThinkAgent>(
-          env.ThinkAgent,
-          decodeURIComponent(workspaceSync[1])
+        const session = decodeURIComponent(workspaceSync[1]);
+        const workspace = env.WorkspaceAgent.get(
+          env.WorkspaceAgent.idFromName(session)
         );
-        return Response.json(await agent.debugWorkspaceSync());
+        return Response.json(await workspace.debugWorkspaceSync());
       }
     }
 

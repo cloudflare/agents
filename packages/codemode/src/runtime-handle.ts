@@ -1,4 +1,11 @@
-import type { CodemodeConnector } from "./connectors";
+import {
+  describeTarget,
+  searchConnectors,
+  type CodemodeConnector,
+  type ConnectorDescription,
+  type DescribeOutput,
+  type SearchOutput
+} from "./connectors";
 import type { Executor } from "./executor";
 import {
   createProxyTool,
@@ -11,6 +18,7 @@ import {
   rollbackCodemode,
   validateConnectorNames,
   type CodemodeTool,
+  type ProxyToolInput,
   type ProxyToolOutput,
   type TransformResult
 } from "./proxy-tool";
@@ -80,7 +88,14 @@ export type CodemodeExpireOptions = {
 };
 
 export interface CodemodeRuntimeHandle {
+  /** Create the AI SDK-compatible model-facing Code Mode tool. */
   tool(options?: CodemodeRuntimeToolOptions): CodemodeTool;
+  /** Execute code directly, without adapting the runtime to an AI SDK tool. */
+  execute(input: ProxyToolInput): Promise<ProxyToolOutput>;
+  /** Search connector methods and saved snippets. */
+  search(query: string): Promise<SearchOutput>;
+  /** Get on-demand TypeScript documentation for a connector method or snippet. */
+  describe(target: string): Promise<DescribeOutput>;
   approve(options: CodemodeApproveOptions): Promise<ProxyToolOutput>;
   /**
    * Reject a pending action, ending the run. Returns whether the reject
@@ -121,6 +136,8 @@ export function createCodemodeRuntime(
 
 class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
   #options: CreateCodemodeRuntimeOptions;
+  #executionTool?: CodemodeTool;
+  #descriptionsPromise?: Promise<ConnectorDescription[]>;
 
   constructor(options: CreateCodemodeRuntimeOptions) {
     validateConnectorNames(options.connectors);
@@ -138,6 +155,27 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       maxExecutions: this.#options.maxExecutions,
       transformResult: this.#options.transformResult
     });
+  }
+
+  execute(input: ProxyToolInput): Promise<ProxyToolOutput> {
+    this.#executionTool ??= this.tool();
+    return this.#executionTool.execute(input, undefined);
+  }
+
+  async search(query: string): Promise<SearchOutput> {
+    const [descriptions, snippets] = await Promise.all([
+      this.#descriptions(),
+      this.snippets()
+    ]);
+    return searchConnectors(query, descriptions, snippets);
+  }
+
+  async describe(target: string): Promise<DescribeOutput> {
+    const [descriptions, snippets] = await Promise.all([
+      this.#descriptions(),
+      this.snippets()
+    ]);
+    return describeTarget(target, descriptions, snippets);
   }
 
   approve(options: CodemodeApproveOptions): Promise<ProxyToolOutput> {
@@ -222,6 +260,12 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
 
   deleteSnippet(name: string): Promise<boolean> {
     return this.#runtime().deleteSnippet(name);
+  }
+
+  #descriptions(): Promise<ConnectorDescription[]> {
+    return (this.#descriptionsPromise ??= Promise.all(
+      this.#options.connectors.map((connector) => connector.describe())
+    ));
   }
 
   #runtime() {

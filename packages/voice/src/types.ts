@@ -157,6 +157,18 @@ export interface TranscriberSession {
   waitUntilReady?(): Promise<void>;
 
   /**
+   * Optional. Provide the agent's most recent spoken reply (the text sent to
+   * TTS) as conversational context for the next user turn.
+   *
+   * The pipeline calls this after the agent finishes speaking each reply and
+   * greeting. Providers that support context carryover (e.g. AssemblyAI's
+   * `agent_context`) use it to better recognize short or contextual answers
+   * ("yes", "7pm", an email spelled aloud). Providers that don't support it
+   * simply omit this method — it is a no-op for them.
+   */
+  updateAgentContext?(text: string): void;
+
+  /**
    * Close the session and release resources.
    * Called at end_call or disconnect — not on interrupt.
    */

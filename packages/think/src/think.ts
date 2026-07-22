@@ -12,7 +12,7 @@
  * Configuration overrides:
  *   - getModel()            — return a model id string (resolved via the
  *                             built-in workers-ai-provider) or a LanguageModel
- *   - getSystemPrompt()     — return the system prompt (fallback when no context blocks)
+ *   - getSystemPrompt()     — return the legacy fallback system prompt
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
  *   - configureSession()    — add context blocks, compaction, search, skills
@@ -84,6 +84,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as aiSdk from "ai";
 import type {
   FlexibleSchema,
   InferSchema,
@@ -107,9 +108,9 @@ import {
   // `isStepCount`). Using it keeps Think compatible with both majors.
   stepCountIs,
   streamText,
-  tool
+  tool,
+  wrapLanguageModel
 } from "ai";
-
 /**
  * Callback type for the AI SDK tool-execution-finished hook, derived from
  * `streamText`'s options so it resolves under both AI SDK v6 and v7 (the
@@ -118,6 +119,7 @@ import {
 type ToolCallFinishCallback = NonNullable<
   Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
 >;
+import { createAISDKTelemetry, wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
@@ -148,6 +150,10 @@ import {
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
+const agentsAISDKTelemetryBrand = Symbol.for(
+  "cloudflare.agents.ai-sdk-telemetry"
+);
+const usesAISDKV7Telemetry = "registerTelemetry" in aiSdk;
 import type {
   AgentToolLifecycleResult,
   AgentToolMilestone,
@@ -320,6 +326,50 @@ export type {
   FetchResponseMode,
   FetchRedirectPolicy
 } from "./tools/fetch";
+
+type AgentSpanAttributes = Readonly<
+  Record<string, string | number | boolean | undefined>
+>;
+
+type UpdateAgentSpan = (attributes: AgentSpanAttributes) => void;
+
+type AgentSpanHost = {
+  _withAgentSpan<T>(
+    operation: string,
+    storagePhase: string,
+    attributes: AgentSpanAttributes,
+    run: (update: UpdateAgentSpan) => T | Promise<T>
+  ): T | Promise<T>;
+};
+
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => Promise<T>
+): Promise<T>;
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => T
+): T;
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => T | Promise<T>
+): T | Promise<T> {
+  return (host as AgentSpanHost)._withAgentSpan(
+    operation,
+    storagePhase,
+    attributes,
+    run
+  );
+}
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
@@ -1469,7 +1519,26 @@ type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 const admittedTurnContext = new AsyncLocalStorage<{
   agent: unknown;
   requestId: string;
+  trigger: TurnTrigger;
+  admission: "queue";
+  channel?: string | undefined;
+  continuation?: boolean | undefined;
+  generation?: number | undefined;
 }>();
+
+// Drains the underlying model stream when a drain loop exits early (in-stream
+// error break, stall abort, user abort). The AI SDK tees its base stream, so
+// an abandoned tee branch would otherwise leave the tracing wrapper's
+// operation span open forever. One registration is associated with both the
+// stable pre-transform result and any wrapper returned by the test seam.
+type InferenceStreamFinalizer = {
+  started: boolean;
+  run: () => Promise<void>;
+};
+const inferenceStreamFinalizers = new WeakMap<
+  object,
+  InferenceStreamFinalizer
+>();
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -2589,13 +2658,33 @@ export class Think<
     "skillsFingerprint"
   ] as const;
   /**
-   * Wait for MCP server connections to be ready before the inference
-   * loop. MCP tools are auto-merged into the tool set.
+   * Whether Think automatically converts connected MCP tools to AI SDK tools
+   * and merges them into each model turn.
+   *
+   * Set this to `false` when MCP tools are exposed through Code Mode or another
+   * mechanism outside Think's automatic tool set. Connections, discovery,
+   * `waitForMcpConnections`, raw tool listing and calls, and explicit
+   * `this.mcp.getAITools()` calls are unaffected.
+   *
+   * @default true
+   */
+  includeMcpTools = true;
+
+  /**
+   * Wait for MCP server connections to be ready before the inference loop.
+   * When {@link includeMcpTools} is enabled, their tools are then auto-merged
+   * into the tool set.
    *
    * Set to `true` for a default 10s timeout, or `{ timeout: ms }`
    * for a custom timeout. Defaults to `false` (no waiting).
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
+
+  /** Store model input/output on `chat` spans. */
+  storeMessages = false;
+
+  /** Store tool input/output on `execute_tool` spans. */
+  storeTools = false;
 
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();
@@ -2814,46 +2903,59 @@ export class Think<
     super(ctx, env);
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async () => {
-      // 1. Workspace initialization
-      if (!this.workspace) {
-        this.workspace = new Workspace({
-          sql: this.ctx.storage.sql,
-          name: () => this.name
-        });
-      }
+    const startThink = async (
+      props: Props | undefined,
+      update: UpdateAgentSpan
+    ) => {
+      await withAgentSpan(
+        this,
+        "initialize_think_session",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        async () => {
+          // 1. Workspace initialization
+          if (!this.workspace) {
+            this.workspace = new Workspace({
+              sql: this.ctx.storage.sql,
+              name: () => this.name
+            });
+          }
 
-      // 2. Session configuration (builder phase — context blocks, compaction, skills)
-      const baseSession = Session.create(this);
-      this.session = await this.configureSession(baseSession);
-      this.session.internal_onMessagesChanged(async (event) => {
-        switch (event.type) {
-          case "append":
-            if (!event.inserted || event.parentId !== undefined) {
-              await this._syncMessages();
-            } else {
-              this._upsertCachedMessage(event.message as UIMessage);
+          // 2. Session configuration (builder phase — context blocks, compaction, skills)
+          const baseSession = Session.create(this);
+          this.session = await this.configureSession(baseSession);
+          this.session.internal_onMessagesChanged(async (event) => {
+            switch (event.type) {
+              case "append":
+                if (!event.inserted || event.parentId !== undefined) {
+                  await this._syncMessages();
+                } else {
+                  this._upsertCachedMessage(event.message as UIMessage);
+                }
+                // The conversation grew — older messages may have aged out of
+                // the keep-recent window. Only schedule the maintenance scan once
+                // this session has actually observed oversized media; otherwise a
+                // normal text-only chat would pay a row-stat read after every turn.
+                this._scheduleMediaEvictionAfterAppend(
+                  event.message as UIMessage
+                );
+                break;
+              case "update":
+                this._patchCachedMessage(event.message as UIMessage);
+                break;
+              case "clear":
+                this._replaceCachedMessages([]);
+                break;
+              case "delete":
+              case "compact":
+                await this._syncMessages();
+                break;
             }
-            // The conversation grew — older messages may have aged out of
-            // the keep-recent window. Only schedule the maintenance scan once
-            // this session has actually observed oversized media; otherwise a
-            // normal text-only chat would pay a row-stat read after every turn.
-            this._scheduleMediaEvictionAfterAppend(event.message as UIMessage);
-            break;
-          case "update":
-            this._patchCachedMessage(event.message as UIMessage);
-            break;
-          case "clear":
-            this._replaceCachedMessages([]);
-            break;
-          case "delete":
-          case "compact":
-            await this._syncMessages();
-            break;
-        }
-      });
+          });
 
-      await this._initializeSkills();
+          await this._initializeSkills();
+        }
+      );
 
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
@@ -2866,66 +2968,102 @@ export class Think<
       // history is untouched and the next safe-boundary `_syncMessages()`
       // retries.
       this._onStartDegradations = [];
-      const hydrated = await this._runBestEffortOnStartStep(
-        "transcript-hydration",
-        () => this._syncMessages(),
-        "The agent is starting with an empty in-memory message view; " +
-          "persisted history is untouched. If the error is SQLITE_NOMEM, " +
-          "the stored transcript is too large to hydrate (often inline " +
-          "base64 media in tool results) — compact or clear the session " +
-          "to recover."
+      await withAgentSpan(
+        this,
+        "hydrate_think_session",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        async () => {
+          const hydrated = await this._runBestEffortOnStartStep(
+            "transcript-hydration",
+            () => this._syncMessages(),
+            "The agent is starting with an empty in-memory message view; " +
+              "persisted history is untouched. If the error is SQLITE_NOMEM, " +
+              "the stored transcript is too large to hydrate (often inline " +
+              "base64 media in tool results) — compact or clear the session " +
+              "to recover."
+          );
+          if (!hydrated) {
+            this._replaceCachedMessages([]);
+          }
+          this._refreshMediaEvictionSignalFromCache();
+        }
       );
-      if (!hydrated) {
-        this._replaceCachedMessages([]);
-      }
-      this._refreshMediaEvictionSignalFromCache();
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
-        await this._initializeExtensions();
+        await withAgentSpan(
+          this,
+          "initialize_think_extensions",
+          "startup",
+          { "cloudflare.agents.component": "think" },
+          () => this._initializeExtensions()
+        );
       }
 
       // 7. Protocol handlers
-      this._resumableStream = new ResumableStream(this.sql.bind(this));
-      this._restoreClientTools();
-      this._restoreBody();
-      this._setupProtocolHandlers();
-      await this._initializeChannels();
+      await withAgentSpan(
+        this,
+        "initialize_think_chat",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        async () => {
+          this._resumableStream = new ResumableStream(this.sql.bind(this));
+          this._restoreClientTools();
+          this._restoreBody();
+          this._setupProtocolHandlers();
+          await this._initializeChannels();
+        }
+      );
 
       // 8. User's onStart
-      await _onStart();
+      await _onStart(props);
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
       // before draining any recovered programmatic work they may enqueue.
       // Best-effort: reconcile runs after the agent is otherwise functional,
       // and a failure (user getScheduledTasks() throwing, storage pressure)
       // must not brick the DO (#1710).
-      await this._runBestEffortOnStartStep(
-        "scheduled-task-reconcile",
-        () => this._reconcileDeclaredScheduledTasks(),
-        "Declared scheduled tasks were not reconciled on this wake; the " +
-          "next successful wake will reconcile them."
+      await withAgentSpan(
+        this,
+        "reconcile_think_schedules",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        () =>
+          this._runBestEffortOnStartStep(
+            "scheduled-task-reconcile",
+            () => this._reconcileDeclaredScheduledTasks(),
+            "Declared scheduled tasks were not reconciled on this wake; the " +
+              "next successful wake will reconcile them."
+          )
       );
 
       // 10. Durable submissions may run user-defined model/hooks, so start them
       // after subclass initialization has completed. Best-effort for the same
       // reason as step 9.
-      await this._runBestEffortOnStartStep(
-        "durable-work-recovery",
-        async () => {
-          await this._sweepActionLedger();
-          await this._sweepActionPendingApprovals();
-          await this._recoverSubmissionsOnStart();
-          this._recoverWorkflowNotifications();
-          if (this._hasPendingSubmissions()) {
-            this._startSubmissionDrain();
-          }
-          if (this._hasPendingWorkflowNotifications()) {
-            this._startWorkflowNotificationDrain();
-          }
-        },
-        "Pending submissions / workflow notifications were not recovered on " +
-          "this wake; the next successful wake will recover them."
+      await withAgentSpan(
+        this,
+        "recover_think_durable_work",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        () =>
+          this._runBestEffortOnStartStep(
+            "durable-work-recovery",
+            async () => {
+              await this._sweepActionLedger();
+              await this._sweepActionPendingApprovals();
+              await this._recoverSubmissionsOnStart();
+              this._recoverWorkflowNotifications();
+              if (this._hasPendingSubmissions()) {
+                await this._scheduleSubmissionDrain();
+              }
+              if (this._hasPendingWorkflowNotifications()) {
+                this._startWorkflowNotificationDrain();
+              }
+            },
+            "Pending submissions / workflow notifications were not recovered on " +
+              "this wake; the next successful wake will recover them."
+          )
       );
 
       // 11. Background bound on the persisted transcript: if hydration was
@@ -2934,7 +3072,24 @@ export class Think<
       if (this._lastHydration?.truncated) {
         this._scheduleMediaEvictionPass({ force: true });
       }
+
+      update({
+        "cloudflare.agents.hydration.messages":
+          this._lastHydration?.hydratedMessages,
+        "cloudflare.agents.hydration.content_bytes":
+          this._lastHydration?.totalContentBytes,
+        "cloudflare.agents.hydration.truncated": this._lastHydration?.truncated,
+        "cloudflare.agents.start.degradations": this._onStartDegradations.length
+      });
     };
+    this.onStart = (props?: Props) =>
+      withAgentSpan(
+        this,
+        "think_start",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        (update) => startThink(props, update)
+      );
   }
 
   /**
@@ -3898,8 +4053,10 @@ export class Think<
   }
 
   /**
-   * Return the system prompt for the assistant.
-   * Used as fallback when no context blocks are configured via `configureSession`.
+   * Return the fallback system prompt for the assistant.
+   * Ignored when Session context blocks are configured. Use
+   * `configureSession().withContext()` for always-on instructions that should
+   * coexist with context blocks or skills.
    */
   getSystemPrompt(): string {
     return [
@@ -4593,6 +4750,15 @@ export class Think<
       const sources = await this.getSkills();
       if (sources.length === 0) return;
 
+      if (this.getSystemPrompt !== Think.prototype.getSystemPrompt) {
+        const warning =
+          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureSession().withContext(...) instead.";
+        if (!this._loggedSkillWarnings.has(warning)) {
+          this._loggedSkillWarnings.add(warning);
+          console.warn(`[think] ${warning}`);
+        }
+      }
+
       const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
       await registry.load();
       this._logSkillWarnings(registry);
@@ -5237,11 +5403,200 @@ export class Think<
   }
 
   /**
+   * Finalizes the traced inference stream after a drain loop exits: drains the
+   * abandoned tee branch so the operation span closes even on early exits.
+   * Idempotent (the finalizer is removed before it runs); the drain rides
+   * `ctx.waitUntil` so it survives turn completion without blocking it.
+   */
+  private _drainInferenceStream(result: object): void {
+    const finalizer = inferenceStreamFinalizers.get(result);
+    inferenceStreamFinalizers.delete(result);
+    if (!finalizer || finalizer.started) {
+      return;
+    }
+
+    finalizer.started = true;
+    // Invoke exactly once: start the drain, then try to extend its lifetime.
+    // A missing/throwing waitUntil must not start a second tee consumer.
+    const completion = finalizer.run();
+    try {
+      this.ctx.waitUntil(completion);
+    } catch {
+      // waitUntil unavailable (tests, exotic contexts): the drain is already
+      // running; nothing further to attach it to.
+    }
+  }
+
+  /**
+   * Adds default identity and current-turn metadata to the AI SDK telemetry
+   * options. The class identifies the logical agent implementation, the named
+   * instance identifies the agent resource, and the opaque Durable Object id
+   * identifies its one persisted conversation. Caller values override defaults.
+   */
+  private _turnTelemetry(
+    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
+  ): Parameters<typeof streamText>[0]["experimental_telemetry"] {
+    const settings = (base ?? {}) as unknown as Record<string, unknown>;
+    const metadata =
+      typeof settings.metadata === "object" && settings.metadata !== null
+        ? (settings.metadata as Record<string, unknown>)
+        : {};
+    const turn = admittedTurnContext.getStore();
+    return {
+      ...settings,
+      // AI SDK maps functionId to gen_ai.agent.name. Use the class name by
+      // default while preserving an explicit caller label.
+      functionId:
+        typeof settings.functionId === "string"
+          ? settings.functionId
+          : this.constructor.name,
+      metadata: {
+        agentId: this.name,
+        conversationId: this.ctx.id.toString(),
+        ...(turn?.agent === this
+          ? {
+              "cloudflare.agents.turn.request_id": turn.requestId,
+              "cloudflare.agents.turn.trigger": turn.trigger,
+              "cloudflare.agents.turn.admission": turn.admission,
+              ...(turn.channel !== undefined && {
+                "cloudflare.agents.turn.channel": turn.channel
+              }),
+              ...(turn.continuation !== undefined && {
+                "cloudflare.agents.turn.continuation": turn.continuation
+              }),
+              ...(turn.generation !== undefined && {
+                "cloudflare.agents.turn.generation": turn.generation
+              })
+            }
+          : {}),
+        // beforeTurn remains authoritative. metadata.agentName, when supplied,
+        // also takes precedence over functionId in the tracing adapter.
+        ...metadata
+      }
+    } as unknown as Parameters<typeof streamText>[0]["experimental_telemetry"];
+  }
+
+  /** Builds the native AI SDK v7 telemetry settings and identity context. */
+  private _turnTelemetryV7(
+    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
+  ): {
+    options: Record<string, unknown>;
+    runtimeContext: Record<string, unknown>;
+  } {
+    const settings = (base ?? {}) as unknown as Record<string, unknown>;
+    const metadata =
+      typeof settings.metadata === "object" && settings.metadata !== null
+        ? (settings.metadata as Record<string, unknown>)
+        : {};
+    const turn = admittedTurnContext.getStore();
+    const runtimeContext: Record<string, unknown> = {
+      agentId: this.name,
+      conversationId: this.ctx.id.toString(),
+      ...(turn?.agent === this
+        ? {
+            "cloudflare.agents.turn.request_id": turn.requestId,
+            "cloudflare.agents.turn.trigger": turn.trigger,
+            "cloudflare.agents.turn.admission": turn.admission,
+            ...(turn.channel !== undefined && {
+              "cloudflare.agents.turn.channel": turn.channel
+            }),
+            ...(turn.continuation !== undefined && {
+              "cloudflare.agents.turn.continuation": turn.continuation
+            }),
+            ...(turn.generation !== undefined && {
+              "cloudflare.agents.turn.generation": turn.generation
+            })
+          }
+        : {}),
+      ...metadata
+    };
+    const includedContext =
+      typeof settings.includeRuntimeContext === "object" &&
+      settings.includeRuntimeContext !== null
+        ? (settings.includeRuntimeContext as Record<string, boolean>)
+        : {};
+    const localIntegrations = settings.integrations;
+    const globalIntegrations = (
+      globalThis as typeof globalThis & {
+        AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[];
+      }
+    ).AI_SDK_TELEMETRY_INTEGRATIONS;
+    const integrations = [
+      ...(localIntegrations !== undefined
+        ? Array.isArray(localIntegrations)
+          ? localIntegrations
+          : [localIntegrations]
+        : (globalIntegrations ?? []))
+    ];
+    if (
+      !integrations.some(
+        (integration) =>
+          typeof integration === "object" &&
+          integration !== null &&
+          agentsAISDKTelemetryBrand in integration
+      )
+    ) {
+      integrations.push(
+        createAISDKTelemetry({
+          storeMessages: this.storeMessages,
+          storeTools: this.storeTools
+        })
+      );
+    }
+
+    const options: Record<string, unknown> = {
+      ...settings,
+      functionId:
+        typeof settings.functionId === "string"
+          ? settings.functionId
+          : this.constructor.name,
+      includeRuntimeContext: {
+        ...Object.fromEntries(
+          Object.keys(runtimeContext).map((key) => [key, true])
+        ),
+        ...includedContext
+      },
+      integrations
+    };
+    delete options.metadata;
+    return { options, runtimeContext };
+  }
+
+  /**
    * The single convergence point for all chat turn entry paths.
    * Merges tools, assembles context, fires lifecycle hooks, wraps tools
    * for interception, and calls streamText.
    */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
+    const turn = admittedTurnContext.getStore();
+    const invoke = await withAgentSpan(
+      this,
+      "prepare_agent",
+      "turn",
+      {
+        "cloudflare.agents.component": "think",
+        ...(turn?.agent === this
+          ? {
+              "cloudflare.agents.turn.request_id": turn.requestId,
+              "cloudflare.agents.turn.trigger": turn.trigger,
+              "cloudflare.agents.turn.admission": turn.admission,
+              "cloudflare.agents.turn.channel": turn.channel,
+              "cloudflare.agents.turn.continuation": turn.continuation,
+              "cloudflare.agents.turn.generation": turn.generation
+            }
+          : {})
+      },
+      () => this._prepareInferenceInvocation(input)
+    );
+    return invoke();
+  }
+
+  private async _prepareInferenceInvocation(
+    input: TurnInput
+  ): Promise<() => StreamableResult> {
+    // Keep one exposure policy for this inference attempt even if subclass
+    // code changes the instance property while asynchronous setup is running.
+    const includeMcpTools = this.includeMcpTools;
     // Reset the per-turn watchdog override; `beforeTurn` may set it below. A
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
@@ -5295,7 +5650,7 @@ export class Think<
       ...extensionTools,
       ...contextTools,
       ...skillTools,
-      ...(this.mcp?.getAITools?.() ?? {}),
+      ...(includeMcpTools ? (this.mcp?.getAITools?.() ?? {}) : {}),
       ...clientToolSet
     };
 
@@ -5465,7 +5820,8 @@ export class Think<
           : [])
     ];
 
-    const result = streamText({
+    const turnTelemetry = config.telemetry ?? config.experimental_telemetry;
+    const streamTextOptions = {
       model: finalModel,
       // `system` is accepted by both AI SDK v6 and v7 (v7 also accepts the
       // renamed `instructions`, but v6 does not). Use `system` for cross-major
@@ -5496,9 +5852,9 @@ export class Think<
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
-      // `experimental_telemetry` is the option name in both AI SDK v6 and v7
-      // (v7 also accepts `telemetry`, but v6 does not). Use the shared name.
-      experimental_telemetry: config.telemetry ?? config.experimental_telemetry,
+      experimental_telemetry: usesAISDKV7Telemetry
+        ? undefined
+        : this._turnTelemetry(turnTelemetry),
       // Forward the per-turn stream transform(s) from TurnConfig so callers
       // can inspect/rewrite the stream (e.g. emit `source` parts derived from
       // tool results) without owning the stream pipeline themselves.
@@ -5631,58 +5987,93 @@ export class Think<
           error
         });
       }) as ToolCallFinishCallback
-    });
+    } satisfies Parameters<typeof streamText>[0];
 
-    const outputPromise = wantsStructuredOutput
-      ? // Structured workflow result = the `final_answer` tool call's INPUT
-        // (its arguments), captured after the stream finishes. Take the last
-        // call in case the model emitted more than one. `result.toolCalls` is a
-        // `PromiseLike`, so wrap it to get a real `Promise` (for `.catch` below).
-        Promise.resolve(result.toolCalls).then((calls) => {
-          const finalCalls = calls.filter(
-            (call) => call.toolName === finalAnswerToolName
-          );
-          const last = finalCalls[finalCalls.length - 1];
-          if (!last) {
-            throw new Error(
-              `Model ended the turn without calling the ${finalAnswerToolName} tool`
-            );
-          }
-          return last.input;
-        })
-      : finalOutput && result.output
-        ? Promise.resolve(result.output)
-        : undefined;
-    if (outputPromise) {
-      // Attach a rejection observer immediately. `_streamResult()` will still
-      // await this promise when captureOutput is enabled, but aborted streams can
-      // reject before the stream consumer reaches that point.
-      void outputPromise.catch(() => {});
+    if (usesAISDKV7Telemetry) {
+      const { options, runtimeContext } = this._turnTelemetryV7(turnTelemetry);
+      const crossMajorOptions = streamTextOptions as unknown as Record<
+        string,
+        unknown
+      >;
+      delete crossMajorOptions.experimental_telemetry;
+      crossMajorOptions.telemetry = options;
+      crossMajorOptions.runtimeContext = runtimeContext;
     }
 
-    const streamResult = {
-      toUIMessageStream: (options) => {
-        const sendReasoning = options?.sendReasoning ?? finalSendReasoning;
-        const onError = options?.onError ?? streamErrorToString;
-        // Use the result's own `toUIMessageStream()` method rather than the
-        // standalone `toUIMessageStream({ stream })` helper: the method exists
-        // in both AI SDK v6 and v7 (deprecated in v7 but functional), whereas
-        // the standalone helper and the `result.stream` property it needs are
-        // v7-only.
-        const uiStream = (
-          result as {
-            toUIMessageStream: (o: {
-              sendReasoning?: boolean;
-              onError?: (error: unknown) => string;
-            }) => ReadableStream;
-          }
-        ).toUIMessageStream({ sendReasoning, onError });
-        return readableStreamToAsyncIterable(uiStream);
-      },
-      output: outputPromise
-    } satisfies StreamableResult;
+    const inferenceStreamText: typeof streamText = usesAISDKV7Telemetry
+      ? streamText
+      : wrapAISDK(
+          { streamText, wrapLanguageModel },
+          { storeMessages: this.storeMessages, storeTools: this.storeTools }
+        ).streamText;
 
-    return this._transformInferenceResult(streamResult);
+    return () => {
+      const result = inferenceStreamText(streamTextOptions);
+
+      const outputPromise = wantsStructuredOutput
+        ? // Structured workflow result = the `final_answer` tool call's INPUT
+          // (its arguments), captured after the stream finishes. Take the last
+          // call in case the model emitted more than one. `result.toolCalls` is a
+          // `PromiseLike`, so wrap it to get a real `Promise` (for `.catch` below).
+          Promise.resolve(result.toolCalls).then((calls) => {
+            const finalCalls = calls.filter(
+              (call) => call.toolName === finalAnswerToolName
+            );
+            const last = finalCalls[finalCalls.length - 1];
+            if (!last) {
+              throw new Error(
+                `Model ended the turn without calling the ${finalAnswerToolName} tool`
+              );
+            }
+            return last.input;
+          })
+        : finalOutput && result.output
+          ? Promise.resolve(result.output)
+          : undefined;
+      if (outputPromise) {
+        // Attach a rejection observer immediately. `_streamResult()` will still
+        // await this promise when captureOutput is enabled, but aborted streams can
+        // reject before the stream consumer reaches that point.
+        void outputPromise.catch(() => {});
+      }
+
+      const streamResult = {
+        toUIMessageStream: (options) => {
+          const sendReasoning = options?.sendReasoning ?? finalSendReasoning;
+          const onError = options?.onError ?? streamErrorToString;
+          // Use the result's own `toUIMessageStream()` method rather than the
+          // standalone `toUIMessageStream({ stream })` helper: the method exists
+          // in both AI SDK v6 and v7 (deprecated in v7 but functional), whereas
+          // the standalone helper and the `result.stream` property it needs are
+          // v7-only.
+          const uiStream = (
+            result as {
+              toUIMessageStream: (o: {
+                sendReasoning?: boolean;
+                onError?: (error: unknown) => string;
+              }) => ReadableStream;
+            }
+          ).toUIMessageStream({ sendReasoning, onError });
+          return readableStreamToAsyncIterable(uiStream);
+        },
+        output: outputPromise
+      } satisfies StreamableResult;
+
+      const finalizer: InferenceStreamFinalizer = {
+        started: false,
+        run: () =>
+          // consumeStream never rejects (onError swallows) and is a no-op when
+          // the stream already ran to completion.
+          Promise.resolve(result.consumeStream({ onError: () => {} }))
+      };
+      inferenceStreamFinalizers.set(streamResult, finalizer);
+
+      const finalized = this._transformInferenceResult(streamResult);
+      if (finalized !== streamResult) {
+        inferenceStreamFinalizers.set(finalized, finalizer);
+      }
+      return finalized;
+    };
   }
 
   /** @internal Test seam — override in test agents to wrap the stream (e.g. error injection). */
@@ -6754,7 +7145,32 @@ export class Think<
       // The non-queue (submit/execute-submission) path runs `execute()` here
       // directly — it does NOT pass through `_runInsideAdmittedTurnBody`, so the
       // channel context must be set here too.
-      return this._withChannelContext(spec.channel, () => spec.execute());
+      return withAgentSpan(
+        this,
+        "chat_submission",
+        "submission",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.trigger": spec.trigger,
+          "cloudflare.agents.turn.admission": spec.admission,
+          "cloudflare.agents.turn.channel": spec.channel
+        },
+        () =>
+          withAgentSpan(
+            this,
+            spec.admission === "submit"
+              ? "accept_chat_submission"
+              : "execute_chat_submission",
+            "submission",
+            {
+              "cloudflare.agents.component": "think",
+              "cloudflare.agents.turn.trigger": spec.trigger,
+              "cloudflare.agents.turn.admission": spec.admission,
+              "cloudflare.agents.turn.channel": spec.channel
+            },
+            () => this._withChannelContext(spec.channel, () => spec.execute())
+          )
+      );
     }
 
     if (!spec.allowNested) {
@@ -6784,61 +7200,89 @@ export class Think<
   private async _runInsideAdmittedTurnBody<T>(
     spec: QueueTurnSpec<T>
   ): Promise<T> {
-    return admittedTurnContext.run(
-      { agent: this, requestId: spec.requestId },
-      async () => {
-        const startedAt = Date.now();
-        this._emit("chat:turn:start", {
-          requestId: spec.requestId,
-          trigger: spec.trigger,
-          admission: spec.admission,
-          ...(spec.continuation !== undefined && {
-            continuation: spec.continuation
-          }),
-          ...(spec.generation !== undefined && { generation: spec.generation })
-        });
-
-        this._activeTurnReplyAttachments = [];
-        this._activeTurnReplyAttachmentsRequestId = spec.requestId;
-
-        try {
-          const value = await this._withChannelContext(spec.channel, () =>
-            spec.execute()
-          );
-          this._emit("chat:turn:finish", {
+    return withAgentSpan(
+      this,
+      "chat_turn",
+      "turn",
+      {
+        "cloudflare.agents.component": "think",
+        "cloudflare.agents.turn.request_id": spec.requestId,
+        "cloudflare.agents.turn.trigger": spec.trigger,
+        "cloudflare.agents.turn.admission": spec.admission,
+        "cloudflare.agents.turn.channel": spec.channel,
+        "cloudflare.agents.turn.continuation": spec.continuation,
+        "cloudflare.agents.turn.generation": spec.generation
+      },
+      (update) =>
+        admittedTurnContext.run(
+          {
+            agent: this,
             requestId: spec.requestId,
             trigger: spec.trigger,
             admission: spec.admission,
-            ...(spec.continuation !== undefined && {
-              continuation: spec.continuation
-            }),
-            ...(spec.generation !== undefined && {
-              generation: spec.generation
-            }),
-            status: spec.getStatus?.() ?? "completed",
-            durationMs: Date.now() - startedAt
-          });
-          return value;
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          this._emit("chat:turn:finish", {
-            requestId: spec.requestId,
-            trigger: spec.trigger,
-            admission: spec.admission,
-            ...(spec.continuation !== undefined && {
-              continuation: spec.continuation
-            }),
-            ...(spec.generation !== undefined && {
-              generation: spec.generation
-            }),
-            status: "error",
-            durationMs: Date.now() - startedAt,
-            error: message
-          });
-          throw error;
-        }
-      }
+            channel: spec.channel,
+            continuation: spec.continuation,
+            generation: spec.generation
+          },
+          async () => {
+            const startedAt = Date.now();
+            this._emit("chat:turn:start", {
+              requestId: spec.requestId,
+              trigger: spec.trigger,
+              admission: spec.admission,
+              ...(spec.continuation !== undefined && {
+                continuation: spec.continuation
+              }),
+              ...(spec.generation !== undefined && {
+                generation: spec.generation
+              })
+            });
+
+            this._activeTurnReplyAttachments = [];
+            this._activeTurnReplyAttachmentsRequestId = spec.requestId;
+
+            try {
+              const value = await this._withChannelContext(spec.channel, () =>
+                spec.execute()
+              );
+              const status = spec.getStatus?.() ?? "completed";
+              this._emit("chat:turn:finish", {
+                requestId: spec.requestId,
+                trigger: spec.trigger,
+                admission: spec.admission,
+                ...(spec.continuation !== undefined && {
+                  continuation: spec.continuation
+                }),
+                ...(spec.generation !== undefined && {
+                  generation: spec.generation
+                }),
+                status,
+                durationMs: Date.now() - startedAt
+              });
+              update({ "cloudflare.agents.turn.status": status });
+              return value;
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              this._emit("chat:turn:finish", {
+                requestId: spec.requestId,
+                trigger: spec.trigger,
+                admission: spec.admission,
+                ...(spec.continuation !== undefined && {
+                  continuation: spec.continuation
+                }),
+                ...(spec.generation !== undefined && {
+                  generation: spec.generation
+                }),
+                status: "error",
+                durationMs: Date.now() - startedAt,
+                error: message
+              });
+              update({ "cloudflare.agents.turn.status": "error" });
+              throw error;
+            }
+          }
+        )
     );
   }
 
@@ -9724,7 +10168,6 @@ export class Think<
         if (existing) {
           if (existing.status === "pending") {
             await this._scheduleSubmissionDrain();
-            this._startSubmissionDrain();
           }
           return {
             ...this._inspectionFromSubmissionRow(existing),
@@ -9763,7 +10206,6 @@ export class Think<
         });
         await this._emitSubmissionStatus(row);
         await this._scheduleSubmissionDrain();
-        this._startSubmissionDrain();
 
         return {
           ...this._inspectionFromSubmissionRow(row),
@@ -9776,12 +10218,6 @@ export class Think<
   private async _scheduleSubmissionDrain(): Promise<void> {
     await this.schedule(0, "_drainThinkSubmissions", undefined, {
       idempotent: true
-    });
-  }
-
-  private _startSubmissionDrain(): void {
-    void this.keepAliveWhile(() => this._drainSubmissions()).catch((error) => {
-      console.error("[Think] Failed to drain submissions", error);
     });
   }
 
@@ -9863,8 +10299,7 @@ export class Think<
           trigger: "submission",
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
-          // The drain runs fire-and-forget (`_startSubmissionDrain` /
-          // `_drainThinkSubmissions` alarm), so it can inherit the ALS of a turn
+          // The alarm-owned drain can inherit the ALS of a turn
           // that called `submitMessages` mid-turn (e.g. a detached-finish notify
           // from a `beforeTurn` hook). `allowNested` skips the
           // not-inside-active-turn guard for that case. Safe on every submission
@@ -10769,7 +11204,20 @@ export class Think<
       if (typeof message === "string") {
         const event = parseProtocolMessage(message);
         if (event) {
-          await this._handleProtocolEvent(connection, event);
+          if (event.type === "chat-request") {
+            await withAgentSpan(
+              this,
+              "chat_interaction",
+              "interaction",
+              {
+                "cloudflare.agents.component": "think",
+                "cloudflare.agents.turn.request_id": event.id
+              },
+              () => this._handleProtocolEvent(connection, event)
+            );
+          } else {
+            await this._handleProtocolEvent(connection, event);
+          }
           return;
         }
       }
@@ -10800,7 +11248,7 @@ export class Think<
   ): Promise<void> {
     switch (event.type) {
       case "stream-resume-request":
-        await this._handleStreamResumeRequest(connection);
+        await this._handleStreamResumeRequest(connection, event.probeId);
         break;
 
       case "stream-resume-ack":
@@ -10873,9 +11321,10 @@ export class Think<
   }
 
   private async _handleStreamResumeRequest(
-    connection: Connection
+    connection: Connection,
+    probeId?: string
   ): Promise<void> {
-    await this._resumeHandshake().handleResumeRequest(connection);
+    await this._resumeHandshake().handleResumeRequest(connection, probeId);
   }
 
   private async _handleStreamResumeAck(
@@ -10948,7 +11397,17 @@ export class Think<
     // gap would surface the previous failed turn's error even though the user
     // has already moved on. Completion clears it too, but only once the turn
     // resolves — which leaves the gap open.
-    await this._clearChatTerminal();
+    await withAgentSpan(
+      this,
+      "clear_previous_chat_state",
+      "interaction",
+      {
+        "cloudflare.agents.component": "think",
+        "cloudflare.agents.turn.request_id": requestId,
+        "cloudflare.agents.turn.trigger": "ws-chat"
+      },
+      () => this._clearChatTerminal()
+    );
 
     // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client that
     // reconnects/re-mounts before the stream starts is parked and told to keep
@@ -10971,18 +11430,30 @@ export class Think<
         rawClientTools && rawClientTools.length > 0
           ? rawClientTools
           : undefined;
-      if (requestClientTools) {
-        this._lastClientTools = requestClientTools;
-        this._persistClientTools();
-      } else if (rawClientTools !== undefined) {
-        this._lastClientTools = undefined;
-        this._persistClientTools();
-      }
-
       const requestBody =
         Object.keys(customBody).length > 0 ? customBody : undefined;
-      this._lastBody = requestBody;
-      this._persistBody();
+      withAgentSpan(
+        this,
+        "persist_chat_request_context",
+        "interaction",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.request_id": requestId,
+          "cloudflare.agents.turn.trigger": "ws-chat"
+        },
+        () => {
+          if (requestClientTools) {
+            this._lastClientTools = requestClientTools;
+            this._persistClientTools();
+          } else if (rawClientTools !== undefined) {
+            this._lastClientTools = undefined;
+            this._persistClientTools();
+          }
+
+          this._lastBody = requestBody;
+          this._persistBody();
+        }
+      );
 
       // ── Reconcile, persist, and broadcast user messages ──────────
       //
@@ -10996,7 +11467,17 @@ export class Think<
       const clientToolsForTurn = this._lastClientTools;
       const bodyForTurn = this._lastBody;
 
-      const serverMessages = await this._readMessagesFromStorage();
+      const serverMessages = await withAgentSpan(
+        this,
+        "load_chat_history",
+        "interaction",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.request_id": requestId,
+          "cloudflare.agents.turn.trigger": "ws-chat"
+        },
+        () => this._readMessagesFromStorage()
+      );
       const reconciled = reconcileMessages(
         incomingMessages,
         serverMessages,
@@ -11008,26 +11489,33 @@ export class Think<
         branchParentId = reconciled[reconciled.length - 1].id;
       }
 
-      if (this._turnQueue.generation !== epoch) {
-        this._completeSkippedRequest(connection, requestId);
-        return;
-      }
+      const persisted = await withAgentSpan(
+        this,
+        "persist_incoming_messages",
+        "interaction",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.request_id": requestId,
+          "cloudflare.agents.turn.trigger": "ws-chat"
+        },
+        async () => {
+          if (this._turnQueue.generation !== epoch) return false;
 
-      for (const msg of reconciled) {
-        if (this._turnQueue.generation !== epoch) {
-          this._completeSkippedRequest(connection, requestId);
-          return;
+          for (const msg of reconciled) {
+            if (this._turnQueue.generation !== epoch) return false;
+            await this._persistIncomingMessage(msg, serverMessages);
+          }
+
+          if (this._turnQueue.generation !== epoch) return false;
+          await this._syncMessages();
+          return true;
         }
-
-        await this._persistIncomingMessage(msg, serverMessages);
-      }
-
-      if (this._turnQueue.generation !== epoch) {
+      );
+      if (!persisted) {
         this._completeSkippedRequest(connection, requestId);
         return;
       }
 
-      await this._syncMessages();
       this._broadcastMessages([connection.id]);
       messagesPersisted = true;
 
@@ -11123,19 +11611,47 @@ export class Think<
                     }
                   : undefined;
 
-                await this._streamResult(requestId, result, abortSignal, {
-                  parentId: branchParentId,
-                  overflowRecovery
-                });
+                await withAgentSpan(
+                  this,
+                  "persist_chat_result",
+                  "turn",
+                  {
+                    "cloudflare.agents.component": "think",
+                    "cloudflare.agents.turn.request_id": requestId,
+                    "cloudflare.agents.turn.trigger": "ws-chat",
+                    "cloudflare.agents.turn.admission": "queue",
+                    "cloudflare.agents.turn.generation": epoch,
+                    "cloudflare.agents.turn.continuation": false
+                  },
+                  () =>
+                    this._streamResult(requestId, result, abortSignal, {
+                      parentId: branchParentId,
+                      overflowRecovery
+                    })
+                );
 
                 if (overflowRequested) {
                   if (
                     attempt < this._overflowMaxRetries &&
                     !abortSignal?.aborted
                   ) {
-                    const shortened = await this._compactForContextOverflow(
-                      "reactive",
-                      { requestId, attempt: attempt + 1 }
+                    const shortened = await withAgentSpan(
+                      this,
+                      "compact_chat_history",
+                      "turn",
+                      {
+                        "cloudflare.agents.component": "think",
+                        "cloudflare.agents.turn.request_id": requestId,
+                        "cloudflare.agents.turn.trigger": "ws-chat",
+                        "cloudflare.agents.turn.admission": "queue",
+                        "cloudflare.agents.turn.generation": epoch,
+                        "cloudflare.agents.turn.continuation": false
+                      },
+                      () =>
+                        this._compactForContextOverflow("reactive", {
+                          requestId,
+                          attempt: attempt + 1
+                        })
                     );
                     // Compaction shortened history → retry. A no-op compaction
                     // can't fix the overflow, so fall through to terminal.
@@ -11586,6 +12102,10 @@ export class Think<
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
+    // True only when the wrapped stream was pulled to natural exhaustion; a
+    // break OR a throw (stall watchdog) leaves it false so the finally drains
+    // the abandoned tee branch.
+    let streamDrainedNaturally = false;
     try {
       this._insideInferenceLoop = true;
       const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
@@ -11682,8 +12202,21 @@ export class Think<
           });
           await callback.onEvent(chunkBody);
         }
+        streamDrainedNaturally = !(
+          aborted ||
+          overflowRetry ||
+          streamError !== undefined
+        );
       } finally {
         this._insideInferenceLoop = false;
+        // Only early exits leave an abandoned tee branch; a naturally
+        // exhausted stream needs no drain (consumeStream is not free — it
+        // tees the base stream and traverses the buffered branch). A thrown
+        // exit (stall watchdog) never reaches the assignment above, so it
+        // drains too.
+        if (!streamDrainedNaturally) {
+          this._drainInferenceStream(result);
+        }
       }
 
       // Recoverable context overflow: discard the partial, close the stream
@@ -12027,6 +12560,10 @@ export class Think<
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
+    // True only when the wrapped stream was pulled to natural exhaustion; a
+    // break OR a throw (stall watchdog) leaves it false so the finally drains
+    // the abandoned tee branch.
+    let streamDrainedNaturally = false;
     try {
       this._insideInferenceLoop = true;
       try {
@@ -12146,8 +12683,21 @@ export class Think<
             ...(continuation && { continuation: true })
           });
         }
+        streamDrainedNaturally = !(
+          streamAborted ||
+          overflowRetry ||
+          streamError !== undefined
+        );
       } finally {
         this._insideInferenceLoop = false;
+        // Only early exits leave an abandoned tee branch; a naturally
+        // exhausted stream needs no drain (consumeStream is not free — it
+        // tees the base stream and traverses the buffered branch). A thrown
+        // exit (stall watchdog) never reaches the assignment above, so it
+        // drains too.
+        if (!streamDrainedNaturally) {
+          this._drainInferenceStream(result);
+        }
       }
 
       // Recoverable context overflow: discard the partial, close this stream

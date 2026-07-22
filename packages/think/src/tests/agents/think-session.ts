@@ -1,6 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, Think } from "../../think";
+import { action, skills, Think } from "../../think";
 import { Agent } from "agents";
 import type {
   AgentToolEventMessage,
@@ -3190,6 +3190,26 @@ export class ThinkAgentToolParent extends Agent {
   }
 }
 
+type ThinkPropsTestProps = {
+  tenantId: string;
+};
+
+export class ThinkPropsTestAgent extends Think<
+  Cloudflare.Env,
+  unknown,
+  ThinkPropsTestProps
+> {
+  private _startProps?: ThinkPropsTestProps;
+
+  override onStart(props?: ThinkPropsTestProps): void {
+    this._startProps = props;
+  }
+
+  getStartProps(): ThinkPropsTestProps | undefined {
+    return this._startProps;
+  }
+}
+
 // ── ThinkSessionTestAgent ───────────────────────────────────
 // Extends Think with Session configuration for context block testing.
 
@@ -3281,6 +3301,47 @@ export class ThinkSessionTestAgent extends Think {
 
   async hostGetContext(label: string): Promise<string | null> {
     return this._hostGetContext(label);
+  }
+}
+
+// ── ThinkSystemPromptSkillsWarningAgent ─────────────────────
+// Repro for #1871: getSkills() registers a Session context block, so an
+// overridden getSystemPrompt() is fallback-only and should warn.
+
+export class ThinkSystemPromptSkillsWarningAgent extends Think {
+  override getModel(): LanguageModel {
+    return createMockModel("Skills warning response");
+  }
+
+  override getSystemPrompt(): string {
+    return "You are Robbie, a pirate. Always answer in pirate speak.";
+  }
+
+  override getSkills() {
+    return [
+      skills.fromManifest({
+        id: "test-skills",
+        fingerprint: "v1",
+        skills: [
+          {
+            name: "knot-tying",
+            description: "How to tie useful knots.",
+            body: "Always double-check the hitch."
+          }
+        ]
+      })
+    ];
+  }
+
+  async runChatTurnForWarningTest(): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat("Ahoy!", cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
   }
 }
 
@@ -4802,6 +4863,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     textChunks: string[];
   } | null = null;
   private _failNextContinueTransient: string | null = null;
+  private _useRecoveryToolModel = false;
+  private _recoveryToolExecutions = 0;
 
   /**
    * Arm a ONE-SHOT platform-transient fault on the next `continueLastTurn`
@@ -4829,6 +4892,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   override getModel(): LanguageModel {
+    if (this._useRecoveryToolModel) return createToolCallingMockModel();
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -4845,6 +4909,32 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     return createMockModel(this._programmaticResponse);
+  }
+
+  override getTools(): ToolSet {
+    if (!this._useRecoveryToolModel) return {};
+    return {
+      echo: tool({
+        description: "Persist one recovery test side effect",
+        inputSchema: z.object({ message: z.string() }),
+        execute: ({ message }: { message: string }) => {
+          this._recoveryToolExecutions++;
+          return `echo: ${message}`;
+        }
+      })
+    };
+  }
+
+  async useRecoveryToolModelForTest(): Promise<void> {
+    this._useRecoveryToolModel = true;
+  }
+
+  async getRecoveryToolExecutionsForTest(): Promise<number> {
+    return this._recoveryToolExecutions;
+  }
+
+  async getMessagesForTest(): Promise<UIMessage[]> {
+    return this.getMessages();
   }
 
   override onChatResponse(result: ChatResponseResult): void {
@@ -5347,6 +5437,47 @@ export class ThinkProgrammaticTestAgent extends Think {
       ],
       options
     );
+  }
+
+  async probeSubmissionAlarmOwnershipForTest(): Promise<{
+    readonly alarmDrainCalls: number;
+    readonly inlineDrainCalls: number;
+    readonly submission: SubmitMessagesResult;
+  }> {
+    const submissionId = `alarm-owned-${crypto.randomUUID()}`;
+    const internal = this as unknown as {
+      _cf_executingScheduleRowId?: string;
+      _drainSubmissions(): Promise<void>;
+      _scheduleSubmissionDrain(): Promise<void>;
+    };
+    const originalDrain = internal._drainSubmissions;
+    let alarmDrainCalls = 0;
+    let inlineDrainCalls = 0;
+    internal._drainSubmissions = async () => {
+      if (internal._cf_executingScheduleRowId === undefined) {
+        inlineDrainCalls += 1;
+      } else {
+        alarmDrainCalls += 1;
+      }
+    };
+
+    try {
+      const submission = await this.testSubmitMessages("alarm owned", {
+        submissionId
+      });
+      // A DO alarm may interleave while this RPC awaits. The base Agent sets
+      // _cf_executingScheduleRowId only around an awaited schedule callback,
+      // which distinguishes the correct owner from the old inline starter.
+      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return { alarmDrainCalls, inlineDrainCalls, submission };
+    } finally {
+      internal._drainSubmissions = originalDrain;
+      // The probe's no-op alarm consumed its schedule row while leaving the
+      // submission pending. Re-arm the real drain for the eventual assertion.
+      await internal._scheduleSubmissionDrain();
+    }
   }
 
   private async _waitForSubmissionForTest(

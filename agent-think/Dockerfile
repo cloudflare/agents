@@ -10,7 +10,9 @@
 # them on PATH inside the FUSE-mounted /workspace. The image stays
 # otherwise lean.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11 AS wsd
+# Workspace PR #18, commit 98b74eb. Keep this in sync with the
+# @cloudflare/workspace pkg.pr.new dependency in package.json.
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:pr-18-98b74eb@sha256:179a3dc35bdf752d4cdcef07012dcf5c9949d04ba4d0d3ab1ed6d5703cfd73a9 AS wsd
 
 FROM debian:stable-slim
 

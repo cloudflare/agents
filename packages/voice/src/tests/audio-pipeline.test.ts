@@ -40,6 +40,33 @@ class SpyTranscriber implements Transcriber {
   }
 }
 
+class SpyContextSession implements TranscriberSession {
+  fed: ArrayBuffer[] = [];
+  closed = false;
+  agentContexts: string[] = [];
+
+  feed(chunk: ArrayBuffer): void {
+    this.fed.push(chunk);
+  }
+
+  updateAgentContext(text: string): void {
+    this.agentContexts.push(text);
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+}
+
+class SpyContextTranscriber implements Transcriber {
+  lastSession: SpyContextSession | null = null;
+
+  createSession(_options?: TranscriberSessionOptions): TranscriberSession {
+    this.lastSession = new SpyContextSession();
+    return this.lastSession;
+  }
+}
+
 // --- Transcriber session lifecycle ---
 
 describe("AudioConnectionManager — transcriber sessions", () => {
@@ -170,6 +197,42 @@ describe("AudioConnectionManager — transcriber sessions", () => {
 
     const session = transcriber.lastSession!;
     expect(session.fed).toHaveLength(2);
+  });
+});
+
+// --- Agent context forwarding ---
+
+describe("AudioConnectionManager — updateAgentContext", () => {
+  it("forwards agent context to a session that implements updateAgentContext", () => {
+    const cm = new AudioConnectionManager("test");
+    const transcriber = new SpyContextTranscriber();
+    cm.initConnection("c1");
+    cm.startTranscriberSession("c1", transcriber, {});
+
+    cm.updateAgentContext("c1", "What date would you like to book?");
+
+    expect(transcriber.lastSession!.agentContexts).toEqual([
+      "What date would you like to book?"
+    ]);
+  });
+
+  it("is a no-op when the session does not implement updateAgentContext", () => {
+    const cm = new AudioConnectionManager("test");
+    const transcriber = new SpyTranscriber();
+    cm.initConnection("c1");
+    cm.startTranscriberSession("c1", transcriber, {});
+
+    // Session has no updateAgentContext — must not throw.
+    expect(() =>
+      cm.updateAgentContext("c1", "ignored by this provider")
+    ).not.toThrow();
+  });
+
+  it("is a no-op when there is no active session", () => {
+    const cm = new AudioConnectionManager("test");
+    cm.initConnection("c1");
+
+    expect(() => cm.updateAgentContext("c1", "no session")).not.toThrow();
   });
 });
 

@@ -226,6 +226,26 @@ export default defineConfig({
 
 The `agents()` plugin is safe to include even if your project does not use decorators. It only runs the transform on files that contain `@` syntax.
 
+### Turndown Stub
+
+By default, the `agents()` Vite plugin also replaces imports of the `turndown`
+package with a Worker-safe stub. This prevents `just-bash`, used by Think's
+workspace `bash` tool and skill scripts, from pulling `turndown`'s Node DOM
+fallback into the Worker bundle. That fallback expects Node's global `require()`,
+which is not available in Workers.
+
+If your app imports `turndown` directly for HTML-to-Markdown conversion, disable
+the stub so your import resolves to the real package:
+
+```typescript
+export default defineConfig({
+  plugins: [agents({ stubTurndown: false }), react(), cloudflare()]
+});
+```
+
+When the stub is enabled and app code calls `turndown()`, the stub throws an
+error that points back to this option.
+
 The starter template and all examples include this plugin by default.
 
 ## Generating Types

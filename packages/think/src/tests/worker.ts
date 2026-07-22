@@ -15,10 +15,12 @@ export {
   LoopToolTestAgent,
   OverflowRecoveryTestAgent,
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -36,6 +38,7 @@ export {
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
+  ThinkMcpToolMaterializationAgent,
   ThinkOnStartReconcileFailureAgent,
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
@@ -51,10 +54,12 @@ import type {
   LoopToolTestAgent,
   OverflowRecoveryTestAgent,
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -72,6 +77,7 @@ import type {
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
+  ThinkMcpToolMaterializationAgent,
   ThinkOnStartReconcileFailureAgent,
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
@@ -191,10 +197,12 @@ export type Env = {
   LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
   OverflowRecoveryTestAgent: DurableObjectNamespace<OverflowRecoveryTestAgent>;
   ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
+  ThinkPropsTestAgent: DurableObjectNamespace<ThinkPropsTestAgent>;
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
   ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
   ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;
+  ThinkSystemPromptSkillsWarningAgent: DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>;
   ThinkAsyncConfigSessionAgent: DurableObjectNamespace<ThinkAsyncConfigSessionAgent>;
   ThinkConfigTestAgent: DurableObjectNamespace<ThinkConfigTestAgent>;
   ThinkLegacyConfigMigrationAgent: DurableObjectNamespace<ThinkLegacyConfigMigrationAgent>;
@@ -209,6 +217,7 @@ export type Env = {
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
+  ThinkMcpToolMaterializationAgent: DurableObjectNamespace<ThinkMcpToolMaterializationAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;
@@ -223,8 +232,13 @@ export type Env = {
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
+    const options = new URL(request.url).pathname.startsWith(
+      "/agents/think-props-test-agent/"
+    )
+      ? { cors: true, props: { tenantId: "tenant-1" } }
+      : { cors: true };
     return (
-      (await routeAgentRequest(request, env, { cors: true })) ||
+      (await routeAgentRequest(request, env, options)) ||
       new Response("Not found", { status: 404 })
     );
   }

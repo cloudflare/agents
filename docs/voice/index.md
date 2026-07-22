@@ -508,11 +508,42 @@ tts = new WorkersAITTS(this.env.AI, {
 
 ### Third-Party Providers
 
-| Package                        | Class           | Description             |
-| ------------------------------ | --------------- | ----------------------- |
-| `@cloudflare/voice-deepgram`   | `DeepgramSTT`   | Continuous STT          |
-| `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS` | High-quality TTS        |
-| `@cloudflare/voice-twilio`     | Twilio adapter  | Telephony (phone calls) |
+| Package                        | Class                            | Description                                 |
+| ------------------------------ | -------------------------------- | ------------------------------------------- |
+| `@cloudflare/voice-assemblyai` | `AssemblyAISTT`                  | Continuous STT (Universal 3.5 Pro Realtime) |
+| `@cloudflare/voice-deepgram`   | `DeepgramSTT`                    | Continuous STT                              |
+| `@cloudflare/voice-elevenlabs` | `ElevenLabsSTT`, `ElevenLabsTTS` | Continuous STT and high-quality TTS         |
+| `@cloudflare/voice-telnyx`     | `TelnyxSTT`, `TelnyxTTS`         | Continuous STT, TTS, and phone transport    |
+| `@cloudflare/voice-twilio`     | Twilio adapter                   | Telephony (phone calls)                     |
+
+**AssemblyAI STT:**
+
+```typescript
+import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
+
+export class MyAgent extends VoiceAgent<Env> {
+  transcriber = new AssemblyAISTT({
+    apiKey: this.env.ASSEMBLYAI_API_KEY
+  });
+  tts = new WorkersAITTS(this.env.AI);
+}
+```
+
+After each agent reply, the pipeline automatically feeds the spoken text back to AssemblyAI as conversational context (`agent_context`), improving recognition of short answers like "yes" or "7pm". See the [package README](https://github.com/cloudflare/agents/tree/main/voice-providers/assemblyai) for the full options table.
+
+**ElevenLabs STT:**
+
+```typescript
+import { ElevenLabsSTT } from "@cloudflare/voice-elevenlabs";
+
+export class MyAgent extends VoiceAgent<Env> {
+  transcriber = new ElevenLabsSTT({
+    apiKey: this.env.ELEVENLABS_API_KEY,
+    keyterms: ["Cloudflare", "Workers AI"]
+  });
+  tts = new WorkersAITTS(this.env.AI);
+}
+```
 
 **ElevenLabs TTS:**
 
@@ -688,7 +719,7 @@ History survives Durable Object restarts and client reconnections. Voice agents 
 
 ## Examples
 
-- [`examples/voice-agent`](https://github.com/cloudflare/agents/tree/main/examples/voice-agent) — full voice agent with Workers AI
+- [`examples/voice-agent`](https://github.com/cloudflare/agents/tree/main/examples/voice-agent) — full voice agent with Workers AI, AssemblyAI, Telnyx, and ElevenLabs STT provider options
 - [`examples/voice-input`](https://github.com/cloudflare/agents/tree/main/examples/voice-input) — voice input (dictation) example
 
 ## Related

@@ -11,6 +11,9 @@
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/voice": "*",
+    "@cloudflare/voice-assemblyai": "*",
+    "@cloudflare/voice-elevenlabs": "*",
+    "@cloudflare/voice-telnyx": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "ai": "^7.0.0",

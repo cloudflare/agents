@@ -42,9 +42,11 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    │     start() ONLY submits the durable turn — returns in ~1s
    │     failed-run continuation refreshes GitHub auth through gh-app's private
    │     AgentThinkTokenBroker binding before submitting into the same session
-   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + complete Workspace VFS
-   │     file tools and both bash backends share the same synchronized tree;
-   │     container backend claims from the warm pool per turn:
+   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn/transcript state only
+   ├─ WorkspaceAgent DO (src/workspace-agent.ts) — same stable per-issue name;
+   │     exclusively owns Workspace VFS + backend connection. File tools and
+   │     both bash backends share its RPC stub; the container backend claims
+   │     from the warm pool per turn:
    │        resolveContainerId(env, id) → env.Sandbox.get(idFromName(uuid))
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
    ├─ WarmPool DO (src/warm-pool.ts) — keeps exactly one unassigned container warm
@@ -186,9 +188,14 @@ npm run seed:r2  # push skills/** to the R2 bucket (add -- --local for dev)
   the full agent path without gh-app or webhooks.
 - Deploys target the `agents` Cloudflare account
   (`CLOUDFLARE_ACCOUNT_ID=b8afc92c7a87f699592038b756153d22`).
-- Model: `gpt-5.5` with medium reasoning through the team AI Gateway token,
-  with a client-side fallback to `claude-opus-4-8` when the primary dispatch
-  fails. Production reads `CLOUDFLARE_AIG_TOKEN` from a Worker secret and
+- Model: `gpt-5.6-sol` with max reasoning through the OpenAI Responses API
+  and team AI Gateway token, with a client-side fallback to
+  `claude-opus-4-8` when the primary dispatch fails. Responses use
+  `store: false`, so agent-think does not persist provider reasoning state.
+- The observability-preview packages are pinned to PR #1860 commit
+  `be4f7abc`. Agent-think opts into full message/tool payload spans while this
+  preview is validated in production. The turn safety cap is 250 steps.
+  Production reads `CLOUDFLARE_AIG_TOKEN` from a Worker secret and
   attributes every request to the `agents-team-agent-think` project. Local
   agent turns read the same variable from `.env`.
 
