@@ -33,7 +33,7 @@
     "create-think": "workspace:*",
     "just-bash": "^3.0.2",
     "smol-toml": "^1.7.0",
-    "workers-ai-provider": "^3.3.0",
+    "workers-ai-provider": "^4.0.0",
     "yargs": "^18.0.0"
   },
   "devDependencies": {

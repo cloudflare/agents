@@ -161,9 +161,11 @@ Updated **54** `package.json` files (root, packages, examples, experimental, thi
 
 ### 17. `workers-ai-provider` peer range
 
-**Change:** `workers-ai-provider@3.3.0` still declares peers on `ai@^6` and `@ai-sdk/*@^3`.  
-**Resolution:** Installed anyway; tests using workers-ai-provider paths still pass under the monorepo.  
-**Status:** **Unresolved / external dependency.** Track upstream release with `ai@7` peers.
+**Change:** `workers-ai-provider@4.0.0` declares peers on `ai@^7` and `@ai-sdk/*@^4`.
+
+**Resolution:** Updated AI SDK v7 applications to `workers-ai-provider@^4.0.0`. The AI SDK v6 compatibility matrix repins Think to provider v3.
+
+**Status:** Done.
 
 ## Architectural decisions / TODOs left open
 
@@ -173,8 +175,7 @@ Updated **54** `package.json` files (root, packages, examples, experimental, thi
 4. **`allowSystemInMessages` policy** if any persisted transcripts embed system roles.
 5. **Audit multi-step result consumers** for final-step-only assumptions (`usage`, `toolCalls`, `files`, …).
 6. **Audit remaining package-local `toUIMessageStream` abstractions** before next AI SDK major; Think's direct AI SDK result call was migrated to the stateless helper.
-7. **`workers-ai-provider` peer dependency** needs an upstream bump.
-8. **Codemod `npx @ai-sdk/codemod v7`** was attempted but timed out; renames applied manually / partially by an interrupted run, then cleaned up.
+7. **Codemod `npx @ai-sdk/codemod v7`** was attempted but timed out; renames applied manually / partially by an interrupted run, then cleaned up.
 
 ## Verification
 

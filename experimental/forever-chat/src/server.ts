@@ -14,7 +14,7 @@
  * streaming and onChatRecovery for provider-specific recovery.
  */
 import { createWorkersAI } from "workers-ai-provider";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV3, LanguageModelV4 } from "@ai-sdk/provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { routeAgentRequest } from "agents";
@@ -135,7 +135,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
     this.setState({ ...this.state, lastProvider: provider });
 
     // Buffer streaming replay: create a replay model that reads from the
-    // buffer and emits LanguageModelV3StreamPart objects. streamText
+    // buffer and emits the provider's language model stream parts. streamText
     // handles everything natively — tool execution, reasoning, UIMessage
     // conversion. Client sees tokens streaming in.
     const replayBufferId = this._pendingBufferReplay;
@@ -688,7 +688,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
   private _getReplayModel(
     provider: Provider,
     replayFetch: typeof fetch
-  ): LanguageModelV3 {
+  ): LanguageModelV3 | LanguageModelV4 {
     switch (provider) {
       case "openai":
         return createOpenAI({

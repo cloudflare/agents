@@ -28,7 +28,7 @@
     "isomorphic-git": "^1.38.5",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "workers-ai-provider": "https://pkg.pr.new/cloudflare/ai/workers-ai-provider@601",
+    "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -16,7 +16,8 @@ if (major !== "6" && major !== "7") {
   process.exit(1);
 }
 
-// AI SDK v7 pairs with @ai-sdk/*@4; v6 pairs with @ai-sdk/*@3.
+// AI SDK v7 pairs with @ai-sdk/* and workers-ai-provider v4; v6 pairs with
+// @ai-sdk/* and workers-ai-provider v3.
 const ranges =
   major === "6"
     ? {
@@ -24,14 +25,16 @@ const ranges =
         "@ai-sdk/react": "^3.0.0",
         "@ai-sdk/openai": "^3.0.0",
         "@ai-sdk/anthropic": "^3.0.0",
-        "@ai-sdk/google": "^3.0.0"
+        "@ai-sdk/google": "^3.0.0",
+        "workers-ai-provider": "^3.3.0"
       }
     : {
         ai: "^7.0.0",
         "@ai-sdk/react": "^4.0.0",
         "@ai-sdk/openai": "^4.0.0",
         "@ai-sdk/anthropic": "^4.0.0",
-        "@ai-sdk/google": "^4.0.0"
+        "@ai-sdk/google": "^4.0.0",
+        "workers-ai-provider": "^4.0.0"
       };
 
 const manifests = [

@@ -47,10 +47,9 @@ zero errors and its full workers test suite passes under each major.
 
 Known limitations:
 
-- `workers-ai-provider` (Think's default model provider) is a fixed dependency
-  targeting one provider-spec generation. Consumers on `ai@6` who rely on
-  Think's built-in default model may hit a provider-version mismatch; passing
-  their own `LanguageModel` avoids this.
+- `workers-ai-provider` (Think's default model provider) is fixed at v4 for AI
+  SDK v7. Consumers on `ai@6` who rely on Think's built-in default model may hit
+  a provider-version mismatch; passing their own `LanguageModel` avoids this.
 - `chat@4.31.0` currently declares an `ai@^6` peer and does not yet advertise
   v7 support; tracked separately.
 - CI should exercise both an `ai@6` and an `ai@7` resolution to guard the matrix.
