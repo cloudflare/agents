@@ -723,7 +723,6 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
-  private _telemetryEvents: string[] = [];
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
@@ -848,51 +847,6 @@ export class ThinkTestAgent extends Think {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
   }
 
-  async setDefaultTurnTelemetryCapture(): Promise<void> {
-    this._telemetryEvents = [];
-    this._turnConfigOverride = {
-      experimental_telemetry: {
-        isEnabled: true,
-        integrations: {
-          onStart: (event) => {
-            this._telemetryEvents.push(this._telemetryIdentity("start", event));
-          },
-          onFinish: (event) => {
-            this._telemetryEvents.push(
-              this._telemetryIdentity("finish", event)
-            );
-          }
-        }
-      }
-    };
-  }
-
-  async setTurnConfigTelemetry(): Promise<void> {
-    this._telemetryEvents = [];
-    this._turnConfigOverride = {
-      experimental_telemetry: {
-        isEnabled: true,
-        functionId: "caller-function",
-        metadata: {
-          agentId: "caller-agent-id",
-          agentName: "CallerAgent",
-          conversationId: "caller-conversation",
-          source: "think-test"
-        },
-        integrations: {
-          onStart: (event) => {
-            this._telemetryEvents.push(this._telemetryIdentity("start", event));
-          },
-          onFinish: (event) => {
-            this._telemetryEvents.push(
-              this._telemetryIdentity("finish", event)
-            );
-          }
-        }
-      }
-    };
-  }
-
   /**
    * Sets a per-turn `experimental_transform` that upper-cases every `text-delta`
    * part flowing through the stream. The transform is constructed inside the DO
@@ -994,27 +948,6 @@ export class ThinkTestAgent extends Think {
     return this._stepLog;
   }
 
-  async getTelemetryEvents(): Promise<string[]> {
-    return this._telemetryEvents;
-  }
-
-  private _telemetryIdentity(
-    phase: string,
-    event: {
-      functionId?: string;
-      metadata?: Record<string, unknown>;
-    }
-  ): string {
-    return [
-      phase,
-      event.functionId ?? "",
-      event.metadata?.source ?? "",
-      event.metadata?.agentName ?? "",
-      event.metadata?.agentId ?? "",
-      event.metadata?.conversationId === this.ctx.id.toString()
-    ].join(":");
-  }
-
   async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {
     return this._lastModelCallSettings;
   }
@@ -1062,10 +995,12 @@ export class ThinkTestAgent extends Think {
 
     return {
       toUIMessageStream(options?: { sendReasoning?: boolean }) {
-        const originalStream = result.toUIMessageStream(options);
-        const reader = (
-          originalStream as unknown as ReadableStream<unknown>
-        ).getReader();
+        // `StreamableResult.toUIMessageStream()` returns an `AsyncIterable`
+        // (not a `ReadableStream`), so consume it via its async iterator
+        // rather than `getReader()`.
+        const iterator = (
+          result.toUIMessageStream(options) as AsyncIterable<unknown>
+        )[Symbol.asyncIterator]();
         let chunkCount = 0;
         let shouldThrow = false;
 
@@ -1086,10 +1021,10 @@ export class ThinkTestAgent extends Think {
                 }
                 while (true) {
                   if (shouldThrow && config) {
-                    await reader.cancel();
+                    await iterator.return?.();
                     throw new SimulatedChatError(config.message);
                   }
-                  const { done, value } = await reader.read();
+                  const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
                   chunkCount++;
                   if (config && chunkCount >= config.afterChunks) {
@@ -1110,7 +1045,7 @@ export class ThinkTestAgent extends Think {
                 }
               },
               async return() {
-                await reader.cancel();
+                await iterator.return?.();
                 return { done: true as const, value: undefined };
               }
             };

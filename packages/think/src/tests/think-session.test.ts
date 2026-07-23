@@ -400,32 +400,6 @@ describe("Think — core", () => {
     expect(turnLog[0].toolNames).not.toContain("ignoredRuntimeTool");
   });
 
-  it("should supply default Think identity to the AI SDK", async () => {
-    const agent = await freshAgent("chat-telemetry-defaults");
-
-    await agent.setDefaultTurnTelemetryCapture();
-    const result = await agent.testChat("Trace this turn");
-
-    expect(result.done).toBe(true);
-    await expect(agent.getTelemetryEvents()).resolves.toEqual([
-      "start:ThinkTestAgent:::chat-telemetry-defaults:true",
-      "finish:ThinkTestAgent:::chat-telemetry-defaults:true"
-    ]);
-  });
-
-  it("should let beforeTurn override default Think identity", async () => {
-    const agent = await freshAgent("chat-telemetry-overrides");
-
-    await agent.setTurnConfigTelemetry();
-    const result = await agent.testChat("Trace this turn");
-
-    expect(result.done).toBe(true);
-    await expect(agent.getTelemetryEvents()).resolves.toEqual([
-      "start:caller-function:think-test:CallerAgent:caller-agent-id:false",
-      "finish:caller-function:think-test:CallerAgent:caller-agent-id:false"
-    ]);
-  });
-
   it("should build assistant message with text parts", async () => {
     const agent = await freshAgent("chat-parts");
     await agent.testChat("Hello!");
@@ -1734,7 +1708,12 @@ describe("Think — model message conversion", () => {
       content?: Array<{
         output?: {
           type: string;
-          value?: Array<{ type: string; data?: string; mediaType?: string }>;
+          value?: Array<{
+            type: string;
+            data?: unknown;
+            mediaType?: string;
+            filename?: string;
+          }>;
         };
       }>;
     }>;
@@ -1743,9 +1722,10 @@ describe("Think — model message conversion", () => {
       ?.content?.find((part) => part.output?.type === "content")?.output;
 
     expect(toolResult?.value).toContainEqual({
-      type: "image-data",
+      type: "file-data",
       data: "iVBORw0KGgo=",
-      mediaType: "image/png"
+      mediaType: "image/png",
+      filename: "screenshot"
     });
   });
 });

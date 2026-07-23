@@ -42,7 +42,7 @@ import {
   streamText,
   convertToModelMessages,
   tool,
-  stepCountIs
+  isStepCount
 } from "ai";
 import { z } from "zod";
 
@@ -55,7 +55,7 @@ export const PERSPECTIVES = {
   technical: {
     name: "Technical Expert",
     icon: "gear",
-    system:
+    instructions:
       "You are a senior technical expert. Analyze the question from a purely " +
       "technical standpoint: feasibility, architecture, performance, scalability, " +
       "security implications. Be specific and cite concrete technical concerns. " +
@@ -64,7 +64,7 @@ export const PERSPECTIVES = {
   business: {
     name: "Business Analyst",
     icon: "chart",
-    system:
+    instructions:
       "You are a sharp business analyst. Analyze the question from a business " +
       "perspective: market impact, cost/benefit, competitive advantage, risk, " +
       "timeline, and ROI. Be pragmatic and numbers-oriented where possible. " +
@@ -73,7 +73,7 @@ export const PERSPECTIVES = {
   skeptic: {
     name: "Devil's Advocate",
     icon: "warning",
-    system:
+    instructions:
       "You are a constructive devil's advocate. Challenge the premise of the " +
       "question. What could go wrong? What are the hidden assumptions? What " +
       "alternatives haven't been considered? Be provocative but fair. " +
@@ -141,7 +141,7 @@ export class PerspectiveAgent extends Agent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: perspective.system,
+      instructions: perspective.instructions,
       prompt: question
     });
 
@@ -277,7 +277,7 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a senior advisor synthesizing multiple perspectives into a " +
         "balanced, actionable recommendation. Be concise — 2-3 paragraphs max.",
       prompt:
@@ -312,7 +312,7 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: `You are a coordinator that manages three specialist sub-agents to analyze questions from multiple perspectives.
+      instructions: `You are a coordinator that manages three specialist sub-agents to analyze questions from multiple perspectives.
 
 When the user asks a question or presents a topic for analysis, use the analyzeFromAllPerspectives tool. This will:
 1. Send the question to three independent sub-agents (Technical Expert, Business Analyst, Devil's Advocate)
@@ -347,7 +347,7 @@ For simple conversation (greetings, follow-up questions about results), respond 
           }
         })
       },
-      stopWhen: stepCountIs(3)
+      stopWhen: isStepCount(3)
     });
 
     return result.toUIMessageStreamResponse();

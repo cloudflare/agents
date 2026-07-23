@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { ExtensionManager } from "../extensions/manager";
 import { sanitizeName } from "../extensions/manager";
@@ -28,7 +28,7 @@ export interface ExtensionToolsOptions {
  * }
  * ```
  */
-export function createExtensionTools(options: ExtensionToolsOptions) {
+export function createExtensionTools(options: ExtensionToolsOptions): ToolSet {
   const { manager } = options;
 
   return {

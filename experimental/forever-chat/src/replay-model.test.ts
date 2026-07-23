@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import type {
   LanguageModelV3,
-  LanguageModelV3StreamPart
+  LanguageModelV3StreamPart,
+  LanguageModelV4,
+  LanguageModelV4StreamPart
 } from "@ai-sdk/provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -26,14 +28,15 @@ function mockBuffer(data: string) {
 }
 
 async function collectStream(
-  model: LanguageModelV3
-): Promise<LanguageModelV3StreamPart[]> {
+  model: LanguageModelV3 | LanguageModelV4
+): Promise<Array<LanguageModelV3StreamPart | LanguageModelV4StreamPart>> {
   const { stream } = await model.doStream({
     prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
     inputFormat: "messages" as never
   } as never);
   const reader = stream.getReader();
-  const parts: LanguageModelV3StreamPart[] = [];
+  const parts: Array<LanguageModelV3StreamPart | LanguageModelV4StreamPart> =
+    [];
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -42,11 +45,15 @@ async function collectStream(
   return parts;
 }
 
-function types(parts: LanguageModelV3StreamPart[]): string[] {
+function types(
+  parts: Array<LanguageModelV3StreamPart | LanguageModelV4StreamPart>
+): string[] {
   return parts.map((p) => p.type);
 }
 
-function textContent(parts: LanguageModelV3StreamPart[]): string {
+function textContent(
+  parts: Array<LanguageModelV3StreamPart | LanguageModelV4StreamPart>
+): string {
   return parts
     .filter((p) => p.type === "text-delta")
     .map((p) => (p as { delta: string }).delta)

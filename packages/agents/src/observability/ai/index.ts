@@ -7,6 +7,10 @@ import { createAISDKV7Telemetry } from "./v7/telemetry";
 import type { AISDKV7Telemetry } from "./v7/types";
 import { tracer } from "../tracing/cloudflare";
 
+const agentsAISDKTelemetryBrand = Symbol.for(
+  "cloudflare.agents.ai-sdk-telemetry"
+);
+
 /**
  * Wraps an AI SDK namespace with tracing.
  */
@@ -27,7 +31,9 @@ export function wrapAISDK<T extends Record<string, unknown>>(
 export function createAISDKTelemetry(
   options: AISDKStorageOptions = {}
 ): AISDKV7Telemetry {
-  return createAISDKV7Telemetry({ options, tracer });
+  const telemetry = createAISDKV7Telemetry({ options, tracer });
+  Object.defineProperty(telemetry, agentsAISDKTelemetryBrand, { value: true });
+  return telemetry;
 }
 
 export type {

@@ -23,7 +23,7 @@ import {
   generateText,
   streamText,
   convertToModelMessages,
-  stepCountIs
+  isStepCount
 } from "ai";
 
 export class MultiSessionAgent extends Agent<Env> {
@@ -105,10 +105,10 @@ export class MultiSessionAgent extends Agent<Env> {
 
     const result = streamText({
       model: this.getAI(),
-      system: await session.freezeSystemPrompt(),
+      instructions: await session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated as UIMessage[]),
       tools: { ...(await session.tools()), ...this.manager.tools() },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     for await (const chunk of result.textStream) {

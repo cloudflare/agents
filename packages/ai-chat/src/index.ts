@@ -1,6 +1,6 @@
 import type {
   UIMessage,
-  StreamTextOnFinishCallback,
+  GenerateTextOnFinishCallback,
   TextUIPart,
   ToolSet,
   UIMessageChunk
@@ -2995,7 +2995,7 @@ export class AIChatAgent<
    */
   async onChatMessage(
     // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
     _options?: OnChatMessageOptions
   ): Promise<Response | undefined> {

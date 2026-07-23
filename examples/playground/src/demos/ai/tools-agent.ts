@@ -5,7 +5,7 @@ import {
   convertToModelMessages,
   pruneMessages,
   tool,
-  stepCountIs
+  isStepCount
 } from "ai";
 import { z } from "zod";
 
@@ -19,7 +19,7 @@ export class ToolsAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a helpful assistant that demonstrates three kinds of tool execution:\n" +
         "1. Server-side tools (getWeather, rollDice) — run automatically on the server.\n" +
         "2. Client-side tools (getUserTimezone, getScreenSize) — executed in the user's browser, no execute function on the server.\n" +
@@ -138,7 +138,7 @@ export class ToolsAgent extends AIChatAgent<Env> {
           }
         })
       },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     return result.toUIMessageStreamResponse();

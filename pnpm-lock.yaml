@@ -13,17 +13,17 @@ importers:
   .:
     devDependencies:
       '@ai-sdk/anthropic':
-        specifier: ^3.0.83
-        version: 3.0.85(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@ai-sdk/google':
-        specifier: ^3.0.81
-        version: 3.0.83(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@ai-sdk/openai':
-        specifier: ^3.0.70
-        version: 3.0.74(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.4.3)
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@changesets/changelog-github':
         specifier: ^0.7.0
         version: 0.7.0
@@ -50,7 +50,7 @@ importers:
         version: 0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.5.1)(ws@8.21.0)(zod@4.4.3)
       '@openai/agents-extensions':
         specifier: ^0.12.0
-        version: 0.12.0(@ai-sdk/provider@3.0.10)(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@openai/agents@0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.5.1)(ws@8.21.0)(zod@4.4.3))(@smithy/signature-v4@5.5.1)(ai@6.0.208(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
+        version: 0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@openai/agents@0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.5.1)(ws@8.21.0)(zod@4.4.3))(@smithy/signature-v4@5.5.1)(ai@7.0.18(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -82,8 +82,8 @@ importers:
         specifier: workspace:*
         version: link:packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       concurrently:
         specifier: ^10.0.3
         version: 10.0.3
@@ -142,8 +142,8 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0(patch_hash=1c11a562f8f4bcb95c9e73d63f769ffaf898ea427aecfd147d6d58acd07f9316)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(vitest@4.1.9)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       wrangler:
         specifier: ^4.105.0
         version: 4.105.0(@cloudflare/workers-types@4.20260629.1)
@@ -154,11 +154,11 @@ importers:
   agent-think:
     dependencies:
       '@ai-sdk/anthropic':
-        specifier: ^3.0.83
-        version: 3.0.85(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@ai-sdk/openai':
-        specifier: ^3.0.70
-        version: 3.0.74(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.4.3)
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../packages/ai-chat
@@ -175,8 +175,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       diff:
         specifier: ^9.0.0
         version: 9.0.0
@@ -190,8 +190,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -245,8 +245,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -254,8 +254,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
@@ -306,8 +306,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -367,8 +367,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -440,8 +440,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -455,8 +455,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -519,8 +519,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -586,8 +586,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -595,8 +595,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
@@ -650,8 +650,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -708,8 +708,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -717,8 +717,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
@@ -758,7 +758,7 @@ importers:
     dependencies:
       '@chat-adapter/telegram':
         specifier: ^4.31.0
-        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+        version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -772,11 +772,11 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       chat:
         specifier: ^4.31.0
-        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+        version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -839,8 +839,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -851,8 +851,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -912,8 +912,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -924,8 +924,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -988,8 +988,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -1003,8 +1003,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: '*'
         version: 4.4.3
@@ -1108,8 +1108,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -1194,8 +1194,8 @@ importers:
   examples/deploy-churn:
     dependencies:
       '@ai-sdk/anthropic':
-        specifier: ^3.0.83
-        version: 3.0.85(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -1209,8 +1209,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -1218,8 +1218,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
@@ -1279,8 +1279,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -1291,8 +1291,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
@@ -1453,8 +1453,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -1465,8 +1465,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -1737,8 +1737,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -1749,8 +1749,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: '*'
         version: 4.4.3
@@ -1935,8 +1935,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -1950,8 +1950,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2017,8 +2017,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       cronstrue:
         specifier: ^3.23.0
         version: 3.23.0
@@ -2044,8 +2044,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2157,8 +2157,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2166,8 +2166,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
@@ -2227,8 +2227,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2291,8 +2291,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2303,8 +2303,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2361,8 +2361,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2370,8 +2370,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.42.3
@@ -2408,7 +2408,7 @@ importers:
     dependencies:
       '@chat-adapter/telegram':
         specifier: ^4.31.0
-        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+        version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -2422,8 +2422,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2529,8 +2529,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2633,8 +2633,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2652,8 +2652,8 @@ importers:
   examples/tictactoe:
     dependencies:
       '@ai-sdk/openai':
-        specifier: ^3.0.70
-        version: 3.0.74(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -2664,8 +2664,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2734,8 +2734,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2743,8 +2743,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2887,8 +2887,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2899,8 +2899,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -3012,8 +3012,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -3024,8 +3024,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -3207,8 +3207,8 @@ importers:
   experimental/chat-recovery-probe:
     dependencies:
       '@ai-sdk/provider':
-        specifier: ^3.0.10
-        version: 3.0.10
+        specifier: ^4.0.0
+        version: 4.0.2
       '@cloudflare/think':
         specifier: '*'
         version: link:../../packages/think
@@ -3216,8 +3216,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20260629.1
@@ -3238,8 +3238,8 @@ importers:
         specifier: '*'
         version: 3.0.74(zod@4.4.3)
       '@ai-sdk/provider':
-        specifier: ^3.0.10
-        version: 3.0.10
+        specifier: ^4.0.0
+        version: 4.0.2
       '@cloudflare/ai-chat':
         specifier: '*'
         version: link:../../packages/ai-chat
@@ -3388,14 +3388,14 @@ importers:
   experimental/gateway-resume:
     dependencies:
       '@ai-sdk/anthropic':
-        specifier: ^3.0.83
-        version: 3.0.85(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@ai-sdk/openai':
-        specifier: ^3.0.70
-        version: 3.0.74(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.4.3)
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -3403,14 +3403,14 @@ importers:
   experimental/gateway-resume-think:
     dependencies:
       '@ai-sdk/anthropic':
-        specifier: ^3.0.83
-        version: 3.0.85(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@ai-sdk/openai':
-        specifier: ^3.0.70
-        version: 3.0.74(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.4.3)
       '@ai-sdk/provider':
-        specifier: ^3.0.10
-        version: 3.0.10
+        specifier: ^4.0.0
+        version: 4.0.2
       '@cloudflare/think':
         specifier: '*'
         version: link:../../packages/think
@@ -3418,8 +3418,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20260629.1
@@ -3445,8 +3445,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20260629.1
@@ -3498,8 +3498,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -3507,8 +3507,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3529,8 +3529,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -3538,8 +3538,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3563,8 +3563,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       pg:
         specifier: ^8.22.0
         version: 8.22.0
@@ -3575,8 +3575,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3603,8 +3603,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -3612,8 +3612,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3637,8 +3637,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -3826,8 +3826,8 @@ importers:
         version: 18.0.0
     devDependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@modelcontextprotocol/conformance':
         specifier: 0.1.16
         version: 0.1.16(@cfworker/json-schema@4.1.1)
@@ -3850,11 +3850,11 @@ importers:
         specifier: ^2.17.0
         version: 2.17.0(typescript@6.0.3)
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       chat:
         specifier: ^4.31.0
-        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+        version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       glob:
         specifier: ^13.0.6
         version: 13.0.6
@@ -3874,8 +3874,8 @@ importers:
   packages/ai-chat:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^3.0.0 || ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       agents:
         specifier: '>=0.17.1 <1.0.0'
         version: link:../agents
@@ -3890,8 +3890,8 @@ importers:
         specifier: ^19.2.17
         version: 19.2.17
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -3921,8 +3921,8 @@ importers:
         specifier: 0.38.0
         version: 0.38.0(@opentelemetry/api@1.9.1)
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       vitest:
         specifier: 4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.0.1)(@vitest/browser-playwright@4.1.9)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.0.1)(typescript@6.0.3))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -3970,11 +3970,11 @@ importers:
   packages/think:
     dependencies:
       '@ai-sdk/anthropic':
-        specifier: ^3.0.83
-        version: 3.0.85(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@ai-sdk/openai':
-        specifier: ^3.0.70
-        version: 3.0.74(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.4.3)
       '@cloudflare/codemode':
         specifier: '>=0.4.0'
         version: link:../codemode
@@ -3986,7 +3986,7 @@ importers:
         version: 0.0.16
       chat:
         specifier: ^4.31.0
-        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+        version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       create-think:
         specifier: workspace:*
         version: link:../create-think
@@ -3997,18 +3997,18 @@ importers:
         specifier: ^1.7.0
         version: 1.7.0
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
       yargs:
         specifier: ^18.0.0
         version: 18.0.0
     devDependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@chat-adapter/telegram':
         specifier: ^4.31.0
-        version: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+        version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../ai-chat
@@ -4043,8 +4043,8 @@ importers:
         specifier: workspace:*
         version: link:../agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1(@noble/hashes@1.8.0)
@@ -4199,8 +4199,8 @@ importers:
   think-starters/basic:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4217,8 +4217,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4269,8 +4269,8 @@ importers:
   think-starters/business-workflow:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4287,8 +4287,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4342,8 +4342,8 @@ importers:
   think-starters/coding-agent:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4360,8 +4360,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4412,8 +4412,8 @@ importers:
   think-starters/customer-support:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4430,8 +4430,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4485,8 +4485,8 @@ importers:
   think-starters/personal-assistant:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4503,8 +4503,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4555,8 +4555,8 @@ importers:
   think-starters/webhook-agent:
     dependencies:
       '@ai-sdk/react':
-        specifier: ^3.0.204
-        version: 3.0.210(react@19.2.7)(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.19(react@19.2.7)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -4573,8 +4573,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4701,11 +4701,11 @@ importers:
   wip/issue-1691-live:
     dependencies:
       '@ai-sdk/anthropic':
-        specifier: ^3.0.83
-        version: 3.0.85(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.4.3)
       '@ai-sdk/openai':
-        specifier: ^3.0.70
-        version: 3.0.74(zod@4.4.3)
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.4.3)
       '@cloudflare/ai-chat':
         specifier: '*'
         version: link:../../packages/ai-chat
@@ -4716,11 +4716,11 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       ai:
-        specifier: ^6.0.202
-        version: 6.0.208(zod@4.4.3)
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
       workers-ai-provider:
-        specifier: ^3.3.0
-        version: 3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3))
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20260629.1
@@ -4767,15 +4767,27 @@ packages:
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/gateway@3.0.133':
-    resolution: {integrity: sha512-Ebs+7iS9zUgJu5B0RlxM2JmDWzq79Cpd6YdiqcCzB5qFdpfQJPUDiXutqlQP89F2XGjOdDeidulBTXUdXWzOxw==}
-    engines: {node: '>=18'}
+  '@ai-sdk/anthropic@4.0.10':
+    resolution: {integrity: sha512-L9GlJyL8stPyv5QTRONnVoRVw82b6iBuX4LTiRJMM++I2RfDe+yrBsPa6gz6Msll9GZ7JsX0MRNUP4G1afjDTw==}
+    engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/google@3.0.83':
-    resolution: {integrity: sha512-Pz7aCX0dy+5x+r4K/37HbLZNaPtPL4q2NduzJW64VffLv5sI9Nb478wAd7PlH2r2asiypJsz/Jerf9draTciUA==}
-    engines: {node: '>=18'}
+  '@ai-sdk/gateway@4.0.14':
+    resolution: {integrity: sha512-wbYqQKpASsuK7bdoa1fp+QA6oy3ddqqBOukN3IkyaR8PAp0pWoc66ch2td+ixeknoCcO4F6VTkSFKVC6MP3bTQ==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/google@4.0.10':
+    resolution: {integrity: sha512-+g629pKE4xhLB6LnskHlOkie30UENhiKpdYMGQoGYm09191kfRU8qAU7wgF01PmzGFe0h3JYpls6Ok2aCYmjzQ==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/mcp@2.0.9':
+    resolution: {integrity: sha512-Mokfd6Ff5QjpdftICnQ9jC9opJcUqfPE31oG9sTYiXEykj5InIt0FA+9acLtCrnM/hx3Tz2BgkNQCXibjSDhpA==}
+    engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
@@ -4785,9 +4797,21 @@ packages:
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
+  '@ai-sdk/openai@4.0.9':
+    resolution: {integrity: sha512-j7x7FC6KQJMQaJoi6hFLzbB2aXMnR+IA8h0BQH8YCbQESppbM7SzmZ4VAPpobIvx0rqiVNJ1JjraElOLuA31Ag==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
   '@ai-sdk/provider-utils@4.0.30':
     resolution: {integrity: sha512-VO7I+vPffqI5sMnPoUq5DCSqKIgQIk/naJWRdQVpz2ma2zoprC/lqiJiUEl2s6DfvTD76TbhD3q39ROjlA6rGw==}
     engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/provider-utils@5.0.6':
+    resolution: {integrity: sha512-i4mVayGtC+HrRmtfPFOxvKKQgFU+1dwTTsh4MY0jY1MaGuppOwDFrNYrJ3dDXWMkO3o6FDVAKY8ZDsy7hLsO9Q==}
+    engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
@@ -4799,9 +4823,13 @@ packages:
     resolution: {integrity: sha512-Q3BZ27qfpYqnCYGvE3vt+Qi6LGOF9R5Nmzn+9JoM1lCRsD9mYaIhfJLkSunN48nfGXJ6n+XNV0J/XVpqGQl7Dw==}
     engines: {node: '>=18'}
 
-  '@ai-sdk/react@3.0.210':
-    resolution: {integrity: sha512-VprBlyc8yvwlpIdcIICL307vRncXrLlmcRTY/7JR5ND9+LvUcxJU16yW6prClFahqEWVza8Vr8P4Bgk5ZBtp4A==}
-    engines: {node: '>=18'}
+  '@ai-sdk/provider@4.0.2':
+    resolution: {integrity: sha512-pfPoy9J1B1xV7cqJ8MYHOsDYrMv5tR3+EMNfI249OhkD2uRakvav3Fo7XpD2luuN/YNCBY7KfEQc7vEV7KEtyw==}
+    engines: {node: '>=22'}
+
+  '@ai-sdk/react@4.0.19':
+    resolution: {integrity: sha512-3n/UxiZZh727ROIjQMEyphyzsz3N8bKyBIcfFHicLq7fJjuydQ8owcGRmLXoU5jrhGBRTf4O1QhwmgYNU+vkJA==}
+    engines: {node: '>=22'}
     peerDependencies:
       react: ^18 || ~19.0.1 || ~19.1.2 || ^19.2.1
 
@@ -7932,6 +7960,9 @@ packages:
   '@vitest/utils@4.1.9':
     resolution: {integrity: sha512-A51o8ymO5PpqlWNnBP9ZHPXDIpuMtTLlGSjN7la4US+LJzoUMyhwjA5QXlm39JexgwHKW4Xjs8Z2d3dLCXOeuA==}
 
+  '@workflow/serde@4.1.0':
+    resolution: {integrity: sha512-pav4F2BoirECWR7Nf1TKt+2eETcBj7jj4cBefQ8VXQCA6NPkaKeLfj/zMgi+3zYV5ZIBT4GuUiphsj0/b9hPQQ==}
+
   '@workflow/serde@4.1.0-beta.2':
     resolution: {integrity: sha512-8kkeoQKLDaKXefjV5dbhBj2aErfKp1Mc4pb6tj8144cF+Em5SPbyMbyLCHp+BVrFfFVCBluCtMx+jjvaFVZGww==}
 
@@ -7998,9 +8029,9 @@ packages:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
 
-  ai@6.0.208:
-    resolution: {integrity: sha512-STz+AaZqJ4ZjH7UkpXkbHx+bjgIDOsE8fIUoZjkZ2whoZcfVmG9K/TqEKouJZ03SuZuD7lagntlU3zBhAEkRpQ==}
-    engines: {node: '>=18'}
+  ai@7.0.18:
+    resolution: {integrity: sha512-/DsiRfbLPtoHf9C47Hy+LK+HkjNowX1DQo3id4zWegfU6z1WjVDRAHYJAiX7SXhGp0mWX4tcenUhfIFessDWnw==}
+    engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
@@ -11919,14 +11950,14 @@ packages:
     engines: {node: '>=16'}
     hasBin: true
 
-  workers-ai-provider@3.3.0:
-    resolution: {integrity: sha512-x5GnN07O3O+3qiXzraMRLNbM34gDuQvnn+Xgw4Xqmhka+StgIWQp8dEQZ/70nVd+rOT75dEZ3/c9JGG/kDyzkw==}
+  workers-ai-provider@4.0.0:
+    resolution: {integrity: sha512-FkhwMP1EP/MKXR8Jv1o7wLVKfTqu0h/PUaEmhZ7gyDiioib5Wsh3oPAKhG+7+SWfU3roTDHaEWlJpkJjpXu+fQ==}
     peerDependencies:
-      '@ai-sdk/anthropic': ^3.0.0
-      '@ai-sdk/google': ^3.0.0
-      '@ai-sdk/openai': ^3.0.0
-      '@ai-sdk/provider': ^3.0.0
-      ai: ^6.0.0
+      '@ai-sdk/anthropic': ^4.0.0
+      '@ai-sdk/google': ^4.0.0
+      '@ai-sdk/openai': ^4.0.0
+      '@ai-sdk/provider': ^4.0.0
+      ai: ^7.0.0
     peerDependenciesMeta:
       '@ai-sdk/anthropic':
         optional: true
@@ -12077,17 +12108,30 @@ snapshots:
       '@ai-sdk/provider-utils': 4.0.30(zod@4.4.3)
       zod: 4.4.3
 
-  '@ai-sdk/gateway@3.0.133(zod@4.4.3)':
+  '@ai-sdk/anthropic@4.0.10(zod@4.4.3)':
     dependencies:
-      '@ai-sdk/provider': 3.0.10
-      '@ai-sdk/provider-utils': 4.0.30(zod@4.4.3)
+      '@ai-sdk/provider': 4.0.2
+      '@ai-sdk/provider-utils': 5.0.6(zod@4.4.3)
+      zod: 4.4.3
+
+  '@ai-sdk/gateway@4.0.14(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.2
+      '@ai-sdk/provider-utils': 5.0.6(zod@4.4.3)
       '@vercel/oidc': 3.2.0
       zod: 4.4.3
 
-  '@ai-sdk/google@3.0.83(zod@4.4.3)':
+  '@ai-sdk/google@4.0.10(zod@4.4.3)':
     dependencies:
-      '@ai-sdk/provider': 3.0.10
-      '@ai-sdk/provider-utils': 4.0.30(zod@4.4.3)
+      '@ai-sdk/provider': 4.0.2
+      '@ai-sdk/provider-utils': 5.0.6(zod@4.4.3)
+      zod: 4.4.3
+
+  '@ai-sdk/mcp@2.0.9(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.2
+      '@ai-sdk/provider-utils': 5.0.6(zod@4.4.3)
+      pkce-challenge: 5.0.1
       zod: 4.4.3
 
   '@ai-sdk/openai@3.0.74(zod@4.4.3)':
@@ -12096,10 +12140,24 @@ snapshots:
       '@ai-sdk/provider-utils': 4.0.30(zod@4.4.3)
       zod: 4.4.3
 
+  '@ai-sdk/openai@4.0.9(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.2
+      '@ai-sdk/provider-utils': 5.0.6(zod@4.4.3)
+      zod: 4.4.3
+
   '@ai-sdk/provider-utils@4.0.30(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 3.0.10
       '@standard-schema/spec': 1.1.0
+      eventsource-parser: 3.1.0
+      zod: 4.4.3
+
+  '@ai-sdk/provider-utils@5.0.6(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.2
+      '@standard-schema/spec': 1.1.0
+      '@workflow/serde': 4.1.0
       eventsource-parser: 3.1.0
       zod: 4.4.3
 
@@ -12111,10 +12169,16 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
-  '@ai-sdk/react@3.0.210(react@19.2.7)(zod@4.4.3)':
+  '@ai-sdk/provider@4.0.2':
     dependencies:
-      '@ai-sdk/provider-utils': 4.0.30(zod@4.4.3)
-      ai: 6.0.208(zod@4.4.3)
+      json-schema: 0.4.0
+
+  '@ai-sdk/react@4.0.19(react@19.2.7)(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/mcp': 2.0.9(zod@4.4.3)
+      '@ai-sdk/provider': 4.0.2
+      '@ai-sdk/provider-utils': 5.0.6(zod@4.4.3)
+      ai: 7.0.18(zod@4.4.3)
       react: 19.2.7
       swr: 2.4.1(react@19.2.7)
       throttleit: 2.1.0
@@ -13089,18 +13153,18 @@ snapshots:
       human-id: 4.2.0
       prettier: 2.8.8
 
-  '@chat-adapter/shared@4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)':
+  '@chat-adapter/shared@4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)':
     dependencies:
-      chat: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+      chat: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
       - zod
 
-  '@chat-adapter/telegram@4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)':
+  '@chat-adapter/telegram@4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
-      chat: 4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3)
+      '@chat-adapter/shared': 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
+      chat: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
@@ -14039,7 +14103,7 @@ snapshots:
       - supports-color
       - ws
 
-  '@openai/agents-extensions@0.12.0(@ai-sdk/provider@3.0.10)(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@openai/agents@0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.5.1)(ws@8.21.0)(zod@4.4.3))(@smithy/signature-v4@5.5.1)(ai@6.0.208(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)':
+  '@openai/agents-extensions@0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@openai/agents@0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.5.1)(ws@8.21.0)(zod@4.4.3))(@smithy/signature-v4@5.5.1)(ai@7.0.18(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)':
     dependencies:
       '@openai/agents': 0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.5.1)(ws@8.21.0)(zod@4.4.3)
       '@openai/agents-core': 0.12.0(@aws-sdk/credential-provider-node@3.972.57)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.5.1)(ws@8.21.0)(zod@4.4.3)
@@ -14048,8 +14112,7 @@ snapshots:
       ws: 8.21.0
       zod: 4.4.3
     optionalDependencies:
-      '@ai-sdk/provider': 3.0.10
-      ai: 6.0.208(zod@4.4.3)
+      ai: 7.0.18(zod@4.4.3)
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@cfworker/json-schema'
@@ -14117,7 +14180,8 @@ snapshots:
 
   '@opentelemetry/api@1.9.0': {}
 
-  '@opentelemetry/api@1.9.1': {}
+  '@opentelemetry/api@1.9.1':
+    optional: true
 
   '@opentelemetry/semantic-conventions@1.41.1': {}
 
@@ -15451,6 +15515,8 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
+  '@workflow/serde@4.1.0': {}
+
   '@workflow/serde@4.1.0-beta.2': {}
 
   '@x402/core@2.17.0':
@@ -15536,12 +15602,11 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  ai@6.0.208(zod@4.4.3):
+  ai@7.0.18(zod@4.4.3):
     dependencies:
-      '@ai-sdk/gateway': 3.0.133(zod@4.4.3)
-      '@ai-sdk/provider': 3.0.10
-      '@ai-sdk/provider-utils': 4.0.30(zod@4.4.3)
-      '@opentelemetry/api': 1.9.1
+      '@ai-sdk/gateway': 4.0.14(zod@4.4.3)
+      '@ai-sdk/provider': 4.0.2
+      '@ai-sdk/provider-utils': 5.0.6(zod@4.4.3)
       zod: 4.4.3
 
   ajv-formats@3.0.1(ajv@8.20.0):
@@ -15899,7 +15964,7 @@ snapshots:
 
   chardet@2.2.0: {}
 
-  chat@4.31.0(ai@6.0.208(zod@4.4.3))(zod@4.4.3):
+  chat@4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3):
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0
@@ -15909,7 +15974,7 @@ snapshots:
       remend: 1.3.0
       unified: 11.0.5
     optionalDependencies:
-      ai: 6.0.208(zod@4.4.3)
+      ai: 7.0.18(zod@4.4.3)
       zod: 4.4.3
     transitivePeerDependencies:
       - supports-color
@@ -20025,14 +20090,14 @@ snapshots:
       '@cloudflare/workerd-linux-arm64': 1.20260625.1
       '@cloudflare/workerd-windows-64': 1.20260625.1
 
-  workers-ai-provider@3.3.0(@ai-sdk/anthropic@3.0.85(zod@4.4.3))(@ai-sdk/google@3.0.83(zod@4.4.3))(@ai-sdk/openai@3.0.74(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.208(zod@4.4.3)):
+  workers-ai-provider@4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3)):
     dependencies:
-      '@ai-sdk/provider': 3.0.10
-      ai: 6.0.208(zod@4.4.3)
+      '@ai-sdk/provider': 4.0.2
+      ai: 7.0.18(zod@4.4.3)
     optionalDependencies:
-      '@ai-sdk/anthropic': 3.0.85(zod@4.4.3)
-      '@ai-sdk/google': 3.0.83(zod@4.4.3)
-      '@ai-sdk/openai': 3.0.74(zod@4.4.3)
+      '@ai-sdk/anthropic': 4.0.10(zod@4.4.3)
+      '@ai-sdk/google': 4.0.10(zod@4.4.3)
+      '@ai-sdk/openai': 4.0.9(zod@4.4.3)
 
   wrangler@4.105.0(@cloudflare/workers-types@4.20260629.1):
     dependencies:

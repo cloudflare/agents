@@ -1,6 +1,6 @@
 import { Agent, type Connection, type WSMessage } from "agents";
 import {
-  stepCountIs,
+  isStepCount,
   streamText,
   tool,
   type LanguageModel,
@@ -659,11 +659,11 @@ export class TestAiSdkFullStreamVoiceAgent extends VoiceBase {
     const result = streamText({
       model: createToolCallingTextStreamModel(this.#mockResponse),
       tools: createMockTools(this.#mockResponse),
-      stopWhen: stepCountIs(3),
+      stopWhen: isStepCount(3),
       prompt: "Check the weather, then answer."
     });
 
-    return result.fullStream;
+    return result.stream;
   }
 
   onMessage(connection: Connection, message: WSMessage) {
@@ -693,7 +693,7 @@ export class TestAiSdkTextStreamVoiceAgent extends VoiceBase {
     const result = streamText({
       model: createToolCallingTextStreamModel(this.#mockResponse),
       tools: createMockTools(this.#mockResponse),
-      stopWhen: stepCountIs(3),
+      stopWhen: isStepCount(3),
       prompt: "Check the weather, then answer."
     });
 

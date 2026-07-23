@@ -84,6 +84,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as aiSdk from "ai";
 import type {
   FlexibleSchema,
   InferSchema,
@@ -93,8 +94,7 @@ import type {
   PrepareStepFunction,
   PrepareStepResult,
   StreamTextOnChunkCallback,
-  StreamTextOnStepFinishCallback,
-  StreamTextOnToolCallFinishCallback,
+  GenerateTextOnStepFinishCallback,
   StopCondition,
   ToolSet,
   TypedToolCall,
@@ -104,12 +104,22 @@ import {
   convertToModelMessages,
   hasToolCall,
   jsonSchema,
+  // `stepCountIs` exists in both AI SDK v6 and v7 (v7 keeps it as an alias of
+  // `isStepCount`). Using it keeps Think compatible with both majors.
   stepCountIs,
   streamText,
   tool,
   wrapLanguageModel
 } from "ai";
-import { wrapAISDK } from "agents/observability/ai";
+/**
+ * Callback type for the AI SDK tool-execution-finished hook, derived from
+ * `streamText`'s options so it resolves under both AI SDK v6 and v7 (the
+ * exported `OnToolExecutionEndCallback` type is v7-only).
+ */
+type ToolCallFinishCallback = NonNullable<
+  Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
+>;
+import { createAISDKTelemetry, wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
@@ -140,6 +150,10 @@ import {
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
+const agentsAISDKTelemetryBrand = Symbol.for(
+  "cloudflare.agents.ai-sdk-telemetry"
+);
+const usesAISDKV7Telemetry = "registerTelemetry" in aiSdk;
 import type {
   AgentToolLifecycleResult,
   AgentToolMilestone,
@@ -433,6 +447,83 @@ function streamErrorToString(error: unknown): string {
     return JSON.stringify(error);
   } catch {
     return String(error);
+  }
+}
+
+/**
+ * Normalizes the AI SDK tool-execution-finished event across major versions.
+ *
+ * Think registers a single `experimental_onToolCallFinish` callback, which is
+ * the native option in AI SDK v6 and a supported alias for `onToolExecutionEnd`
+ * in AI SDK v7 (resolved internally — see `ai`'s `streamText`). The two majors
+ * hand the callback different event shapes:
+ *
+ * - v6: `{ toolCall, messages, success, output, error, durationMs, stepNumber }`
+ * - v7: `{ toolCall, messages, toolExecutionMs, toolOutput: { type, output|error } }`
+ *   (no `stepNumber`)
+ *
+ * This collapses both into one shape so the rest of Think stays version-agnostic.
+ */
+function normalizeToolFinishEvent(event: unknown): {
+  toolCall: TypedToolCall<ToolSet>;
+  messages: ModelMessage[];
+  toolExecutionMs: number;
+  stepNumber: number | undefined;
+  success: boolean;
+  output: unknown;
+  error: unknown;
+} {
+  const e = event as {
+    toolCall: TypedToolCall<ToolSet>;
+    messages: ModelMessage[];
+    // v7
+    toolExecutionMs?: number;
+    toolOutput?: { type: string; output?: unknown; error?: unknown };
+    // v6
+    durationMs?: number;
+    success?: boolean;
+    output?: unknown;
+    error?: unknown;
+    stepNumber?: number;
+  };
+  const toolExecutionMs = e.toolExecutionMs ?? e.durationMs ?? 0;
+  if (e.toolOutput) {
+    const success = e.toolOutput.type === "tool-result";
+    return {
+      toolCall: e.toolCall,
+      messages: e.messages,
+      toolExecutionMs,
+      // v7 does not provide a step number on this event.
+      stepNumber: undefined,
+      success,
+      output: success ? e.toolOutput.output : undefined,
+      error: success ? undefined : e.toolOutput.error
+    };
+  }
+  const success = e.success ?? false;
+  return {
+    toolCall: e.toolCall,
+    messages: e.messages,
+    toolExecutionMs,
+    stepNumber: e.stepNumber,
+    success,
+    output: success ? e.output : undefined,
+    error: success ? undefined : e.error
+  };
+}
+
+async function* readableStreamToAsyncIterable<T>(
+  stream: ReadableStream<T>
+): AsyncIterable<T> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -2003,7 +2094,9 @@ export interface TurnConfig {
    * as {@link Think.getModel}) or a `LanguageModel`.
    */
   model?: ThinkModel;
-  /** Override the assembled system prompt. */
+  /** Override the assembled instructions prompt. */
+  instructions?: string;
+  /** @deprecated Prefer `instructions`. */
   system?: string;
   /** Override the assembled messages. */
   messages?: ModelMessage[];
@@ -2059,7 +2152,14 @@ export interface TurnConfig {
   headers?: Parameters<typeof streamText>[0]["headers"];
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
-  /** Optional AI SDK telemetry configuration for this turn. */
+  /**
+   * Optional AI SDK telemetry configuration for this turn.
+   *
+   * Typed via the `experimental_telemetry` key, which exists in both AI SDK v6
+   * and v7 (`telemetry` is v7-only), so this type resolves under either major.
+   */
+  telemetry?: Parameters<typeof streamText>[0]["experimental_telemetry"];
+  /** @deprecated Prefer `telemetry`. */
   experimental_telemetry?: Parameters<
     typeof streamText
   >[0]["experimental_telemetry"];
@@ -2266,8 +2366,9 @@ export type PrepareStepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
  * Configuration returned by `beforeStep` to override defaults for the
  * current AI SDK step. This is the AI SDK's `PrepareStepResult<TOOLS>` —
  * return only the fields you want to override (`model`, `toolChoice`,
- * `activeTools`, `system`, `messages`, `experimental_context`,
- * `providerOptions`).
+ * `activeTools`, `instructions`, `messages`, `experimental_context`,
+ * `providerOptions`). The previous `system` field remains available as a
+ * deprecated alias.
  *
  * `model` is widened to {@link ThinkModel}: like {@link Think.getModel}, you
  * can return a model id string (resolved via the built-in provider) instead of
@@ -2371,15 +2472,16 @@ export type ToolCallDecision =
 /**
  * Context passed to the `afterToolCall` hook after a tool executes.
  *
- * Backed by the AI SDK's `OnToolCallFinishEvent` (the parameter of
- * `experimental_onToolCallFinish`). The full `TypedToolCall<TOOLS>`
- * fields (`toolName`, `toolCallId`, `input`, …) are spread at the top
- * level, plus the per-call event extras:
+ * Backed by the AI SDK's `OnToolExecutionEndEvent`. The full
+ * `TypedToolCall<TOOLS>` fields (`toolName`, `toolCallId`, `input`, …) are
+ * spread at the top level, plus the per-call event extras:
  *
  * - `stepNumber`  — index of the current step
  * - `messages`    — conversation messages visible at tool execution time
- * - `durationMs`  — wall-clock execution time in milliseconds
- * - `success`/`output`/`error` — discriminated outcome:
+ * - `toolExecutionMs` — wall-clock execution time in milliseconds
+ * - `durationMs`  — deprecated alias for `toolExecutionMs`
+ * - `toolOutput` — AI SDK v7 discriminated outcome
+ * - `success`/`output`/`error` — deprecated normalized outcome aliases:
  *   - on success: `success: true`, `output` typed per tool
  *   - on failure: `success: false`, `error: unknown`
  *
@@ -2412,6 +2514,8 @@ type ToolCallResultBase = {
   readonly stepNumber: number | undefined;
   readonly messages: ReadonlyArray<ModelMessage>;
   /** Wall-clock execution time in milliseconds. */
+  readonly toolExecutionMs: number;
+  /** @deprecated Prefer `toolExecutionMs`. */
   readonly durationMs: number;
 };
 
@@ -2421,13 +2525,19 @@ type ToolCallResultBase = {
  */
 type ToolCallOutcome<O> =
   | {
+      readonly toolOutput: { type: "tool-result"; output: O };
+      /** @deprecated Prefer `toolOutput.type === "tool-result"`. */
       readonly success: true;
+      /** @deprecated Prefer `toolOutput.output`. */
       readonly output: O;
       readonly error?: never;
     }
   | {
+      readonly toolOutput: { type: "tool-error"; error: unknown };
+      /** @deprecated Prefer `toolOutput.type === "tool-error"`. */
       readonly success: false;
       readonly output?: never;
+      /** @deprecated Prefer `toolOutput.error`. */
       readonly error: unknown;
     };
 
@@ -2444,7 +2554,7 @@ type ToolCallOutcome<O> =
  * Pass an explicit `TOOLS` generic for typed `toolCalls`/`toolResults`.
  */
 export type StepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
-  StreamTextOnStepFinishCallback<TOOLS>
+  GenerateTextOnStepFinishCallback<TOOLS>
 >[0];
 
 /**
@@ -2484,7 +2594,8 @@ type ToolDecisionOptions = {
   toolCallId: string;
   messages: ModelMessage[];
   abortSignal?: AbortSignal;
-  experimental_context?: unknown;
+  context?: unknown;
+  experimental_context?: unknown; // v6 alias kept for local wrappers if present
 };
 
 /**
@@ -4926,6 +5037,15 @@ export class Think<
    * Called after each step completes (initial, continue, tool-result).
    * Override for step-level logging or analytics.
    */
+  onStepEnd(ctx: StepContext): void | Promise<void> {
+    return this.onStepFinish(ctx);
+  }
+
+  /**
+   * Called after each step completes (initial, continue, tool-result).
+   * Override for step-level logging or analytics.
+   * @deprecated Prefer `onStepEnd`.
+   */
   onStepFinish(_ctx: StepContext): void | Promise<void> {}
 
   /**
@@ -5316,12 +5436,20 @@ export class Think<
   private _turnTelemetry(
     base: Parameters<typeof streamText>[0]["experimental_telemetry"]
   ): Parameters<typeof streamText>[0]["experimental_telemetry"] {
+    const settings = (base ?? {}) as unknown as Record<string, unknown>;
+    const metadata =
+      typeof settings.metadata === "object" && settings.metadata !== null
+        ? (settings.metadata as Record<string, unknown>)
+        : {};
     const turn = admittedTurnContext.getStore();
     return {
-      ...base,
+      ...settings,
       // AI SDK maps functionId to gen_ai.agent.name. Use the class name by
       // default while preserving an explicit caller label.
-      functionId: base?.functionId ?? this.constructor.name,
+      functionId:
+        typeof settings.functionId === "string"
+          ? settings.functionId
+          : this.constructor.name,
       metadata: {
         agentId: this.name,
         conversationId: this.ctx.id.toString(),
@@ -5343,9 +5471,95 @@ export class Think<
           : {}),
         // beforeTurn remains authoritative. metadata.agentName, when supplied,
         // also takes precedence over functionId in the tracing adapter.
-        ...base?.metadata
+        ...metadata
       }
+    } as unknown as Parameters<typeof streamText>[0]["experimental_telemetry"];
+  }
+
+  /** Builds the native AI SDK v7 telemetry settings and identity context. */
+  private _turnTelemetryV7(
+    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
+  ): {
+    options: Record<string, unknown>;
+    runtimeContext: Record<string, unknown>;
+  } {
+    const settings = (base ?? {}) as unknown as Record<string, unknown>;
+    const metadata =
+      typeof settings.metadata === "object" && settings.metadata !== null
+        ? (settings.metadata as Record<string, unknown>)
+        : {};
+    const turn = admittedTurnContext.getStore();
+    const runtimeContext: Record<string, unknown> = {
+      agentId: this.name,
+      conversationId: this.ctx.id.toString(),
+      ...(turn?.agent === this
+        ? {
+            "cloudflare.agents.turn.request_id": turn.requestId,
+            "cloudflare.agents.turn.trigger": turn.trigger,
+            "cloudflare.agents.turn.admission": turn.admission,
+            ...(turn.channel !== undefined && {
+              "cloudflare.agents.turn.channel": turn.channel
+            }),
+            ...(turn.continuation !== undefined && {
+              "cloudflare.agents.turn.continuation": turn.continuation
+            }),
+            ...(turn.generation !== undefined && {
+              "cloudflare.agents.turn.generation": turn.generation
+            })
+          }
+        : {}),
+      ...metadata
     };
+    const includedContext =
+      typeof settings.includeRuntimeContext === "object" &&
+      settings.includeRuntimeContext !== null
+        ? (settings.includeRuntimeContext as Record<string, boolean>)
+        : {};
+    const localIntegrations = settings.integrations;
+    const globalIntegrations = (
+      globalThis as typeof globalThis & {
+        AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[];
+      }
+    ).AI_SDK_TELEMETRY_INTEGRATIONS;
+    const integrations = [
+      ...(localIntegrations !== undefined
+        ? Array.isArray(localIntegrations)
+          ? localIntegrations
+          : [localIntegrations]
+        : (globalIntegrations ?? []))
+    ];
+    if (
+      !integrations.some(
+        (integration) =>
+          typeof integration === "object" &&
+          integration !== null &&
+          agentsAISDKTelemetryBrand in integration
+      )
+    ) {
+      integrations.push(
+        createAISDKTelemetry({
+          storeMessages: this.storeMessages,
+          storeTools: this.storeTools
+        })
+      );
+    }
+
+    const options: Record<string, unknown> = {
+      ...settings,
+      functionId:
+        typeof settings.functionId === "string"
+          ? settings.functionId
+          : this.constructor.name,
+      includeRuntimeContext: {
+        ...Object.fromEntries(
+          Object.keys(runtimeContext).map((key) => [key, true])
+        ),
+        ...includedContext
+      },
+      integrations
+    };
+    delete options.metadata;
+    return { options, runtimeContext };
   }
 
   /**
@@ -5499,6 +5713,7 @@ export class Think<
     const finalModel =
       config.model != null ? this.resolveModel(config.model) : model;
     const finalSystem =
+      config.instructions ??
       config.system ??
       this._systemPromptForTurn(
         baseSystem,
@@ -5605,148 +5820,195 @@ export class Think<
           : [])
     ];
 
-    const tracedStreamText = wrapAISDK(
-      { streamText, wrapLanguageModel },
-      { storeMessages: this.storeMessages, storeTools: this.storeTools }
-    ).streamText;
+    const turnTelemetry = config.telemetry ?? config.experimental_telemetry;
+    const streamTextOptions = {
+      model: finalModel,
+      // `system` is accepted by both AI SDK v6 and v7 (v7 also accepts the
+      // renamed `instructions`, but v6 does not). Use `system` for cross-major
+      // compatibility.
+      system: turnSystem,
+      messages: finalMessages,
+      tools: finalTools,
+      // Keep the synthetic final-answer tool callable even when a caller
+      // restricts `activeTools` — otherwise a structured turn could never call
+      // it and would fail to produce output.
+      activeTools:
+        wantsStructuredOutput && config.activeTools
+          ? [...config.activeTools, finalAnswerToolName]
+          : config.activeTools,
+      toolChoice: finalToolChoice,
+      maxOutputTokens: config.maxOutputTokens,
+      temperature: config.temperature,
+      topP: config.topP,
+      topK: config.topK,
+      presencePenalty: config.presencePenalty,
+      frequencyPenalty: config.frequencyPenalty,
+      stopSequences: config.stopSequences,
+      seed: config.seed,
+      maxRetries: config.maxRetries,
+      timeout: config.timeout,
+      headers: config.headers,
+      stopWhen: finalStopWhen,
+      providerOptions: config.providerOptions as
+        | Parameters<typeof streamText>[0]["providerOptions"]
+        | undefined,
+      experimental_telemetry: usesAISDKV7Telemetry
+        ? undefined
+        : this._turnTelemetry(turnTelemetry),
+      // Forward the per-turn stream transform(s) from TurnConfig so callers
+      // can inspect/rewrite the stream (e.g. emit `source` parts derived from
+      // tool results) without owning the stream pipeline themselves.
+      experimental_transform: config.experimental_transform,
+      // Forward the per-turn structured-output spec from TurnConfig so
+      // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
+      // on the terminal turn without dropping tools at model construction.
+      output: finalOutput,
+      abortSignal: input.signal,
+      // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
+      // can make per-step decisions from the previous steps, current
+      // messages, model, and experimental context.
+      //
+      // Subclass-only by design: extension dispatch is intentionally not
+      // wired here. The prepareStep event includes a live `LanguageModel`
+      // instance which is not JSON-serializable, and a returned override
+      // can include the same — there's no useful "snapshot, override"
+      // contract we could give to sandboxed extensions. If we expose
+      // observation-only later it should go through a separate,
+      // serialized event surface.
+      //
+      // `beforeStep` returning `void`/`undefined`/`null` is normalized to
+      // `{}` so the AI SDK falls back to top-level settings (it accepts
+      // `undefined` per docs but the typed return is non-null).
+      prepareStep: (async (event) => {
+        // Proactive context guard (Layer 1) runs first so `beforeStep` sees the
+        // recompacted messages and can still override them if it wants to.
+        const guarded = await this._maybeProactiveContextCompact(event);
+        const result = await this.beforeStep(event);
+        const base = result == null ? {} : result;
+        // Only apply the guard's recompacted messages when the subclass didn't
+        // set its own `messages` override for this step.
+        const baseMessages = (base as { messages?: unknown }).messages;
+        const withMessages =
+          guarded && baseMessages === undefined
+            ? { ...base, messages: guarded }
+            : base;
+        // Safety net for structured workflow turns: on the final permitted step,
+        // force the model to call `final_answer` so the turn always terminates
+        // with a schema-shaped result instead of running out of steps. Respect a
+        // `toolChoice` the subclass already set for this step.
+        const stepResult =
+          wantsStructuredOutput &&
+          event.stepNumber >= finalMaxSteps - 1 &&
+          (withMessages as { toolChoice?: unknown }).toolChoice === undefined
+            ? {
+                ...withMessages,
+                toolChoice: {
+                  type: "tool" as const,
+                  toolName: finalAnswerToolName
+                },
+                activeTools: [finalAnswerToolName]
+              }
+            : withMessages;
+        // `beforeStep` may return a string `model` (StepConfig widens it to
+        // ThinkModel); the AI SDK needs a concrete LanguageModel, so resolve it.
+        const stepModel = (stepResult as { model?: ThinkModel }).model;
+        if (typeof stepModel === "string") {
+          return {
+            ...stepResult,
+            model: this.resolveModel(stepModel)
+          } as PrepareStepResult<ToolSet>;
+        }
+        return stepResult as PrepareStepResult<ToolSet>;
+      }) satisfies PrepareStepFunction<ToolSet>,
+      onChunk: async (event) => {
+        // Pass the AI SDK's chunk event through unchanged — gives users
+        // access to the discriminated `TextStreamPart` chunk with all
+        // provider metadata.
+        await this.onChunk(event);
+        await this._pipelineExtensionChunk(event);
+      },
+      // `onStepFinish` is the step callback name in both AI SDK v6 and v7 (v7
+      // also accepts the renamed `onStepEnd`, but v6 does not). Use the shared
+      // name; it still dispatches to Think's `onStepEnd` hook.
+      onStepFinish: async (event) => {
+        // Pass the full StepResult through — gives users access to
+        // reasoning, sources, files, providerMetadata (cache tokens),
+        // request/response, warnings, and the full LanguageModelUsage
+        // that the AI SDK provides.
+        await this.onStepEnd(event);
+        await this._pipelineExtensionStepFinish(event);
+      },
+      // `beforeToolCall` is dispatched from the wrapped `execute` (see
+      // `_wrapToolsWithDecision` above) so the returned `ToolCallDecision`
+      // can actually intercept the call. `afterToolCall` is wired through
+      // the AI SDK's `experimental_onToolCallFinish` callback so we get
+      // accurate execution time and the discriminated `success`/`error`
+      // outcome — including failures that propagate out of `execute`.
+      //
+      // We register `experimental_onToolCallFinish` (rather than the v7-only
+      // `onToolExecutionEnd`) because it is the native option in AI SDK v6 and
+      // a supported alias in v7 — `ai` resolves it to `onToolExecutionEnd`
+      // internally and fires it exactly once. `normalizeToolFinishEvent`
+      // reconciles the differing event shapes between the two majors.
+      experimental_onToolCallFinish: (async (event) => {
+        // The synthetic final-answer tool is internal plumbing for structured
+        // workflow turns — do not surface it to user `afterToolCall` hooks or
+        // extensions.
+        const e = normalizeToolFinishEvent(event);
+        if (e.toolCall.toolName === finalAnswerToolName) return;
+        const { success, output, error } = e;
+        const base = {
+          ...e.toolCall,
+          stepNumber: e.stepNumber,
+          messages: e.messages,
+          toolExecutionMs: e.toolExecutionMs,
+          durationMs: e.toolExecutionMs
+        };
+        const ctx = (success
+          ? {
+              ...base,
+              toolOutput: { type: "tool-result" as const, output },
+              success: true as const,
+              output
+            }
+          : {
+              ...base,
+              toolOutput: { type: "tool-error" as const, error },
+              success: false as const,
+              error
+            }) as unknown as ToolCallResultContext;
+        await this.afterToolCall(ctx);
+        await this._pipelineExtensionToolCallFinish({
+          toolCall: e.toolCall,
+          stepNumber: e.stepNumber,
+          durationMs: e.toolExecutionMs,
+          success,
+          output,
+          error
+        });
+      }) as ToolCallFinishCallback
+    } satisfies Parameters<typeof streamText>[0];
+
+    if (usesAISDKV7Telemetry) {
+      const { options, runtimeContext } = this._turnTelemetryV7(turnTelemetry);
+      const crossMajorOptions = streamTextOptions as unknown as Record<
+        string,
+        unknown
+      >;
+      delete crossMajorOptions.experimental_telemetry;
+      crossMajorOptions.telemetry = options;
+      crossMajorOptions.runtimeContext = runtimeContext;
+    }
+
+    const inferenceStreamText: typeof streamText = usesAISDKV7Telemetry
+      ? streamText
+      : wrapAISDK(
+          { streamText, wrapLanguageModel },
+          { storeMessages: this.storeMessages, storeTools: this.storeTools }
+        ).streamText;
+
     return () => {
-      const result = tracedStreamText({
-        model: finalModel,
-        system: turnSystem,
-        messages: finalMessages,
-        tools: finalTools,
-        // Keep the synthetic final-answer tool callable even when a caller
-        // restricts `activeTools` — otherwise a structured turn could never call
-        // it and would fail to produce output.
-        activeTools:
-          wantsStructuredOutput && config.activeTools
-            ? [...config.activeTools, finalAnswerToolName]
-            : config.activeTools,
-        toolChoice: finalToolChoice,
-        maxOutputTokens: config.maxOutputTokens,
-        temperature: config.temperature,
-        topP: config.topP,
-        topK: config.topK,
-        presencePenalty: config.presencePenalty,
-        frequencyPenalty: config.frequencyPenalty,
-        stopSequences: config.stopSequences,
-        seed: config.seed,
-        maxRetries: config.maxRetries,
-        timeout: config.timeout,
-        headers: config.headers,
-        stopWhen: finalStopWhen,
-        providerOptions: config.providerOptions as
-          | Parameters<typeof streamText>[0]["providerOptions"]
-          | undefined,
-        experimental_telemetry: this._turnTelemetry(
-          config.experimental_telemetry
-        ),
-        // Forward the per-turn stream transform(s) from TurnConfig so callers
-        // can inspect/rewrite the stream (e.g. emit `source` parts derived from
-        // tool results) without owning the stream pipeline themselves.
-        experimental_transform: config.experimental_transform,
-        // Forward the per-turn structured-output spec from TurnConfig so
-        // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
-        // on the terminal turn without dropping tools at model construction.
-        output: finalOutput,
-        abortSignal: input.signal,
-        // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
-        // can make per-step decisions from the previous steps, current
-        // messages, model, and experimental context.
-        //
-        // Subclass-only by design: extension dispatch is intentionally not
-        // wired here. The prepareStep event includes a live `LanguageModel`
-        // instance which is not JSON-serializable, and a returned override
-        // can include the same — there's no useful "snapshot, override"
-        // contract we could give to sandboxed extensions. If we expose
-        // observation-only later it should go through a separate,
-        // serialized event surface.
-        //
-        // `beforeStep` returning `void`/`undefined`/`null` is normalized to
-        // `{}` so the AI SDK falls back to top-level settings (it accepts
-        // `undefined` per docs but the typed return is non-null).
-        prepareStep: (async (event) => {
-          // Proactive context guard (Layer 1) runs first so `beforeStep` sees the
-          // recompacted messages and can still override them if it wants to.
-          const guarded = await this._maybeProactiveContextCompact(event);
-          const result = await this.beforeStep(event);
-          const base = result == null ? {} : result;
-          // Only apply the guard's recompacted messages when the subclass didn't
-          // set its own `messages` override for this step.
-          const baseMessages = (base as { messages?: unknown }).messages;
-          const withMessages =
-            guarded && baseMessages === undefined
-              ? { ...base, messages: guarded }
-              : base;
-          // Safety net for structured workflow turns: on the final permitted step,
-          // force the model to call `final_answer` so the turn always terminates
-          // with a schema-shaped result instead of running out of steps. Respect a
-          // `toolChoice` the subclass already set for this step.
-          const stepResult =
-            wantsStructuredOutput &&
-            event.stepNumber >= finalMaxSteps - 1 &&
-            (withMessages as { toolChoice?: unknown }).toolChoice === undefined
-              ? {
-                  ...withMessages,
-                  toolChoice: {
-                    type: "tool" as const,
-                    toolName: finalAnswerToolName
-                  },
-                  activeTools: [finalAnswerToolName]
-                }
-              : withMessages;
-          // `beforeStep` may return a string `model` (StepConfig widens it to
-          // ThinkModel); the AI SDK needs a concrete LanguageModel, so resolve it.
-          const stepModel = (stepResult as { model?: ThinkModel }).model;
-          if (typeof stepModel === "string") {
-            return {
-              ...stepResult,
-              model: this.resolveModel(stepModel)
-            } as PrepareStepResult<ToolSet>;
-          }
-          return stepResult as PrepareStepResult<ToolSet>;
-        }) satisfies PrepareStepFunction<ToolSet>,
-        onChunk: async (event) => {
-          // Pass the AI SDK's chunk event through unchanged — gives users
-          // access to the discriminated `TextStreamPart` chunk with all
-          // provider metadata.
-          await this.onChunk(event);
-          await this._pipelineExtensionChunk(event);
-        },
-        onStepFinish: async (event) => {
-          // Pass the full StepResult through — gives users access to
-          // reasoning, sources, files, providerMetadata (cache tokens),
-          // request/response, warnings, and the full LanguageModelUsage
-          // that the AI SDK provides.
-          await this.onStepFinish(event);
-          await this._pipelineExtensionStepFinish(event);
-        },
-        // `beforeToolCall` is dispatched from the wrapped `execute` (see
-        // `_wrapToolsWithDecision` above) so the returned `ToolCallDecision`
-        // can actually intercept the call. `afterToolCall` is wired through
-        // the AI SDK's `experimental_onToolCallFinish` callback so we get
-        // accurate `durationMs` and the discriminated `success`/`error`
-        // outcome — including failures that propagate out of `execute`.
-        experimental_onToolCallFinish: (async (event) => {
-          // The synthetic final-answer tool is internal plumbing for structured
-          // workflow turns — do not surface it to user `afterToolCall` hooks or
-          // extensions.
-          if (event.toolCall.toolName === finalAnswerToolName) return;
-          const base = {
-            ...event.toolCall,
-            stepNumber: event.stepNumber,
-            messages: event.messages,
-            durationMs: event.durationMs
-          };
-          const ctx = (
-            event.success
-              ? { ...base, success: true as const, output: event.output }
-              : { ...base, success: false as const, error: event.error }
-          ) as ToolCallResultContext;
-          await this.afterToolCall(ctx);
-          await this._pipelineExtensionToolCallFinish(event);
-        }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
-      });
+      const result = inferenceStreamText(streamTextOptions);
 
       const outputPromise = wantsStructuredOutput
         ? // Structured workflow result = the `final_answer` tool call's INPUT
@@ -5776,11 +6038,24 @@ export class Think<
       }
 
       const streamResult = {
-        toUIMessageStream: (options) =>
-          result.toUIMessageStream({
-            sendReasoning: options?.sendReasoning ?? finalSendReasoning,
-            onError: options?.onError ?? streamErrorToString
-          }),
+        toUIMessageStream: (options) => {
+          const sendReasoning = options?.sendReasoning ?? finalSendReasoning;
+          const onError = options?.onError ?? streamErrorToString;
+          // Use the result's own `toUIMessageStream()` method rather than the
+          // standalone `toUIMessageStream({ stream })` helper: the method exists
+          // in both AI SDK v6 and v7 (deprecated in v7 but functional), whereas
+          // the standalone helper and the `result.stream` property it needs are
+          // v7-only.
+          const uiStream = (
+            result as {
+              toUIMessageStream: (o: {
+                sendReasoning?: boolean;
+                onError?: (error: unknown) => string;
+              }) => ReadableStream;
+            }
+          ).toUIMessageStream({ sendReasoning, onError });
+          return readableStreamToAsyncIterable(uiStream);
+        },
         output: outputPromise
       } satisfies StreamableResult;
 

@@ -6,7 +6,7 @@ import {
   type MCPConnectionState
 } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
-import type { ToolCallOptions } from "ai";
+import type { ToolExecutionOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
@@ -2797,7 +2797,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Test tool execution
       const result = await tool.execute!(
         { message: "test" },
-        {} as ToolCallOptions
+        {} as ToolExecutionOptions<unknown>
       );
       expect(result).toBeDefined();
       expect(conn.client.callTool).toHaveBeenCalledWith(
@@ -2879,7 +2879,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(tools[tool2Key].description).toBe("Tool from server 2");
 
       // Test both tools execute correctly
-      await tools[tool1Key].execute!({}, {} as ToolCallOptions);
+      await tools[tool1Key].execute!({}, {} as ToolExecutionOptions<unknown>);
       expect(conn1.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_one",
@@ -2889,7 +2889,7 @@ describe("MCPClientManager OAuth Integration", () => {
         undefined
       );
 
-      await tools[tool2Key].execute!({}, {} as ToolCallOptions);
+      await tools[tool2Key].execute!({}, {} as ToolExecutionOptions<unknown>);
       expect(conn2.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_two",
@@ -3444,7 +3444,7 @@ describe("MCPClientManager OAuth Integration", () => {
           const key = toolKey("server-1", "create_charge");
           const result = await tools[key].execute!(
             { input: "test" },
-            {} as ToolCallOptions
+            {} as ToolExecutionOptions<unknown>
           );
 
           expect(result).toBeDefined();

@@ -48,11 +48,13 @@ function makeWorkspace() {
   return { files, bytes, dirs, ws };
 }
 
-const toolCtx = () => ({
-  toolCallId: "test",
-  messages: [],
-  abortSignal: new AbortController().signal
-});
+const toolCtx = () =>
+  ({
+    toolCallId: "test",
+    messages: [],
+    abortSignal: new AbortController().signal,
+    context: {}
+  }) as never;
 
 async function runTool(
   tools: ReturnType<typeof createFetchTools>,
@@ -62,7 +64,7 @@ async function runTool(
 ): Promise<FetchResult> {
   const t = tools[name];
   if (!t?.execute) throw new Error(`tool ${name} has no execute`);
-  return (await t.execute(input, ctx)) as FetchResult;
+  return (await t.execute(input as never, ctx as never)) as FetchResult;
 }
 
 function docsBinding(): Fetcher {
@@ -548,12 +550,12 @@ describe("fetch — abort and timeout", () => {
   it("reports aborted when the turn signal aborts", async () => {
     const controller = new AbortController();
     controller.abort();
-    const res = await runTool(
-      hangTools(10_000),
-      "fetch_slow",
-      { path: "/x" },
-      { toolCallId: "t", messages: [], abortSignal: controller.signal }
-    );
+    const res = await runTool(hangTools(10_000), "fetch_slow", { path: "/x" }, {
+      toolCallId: "t",
+      messages: [],
+      abortSignal: controller.signal,
+      context: {}
+    } as never);
     expect(res).toMatchObject({ ok: false, code: "aborted" });
   });
 });

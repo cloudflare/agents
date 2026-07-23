@@ -102,7 +102,7 @@ export class LiveChatAgent extends AIChatAgent<Env> {
     const result = streamText({
       abortSignal: options?.abortSignal,
       model,
-      system:
+      instructions:
         "You are a terse assistant. Follow the user's formatting instructions exactly.",
       messages: await convertToModelMessages(this.messages)
     });

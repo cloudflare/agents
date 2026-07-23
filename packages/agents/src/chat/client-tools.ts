@@ -85,7 +85,7 @@ export function createToolsFromClientSchemas(
   // permissive signature (same approach as `agentTool()`), since the wire
   // schema is untyped JSON.
   const createTool = tool as unknown as (config: {
-    description: string;
+    description: string | ((options: unknown) => string);
     inputSchema: ReturnType<typeof jsonSchema>;
     execute?: (
       input: unknown,
@@ -97,7 +97,8 @@ export function createToolsFromClientSchemas(
     clientTools.map((t) => [
       t.name,
       createTool({
-        description: t.description ?? "",
+        description:
+          typeof t.description === "function" ? "" : (t.description ?? ""),
         inputSchema: jsonSchema(t.parameters ?? { type: "object" }),
         ...(execute
           ? {

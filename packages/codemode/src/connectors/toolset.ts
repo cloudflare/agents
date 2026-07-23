@@ -111,7 +111,8 @@ export class ToolSetConnector extends CodemodeConnector {
         needsApproval !== undefined && needsApproval !== false;
 
       out[name] = {
-        description: t.description,
+        description:
+          typeof t.description === "function" ? undefined : t.description,
         inputSchema: schema?.jsonSchema as JSONSchema7 | undefined,
         ...(requiresApproval ? { requiresApproval: true } : {}),
         execute: schema?.validate

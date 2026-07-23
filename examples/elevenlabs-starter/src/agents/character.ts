@@ -151,7 +151,7 @@ Keep it under 200 words. Return ONLY the system prompt text, no wrapper or expla
 
     const result = streamText({
       model: workersai("@cf/moonshotai/kimi-k2.7-code"),
-      system: this.state.character.systemPrompt,
+      instructions: this.state.character.systemPrompt,
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages"

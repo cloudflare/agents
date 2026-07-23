@@ -14,11 +14,11 @@
     "@modelcontextprotocol/sdk": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "nanoid": "^5.1.16",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "workers-ai-provider": "^3.3.0",
+    "workers-ai-provider": "^4.0.0",
     "zod": "*"
   },
   "devDependencies": {

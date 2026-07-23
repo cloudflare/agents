@@ -222,10 +222,12 @@ describe("ExtensionManager", () => {
 
       const tools = manager.getTools();
       const greet = tools.greeter_greet;
-      const result = await greet.execute!(
-        { name: "World" },
-        { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
-      );
+      const result = await greet.execute!({ name: "World" }, {
+        toolCallId: "tc1",
+        messages: [],
+        abortSignal: undefined as never,
+        context: {}
+      } as never);
 
       expect(result).toBe("Hello, World!");
     });
@@ -235,16 +237,20 @@ describe("ExtensionManager", () => {
 
       const tools = manager.getTools();
 
-      const sum = await tools.math_add.execute!(
-        { a: 3, b: 4 },
-        { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
-      );
+      const sum = await tools.math_add.execute!({ a: 3, b: 4 }, {
+        toolCallId: "tc1",
+        messages: [],
+        abortSignal: undefined as never,
+        context: {}
+      } as never);
       expect(sum).toBe(7);
 
-      const product = await tools.math_multiply.execute!(
-        { a: 5, b: 6 },
-        { toolCallId: "tc2", messages: [], abortSignal: undefined as never }
-      );
+      const product = await tools.math_multiply.execute!({ a: 5, b: 6 }, {
+        toolCallId: "tc2",
+        messages: [],
+        abortSignal: undefined as never,
+        context: {}
+      } as never);
       expect(product).toBe(30);
     });
 
@@ -254,10 +260,12 @@ describe("ExtensionManager", () => {
       const tools = manager.getTools();
 
       await expect(
-        tools.bad_fail.execute!(
-          {},
-          { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
-        )
+        tools.bad_fail.execute!({}, {
+          toolCallId: "tc1",
+          messages: [],
+          abortSignal: undefined as never,
+          context: {}
+        } as never)
       ).rejects.toThrow("intentional failure");
     });
   });
@@ -286,10 +294,12 @@ describe("ExtensionManager", () => {
       const tools = manager.getTools();
 
       await expect(
-        tools.fetcher_fetchUrl.execute!(
-          { url: "https://example.com" },
-          { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
-        )
+        tools.fetcher_fetchUrl.execute!({ url: "https://example.com" }, {
+          toolCallId: "tc1",
+          messages: [],
+          abortSignal: undefined as never,
+          context: {}
+        } as never)
       ).rejects.toThrow();
     });
   });
@@ -321,10 +331,12 @@ describe("ExtensionManager", () => {
 
       // Executing the captured tool should throw
       await expect(
-        tools.temp_greet.execute!(
-          { name: "world" },
-          { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
-        )
+        tools.temp_greet.execute!({ name: "world" }, {
+          toolCallId: "tc1",
+          messages: [],
+          abortSignal: undefined as never,
+          context: {}
+        } as never)
       ).rejects.toThrow(/has been unloaded/);
     });
 
@@ -386,10 +398,12 @@ describe("ExtensionManager", () => {
       // Tools should work after restore
       const tools = manager2.getTools();
       expect(tools).toHaveProperty("math_add");
-      const sum = await tools.math_add.execute!(
-        { a: 10, b: 20 },
-        { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
-      );
+      const sum = await tools.math_add.execute!({ a: 10, b: 20 }, {
+        toolCallId: "tc1",
+        messages: [],
+        abortSignal: undefined as never,
+        context: {}
+      } as never);
       expect(sum).toBe(30);
     });
 
@@ -568,10 +582,12 @@ describe("ExtensionManager", () => {
 
       await manager.load(makeManifest({ name: "calc" }), source);
       const tools = manager.getTools();
-      const result = await tools.calc_add.execute!(
-        { a: 7, b: 3 },
-        { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
-      );
+      const result = await tools.calc_add.execute!({ a: 7, b: 3 }, {
+        toolCallId: "tc1",
+        messages: [],
+        abortSignal: undefined as never,
+        context: {}
+      } as never);
       expect(result).toBe(10);
     });
 

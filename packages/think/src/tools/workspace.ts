@@ -1,5 +1,5 @@
 import type { Workspace, FileInfo } from "@cloudflare/shell";
-import type { JSONValue } from "ai";
+import type { JSONValue, Tool } from "ai";
 import type { InitialFiles } from "just-bash";
 import { Bash } from "just-bash";
 import { tool } from "ai";
@@ -280,7 +280,7 @@ export interface ReadToolOptions {
   ops: ReadOperations;
 }
 
-export function createReadTool(options: ReadToolOptions) {
+export function createReadTool(options: ReadToolOptions): Tool {
   const { ops } = options;
 
   return tool({
@@ -412,21 +412,15 @@ export function createReadTool(options: ReadToolOptions) {
       const data = uint8ArrayToBase64(bytes);
       const note = `Read ${replayOutput.path} (${replayOutput.mediaType}, ${formatSize(bytes.byteLength)}).`;
 
-      if (replayOutput.kind === "image") {
-        return {
-          type: "content",
-          value: [
-            { type: "text", text: note },
-            { type: "image-data", data, mediaType: replayOutput.mediaType }
-          ]
-        };
-      }
-
       return {
         type: "content",
         value: [
           { type: "text", text: note },
           {
+            // `file-data` (base64 string `data`) is accepted by both AI SDK v6
+            // and v7. v7 also offers the newer `{ type: "file", data: { type:
+            // "data", data } }` shape, but that does not exist in v6, so we use
+            // the cross-major form here.
             type: "file-data",
             data,
             mediaType: replayOutput.mediaType,
@@ -651,7 +645,7 @@ export interface WriteToolOptions {
   ops: WriteOperations;
 }
 
-export function createWriteTool(options: WriteToolOptions) {
+export function createWriteTool(options: WriteToolOptions): Tool {
   const { ops } = options;
 
   return tool({
@@ -687,7 +681,7 @@ export interface EditToolOptions {
   ops: EditOperations;
 }
 
-export function createEditTool(options: EditToolOptions) {
+export function createEditTool(options: EditToolOptions): Tool {
   const { ops } = options;
 
   return tool({
@@ -866,7 +860,7 @@ export interface ListToolOptions {
   ops: ListOperations;
 }
 
-export function createListTool(options: ListToolOptions) {
+export function createListTool(options: ListToolOptions): Tool {
   const { ops } = options;
 
   return tool({
@@ -927,7 +921,7 @@ export interface FindToolOptions {
   ops: FindOperations;
 }
 
-export function createFindTool(options: FindToolOptions) {
+export function createFindTool(options: FindToolOptions): Tool {
   const { ops } = options;
 
   return tool({
@@ -979,7 +973,7 @@ export interface GrepToolOptions {
   ops: GrepOperations;
 }
 
-export function createGrepTool(options: GrepToolOptions) {
+export function createGrepTool(options: GrepToolOptions): Tool {
   const { ops } = options;
 
   return tool({
@@ -1165,7 +1159,7 @@ export interface BashToolOptions {
   maxOutputBytes?: number;
 }
 
-export function createBashTool(options: BashToolOptions) {
+export function createBashTool(options: BashToolOptions): Tool {
   return tool({
     description:
       "Run a Bash script against the workspace. Use for shell-style workflows " +
@@ -1559,7 +1553,7 @@ export interface DeleteToolOptions {
   ops: DeleteOperations;
 }
 
-export function createDeleteTool(options: DeleteToolOptions) {
+export function createDeleteTool(options: DeleteToolOptions): Tool {
   const { ops } = options;
 
   return tool({

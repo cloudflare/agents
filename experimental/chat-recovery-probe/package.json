@@ -10,10 +10,10 @@
     "test:e2e:deployed": "node scripts/run-suite.mjs"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^3.0.10",
+    "@ai-sdk/provider": "^4.0.0",
     "@cloudflare/think": "*",
     "agents": "*",
-    "ai": "^6.0.202"
+    "ai": "^7.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260629.1",

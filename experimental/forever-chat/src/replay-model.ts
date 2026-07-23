@@ -4,7 +4,7 @@
  * Instead of custom SSE parsing, this creates the real provider model
  * (OpenAI, Anthropic, Workers AI) with a `replayFetch` that returns
  * the buffer's response. The provider's own maintained SSE parser
- * handles format conversion to LanguageModelV3StreamPart.
+ * handles format conversion to the provider's language model stream parts.
  *
  * This means: if @ai-sdk/openai updates how it parses Responses API
  * SSE, the replay model picks it up automatically. Zero drift.
@@ -15,8 +15,14 @@
  */
 import type {
   LanguageModelV3,
-  LanguageModelV3StreamPart
+  LanguageModelV3CallOptions,
+  LanguageModelV3StreamPart,
+  LanguageModelV4,
+  LanguageModelV4CallOptions,
+  LanguageModelV4StreamPart
 } from "@ai-sdk/provider";
+
+type ReplayLanguageModel = LanguageModelV3 | LanguageModelV4;
 
 /**
  * Create a replay model that reads from the inference buffer and
@@ -35,8 +41,8 @@ import type {
 export function createReplayModel(options: {
   buffer: Fetcher;
   bufferId: string;
-  createModel: (replayFetch: typeof fetch) => LanguageModelV3;
-}): LanguageModelV3 {
+  createModel: (replayFetch: typeof fetch) => ReplayLanguageModel;
+}): ReplayLanguageModel {
   // Single-use: first doStream replays the buffer. Subsequent calls
   // (from streamText's tool-call step loop) return an empty finish
   // stream so the loop terminates cleanly.
@@ -56,6 +62,24 @@ export function createReplayModel(options: {
 
   const innerModel = options.createModel(replayFetch);
 
+  if (innerModel.specificationVersion === "v4") {
+    return {
+      ...innerModel,
+
+      doGenerate: async () => {
+        throw new Error("Replay model is stream-only");
+      },
+
+      doStream: async (params: LanguageModelV4CallOptions) => {
+        if (replayed) {
+          return { stream: createEmptyV4FinishStream() };
+        }
+        replayed = true;
+        return innerModel.doStream(params);
+      }
+    };
+  }
+
   return {
     ...innerModel,
 
@@ -63,7 +87,7 @@ export function createReplayModel(options: {
       throw new Error("Replay model is stream-only");
     },
 
-    doStream: async (params) => {
+    doStream: async (params: LanguageModelV3CallOptions) => {
       if (replayed) {
         return { stream: createEmptyFinishStream() };
       }
@@ -74,6 +98,32 @@ export function createReplayModel(options: {
 }
 
 function createEmptyFinishStream(): ReadableStream<LanguageModelV3StreamPart> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] });
+      controller.enqueue({
+        type: "finish",
+        finishReason: { unified: "stop", raw: undefined },
+        usage: {
+          inputTokens: {
+            total: undefined,
+            noCache: undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined
+          },
+          outputTokens: {
+            total: undefined,
+            text: undefined,
+            reasoning: undefined
+          }
+        }
+      });
+      controller.close();
+    }
+  });
+}
+
+function createEmptyV4FinishStream(): ReadableStream<LanguageModelV4StreamPart> {
   return new ReadableStream({
     start(controller) {
       controller.enqueue({ type: "stream-start", warnings: [] });

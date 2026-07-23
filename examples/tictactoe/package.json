@@ -13,11 +13,11 @@
   "type": "module",
   "version": "0.0.0",
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.70",
+    "@ai-sdk/openai": "^4.0.0",
     "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "zod": "^4.4.3"

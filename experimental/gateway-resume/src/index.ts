@@ -790,7 +790,7 @@ export default {
           const partTypes: Record<string, number> = {};
           let textChars = 0;
           let streamError: string | undefined;
-          for await (const part of result.fullStream) {
+          for await (const part of result.stream) {
             partTypes[part.type] = (partTypes[part.type] ?? 0) + 1;
             if (part.type === "text-delta") {
               textChars +=
@@ -922,7 +922,7 @@ export default {
         let streamError: string | undefined;
         try {
           const result = streamText({ model: delegateModel, prompt });
-          for await (const part of result.fullStream) {
+          for await (const part of result.stream) {
             partTypes[part.type] = (partTypes[part.type] ?? 0) + 1;
             if (part.type === "text-delta") {
               textChars +=
@@ -1150,7 +1150,7 @@ export default {
             return jsonError(`reattach not mapped for vendor "${vendor}"`, 400);
           }
           const result = streamText({ model: delegateModel, prompt });
-          for await (const part of result.fullStream) {
+          for await (const part of result.stream) {
             if (part.type === "text-delta") {
               parseChars +=
                 (part as unknown as { text?: string }).text?.length ?? 0;
@@ -1215,7 +1215,7 @@ export default {
                   fetch: midFetch as typeof globalThis.fetch
                 })(bareModel);
           const midResult = streamText({ model: midModel, prompt });
-          for await (const part of midResult.fullStream) {
+          for await (const part of midResult.stream) {
             if (part.type === "text-delta") {
               midParseChars +=
                 (part as unknown as { text?: string }).text?.length ?? 0;

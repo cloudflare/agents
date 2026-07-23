@@ -60,7 +60,7 @@ const codemode = createCodeTool({ tools, executor });
 // 4. Use it with streamText — the LLM writes code that calls your tools
 const result = streamText({
   model,
-  system: "You are a helpful assistant.",
+  instructions: "You are a helpful assistant.",
   messages,
   tools: { codemode }
 });
@@ -577,7 +577,7 @@ The user sends a message, the agent passes it to an LLM with the codemode tool, 
 import { Agent } from "agents";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { streamText, convertToModelMessages, stepCountIs } from "ai";
+import { streamText, convertToModelMessages, isStepCount } from "ai";
 
 export class MyAgent extends Agent<Env, State> {
   async onChatMessage() {
@@ -587,10 +587,10 @@ export class MyAgent extends Agent<Env, State> {
 
     const result = streamText({
       model,
-      system: "You are a helpful assistant.",
+      instructions: "You are a helpful assistant.",
       messages: await convertToModelMessages(this.state.messages),
       tools: { codemode },
-      stopWhen: stepCountIs(10)
+      stopWhen: isStepCount(10)
     });
 
     // Stream response back to client...

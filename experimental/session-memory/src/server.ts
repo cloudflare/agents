@@ -25,7 +25,7 @@ import {
   generateText,
   streamText,
   convertToModelMessages,
-  stepCountIs
+  isStepCount
 } from "ai";
 
 export class ChatAgent extends Agent<Env> {
@@ -84,10 +84,10 @@ export class ChatAgent extends Agent<Env> {
 
     const result = streamText({
       model: this.getAI(),
-      system: await this.session.freezeSystemPrompt(),
+      instructions: await this.session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated as UIMessage[]),
       tools: await this.session.tools(),
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     // Stream text chunks to the client

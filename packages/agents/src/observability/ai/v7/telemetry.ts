@@ -479,7 +479,11 @@ function runtimeContextAttributes(
   const runtimeContext = recordValue(runtimeContextValue);
   for (const [key, value] of Object.entries(runtimeContext ?? {})) {
     if (!SEMANTIC_CONTEXT_KEYS.has(key) && isScalarAttributeValue(value)) {
-      attributes[`cloudflare.agents.runtime_context.${key}`] = value;
+      attributes[
+        key.startsWith("cloudflare.agents.")
+          ? key
+          : `cloudflare.agents.runtime_context.${key}`
+      ] = value;
     }
   }
 

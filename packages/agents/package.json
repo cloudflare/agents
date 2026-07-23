@@ -39,7 +39,7 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/react": "^3.0.204",
+    "@ai-sdk/react": "^4.0.0",
     "@modelcontextprotocol/conformance": "0.1.16",
     "@tanstack/ai": "0.38.0",
     "@types/react": "^19.2.17",
@@ -47,7 +47,7 @@
     "@vitest/browser-playwright": "^4.1.9",
     "@x402/core": "^2.17.0",
     "@x402/evm": "^2.17.0",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "chat": "^4.31.0",
     "glob": "^13.0.6",
     "just-bash": "^3.0.2",
@@ -56,11 +56,11 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@ai-sdk/react": "^3.0.204",
+    "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
-    "ai": "^6.0.0",
+    "ai": "^6.0.0 || ^7.0.0",
     "chat": "^4.29.0",
     "just-bash": "^3.0.0",
     "react": "^19.0.0",

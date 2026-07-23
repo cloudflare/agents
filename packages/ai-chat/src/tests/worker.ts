@@ -6,7 +6,7 @@ import {
 } from "../";
 import type {
   UIMessage as ChatMessage,
-  StreamTextOnFinishCallback,
+  GenerateTextOnFinishCallback,
   ToolSet
 } from "ai";
 import { Agent, getCurrentAgent, routeAgentRequest } from "agents";
@@ -132,7 +132,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   private _chatMessageCallCount = 0;
 
   async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
     this._chatMessageCallCount++;
@@ -999,7 +999,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   private _chatResponseResults: ChatResponseResult[] = [];
 
   async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
     if (options?.requestId) {
@@ -1404,7 +1404,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
   private _responseResults: ChatResponseResult[] = [];
 
   async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
     const body = options?.body as
@@ -1519,7 +1519,7 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
   private _responseResults: ChatResponseResult[] = [];
 
   async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     _options?: OnChatMessageOptions
   ) {
     return new Response("Continuation response", {
@@ -1551,7 +1551,7 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
   private _streamCompleted = false;
 
   async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
     const throwError = (options?.body as { throwError?: boolean } | undefined)
@@ -1601,7 +1601,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
   private _messageQueue: string[] = [];
 
   async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     _options?: OnChatMessageOptions
   ) {
     return new Response("Agent reply", {
@@ -3261,7 +3261,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
     const input = options?.body?.agentToolInput as AgentToolInput | undefined;

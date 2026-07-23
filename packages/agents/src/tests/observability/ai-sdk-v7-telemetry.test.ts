@@ -15,6 +15,7 @@ describe("createAISDKV7Telemetry", () => {
       operationId: "ai.generateText",
       provider: "test-provider",
       runtimeContext: {
+        "cloudflare.agents.turn.request_id": "turn-1",
         conversationId: "conversation-1",
         privateObject: { secret: true },
         requestId: "req-1"
@@ -59,6 +60,7 @@ describe("createAISDKV7Telemetry", () => {
       "cloudflare.agents.operation.name": "generateText",
       "cloudflare.agents.response.finish_reason": "stop",
       "cloudflare.agents.runtime_context.requestId": "req-1",
+      "cloudflare.agents.turn.request_id": "turn-1",
       "gen_ai.agent.name": "fixture-agent",
       "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "invoke_agent",

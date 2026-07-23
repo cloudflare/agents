@@ -2,7 +2,7 @@ import { Agent, routeAgentRequest, getAgentByName } from "agents";
 import {
   streamText,
   convertToModelMessages,
-  stepCountIs,
+  isStepCount,
   tool,
   type UIMessage
 } from "ai";
@@ -139,7 +139,7 @@ export class CodemodeAgent extends Agent<Env> {
 
     const result = streamText({
       model,
-      system: `You are a helpful assistant with access to a codemode tool.
+      instructions: `You are a helpful assistant with access to a codemode tool.
 When asked to perform operations, use the codemode tool to write JavaScript code that calls the available functions on the \`codemode\` object.
 Keep responses very short (1-2 sentences max).
 When asked to add numbers, use the addNumbers tool via codemode.
@@ -147,7 +147,7 @@ When asked about weather, use the getWeather tool via codemode.
 When asked about projects, use createProject or listProjects via codemode.`,
       messages: await convertToModelMessages(body.messages),
       tools: { codemode },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     return result.toTextStreamResponse();
@@ -316,14 +316,14 @@ async function handleRunMulti(request: Request, env: Env): Promise<Response> {
 
   const result = streamText({
     model,
-    system: `You are a helpful assistant with access to a codemode tool.
+    instructions: `You are a helpful assistant with access to a codemode tool.
 The codemode tool lets you write JavaScript code. You have two namespaces:
 - \`codemode\` for weather, projects, and adding numbers
 - \`math\` for multiplying and dividing numbers
 Keep responses very short (1-2 sentences max).`,
     messages: await convertToModelMessages(body.messages),
     tools: { codemode },
-    stopWhen: stepCountIs(5)
+    stopWhen: isStepCount(5)
   });
 
   return result.toTextStreamResponse();
