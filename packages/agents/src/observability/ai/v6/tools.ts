@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { toolApprovalSpan, toolCallSpan } from "../../genai/telemetry";
+import type { SemanticContext } from "../../genai/telemetry";
 import { toolInputAttributes, toolOutputAttributes } from "../content";
 import { readString } from "../read";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
@@ -10,7 +11,8 @@ type ContextSnapshot = <R>(fn: () => R) => R;
 export function wrapTools(
   tracer: AgentTracer,
   tools: unknown,
-  storeTools: boolean
+  storeTools: boolean,
+  context: SemanticContext
 ): unknown {
   if (typeof tools !== "object" || tools === null) {
     return tools;
@@ -20,7 +22,13 @@ export function wrapTools(
   const toolRecord = tools as Record<string, unknown>;
   const wrappedTools: Record<string, unknown> = {};
   for (const [toolName, tool] of Object.entries(toolRecord)) {
-    wrappedTools[toolName] = wrapTool(tracer, toolName, tool, storeTools);
+    wrappedTools[toolName] = wrapTool(
+      tracer,
+      toolName,
+      tool,
+      storeTools,
+      context
+    );
   }
   return wrappedTools;
 }
@@ -29,7 +37,8 @@ function wrapTool(
   tracer: AgentTracer,
   toolName: string,
   tool: unknown,
-  storeTools: boolean
+  storeTools: boolean,
+  context: SemanticContext
 ): unknown {
   if (typeof tool !== "object" || tool === null) {
     return tool;
@@ -52,7 +61,7 @@ function wrapTool(
     execute: (...args: readonly unknown[]) => unknown;
   };
   if (hasApproval) {
-    wrapApprovalCheck(tracer, wrappedTool, toolRecord, tool, toolName);
+    wrapApprovalCheck(tracer, wrappedTool, toolRecord, tool, toolName, context);
   }
   if (!hasExecute) {
     return wrappedTool;
@@ -68,6 +77,7 @@ function wrapTool(
 
   wrappedTool.execute = (...args) => {
     const span = toolCallSpan({
+      context,
       integration: "ai-sdk",
       operation: "tool.execute",
       toolCallId: extractToolCallId(args[1]),
@@ -89,7 +99,13 @@ function wrapTool(
         extractToolCallId(args[1])
       );
       if (approval?.approved === true) {
-        recordApprovalChild(tracer, toolName, approval.toolCallId, "approved");
+        recordApprovalChild(
+          tracer,
+          toolName,
+          approval.toolCallId,
+          "approved",
+          context
+        );
       }
       const result = originalExecute(...args);
 
@@ -116,7 +132,8 @@ function wrapApprovalCheck(
   wrappedTool: Record<string, unknown>,
   toolRecord: Record<string, unknown>,
   tool: object,
-  toolName: string
+  toolName: string,
+  context: SemanticContext
 ): void {
   const approval = toolRecord.needsApproval;
   const original =
@@ -129,7 +146,13 @@ function wrapApprovalCheck(
     const recordRequested = (needed: unknown): unknown => {
       const toolCallId = extractToolCallId(args[1]);
       if (needed === true && !hasApprovalResponse(args[1], toolCallId)) {
-        recordApprovalSegment(tracer, toolName, toolCallId, "requested");
+        recordApprovalSegment(
+          tracer,
+          toolName,
+          toolCallId,
+          "requested",
+          context
+        );
       }
       return needed;
     };
@@ -143,7 +166,8 @@ function wrapApprovalCheck(
 /** Records denied responses, whose tool never reaches execute(). */
 export function recordDeniedApprovalResponses(
   tracer: AgentTracer,
-  messages: unknown
+  messages: unknown,
+  context: SemanticContext
 ): void {
   for (const response of approvalResponses(messages)) {
     if (!response.approved) {
@@ -151,7 +175,8 @@ export function recordDeniedApprovalResponses(
         tracer,
         response.toolName,
         response.toolCallId,
-        "denied"
+        "denied",
+        context
       );
     }
   }
@@ -161,16 +186,18 @@ function recordApprovalSegment(
   tracer: AgentTracer,
   toolName: string,
   toolCallId: string | undefined,
-  state: "approved" | "denied" | "requested"
+  state: "approved" | "denied" | "requested",
+  context: SemanticContext
 ): void {
   const tool = toolCallSpan({
+    context,
     integration: "ai-sdk",
     operation: "tool.approval",
     toolCallId,
     toolName
   });
   tracer.withSpan(tool.name, tool.attributes, () => {
-    recordApprovalChild(tracer, toolName, toolCallId, state);
+    recordApprovalChild(tracer, toolName, toolCallId, state, context);
   });
 }
 
@@ -178,9 +205,15 @@ function recordApprovalChild(
   tracer: AgentTracer,
   toolName: string,
   toolCallId: string | undefined,
-  state: "approved" | "denied" | "requested"
+  state: "approved" | "denied" | "requested",
+  context: SemanticContext
 ): void {
-  const approval = toolApprovalSpan({ state, toolCallId, toolName });
+  const approval = toolApprovalSpan({
+    context,
+    state,
+    toolCallId,
+    toolName
+  });
   tracer.withSpan(approval.name, approval.attributes, () => undefined);
 }
 

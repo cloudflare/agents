@@ -93,6 +93,8 @@ describe("createAISDKV6Wrapper", () => {
     expect(modelCall?.attributes).toMatchObject({
       "cloudflare.agents.operation.name": "doGenerate",
       "cloudflare.agents.usage.total_tokens": 6,
+      "gen_ai.agent.name": "fixture-agent",
+      "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "chat",
       "gen_ai.provider.name": "test-provider",
       "gen_ai.request.model": "test-model",
@@ -679,6 +681,10 @@ describe("createAISDKV6Wrapper", () => {
 
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
     await wrapped.generateText({
+      experimental_telemetry: {
+        functionId: "fixture-agent",
+        metadata: { conversationId: "conversation-1" }
+      },
       prompt: "multiply",
       tools: { multiply: multiplyTool }
     });
@@ -687,6 +693,8 @@ describe("createAISDKV6Wrapper", () => {
     const toolSpan = tracing.rootSpans[0]?.children[0];
     expect(toolSpan?.name).toBe("execute_tool multiply");
     expect(toolSpan?.attributes).toMatchObject({
+      "gen_ai.agent.name": "fixture-agent",
+      "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": "multiply",
       "gen_ai.tool.type": "function"
@@ -1384,7 +1392,10 @@ describe("createAISDKV6Wrapper", () => {
     const ai: AISDKV6Namespace = {
       generateText: async (params) => {
         receivedModel = params.model;
-        return { text: "ok" };
+        return {
+          text: "ok",
+          usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 }
+        };
       },
       wrapLanguageModel({ model: rawModel }) {
         return rawModel;
@@ -1398,7 +1409,10 @@ describe("createAISDKV6Wrapper", () => {
 
     expect(receivedModel).toBe("gateway/model-9");
     expect(tracing.rootSpans[0]?.attributes).toMatchObject({
-      "gen_ai.request.model": "gateway/model-9"
+      "cloudflare.agents.usage.total_tokens": 6,
+      "gen_ai.request.model": "gateway/model-9",
+      "gen_ai.usage.input_tokens": 4,
+      "gen_ai.usage.output_tokens": 2
     });
   });
 

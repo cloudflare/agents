@@ -81,6 +81,8 @@ describe("createAISDKV7Telemetry", () => {
     expect(tracing.spans[1]?.attributes).toMatchObject({
       "cloudflare.agents.call.id": "call-1",
       "cloudflare.agents.operation.name": "doGenerate",
+      "gen_ai.agent.name": "fixture-agent",
+      "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "chat",
       "gen_ai.response.id": "response-1",
       "gen_ai.response.time_to_first_chunk": 0.125
@@ -346,7 +348,9 @@ describe("createAISDKV7Telemetry", () => {
 
     telemetry.onStart?.({
       callId: "call-1",
-      operationId: "ai.streamText"
+      functionId: "fixture-agent",
+      operationId: "ai.streamText",
+      runtimeContext: { conversationId: "conversation-1" }
     });
     telemetry.onToolExecutionStart?.({
       callId: "call-1",
@@ -397,6 +401,8 @@ describe("createAISDKV7Telemetry", () => {
       "cloudflare.agents.call.id": "call-1",
       "cloudflare.agents.operation.name": "tool.execute",
       "cloudflare.agents.tool_context.multiply.unit": "count",
+      "gen_ai.agent.name": "fixture-agent",
+      "gen_ai.conversation.id": "conversation-1",
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.call.id": "tool-call-1",
       "gen_ai.tool.name": "multiply",
