@@ -142,4 +142,51 @@ describe("AgentLifecycleRunner", () => {
 
     expect(calls).toEqual(["second", "first"]);
   });
+
+  it("destroys remaining components when one fails, then rethrows", async () => {
+    const calls: string[] = [];
+    const expected = new Error("destroy failed");
+    const runner = new AgentLifecycleRunner(() => [
+      {
+        onDestroy() {
+          calls.push("first");
+        }
+      },
+      {
+        onDestroy() {
+          calls.push("second");
+          throw expected;
+        }
+      }
+    ]);
+
+    await expect(runner.onDestroy({})).rejects.toBe(expected);
+    expect(calls).toEqual(["second", "first"]);
+  });
+
+  it("aggregates multiple destroy failures", async () => {
+    const first = new Error("first failed");
+    const second = new Error("second failed");
+    const runner = new AgentLifecycleRunner(() => [
+      {
+        onDestroy() {
+          throw first;
+        }
+      },
+      {
+        onDestroy() {
+          throw second;
+        }
+      }
+    ]);
+
+    const error = await runner.onDestroy({}).then(
+      () => {
+        throw new Error("expected onDestroy to reject");
+      },
+      (thrown) => thrown as AggregateError
+    );
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.errors).toEqual([second, first]);
+  });
 });

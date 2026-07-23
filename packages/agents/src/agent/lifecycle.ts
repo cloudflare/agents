@@ -71,9 +71,21 @@ export class AgentLifecycleRunner<Props = unknown> {
   }
 
   async onDestroy(context: AgentDestroyContext): Promise<void> {
+    // Destruction is best-effort: a failing component must not prevent the
+    // components before it from releasing their resources. Errors are
+    // collected and rethrown after every component has run.
+    const errors: unknown[] = [];
     const components = [...this.resolveComponents()];
     for (let index = components.length - 1; index >= 0; index--) {
-      await components[index].onDestroy?.(context);
+      try {
+        await components[index].onDestroy?.(context);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, "Agent component destruction failed");
     }
   }
 }

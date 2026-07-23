@@ -496,6 +496,11 @@ export class MCPClientManager implements AgentLifecycle {
     const host = this._host;
     this.ensureSchema();
 
+    // State-publication and observability subscriptions attach here rather
+    // than in the constructor. This relies on the Agent awaiting onStart
+    // before serving traffic (partyserver semantics): MCP state cannot
+    // change between construction and onStart, so no events are missed.
+
     this._hostDisposables?.dispose();
     this._hostDisposables = new DisposableStore();
     this._hostDisposables.add(
