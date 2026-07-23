@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agent-think",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "type": "module",
   "description": "Think agent that reproduces and fixes cloudflare/agents GitHub issues in a container-backed Workspace. Invoked as `@agent-think repro|pr` via the gh-app webhook service; streams a live thread UI and reports back on the issue.",
