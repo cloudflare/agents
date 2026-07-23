@@ -11,7 +11,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@cloudflare/codemode": ">=0.4.0",
+    "@cloudflare/codemode": ">=0.5.0",
     "isomorphic-git": "^1.38.5"
   },
   "devDependencies": {
