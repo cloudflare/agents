@@ -4,6 +4,7 @@ export {
   defaultConversationName,
   idempotencyKeyForEvent,
   normalizeMessengers,
+  resolveSelfMention,
   ThinkMessengerRuntime,
   ThinkMessengerStateAgent,
   toMessengerAttachment,
@@ -55,11 +56,13 @@ export type {
 
 export {
   messengerContextFromEvent,
+  resolveChannelSpeakerLabel,
   serializableMessengerEvent,
   toMessengerUserMessage
 } from "./events";
 
 export type {
+  ChannelSpeakerLabel,
   MessengerAction,
   MessengerAttachment,
   MessengerAuthor,

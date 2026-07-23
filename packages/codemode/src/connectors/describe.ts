@@ -81,6 +81,9 @@ export function describeTarget(
       return {
         path: `${candidate.name}.${methodName}`,
         description: candidate.descriptors[methodName]?.description,
+        ...(candidate.annotations?.[methodName]?.requiresApproval
+          ? { requiresApproval: true }
+          : {}),
         types: renderMethodTypes(methodName, candidate.descriptors),
         kind: "method"
       };

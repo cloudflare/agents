@@ -50,6 +50,7 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
   };
 
   onStart(): void | Promise<void> {
+    this.registerUrlElicitationTool();
     this.server.registerTool(
       "increase-counter",
       {
@@ -117,6 +118,45 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
             content: [{ type: "text", text: "Counter increase failed." }]
           };
         }
+      }
+    );
+  }
+
+  registerUrlElicitationTool() {
+    this.server.registerTool(
+      "connect-account",
+      {
+        description:
+          "Pretends to link an external account. Demonstrates url-mode " +
+          "elicitation: the sensitive URL goes to the user out-of-band " +
+          "instead of into tool-result text.",
+        inputSchema: {}
+      },
+      async (_args, extra) => {
+        const result = await this.server.server.elicitInput(
+          {
+            mode: "url",
+            message:
+              "Open this link to connect your account, then come back and confirm.",
+            url: "https://example.com/oauth/authorize?demo=true",
+            elicitationId: crypto.randomUUID()
+          },
+          { relatedRequestId: extra.requestId }
+        );
+
+        if (result.action !== "accept") {
+          return {
+            content: [{ type: "text", text: "Account connection cancelled." }]
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Account connection page opened. Complete it in your browser."
+            }
+          ]
+        };
       }
     );
   }

@@ -40,18 +40,23 @@ agent-think  (this dir — PUBLIC-safe, holds no App creds)
    ├─ AgentThink WorkerEntrypoint.dispatch  (src/index.ts)
    │     getAgentByName(env.ThinkAgent, session) → setContext → start()
    │     start() ONLY submits the durable turn — returns in ~1s
-   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn state + complete Workspace VFS
-   │     file tools and both bash backends share the same synchronized tree;
-   │     container backend claims from the warm pool per turn:
+   │     failed-run continuation refreshes GitHub auth through gh-app's private
+   │     AgentThinkTokenBroker binding before submitting into the same session
+   ├─ ThinkAgent DO  (src/agent.ts) — owns durable turn/transcript state only
+   ├─ WorkspaceAgent DO (src/workspace-agent.ts) — same stable per-issue name;
+   │     exclusively owns Workspace VFS + backend connection. File tools and
+   │     both bash backends share its RPC stub; the container backend claims
+   │     from the warm pool per turn:
    │        resolveContainerId(env, id) → env.Sandbox.get(idFromName(uuid))
    ├─ Sandbox DO  (src/sandbox.ts)   — container host (wsd); handed out by pool
    ├─ WarmPool DO (src/warm-pool.ts) — keeps exactly one unassigned container warm
    ├─ CommandCenterAgent DO (src/command-center.ts) — singleton ("main")
    │     registry of every thread + per-thread counters; ThinkAgent reports
-   │     lifecycle events fire-and-forget (observing must never break a run)
-   └─ UI (React SPA, src/client.tsx): `/` command center (metrics + ChatGPT-
-      style thread sidebar, live via agents state sync); /thread/:session
-      live thread view
+   │     lifecycle events fire-and-forget; failed runs are claimed atomically
+   │     before an operator continuation
+   └─ UI (React SPA, src/client.tsx): `/` command center (metrics, failed-run
+      continuation, and ChatGPT-style thread sidebar, live via agents state
+      sync); /thread/:session live thread view
 ```
 
 Reactions are the liveness protocol (an "on it" comment was tried and removed
@@ -183,11 +188,16 @@ npm run seed:r2  # push skills/** to the R2 bucket (add -- --local for dev)
   the full agent path without gh-app or webhooks.
 - Deploys target the `agents` Cloudflare account
   (`CLOUDFLARE_ACCOUNT_ID=b8afc92c7a87f699592038b756153d22`).
-- Model: `openai/gpt-5.5` through the account's default AI Gateway
-  (`createWorkersAI({ binding, gateway, providers: [openai] })` — the catalog
-  slug routes via the gateway delegate; Unified Billing, no OpenAI key).
-  NOTE: the `providers: [openai]` plugin is REQUIRED for `{provider}/{model}`
-  slugs — without it workers-ai-provider refuses to build the model.
+- Model: `gpt-5.6-sol` with max reasoning through the OpenAI Responses API
+  and team AI Gateway token, with a client-side fallback to
+  `claude-opus-4-8` when the primary dispatch fails. Responses use
+  `store: false`, so agent-think does not persist provider reasoning state.
+- Agent-think uses the monorepo's Agents, AI Chat, and Think workspace
+  packages and opts into full message/tool payload spans. The turn safety cap
+  is 250 steps.
+  Production reads `CLOUDFLARE_AIG_TOKEN` from a Worker secret and
+  attributes every request to the `agents-team-agent-think` project. Local
+  agent turns read the same variable from `.env`.
 
 ## Where the pieces live
 

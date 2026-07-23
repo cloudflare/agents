@@ -5,7 +5,9 @@ import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
 import type {
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -25,6 +27,13 @@ const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 async function freshAgent(name: string) {
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+    name
+  );
+}
+
+async function freshPropsAgent(name: string) {
+  return getServerByName(
+    env.ThinkPropsTestAgent as unknown as DurableObjectNamespace<ThinkPropsTestAgent>,
     name
   );
 }
@@ -151,6 +160,25 @@ async function freshLegacyConfigMigrationAgent(name: string) {
 // ── Core chat functionality ──────────────────────────────────────
 
 describe("Think — core", () => {
+  it("should forward routed props to onStart", async () => {
+    const room = `props-${crypto.randomUUID()}`;
+    const response = await exports.default.fetch(
+      `http://example.com/agents/think-props-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    expect(ws).toBeDefined();
+    ws.accept();
+
+    try {
+      const agent = await freshPropsAgent(room);
+      expect(await agent.getStartProps()).toEqual({ tenantId: "tenant-1" });
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it("should run a chat turn and persist messages", async () => {
     const agent = await freshAgent("chat-basic");
     const result = await agent.testChat("Hello!");
@@ -372,16 +400,29 @@ describe("Think — core", () => {
     expect(turnLog[0].toolNames).not.toContain("ignoredRuntimeTool");
   });
 
-  it("should forward turn telemetry to the AI SDK", async () => {
-    const agent = await freshAgent("chat-telemetry");
+  it("should supply default Think identity to the AI SDK", async () => {
+    const agent = await freshAgent("chat-telemetry-defaults");
+
+    await agent.setDefaultTurnTelemetryCapture();
+    const result = await agent.testChat("Trace this turn");
+
+    expect(result.done).toBe(true);
+    await expect(agent.getTelemetryEvents()).resolves.toEqual([
+      "start:ThinkTestAgent:::chat-telemetry-defaults:true",
+      "finish:ThinkTestAgent:::chat-telemetry-defaults:true"
+    ]);
+  });
+
+  it("should let beforeTurn override default Think identity", async () => {
+    const agent = await freshAgent("chat-telemetry-overrides");
 
     await agent.setTurnConfigTelemetry();
     const result = await agent.testChat("Trace this turn");
 
     expect(result.done).toBe(true);
     await expect(agent.getTelemetryEvents()).resolves.toEqual([
-      "start:think-test-turn:think-test",
-      "finish:think-test-turn:think-test"
+      "start:caller-function:think-test:CallerAgent:caller-agent-id:false",
+      "finish:caller-function:think-test:CallerAgent:caller-agent-id:false"
     ]);
   });
 
@@ -1013,6 +1054,27 @@ describe("Think — context blocks", () => {
 
     expect(systemPrompt).toContain("MEMORY");
     expect(systemPrompt).toContain("[writable]");
+  });
+
+  it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const agent = await getServerByName(
+      env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
+      "skills-system-prompt-warning"
+    );
+
+    try {
+      await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
+        done: true
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured"
+        )
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -4783,6 +4845,38 @@ describe("Think — onChatRecovery", () => {
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
     expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-storage-reset");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage:
+        "Internal error in Durable Object storage caused object to be reset",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+    expect(result.submissionStatus).toBe("running");
+  });
+
+  it("terminalizes an ordinary application SQL error", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-application-sql");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "constraint failed: application records.slug",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(false);
+    expect(result.incidentStatus).toBe("exhausted");
+    expect(result.exhaustedContexts).toBe(1);
+    expect(result.submissionStatus).toBe("error");
   });
 
   it("re-throws a retryable-flagged platform error and does NOT terminalize (#1730)", async () => {

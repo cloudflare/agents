@@ -1,10 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import {
   SSEClientTransport,
   type SSEClientTransportOptions
 } from "@modelcontextprotocol/sdk/client/sse.js";
 import {
   StreamableHTTPClientTransport,
+  StreamableHTTPError,
   type StreamableHTTPClientTransportOptions
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 // Import types directly from MCP SDK
@@ -43,6 +45,14 @@ import type {
   TransportType,
   McpClientOptions
 } from "./types";
+
+// Workers disallows runtime code generation, so the MCP SDK's default AJV
+// validator (which compiles schemas with `new Function`) cannot run there.
+// Every connection defaults to the Worker-safe validator unless the caller
+// supplies their own.
+const defaultClientOptions: McpClientOptions = {
+  jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
+};
 
 /**
  * Connection state machine for MCP client connections.
@@ -92,15 +102,42 @@ export type MCPClientConnectionResult = {
   transport?: BaseTransportType;
 };
 
+/** Result of discovering server capabilities. */
+export type MCPDiscoveryResult =
+  | { success: true }
+  | { success: false; reason: "error" | "stale-session"; error: string };
+
 /**
- * Result of a discovery operation.
- * success indicates whether discovery completed successfully.
- * error is present when success is false.
+ * Handler for server-initiated `elicitation/create` requests.
+ * Held in memory only — never persisted — so it must be re-supplied when a
+ * connection is recreated (e.g. after Durable Object hibernation).
  */
-export type MCPDiscoveryResult = {
-  success: boolean;
-  error?: string;
+export type MCPElicitationHandler = (
+  request: ElicitRequest
+) => Promise<ElicitResult>;
+
+export type MCPElicitationHandlers = {
+  form?: MCPElicitationHandler;
+  url?: MCPElicitationHandler;
 };
+
+/** Derive the elicitation capability to advertise from the handler keys. */
+export function elicitationCapabilitiesFromHandlers(handlers?: {
+  form?: unknown;
+  url?: unknown;
+}): ClientCapabilities["elicitation"] | undefined {
+  if (!handlers) return undefined;
+
+  const elicitation: NonNullable<ClientCapabilities["elicitation"]> = {};
+  if (handlers.form) {
+    elicitation.form = {};
+  }
+  if (handlers.url) {
+    elicitation.url = {};
+  }
+
+  return elicitation.form || elicitation.url ? elicitation : undefined;
+}
 
 export class MCPClientConnection {
   client: Client;
@@ -140,23 +177,83 @@ export class MCPClientConnection {
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
     this._onObservabilityEvent.event;
 
+  /**
+   * Whether the connection advertised the elicitation capability. The SDK
+   * client refuses to register an `elicitation/create` request handler when
+   * the capability was not declared, so handler registration is gated on
+   * this.
+   */
+  private _elicitationEnabled = false;
+
   constructor(
     public url: URL,
-    info: ConstructorParameters<typeof Client>[0],
+    private readonly _info: ConstructorParameters<typeof Client>[0],
     public options: {
       transport: MCPTransportOptions;
       client: McpClientOptions;
+      elicitationHandlers?: MCPElicitationHandlers;
+      /**
+       * Client capabilities persisted from a previous session, advertised
+       * until handlers are reconfigured after a hibernation restore. Cleared
+       * by {@link configureElicitationHandlers} — reconfigured handlers are
+       * the source of truth. Explicit `client.capabilities` win per key.
+       */
+      capabilitySeed?: ClientCapabilities;
     } = { client: {}, transport: {} }
   ) {
+    this.options = {
+      ...options,
+      client: { ...defaultClientOptions, ...options.client }
+    };
+
+    this.client = this.createClient();
+  }
+
+  private createClient(): Client {
+    // Advertise elicitation only when it can actually be handled. Handler
+    // keys map directly to advertised modes, so a form-only handler advertises
+    // form only, a url-only handler advertises url only, and no handlers means
+    // no elicitation capability. An explicit caller-declared
+    // `capabilities.elicitation` wins wholesale so callers can narrow (or
+    // widen) the advertised modes. The restore seed applies last, covering
+    // the window before handlers are reconfigured after hibernation.
+    const seed = this.options.capabilitySeed;
+    const elicitation =
+      this.options.client?.capabilities?.elicitation ??
+      elicitationCapabilitiesFromHandlers(this.options.elicitationHandlers) ??
+      seed?.elicitation;
+    this._elicitationEnabled = elicitation !== undefined;
     const clientOptions = {
-      ...options.client,
+      ...this.options.client,
       capabilities: {
-        ...options.client?.capabilities,
-        elicitation: {}
+        ...seed,
+        ...this.options.client?.capabilities,
+        ...(elicitation ? { elicitation } : {})
       } as ClientCapabilities
     };
 
-    this.client = new Client(info, clientOptions);
+    return new Client(this._info, clientOptions);
+  }
+
+  /**
+   * Configure the handler used for server-initiated elicitation requests.
+   *
+   * If the connection has not been initialized yet, rebuild the SDK client so
+   * handler-driven elicitation capabilities are reflected in the initial
+   * handshake. A rebuild (rather than `Client.registerCapabilities`) is
+   * required because SDK capability registration is merge-only — it cannot
+   * un-advertise a mode when handlers are cleared before connecting. Active
+   * connections keep their negotiated capabilities until they reconnect.
+   */
+  configureElicitationHandlers(handlers?: MCPElicitationHandlers): void {
+    this.options.elicitationHandlers = handlers;
+    // Handlers are now the source of truth — drop the restore seed so
+    // clearing the handlers un-advertises the capability on rebuild.
+    this.options.capabilitySeed = undefined;
+
+    if (!this.client.transport) {
+      this.client = this.createClient();
+    }
   }
 
   /**
@@ -174,7 +271,9 @@ export class MCPClientConnection {
     // init() can be re-entered after a mid-session 401 → OAuth → reconnect
     // cycle (e.g. scope step-up, token revocation). The SDK client refuses
     // to connect while a previous transport is still attached, so detach it
-    // first.
+    // first. Rebuild the client so the new handshake advertises the current
+    // handler-derived capabilities — reconnects are documented as the point
+    // where handler changes on a live connection take effect.
     if (this.client.transport) {
       this._transport = undefined;
       try {
@@ -182,6 +281,7 @@ export class MCPClientConnection {
       } catch {
         // Closing a transport that just failed auth is best-effort.
       }
+      this.client = this.createClient();
     }
 
     const res = await this.tryConnect(transportType);
@@ -191,13 +291,17 @@ export class MCPClientConnection {
 
     // Handle the result and emit appropriate events
     if (res.state === MCPConnectionState.CONNECTED && res.transport) {
-      // Set up elicitation request handler after successful connection
-      this.client.setRequestHandler(
-        ElicitRequestSchema,
-        async (request: ElicitRequest) => {
-          return await this.handleElicitationRequest(request);
-        }
-      );
+      // Set up the elicitation request handler after a successful
+      // connection. Only when the capability was advertised — the SDK
+      // client throws on registering a handler for an undeclared capability.
+      if (this._elicitationEnabled) {
+        this.client.setRequestHandler(
+          ElicitRequestSchema,
+          async (request: ElicitRequest) => {
+            return await this.handleElicitationRequest(request);
+          }
+        );
+      }
 
       this.lastConnectedTransport = res.transport;
 
@@ -439,6 +543,7 @@ export class MCPClientConnection {
       });
       return {
         success: false,
+        reason: "error",
         error: `Discovery skipped - connection in ${this.connectionState} state`
       };
     }
@@ -511,7 +616,17 @@ export class MCPClientConnection {
       this.connectionState = MCPConnectionState.CONNECTED;
 
       const error = e instanceof Error ? e.message : String(e);
-      return { success: false, error };
+      // A restored streamable HTTP session rejected with 404 must be
+      // initialized again without its persisted session id.
+      const staleSession =
+        this._probingCapabilities &&
+        e instanceof StreamableHTTPError &&
+        e.code === 404;
+      return {
+        success: false,
+        reason: staleSession ? "stale-session" : "error",
+        error
+      };
     } finally {
       // Clean up the abort controller
       this._discoveryAbortController = undefined;
@@ -659,16 +774,28 @@ export class MCPClientConnection {
   }
 
   /**
-   * Handle elicitation request from server
-   * Automatically uses the Agent's built-in elicitation handling if available
+   * Handle elicitation request from server.
+   *
+   * Delegates to the `elicitationHandlers` connection option when provided.
+   *
+   * @deprecated Overriding or instance-patching this method directly is
+   * deprecated — pass the `elicitationHandlers` connection option instead.
    */
   async handleElicitationRequest(
-    _request: ElicitRequest
+    request: ElicitRequest
   ): Promise<ElicitResult> {
-    // Elicitation handling must be implemented by the platform
-    // For MCP servers, this should be handled by McpAgent.elicitInput()
+    const mode = request.params.mode === "url" ? "url" : "form";
+    const handler = this.options.elicitationHandlers?.[mode];
+    if (handler) {
+      return handler(request);
+    }
+    if (this.options.elicitationHandlers) {
+      throw new Error(
+        `No MCP ${mode}-mode elicitation handler configured for this connection.`
+      );
+    }
     throw new Error(
-      "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
+      "Elicitation handler must be implemented for your platform. Provide the MCPClientConnection elicitationHandlers option, or register handlers through the MCP client manager before connecting."
     );
   }
 
@@ -685,6 +812,13 @@ export class MCPClientConnection {
     }
 
     return undefined;
+  }
+
+  /** @internal Clear a restored session before reconnecting. */
+  clearResumedSession(): void {
+    if ("sessionId" in this.options.transport) {
+      delete this.options.transport.sessionId;
+    }
   }
 
   private getTransportName(

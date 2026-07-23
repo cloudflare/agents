@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolResult,
@@ -94,6 +95,32 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       },
       async ({ name }) => {
         return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
+      }
+    );
+
+    // Tool with an outputSchema: the MCP SDK client compiles a JSON Schema
+    // validator for it during discovery, which requires the Worker-safe
+    // validator (the SDK's AJV fallback uses `new Function`, disallowed in
+    // Workers).
+    this.server.registerTool(
+      "structuredGreet",
+      {
+        description: "Greet and return structured output",
+        inputSchema: { name: z.string().describe("Name to greet") },
+        outputSchema: {
+          greeting: z.string(),
+          nameLength: z.number()
+        }
+      },
+      async ({ name }) => {
+        const structuredContent = {
+          greeting: `Hello, ${name}!`,
+          nameLength: name.length
+        };
+        return {
+          content: [{ text: JSON.stringify(structuredContent), type: "text" }],
+          structuredContent
+        };
       }
     );
 
@@ -483,6 +510,39 @@ export class TestRpcMcpClientAgent extends Agent {
       const toolNames = tools.map((t) => t.name);
 
       return { success: true, toolNames };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcClientUsesWorkerSafeValidator() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-validator-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "rpc-validator-value" }
+        }
+      );
+
+      const validator =
+        this.mcp.mcpConnections[id]?.options.client?.jsonSchemaValidator;
+
+      const result = await this.mcp.callTool({
+        serverId: id,
+        name: "structuredGreet",
+        arguments: { name: "RPC User" }
+      });
+
+      return {
+        success: true,
+        usesWorkerSafeValidator:
+          validator instanceof CfWorkerJsonSchemaValidator,
+        structuredContent: result.structuredContent
+      };
     } catch (error) {
       return {
         success: false,
@@ -1050,6 +1110,47 @@ export class TestHttpMcpDedupAgent extends Agent {
       seededId,
       returnedId: result.id,
       deduped: result.id === seededId
+    };
+  }
+
+  async testStoredHttpServerWithoutConnectionReusesId() {
+    const id = "stored-without-connection";
+    const url = "https://mcp.example.com/stored";
+    await this.mcp.registerServer(id, {
+      url,
+      name: "stored-server",
+      transport: { type: "auto" as const }
+    });
+    delete this.mcp.mcpConnections[id];
+
+    let returnedId: string | null = null;
+    let threwExpectedConnectionError = false;
+    let connectionError: string | null = null;
+    try {
+      const result = await this.addMcpServer("stored-server", url);
+      returnedId = result.id;
+    } catch (error) {
+      connectionError = error instanceof Error ? error.message : String(error);
+      const expectedPrefix = `Failed to connect to MCP server at ${new URL(url).href}:`;
+      if (!connectionError.startsWith(expectedPrefix)) {
+        throw error;
+      }
+      threwExpectedConnectionError = true;
+      returnedId =
+        this.mcp.listServers().find((s) => s.name === "stored-server")?.id ??
+        null;
+    }
+
+    const storedIds = this.mcp
+      .listServers()
+      .filter((s) => s.name === "stored-server")
+      .map((s) => s.id);
+
+    return {
+      connectionError,
+      returnedId,
+      storedIds,
+      threwExpectedConnectionError
     };
   }
 

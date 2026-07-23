@@ -100,6 +100,26 @@ export class TestWaitConnectionsAgent extends Agent {
     };
   }
 
+  /** Wait for the lifecycle-started restores without triggering another one. */
+  async waitAndReport(timeout?: number): Promise<{
+    connectionIds: string[];
+    connectionStates: Record<string, string>;
+  }> {
+    await this.mcp.waitForConnections(
+      timeout != null ? { timeout } : undefined
+    );
+
+    return {
+      connectionIds: Object.keys(this.mcp.mcpConnections),
+      connectionStates: Object.fromEntries(
+        Object.entries(this.mcp.mcpConnections).map(([id, connection]) => [
+          id,
+          connection.connectionState
+        ])
+      )
+    };
+  }
+
   /**
    * Trigger restore WITHOUT waiting, then immediately check states.
    * This simulates the race condition (old behavior).

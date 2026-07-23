@@ -45,6 +45,7 @@ import {
 export {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
+  isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
 import {
@@ -79,6 +80,11 @@ import {
   type Observability,
   type ObservabilityEvent
 } from "./observability";
+import { tracer } from "./observability/tracing/cloudflare";
+import {
+  writeSpanAttributes,
+  type TraceAttributes
+} from "./observability/tracing/tracer";
 import { DisposableStore } from "./core/events";
 import { AgentLifecycleRunner } from "./agent/lifecycle";
 import { MessageType } from "./types";
@@ -1763,6 +1769,50 @@ export class Agent<
     return { tools: contribution.tools ?? {} };
   }
 
+  /** Run SDK work under a stable parent for platform child spans. */
+  private _withAgentSpan<T>(
+    operation: string,
+    storagePhase: string,
+    attributes: TraceAttributes,
+    run: (update: (attributes: TraceAttributes) => void) => Promise<T>
+  ): Promise<T>;
+  private _withAgentSpan<T>(
+    operation: string,
+    storagePhase: string,
+    attributes: TraceAttributes,
+    run: (update: (attributes: TraceAttributes) => void) => T
+  ): T;
+  private _withAgentSpan<T>(
+    operation: string,
+    storagePhase: string,
+    attributes: TraceAttributes,
+    run: (update: (attributes: TraceAttributes) => void) => T | Promise<T>
+  ): T | Promise<T> {
+    // The instance name is not always readable during construction: facets
+    // restore it after construction and unnamed DOs receive it later.
+    let agentId: string | undefined;
+    try {
+      agentId = this.name;
+    } catch {
+      agentId = undefined;
+    }
+
+    return tracer.withSpan(
+      operation,
+      {
+        "cloudflare.agents.agent.id": agentId,
+        "cloudflare.agents.agent.name": this._ParentClass.name,
+        "cloudflare.agents.operation.name": operation,
+        "cloudflare.agents.storage.grouped": true,
+        "cloudflare.agents.storage.system": "durable_object",
+        "cloudflare.agents.storage.phase": storagePhase,
+        ...attributes
+      },
+      (span) =>
+        run((finishAttributes) => writeSpanAttributes(span, finishAttributes))
+    );
+  }
+
   /**
    * Execute SQL queries against the Agent's database
    * @template T Type of the returned rows
@@ -1788,6 +1838,14 @@ export class Agent<
       throw new SqlError(query, e);
     }
   }
+  private _schemaInitialization:
+    | {
+        previousVersion: number;
+        currentVersion: number;
+        migrated: boolean;
+      }
+    | undefined;
+
   /**
    * Create all internal tables and run migrations if needed.
    * Called by the constructor on every wake. Idempotent — skips DDL when
@@ -2134,56 +2192,87 @@ export class Agent<
         VALUES (${SCHEMA_VERSION_ROW_ID}, ${String(CURRENT_SCHEMA_VERSION)})
       `;
     }
+
+    this._schemaInitialization = {
+      previousVersion: schemaVersion,
+      currentVersion: CURRENT_SCHEMA_VERSION,
+      migrated: schemaVersion < CURRENT_SCHEMA_VERSION
+    };
   }
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    if (!wrappedClasses.has(this.constructor)) {
-      // Auto-wrap custom methods with agent context
-      this._autoWrapCustomMethods();
-      wrappedClasses.add(this.constructor);
-    }
+    this.mcp = this._withAgentSpan(
+      "agent_initialization",
+      "initialization",
+      {},
+      (update) => {
+        if (!wrappedClasses.has(this.constructor)) {
+          // Auto-wrap custom methods with agent context
+          this._autoWrapCustomMethods();
+          wrappedClasses.add(this.constructor);
+        }
 
-    this._ensureSchema();
-
-    const mcpHost: MCPClientManagerHost = {
-      storage: this.ctx.storage,
-      getAgentClassName: () => this._ParentClass.name,
-      getAgentInstanceName: () => this.name,
-      getEnv: () => this.env as Record<string, unknown>,
-      getRequestContext: () => {
-        const context = agentContext.getStore();
-        return {
-          request: context?.request,
-          connectionUri: context?.connection?.uri
-        };
-      },
-      getSendIdentityOnConnect: () =>
-        this._resolvedOptions.sendIdentityOnConnect,
-      createAuthProvider: (callbackUrl) =>
-        this.createMcpOAuthProvider(callbackUrl),
-      publishState: (mcp) => {
-        this._broadcastProtocol(
-          JSON.stringify({
-            mcp,
-            type: MessageType.CF_AGENT_MCP_SERVERS
-          })
+        this._withAgentSpan(
+          "initialize_agent_storage",
+          "initialization",
+          {},
+          (updateStorage) => {
+            this._ensureSchema();
+            const schemaAttributes = {
+              "cloudflare.agents.schema.version.previous":
+                this._schemaInitialization?.previousVersion,
+              "cloudflare.agents.schema.version.current":
+                this._schemaInitialization?.currentVersion,
+              "cloudflare.agents.schema.migrated":
+                this._schemaInitialization?.migrated
+            };
+            updateStorage(schemaAttributes);
+            update(schemaAttributes);
+          }
         );
-      },
-      emitObservability: (event) => {
-        this.observability?.emit({
-          ...event,
-          agent: this._ParentClass.name,
-          name: this.name
+
+        const mcpHost: MCPClientManagerHost = {
+          storage: this.ctx.storage,
+          getAgentClassName: () => this._ParentClass.name,
+          getAgentInstanceName: () => this.name,
+          getEnv: () => this.env as Record<string, unknown>,
+          getRequestContext: () => {
+            const context = agentContext.getStore();
+            return {
+              request: context?.request,
+              connectionUri: context?.connection?.uri
+            };
+          },
+          getSendIdentityOnConnect: () =>
+            this._resolvedOptions.sendIdentityOnConnect,
+          createAuthProvider: (callbackUrl) =>
+            this.createMcpOAuthProvider(callbackUrl),
+          publishState: (mcp) => {
+            this._broadcastProtocol(
+              JSON.stringify({
+                mcp,
+                type: MessageType.CF_AGENT_MCP_SERVERS
+              })
+            );
+          },
+          emitObservability: (event) => {
+            this.observability?.emit({
+              ...event,
+              agent: this._ParentClass.name,
+              name: this.name
+            });
+          }
+        };
+        registerMCPClientManagerHost(this, mcpHost);
+        // Initialize MCPClientManager AFTER tables are created
+        return new MCPClientManager(this, {
+          name: this._ParentClass.name,
+          version: "0.0.1"
         });
       }
-    };
-    registerMCPClientManagerHost(this, mcpHost);
-    this.mcp = new MCPClientManager(this, {
-      name: this._ParentClass.name,
-      version: "0.0.1"
-    });
+    );
     // Compute persistence-hook dispatch mode once.
     // Throws immediately if both hooks are overridden on the same class.
     {
@@ -2511,7 +2600,10 @@ export class Agent<
     };
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async (props?: Props) => {
+    const startAgent = async (
+      props: Props | undefined,
+      update: (attributes: TraceAttributes) => void
+    ) => {
       return agentContext.run(
         {
           agent: this,
@@ -2520,40 +2612,71 @@ export class Agent<
           email: undefined
         },
         async () => {
-          // Hydrate _isFacet from persistent storage so the flag
-          // survives hibernation (the DO constructor resets it to false).
-          const isFacet =
-            await this.ctx.storage.get<boolean>("cf_agents_is_facet");
-          if (isFacet) this._isFacet = true;
+          await this._withAgentSpan(
+            "restore_agent_state",
+            "startup",
+            {},
+            async () => {
+              // Hydrate _isFacet from persistent storage so the flag
+              // survives hibernation (the DO constructor resets it to false).
+              const isFacet =
+                await this.ctx.storage.get<boolean>("cf_agents_is_facet");
+              if (isFacet) this._isFacet = true;
 
-          const storedFacetName = await this.ctx.storage.get<string>(
-            "cf_agents_facet_name"
+              const storedFacetName = await this.ctx.storage.get<string>(
+                "cf_agents_facet_name"
+              );
+              if (typeof storedFacetName === "string") {
+                this._facetName = storedFacetName;
+              }
+
+              const storedParentPath = await this.ctx.storage.get<
+                Array<{ className: string; name: string }>
+              >("cf_agents_parent_path");
+              if (isValidParentPath(storedParentPath)) {
+                this._parentPath = storedParentPath;
+              }
+              try {
+                await this._cf_hydrateSubAgentConnectionsFromRoot();
+              } catch (error) {
+                console.warn(
+                  "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+                  error
+                );
+              }
+            }
           );
-          if (typeof storedFacetName === "string") {
-            this._facetName = storedFacetName;
-          }
-
-          const storedParentPath = await this.ctx.storage.get<
-            Array<{ className: string; name: string }>
-          >("cf_agents_parent_path");
-          if (isValidParentPath(storedParentPath)) {
-            this._parentPath = storedParentPath;
-          }
-          try {
-            await this._cf_hydrateSubAgentConnectionsFromRoot();
-          } catch (error) {
-            console.warn(
-              "[Agent] Unable to hydrate sub-agent WebSocket connections:",
-              error
-            );
-          }
 
           await this._tryCatch(async () => {
-            await this._lifecycle.onStart({ props });
+            // Restore MCP connections (via component lifecycle) before
+            // fiber/chat recovery so recovered turns see MCP tools. Restored
+            // connections re-advertise the capabilities persisted from the
+            // previous session; the handlers behind them attach when
+            // onStart() configures them.
+            await this._withAgentSpan(
+              "restore_mcp_connections",
+              "startup",
+              {},
+              async () => {
+                await this._lifecycle.onStart({ props });
+              }
+            );
 
-            this._checkOrphanedWorkflows();
-            await this._checkRunFibers();
-            const startupAgentToolRunIds = this._agentToolRunRecoveryRunIds();
+            const startupAgentToolRunIds = await this._withAgentSpan(
+              "recover_agent_work",
+              "startup",
+              {},
+              async () => {
+                this._checkOrphanedWorkflows();
+                await this._checkRunFibers();
+                return this._agentToolRunRecoveryRunIds();
+              }
+            );
+            update({
+              "cloudflare.agents.start.facet": this._isFacet,
+              "cloudflare.agents.recovery.agent_tools.count":
+                startupAgentToolRunIds.length
+            });
 
             // Chat recovery (above, in `_checkRunFibers`) evaluates its budgets
             // — and may seal an interrupted turn, firing `onExhausted` — BEFORE
@@ -2569,7 +2692,12 @@ export class Agent<
             this._warnedScheduleInOnStart.clear();
             let result: Awaited<ReturnType<typeof _onStart>>;
             try {
-              result = await _onStart(props);
+              result = await this._withAgentSpan(
+                "run_user_on_start",
+                "startup",
+                {},
+                () => _onStart(props)
+              );
             } finally {
               this._insideOnStart = false;
             }
@@ -2610,6 +2738,10 @@ export class Agent<
         }
       );
     };
+    this.onStart = (props?: Props) =>
+      this._withAgentSpan("agent_start", "startup", {}, (update) =>
+        startAgent(props, update)
+      );
   }
 
   /**
@@ -5398,10 +5530,20 @@ export class Agent<
     options?: InternalFiberOptions
   ): Promise<T> {
     const signal = options?.signal ?? new AbortController().signal;
-    this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-      VALUES (${id}, ${name}, NULL, ${Date.now()})
-    `;
+    this._withAgentSpan(
+      "initialize_fiber",
+      "fiber",
+      {
+        "cloudflare.agents.fiber.id": id,
+        "cloudflare.agents.fiber.name": name
+      },
+      () => {
+        this.sql`
+          INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+          VALUES (${id}, ${name}, NULL, ${Date.now()})
+        `;
+      }
+    );
     const startedAt = Date.now();
     this._emit("fiber:run:started", {
       fiberId: id,
@@ -5412,16 +5554,26 @@ export class Agent<
 
     const writeSnapshot = (data: unknown) => {
       const snapshot = JSON.stringify(data);
-      this.sql`
-        UPDATE cf_agents_runs SET snapshot = ${snapshot}
-        WHERE id = ${id}
-      `;
-      if (options?.managed) {
-        this.sql`
-          UPDATE cf_agents_fibers SET snapshot = ${snapshot}
-          WHERE fiber_id = ${id}
-        `;
-      }
+      this._withAgentSpan(
+        "persist_fiber_snapshot",
+        "fiber",
+        {
+          "cloudflare.agents.fiber.id": id,
+          "cloudflare.agents.fiber.name": name
+        },
+        () => {
+          this.sql`
+            UPDATE cf_agents_runs SET snapshot = ${snapshot}
+            WHERE id = ${id}
+          `;
+          if (options?.managed) {
+            this.sql`
+              UPDATE cf_agents_fibers SET snapshot = ${snapshot}
+              WHERE fiber_id = ${id}
+            `;
+          }
+        }
+      );
     };
 
     let root: RootFacetRpcSurface | undefined;
@@ -5468,7 +5620,17 @@ export class Agent<
       }
     } finally {
       this._runFiberActiveFibers.delete(id);
-      this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
+      this._withAgentSpan(
+        "finalize_fiber",
+        "fiber",
+        {
+          "cloudflare.agents.fiber.id": id,
+          "cloudflare.agents.fiber.name": name
+        },
+        () => {
+          this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
+        }
+      );
       dispose();
       if (root && registeredFacetRun) {
         try {
@@ -6197,7 +6359,13 @@ export class Agent<
     return (ledgerOnly[0]?.count ?? 0) > 0;
   }
 
-  private async _scheduleNextAlarm() {
+  private async _scheduleNextAlarm(): Promise<void> {
+    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, () =>
+      this._scheduleNextAlarmBody()
+    );
+  }
+
+  private async _scheduleNextAlarmBody(): Promise<void> {
     // A pending destroy (#1625) owns the alarm: keep it armed immediately so
     // teardown lands, and never let the "no work pending" branch below
     // delete it out from under `_cf_scheduleDestroy`.

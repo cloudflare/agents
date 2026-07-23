@@ -66,6 +66,34 @@ export function mockInference(): LanguageModel {
           "mkdir -p /temp; sleep 2; printf lifecycle-ok > /temp/lifecycle-marker"
         );
       }
+      if (
+        serialized.includes("TEST: repository install recovery") &&
+        !hasToolResult
+      ) {
+        return callBash(
+          [
+            "set -e",
+            "root=/workspace/recovery-fixture",
+            'mkdir -p "$root/vendor/tiny" /temp',
+            "count=0; test ! -f /temp/recovery-command-count || count=$(cat /temp/recovery-command-count)",
+            "printf '%s' $((count + 1)) > /temp/recovery-command-count",
+            'printf \'%s\' \'{"name":"fixture","private":true,"dependencies":{"tiny":"file:vendor/tiny"}}\' > "$root/package.json"',
+            'printf \'%s\' \'{"name":"tiny","version":"1.0.0","main":"index.js"}\' > "$root/vendor/tiny/package.json"',
+            'printf "module.exports = \'installed\';\\n" > "$root/vendor/tiny/index.js"',
+            'cd "$root"',
+            "npm install --ignore-scripts --no-package-lock --no-audit --no-fund >/temp/recovery-install.log 2>&1",
+            "mkdir -p dist",
+            "node -e \"require('node:fs').writeFileSync('dist/result.txt', require('tiny'))\"",
+            "printf 'recovery-command-ok count='; cat /temp/recovery-command-count"
+          ].join("\n")
+        );
+      }
+      if (serialized.includes("TEST: repository install recovery")) {
+        // Leave a visible non-terminal window after the durable tool result is
+        // recorded, so the E2E can prove recovery does not replay the command.
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+        return finishText("repository-install-recovered");
+      }
       return finishText(`captured-run-context: ${serialized}`);
     }
   });

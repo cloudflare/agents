@@ -8,8 +8,10 @@ export {
 } from "./assistant-agent-loop";
 export {
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkToolsTestAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -35,3 +37,4 @@ export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";
 export { ThinkMessengerRouteTestAgent } from "./messengers";
+export { ThinkMcpToolMaterializationAgent } from "./mcp-tool-materialization";

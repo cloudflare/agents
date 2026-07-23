@@ -8,6 +8,7 @@ interface DebugMessage {
 
 interface ThreadMeta {
   status: "running" | "done" | "error";
+  tools?: number;
   lastError?: string;
 }
 
@@ -120,6 +121,28 @@ describe("E2E: production graph with inference adapter", () => {
     });
   }, 120_000);
 
+  it("keeps Think state readable when Workspace reset RPC throws", async () => {
+    const { session } = await dispatch(
+      "TEST: echo immutable run envelope",
+      issueBase + 5
+    );
+    await waitForThread(session, "done");
+    const before = transcriptText(await messages(session));
+    expect(before).toContain("captured-run-context:");
+
+    const reset = await fetch(
+      `${BASE_URL}/__test/workspace-reset-failure/${encodeURIComponent(session)}`,
+      { method: "POST" }
+    );
+    expect(reset.status).toBe(200);
+    await expect(reset.json()).resolves.toMatchObject({
+      threw: true,
+      error: expect.stringContaining("injected Workspace reset RPC failure")
+    });
+
+    expect(transcriptText(await messages(session))).toBe(before);
+  }, 120_000);
+
   it("uses the lightweight VFS shell when backend is omitted", async () => {
     const { session } = await dispatch(
       "TEST: use default shell",
@@ -188,6 +211,42 @@ describe("E2E: production graph with inference adapter", () => {
     expect(wranglerOutput()).not.toContain(
       "An RPC stub was not disposed properly"
     );
+  }, 180_000);
+
+  it("keeps a repository install submission running after its command result", async () => {
+    const { session } = await dispatch(
+      "TEST: repository install recovery",
+      issueBase + 4
+    );
+
+    let duringRecovery: ThreadMeta | undefined;
+    try {
+      await vi.waitUntil(
+        async () => {
+          const current = await thread(session);
+          duringRecovery = current;
+          // afterToolCall records this only after the command result returns.
+          // Think publishes the assistant transcript atomically at the end of
+          // the turn, so command-center state is the durable mid-turn signal.
+          return current?.status === "running" && current.tools === 1;
+        },
+        { timeout: 120_000, interval: 200 }
+      );
+    } catch (error) {
+      throw new Error(
+        `Timed out observing recovery window; current=${JSON.stringify(duringRecovery)}\n` +
+          `transcript=${JSON.stringify(await messages(session), null, 2)}\n` +
+          `wrangler=${wranglerOutput().slice(-20_000)}`,
+        { cause: error }
+      );
+    }
+    expect(duringRecovery?.status).toBe("running");
+
+    await waitForThread(session, "done");
+    const text = transcriptText(await messages(session));
+    expect(text).toContain("recovery-command-ok count=1");
+    expect(text).toContain("repository-install-recovered");
+    expect(text).not.toContain("recovery-command-ok count=2");
   }, 180_000);
 
   it("marks a tool-only step-budget exhaustion as error, not done", async () => {

@@ -290,20 +290,52 @@ body {
 .run {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
+  gap: 8px;
+  padding: 2px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
   min-width: 0;
 }
 
 .run:hover {
   background: var(--panel-2);
+}
+
+.run__open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+  flex: 1;
+}
+
+.run__continue {
+  flex-shrink: 0;
+  margin-right: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--red);
+  font: 600 11px var(--sans);
+  cursor: pointer;
+}
+
+.run__continue:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
+.run__continue:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .run__dot {

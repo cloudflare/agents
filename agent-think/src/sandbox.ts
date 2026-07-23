@@ -3,7 +3,7 @@
  * Container; minted by the warm pool; lives for the lifetime of
  * that container.
  *
- * Wiring: cross-DO. The *Agent* DO owns the `Workspace` instance
+ * Wiring: cross-DO. The `WorkspaceAgent` DO owns the `Workspace` instance
  * and the `CloudflareContainerBackend` that drives wsd. The backend's
  * `container: () => ...` factory returns a stub to one of these
  * Sandboxes; the backend then calls `getWorkspaceContainer()` over
@@ -19,7 +19,7 @@
  *
  *   - `WorkspaceProxy` is re-exported at the worker entrypoint
  *     (not here \u2014 it's a top-level export in `index.ts`) so wsd's
- *     `/ws` callback can route back into the Agent DO that owns
+ *     `/ws` callback can route back into the WorkspaceAgent DO that owns
  *     the workspace.
  *
  *   - Three lifecycle methods (`startAndWaitForPorts`, `stop`,
@@ -32,7 +32,7 @@
  * What's *gone* compared to the prior shape: no Workspace instance,
  * no CloudflareContainerBackend, no `getWorkspace()` or `gitClone()`
  * RPC, no synthetic connect-state tracking. All of that moved to
- * the Agent DO where the Workspace now lives.
+ * WorkspaceAgent where the Workspace now lives.
  */
 
 import { withWorkspaceContainer } from "@cloudflare/workspace/backends/container";
@@ -142,7 +142,7 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
   //
   // All three methods are RPC entries the warm pool driver calls
   // on a Sandbox stub. None of them carry workspace state \u2014 the
-  // Agent DO owns that.
+  // WorkspaceAgent DO owns that.
 
   /**
    * Pre-warm the container by starting it. The warm pool calls this

@@ -40,6 +40,10 @@
         "name": "ThinkTestAgent"
       },
       {
+        "class_name": "ThinkPropsTestAgent",
+        "name": "ThinkPropsTestAgent"
+      },
+      {
         "class_name": "ThinkToolsTestAgent",
         "name": "ThinkToolsTestAgent"
       },
@@ -54,6 +58,10 @@
       {
         "class_name": "ThinkSessionTestAgent",
         "name": "ThinkSessionTestAgent"
+      },
+      {
+        "class_name": "ThinkSystemPromptSkillsWarningAgent",
+        "name": "ThinkSystemPromptSkillsWarningAgent"
       },
       {
         "class_name": "ThinkAsyncConfigSessionAgent",
@@ -112,6 +120,10 @@
         "name": "ThinkMessengerRouteTestAgent"
       },
       {
+        "class_name": "ThinkMcpToolMaterializationAgent",
+        "name": "ThinkMcpToolMaterializationAgent"
+      },
+      {
         "class_name": "ThinkExecuteToolAgent",
         "name": "ThinkExecuteToolAgent"
       },
@@ -168,10 +180,12 @@
         "LoopToolTestAgent",
         "OverflowRecoveryTestAgent",
         "ThinkTestAgent",
+        "ThinkPropsTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
         "ThinkClientToolsAgent",
         "ThinkSessionTestAgent",
+        "ThinkSystemPromptSkillsWarningAgent",
         "ThinkAsyncConfigSessionAgent",
         "ThinkConfigTestAgent",
         "ThinkLegacyConfigMigrationAgent",
@@ -186,6 +200,7 @@
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
         "ThinkMessengerRouteTestAgent",
+        "ThinkMcpToolMaterializationAgent",
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
         "ThinkFetchToolsTestAgent",

@@ -1,5 +1,78 @@
 # @cloudflare/agents
 
+## 0.18.0
+
+### Minor Changes
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Group SDK-managed initialization, startup, chat interactions, turns, and durable submissions into semantic phases. Storage-heavy setup, hydration, recovery, request persistence, and response persistence each receive a named bucket, keeping inference and tool spans visible without discarding lower-level Durable Object SQLite spans. Each span records agent identity, storage phase, a stable marker for UI grouping, and operation-specific metadata. No-op on runtimes without the `tracing` API.
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `agents/observability/ai` with `wrapAISDK` for AI SDK v6 and `createAISDKTelemetry` for AI SDK v7. Both project Cloudflare-native `invoke_agent {agent}`, `chat {model}`, and `execute_tool {tool}` spans using scalar OpenTelemetry GenAI attributes, including request settings, token usage, finish reasons, tool-call IDs, model-call time to first chunk, bounded AI SDK v6 approval lifecycle spans, and conditional AI Gateway log references. Payload storage is opt-in: `storeMessages` writes OTel-schema input/output message arrays to `chat` (`{ role, parts }`, canonical text/reasoning/tool parts, and output `finish_reason`; oldest messages are dropped past the budget while protecting the first two), and `storeTools` writes arguments/results to `execute_tool`. The flags themselves are never emitted as span attributes. Schemas, request headers, provider options, and raw errors remain excluded.
+
+### Patch Changes
+
+- [#1959](https://github.com/cloudflare/agents/pull/1959) [`a3cbed1`](https://github.com/cloudflare/agents/commit/a3cbed1d9944690cf856238f1466940def9a3101) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Cache MCP JSON Schema conversion for the current catalog on each live connection, and let Think agents skip direct MCP AI-tool exposure when those tools are exposed through Code Mode or another mechanism outside Think's automatic tool set.
+
+- [#1963](https://github.com/cloudflare/agents/pull/1963) [`3ce98ff`](https://github.com/cloudflare/agents/commit/3ce98ff084fcd5f0f8433e1f20352f0a170e3e4a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Reconcile stale `useAgentChat` server-streaming state after an errored client reconnects.
+
+  Reconnect probes now include correlation IDs, and `STREAM_RESUME_NONE` distinguishes globally idle agents from active continuations owned by another connection. The hook clears fallback streaming state only for a correlated idle response. Reconnect opens are retained while a prior resume or status transition settles, in-flight handshakes are retransmitted on replacement sockets, and all AI SDK resume entry points share one serialization gate.
+
+- [#1944](https://github.com/cloudflare/agents/pull/1944) [`fff4131`](https://github.com/cloudflare/agents/commit/fff413112915cfafcbca013a764065abc6105db1) Thanks [@cjol](https://github.com/cjol)! - Make the `agents/vite` `turndown` stub fail with a diagnostic error when app code calls it directly, and document the `stubTurndown: false` opt-out for applications that use `turndown` themselves.
+
+- [#1926](https://github.com/cloudflare/agents/pull/1926) [`6861933`](https://github.com/cloudflare/agents/commit/6861933da2a73d699b6cc26a283cc1fee597f155) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Verify MCP OAuth callback state before changing a connection. Forged, expired, and replayed callbacks no longer disrupt the genuine authorization flow, and `addMcpServer()` refreshes auth URLs whose embedded state has expired.
+
+- [#1924](https://github.com/cloudflare/agents/pull/1924) [`c19d58a`](https://github.com/cloudflare/agents/commit/c19d58aeef5dbf18e6382de9dd773775aafdb6c8) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden MCP connection recovery: honor retry budgets for resolved connection failures, finish in-flight restore work before stable-id migration, and close connections replaced by the legacy `connect()` path.
+
+- [#1923](https://github.com/cloudflare/agents/pull/1923) [`33e59c4`](https://github.com/cloudflare/agents/commit/33e59c4af9a120fafea2d9dd7ceb1181d5813267) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Recover streamable HTTP connections when a server rejects a persisted session with HTTP 404. The client clears the stale session from memory and storage, initializes a new session, and rediscovers capabilities once.
+
+## 0.17.4
+
+### Patch Changes
+
+- [#1902](https://github.com/cloudflare/agents/pull/1902) [`a9d78c0`](https://github.com/cloudflare/agents/commit/a9d78c01379e7715f7fe33046e71bd9eaf3611ef) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Always apply the Worker-safe `CfWorkerJsonSchemaValidator` to MCP client connections by default.
+
+  `MCPClientConnection` now owns the default (merged in its constructor), so every construction path uses the Worker-safe validator unless the caller supplies their own — including the RPC `addMcpServer(name, namespace)` path via `MCPClientManager.connect()`, which previously skipped it. Without the default, the MCP SDK fell back to its AJV validator when a server exposed tools with `outputSchema`; AJV compiles schemas with `new Function`, which Workers disallows, failing discovery with "Code generation from strings disallowed for this context".
+
+  `connect()` now builds connections through `createConnection()` instead of duplicating construction, so the two paths can no longer drift. Caller-supplied `client.jsonSchemaValidator` overrides are respected on the live connection; because validator instances cannot survive JSON serialization, they are no longer persisted, and a previously persisted, serialization-degraded validator is ignored on restore — after hibernation the connection falls back to the Worker-safe default instead of failing discovery.
+
+- [#1903](https://github.com/cloudflare/agents/pull/1903) [`3ba6a78`](https://github.com/cloudflare/agents/commit/3ba6a78c1d585948453803524093d686394ce4d4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: url-mode elicitation support with a real elicitation handler
+
+  - Agents can now respond to server-initiated `elicitation/create` requests by
+    calling `this.mcp.configureElicitationHandlers({ form, url })`, typically in
+    `onStart()`. The advertised modes are persisted with each MCP server, so
+    connections restored after Durable Object hibernation re-advertise them at
+    the handshake and the handlers re-attach when onStart runs.
+  - Connections advertise elicitation modes based on what can actually be
+    handled: they advertise exactly the modes with configured handlers at the
+    initialize handshake; without handlers they advertise no elicitation
+    capability. An explicit
+    `client.capabilities.elicitation` (e.g. via `addMcpServer`) always wins,
+    is persisted with the server options, and survives hibernation — it is no
+    longer clobbered by a hardcoded value.
+
+- [#1925](https://github.com/cloudflare/agents/pull/1925) [`762998d`](https://github.com/cloudflare/agents/commit/762998da1c873701305a44c598e9c029617047b4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: consume the persisted capability seed at first use instead of at restore-time read
+
+  The capability stamp persisted on each MCP server row (used to re-advertise elicitation modes at the handshake after Durable Object hibernation) was read-and-cleared when the connection object was created, before any connection attempt. Wakes that never reached a handshake burned it: a restore that parked on a pending OAuth flow, or a wake interrupted between restore and `onStart` re-stamping the rows, left the next wake's connections negotiating without the elicitation capability until some later reconnect.
+
+  The stamp is now read without clearing and only cleared once a seeded handshake actually completes in a session that has not configured handlers, preserving the one-successful-restore semantics: after the seed is used in a completed handshake it no longer re-advertises stale modes, and any `configureElicitationHandlers` call still re-stamps every row. Sessions with handlers configured own their row stamps, so a handshake there (e.g. re-adding a server under a stable id) keeps the fresh stamp in place for the next wake.
+
+- [#1910](https://github.com/cloudflare/agents/pull/1910) [`9e1b733`](https://github.com/cloudflare/agents/commit/9e1b733426620642ae67b70a6fea63459e8a1e8c) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: advertise no elicitation capability when no handler is configured
+
+  Connections without an elicitation handler previously advertised form-mode
+  elicitation while rejecting every elicitation request that arrived, so
+  spec-compliant servers chose elicitation over their fallback flows and the
+  tool call failed mid-flight. Connections now advertise the elicitation
+  capability only when it can be handled: form mode, URL mode, or both, based on
+  handlers configured via `this.mcp.configureElicitationHandlers({ form, url })`.
+  Connections without handlers advertise no elicitation capability, letting
+  servers fall back gracefully.
+
+  An explicit `client.capabilities.elicitation` declaration remains authoritative.
+  Only advertise modes your Agent can handle.
+
+- [#1869](https://github.com/cloudflare/agents/pull/1869) [`f274903`](https://github.com/cloudflare/agents/commit/f274903ee06123bc12cd5834d5187b7ffec4722e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix `addMcpServer()` reporting `ready` for an HTTP MCP connection that was restored while OAuth is still in progress.
+
+  For an existing `AUTHENTICATING` connection, `addMcpServer()` now prefers the live authorization URL, otherwise returns a persisted absolute HTTP(S) authorization URL. If neither is available, it reconnects the existing connection without re-registering it: a new authorization URL is returned and persisted, a connected result is discovered before returning `ready`, and failed or incomplete OAuth results throw instead of falling through to `ready`.
+
 ## 0.17.3
 
 ### Patch Changes

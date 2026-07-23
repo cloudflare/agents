@@ -1,5 +1,52 @@
 # @cloudflare/think
 
+## 0.14.0
+
+### Minor Changes
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Think agents emit Cloudflare-native traces out of the box with no tracing setup beyond enabling Worker traces. Named lifecycle and storage-phase spans group Durable Object internals around startup, request persistence, turn preparation, inference, result persistence, recovery, alarms, and durable submissions. Every inference call produces an `invoke_agent {agent class}` span with `chat {model}` and `execute_tool {tool}` children. Think supplies durable identity and turn metadata. Payload storage remains off by default; agents can set `storeMessages` for OTel-schema model messages (`{ role, parts }`, canonical tool parts, and output `finish_reason`) on `chat` and `storeTools` for tool arguments/results on `execute_tool`. These flags configure the wrapper and are never emitted as metadata or attributes. Model streams are finalized on early exit, and durable submissions run from their awaited alarm invocation so spans do not outlive invocation boundaries.
+
+### Patch Changes
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Group SDK-managed initialization, startup, chat interactions, turns, and durable submissions into semantic phases. Storage-heavy setup, hydration, recovery, request persistence, and response persistence each receive a named bucket, keeping inference and tool spans visible without discarding lower-level Durable Object SQLite spans. Each span records agent identity, storage phase, a stable marker for UI grouping, and operation-specific metadata. No-op on runtimes without the `tracing` API.
+
+- [#1959](https://github.com/cloudflare/agents/pull/1959) [`a3cbed1`](https://github.com/cloudflare/agents/commit/a3cbed1d9944690cf856238f1466940def9a3101) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Cache MCP JSON Schema conversion for the current catalog on each live connection, and let Think agents skip direct MCP AI-tool exposure when those tools are exposed through Code Mode or another mechanism outside Think's automatic tool set.
+
+- [#1963](https://github.com/cloudflare/agents/pull/1963) [`3ce98ff`](https://github.com/cloudflare/agents/commit/3ce98ff084fcd5f0f8433e1f20352f0a170e3e4a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Reconcile stale `useAgentChat` server-streaming state after an errored client reconnects.
+
+  Reconnect probes now include correlation IDs, and `STREAM_RESUME_NONE` distinguishes globally idle agents from active continuations owned by another connection. The hook clears fallback streaming state only for a correlated idle response. Reconnect opens are retained while a prior resume or status transition settles, in-flight handshakes are retransmitted on replacement sockets, and all AI SDK resume entry points share one serialization gate.
+
+- [#1937](https://github.com/cloudflare/agents/pull/1937) [`ed9f42b`](https://github.com/cloudflare/agents/commit/ed9f42b447f244a20801cf2cbcba72a191f73c9d) Thanks [@cjol](https://github.com/cjol)! - Forward routing props through the Think `onStart` lifecycle wrapper.
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Run durable submissions only from their awaited scheduled drain, preventing model work and tracing spans from outliving the short submission-acceptance invocation.
+
+- [#1949](https://github.com/cloudflare/agents/pull/1949) [`32e7390`](https://github.com/cloudflare/agents/commit/32e73900f4c6bf9cec1b09bb08085fbe46073a99) Thanks [@cjol](https://github.com/cjol)! - Warn when `getSkills()` makes an overridden `getSystemPrompt()` fallback-only and document using Session context blocks for always-on instructions.
+
+## 0.13.0
+
+### Minor Changes
+
+- [#1907](https://github.com/cloudflare/agents/pull/1907) [`38bf87a`](https://github.com/cloudflare/agents/commit/38bf87a3e887de328f22b1f8fe26d53de1c5e72d) Thanks [@cjol](https://github.com/cjol)! - feat(think): add channelSpeakerLabel option to MessengerDefinition for configurable channel speaker prefixing
+
+  Channel (non-DM) messages and action events are prefixed with the speaker label
+  so the model can attribute multi-user traffic; direct messages never get a
+  prefix. Previously action events were labelled even in DMs — they now follow the
+  same channel-only rule as regular messages.
+
+- [#1921](https://github.com/cloudflare/agents/pull/1921) [`7e0c069`](https://github.com/cloudflare/agents/commit/7e0c069226f0c953a58de22481fd6cec2608e75b) Thanks [@cjol](https://github.com/cjol)! - Add `ChatOptions.metadata` — a per-turn, recovery-safe metadata carrier.
+
+  Server-side callers of `chat()` / `chatWithMessengerContext()` can now attach immutable per-turn metadata (e.g. "which authenticated principal initiated this turn"). It is stamped onto the turn's user message alongside `channel` (as `metadata.turnMetadata`) so a recovered/continued turn re-resolves it from durable history, and is readable turn-scoped via the new `Think.activeTurnMetadata` getter.
+
+  The trust model mirrors the channel stamp: the reserved metadata keys `channel` and `turnMetadata` are now stripped from client-supplied messages at intake, so a client can never forge server-written turn context (this also closes the prior gap where a client message could carry a forged `metadata.channel`). This lets messenger/RPC entry points carry correct multi-user identity without either mutable agent-wide state (a last-writer-wins race) or the submission path (which loses incremental streaming).
+
+### Patch Changes
+
+- [#1920](https://github.com/cloudflare/agents/pull/1920) [`0235fc9`](https://github.com/cloudflare/agents/commit/0235fc926f6b8ebdd2f7922dc9c5fa025c0a8c9a) Thanks [@cjol](https://github.com/cjol)! - Rewrite the bot's own unresolved self-mention in messenger events to its readable handle before the model sees it.
+
+  When a user @-mentions a Think messenger bot, the triggering message leads with the bot's own mention. Adapters resolve every other user's mention to `@DisplayName` but leave the bot's own as a raw user-id token (for example, Slack's `@U0BD9EYL52S`), which small models can misread as a third party the sender was trying to reach. Think now rewrites that surviving self-mention to `@<userName>` (the bot handle already required on every messenger) in `defaultChatSdkEvent`, reconstructing the `@handle` the sender originally typed.
+
+  Adds the exported `resolveSelfMention` helper. Rewriting only applies when the adapter exposes a `botUserId`, so handle-based adapters (for example, Telegram) are unaffected. No new configuration is required.
+
 ## 0.12.1
 
 ### Patch Changes

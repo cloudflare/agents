@@ -20,9 +20,13 @@ export class TestRunFiberAgent extends Agent {
   private _releaseIgnoredCancelManagedFiber?: () => void;
   private _releaseBlockedRecovery?: () => void;
 
+  /** MCP connection ids visible at the moment each fiber was recovered. */
+  recoveryMcpConnections: Record<string, string[]> = {};
+
   override async onFiberRecovered(
     ctx: FiberRecoveryContext
   ): Promise<void | FiberRecoveryResult> {
+    this.recoveryMcpConnections[ctx.id] = Object.keys(this.mcp.mcpConnections);
     this.recoveredFibers.push(ctx);
     if (ctx.name === "managed-recovery-block") {
       await new Promise<void>((resolve) => {
@@ -546,6 +550,36 @@ export class TestRunFiberAgent extends Agent {
   }
 
   // ── Eviction simulation ───────────────────────────────────────
+
+  /**
+   * Insert a stored MCP server pending OAuth (never dials out on restore)
+   * and reset the manager so the next wake restores it again. Clears the
+   * in-memory connections so any connection seen later provably came from
+   * that wake's restore.
+   */
+  async seedMcpServerRow(id: string): Promise<void> {
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers
+        (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (${id}, ${"seeded"}, ${"http://mcp.invalid/mcp"}, NULL,
+              ${"http://mcp.invalid/authorize"}, ${"http://mcp.invalid/callback"},
+              ${JSON.stringify({ capabilities: { elicitation: { form: {}, url: {} } } })})
+    `;
+    for (const connectionId of Object.keys(this.mcp.mcpConnections)) {
+      delete this.mcp.mcpConnections[connectionId];
+    }
+    // @ts-expect-error - accessing private field for testing
+    this.mcp._isRestored = false;
+  }
+
+  /** Re-run the wrapped wake sequence: MCP restore → fiber recovery → onStart. */
+  async rerunWakeSequence(): Promise<void> {
+    await this.onStart();
+  }
+
+  async getRecoveryMcpConnections(): Promise<Record<string, string[]>> {
+    return this.recoveryMcpConnections;
+  }
 
   async insertInterruptedFiber(
     id: string,

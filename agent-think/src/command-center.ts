@@ -5,8 +5,8 @@
  * worker has ever dispatched: repo/issue coordinates, live status, and
  * per-thread tool counters. ThinkAgent reports lifecycle events here
  * fire-and-forget (see `#report` in agent.ts) — a reporting failure must
- * never break a run, and the command center never drives runs, it only
- * observes them.
+ * never break a run. The only control mutation is an atomic claim for
+ * continuing a failed run from the operator command center.
  *
  * The UI connects with `useAgent({ agent: "command-center", name: "main" })`
  * and receives every update through the agents SDK state sync, which is what
@@ -14,8 +14,9 @@
  */
 
 import { Agent } from "agents";
+import { STALE_RUN_MS } from "./run-status";
 
-export type ThreadStatus = "running" | "done" | "error";
+export type ThreadStatus = "running" | "recovering" | "done" | "error";
 
 export interface ThreadMeta {
   /** Session slug — also the /thread/:session route (e.g. cloudflare-agents-1859). */
@@ -89,6 +90,16 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
     });
   }
 
+  /** A recoverable interruption was detected; no terminal outcome exists yet. */
+  async recordRecovery(input: { session: string }): Promise<void> {
+    this.#setActiveStatus(input.session, "recovering");
+  }
+
+  /** Recovery entered a fresh continuation invocation. */
+  async recordRunning(input: { session: string }): Promise<void> {
+    this.#setActiveStatus(input.session, "running");
+  }
+
   /** A turn reached a terminal state. */
   async recordTurn(input: {
     session: string;
@@ -110,6 +121,41 @@ export class CommandCenterAgent extends Agent<Env, CommandCenterState> {
   /** Read-only snapshot for the HTTP fallback (see /api/command-center). */
   async getSnapshot(): Promise<CommandCenterState> {
     return this.state;
+  }
+
+  async claimContinuation(
+    session: string
+  ): Promise<
+    | { ok: true; thread: ThreadMeta }
+    | { ok: false; reason: "not_found" | "not_recoverable" }
+  > {
+    const thread = this.state.threads[session];
+    if (!thread) return { ok: false, reason: "not_found" };
+    const staleRunning =
+      thread.status === "running" &&
+      Date.now() - thread.updatedAt >= STALE_RUN_MS;
+    if (thread.status !== "error" && !staleRunning) {
+      return { ok: false, reason: "not_recoverable" };
+    }
+    this.#put({
+      ...thread,
+      status: "running",
+      updatedAt: Date.now(),
+      runs: thread.runs + 1,
+      lastError: undefined
+    });
+    return { ok: true, thread };
+  }
+
+  #setActiveStatus(session: string, status: "recovering" | "running"): void {
+    const prev = this.state.threads[session];
+    if (!prev || prev.status === "done") return;
+    this.#put({
+      ...prev,
+      status,
+      updatedAt: Date.now(),
+      lastError: undefined
+    });
   }
 
   #put(meta: ThreadMeta): void {

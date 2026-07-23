@@ -153,6 +153,9 @@ importers:
 
   agent-think:
     dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^3.0.83
+        version: 3.0.85(zod@4.4.3)
       '@ai-sdk/openai':
         specifier: ^3.0.70
         version: 3.0.74(zod@4.4.3)
@@ -163,8 +166,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/think
       '@cloudflare/workspace':
-        specifier: 0.0.0-alpha.11
-        version: 0.0.0-alpha.11(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)
+        specifier: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18
+        version: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)
       '@platformatic/vfs':
         specifier: ^0.4.0
         version: 0.4.0
@@ -2715,6 +2718,15 @@ importers:
       '@cloudflare/voice':
         specifier: '*'
         version: link:../../packages/voice
+      '@cloudflare/voice-assemblyai':
+        specifier: '*'
+        version: link:../../voice-providers/assemblyai
+      '@cloudflare/voice-elevenlabs':
+        specifier: '*'
+        version: link:../../voice-providers/elevenlabs
+      '@cloudflare/voice-telnyx':
+        specifier: '*'
+        version: link:../../voice-providers/telnyx
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -3933,7 +3945,7 @@ importers:
   packages/hono-agents:
     devDependencies:
       agents:
-        specifier: ^0.17.1
+        specifier: ^0.18.0
         version: link:../agents
       hono:
         specifier: ^4.12.27
@@ -4612,6 +4624,12 @@ importers:
       wrangler:
         specifier: ^4.105.0
         version: 4.105.0(@cloudflare/workers-types@4.20260629.1)
+
+  voice-providers/assemblyai:
+    dependencies:
+      '@cloudflare/voice':
+        specifier: '>=0.3.3 <1.0.0'
+        version: link:../../packages/voice
 
   voice-providers/deepgram:
     dependencies:
@@ -5554,8 +5572,9 @@ packages:
   '@cloudflare/workers-types@4.20260629.1':
     resolution: {integrity: sha512-5vq2ErIFVRSQ8Dcw5YOeEoBdZBudqBjHFKTWD3SBGiJR5hD1+/86aRUV/DTpEK9sXXCGOTGgpWBGlPSlW7djVg==}
 
-  '@cloudflare/workspace@0.0.0-alpha.11':
-    resolution: {integrity: sha512-L6lsiHZBz7X5eTpbgBvpA3VeVIRpcGUp3KXfaFZOy6LL9JF4vWDuZPN86/bDEa7hklNPx4UQK/n88gCRAToAFA==}
+  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18':
+    resolution: {integrity: sha512-xd19y3M6pYO7l9TZIFEMSTy/its4EaikA5UmnEezzcSDvtq3c9+h9/AlsbALNEhHF1SP6mk48Qns9ZtK367W0g==, tarball: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18}
+    version: 0.0.0-alpha.11
     peerDependencies:
       '@platformatic/vfs': '*'
       diff: ^9.0.0
@@ -13220,7 +13239,7 @@ snapshots:
 
   '@cloudflare/workers-types@4.20260629.1': {}
 
-  '@cloudflare/workspace@0.0.0-alpha.11(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
+  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
     dependencies:
       capnweb: 0.8.0
       just-bash: 3.0.2

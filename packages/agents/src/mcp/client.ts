@@ -4,7 +4,10 @@ import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.j
 import type {
   CallToolRequest,
   CallToolResultSchema,
+  ClientCapabilities,
   CompatibilityCallToolResultSchema,
+  ElicitRequest,
+  ElicitResult,
   GetPromptRequest,
   Prompt,
   ReadResourceRequest,
@@ -13,15 +16,17 @@ import type {
   ServerCapabilities,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { type RetryOptions, tryN } from "../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
+  elicitationCapabilitiesFromHandlers,
   MCPClientConnection,
   MCPConnectionState,
+  type MCPDiscoveryResult,
+  type MCPElicitationHandlers,
   type MCPTransportOptions
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
@@ -44,10 +49,6 @@ import {
 } from "./client-host";
 import type { Agent } from "../index";
 import type { McpAgent } from ".";
-
-const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
-  jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
-};
 
 export type MCPAITool = {
   description?: string;
@@ -101,6 +102,27 @@ function sanitizeErrorString(error: string | null): string | null {
   }
   return sanitized;
 }
+type MCPAIConvertedSchemas = {
+  inputSchema: z.ZodType;
+  outputSchema?: z.ZodType;
+};
+
+type MCPAISchemaSource = {
+  tool: Tool;
+  inputSchema: Tool["inputSchema"] | undefined;
+  outputSchema: Tool["outputSchema"] | undefined;
+};
+
+type MCPAISchemaCacheSlot = MCPAISchemaSource &
+  (
+    | { status: "converted"; converted: MCPAIConvertedSchemas }
+    | { status: "failed"; error: string }
+  );
+
+type MCPAISchemaCacheEntry = {
+  catalog: Tool[];
+  converted: Array<MCPAISchemaCacheSlot | undefined>;
+};
 
 /** Maximum length of a normalized MCP server id. */
 export const MCP_SERVER_ID_MAX_LENGTH = 64;
@@ -290,6 +312,12 @@ export type MCPServerOptions = {
   };
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
+  /**
+   * Client capabilities advertised from configured handlers (currently the
+   * elicitation modes). Handlers are functions and cannot be persisted, so
+   * this records what they advertised for restores after hibernation.
+   */
+  capabilities?: ClientCapabilities;
 };
 
 /**
@@ -332,6 +360,13 @@ export type MCPConnectionResult =
       state: typeof MCPConnectionState.CONNECTED;
     };
 
+/** Converts a resolved connection failure into a retry signal. */
+class ConnectRetryError extends Error {
+  constructor(readonly result: MCPConnectionResult) {
+    super("MCP connection attempt failed");
+  }
+}
+
 /**
  * Result of discovering server capabilities.
  * success indicates whether discovery completed successfully.
@@ -360,6 +395,16 @@ export type MCPClientOAuthResult =
     };
 
 /** Options for an Agent-owned MCP client manager. */
+export type MCPClientElicitationHandler = (
+  request: ElicitRequest,
+  serverId: string
+) => Promise<ElicitResult>;
+
+export type MCPClientElicitationHandlers = {
+  form?: MCPClientElicitationHandler;
+  url?: MCPClientElicitationHandler;
+};
+
 export type MCPClientManagerOptions = {
   name: string;
   version: string;
@@ -403,6 +448,11 @@ export type MCPServerFilter = {
  */
 export class MCPClientManager implements AgentLifecycle {
   public mcpConnections: Record<string, MCPClientConnection> = {};
+  /** Cache only the current catalog so old schema graphs are not retained. */
+  private readonly _aiToolSchemas = new WeakMap<
+    MCPClientConnection,
+    MCPAISchemaCacheEntry
+  >();
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
@@ -413,6 +463,7 @@ export class MCPClientManager implements AgentLifecycle {
   private readonly _host: MCPClientManagerHost;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
+  private _elicitationHandlers?: MCPClientElicitationHandlers;
 
   /** @internal Protected for testing purposes. */
   protected readonly _onObservabilityEvent =
@@ -592,6 +643,25 @@ export class MCPClientManager implements AgentLifecycle {
         `);
   }
 
+  /**
+   * Scope the manager-level elicitation handler to a single connection.
+   * Returns undefined when no handler is configured so the connection keeps
+   * its default throwing behavior.
+   */
+  private scopedElicitationHandlers(
+    serverId: string
+  ): MCPElicitationHandlers | undefined {
+    const handlers = this._elicitationHandlers;
+    if (!handlers) return undefined;
+
+    const form = handlers.form;
+    const url = handlers.url;
+    return {
+      form: form ? (request) => form(request, serverId) : undefined,
+      url: url ? (request) => url(request, serverId) : undefined
+    };
+  }
+
   // SQL helper - runs a query and returns results as array
   private sql<T extends Record<string, SqlStorageValue>>(
     query: string,
@@ -645,6 +715,14 @@ export class MCPClientManager implements AgentLifecycle {
     clientName: string
   ): Promise<void> {
     if (oldId === newId) return;
+
+    // Restore work closes over oldId. Drain it before renaming, including
+    // replacement work registered while an earlier task settles.
+    while (true) {
+      const pending = this._pendingConnections.get(oldId);
+      if (!pending) break;
+      await pending.catch(() => {});
+    }
 
     const existing = this.sql<MCPServerRow>(
       "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
@@ -718,6 +796,14 @@ export class MCPClientManager implements AgentLifecycle {
       if (authProvider) {
         authProvider.serverId = newId;
       }
+      // The elicitation handler closes over the server id it was created
+      // with — rescope it so elicitation requests report the new id. With no
+      // handlers there is nothing to rescope, and configuring would wipe the
+      // connection's restored capability seed.
+      const scoped = this.scopedElicitationHandlers(newId);
+      if (scoped) {
+        conn.configureElicitationHandlers(scoped);
+      }
     }
 
     const disposables = this._connectionDisposables.get(oldId);
@@ -775,16 +861,48 @@ export class MCPClientManager implements AgentLifecycle {
   }
 
   /**
-   * Get the retry options for a server from stored server_options
+   * Get the parsed server_options for a stored server, if any.
    */
-  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
+  private getStoredServerOptions(
+    serverId: string
+  ): MCPServerOptions | undefined {
     const rows = this.sql<MCPServerRow>(
       "SELECT server_options FROM cf_agents_mcp_servers WHERE id = ?",
       serverId
     );
     if (!rows.length || !rows[0].server_options) return undefined;
-    const parsed: MCPServerOptions = JSON.parse(rows[0].server_options);
-    return parsed.retry;
+    return JSON.parse(rows[0].server_options);
+  }
+
+  /**
+   * Clear the capabilities persisted on a stored server row. Called once a
+   * seeded connection's handshake completes (see `createConnection`): the
+   * stamp is valid for one successful restore — sessions that configure
+   * handlers re-stamp every row, so a deploy that stops configuring them
+   * stops advertising stale modes after its first connected wake instead of
+   * forever, while wakes that never handshake don't burn the stamp.
+   */
+  private clearStoredCapabilities(serverId: string): void {
+    const rows = this.sql<MCPServerRow>(
+      "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers WHERE id = ?",
+      serverId
+    );
+    const row = rows[0];
+    if (!row?.server_options) return;
+    const options: MCPServerOptions = JSON.parse(row.server_options);
+    if (!options.capabilities) return;
+    options.capabilities = undefined;
+    this.saveServerToStorage({
+      ...row,
+      server_options: JSON.stringify(options)
+    });
+  }
+
+  /**
+   * Get the retry options for a server from stored server_options
+   */
+  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
+    return this.getStoredServerOptions(serverId)?.retry;
   }
 
   private clearServerAuthUrl(serverId: string): void {
@@ -868,6 +986,29 @@ export class MCPClientManager implements AgentLifecycle {
       return authProvider.runWithCodeVerifierState(state, callback);
     }
     return callback();
+  }
+
+  private async hasRedeemableOAuthState(
+    serverId: string,
+    authProvider: AgentMcpOAuthProvider,
+    state: string
+  ): Promise<boolean> {
+    authProvider.serverId = serverId;
+    try {
+      return (await authProvider.checkState(state)).valid;
+    } catch {
+      return false;
+    }
+  }
+
+  private ignoreUnverifiedCallback(
+    serverId: string,
+    error: string
+  ): MCPOAuthCallbackResult {
+    console.warn(
+      `[MCPClientManager] Ignoring OAuth callback with unverified state for server "${serverId}": ${error}`
+    );
+    return { serverId, authSuccess: false, authError: error };
   }
 
   private async consumeStaleOAuthState(
@@ -960,7 +1101,11 @@ export class MCPClientManager implements AgentLifecycle {
       client_id: null,
       auth_url: null,
       callback_url: "",
-      server_options: JSON.stringify({ bindingName, props })
+      server_options: JSON.stringify({
+        bindingName,
+        props,
+        capabilities: this.advertisedHandlerCapabilities()
+      })
     });
   }
 
@@ -1027,6 +1172,12 @@ export class MCPClientManager implements AgentLifecycle {
       const parsedOptions: MCPServerOptions | null = server.server_options
         ? JSON.parse(server.server_options)
         : null;
+      // A caller-supplied jsonSchemaValidator is a live instance that can't
+      // survive JSON serialization; drop whatever degraded value an older row
+      // may hold so the connection falls back to the Worker-safe default.
+      if (parsedOptions?.client) {
+        delete parsedOptions.client.jsonSchemaValidator;
+      }
 
       let authProvider: AgentMcpOAuthProvider | undefined;
       if (server.callback_url) {
@@ -1109,6 +1260,34 @@ export class MCPClientManager implements AgentLifecycle {
     }
   }
 
+  private async _connectWithRetry(
+    serverId: string,
+    retry?: RetryOptions
+  ): Promise<MCPConnectionResult> {
+    const maxAttempts = retry?.maxAttempts ?? 3;
+    const baseDelayMs = retry?.baseDelayMs ?? 500;
+    const maxDelayMs = retry?.maxDelayMs ?? 5000;
+
+    try {
+      return await tryN(
+        maxAttempts,
+        async () => {
+          const result = await this.connectToServer(serverId);
+          if (result.state === MCPConnectionState.FAILED) {
+            throw new ConnectRetryError(result);
+          }
+          return result;
+        },
+        { baseDelayMs, maxDelayMs }
+      );
+    } catch (error) {
+      if (error instanceof ConnectRetryError) {
+        return error.result;
+      }
+      throw error;
+    }
+  }
+
   /**
    * Internal method to restore a single server connection and discovery
    */
@@ -1120,21 +1299,12 @@ export class MCPClientManager implements AgentLifecycle {
     // If stored OAuth tokens are valid, connection will succeed automatically
     // If tokens are missing/invalid, connection will fail with Unauthorized
     // and state will be set to "authenticating"
-    const maxAttempts = retry?.maxAttempts ?? 3;
-    const baseDelayMs = retry?.baseDelayMs ?? 500;
-    const maxDelayMs = retry?.maxDelayMs ?? 5000;
-
-    const connectResult = await tryN(
-      maxAttempts,
-      async () => this.connectToServer(serverId),
-      { baseDelayMs, maxDelayMs }
-    ).catch((error) => {
-      console.error(
-        `Error connecting to ${serverId} after ${maxAttempts} attempts:`,
-        error
-      );
-      return null;
-    });
+    const connectResult = await this._connectWithRetry(serverId, retry).catch(
+      (error) => {
+        console.error(`Error connecting to ${serverId}:`, error);
+        return null;
+      }
+    );
 
     if (connectResult?.state === MCPConnectionState.CONNECTED) {
       const discoverResult = await this.discoverIfConnected(serverId);
@@ -1190,37 +1360,20 @@ export class MCPClientManager implements AgentLifecycle {
       );
     }
 
-    // During OAuth reconnect, reuse existing connection to preserve state
+    // During OAuth reconnect, reuse existing connection to preserve state;
+    // otherwise drop any existing connection and rebuild it.
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
-      const normalizedTransport = {
-        ...options.transport,
-        type: options.transport?.type ?? ("auto" as TransportType)
-      };
-
-      this.mcpConnections[id] = new MCPClientConnection(
-        new URL(url),
-        {
-          name: this._name,
-          version: this._version
-        },
-        {
-          client: options.client ?? {},
-          transport: normalizedTransport
-        }
-      );
-
-      // Pipe connection-level observability events to the manager-level emitter
-      // and track the subscription for cleanup.
-      const store = new DisposableStore();
-      // If we somehow already had disposables for this id, clear them first
-      const existing = this._connectionDisposables.get(id);
-      if (existing) existing.dispose();
-      this._connectionDisposables.set(id, store);
-      store.add(
-        this.mcpConnections[id].onObservabilityEvent((event) => {
-          this._onObservabilityEvent.fire(event);
-        })
-      );
+      const replaced = this.mcpConnections[id];
+      if (replaced) {
+        delete this.mcpConnections[id];
+        // Once removed from the map, nothing else can close this transport.
+        await replaced.close().catch(() => {});
+        this.updateStoredSessionId(id, undefined);
+      }
+      this.createConnection(id, url, {
+        client: options.client,
+        transport: options.transport ?? {}
+      });
     }
 
     // Initialize connection first. this will try connect
@@ -1322,6 +1475,14 @@ export class MCPClientManager implements AgentLifecycle {
       type: options.transport?.type ?? ("auto" as TransportType)
     };
 
+    // Stored servers re-advertise the capabilities persisted on their row
+    // (see MCPServerOptions.capabilities); fresh registrations have no row
+    // yet and rely on the handlers below. The stamp is read without
+    // clearing so a wake that never handshakes (OAuth still pending, isolate
+    // death before connect) doesn't burn it — it is consumed at first use,
+    // once a seeded handshake completes.
+    const capabilitySeed = this.getStoredServerOptions(id)?.capabilities;
+
     this.mcpConnections[id] = new MCPClientConnection(
       new URL(url),
       {
@@ -1329,8 +1490,10 @@ export class MCPClientManager implements AgentLifecycle {
         version: this._version
       },
       {
-        client: { ...defaultClientOptions, ...options.client },
-        transport: normalizedTransport
+        client: options.client ?? {},
+        transport: normalizedTransport,
+        elicitationHandlers: this.scopedElicitationHandlers(id),
+        capabilitySeed
       }
     );
 
@@ -1344,6 +1507,36 @@ export class MCPClientManager implements AgentLifecycle {
         this._onObservabilityEvent.fire(event);
       })
     );
+
+    if (capabilitySeed) {
+      const conn = this.mcpConnections[id];
+      // Every handshake reports its success through this event, so it marks
+      // the seed's first use. The burn only targets deploys that stopped
+      // configuring handlers: a session with handlers configured owns the
+      // row stamps (each configure call re-stamps them, and re-registering
+      // a server writes a fresh one), and configureElicitationHandlers
+      // drops the in-memory seed on live connections — either way a fresh
+      // stamp meant for the next wake is never wiped here.
+      const seedClear = conn.onObservabilityEvent((event) => {
+        if (
+          event.type !== "mcp:client:connect" ||
+          event.payload.state !== MCPConnectionState.CONNECTED
+        ) {
+          return;
+        }
+        seedClear.dispose();
+        if (this._elicitationHandlers || !conn.options.capabilitySeed) return;
+        // migrateServerId may have renamed the row while the handshake was
+        // in flight — clear under the connection's current id.
+        const currentId = Object.keys(this.mcpConnections).find(
+          (key) => this.mcpConnections[key] === conn
+        );
+        if (currentId) {
+          this.clearStoredCapabilities(currentId);
+        }
+      });
+      store.add(seedClear);
+    }
 
     return this.mcpConnections[id];
   }
@@ -1375,9 +1568,13 @@ export class MCPClientManager implements AgentLifecycle {
       }
     });
 
-    // Save to storage (exclude authProvider since it's recreated during restore)
+    // Save to storage, excluding live instances that can't survive JSON
+    // serialization: authProvider is recreated during restore, and
+    // jsonSchemaValidator falls back to the Worker-safe default.
     const { authProvider: _, ...transportWithoutAuth } =
       options.transport ?? {};
+    const { jsonSchemaValidator: _validator, ...serializableClient } =
+      options.client ?? {};
     this.saveServerToStorage({
       id,
       name: options.name,
@@ -1386,9 +1583,10 @@ export class MCPClientManager implements AgentLifecycle {
       client_id: options.clientId ?? null,
       auth_url: options.authUrl ?? null,
       server_options: JSON.stringify({
-        client: options.client,
+        client: serializableClient,
         transport: transportWithoutAuth,
-        retry: options.retry
+        retry: options.retry,
+        capabilities: this.advertisedHandlerCapabilities()
       })
     });
 
@@ -1606,6 +1804,24 @@ export class MCPClientManager implements AgentLifecycle {
           }
           return this.oauthCallbackSuccess(validation.serverId, conn);
         }
+        // Only a callback carrying a genuine state nonce may fail the
+        // connection; a stray or invalid callback must not alter the
+        // connection state machine.
+        const authProvider = conn.options.transport.authProvider;
+        if (
+          validation.state &&
+          authProvider &&
+          !(await this.hasRedeemableOAuthState(
+            validation.serverId,
+            authProvider,
+            validation.state
+          ))
+        ) {
+          return this.ignoreUnverifiedCallback(
+            validation.serverId,
+            validation.error
+          );
+        }
         return this.failConnection(validation.serverId, validation.error);
       }
 
@@ -1637,7 +1853,12 @@ export class MCPClientManager implements AgentLifecycle {
           await this.consumeStaleOAuthState(serverId, authProvider, state);
           return this.oauthCallbackSuccess(serverId, conn);
         }
-        throw new Error(stateValidation.error || "Invalid state");
+        // Same rule as the invalid branch above: a callback whose nonce
+        // cannot be verified must not alter the connection state machine.
+        return this.ignoreUnverifiedCallback(
+          serverId,
+          stateValidation.error || "Invalid state"
+        );
       }
 
       // A stale popup can complete after another callback already exchanged tokens.
@@ -1647,12 +1868,16 @@ export class MCPClientManager implements AgentLifecycle {
         return this.oauthCallbackSuccess(serverId, conn);
       }
 
-      if (conn.connectionState !== MCPConnectionState.AUTHENTICATING) {
+      if (
+        conn.connectionState !== MCPConnectionState.AUTHENTICATING &&
+        conn.connectionState !== MCPConnectionState.FAILED
+      ) {
         throw new Error(
-          `Failed to authenticate: the client is in "${conn.connectionState}" state, expected "authenticating"`
+          `Failed to authenticate from "${conn.connectionState}" state`
         );
       }
 
+      // A genuine callback can recover a flow that previously entered FAILED.
       conn.connectionState = MCPConnectionState.CONNECTING;
       await authProvider.consumeState(state);
       await this.completeAuthorizationAndCleanupVerifier(
@@ -1702,12 +1927,57 @@ export class MCPClientManager implements AgentLifecycle {
 
     // Delegate to connection's discover method which handles cancellation and timeout
     const result = await conn.discover(options);
+    if (!result.success && result.reason === "stale-session") {
+      return this._recoverStaleSession(conn, serverId, options);
+    }
     this._onServerStateChanged.fire();
 
-    return {
-      ...result,
-      state: conn.connectionState
-    };
+    return this._toDiscoverResult(conn, result);
+  }
+
+  private _toDiscoverResult(
+    conn: MCPClientConnection,
+    result: MCPDiscoveryResult
+  ): MCPDiscoverResult {
+    return result.success
+      ? { success: true, state: conn.connectionState }
+      : { success: false, error: result.error, state: conn.connectionState };
+  }
+
+  private async _recoverStaleSession(
+    conn: MCPClientConnection,
+    serverId: string,
+    options: { timeoutMs?: number }
+  ): Promise<MCPDiscoverResult> {
+    conn.clearResumedSession();
+    this.updateStoredSessionId(serverId, undefined);
+
+    let connectResult: MCPConnectionResult;
+    try {
+      connectResult = await this.connectToServer(serverId);
+    } catch (error) {
+      return {
+        success: false,
+        error: toErrorMessage(error),
+        state: conn.connectionState
+      };
+    }
+
+    if (connectResult.state !== MCPConnectionState.CONNECTED) {
+      return {
+        success: false,
+        error:
+          connectResult.state === MCPConnectionState.FAILED
+            ? connectResult.error
+            : `Connection in ${connectResult.state} state after session re-initialization`,
+        state: conn.connectionState
+      };
+    }
+
+    const result = await conn.discover(options);
+    this._onServerStateChanged.fire();
+
+    return this._toDiscoverResult(conn, result);
   }
 
   /**
@@ -1752,15 +2022,7 @@ export class MCPClientManager implements AgentLifecycle {
     }
 
     const retry = this.getServerRetryOptions(serverId);
-    const maxAttempts = retry?.maxAttempts ?? 3;
-    const baseDelayMs = retry?.baseDelayMs ?? 500;
-    const maxDelayMs = retry?.maxDelayMs ?? 5000;
-
-    const connectResult = await tryN(
-      maxAttempts,
-      async () => this.connectToServer(serverId),
-      { baseDelayMs, maxDelayMs }
-    );
+    const connectResult = await this._connectWithRetry(serverId, retry);
     this._onServerStateChanged.fire();
 
     if (connectResult.state === MCPConnectionState.CONNECTED) {
@@ -1787,6 +2049,67 @@ export class MCPClientManager implements AgentLifecycle {
   }
 
   /**
+   * Configure handling for server-initiated `elicitation/create` requests.
+   *
+   * The handler is held in memory only and applied to every MCP connection
+   * created or restored by this manager. Call this before registering
+   * connections when you want the initial MCP handshake to advertise
+   * handler-driven form- and url-mode elicitation. Existing active connections
+   * keep their negotiated capabilities until they reconnect.
+   *
+   * The advertised modes are persisted with each stored server, so
+   * connections restored after hibernation re-advertise them at the handshake
+   * even when this is called later in the wake-up (e.g. from onStart) — the
+   * handlers attach to the live connections as soon as this runs.
+   *
+   * Pass undefined to clear the handler.
+   *
+   * @param handlers Elicitation handlers keyed by mode, each scoped with the server id that sent the request
+   */
+  configureElicitationHandlers(handlers?: MCPClientElicitationHandlers): void {
+    this._elicitationHandlers =
+      handlers && (handlers.form || handlers.url) ? handlers : undefined;
+    this.persistAdvertisedCapabilities();
+    for (const [id, connection] of Object.entries(this.mcpConnections)) {
+      connection.configureElicitationHandlers(
+        this.scopedElicitationHandlers(id)
+      );
+    }
+  }
+
+  /** Client capabilities advertised from the currently configured handlers. */
+  private advertisedHandlerCapabilities(): ClientCapabilities | undefined {
+    const elicitation = elicitationCapabilitiesFromHandlers(
+      this._elicitationHandlers
+    );
+    return elicitation ? { elicitation } : undefined;
+  }
+
+  /**
+   * Record the handler-derived capabilities on every stored server row so a
+   * restore after hibernation re-advertises them before the handlers
+   * themselves are reconfigured.
+   */
+  private persistAdvertisedCapabilities(): void {
+    const capabilities = this.advertisedHandlerCapabilities();
+    for (const server of this.getServersFromStorage()) {
+      const options: MCPServerOptions = server.server_options
+        ? JSON.parse(server.server_options)
+        : {};
+      if (
+        JSON.stringify(options.capabilities) === JSON.stringify(capabilities)
+      ) {
+        continue;
+      }
+      options.capabilities = capabilities;
+      this.saveServerToStorage({
+        ...server,
+        server_options: JSON.stringify(options)
+      });
+    }
+  }
+
+  /**
    * Get the current OAuth callback configuration
    * @returns The current OAuth callback configuration
    */
@@ -1803,70 +2126,130 @@ export class MCPClientManager implements AgentLifecycle {
   }
 
   /**
+   * Convert connected MCP tools for the AI SDK. Converted schemas are reused
+   * while a live connection retains the same catalog array and schema-source
+   * identities; tool records and execute closures are rebuilt on every call.
+   *
    * @param filter - Optional filter to scope results to specific servers
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(filter?: MCPServerFilter): MCPAIToolSet {
     const connections = this.filterConnections(filter);
+    const entries: [string, MCPAITool][] = [];
 
-    for (const [id, conn] of Object.entries(connections)) {
+    for (const [serverId, conn] of Object.entries(connections)) {
       if (
         conn.connectionState !== MCPConnectionState.READY &&
         conn.connectionState !== MCPConnectionState.AUTHENTICATING
       ) {
         console.warn(
-          `[getAITools] WARNING: Reading tools from connection ${id} in state "${conn.connectionState}". Tools may not be loaded yet.`
+          `[getAITools] WARNING: Reading tools from connection ${serverId} in state "${conn.connectionState}". Tools may not be loaded yet.`
         );
       }
+
+      const catalog = conn.tools;
+      let cache = this._aiToolSchemas.get(conn);
+      if (!cache || cache.catalog !== catalog) {
+        cache = { catalog, converted: [] };
+        this._aiToolSchemas.set(conn, cache);
+      }
+
+      for (const [index, tool] of catalog.entries()) {
+        const toolName = tool.name;
+        try {
+          const sourceInputSchema = tool.inputSchema;
+          const sourceOutputSchema = tool.outputSchema;
+          let slot = cache.converted[index];
+          if (
+            !slot ||
+            slot.tool !== tool ||
+            slot.inputSchema !== sourceInputSchema ||
+            slot.outputSchema !== sourceOutputSchema
+          ) {
+            try {
+              slot = {
+                status: "converted",
+                tool,
+                inputSchema: sourceInputSchema,
+                outputSchema: sourceOutputSchema,
+                converted: {
+                  inputSchema: sourceInputSchema
+                    ? z.fromJSONSchema(
+                        sourceInputSchema as Parameters<
+                          typeof z.fromJSONSchema
+                        >[0]
+                      )
+                    : z.fromJSONSchema({ type: "object" }),
+                  outputSchema: sourceOutputSchema
+                    ? z.fromJSONSchema(
+                        sourceOutputSchema as Parameters<
+                          typeof z.fromJSONSchema
+                        >[0]
+                      )
+                    : undefined
+                }
+              };
+            } catch (error) {
+              const errorText = String(error);
+              cache.converted[index] = {
+                status: "failed",
+                tool,
+                inputSchema: sourceInputSchema,
+                outputSchema: sourceOutputSchema,
+                error: errorText
+              };
+              console.warn(
+                `[getAITools] Skipping tool "${toolName}" from "${serverId}": ${errorText}`
+              );
+              continue;
+            }
+            cache.converted[index] = slot;
+          }
+
+          if (slot.status === "failed") continue;
+
+          const toolKey = `tool_${serverId.replace(/-/g, "")}_${toolName}`;
+          const title = tool.title ?? tool.annotations?.title;
+          const description = tool.description;
+          entries.push([
+            toolKey,
+            {
+              description,
+              title,
+              execute: async (args) => {
+                const result = await this.callTool({
+                  arguments: args,
+                  name: toolName,
+                  serverId
+                });
+                if (result.isError) {
+                  const content = result.content as
+                    | Array<{ type: string; text?: string }>
+                    | undefined;
+                  const textContent = content?.[0];
+                  const message =
+                    textContent?.type === "text" && textContent.text
+                      ? textContent.text
+                      : "Tool call failed";
+                  throw new Error(message);
+                }
+                return result;
+              },
+              inputSchema: slot.converted.inputSchema,
+              outputSchema: slot.converted.outputSchema
+            }
+          ]);
+        } catch (error) {
+          console.warn(
+            `[getAITools] Skipping tool "${toolName}" from "${serverId}": ${error}`
+          );
+        }
+      }
+
+      // Release removed slots when a public catalog array is spliced in place.
+      cache.converted.length = catalog.length;
     }
 
-    const entries: [string, MCPAITool][] = [];
-    for (const tool of getNamespacedData(connections, "tools")) {
-      try {
-        const toolKey = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
-        const title = tool.title ?? tool.annotations?.title;
-        entries.push([
-          toolKey,
-          {
-            description: tool.description,
-            title,
-            execute: async (args) => {
-              const result = await this.callTool({
-                arguments: args,
-                name: tool.name,
-                serverId: tool.serverId
-              });
-              if (result.isError) {
-                const content = result.content as
-                  | Array<{ type: string; text?: string }>
-                  | undefined;
-                const textContent = content?.[0];
-                const message =
-                  textContent?.type === "text" && textContent.text
-                    ? textContent.text
-                    : "Tool call failed";
-                throw new Error(message);
-              }
-              return result;
-            },
-            inputSchema: tool.inputSchema
-              ? z.fromJSONSchema(
-                  tool.inputSchema as Parameters<typeof z.fromJSONSchema>[0]
-                )
-              : z.fromJSONSchema({ type: "object" }),
-            outputSchema: tool.outputSchema
-              ? z.fromJSONSchema(
-                  tool.outputSchema as Parameters<typeof z.fromJSONSchema>[0]
-                )
-              : undefined
-          }
-        ]);
-      } catch (e) {
-        console.warn(
-          `[getAITools] Skipping tool "${tool.name}" from "${tool.serverId}": ${e}`
-        );
-      }
-    }
     return Object.fromEntries(entries);
   }
 
@@ -2060,15 +2443,55 @@ export class MCPClientManager implements AgentLifecycle {
 
     if (existingServer && this.mcpConnections[existingServer.id]) {
       const connection = this.mcpConnections[existingServer.id];
-      if (
-        connection.connectionState === MCPConnectionState.AUTHENTICATING &&
-        connection.options.transport.authProvider?.authUrl
-      ) {
-        return {
-          id: existingServer.id,
-          state: MCPConnectionState.AUTHENTICATING,
-          authUrl: connection.options.transport.authProvider.authUrl
-        };
+      if (connection.connectionState === MCPConnectionState.AUTHENTICATING) {
+        const authProvider = connection.options.transport.authProvider;
+        const authUrl =
+          (await this._redeemableAuthUrl(
+            existingServer.id,
+            authProvider?.authUrl,
+            authProvider
+          )) ??
+          (await this._redeemableAuthUrl(
+            existingServer.id,
+            existingServer.auth_url,
+            authProvider
+          ));
+        if (authUrl) {
+          return {
+            id: existingServer.id,
+            state: MCPConnectionState.AUTHENTICATING,
+            authUrl
+          };
+        }
+
+        const reconnectResult = await this.connectToServer(existingServer.id);
+        if (reconnectResult.state === MCPConnectionState.AUTHENTICATING) {
+          if (!reconnectResult.authUrl) {
+            throw new Error("OAuth configuration incomplete: missing authUrl");
+          }
+          return {
+            id: existingServer.id,
+            state: reconnectResult.state,
+            authUrl: reconnectResult.authUrl
+          };
+        }
+        if (reconnectResult.state === MCPConnectionState.CONNECTED) {
+          const discoverResult = await this.discoverIfConnected(
+            existingServer.id
+          );
+          if (!discoverResult?.success) {
+            throw new Error(
+              `Failed to discover MCP server capabilities: ${discoverResult?.error ?? "connection not found"}`
+            );
+          }
+          return {
+            id: existingServer.id,
+            state: MCPConnectionState.READY
+          };
+        }
+        throw new Error(
+          `Failed to connect to MCP server at ${normalizedUrl}: ${reconnectResult.error}`
+        );
       }
       if (connection.connectionState === MCPConnectionState.FAILED) {
         throw new Error(
@@ -2177,7 +2600,7 @@ export class MCPClientManager implements AgentLifecycle {
         : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(host.getAgentClassName())}/${host.getAgentInstanceName()}/callback`;
     }
 
-    const id = requestedId ?? nanoid(8);
+    const id = requestedId ?? existingServer?.id ?? nanoid(8);
     let authProvider: AgentMcpOAuthProvider | undefined;
     if (callbackUrl) {
       authProvider = this._host.createAuthProvider(callbackUrl);
@@ -2291,6 +2714,41 @@ export class MCPClientManager implements AgentLifecycle {
     }
 
     return state;
+  }
+
+  /**
+   * Validate that a persisted OAuth authorization URL is still redeemable —
+   * i.e. its `state` parameter is still valid — before handing it back to a
+   * caller. Stale URLs would send the user through a flow whose callback the
+   * provider rejects.
+   */
+  private async _redeemableAuthUrl(
+    serverId: string,
+    authUrl: string | null | undefined,
+    authProvider: AgentMcpOAuthProvider | undefined
+  ): Promise<string | undefined> {
+    if (!this._isAbsoluteHttpUrl(authUrl) || !authProvider) return;
+    const state = new URL(authUrl).searchParams.get("state");
+    if (!state) return authUrl;
+
+    authProvider.serverId = serverId;
+    try {
+      return (await authProvider.checkState(state)).valid ? authUrl : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private _isAbsoluteHttpUrl(
+    value: string | null | undefined
+  ): value is string {
+    if (!value) return false;
+    try {
+      const url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+      return false;
+    }
   }
 
   /**

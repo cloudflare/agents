@@ -103,6 +103,89 @@ describe("createCodemodeRuntime", () => {
     });
   });
 
+  it("executes directly without an AI SDK adapter", async () => {
+    const runtimeStub = {
+      begin: vi.fn(async () => "exec_direct"),
+      getExecution: vi.fn(async () => null),
+      complete: vi.fn(async () => undefined)
+    };
+    const executor = createMockExecutor("direct result");
+    const runtime = createCodemodeRuntime({
+      ctx: createMockCtx(runtimeStub),
+      executor,
+      connectors: []
+    });
+
+    await expect(runtime.execute({ code: "async () => 42" })).resolves.toEqual({
+      status: "completed",
+      executionId: "exec_direct",
+      result: "direct result",
+      logs: undefined
+    });
+    expect(executor.execute).toHaveBeenCalled();
+  });
+
+  it("searches and describes connectors without running sandbox code", async () => {
+    const runtimeStub = {
+      listSnippets: vi.fn(async () => [
+        {
+          name: "triage",
+          description: "Triage open issues",
+          code: "async () => []",
+          savedAt: 1
+        }
+      ])
+    };
+    const describe = vi.fn(async () => ({
+      name: "github",
+      instructions: "GitHub issues",
+      descriptors: {
+        list_issues: {
+          description: "List repository issues",
+          inputSchema: { type: "object" }
+        },
+        create_issue: {
+          description: "Create a repository issue",
+          inputSchema: {
+            type: "object",
+            properties: { title: { type: "string" } },
+            required: ["title"]
+          }
+        }
+      },
+      annotations: { create_issue: { requiresApproval: true } }
+    }));
+    const connector = {
+      name: () => "github",
+      describe
+    } as unknown as import("../connectors").CodemodeConnector;
+    const runtime = createCodemodeRuntime({
+      ctx: createMockCtx(runtimeStub),
+      executor: createMockExecutor(),
+      connectors: [connector]
+    });
+
+    await expect(runtime.search("create issue")).resolves.toMatchObject({
+      results: [
+        {
+          path: "github.create_issue",
+          kind: "method",
+          requiresApproval: true
+        }
+      ]
+    });
+    await expect(
+      runtime.describe("github.create_issue")
+    ).resolves.toMatchObject({
+      path: "github.create_issue",
+      description: "Create a repository issue",
+      requiresApproval: true,
+      kind: "method"
+    });
+    expect(describe).toHaveBeenCalledTimes(1);
+    expect(runtimeStub.listSnippets).toHaveBeenCalledTimes(2);
+  });
+
   it("executes as a plain tool through AI SDK streamText", async () => {
     const runtimeStub = {
       begin: vi.fn(async () => "exec_1"),
@@ -198,7 +281,8 @@ describe("createCodemodeRuntime", () => {
       status: "completed",
       executionId: "exec_1",
       result: "approved",
-      logs: undefined
+      logs: undefined,
+      calls: []
     });
 
     expect(runtimeStub.resume).toHaveBeenCalledWith("exec_1");

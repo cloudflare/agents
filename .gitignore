@@ -164,3 +164,6 @@ test-results/
 
 # Temporary compat-verification harness (Layer A)
 .compat-harness/
+
+# npm artifacts (repo uses pnpm)
+package-lock.json

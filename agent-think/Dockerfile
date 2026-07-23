@@ -10,7 +10,9 @@
 # them on PATH inside the FUSE-mounted /workspace. The image stays
 # otherwise lean.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11 AS wsd
+# Workspace PR #18, commit 98b74eb. Keep this in sync with the
+# @cloudflare/workspace pkg.pr.new dependency in package.json.
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:pr-18-98b74eb@sha256:179a3dc35bdf752d4cdcef07012dcf5c9949d04ba4d0d3ab1ed6d5703cfd73a9 AS wsd
 
 FROM debian:stable-slim
 
@@ -25,7 +27,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl xz-utils git bash unzip \
       fuse3 libfuse2t64 \
-      build-essential \
+      build-essential python3 \
       gh jq \
  && rm -rf /var/lib/apt/lists/*
 
@@ -68,10 +70,9 @@ COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 #                          and most language runtimes honour this.
 #   - NODE_EXTRA_CA_CERTS — Node's TLS stack. Appends to its bundled
 #                          CA list (not a replacement).
-#   - REQUESTS_CA_BUNDLE  — Python's `requests`. Harmless when Python
-#                          isn't installed; cheap insurance for any
-#                          future Python add-ons or `pip` calls a
-#                          user invokes via `exec`.
+#   - REQUESTS_CA_BUNDLE  — Python's `requests`. Keeps Python add-ons
+#                          and `pip` calls made through `exec` on the
+#                          same trusted bundle.
 #
 # Setting all three before the Node/Bun install means the global
 # `npm install -g esbuild wrangler` and Bun bootstrap below also run
