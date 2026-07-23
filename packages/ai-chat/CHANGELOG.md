@@ -1,5 +1,15 @@
 # @cloudflare/ai-chat
 
+## 0.9.4
+
+### Patch Changes
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Group SDK-managed initialization, startup, chat interactions, turns, and durable submissions into semantic phases. Storage-heavy setup, hydration, recovery, request persistence, and response persistence each receive a named bucket, keeping inference and tool spans visible without discarding lower-level Durable Object SQLite spans. Each span records agent identity, storage phase, a stable marker for UI grouping, and operation-specific metadata. No-op on runtimes without the `tracing` API.
+
+- [#1963](https://github.com/cloudflare/agents/pull/1963) [`3ce98ff`](https://github.com/cloudflare/agents/commit/3ce98ff084fcd5f0f8433e1f20352f0a170e3e4a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Reconcile stale `useAgentChat` server-streaming state after an errored client reconnects.
+
+  Reconnect probes now include correlation IDs, and `STREAM_RESUME_NONE` distinguishes globally idle agents from active continuations owned by another connection. The hook clears fallback streaming state only for a correlated idle response. Reconnect opens are retained while a prior resume or status transition settles, in-flight handshakes are retransmitted on replacement sockets, and all AI SDK resume entry points share one serialization gate.
+
 ## 0.9.3
 
 ### Patch Changes

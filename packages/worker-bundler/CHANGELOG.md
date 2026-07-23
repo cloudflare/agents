@@ -1,5 +1,11 @@
 # @cloudflare/worker-bundler
 
+## 0.2.2
+
+### Patch Changes
+
+- [#1961](https://github.com/cloudflare/agents/pull/1961) [`365ced3`](https://github.com/cloudflare/agents/commit/365ced36bab5f713f1669f3b79f6810ba1535729) Thanks [@agent-think](https://github.com/apps/agent-think)! - fix: eliminate polynomial-time ReDoS in import/export matching. The `importExportRegex` in `rewriteImports` and the regex fallback in `parseImports` matched the import clause with `[\w*{}\s,]+` followed by `\s+`, letting both quantifiers consume the same whitespace and backtrack catastrophically on near-match inputs (`import` + 10k spaces took ~175s). Clauses are now matched as non-whitespace tokens separated by whitespace and bounded at the next import/export keyword, eliminating both overlapping backtracking and repeated suffix scans while preserving valid imports.
+
 ## 0.2.1
 
 ### Patch Changes

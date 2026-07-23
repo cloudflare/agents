@@ -88,7 +88,7 @@ function createManagerStorage() {
   return { rows, storage };
 }
 
-function createRecordedFetch(): {
+function createRecordedFetch(options?: { rejectSessionId?: string }): {
   fetch: typeof globalThis.fetch;
   requests: RecordedRequest[];
 } {
@@ -96,12 +96,17 @@ function createRecordedFetch(): {
 
   const recordedFetch: typeof globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
+    const sessionId = request.headers.get("mcp-session-id");
     requests.push({
       method: request.method,
       url: request.url,
-      sessionId: request.headers.get("mcp-session-id"),
+      sessionId,
       accept: request.headers.get("accept")
     });
+
+    if (sessionId === options?.rejectSessionId) {
+      return new Response("Session not found", { status: 404 });
+    }
 
     const ctx = createExecutionContext();
     return worker.fetch(request, env, ctx);
@@ -293,6 +298,52 @@ describe("MCP streamable-http session lifecycle integration", () => {
       if (manager2) {
         await manager2.closeAllConnections();
       }
+    }
+  });
+
+  it("reinitializes when a server rejects a restored session", async () => {
+    const { rows, storage } = createManagerStorage();
+    const staleSessionId = "expired-session";
+    const serverId = "integration-stale-session";
+    const manager1 = new MCPClientManager("test-client", "1.0.0", {
+      storage
+    });
+    let manager2: MCPClientManager | undefined;
+
+    try {
+      await manager1.registerServer(serverId, {
+        url: "http://example.com/mcp",
+        name: "Stale Session Server",
+        transport: { type: "streamable-http", sessionId: staleSessionId }
+      });
+
+      manager2 = new MCPClientManager("test-client", "1.0.0", { storage });
+      const restoredFetch = createRecordedFetch({
+        rejectSessionId: staleSessionId
+      });
+      vi.stubGlobal("fetch", restoredFetch.fetch);
+
+      await manager2.restoreConnectionsFromStorage("test-client");
+      await manager2.waitForConnections({ timeout: 5000 });
+
+      expect(manager2.mcpConnections[serverId].connectionState).toBe("ready");
+      expect(
+        restoredFetch.requests.some(
+          (request) => request.sessionId === staleSessionId
+        )
+      ).toBe(true);
+      expect(
+        restoredFetch.requests.filter(
+          (request) => request.method === "POST" && !request.sessionId
+        )
+      ).toHaveLength(1);
+
+      const options = JSON.parse(rows.get(serverId)?.server_options ?? "{}");
+      expect(options.transport.sessionId).toEqual(expect.any(String));
+      expect(options.transport.sessionId).not.toBe(staleSessionId);
+    } finally {
+      await manager1.closeAllConnections();
+      await manager2?.closeAllConnections();
     }
   });
 });

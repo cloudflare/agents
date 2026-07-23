@@ -23,6 +23,7 @@ import {
   elicitationCapabilitiesFromHandlers,
   MCPClientConnection,
   MCPConnectionState,
+  type MCPDiscoveryResult,
   type MCPElicitationHandlers,
   type MCPTransportOptions
 } from "./client-connection";
@@ -309,6 +310,13 @@ export type MCPConnectionResult =
       state: typeof MCPConnectionState.CONNECTED;
     };
 
+/** Converts a resolved connection failure into a retry signal. */
+class ConnectRetryError extends Error {
+  constructor(readonly result: MCPConnectionResult) {
+    super("MCP connection attempt failed");
+  }
+}
+
 /**
  * Result of discovering server capabilities.
  * success indicates whether discovery completed successfully.
@@ -490,6 +498,14 @@ export class MCPClientManager {
     clientName: string
   ): Promise<void> {
     if (oldId === newId) return;
+
+    // Restore work closes over oldId. Drain it before renaming, including
+    // replacement work registered while an earlier task settles.
+    while (true) {
+      const pending = this._pendingConnections.get(oldId);
+      if (!pending) break;
+      await pending.catch(() => {});
+    }
 
     const existing = this.sql<MCPServerRow>(
       "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
@@ -753,6 +769,29 @@ export class MCPClientManager {
       return authProvider.runWithCodeVerifierState(state, callback);
     }
     return callback();
+  }
+
+  private async hasRedeemableOAuthState(
+    serverId: string,
+    authProvider: AgentMcpOAuthProvider,
+    state: string
+  ): Promise<boolean> {
+    authProvider.serverId = serverId;
+    try {
+      return (await authProvider.checkState(state)).valid;
+    } catch {
+      return false;
+    }
+  }
+
+  private ignoreUnverifiedCallback(
+    serverId: string,
+    error: string
+  ): MCPOAuthCallbackResult {
+    console.warn(
+      `[MCPClientManager] Ignoring OAuth callback with unverified state for server "${serverId}": ${error}`
+    );
+    return { serverId, authSuccess: false, authError: error };
   }
 
   private async consumeStaleOAuthState(
@@ -1039,6 +1078,34 @@ export class MCPClientManager {
     }
   }
 
+  private async _connectWithRetry(
+    serverId: string,
+    retry?: RetryOptions
+  ): Promise<MCPConnectionResult> {
+    const maxAttempts = retry?.maxAttempts ?? 3;
+    const baseDelayMs = retry?.baseDelayMs ?? 500;
+    const maxDelayMs = retry?.maxDelayMs ?? 5000;
+
+    try {
+      return await tryN(
+        maxAttempts,
+        async () => {
+          const result = await this.connectToServer(serverId);
+          if (result.state === MCPConnectionState.FAILED) {
+            throw new ConnectRetryError(result);
+          }
+          return result;
+        },
+        { baseDelayMs, maxDelayMs }
+      );
+    } catch (error) {
+      if (error instanceof ConnectRetryError) {
+        return error.result;
+      }
+      throw error;
+    }
+  }
+
   /**
    * Internal method to restore a single server connection and discovery
    */
@@ -1050,21 +1117,12 @@ export class MCPClientManager {
     // If stored OAuth tokens are valid, connection will succeed automatically
     // If tokens are missing/invalid, connection will fail with Unauthorized
     // and state will be set to "authenticating"
-    const maxAttempts = retry?.maxAttempts ?? 3;
-    const baseDelayMs = retry?.baseDelayMs ?? 500;
-    const maxDelayMs = retry?.maxDelayMs ?? 5000;
-
-    const connectResult = await tryN(
-      maxAttempts,
-      async () => this.connectToServer(serverId),
-      { baseDelayMs, maxDelayMs }
-    ).catch((error) => {
-      console.error(
-        `Error connecting to ${serverId} after ${maxAttempts} attempts:`,
-        error
-      );
-      return null;
-    });
+    const connectResult = await this._connectWithRetry(serverId, retry).catch(
+      (error) => {
+        console.error(`Error connecting to ${serverId}:`, error);
+        return null;
+      }
+    );
 
     if (connectResult?.state === MCPConnectionState.CONNECTED) {
       const discoverResult = await this.discoverIfConnected(serverId);
@@ -1123,7 +1181,13 @@ export class MCPClientManager {
     // During OAuth reconnect, reuse existing connection to preserve state;
     // otherwise drop any existing connection and rebuild it.
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
-      delete this.mcpConnections[id];
+      const replaced = this.mcpConnections[id];
+      if (replaced) {
+        delete this.mcpConnections[id];
+        // Once removed from the map, nothing else can close this transport.
+        await replaced.close().catch(() => {});
+        this.updateStoredSessionId(id, undefined);
+      }
       this.createConnection(id, url, {
         client: options.client,
         transport: options.transport ?? {}
@@ -1558,6 +1622,24 @@ export class MCPClientManager {
           }
           return this.oauthCallbackSuccess(validation.serverId, conn);
         }
+        // Only a callback carrying a genuine state nonce may fail the
+        // connection; a stray or invalid callback must not alter the
+        // connection state machine.
+        const authProvider = conn.options.transport.authProvider;
+        if (
+          validation.state &&
+          authProvider &&
+          !(await this.hasRedeemableOAuthState(
+            validation.serverId,
+            authProvider,
+            validation.state
+          ))
+        ) {
+          return this.ignoreUnverifiedCallback(
+            validation.serverId,
+            validation.error
+          );
+        }
         return this.failConnection(validation.serverId, validation.error);
       }
 
@@ -1589,7 +1671,12 @@ export class MCPClientManager {
           await this.consumeStaleOAuthState(serverId, authProvider, state);
           return this.oauthCallbackSuccess(serverId, conn);
         }
-        throw new Error(stateValidation.error || "Invalid state");
+        // Same rule as the invalid branch above: a callback whose nonce
+        // cannot be verified must not alter the connection state machine.
+        return this.ignoreUnverifiedCallback(
+          serverId,
+          stateValidation.error || "Invalid state"
+        );
       }
 
       // A stale popup can complete after another callback already exchanged tokens.
@@ -1599,12 +1686,16 @@ export class MCPClientManager {
         return this.oauthCallbackSuccess(serverId, conn);
       }
 
-      if (conn.connectionState !== MCPConnectionState.AUTHENTICATING) {
+      if (
+        conn.connectionState !== MCPConnectionState.AUTHENTICATING &&
+        conn.connectionState !== MCPConnectionState.FAILED
+      ) {
         throw new Error(
-          `Failed to authenticate: the client is in "${conn.connectionState}" state, expected "authenticating"`
+          `Failed to authenticate from "${conn.connectionState}" state`
         );
       }
 
+      // A genuine callback can recover a flow that previously entered FAILED.
       conn.connectionState = MCPConnectionState.CONNECTING;
       await authProvider.consumeState(state);
       await this.completeAuthorizationAndCleanupVerifier(
@@ -1654,12 +1745,57 @@ export class MCPClientManager {
 
     // Delegate to connection's discover method which handles cancellation and timeout
     const result = await conn.discover(options);
+    if (!result.success && result.reason === "stale-session") {
+      return this._recoverStaleSession(conn, serverId, options);
+    }
     this._onServerStateChanged.fire();
 
-    return {
-      ...result,
-      state: conn.connectionState
-    };
+    return this._toDiscoverResult(conn, result);
+  }
+
+  private _toDiscoverResult(
+    conn: MCPClientConnection,
+    result: MCPDiscoveryResult
+  ): MCPDiscoverResult {
+    return result.success
+      ? { success: true, state: conn.connectionState }
+      : { success: false, error: result.error, state: conn.connectionState };
+  }
+
+  private async _recoverStaleSession(
+    conn: MCPClientConnection,
+    serverId: string,
+    options: { timeoutMs?: number }
+  ): Promise<MCPDiscoverResult> {
+    conn.clearResumedSession();
+    this.updateStoredSessionId(serverId, undefined);
+
+    let connectResult: MCPConnectionResult;
+    try {
+      connectResult = await this.connectToServer(serverId);
+    } catch (error) {
+      return {
+        success: false,
+        error: toErrorMessage(error),
+        state: conn.connectionState
+      };
+    }
+
+    if (connectResult.state !== MCPConnectionState.CONNECTED) {
+      return {
+        success: false,
+        error:
+          connectResult.state === MCPConnectionState.FAILED
+            ? connectResult.error
+            : `Connection in ${connectResult.state} state after session re-initialization`,
+        state: conn.connectionState
+      };
+    }
+
+    const result = await conn.discover(options);
+    this._onServerStateChanged.fire();
+
+    return this._toDiscoverResult(conn, result);
   }
 
   /**
@@ -1704,15 +1840,7 @@ export class MCPClientManager {
     }
 
     const retry = this.getServerRetryOptions(serverId);
-    const maxAttempts = retry?.maxAttempts ?? 3;
-    const baseDelayMs = retry?.baseDelayMs ?? 500;
-    const maxDelayMs = retry?.maxDelayMs ?? 5000;
-
-    const connectResult = await tryN(
-      maxAttempts,
-      async () => this.connectToServer(serverId),
-      { baseDelayMs, maxDelayMs }
-    );
+    const connectResult = await this._connectWithRetry(serverId, retry);
     this._onServerStateChanged.fire();
 
     if (connectResult.state === MCPConnectionState.CONNECTED) {

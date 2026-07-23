@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/sse.js";
 import {
   StreamableHTTPClientTransport,
+  StreamableHTTPError,
   type StreamableHTTPClientTransportOptions
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 // Import types directly from MCP SDK
@@ -101,15 +102,10 @@ export type MCPClientConnectionResult = {
   transport?: BaseTransportType;
 };
 
-/**
- * Result of a discovery operation.
- * success indicates whether discovery completed successfully.
- * error is present when success is false.
- */
-export type MCPDiscoveryResult = {
-  success: boolean;
-  error?: string;
-};
+/** Result of discovering server capabilities. */
+export type MCPDiscoveryResult =
+  | { success: true }
+  | { success: false; reason: "error" | "stale-session"; error: string };
 
 /**
  * Handler for server-initiated `elicitation/create` requests.
@@ -547,6 +543,7 @@ export class MCPClientConnection {
       });
       return {
         success: false,
+        reason: "error",
         error: `Discovery skipped - connection in ${this.connectionState} state`
       };
     }
@@ -619,7 +616,17 @@ export class MCPClientConnection {
       this.connectionState = MCPConnectionState.CONNECTED;
 
       const error = e instanceof Error ? e.message : String(e);
-      return { success: false, error };
+      // A restored streamable HTTP session rejected with 404 must be
+      // initialized again without its persisted session id.
+      const staleSession =
+        this._probingCapabilities &&
+        e instanceof StreamableHTTPError &&
+        e.code === 404;
+      return {
+        success: false,
+        reason: staleSession ? "stale-session" : "error",
+        error
+      };
     } finally {
       // Clean up the abort controller
       this._discoveryAbortController = undefined;
@@ -805,6 +812,13 @@ export class MCPClientConnection {
     }
 
     return undefined;
+  }
+
+  /** @internal Clear a restored session before reconnecting. */
+  clearResumedSession(): void {
+    if ("sessionId" in this.options.transport) {
+      delete this.options.transport.sessionId;
+    }
   }
 
   private getTransportName(
