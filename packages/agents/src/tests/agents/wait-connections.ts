@@ -1,6 +1,7 @@
 import { Agent } from "../../index.ts";
 import type { AgentContext } from "../../index.ts";
 import { MCPConnectionState } from "../../mcp/client-connection.ts";
+import { MCPClientManager } from "../../mcp/client.ts";
 
 /**
  * Test Agent that exposes waitForConnections() for E2E testing.
@@ -12,6 +13,11 @@ import { MCPConnectionState } from "../../mcp/client-connection.ts";
  * avoiding DNS "nodename nor servname" spam from fake server URLs.
  */
 export class TestWaitConnectionsAgent extends Agent {
+  override mcp = new MCPClientManager(this, {
+    name: "wait-connections-test",
+    version: "1.0.0"
+  });
+
   constructor(ctx: AgentContext, env: Cloudflare.Env) {
     super(ctx, env);
     // Patch immediately — before onStart calls restoreConnectionsFromStorage
@@ -78,7 +84,7 @@ export class TestWaitConnectionsAgent extends Agent {
     connectionIds: string[];
     connectionStates: Record<string, string>;
   }> {
-    await this.mcp.restoreConnectionsFromStorage(this.name);
+    await this.mcp.restoreConnectionsFromStorage();
     await this.mcp.waitForConnections(
       timeout != null ? { timeout } : undefined
     );
@@ -122,7 +128,7 @@ export class TestWaitConnectionsAgent extends Agent {
     connectionIds: string[];
     connectionStates: Record<string, string>;
   }> {
-    await this.mcp.restoreConnectionsFromStorage(this.name);
+    await this.mcp.restoreConnectionsFromStorage();
     // No waitForConnections — check states immediately
 
     const connectionStates: Record<string, string> = {};

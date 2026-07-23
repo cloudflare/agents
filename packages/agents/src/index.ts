@@ -16,15 +16,8 @@ export {
   SUB_PREFIX
 } from "./sub-routing";
 export type { SubAgentPathMatch } from "./sub-routing";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
 
-import type {
-  Prompt,
-  Resource,
-  ServerCapabilities,
-  Tool
-} from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
@@ -57,9 +50,14 @@ export {
 } from "./retries";
 import {
   MCPClientManager,
-  normalizeServerId,
-  type MCPClientOAuthResult
+  type AddMcpServerOptions,
+  type AddRpcMcpServerOptions,
+  type MCPServersState
 } from "./mcp/client";
+import {
+  registerMCPClientManagerHost,
+  type MCPClientManagerHost
+} from "./mcp/client-host";
 import type {
   WorkflowCallback,
   WorkflowTrackingRow,
@@ -88,8 +86,8 @@ import {
   type TraceAttributes
 } from "./observability/tracing/tracer";
 import { DisposableStore } from "./core/events";
+import { AgentLifecycleRunner } from "./agent/lifecycle";
 import { MessageType } from "./types";
-import { RPC_DO_PREFIX } from "./mcp/rpc";
 import type { McpAgent } from "./mcp";
 export {
   AGENT_TOOL_PROGRESS_PART,
@@ -878,8 +876,12 @@ export type { RetryOptions } from "./retries";
 export {
   normalizeServerId,
   MCP_SERVER_ID_MAX_LENGTH,
+  type AddMcpServerOptions,
+  type AddRpcMcpServerOptions,
   type MCPAITool,
-  type MCPAIToolSet
+  type MCPAIToolSet,
+  type MCPServer,
+  type MCPServersState
 } from "./mcp/client";
 export {
   DurableObjectOAuthClientProvider,
@@ -894,86 +896,6 @@ export {
 export type MCPServerMessage = {
   type: MessageType.CF_AGENT_MCP_SERVERS;
   mcp: MCPServersState;
-};
-
-export type MCPServersState = {
-  servers: {
-    [id: string]: MCPServer;
-  };
-  tools: (Tool & { serverId: string })[];
-  prompts: (Prompt & { serverId: string })[];
-  resources: (Resource & { serverId: string })[];
-};
-
-export type MCPServer = {
-  name: string;
-  server_url: string;
-  auth_url: string | null;
-  // This state is specifically about the temporary process of getting a token (if needed).
-  // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
-  // to communicate a change to a non-ready state.
-  state: MCPConnectionState;
-  /** May contain untrusted content from external OAuth providers. Escape appropriately for your output context. */
-  error: string | null;
-  instructions: string | null;
-  capabilities: ServerCapabilities | null;
-};
-
-/**
- * Options for adding an MCP server
- */
-export type AddMcpServerOptions = {
-  /**
-   * Optional caller-supplied stable server id. When provided, this id is used
-   * for storage, restore, and tool-name namespacing instead of a generated
-   * `nanoid`. The value is normalized via {@link normalizeServerId} — for
-   * connector-style integrations this lets `addMcpServer` keep producing
-   * keys like `tool_github_create_pull_request`.
-   *
-   * Throws if an existing server already uses the same (normalized) id but a
-   * different name or url.
-   */
-  id?: string;
-  /** OAuth callback host (auto-derived from request if omitted) */
-  callbackHost?: string;
-  /**
-   * Custom callback URL path — bypasses the default `/agents/{class}/{name}/callback` construction.
-   * Required when `sendIdentityOnConnect` is `false` to prevent leaking the instance name.
-   * When set, the callback URL becomes `{callbackHost}/{callbackPath}`.
-   * The developer must route this path to the agent instance via `getAgentByName`.
-   * Should be a plain path (e.g., `/mcp-callback`) — do not include query strings or fragments.
-   */
-  callbackPath?: string;
-  /** Agents routing prefix (default: "agents") */
-  agentsPrefix?: string;
-  /** MCP client options */
-  client?: ConstructorParameters<typeof Client>[1];
-  /** Transport options */
-  transport?: {
-    /** Custom headers for authentication (e.g., bearer tokens, CF Access) */
-    headers?: HeadersInit;
-    /** Transport type: "sse", "streamable-http", or "auto" (default) */
-    type?: TransportType;
-  };
-  /** Retry options for connection and reconnection attempts */
-  retry?: RetryOptions;
-};
-
-/**
- * Options for adding an MCP server via RPC (Durable Object binding)
- */
-export type AddRpcMcpServerOptions = {
-  /**
-   * Optional caller-supplied stable server id. When provided, this id is used
-   * for storage, restore, and tool-name namespacing instead of a generated
-   * `nanoid`. The value is normalized via {@link normalizeServerId}.
-   *
-   * Throws if an existing server already uses the same (normalized) id but a
-   * different name or url.
-   */
-  id?: string;
-  /** Props to pass to the McpAgent instance */
-  props?: Record<string, unknown>;
 };
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
@@ -1229,31 +1151,6 @@ function extractInternalFlags(
     }
   }
   return result;
-}
-
-/** Max length for error strings broadcast to clients. */
-const MAX_ERROR_STRING_LENGTH = 500;
-
-/**
- * Sanitize an error string before broadcasting to clients.
- * MCP error strings may contain untrusted content from external OAuth
- * providers — truncate and strip control characters to limit XSS risk.
- */
-// Regex to match C0 control characters (except \t, \n, \r) and DEL.
-const CONTROL_CHAR_RE = new RegExp(
-  // oxlint-disable-next-line no-control-regex -- intentionally matching control chars for sanitization
-  "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]",
-  "g"
-);
-
-function sanitizeErrorString(error: string | null): string | null {
-  if (error === null) return null;
-  // Strip control characters (keep printable ASCII + common unicode)
-  let sanitized = error.replace(CONTROL_CHAR_RE, "");
-  if (sanitized.length > MAX_ERROR_STRING_LENGTH) {
-    sanitized = sanitized.substring(0, MAX_ERROR_STRING_LENGTH) + "...";
-  }
-  return sanitized;
 }
 
 /**
@@ -1584,6 +1481,7 @@ export class Agent<
 > extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
+  private _lifecycle = new AgentLifecycleRunner<Props>(() => [this.mcp]);
   private _destroyed = false;
 
   /**
@@ -1686,7 +1584,7 @@ export class Agent<
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  readonly mcp: MCPClientManager;
+  mcp: MCPClientManager;
 
   /**
    * Initial state for the Agent
@@ -1859,6 +1757,18 @@ export class Agent<
     } as ObservabilityEvent);
   }
 
+  /** Run installed component turn hooks and merge their contributions. */
+  protected async _runLifecycleTurn(
+    readiness?: { timeout?: number },
+    options?: { includeTools?: boolean }
+  ): Promise<{ tools: Record<string, unknown> }> {
+    const contribution = await this._lifecycle.onTurn({
+      readiness,
+      includeTools: options?.includeTools
+    });
+    return { tools: contribution.tools ?? {} };
+  }
+
   /** Run SDK work under a stable parent for platform child spans. */
   private _withAgentSpan<T>(
     operation: string,
@@ -1963,18 +1873,6 @@ export class Agent<
       versionRow.length > 0 ? Number(versionRow[0].state) : 0;
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
-      this.sql`
-          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )
-        `;
-
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_queues (
           id TEXT PRIMARY KEY NOT NULL,
@@ -2335,31 +2233,45 @@ export class Agent<
           }
         );
 
-        // Initialize MCPClientManager AFTER tables are created
-        return new MCPClientManager(this._ParentClass.name, "0.0.1", {
+        const mcpHost: MCPClientManagerHost = {
           storage: this.ctx.storage,
+          getAgentClassName: () => this._ParentClass.name,
+          getAgentInstanceName: () => this.name,
+          getEnv: () => this.env as Record<string, unknown>,
+          getRequestContext: () => {
+            const context = agentContext.getStore();
+            return {
+              request: context?.request,
+              connectionUri: context?.connection?.uri
+            };
+          },
+          getSendIdentityOnConnect: () =>
+            this._resolvedOptions.sendIdentityOnConnect,
           createAuthProvider: (callbackUrl) =>
-            this.createMcpOAuthProvider(callbackUrl)
+            this.createMcpOAuthProvider(callbackUrl),
+          publishState: (mcp) => {
+            this._broadcastProtocol(
+              JSON.stringify({
+                mcp,
+                type: MessageType.CF_AGENT_MCP_SERVERS
+              })
+            );
+          },
+          emitObservability: (event) => {
+            this.observability?.emit({
+              ...event,
+              agent: this._ParentClass.name,
+              name: this.name
+            });
+          }
+        };
+        registerMCPClientManagerHost(this, mcpHost);
+        // Initialize MCPClientManager AFTER tables are created
+        return new MCPClientManager(this, {
+          name: this._ParentClass.name,
+          version: "0.0.1"
         });
       }
-    );
-
-    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
-    this._disposables.add(
-      this.mcp.onServerStateChanged(async () => {
-        this.broadcastMcpServers();
-      })
-    );
-
-    // Emit MCP observability events
-    this._disposables.add(
-      this.mcp.onObservabilityEvent((event) => {
-        this.observability?.emit({
-          ...event,
-          agent: this._ParentClass.name,
-          name: this.name
-        });
-      })
     );
     // Compute persistence-hook dispatch mode once.
     // Throws immediately if both hooks are overridden on the same class.
@@ -2405,11 +2317,10 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          // Handle MCP OAuth callback if this is one
-          const oauthResponse = await this.handleMcpOAuthCallback(request);
-          if (oauthResponse) {
-            return oauthResponse;
-          }
+          const lifecycleResponse = await this._lifecycle.onRequest({
+            request
+          });
+          if (lifecycleResponse) return lifecycleResponse;
 
           return this._tryCatch(() => _onRequest(request));
         }
@@ -2737,18 +2648,17 @@ export class Agent<
           );
 
           await this._tryCatch(async () => {
-            // Restore MCP connections before fiber/chat recovery so recovered
-            // turns see MCP tools. Restored connections re-advertise the
-            // capabilities persisted from the previous session; the handlers
-            // behind them attach when onStart() configures them.
+            // Restore MCP connections (via component lifecycle) before
+            // fiber/chat recovery so recovered turns see MCP tools. Restored
+            // connections re-advertise the capabilities persisted from the
+            // previous session; the handlers behind them attach when
+            // onStart() configures them.
             await this._withAgentSpan(
               "restore_mcp_connections",
               "startup",
               {},
               async () => {
-                await this.mcp.restoreConnectionsFromStorage(this.name);
-                await this._restoreRpcMcpServers();
-                this.broadcastMcpServers();
+                await this._lifecycle.onStart({ props });
               }
             );
 
@@ -10998,14 +10908,14 @@ export class Agent<
     // SQL row: it must outlive `_dropInternalTablesForDestroy`.
     await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
 
+    this._disposables.dispose();
+    await this._lifecycle.onDestroy({});
+
     this._dropInternalTablesForDestroy();
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
-
-    this._disposables.dispose();
-    await this.mcp.dispose();
 
     this._destroyed = true;
 
@@ -11074,7 +10984,6 @@ export class Agent<
 
   /** @internal Drop every internal Agents SDK table during top-level destroy. */
   protected _dropInternalTablesForDestroy(): void {
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
@@ -12040,65 +11949,6 @@ export class Agent<
     return undefined;
   }
 
-  private _findBindingNameForNamespace(
-    namespace: DurableObjectNamespace<McpAgent>
-  ): string | undefined {
-    for (const [key, value] of Object.entries(
-      this.env as Record<string, unknown>
-    )) {
-      if (value === namespace) {
-        return key;
-      }
-    }
-    return undefined;
-  }
-
-  private async _restoreRpcMcpServers(): Promise<void> {
-    const rpcServers = this.mcp.getRpcServersFromStorage();
-    for (const server of rpcServers) {
-      if (this.mcp.mcpConnections[server.id]) {
-        continue;
-      }
-
-      const opts: { bindingName: string; props?: Record<string, unknown> } =
-        server.server_options ? JSON.parse(server.server_options) : {};
-
-      const namespace = (this.env as Record<string, unknown>)[
-        opts.bindingName
-      ] as DurableObjectNamespace<McpAgent> | undefined;
-      if (!namespace) {
-        console.warn(
-          `[Agent] Cannot restore RPC MCP server "${server.name}": binding "${opts.bindingName}" not found in env`
-        );
-        continue;
-      }
-
-      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-
-      try {
-        await this.mcp.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-          reconnect: { id: server.id },
-          transport: {
-            type: "rpc" as TransportType,
-            namespace,
-            name: normalizedName,
-            props: opts.props
-          }
-        });
-
-        const conn = this.mcp.mcpConnections[server.id];
-        if (conn && conn.connectionState === MCPConnectionState.CONNECTED) {
-          await this.mcp.discoverIfConnected(server.id);
-        }
-      } catch (error) {
-        console.error(
-          `[Agent] Error restoring RPC MCP server "${server.name}":`,
-          error
-        );
-      }
-    }
-  }
-
   // ==========================================
   // Workflow Lifecycle Callbacks
   // ==========================================
@@ -12293,30 +12143,14 @@ export class Agent<
     }
   }
 
-  /**
-   * Connect to a new MCP Server via RPC (Durable Object binding)
-   *
-   * The binding name and props are persisted to storage so the connection
-   * is automatically restored after Durable Object hibernation.
-   *
-   * @example
-   * await this.addMcpServer("counter", env.MY_MCP);
-   * await this.addMcpServer("counter", env.MY_MCP, { props: { userId: "123" } });
-   */
+  /** Connect to an MCP server backed by a Durable Object binding. */
   async addMcpServer<T extends McpAgent>(
     serverName: string,
     binding: DurableObjectNamespace<T>,
     options?: AddRpcMcpServerOptions
   ): Promise<{ id: string; state: typeof MCPConnectionState.READY }>;
 
-  /**
-   * Connect to a new MCP Server via HTTP (SSE or Streamable HTTP)
-   *
-   * @example
-   * await this.addMcpServer("github", "https://mcp.github.com");
-   * await this.addMcpServer("github", "https://mcp.github.com", { transport: { type: "sse" } });
-   * await this.addMcpServer("github", url, callbackHost, agentsPrefix, options); // legacy
-   */
+  /** Connect to an MCP server over HTTP. */
   async addMcpServer(
     serverName: string,
     url: string,
@@ -12345,417 +12179,31 @@ export class Agent<
     agentsPrefix?: string,
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
-      };
+      transport?: { headers?: HeadersInit; type?: TransportType };
     }
-  ): Promise<
-    | {
-        id: string;
-        state: typeof MCPConnectionState.AUTHENTICATING;
-        authUrl: string;
-      }
-    | {
-        id: string;
-        state: typeof MCPConnectionState.READY;
-        authUrl?: undefined;
-      }
-  > {
-    const isHttpTransport = typeof urlOrBinding === "string";
-    const normalizedUrl = isHttpTransport
-      ? new URL(urlOrBinding).href
-      : undefined;
-
-    // Extract and normalize a caller-supplied stable id, if any. The same
-    // option field is accepted on both the HTTP and RPC option shapes.
-    let requestedId: string | undefined;
-    if (
-      typeof callbackHostOrOptions === "object" &&
-      callbackHostOrOptions !== null &&
-      typeof (callbackHostOrOptions as { id?: unknown }).id === "string"
-    ) {
-      const rawId = (callbackHostOrOptions as { id: string }).id;
-      requestedId = normalizeServerId(rawId);
+  ) {
+    if (typeof urlOrBinding === "string") {
+      return this.mcp.addMcpServer(
+        serverName,
+        urlOrBinding,
+        callbackHostOrOptions as string | AddMcpServerOptions | undefined,
+        agentsPrefix,
+        options
+      );
     }
-
-    const allServers = this.mcp.listServers();
-
-    const existingServer = allServers.find(
-      (s) =>
-        s.name === serverName &&
-        (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
+    return this.mcp.addMcpServer(
+      serverName,
+      urlOrBinding,
+      callbackHostOrOptions as AddRpcMcpServerOptions | undefined
     );
-
-    if (requestedId) {
-      // Collision check 1: a caller-supplied id may only re-resolve to an
-      // existing server when the (name, url) also matches. Otherwise storage
-      // (INSERT OR REPLACE on id) would silently overwrite the existing row.
-      const idConflict = allServers.find((s) => {
-        if (s.id !== requestedId) return false;
-        if (s.name !== serverName) return true;
-        if (isHttpTransport) {
-          return new URL(s.server_url).href !== normalizedUrl;
-        }
-        return false;
-      });
-      if (idConflict) {
-        throw new Error(
-          `MCP server id "${requestedId}" is already in use by server "${idConflict.name}" (${idConflict.server_url}). ` +
-            `Stable ids must be unique per (name, url).`
-        );
-      }
-
-      // JIT-migrate: the same (name, url) is already registered under a
-      // different id (typically an auto-generated nanoid from a previous
-      // call that didn't supply `id`). This is the natural upgrade path —
-      // a user adds `{ id: "github" }` to an existing `addMcpServer` call.
-      // Rename the existing row + connection + OAuth keys to the new id in
-      // place so the caller's contract ("the id I get back is the id I
-      // asked for") holds and no stale storage rows are left behind.
-      if (existingServer && existingServer.id !== requestedId) {
-        await this.mcp.migrateServerId(
-          existingServer.id,
-          requestedId,
-          this.name
-        );
-        existingServer.id = requestedId;
-      }
-    }
-
-    if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
-      const conn = this.mcp.mcpConnections[existingServer.id];
-      if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
-        const authProvider = conn.options.transport.authProvider;
-        const authUrl =
-          (await this._redeemableAuthUrl(
-            existingServer.id,
-            authProvider?.authUrl,
-            authProvider
-          )) ??
-          (await this._redeemableAuthUrl(
-            existingServer.id,
-            existingServer.auth_url,
-            authProvider
-          ));
-        if (authUrl) {
-          return {
-            id: existingServer.id,
-            state: MCPConnectionState.AUTHENTICATING,
-            authUrl
-          };
-        }
-
-        const reconnectResult = await this.mcp.connectToServer(
-          existingServer.id
-        );
-        if (reconnectResult.state === MCPConnectionState.AUTHENTICATING) {
-          if (!reconnectResult.authUrl) {
-            throw new Error("OAuth configuration incomplete: missing authUrl");
-          }
-          return {
-            id: existingServer.id,
-            state: reconnectResult.state,
-            authUrl: reconnectResult.authUrl
-          };
-        }
-        if (reconnectResult.state === MCPConnectionState.CONNECTED) {
-          const discoverResult = await this.mcp.discoverIfConnected(
-            existingServer.id
-          );
-          if (!discoverResult?.success) {
-            throw new Error(
-              `Failed to discover MCP server capabilities: ${discoverResult?.error ?? "connection not found"}`
-            );
-          }
-          return {
-            id: existingServer.id,
-            state: MCPConnectionState.READY
-          };
-        }
-        throw new Error(
-          `Failed to connect to MCP server at ${normalizedUrl}: ${reconnectResult.error}`
-        );
-      }
-      if (conn.connectionState === MCPConnectionState.FAILED) {
-        throw new Error(
-          `MCP server "${serverName}" is in failed state: ${conn.connectionError}`
-        );
-      }
-      return { id: existingServer.id, state: MCPConnectionState.READY };
-    }
-
-    // RPC transport path: second argument is a DurableObjectNamespace
-    if (typeof urlOrBinding !== "string") {
-      const rpcOpts = callbackHostOrOptions as
-        | AddRpcMcpServerOptions
-        | undefined;
-
-      const normalizedName = serverName.toLowerCase().replace(/\s+/g, "-");
-
-      // Prefer the caller-supplied stable id, falling back to the existing
-      // server's id (for restore-through-addMcpServer), then to a generated id.
-      const reconnectId = requestedId ?? existingServer?.id;
-      const { id } = await this.mcp.connect(
-        `${RPC_DO_PREFIX}${normalizedName}`,
-        {
-          reconnect: reconnectId ? { id: reconnectId } : undefined,
-          transport: {
-            type: "rpc" as TransportType,
-            namespace:
-              urlOrBinding as unknown as DurableObjectNamespace<McpAgent>,
-            name: normalizedName,
-            props: rpcOpts?.props
-          }
-        }
-      );
-
-      const conn = this.mcp.mcpConnections[id];
-      if (conn && conn.connectionState === MCPConnectionState.CONNECTED) {
-        const discoverResult = await this.mcp.discoverIfConnected(id);
-        if (discoverResult && !discoverResult.success) {
-          throw new Error(
-            `Failed to discover MCP server capabilities: ${discoverResult.error}`
-          );
-        }
-      } else if (conn && conn.connectionState === MCPConnectionState.FAILED) {
-        throw new Error(
-          `Failed to connect to MCP server "${serverName}" via RPC: ${conn.connectionError}`
-        );
-      }
-
-      const bindingName = this._findBindingNameForNamespace(
-        urlOrBinding as unknown as DurableObjectNamespace<McpAgent>
-      );
-      if (bindingName) {
-        this.mcp.saveRpcServerToStorage(
-          id,
-          serverName,
-          normalizedName,
-          bindingName,
-          rpcOpts?.props
-        );
-      }
-
-      return { id, state: MCPConnectionState.READY };
-    }
-
-    // HTTP transport path
-    const httpOptions = callbackHostOrOptions as
-      | string
-      | AddMcpServerOptions
-      | undefined;
-
-    let resolvedCallbackHost: string | undefined;
-    let resolvedAgentsPrefix: string;
-    let resolvedOptions:
-      | {
-          client?: ConstructorParameters<typeof Client>[1];
-          transport?: {
-            headers?: HeadersInit;
-            type?: TransportType;
-          };
-          retry?: RetryOptions;
-        }
-      | undefined;
-
-    let resolvedCallbackPath: string | undefined;
-
-    if (typeof httpOptions === "object" && httpOptions !== null) {
-      resolvedCallbackHost = httpOptions.callbackHost;
-      resolvedCallbackPath = httpOptions.callbackPath;
-      resolvedAgentsPrefix = httpOptions.agentsPrefix ?? "agents";
-      resolvedOptions = {
-        client: httpOptions.client,
-        transport: httpOptions.transport,
-        retry: httpOptions.retry
-      };
-    } else {
-      resolvedCallbackHost = httpOptions;
-      resolvedAgentsPrefix = agentsPrefix ?? "agents";
-      resolvedOptions = options;
-    }
-
-    // Enforce callbackPath when sendIdentityOnConnect is false and callbackHost is provided
-    if (
-      !this._resolvedOptions.sendIdentityOnConnect &&
-      resolvedCallbackHost &&
-      !resolvedCallbackPath
-    ) {
-      throw new Error(
-        "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false — " +
-          "the default callback URL would expose the instance name. " +
-          "Provide a callbackPath and route the callback request to this agent via getAgentByName."
-      );
-    }
-
-    // Try to derive callbackHost from the current request or connection URI
-    if (!resolvedCallbackHost) {
-      const { request, connection } = getCurrentAgent();
-      if (request) {
-        const requestUrl = new URL(request.url);
-        resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
-      } else if (connection?.uri) {
-        const connectionUrl = new URL(connection.uri);
-        resolvedCallbackHost = `${connectionUrl.protocol}//${connectionUrl.host}`;
-      }
-    }
-
-    // Build the callback URL if we have a host (needed for OAuth, optional for non-OAuth servers)
-    let callbackUrl: string | undefined;
-    if (resolvedCallbackHost) {
-      const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
-      callbackUrl = resolvedCallbackPath
-        ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
-        : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
-    }
-
-    const id = requestedId ?? existingServer?.id ?? nanoid(8);
-
-    // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
-    let authProvider:
-      | ReturnType<typeof this.createMcpOAuthProvider>
-      | undefined;
-    if (callbackUrl) {
-      authProvider = this.createMcpOAuthProvider(callbackUrl);
-      authProvider.serverId = id;
-    }
-
-    // Use the transport type specified in options, or default to "auto"
-    const transportType: TransportType =
-      resolvedOptions?.transport?.type ?? "auto";
-
-    // allows passing through transport headers if necessary
-    // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
-    let headerTransportOpts: SSEClientTransportOptions = {};
-    if (resolvedOptions?.transport?.headers) {
-      headerTransportOpts = {
-        eventSourceInit: {
-          fetch: (url, init) =>
-            fetch(url, {
-              ...init,
-              headers: resolvedOptions?.transport?.headers
-            })
-        },
-        requestInit: {
-          headers: resolvedOptions?.transport?.headers
-        }
-      };
-    }
-
-    // Register server (also saves to storage)
-    await this.mcp.registerServer(id, {
-      url: normalizedUrl!,
-      name: serverName,
-      callbackUrl,
-      client: resolvedOptions?.client,
-      transport: {
-        ...headerTransportOpts,
-        authProvider,
-        type: transportType
-      },
-      retry: resolvedOptions?.retry
-    });
-
-    const result = await this.mcp.connectToServer(id);
-
-    if (result.state === MCPConnectionState.FAILED) {
-      // Server stays in storage so user can retry via connectToServer(id)
-      throw new Error(
-        `Failed to connect to MCP server at ${normalizedUrl}: ${result.error}`
-      );
-    }
-
-    if (result.state === MCPConnectionState.AUTHENTICATING) {
-      if (!callbackUrl) {
-        throw new Error(
-          "This MCP server requires OAuth authentication. " +
-            "Provide callbackHost in addMcpServer options to enable the OAuth flow."
-        );
-      }
-      return { id, state: result.state, authUrl: result.authUrl };
-    }
-
-    // State is CONNECTED - discover capabilities
-    const discoverResult = await this.mcp.discoverIfConnected(id);
-
-    if (discoverResult && !discoverResult.success) {
-      // Server stays in storage - connection is still valid, user can retry discovery
-      throw new Error(
-        `Failed to discover MCP server capabilities: ${discoverResult.error}`
-      );
-    }
-
-    return { id, state: MCPConnectionState.READY };
   }
 
-  private async _redeemableAuthUrl(
-    serverId: string,
-    authUrl: string | null | undefined,
-    authProvider: AgentMcpOAuthProvider | undefined
-  ): Promise<string | undefined> {
-    if (!this._isAbsoluteHttpUrl(authUrl) || !authProvider) return;
-    const state = new URL(authUrl).searchParams.get("state");
-    if (!state) return authUrl;
-
-    authProvider.serverId = serverId;
-    try {
-      return (await authProvider.checkState(state)).valid ? authUrl : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private _isAbsoluteHttpUrl(
-    value: string | null | undefined
-  ): value is string {
-    if (!value) return false;
-    try {
-      const url = new URL(value);
-      return url.protocol === "http:" || url.protocol === "https:";
-    } catch {
-      return false;
-    }
-  }
-
-  async removeMcpServer(id: string) {
+  async removeMcpServer(id: string): Promise<void> {
     await this.mcp.removeServer(id);
   }
 
   getMcpServers(): MCPServersState {
-    const mcpState: MCPServersState = {
-      prompts: this.mcp.listPrompts(),
-      resources: this.mcp.listResources(),
-      servers: {},
-      tools: this.mcp.listTools()
-    };
-
-    const servers = this.mcp.listServers();
-
-    if (servers && Array.isArray(servers) && servers.length > 0) {
-      for (const server of servers) {
-        const serverConn = this.mcp.mcpConnections[server.id];
-
-        // Determine the default state when no connection exists
-        let defaultState: "authenticating" | "not-connected" = "not-connected";
-        if (!serverConn && server.auth_url) {
-          // If there's an auth_url but no connection, it's waiting for OAuth
-          defaultState = "authenticating";
-        }
-
-        mcpState.servers[server.id] = {
-          auth_url: server.auth_url,
-          capabilities: serverConn?.serverCapabilities ?? null,
-          error: sanitizeErrorString(serverConn?.connectionError ?? null),
-          instructions: serverConn?.instructions ?? null,
-          name: server.name,
-          server_url: server.server_url,
-          state: serverConn?.connectionState ?? defaultState
-        };
-      }
-    }
-
-    return mcpState;
+    return this.mcp.getMcpServers();
   }
 
   /**
@@ -12786,109 +12234,6 @@ export class Agent<
       this.name,
       callbackUrl
     );
-  }
-
-  private broadcastMcpServers() {
-    this._broadcastProtocol(
-      JSON.stringify({
-        mcp: this.getMcpServers(),
-        type: MessageType.CF_AGENT_MCP_SERVERS
-      })
-    );
-  }
-
-  /**
-   * Handle MCP OAuth callback request if it's an OAuth callback.
-   *
-   * This method encapsulates the entire OAuth callback flow:
-   * 1. Checks if the request is an MCP OAuth callback
-   * 2. Processes the OAuth code exchange
-   * 3. Establishes the connection if successful
-   * 4. Broadcasts MCP server state updates
-   * 5. Returns the appropriate HTTP response
-   *
-   * @param request The incoming HTTP request
-   * @returns Response if this was an OAuth callback, null otherwise
-   */
-  private async handleMcpOAuthCallback(
-    request: Request
-  ): Promise<Response | null> {
-    // Check if this is an OAuth callback request
-    const isCallback = this.mcp.isCallbackRequest(request);
-    if (!isCallback) {
-      return null;
-    }
-
-    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
-    // This fires onServerStateChanged event which triggers broadcast
-    const result = await this.mcp.handleCallbackRequest(request);
-
-    // If auth was successful, establish the connection in the background
-    // (establishConnection handles retries internally using per-server retry config)
-    if (result.authSuccess) {
-      this.mcp.establishConnection(result.serverId).catch((error) => {
-        console.error(
-          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
-          error
-        );
-      });
-    }
-
-    this.broadcastMcpServers();
-
-    // Return the HTTP response for the OAuth callback
-    return this.handleOAuthCallbackResponse(result, request);
-  }
-
-  /**
-   * Handle OAuth callback response using MCPClientManager configuration
-   * @param result OAuth callback result
-   * @param request The original request (needed for base URL)
-   * @returns Response for the OAuth callback
-   */
-  private handleOAuthCallbackResponse(
-    result: MCPClientOAuthResult,
-    request: Request
-  ): Response {
-    const config = this.mcp.getOAuthCallbackConfig();
-
-    // Use custom handler if configured
-    if (config?.customHandler) {
-      return config.customHandler(result);
-    }
-
-    const baseOrigin = new URL(request.url).origin;
-
-    // Redirect to success URL if configured
-    if (config?.successRedirect && result.authSuccess) {
-      try {
-        return Response.redirect(
-          new URL(config.successRedirect, baseOrigin).href
-        );
-      } catch (e) {
-        console.error(
-          "Invalid successRedirect URL:",
-          config.successRedirect,
-          e
-        );
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    // Redirect to error URL if configured
-    if (config?.errorRedirect && !result.authSuccess) {
-      try {
-        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
-          result.authError || "Unknown error"
-        )}`;
-        return Response.redirect(new URL(errorUrl, baseOrigin).href);
-      } catch (e) {
-        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    return Response.redirect(baseOrigin);
   }
 }
 

@@ -5,6 +5,12 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { MCPClientManager } from "../../mcp/client";
+import type { Agent } from "../../index";
+import { registerMCPClientManagerHost } from "../../mcp/client-host";
+import {
+  DurableObjectOAuthClientProvider,
+  type AgentMcpOAuthProvider
+} from "../../mcp/do-oauth-client-provider";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 
@@ -28,6 +34,35 @@ const urlElicitRequest: ElicitRequest = {
     elicitationId: "elicit-1"
   }
 };
+
+function createManager(
+  storage: DurableObjectStorage,
+  createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider
+): MCPClientManager {
+  const owner = {};
+  registerMCPClientManagerHost(owner, {
+    storage,
+    getAgentClassName: () => "TestAgent",
+    getAgentInstanceName: () => "test-client",
+    getEnv: () => ({}),
+    getRequestContext: () => ({}),
+    getSendIdentityOnConnect: () => true,
+    createAuthProvider:
+      createAuthProvider ??
+      ((callbackUrl) =>
+        new DurableObjectOAuthClientProvider(
+          storage,
+          "test-client",
+          callbackUrl
+        )),
+    publishState: () => {},
+    emitObservability: () => {}
+  });
+  return new MCPClientManager(owner as Agent, {
+    name: "test-client",
+    version: "1.0.0"
+  });
+}
 
 function advertisedCapabilities(
   connection: MCPClientConnection
@@ -317,9 +352,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const handler = vi
         .fn()
         .mockResolvedValue({ action: "accept", content: { name: "Alice" } });
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
 
       manager.configureElicitationHandlers({ form: handler, url: handler });
       await manager.registerServer("srv-1", {
@@ -347,9 +380,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const handler = vi
         .fn()
         .mockResolvedValue({ action: "decline", content: {} });
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
 
       await manager.registerServer("srv-1", {
         url: "http://example.com/mcp",
@@ -371,9 +402,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
     it("configureElicitationHandlers can clear an uninitialized connection handler", async () => {
       const { storage } = createMockStorage();
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
 
       manager.configureElicitationHandlers({
         form: async () => ({
@@ -404,9 +433,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const handler = vi
         .fn()
         .mockResolvedValue({ action: "decline", content: {} });
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
       manager.configureElicitationHandlers({ form: handler, url: handler });
 
       await manager.registerServer("srv-1", {
@@ -426,9 +453,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const handler = vi
         .fn()
         .mockResolvedValue({ action: "accept", content: {} });
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
       manager.configureElicitationHandlers({ form: handler, url: handler });
 
       await manager.registerServer("old-id", {
@@ -446,9 +471,7 @@ describe("MCP client elicitation options (#1875)", () => {
     it("rewires the handler and restores declared capabilities after hibernation", async () => {
       const { storage } = createMockStorage();
       const handlerA = vi.fn();
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({ form: handlerA, url: handlerA });
 
       await managerA.registerServer("srv-1", {
@@ -466,13 +489,12 @@ describe("MCP client elicitation options (#1875)", () => {
       const handlerB = vi
         .fn()
         .mockResolvedValue({ action: "cancel", content: {} });
-      const managerB = new MCPClientManager("test-client", "1.0.0", {
+      const managerB = createManager(
         storage,
-        createAuthProvider: () =>
-          ({ serverId: undefined, clientId: undefined }) as never
-      });
+        () => ({ serverId: undefined, clientId: undefined }) as never
+      );
       managerB.configureElicitationHandlers({ form: handlerB, url: handlerB });
-      await managerB.restoreConnectionsFromStorage("test-client");
+      await managerB.restoreConnectionsFromStorage();
 
       const restored = managerB.mcpConnections["srv-1"];
       expect(restored).toBeDefined();
@@ -496,9 +518,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const urlHandler = vi
         .fn()
         .mockResolvedValue({ action: "accept", content: {} });
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
 
       manager.configureElicitationHandlers({
         form: formHandler,
@@ -533,9 +553,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
     it("re-advertises persisted capabilities on restore before handlers are reconfigured", async () => {
       const { storage, rows } = createMockStorage();
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} }),
         url: async () => ({ action: "accept", content: {} })
@@ -550,12 +568,11 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // Wake after hibernation: restore runs (before fiber/chat recovery)
       // while no handlers are configured yet
-      const managerB = new MCPClientManager("test-client", "1.0.0", {
+      const managerB = createManager(
         storage,
-        createAuthProvider: () =>
-          ({ serverId: undefined, clientId: undefined }) as never
-      });
-      await managerB.restoreConnectionsFromStorage("test-client");
+        () => ({ serverId: undefined, clientId: undefined }) as never
+      );
+      await managerB.restoreConnectionsFromStorage();
 
       const restored = managerB.mcpConnections["srv-1"];
       expect(advertisedCapabilities(restored).elicitation).toEqual({
@@ -599,9 +616,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const { storage, rows } = createMockStorage();
       const name = crypto.randomUUID();
 
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
@@ -609,9 +624,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // First connected wake after the deploy stopped configuring handlers:
       // the stamp still seeds the handshake once
-      const managerB = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerB = createManager(storage);
       await managerB.connect(`rpc://${name}`, {
         reconnect: { id: "srv-rpc" },
         transport: { type: "rpc", namespace: env.MCP_OBJECT, name }
@@ -626,9 +639,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // Next wake with no configure call in between: the stale mode is no
       // longer advertised, so servers use their non-elicitation fallbacks
-      const managerC = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerC = createManager(storage);
       await managerC.connect(`rpc://${name}`, {
         reconnect: { id: "srv-rpc" },
         transport: { type: "rpc", namespace: env.MCP_OBJECT, name }
@@ -643,9 +654,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const name = crypto.randomUUID();
 
       // Previous session stamped the row under a stable id
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
@@ -654,9 +663,7 @@ describe("MCP client elicitation options (#1875)", () => {
       // New session configures before the connection object exists, then
       // re-adds the same stable id: createConnection reads the row stamp as
       // a seed and registerServer writes a fresh one before the handshake
-      const managerB = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerB = createManager(storage);
       managerB.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
@@ -677,9 +684,7 @@ describe("MCP client elicitation options (#1875)", () => {
     it("re-adding a closed server in a configuring session keeps the row stamped", async () => {
       const { storage, rows } = createMockStorage();
       const name = crypto.randomUUID();
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
       manager.configureElicitationHandlers({
         url: async () => ({ action: "accept", content: {} })
       });
@@ -705,9 +710,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
     it("an OAuth-pending restore keeps the capability seed for the wake that connects", async () => {
       const { storage, rows } = createMockStorage();
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
@@ -720,12 +723,11 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // Wake 1: OAuth is still pending, so restore parks the connection in
       // AUTHENTICATING and never handshakes — the stamp must not be burned
-      const managerB = new MCPClientManager("test-client", "1.0.0", {
+      const managerB = createManager(
         storage,
-        createAuthProvider: () =>
-          ({ serverId: undefined, clientId: undefined }) as never
-      });
-      await managerB.restoreConnectionsFromStorage("test-client");
+        () => ({ serverId: undefined, clientId: undefined }) as never
+      );
+      await managerB.restoreConnectionsFromStorage();
       expect(managerB.mcpConnections["srv-1"].connectionState).toBe(
         "authenticating"
       );
@@ -733,12 +735,11 @@ describe("MCP client elicitation options (#1875)", () => {
       expect(options.capabilities).toEqual({ elicitation: { form: {} } });
 
       // Wake 2: the seed still covers the handshake
-      const managerC = new MCPClientManager("test-client", "1.0.0", {
+      const managerC = createManager(
         storage,
-        createAuthProvider: () =>
-          ({ serverId: undefined, clientId: undefined }) as never
-      });
-      await managerC.restoreConnectionsFromStorage("test-client");
+        () => ({ serverId: undefined, clientId: undefined }) as never
+      );
+      await managerC.restoreConnectionsFromStorage();
       expect(
         advertisedCapabilities(managerC.mcpConnections["srv-1"]).elicitation
       ).toEqual({ form: {} });
@@ -746,9 +747,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
     it("a wake interrupted before the handshake does not burn the capability seed", async () => {
       const { storage, rows } = createMockStorage();
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({
         url: async () => ({ action: "accept", content: {} })
       });
@@ -763,20 +762,16 @@ describe("MCP client elicitation options (#1875)", () => {
         .spyOn(MCPClientConnection.prototype, "init")
         .mockResolvedValue(undefined);
       try {
-        const managerB = new MCPClientManager("test-client", "1.0.0", {
-          storage
-        });
-        await managerB.restoreConnectionsFromStorage("test-client");
+        const managerB = createManager(storage);
+        await managerB.restoreConnectionsFromStorage();
         await managerB.waitForConnections();
 
         const options = JSON.parse(rows.get("srv-1")?.server_options ?? "{}");
         expect(options.capabilities).toEqual({ elicitation: { url: {} } });
 
         // Wake 2 still seeds the handshake with the stamped capability
-        const managerC = new MCPClientManager("test-client", "1.0.0", {
-          storage
-        });
-        await managerC.restoreConnectionsFromStorage("test-client");
+        const managerC = createManager(storage);
+        await managerC.restoreConnectionsFromStorage();
         await managerC.waitForConnections();
         expect(
           advertisedCapabilities(managerC.mcpConnections["srv-1"]).elicitation
@@ -788,9 +783,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
     it("a server id migration preserves the restored capability seed", async () => {
       const { storage } = createMockStorage();
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({
         url: async () => ({ action: "accept", content: {} })
       });
@@ -803,12 +796,11 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // Restore without configuring handlers (the pre-onStart window), then
       // migrate the id — the seed must survive the rescope
-      const managerB = new MCPClientManager("test-client", "1.0.0", {
+      const managerB = createManager(
         storage,
-        createAuthProvider: () =>
-          ({ serverId: undefined, clientId: undefined }) as never
-      });
-      await managerB.restoreConnectionsFromStorage("test-client");
+        () => ({ serverId: undefined, clientId: undefined }) as never
+      );
+      await managerB.restoreConnectionsFromStorage();
       await managerB.migrateServerId("old-id", "github", "test-client");
 
       expect(
@@ -818,9 +810,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
     it("records the advertised capability on stored rows as handlers change", async () => {
       const { storage, rows } = createMockStorage();
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
       const parse = () => JSON.parse(rows.get("srv-1")?.server_options ?? "{}");
 
       await manager.registerServer("srv-1", {
@@ -840,9 +830,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
     it("stamps the current capability onto rows registered after configuration", async () => {
       const { storage, rows } = createMockStorage();
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
       manager.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
@@ -864,9 +852,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const name = crypto.randomUUID();
 
       // Previous session: handlers configured, RPC server row stamped
-      const managerA = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerA = createManager(storage);
       managerA.configureElicitationHandlers({
         form: async () => ({ action: "accept", content: {} })
       });
@@ -874,9 +860,7 @@ describe("MCP client elicitation options (#1875)", () => {
 
       // Wake: the Agent RPC restore path reconnects by stored id before any
       // handler exists — the manager seeds capabilities from its own row
-      const managerB = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const managerB = createManager(storage);
       await managerB.connect(`rpc://${name}`, {
         reconnect: { id: "srv-rpc" },
         transport: { type: "rpc", namespace: env.MCP_OBJECT, name }
@@ -905,9 +889,7 @@ describe("MCP client elicitation options (#1875)", () => {
       const urlHandler = vi
         .fn()
         .mockResolvedValue({ action: "accept", content: {} });
-      const manager = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      const manager = createManager(storage);
 
       manager.configureElicitationHandlers({ url: urlHandler });
       await manager.registerServer("srv-1", {
