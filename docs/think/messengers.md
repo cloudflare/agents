@@ -96,6 +96,38 @@ source message id, and initiating user. Use `getMessengerContext()?.action`
 inside hooks or tools when you need provider-specific action details. Actions
 are opt-in so interactive cards do not accidentally trigger model turns.
 
+## Channel Speaker Labels
+
+In multi-user channels (group chats, rooms, threads that are not direct
+messages), Think prefixes the speaker onto the model-facing text so the model
+can attribute traffic from several people:
+
+```text
+Ada Lovelace: summarize this
+```
+
+The default label is the author cascade `fullName || userName || userId`.
+**Direct messages never get a speaker prefix**, even if a label would resolve —
+a DM is already a one-to-one conversation, so the extra name is noise.
+
+Customize this with `channelSpeakerLabel` on the messenger definition. The option
+accepts a formatter only; return `null` or an empty string to suppress the prefix
+for that author.
+
+```typescript
+telegramMessenger({
+  token: this.env.TELEGRAM_BOT_TOKEN,
+  userName: "support_bot",
+  secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
+  channelSpeakerLabel: (author) => author.userName ?? author.userId
+});
+```
+
+Action events (button presses) are labelled the same way as regular messages:
+they get a speaker prefix in channels so the model can attribute interactive
+clicks, and no prefix in DMs. Returning `null` or an empty string from
+`channelSpeakerLabel` suppresses the channel label as well.
+
 ## Conversation Targets
 
 The default conversation mode is one Think sub-agent per Chat SDK thread. This
@@ -167,6 +199,24 @@ if (messenger?.thread.isDirectMessage === false) {
 }
 ```
 
+## Self-Mentions
+
+When a user @-mentions the bot, the triggering message leads with the bot's own
+mention. Adapters resolve every other user's mention to a readable
+`@DisplayName`, but they leave the bot's own mention as a raw user-id token (for
+example, Slack's `@U0BD9EYL52S`) because mention detection still needs it. That
+raw id is the only unresolved mention that can survive in the text, so Think
+rewrites it to `@<userName>` (the bot handle you already configure) before the
+model sees it. This reconstructs the `@handle` the sender originally typed and
+keeps a small model from reading the unexplained id as a third party the sender
+was trying to reach.
+
+Rewriting reuses the required `userName` option, so no extra configuration is
+needed. It only applies when the adapter exposes a `botUserId` (used by
+platforms that put ids in mentions). Adapters that mention the bot by handle
+(for example, Telegram's `@username`) already produce readable text and are left
+unchanged.
+
 ## Custom Chat SDK Adapters
 
 Use `chatSdkMessenger()` for providers that do not have a Think helper yet:
@@ -176,6 +226,8 @@ chatSdkMessenger({
   adapter,
   provider: "custom",
   userName: "custom_bot",
+  // Optional: control how channel speakers are labelled for the model.
+  // channelSpeakerLabel: (author) => string | null | undefined
   verifyWebhook(request) {
     return request.headers.get("x-custom-signature") === expectedSignature;
   }

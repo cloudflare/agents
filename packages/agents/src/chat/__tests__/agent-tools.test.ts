@@ -82,6 +82,45 @@ describe("agent tool event reducer", () => {
     });
   });
 
+  it("is a pure reducer: replaying a text-delta chunk against the same prev does not double text (#1835)", () => {
+    let state = createAgentToolEventState();
+    state = applyAgentToolEvent(
+      state,
+      frame(0, {
+        kind: "started",
+        runId: "r",
+        agentType: "Researcher",
+        order: 0
+      })
+    );
+    state = applyAgentToolEvent(
+      state,
+      frame(1, {
+        kind: "chunk",
+        runId: "r",
+        body: JSON.stringify({ type: "text-delta", delta: "hello" })
+      })
+    );
+
+    const prev = state;
+    const deltaFrame = frame(2, {
+      kind: "chunk",
+      runId: "r",
+      body: JSON.stringify({ type: "text-delta", delta: " world" })
+    });
+
+    // React StrictMode / dev hydration double-invokes setState updaters with the
+    // SAME prev. A pure reducer must produce the same result both times and must
+    // never mutate prev — otherwise the second pass appends the delta twice.
+    const first = applyAgentToolEvent(prev, deltaFrame);
+    const second = applyAgentToolEvent(prev, deltaFrame);
+
+    expect(first.runsById.r.parts[0]).toMatchObject({ text: "hello world" });
+    expect(second.runsById.r.parts[0]).toMatchObject({ text: "hello world" });
+    // prev must be untouched by either invocation.
+    expect(prev.runsById.r.parts[0]).toMatchObject({ text: "hello" });
+  });
+
   it("projects a transient data-agent-progress chunk onto run.progress without persisting a part", () => {
     let state = createAgentToolEventState();
     state = applyAgentToolEvent(

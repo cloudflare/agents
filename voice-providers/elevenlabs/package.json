@@ -2,7 +2,7 @@
   "name": "@cloudflare/voice-elevenlabs",
   "private": true,
   "version": "0.0.1",
-  "description": "ElevenLabs TTS provider for Cloudflare Agents voice pipeline",
+  "description": "ElevenLabs STT and TTS providers for Cloudflare Agents voice pipeline",
   "repository": {
     "directory": "voice-providers/elevenlabs",
     "type": "git",
@@ -26,15 +26,18 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsx ./scripts/build.ts"
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest run"
   },
   "keywords": [
     "cloudflare",
     "agents",
     "voice",
+    "stt",
     "tts",
     "elevenlabs",
-    "text-to-speech"
+    "text-to-speech",
+    "speech-to-text"
   ],
   "author": "Cloudflare Inc.",
   "license": "MIT",

@@ -42,12 +42,6 @@ The agent has:
 import { Think, skills } from "@cloudflare/think";
 import bundledSkills from "agents:skills"; // -> ./skills next to this file
 
-type Env = {
-  AI: Ai;
-  LOADER: WorkerLoader;
-  SkillsAgent: DurableObjectNamespace<SkillsAgent>;
-};
-
 export class SkillsAgent extends Think<Env> {
   getSkills() {
     return [bundledSkills];

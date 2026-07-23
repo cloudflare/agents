@@ -48,6 +48,10 @@
   ],
   "name": "anthropic-agent-patterns",
 
+  "secrets": {
+    "required": ["OPENAI_API_KEY", "AI_GATEWAY_TOKEN"]
+  },
+
   "vars": {
     "AI_GATEWAY_ACCOUNT_ID": "85d0c02b57ed75faf9b18f92d5c01602",
     "AI_GATEWAY_ID": "anthropic-agent-patterns"

@@ -1,0 +1,10 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    // The generated worker-configuration.d.ts carries the runtime types
+    // (wrangler types), so @cloudflare/workers-types from the base list is
+    // deliberately replaced here — both at once would conflict.
+    "types": ["node", "vite/client", "./worker-configuration.d.ts"]
+  },
+  "include": ["worker-configuration.d.ts", "src/**/*.ts", "src/**/*.tsx"]
+}

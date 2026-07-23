@@ -18,6 +18,14 @@ export interface MessengerAuthor {
 export interface MessengerAttachment {
   data?: ArrayBuffer;
   fetch?: () => Promise<ArrayBuffer>;
+  /**
+   * Platform-specific metadata needed to re-fetch the attachment after the
+   * event has been serialized (e.g. across a sub-agent Durable Object hop).
+   * Adapters store identifiers here — Telegram `fileId`, WhatsApp `mediaId`,
+   * etc. — that survive serialization even when `fetch`, `data`, and `raw`
+   * cannot, so a downstream agent can reconstruct the download closure.
+   */
+  fetchMetadata?: Record<string, string>;
   id?: string;
   mediaType?: string;
   name?: string;
@@ -114,6 +122,9 @@ export function serializableMessengerEvent(
     message: event.message
       ? {
           attachments: event.message.attachments.map((attachment) => ({
+            fetchMetadata: attachment.fetchMetadata
+              ? { ...attachment.fetchMetadata }
+              : undefined,
             id: attachment.id,
             mediaType: attachment.mediaType,
             name: attachment.name,
@@ -132,11 +143,42 @@ export function serializableMessengerEvent(
   };
 }
 
-export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
+/**
+ * Customizes how channel (non-DM) speaker names are prefixed onto model-facing
+ * text. By default, speaker labels use `fullName || userName || userId`.
+ * Direct messages never get a speaker prefix, regardless of this setting.
+ * Return `null`/empty to suppress the prefix for that author.
+ */
+export type ChannelSpeakerLabel = (
+  author: MessengerAuthor
+) => string | null | undefined;
+
+export function resolveChannelSpeakerLabel(
+  author: MessengerAuthor | undefined,
+  channelSpeakerLabel?: ChannelSpeakerLabel
+): string | undefined {
+  if (!author) {
+    return undefined;
+  }
+
+  if (channelSpeakerLabel) {
+    const label = channelSpeakerLabel(author);
+    return label ? label : undefined;
+  }
+
+  return author.fullName || author.userName || author.userId || undefined;
+}
+
+export function toMessengerUserMessage(
+  event: MessengerEvent,
+  channelSpeakerLabel?: ChannelSpeakerLabel
+): UIMessage {
   const message = event.message;
   if (event.action) {
     const user = event.action.user;
-    const displayName = user?.fullName || user?.userName || user?.userId;
+    const displayName = event.thread.isDirectMessage
+      ? undefined
+      : resolveChannelSpeakerLabel(user, channelSpeakerLabel);
     const details = [
       `Action selected: ${event.action.actionId}`,
       event.action.value ? `Value: ${event.action.value}` : undefined,
@@ -171,8 +213,10 @@ export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
   }
 
   const text = message.text.trim();
-  const displayName =
-    message.author.fullName || message.author.userName || message.author.userId;
+  const displayName = resolveChannelSpeakerLabel(
+    message.author,
+    channelSpeakerLabel
+  );
   const content =
     event.thread.isDirectMessage || !displayName
       ? text

@@ -54,6 +54,19 @@ export class ConformanceHost extends Agent<Env> {
   private _serverId: string | undefined;
 
   onStart() {
+    // Accept elicitation requests. Form-mode defaults are applied by the SDK
+    // client because the connection advertises `form.applyDefaults` (SEP-1034).
+    this.mcp.configureElicitationHandlers({
+      form: async () => ({
+        action: "accept",
+        content: {}
+      }),
+      url: async () => ({
+        action: "accept",
+        content: {}
+      })
+    });
+
     // Respond to OAuth callbacks with an explicit status the driver can
     // assert on, instead of the default redirect-to-origin.
     this.mcp.configureOAuthCallback({
@@ -92,7 +105,14 @@ export class ConformanceHost extends Agent<Env> {
     try {
       if (!this._serverId) {
         const result = await this.addMcpServer(SERVER_NAME, serverUrl, {
-          transport: { type: "streamable-http" }
+          transport: { type: "streamable-http" },
+          client: {
+            capabilities: {
+              // Opt into SDK-side default application (SEP-1034) on top of
+              // the handler-driven default of `{ form: {}, url: {} }`.
+              elicitation: { form: { applyDefaults: true }, url: {} }
+            }
+          }
         });
         this._serverId = result.id;
         if (result.state === MCPConnectionState.AUTHENTICATING) {

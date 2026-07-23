@@ -9,7 +9,7 @@
     "tools"
   ],
   "type": "module",
-  "version": "0.11.0",
+  "version": "0.13.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
@@ -24,6 +24,8 @@
     "think": "dist/cli/index.js"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.83",
+    "@ai-sdk/openai": "^3.0.70",
     "@cloudflare/codemode": ">=0.4.0",
     "@cloudflare/shell": ">=0.4.0",
     "aywson": "^0.0.16",
@@ -31,11 +33,10 @@
     "create-think": "workspace:*",
     "just-bash": "^3.0.2",
     "smol-toml": "^1.7.0",
+    "workers-ai-provider": "^3.3.0",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/anthropic": "^3.0.83",
-    "@ai-sdk/openai": "^3.0.70",
     "@ai-sdk/react": "^3.0.204",
     "@chat-adapter/telegram": "^4.31.0",
     "@cloudflare/ai-chat": "workspace:*",
@@ -54,14 +55,14 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",
-    "tailwindcss": "^4.3.1",
+    "tailwindcss": "^4.3.2",
     "vite": "^8.1.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.204",
     "@chat-adapter/telegram": "^4.29.0",
-    "agents": ">=0.17.0 <1.0.0",
+    "agents": ">=0.17.1 <1.0.0",
     "ai": "^6.0.182",
     "react": "^19.0.0",
     "vite": ">=6 <9",
@@ -117,6 +118,10 @@
     "./tools/workspace": {
       "types": "./dist/tools/workspace.d.ts",
       "import": "./dist/tools/workspace.js"
+    },
+    "./tools/fetch": {
+      "types": "./dist/tools/fetch.d.ts",
+      "import": "./dist/tools/fetch.js"
     },
     "./tools/execute": {
       "types": "./dist/tools/execute.d.ts",

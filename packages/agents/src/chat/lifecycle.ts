@@ -179,6 +179,9 @@ export type ChatRecoveryExhaustedContext = Pick<
    * - `work_budget_exceeded` — the turn kept producing content but exceeded the
    *   configured `maxRecoveryWork` runaway-loop budget.
    * - `recovery_aborted` — the caller's `shouldKeepRecovering` hook returned `false`.
+   * - `out_of_memory` — recovery attempts kept hitting a Durable Object
+   *   memory-limit reset (the isolate exceeded its 128 MB limit) until the
+   *   tight `maxOomRetries` budget drained (#1825).
    * - `stable_timeout` — a recovery attempt kept timing out waiting for the
    *   isolate to reach stable state until the budget drained (extreme churn).
    * - `max_recovery_window_exceeded` — DEPRECATED. The old absolute incident-age
@@ -220,7 +223,7 @@ export type ChatRecoveryProgressContext = {
 /**
  * Configuration for durable chat recovery. `true` uses these defaults:
  * `maxAttempts: 10`, `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000`
- * (5 min), `maxRecoveryWork: Infinity`, and a generic terminal message.
+ * (5 min), `maxRecoveryWork: 1000`, and a generic terminal message.
  *
  * **Apply this as a class field or in the constructor — never assign it in
  * `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal
@@ -248,12 +251,31 @@ export type ChatRecoveryConfig =
       /**
        * Runaway-loop guard. Maximum recovery WORK — produced content/tool units
        * since the incident began — before a still-progressing turn is sealed
-       * with `reason="work_budget_exceeded"`. Defaults to `Infinity` (no cap):
-       * the SDK never terminates a progressing turn on its own. Set a finite
-       * value (or use `shouldKeepRecovering`) to bound a loop that keeps
-       * emitting content but never converges.
+       * with `reason="work_budget_exceeded"`. Defaults to `1000`: a generous
+       * backstop that bounds wasted re-run cost when a turn keeps emitting a
+       * little content but never converges (e.g. an isolate that OOMs mid-stream
+       * on every recovery — #1825 — which otherwise resets the attempt cap and
+       * no-progress window forever). Work only accrues from the first
+       * interruption until the turn completes, so a normal interrupted turn
+       * never approaches it. A very long agentic turn under heavy interruption
+       * that legitimately needs more can raise this (or set `Infinity` to
+       * disable the framework cap and bound the runaway via `shouldKeepRecovering`
+       * instead).
        */
       maxRecoveryWork?: number;
+      /**
+       * Tight retry budget for the specific case of a Durable Object isolate
+       * exceeding its memory limit and being reset mid-turn. An OOM is usually
+       * deterministic (the turn's working set no longer fits in 128 MB), so
+       * re-running re-OOMs; but a single OOM can be a transient spike, so
+       * recovery retries this many times before sealing with
+       * `reason="out_of_memory"`. Counts only attempts that ended in an OOM (not
+       * total attempts), so a turn interrupted by deploys is unaffected.
+       * Defaults to `3`. Set `0` to seal on the first OOM. Much tighter than
+       * `maxRecoveryWork` because an OOM is attributable and each re-run is
+       * expensive (it re-runs the model).
+       */
+      maxOomRetries?: number;
       /**
        * Caller policy consulted on each recovery attempt from the second
        * onward — it is NOT called on the first detection (the attempt that
@@ -282,6 +304,7 @@ export type ResolvedChatRecoveryConfig = {
   terminalMessage: string;
   noProgressTimeoutMs: number;
   maxRecoveryWork: number;
+  maxOomRetries: number;
   shouldKeepRecovering?: (
     ctx: ChatRecoveryProgressContext
   ) => boolean | Promise<boolean>;

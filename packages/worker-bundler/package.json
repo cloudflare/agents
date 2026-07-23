@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@typescript/vfs": "^1.6.4",
-    "es-module-lexer": "^2.1.0",
+    "es-module-lexer": "^2.2.0",
     "esbuild-wasm": "0.28.1",
     "fflate": "^0.8.2",
     "resolve.exports": "^2.0.3",
@@ -44,7 +44,7 @@
     "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260625.1",
+    "@cloudflare/workers-types": "^4.20260629.1",
     "@types/semver": "^7.7.1",
     "esbuild": "^0.28.1",
     "tsdown": "^0.22.3"

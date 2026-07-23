@@ -13,7 +13,6 @@ import { createCompactFunction } from "agents/experimental/memory/utils";
 import { generateText } from "ai";
 import type { Session } from "@cloudflare/think";
 import { Think } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
 
 export interface Skill {
   key: string;
@@ -23,10 +22,7 @@ export interface Skill {
 
 export class SkillsAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code",
-      { sessionAffinity: this.sessionAffinity }
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   configureSession(session: Session) {
@@ -55,9 +51,7 @@ export class SkillsAgent extends Think<Env> {
         createCompactFunction({
           summarize: (prompt) =>
             generateText({
-              model: createWorkersAI({ binding: this.env.AI })(
-                "@cf/zai-org/glm-4.7-flash"
-              ),
+              model: this.resolveModel("@cf/zai-org/glm-4.7-flash"),
               prompt
             }).then((r) => r.text),
           tailTokenBudget: 150,

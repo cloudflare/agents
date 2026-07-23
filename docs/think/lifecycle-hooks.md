@@ -81,7 +81,9 @@ export class MyAgent extends Think<Env> {
       .onCompaction(
         createCompactFunction({
           summarize: (prompt) =>
-            generateText({ model: this.getModel(), prompt }).then((r) => r.text)
+            generateText({ model: this.resolveModel(), prompt }).then(
+              (r) => r.text
+            )
         })
       )
       .compactAfter(100_000)
@@ -109,7 +111,7 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 | `system`       | `string`                  | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
 | `messages`     | `ModelMessage[]`          | Assembled model messages (truncated)                                     |
 | `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + session + MCP + client + caller) |
-| `model`        | `LanguageModel`           | The model from `getModel()`                                              |
+| `model`        | `LanguageModel`           | The resolved model (a string from `getModel()` is already resolved here) |
 | `continuation` | `boolean`                 | Whether this is a continuation turn (auto-continue after tool result)    |
 | `body`         | `Record<string, unknown>` | Custom body fields from the client request                               |
 
@@ -119,7 +121,7 @@ All fields are optional. Return only what you want to change.
 
 | Field                      | Type                                           | Description                                                                                                                                                                       |
 | -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                    | `LanguageModel`                                | Override the model for this turn                                                                                                                                                  |
+| `model`                    | `ThinkModel`                                   | Override the model for this turn — a model id string or a `LanguageModel`                                                                                                         |
 | `system`                   | `string`                                       | Override the system prompt                                                                                                                                                        |
 | `messages`                 | `ModelMessage[]`                               | Override the assembled messages                                                                                                                                                   |
 | `tools`                    | `ToolSet`                                      | Extra tools to merge (additive)                                                                                                                                                   |
@@ -314,15 +316,15 @@ onStepFinish(step 1)
 
 `StepConfig<TOOLS>` is the AI SDK's `PrepareStepResult<TOOLS>`. Return only the fields to override for the current step.
 
-| Field                  | Type                                                   | Description                                                 |
-| ---------------------- | ------------------------------------------------------ | ----------------------------------------------------------- |
-| `model`                | `LanguageModel`                                        | Override the model for this step                            |
-| `toolChoice`           | `ToolChoice<TOOLS>`                                    | Force or disable tool calling for this step                 |
-| `activeTools`          | `Array<keyof TOOLS>`                                   | Limit which tools are available for this step               |
-| `system`               | `string \| SystemModelMessage \| SystemModelMessage[]` | Override the system message for this step                   |
-| `messages`             | `ModelMessage[]`                                       | Override the full message list for this step                |
-| `experimental_context` | `unknown`                                              | Override context passed to tool execution from this step on |
-| `providerOptions`      | `ProviderOptions`                                      | Provider-specific options for this step                     |
+| Field                  | Type                                                   | Description                                                               |
+| ---------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `model`                | `ThinkModel`                                           | Override the model for this step — a model id string or a `LanguageModel` |
+| `toolChoice`           | `ToolChoice<TOOLS>`                                    | Force or disable tool calling for this step                               |
+| `activeTools`          | `Array<keyof TOOLS>`                                   | Limit which tools are available for this step                             |
+| `system`               | `string \| SystemModelMessage \| SystemModelMessage[]` | Override the system message for this step                                 |
+| `messages`             | `ModelMessage[]`                                       | Override the full message list for this step                              |
+| `experimental_context` | `unknown`                                              | Override context passed to tool execution from this step on               |
+| `providerOptions`      | `ProviderOptions`                                      | Provider-specific options for this step                                   |
 
 ### Examples
 
@@ -477,7 +479,8 @@ beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
 - **Substituted input is not re-validated.** The AI SDK validates the model's emitted input against the tool's `inputSchema` _before_ `execute` runs. When `beforeToolCall` returns `{ action: "allow", input: ... }`, that substituted input is passed straight through to `execute` without going through the schema again. If you substitute, ensure the shape stays valid for the tool you're calling.
 - **`stepNumber` is `undefined` in `ToolCallContext`.** The AI SDK's `ToolExecutionOptions` doesn't expose the current step index. The same field _is_ populated on `ToolCallResultContext` (sourced from `experimental_onToolCallFinish`).
 - **Throwing from `beforeToolCall`** propagates as a tool error — the AI SDK records it in the same way it would record an `execute` failure, and `afterToolCall` fires with `success: false, error: ...`.
-- **Streaming tools (AsyncIterable returns).** The AI SDK supports tools whose `execute` returns `AsyncIterable<output>` to emit preliminary results before a final value. This works regardless of whether the iterator is returned directly (`function execute(...) { return makeIter(); }`, `async function* execute(...) { … }`) or wrapped in a Promise (`async function execute(...) { return makeIter(); }`). Because Think's wrapper must `await beforeToolCall` first, preliminary chunks are collapsed — only the final yielded value reaches the model. If you need true preliminary streaming, override `getTools()` to provide such tools and avoid using `beforeToolCall` for them.
+- **Streaming tools (AsyncIterable returns).** The AI SDK supports tools whose `execute` returns `AsyncIterable<output>` to emit preliminary results before a final value. The canonical form is an async generator (`async function* execute(...) { … }`). Think preserves preliminary streaming for that form even through `beforeToolCall`: each yielded value reaches the model as a `preliminary` tool-result, and the last as the final value. The non-canonical `async function execute(...) { return makeIter(); }` form returns a `Promise<AsyncIterable>`, which does not stream even in the raw AI SDK — Think collapses it to the last yielded value. Use an `async function*` `execute` if you need preliminary streaming.
+- **Blocking/substituting an `async function*` tool emits one `preliminary` chunk.** To keep an `async function*` tool streaming through `beforeToolCall`, its wrapper must commit to an `AsyncIterable` shape synchronously — before the (async) decision is known. The AI SDK turns every value sent through that iterable into a `preliminary` tool-result plus a `final`, so a `block`/`substitute` outcome surfaces one extra `preliminary: true` chunk to observers like `onChunk` (a scalar-`execute` tool never does). The model-visible final output is identical and correct; this only affects observation hooks for the narrow case of blocking/substituting a streaming tool, and it matches how any streaming tool that emits a single value already behaves.
 - **Hook order:** `beforeToolCall` (subclass) → extension `beforeToolCall` dispatch → original `execute` (or `block`/`substitute` short-circuit) → AI SDK records the outcome → `afterToolCall` (subclass) → extension `afterToolCall` dispatch.
 
 ---
@@ -494,19 +497,29 @@ afterToolCall(ctx: ToolCallResultContext): void | Promise<void>
 
 `ToolCallResultContext<TOOLS>` is backed by the AI SDK's `OnToolCallFinishEvent<TOOLS>` (the parameter of `experimental_onToolCallFinish`). It spreads the originating `TypedToolCall<TOOLS>` at the top level, plus the per-call event extras and a discriminated outcome:
 
-| Field        | Type                                  | Description                                          |
-| ------------ | ------------------------------------- | ---------------------------------------------------- |
-| `type`       | `"tool-call"`                         | Discriminator (carried over from the call)           |
-| `toolCallId` | `string`                              | Unique id matching the originating `ToolCallContext` |
-| `toolName`   | `string`                              | Name of the tool that was called                     |
-| `input`      | typed when `TOOLS` is passed          | Arguments the tool was called with                   |
-| `dynamic?`   | `boolean`                             | `true` for runtime-registered tools                  |
-| `stepNumber` | `number \| undefined`                 | Index of the current step                            |
-| `messages`   | `ReadonlyArray<ModelMessage>`         | Conversation messages visible at tool execution time |
-| `durationMs` | `number`                              | Wall-clock execution time of `execute`               |
-| `success`    | `boolean`                             | Discriminator: `true` on success, `false` on failure |
-| `output`     | `unknown` (when `success` is `true`)  | Whatever the tool's `execute` returned               |
-| `error`      | `unknown` (when `success` is `false`) | Whatever was thrown from `execute`                   |
+| Field        | Type                                      | Description                                          |
+| ------------ | ----------------------------------------- | ---------------------------------------------------- |
+| `type`       | `"tool-call"`                             | Discriminator (carried over from the call)           |
+| `toolCallId` | `string`                                  | Unique id matching the originating `ToolCallContext` |
+| `toolName`   | `string`                                  | Name of the tool that was called                     |
+| `input`      | typed when `TOOLS` is passed              | Arguments the tool was called with                   |
+| `dynamic?`   | `boolean`                                 | `true` for runtime-registered tools                  |
+| `stepNumber` | `number \| undefined`                     | Index of the current step                            |
+| `messages`   | `ReadonlyArray<ModelMessage>`             | Conversation messages visible at tool execution time |
+| `durationMs` | `number`                                  | Wall-clock execution time of `execute`               |
+| `success`    | `boolean`                                 | Discriminator: `true` on success, `false` on failure |
+| `output`     | typed per tool (when `success` is `true`) | Whatever the tool's `execute` returned               |
+| `error`      | `unknown` (when `success` is `false`)     | Whatever was thrown from `execute`                   |
+
+When you pass an explicit `TOOLS` generic, narrowing on `ctx.toolName` (together with `ctx.success`) narrows `ctx.output` to that tool's inferred output type. Dynamic tools (runtime-registered, MCP) stay `unknown`:
+
+```typescript
+afterToolCall(ctx: ToolCallResultContext<typeof tools>) {
+  if (ctx.toolName === "search" && ctx.success) {
+    ctx.output.results; // typed as the `search` tool's output
+  }
+}
+```
 
 ### Example
 

@@ -1,5 +1,108 @@
 # @cloudflare/think
 
+## 0.13.0
+
+### Minor Changes
+
+- [#1907](https://github.com/cloudflare/agents/pull/1907) [`38bf87a`](https://github.com/cloudflare/agents/commit/38bf87a3e887de328f22b1f8fe26d53de1c5e72d) Thanks [@cjol](https://github.com/cjol)! - feat(think): add channelSpeakerLabel option to MessengerDefinition for configurable channel speaker prefixing
+
+  Channel (non-DM) messages and action events are prefixed with the speaker label
+  so the model can attribute multi-user traffic; direct messages never get a
+  prefix. Previously action events were labelled even in DMs — they now follow the
+  same channel-only rule as regular messages.
+
+- [#1921](https://github.com/cloudflare/agents/pull/1921) [`7e0c069`](https://github.com/cloudflare/agents/commit/7e0c069226f0c953a58de22481fd6cec2608e75b) Thanks [@cjol](https://github.com/cjol)! - Add `ChatOptions.metadata` — a per-turn, recovery-safe metadata carrier.
+
+  Server-side callers of `chat()` / `chatWithMessengerContext()` can now attach immutable per-turn metadata (e.g. "which authenticated principal initiated this turn"). It is stamped onto the turn's user message alongside `channel` (as `metadata.turnMetadata`) so a recovered/continued turn re-resolves it from durable history, and is readable turn-scoped via the new `Think.activeTurnMetadata` getter.
+
+  The trust model mirrors the channel stamp: the reserved metadata keys `channel` and `turnMetadata` are now stripped from client-supplied messages at intake, so a client can never forge server-written turn context (this also closes the prior gap where a client message could carry a forged `metadata.channel`). This lets messenger/RPC entry points carry correct multi-user identity without either mutable agent-wide state (a last-writer-wins race) or the submission path (which loses incremental streaming).
+
+### Patch Changes
+
+- [#1920](https://github.com/cloudflare/agents/pull/1920) [`0235fc9`](https://github.com/cloudflare/agents/commit/0235fc926f6b8ebdd2f7922dc9c5fa025c0a8c9a) Thanks [@cjol](https://github.com/cjol)! - Rewrite the bot's own unresolved self-mention in messenger events to its readable handle before the model sees it.
+
+  When a user @-mentions a Think messenger bot, the triggering message leads with the bot's own mention. Adapters resolve every other user's mention to `@DisplayName` but leave the bot's own as a raw user-id token (for example, Slack's `@U0BD9EYL52S`), which small models can misread as a third party the sender was trying to reach. Think now rewrites that surviving self-mention to `@<userName>` (the bot handle already required on every messenger) in `defaultChatSdkEvent`, reconstructing the `@handle` the sender originally typed.
+
+  Adds the exported `resolveSelfMention` helper. Rewriting only applies when the adapter exposes a `botUserId`, so handle-based adapters (for example, Telegram) are unaffected. No new configuration is required.
+
+## 0.12.1
+
+### Patch Changes
+
+- [`58eea18`](https://github.com/cloudflare/agents/commit/58eea18f74dec943a5e9df3d78135f8980c445c4) Thanks [@threepointone](https://github.com/threepointone)! - trigger a release
+
+- [#1839](https://github.com/cloudflare/agents/pull/1839) [`62b90eb`](https://github.com/cloudflare/agents/commit/62b90eba069285c53b5dd76ff942a2bedbd2dccc) Thanks [@threepointone](https://github.com/threepointone)! - Preserve attachment `fetchMetadata` through messenger event serialization so sub-agents can re-fetch files.
+
+  When a conversation resolver routes a thread to a sub-agent Durable Object, the messenger event is run through `serializableMessengerEvent()` before crossing the DO boundary. That serialization previously dropped everything except `id`, `mediaType`, `name`, `size`, `text`, and `url` from each attachment — discarding `fetch`, `raw`, and (for adapters that store their platform identifier there) the only remaining handle on the file.
+
+  For adapters like `@chat-adapter/telegram`, the file identifier lives exclusively in `fetchMetadata.fileId` and the top-level `id` is never populated, so photos became irretrievable inside a sub-agent (`attachment.id` and `attachment.fetch` were both missing).
+
+  `MessengerAttachment` now carries a serialization-safe `fetchMetadata?: Record<string, string>` field that survives the sub-agent hop. `toMessengerAttachment()` copies `fetchMetadata` from the underlying Chat SDK attachment and backfills the top-level `id` from a known metadata key (`id`, `fileId`, `mediaId`, `fileUniqueId`) when the adapter doesn't set one. A downstream agent can use `fetchMetadata` together with the adapter's `rehydrateAttachment()` to reconstruct the download closure.
+
+## 0.12.0
+
+### Minor Changes
+
+- [#1832](https://github.com/cloudflare/agents/pull/1832) [`51ec433`](https://github.com/cloudflare/agents/commit/51ec433b7de191cab3fb73f331261488bae6e8a3) Thanks [@threepointone](https://github.com/threepointone)! - `getModel()` now accepts a model id string, resolved through a built-in `workers-ai-provider` instance — no separate provider package to install, import, or wire up for the common case.
+
+  Think now depends on `workers-ai-provider` (plus the `@ai-sdk/openai` and `@ai-sdk/anthropic` wire-format plugins) directly. When `getModel()` returns a string, Think resolves it off your `AI` binding:
+
+  - A `@cf/...` id hits Workers AI directly (with `sessionAffinity` wired in automatically for prefix-cache hits).
+  - Any other `"<provider>/<model>"` slug — e.g. `"openai/gpt-5.5"`, `"anthropic/claude-sonnet-4-5"`, `"google/gemini-2.5-pro"`, `"xai/grok-4"`, `"groq/..."` — is routed through AI Gateway.
+
+  ```typescript
+  export class MyAgent extends Think<Env> {
+    getModel() {
+      return "@cf/moonshotai/kimi-k2.7-code"; // or "openai/gpt-5.5"
+    }
+  }
+  ```
+
+  Returning a fully-constructed AI SDK `LanguageModel` from `getModel()` still works unchanged for any other provider or for full control over provider/gateway options. A new `getAIBinding()` override (default `this.env.AI`) controls which binding the string resolver uses.
+
+  Because `getModel()` may now return a bare string, a new public `resolveModel(model?)` method (defaults to resolving `getModel()`) returns a concrete `LanguageModel`. Use it for side inference calls — e.g. summarization/compaction `generateText` — instead of passing `getModel()` straight to the AI SDK.
+
+  The per-turn override `TurnConfig.model` (returned from `beforeTurn`) also accepts a `ThinkModel` now, so you can switch models for a turn with a plain string (e.g. a cheaper model for continuations). The per-step override `StepConfig.model` (returned from `beforeStep`) accepts a `ThinkModel` too — Think resolves a string back into a `LanguageModel` before handing the step to the AI SDK.
+
+  `getModel()` is typed to return `ThinkModel` (a newly exported alias for `LanguageModel | ThinkModelId`). `ThinkModelId` (also exported) gives editor autocomplete for the Workers AI text-generation catalog (`@cf/...`, derived from the installed `@cloudflare/workers-types`) while still accepting any string — gateway catalog slugs like `"openai/gpt-5.5"` are validated at runtime, since the catalog lives server-side and is not knowable from types.
+
+### Patch Changes
+
+- [#1827](https://github.com/cloudflare/agents/pull/1827) [`e5e6b57`](https://github.com/cloudflare/agents/commit/e5e6b5731e1c316a7edfeac47dfef6a9cadfe3a3) Thanks [@threepointone](https://github.com/threepointone)! - Fix sub-agent tool events getting stuck at `input-available` when an agent-tool child proxies a remote `toUIMessageStreamResponse()` ([#1589](https://github.com/cloudflare/agents/issues/1589)).
+
+  `tailAgentToolRun` (in both `AIChatAgent` and `Think`) drained the stored chunk backlog and only afterwards attached its live forwarder, with `await` boundaries in between. Any chunk the child stored and broadcast in that window was neither in the drained snapshot nor live-forwarded, so it silently vanished from the parent's stream — leaving tool parts (notably `tool-output-available`) stuck at `input-available` in `useAgentToolEvents`. A network-paced proxied remote stream hits this window constantly, while a fast local child mostly avoids it. The forwarder is now registered before the backlog is drained, with live chunks buffered and replayed in order and deduped by sequence, closing the gap.
+
+  Both `AIChatAgent` and `Think` also realign the in-memory live sequence to the stored high-water mark after draining. Without this, a re-attach after the child's Durable Object restarts or wakes from hibernation (where the live counter is cold but the durable backlog sits at N) would hand the recovered turn's new chunks sequences from 0, which the high-water dedupe silently drops — leaving the parent permanently stuck with no post-restart chunks.
+
+## 0.11.1
+
+### Patch Changes
+
+- [#1826](https://github.com/cloudflare/agents/pull/1826) [`1bbd9bc`](https://github.com/cloudflare/agents/commit/1bbd9bca45834e7699969d83d203ec82f53a9bac) Thanks [@threepointone](https://github.com/threepointone)! - Add a tight, OOM-specific retry budget to chat recovery so a memory-limit crash loop seals fast and attributably ([#1825](https://github.com/cloudflare/agents/issues/1825)).
+
+  When a recovery turn hits a Durable Object memory-limit reset (the isolate exceeded its 128 MB limit), recovery now classifies it as a distinct, deterministic failure rather than a deploy-style transient. A memory reset re-OOMs on re-run (the turn's working set, not the platform, is the cause), so it must NOT be deferred and retried forever like a code-update/connection-lost transient. Each such crash bumps a durable per-incident `oomAttempts` counter; recovery retries a small number of times (new `chatRecovery.maxOomRetries`, default `3`) — in case the OOM was a transient spike — then seals with `reason="out_of_memory"`. This is far tighter than the generic `maxRecoveryWork` backstop because an OOM is attributable and each re-run re-runs the model.
+
+  This complements the finite `maxRecoveryWork` default: the OOM budget is the fast path for memory resets that surface as catchable errors thrown from recovery bookkeeping (e.g. storage/SQL rejections after the reset), while `maxRecoveryWork` remains a backstop for the hard-kill case where no in-isolate code runs to record the OOM.
+
+  Adds an **alarm-boundary circuit breaker** (`agents`) as the universal backstop for the case the in-DO budgets can't catch ([#1825](https://github.com/cloudflare/agents/issues/1825)): a memory-limit reset that bypasses them entirely — thrown before the budget code runs (e.g. boot-time state hydration OOMs), or whose own small writes also OOM under memory pressure. Left unhandled, such an error propagates out of `alarm()` and the platform auto-retries the alarm forever, re-running the doomed, billable turn each cycle. `Agent.alarm()` now intercepts ONLY Durable Object memory-limit resets at the outermost frame — where the heavy turn has unwound and GC has reclaimed its footprint, so the seal/purge writes can land where mid-turn ones OOMed. A durable strike counter tolerates a few resets (new `static options.maxAlarmMemoryLimitStrikes`, default `3`) — backing off the looping rows so the retry is not a hot loop — then seals the recovery (`out_of_memory`) and surgically purges only the looping schedule rows, leaving unrelated scheduled tasks intact. A new `alarm:memory_limit_reset` observability event is emitted. Everything except memory-limit resets re-throws exactly as before.
+
+  Also broadens and exports the `isDurableObjectMemoryLimitReset(error)` predicate from `agents` (a sibling to `isDurableObjectCodeUpdateReset` / `isPlatformTransientError`): it now matches the shared `"exceeded its memory limit"` fragment so truncated/reworded surfacings (observed in real [#1825](https://github.com/cloudflare/agents/issues/1825) logs) still classify.
+
+- [#1826](https://github.com/cloudflare/agents/pull/1826) [`1bbd9bc`](https://github.com/cloudflare/agents/commit/1bbd9bca45834e7699969d83d203ec82f53a9bac) Thanks [@threepointone](https://github.com/threepointone)! - Fix neverending chat-recovery retries when a Durable Object isolate runs out of memory mid-turn ([#1825](https://github.com/cloudflare/agents/issues/1825)).
+
+  `chatRecovery.maxRecoveryWork` now defaults to a generous finite backstop (`1000`) instead of `Infinity`. An isolate that exceeds its memory limit and is reset mid-stream has usually already streamed a little content, which bumps the durable progress counter. On the next wake recovery reads that as forward progress and **resets both progress-keyed bounds** — the attempt cap (`maxAttempts`) and the no-progress window (`noProgressTimeoutMs`) — and because each crash lands inside the alarm-debounce window the attempt counter is pinned too. With the work budget disabled (`Infinity`), no instrument could ever seal the turn, so recovery re-ran the turn (and its LLM calls) forever. The work meter is the one signal that keeps climbing across such a loop, so a finite default seals a runaway with `reason="work_budget_exceeded"` instead of looping.
+
+  Work only accrues from the first interruption until the turn completes, so a normal interrupted turn never approaches the cap. A very long agentic turn that legitimately produces a large amount of content under heavy interruption can raise `maxRecoveryWork` (or set it to `Infinity` to restore the previous fully-unbounded behavior, ideally paired with a `shouldKeepRecovering` predicate that bounds the runaway via real token/cost accounting).
+
+- [#1821](https://github.com/cloudflare/agents/pull/1821) [`de6a695`](https://github.com/cloudflare/agents/commit/de6a6951bc5dce48cdf6ba3f490689c95c9690e8) Thanks [@threepointone](https://github.com/threepointone)! - Add an opt-in, read-only HTTP fetch capability for Think agents via the new `@cloudflare/think/tools/fetch` export and a `fetchTools` property on `Think`.
+
+  `createFetchTools()` generates a generic, allowlisted `fetch_url` tool plus one `fetch_<name>` tool per named service-binding/`Fetcher` target. It is `GET`-only with Workers-grounded SSRF defenses (private/loopback/link-local/`*.internal` blocking, URL normalization, credential rejection), separate download/model/workspace size limits (`maxBytes`, `maxModelChars`, `response: "workspace"` spill), an allowlist-aware redirect policy with cross-origin header stripping, a model header allowlist, and a `tool:fetch` observability event. Disabled by default.
+
+- [#1823](https://github.com/cloudflare/agents/pull/1823) [`b58b5a3`](https://github.com/cloudflare/agents/commit/b58b5a3cb5eba150e12bff2ef6dbfebd1bed6248) Thanks [@threepointone](https://github.com/threepointone)! - Improve Think's tool-call lifecycle hooks (follow-ups from [#1343](https://github.com/cloudflare/agents/issues/1343)):
+
+  - **Preserve preliminary streaming through `beforeToolCall`.** Tools whose `execute` is an async generator (`async function* execute(...)`) now stream their preliminary tool-results to the model even though Think wraps `execute` to consult `beforeToolCall` first. Non-streaming tools keep a scalar wrapper, so they never emit a synthetic `preliminary` chunk. The non-canonical `async () => makeIterator()` form (a `Promise<AsyncIterable>`) still collapses to its last yielded value, matching the raw AI SDK.
+  - **Per-tool typing on the lifecycle contexts.** When an explicit `TOOLS` generic is passed, narrowing on `ctx.toolName` now narrows `ctx.input` on `beforeToolCall` and — new — `ctx.output` on `afterToolCall`'s success branch to that tool's inferred output type. Dynamic tools stay `unknown`. Behavior with the default `ToolSet` is unchanged.
+
 ## 0.11.0
 
 ### Minor Changes

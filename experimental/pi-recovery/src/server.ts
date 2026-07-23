@@ -8,7 +8,7 @@
  * @internal Validation fixture, not a published package.
  */
 import { getAgentByName } from "agents";
-import { PiAgent, type Env } from "./pi-agent";
+import { PiAgent } from "./pi-agent";
 
 export { PiAgent };
 

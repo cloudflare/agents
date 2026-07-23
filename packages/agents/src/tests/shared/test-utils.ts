@@ -148,18 +148,28 @@ export async function initializeMCPClientConnection(
 }
 
 /**
- * Helper to create RPC connection to TestMcpAgent
+ * Helper to create RPC connection to TestMcpAgent.
+ *
+ * Pass `elicitationHandlers` when the test exercises elicitation — without
+ * handlers the connection advertises no elicitation capability, so the server
+ * refuses to elicit.
  */
-export async function establishRPCConnection(): Promise<{
+export async function establishRPCConnection(
+  elicitationHandlers?: MCPClientConnection["options"]["elicitationHandlers"]
+): Promise<{
   connection: MCPClientConnection;
   sessionId: string;
 }> {
   const name = crypto.randomUUID();
 
-  const connection = await initializeMCPClientConnection(
-    `rpc://${name}`,
-    "rpc",
-    { namespace: env.MCP_OBJECT, name }
+  const connection = new MCPClientConnection(
+    new URL(`rpc://${name}`),
+    { name: "test-client", version: "1.0.0" },
+    {
+      transport: { type: "rpc", namespace: env.MCP_OBJECT, name },
+      client: {},
+      elicitationHandlers
+    }
   );
 
   await connection.init();

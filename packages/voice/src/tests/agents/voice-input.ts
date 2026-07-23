@@ -73,10 +73,35 @@ export class TestVoiceInputAgent extends InputBase {
   #transcripts: string[] = [];
   #connectCount = 0;
   #closeCount = 0;
+  #callStartCount = 0;
+  #callEndCount = 0;
   #customMessages: string[] = [];
+  #beforeCallStartMode: "allow" | "pending" = "allow";
+  #resolveBeforeCallStart: ((allowed: boolean) => void) | null = null;
+  #onCallStartShouldThrow = false;
 
   onTranscript(text: string, _connection: Connection) {
     this.#transcripts.push(text);
+  }
+
+  beforeCallStart(connection: Connection): boolean | Promise<boolean> {
+    if (this.#beforeCallStartMode === "allow") return true;
+
+    connection.send(JSON.stringify({ type: "_startup_pending" }));
+    return new Promise<boolean>((resolve) => {
+      this.#resolveBeforeCallStart = resolve;
+    });
+  }
+
+  onCallStart(_connection: Connection) {
+    this.#callStartCount++;
+    if (this.#onCallStartShouldThrow) {
+      throw new Error("onCallStart failed");
+    }
+  }
+
+  onCallEnd(_connection: Connection) {
+    this.#callEndCount++;
   }
 
   onConnect(connection: Connection) {
@@ -106,8 +131,35 @@ export class TestVoiceInputAgent extends InputBase {
               transcripts: this.#transcripts,
               connectCount: this.#connectCount,
               closeCount: this.#closeCount,
+              callStart: this.#callStartCount,
+              callEnd: this.#callEndCount,
               customMessages: this.#customMessages
             })
+          );
+          break;
+        case "_set_before_call_start":
+          if (parsed.value === "pending") {
+            this.#beforeCallStartMode = "pending";
+          } else if (parsed.value === "allow") {
+            this.#beforeCallStartMode = "allow";
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_resolve_before_call_start": {
+          const resolve = this.#resolveBeforeCallStart;
+          this.#resolveBeforeCallStart = null;
+          resolve?.(parsed.value !== false);
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        }
+        case "_set_on_call_start_throw":
+          this.#onCallStartShouldThrow = parsed.value === true;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
           );
           break;
         case "_custom":

@@ -46,10 +46,6 @@ import {
 import { passthroughProbe, type PassthroughResult } from "./passthrough";
 import { createResumableStream, ResumeExpiredError } from "./resumable";
 
-interface Env {
-  AI: Ai;
-}
-
 // env.AI.fetch() exists at runtime (workerd ai-api.ts) but isn't in the
 // generated Ai type. This is the internal binding fetch used to reach the
 // gateway resume endpoint.

@@ -25,9 +25,11 @@ npm init -y
 Install dependencies:
 
 ```sh
-npm install @cloudflare/think agents ai @cloudflare/shell zod workers-ai-provider react react-dom
+npm install @cloudflare/think agents ai @cloudflare/shell zod react react-dom
 npm install -D wrangler @cloudflare/vite-plugin @cloudflare/workers-types @vitejs/plugin-react @tailwindcss/vite tailwindcss typescript vite
 ```
+
+Think bundles [`workers-ai-provider`](https://www.npmjs.com/package/workers-ai-provider), so you do not need to install or import it for the common case — `getModel()` can return a model id string (see below).
 
 ## 2. Configure wrangler
 
@@ -78,14 +80,14 @@ Create `src/server.ts`:
 
 ```typescript
 import { Think } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
 
 export class MyAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    // A string is resolved through Think's built-in workers-ai-provider off the
+    // `AI` binding. Use a "@cf/..." id for Workers AI, or a "provider/model"
+    // slug like "openai/gpt-5.5" to route through AI Gateway.
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {
@@ -202,10 +204,8 @@ Override `configureSession` to give the model writable memory that survives rest
 
 ```typescript
 export class MyAgent extends Think<Env> {
-  getModel(): LanguageModel {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+  getModel() {
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   configureSession(session: Session) {
@@ -240,7 +240,7 @@ import { tool } from "ai";
 import { z } from "zod";
 
 export class MyAgent extends Think<Env> {
-  getModel(): LanguageModel {
+  getModel() {
     /* ... */
   }
   configureSession(session: Session) {
@@ -287,7 +287,7 @@ import type {
 } from "@cloudflare/think";
 
 export class MyAgent extends Think<Env> {
-  getModel(): LanguageModel {
+  getModel() {
     /* ... */
   }
 

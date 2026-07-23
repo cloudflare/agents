@@ -17,11 +17,6 @@ import { Agent, getAgentByName } from "agents";
 import { generateText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
-type Env = {
-  AI: Ai;
-  MyA2A: DurableObjectNamespace<MyA2A>;
-};
-
 const agentCard: AgentCard = {
   capabilities: {
     pushNotifications: false,

@@ -30,6 +30,10 @@ export type AgentObservabilityEvent =
       "schedule:duplicate_warning",
       { callback: string; count: number; type: string }
     >
+  | BaseEvent<
+      "alarm:memory_limit_reset",
+      { strikes: number; limit: number; sealed: boolean; error: string }
+    >
   | BaseEvent<"queue:create", { callback: string; id: string }>
   | BaseEvent<
       "queue:retry",

@@ -11,7 +11,7 @@ On every turn, Think merges tools from multiple sources. Later sources override 
 3. **Extension tools** — tools from loaded extensions (prefixed by extension name)
 4. **Session tools** — `set_context`, `load_context`, `search_context` (from `configureSession`)
 5. **Skill tools** — `activate_skill`, `read_skill_resource`, `run_skill_script` (from `getSkills()`)
-6. **MCP tools** — from connected MCP servers
+6. **MCP tools** — from connected MCP servers (when `includeMcpTools` is enabled)
 7. **Client tools** — from the browser (see [Client Tools](./client-tools.md))
 
 Tools belong to the agent running the turn. For parent-child orchestration,
@@ -182,7 +182,7 @@ beforeTurn(ctx: TurnContext) {
 
 ## MCP Tools
 
-Think inherits MCP client support from the `Agent` base class. MCP tools from connected servers are automatically merged into every turn.
+Think inherits MCP client support from the `Agent` base class. By default, tools from connected MCP servers are converted to AI SDK tools and merged into every turn.
 
 Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
 
@@ -196,6 +196,23 @@ export class MyAgent extends Think<Env> {
   }
 }
 ```
+
+If you expose MCP tools through Code Mode or another mechanism outside Think's automatic tool set, disable direct AI SDK tool exposure:
+
+```typescript
+export class MyAgent extends Think<Env> {
+  includeMcpTools = false;
+  waitForMcpConnections = true;
+
+  getModel() {
+    /* ... */
+  }
+}
+```
+
+`includeMcpTools = false` suppresses only Think's automatic `this.mcp.getAITools()` merge. MCP registration, restoration, discovery, waiting, raw catalog access, direct calls, Code Mode connectors, and explicit application calls to `this.mcp.getAITools()` continue to work. This avoids converting every MCP JSON Schema to Zod when the model only uses the raw MCP connection through the connector.
+
+Use the class property instead of `beforeTurn({ activeTools: [] })` for this purpose. `activeTools` limits tools after turn assembly; MCP schema conversion happens while Think assembles the context, before `beforeTurn` runs.
 
 Add MCP servers programmatically or via `@callable` methods:
 

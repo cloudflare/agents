@@ -10,18 +10,6 @@ import {
 import { generateObject, generateText } from "ai";
 import { z } from "zod";
 
-type Env = {
-  OPENAI_API_KEY: string;
-  AI_GATEWAY_TOKEN: string;
-  AI_GATEWAY_ACCOUNT_ID: string;
-  AI_GATEWAY_ID: string;
-  Sequential: DurableObjectNamespace<Agent<Env>>;
-  Routing: DurableObjectNamespace<Agent<Env>>;
-  Parallel: DurableObjectNamespace<Agent<Env>>;
-  Orchestrator: DurableObjectNamespace<Agent<Env>>;
-  Evaluator: DurableObjectNamespace<Agent<Env>>;
-};
-
 // createAgent is a helper function to generate an agent class
 // with helpers for sending/receiving messages to the client and updating the status
 function createAgent<

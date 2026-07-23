@@ -25,8 +25,7 @@
     "test:e2e": "nx run-many -t test:e2e --parallel=1",
     "test:recovery:live": "RUN_DEPLOYED_E2E=1 pnpm --filter @cloudflare/ai-chat run test:e2e:deployed && RUN_DEPLOYED_E2E=1 pnpm --filter @cloudflare/agents-chat-recovery-probe run test:e2e:deployed",
     "test:react": "pnpm --filter agents run test:react",
-    "prepare:playwright": "playwright install --with-deps chromium",
-    "prepare": "husky"
+    "prepare:playwright": "playwright install --with-deps chromium"
   },
   "license": "MIT",
   "version": "0.0.0",
@@ -40,7 +39,7 @@
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/vite-plugin": "^1.42.3",
     "@cloudflare/vitest-pool-workers": "^0.16.20",
-    "@cloudflare/workers-types": "^4.20260625.1",
+    "@cloudflare/workers-types": "^4.20260629.1",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@openai/agents": "^0.12.0",
     "@openai/agents-extensions": "^0.12.0",
@@ -48,7 +47,7 @@
     "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@typescript/native-preview": "^7.0.0-dev.20260624.1",
+    "@typescript/native-preview": "^7.0.0-dev.20260629.1",
     "@vitejs/plugin-react": "^6.0.3",
     "@vitest/browser": "^4.1.9",
     "@vitest/browser-playwright": "^4.1.9",
@@ -58,8 +57,6 @@
     "concurrently": "^10.0.3",
     "evalite": "^0.19.0",
     "fast-glob": "^3.3.3",
-    "husky": "^9.1.7",
-    "lint-staged": "^17.0.8",
     "nx": "^23.0.1",
     "oxfmt": "^0.56.0",
     "oxlint": "^1.71.0",
@@ -76,14 +73,9 @@
     "vite": "^8.1.0",
     "vitest": "4.1.9",
     "vitest-browser-react": "^2.2.0",
-    "workers-ai-provider": "^3.2.1",
+    "workers-ai-provider": "^3.3.0",
     "wrangler": "^4.105.0",
     "zod": "^4.4.3"
-  },
-  "lint-staged": {
-    "*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,vue,astro,svelte,css}": [
-      "oxfmt --write"
-    ]
   },
   "packageManager": "pnpm@11.9.0"
 }

@@ -3303,6 +3303,320 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     return this.messages;
   }
 
+  private _attachRaceInjection: { runId: string; body: string } | null = null;
+
+  /**
+   * #1589: arm a one-shot chunk injection that fires from inside
+   * `getAgentToolChunks` — i.e. AFTER the stored snapshot is read but (in the
+   * buggy ordering) BEFORE `tailAgentToolRun` attaches its live forwarder. This
+   * deterministically reproduces the drain↔register window a network-paced
+   * proxied remote stream hits constantly.
+   */
+  armAttachRaceInjectionForTest(runId: string, body: string): void {
+    this._attachRaceInjection = { runId, body };
+  }
+
+  private _progressInjection: {
+    runId: string;
+    progressBody: string;
+    milestoneBody: string;
+  } | null = null;
+
+  /**
+   * Arm a one-shot injection of NON-stored progress + milestone frames (the
+   * `reportProgress` wire shape) that fire from inside `getAgentToolChunks`,
+   * i.e. while the parent is still in the stored-replay → live-forwarding
+   * handoff. Unlike a streamed chunk these are broadcast-only — they carry no
+   * stored `chunk_index`, so they rely on the in-memory live sequence counter
+   * to be forwarded. Guards that they survive the handoff and reach the parent.
+   */
+  armProgressInjectionForTest(
+    runId: string,
+    progressBody: string,
+    milestoneBody: string
+  ): void {
+    this._progressInjection = { runId, progressBody, milestoneBody };
+  }
+
+  /**
+   * Bounded-poll until the live child turn has registered its request id and
+   * resumable stream id, so a test injection attributes (and, for a stored
+   * chunk, persists) exactly like a real streamed chunk. Returns null if the
+   * turn never came up within the window.
+   */
+  private async _waitForLiveTurnForTest(
+    runId: string
+  ): Promise<{ requestId: string; streamId: string } | null> {
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const row = this["_getAgentToolRunRow"](runId);
+      const requestId = row?.request_id ?? undefined;
+      if (requestId) {
+        const streamId = this["_getAgentToolStreamId"](requestId);
+        if (streamId) return { requestId, streamId };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return null;
+  }
+
+  override async getAgentToolChunks(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<AgentToolStoredChunk[]> {
+    const chunks = await super.getAgentToolChunks(runId, options);
+
+    const race = this._attachRaceInjection;
+    if (race && race.runId === runId) {
+      this._attachRaceInjection = null;
+      // Land a STORED + broadcast chunk in the drain↔register window. This runs
+      // INSIDE getAgentToolChunks, i.e. before tailAgentToolRun's post-drain
+      // forwarder registration in the buggy ordering, so it faithfully lands in
+      // the attach window. With the #1589 fix the forwarder is already attached,
+      // so the chunk is buffered and replayed in order instead of being dropped.
+      const live = await this._waitForLiveTurnForTest(runId);
+      if (live) {
+        await this["_storeStreamChunk"](live.streamId, race.body);
+        this["_broadcastChatMessage"]({
+          body: race.body,
+          done: false,
+          id: live.requestId,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        });
+      }
+    }
+
+    const progress = this._progressInjection;
+    if (progress && progress.runId === runId) {
+      this._progressInjection = null;
+      // Land NON-stored progress + milestone frames in the same window. These
+      // are broadcast-only (exactly like `reportProgress`): they carry no
+      // stored chunk_index, so they depend on the in-memory live sequence to be
+      // forwarded. Sourcing the forward sequence from the stored chunk count
+      // would collide them with the last stored chunk and the tail's high-water
+      // dedupe would silently drop them — the regression this guards against.
+      const live = await this._waitForLiveTurnForTest(runId);
+      if (live) {
+        this["_broadcastChatMessage"]({
+          body: progress.progressBody,
+          done: false,
+          id: live.requestId,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        });
+        this["_broadcastChatMessage"]({
+          body: progress.milestoneBody,
+          done: false,
+          id: live.requestId,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        });
+      }
+    }
+
+    return chunks;
+  }
+
+  /**
+   * Reproduce the post-restart cold-counter realign (Devin review on #1827,
+   * the hibernation / chat-recovery re-attach path). Seeds a RUNNING run with a
+   * stored backlog 0..N, wipes the in-memory live sequence (as a child DO
+   * restart / hibernation wake would), then tails it directly. After the drain
+   * the live counter must realign to N+1 so a NEW broadcast — the recovered
+   * turn's next chunk — forwards at N+1 instead of restarting at 0 and being
+   * silently dropped by `emit`'s high-water dedupe.
+   *
+   * Returns the drained backlog sequences, the live counter after the drain,
+   * and the forwarded post-restart chunk (null if it was dropped — the pre-fix
+   * behaviour).
+   */
+  async coldCounterReattachForwardsForTest(): Promise<{
+    drained: number[];
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = "cold-realign-run";
+    const requestId = "cold-realign-req";
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = [
+      JSON.stringify({ type: "text-start" }),
+      JSON.stringify({ type: "text-delta", delta: "a" }),
+      JSON.stringify({ type: "text-delta", delta: "b" })
+    ];
+    for (const body of backlog) {
+      await this["_storeStreamChunk"](streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    // Simulate a restart / hibernation wake: the in-memory live sequence map is
+    // cold; only the durable stored backlog survives.
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const stream = (await this.tailAgentToolRun(runId, {
+      afterSequence: -1
+    })) as unknown as ReadableStream<Uint8Array>;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const readLine = async (timeoutMs: number): Promise<string | null> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const nl = buffer.indexOf("\n");
+        if (nl >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line) return line;
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return null;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) return null;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+    };
+
+    const drained: number[] = [];
+    for (let i = 0; i < backlog.length; i++) {
+      const line = await readLine(2000);
+      if (line === null) break;
+      drained.push((JSON.parse(line) as { sequence: number }).sequence);
+    }
+
+    // Wait (bounded) for the post-drain realign to run.
+    const deadline = Date.now() + 2000;
+    while (
+      this["_agentToolLiveSequences"].get(runId) !== backlog.length &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const liveSequenceAfterDrain = this["_agentToolLiveSequences"].get(runId);
+
+    // The recovered turn now broadcasts a NEW chunk (not in the backlog).
+    const postBody = JSON.stringify({
+      type: "tool-output-available",
+      toolCallId: "post-restart",
+      output: "ok"
+    });
+    this["_broadcastChatMessage"]({
+      body: postBody,
+      done: false,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    });
+
+    const postLine = await readLine(2000);
+    const postRestart =
+      postLine === null
+        ? null
+        : (JSON.parse(postLine) as { sequence: number; body: string });
+    await reader.cancel();
+    return { drained, liveSequenceAfterDrain, postRestart };
+  }
+
+  /**
+   * Reproduce the cancelled-tailer-starves-siblings bug (Devin review on #1827).
+   * Two parents tail the SAME run; tailer A's consumer cancels its reader. With
+   * an empty `cancel` handler and an unguarded `controller.close()`, A's stale
+   * forwarder stays registered, and the next broadcast throws while emitting to
+   * A (enqueue on a cancelled stream → `close()` → `controller.close()` throws),
+   * which propagates out of `interceptAgentToolBroadcast`'s forward loop and
+   * starves sibling tailer B of that chunk. With the fix A is detached on cancel
+   * and `controller.close()` is guarded, so B still receives the chunk.
+   */
+  async cancelledTailerStarvationForTest(): Promise<{
+    siblingBodyAfterCancel: string | null;
+  }> {
+    const runId = "starve-run";
+    const requestId = "starve-req";
+    const streamId = this["_resumableStream"].start(requestId);
+    await this["_storeStreamChunk"](
+      streamId,
+      JSON.stringify({ type: "text-start" })
+    );
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    // One stored chunk (index 0) ⇒ live counter sits at 1, in lockstep.
+    this["_agentToolLiveSequences"].set(runId, 1);
+
+    // afterSequence: 0 ⇒ the drain skips the stored backlog, so both tailers go
+    // live immediately. A is registered first (iterated first in the broadcast).
+    const a = (await this.tailAgentToolRun(runId, {
+      afterSequence: 0
+    })) as unknown as ReadableStream<Uint8Array>;
+    const b = (await this.tailAgentToolRun(runId, {
+      afterSequence: 0
+    })) as unknown as ReadableStream<Uint8Array>;
+    const readerA = a.getReader();
+    const readerB = b.getReader();
+
+    // Wait until both forwarders are registered and live (drain complete).
+    const regDeadline = Date.now() + 2000;
+    while (
+      (this["_agentToolForwarders"].get(runId)?.size ?? 0) < 2 &&
+      Date.now() < regDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // A's consumer detaches.
+    await readerA.cancel();
+
+    // A new chunk is broadcast for the run.
+    const body = JSON.stringify({
+      type: "tool-output-available",
+      toolCallId: "sibling",
+      output: "ok"
+    });
+    this["_broadcastChatMessage"]({
+      body,
+      done: false,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    });
+
+    // B must still receive it.
+    const decoder = new TextDecoder();
+    let buf = "";
+    let siblingBodyAfterCancel: string | null = null;
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const nl = buf.indexOf("\n");
+      if (nl >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line) {
+          siblingBodyAfterCancel = (JSON.parse(line) as { body: string }).body;
+          break;
+        }
+        continue;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        readerB.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buf += decoder.decode(next.value, { stream: true });
+    }
+    await readerB.cancel();
+    return { siblingBodyAfterCancel };
+  }
+
   /**
    * #1575: broadcast a chat error frame whose request id belongs to no
    * agent-tool run, simulating an unrelated turn failing on this agent
@@ -3536,6 +3850,85 @@ export class AIChatAgentToolParent extends Agent<Env> {
       input,
       inputPreview: input.prompt
     });
+  }
+
+  /**
+   * #1589: run a child that injects a chunk into the tail attach window and
+   * return the forwarded agent-tool events so the test can assert the chunk
+   * survives the stored-replay → live-forwarding handoff.
+   */
+  async runChildWithAttachRaceForTest(
+    input: AgentToolInput,
+    raceBody: string,
+    runId = crypto.randomUUID()
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    await child.armAttachRaceInjectionForTest(runId, raceBody);
+    const result = await this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input,
+      inputPreview: input.prompt
+    });
+    return { result, events: this.events };
+  }
+
+  /**
+   * Run a child that injects NON-stored progress + milestone frames into the
+   * tail attach window and return the forwarded events, so the test can assert
+   * broadcast-only `reportProgress` frames survive the stored-replay →
+   * live-forwarding handoff (they have no stored chunk_index, so the in-memory
+   * live sequence counter is load-bearing for forwarding them).
+   */
+  async runChildWithProgressInjectionForTest(
+    input: AgentToolInput,
+    progressBody: string,
+    milestoneBody: string,
+    runId = crypto.randomUUID()
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    await child.armProgressInjectionForTest(runId, progressBody, milestoneBody);
+    const result = await this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input,
+      inputPreview: input.prompt
+    });
+    return { result, events: this.events };
+  }
+
+  /**
+   * Drive the child's post-restart cold-counter realign probe (Devin review on
+   * #1827). Routed through `subAgent` so the child runs in its SQL-enabled DO.
+   */
+  async coldCounterChildReattachForTest(): Promise<{
+    drained: number[];
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.coldCounterReattachForwardsForTest();
+  }
+
+  /**
+   * Drive the cancelled-tailer-starves-siblings probe (Devin review on #1827).
+   * Routed through `subAgent` so the child runs in its SQL-enabled DO.
+   */
+  async cancelledTailerStarvationChildForTest(): Promise<{
+    siblingBodyAfterCancel: string | null;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.cancelledTailerStarvationForTest();
   }
 
   async runChildWithDelayedAbort(

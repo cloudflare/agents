@@ -10,9 +10,8 @@
 import { callable, routeAgentRequest } from "agents";
 import { agentTool } from "agents/agent-tools";
 import { Think } from "@cloudflare/think";
-import type { LanguageModel, ToolSet } from "ai";
+import type { ToolSet } from "ai";
 import { tool } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
 type ResearchInput = { query: string };
@@ -31,11 +30,8 @@ function inputText(input: unknown): string {
 class DemoToolAgent extends Think<Env> {
   override chatRecovery = true;
 
-  override getModel(): LanguageModel {
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai("@cf/moonshotai/kimi-k2.7-code", {
-      sessionAffinity: this.sessionAffinity
-    });
+  override getModel() {
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   formatAgentToolInput(input: unknown) {
@@ -176,11 +172,8 @@ export class Planner extends DemoToolAgent {
 export class Assistant extends Think<Env> {
   override maxConcurrentAgentTools = 4;
 
-  override getModel(): LanguageModel {
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai("@cf/moonshotai/kimi-k2.7-code", {
-      sessionAffinity: this.sessionAffinity
-    });
+  override getModel() {
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   override getSystemPrompt(): string {

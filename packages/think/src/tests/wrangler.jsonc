@@ -40,6 +40,10 @@
         "name": "ThinkTestAgent"
       },
       {
+        "class_name": "ThinkPropsTestAgent",
+        "name": "ThinkPropsTestAgent"
+      },
+      {
         "class_name": "ThinkToolsTestAgent",
         "name": "ThinkToolsTestAgent"
       },
@@ -112,12 +116,20 @@
         "name": "ThinkMessengerRouteTestAgent"
       },
       {
+        "class_name": "ThinkMcpToolMaterializationAgent",
+        "name": "ThinkMcpToolMaterializationAgent"
+      },
+      {
         "class_name": "ThinkExecuteToolAgent",
         "name": "ThinkExecuteToolAgent"
       },
       {
         "class_name": "ThinkExecuteHitlAgent",
         "name": "ThinkExecuteHitlAgent"
+      },
+      {
+        "class_name": "ThinkFetchToolsTestAgent",
+        "name": "ThinkFetchToolsTestAgent"
       },
       {
         "class_name": "ThinkOnStartReconcileFailureAgent",
@@ -164,6 +176,7 @@
         "LoopToolTestAgent",
         "OverflowRecoveryTestAgent",
         "ThinkTestAgent",
+        "ThinkPropsTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
         "ThinkClientToolsAgent",
@@ -182,8 +195,10 @@
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
         "ThinkMessengerRouteTestAgent",
+        "ThinkMcpToolMaterializationAgent",
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
+        "ThinkFetchToolsTestAgent",
         "ThinkOnStartReconcileFailureAgent",
         "ThinkOnStartHydrationFailureAgent",
         "ThinkWindowedHydrationAgent",

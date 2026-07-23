@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
+import { getAgentByName } from "../..";
 
 /**
  * E2E tests for waitForConnections() through the full Agent lifecycle.
@@ -234,6 +236,35 @@ describe("waitForConnections E2E", () => {
       expect(result.connectionStates["regular-server"]).not.toBe("connecting");
       // OAuth server should be in authenticating state
       expect(result.connectionStates["oauth-server"]).toBe("authenticating");
+    });
+
+    // This forces a running actor out of memory. It verifies reconstruction,
+    // not natural idle-hibernation eligibility.
+    it("automatically restores MCP connections after forced eviction", async () => {
+      const name = `forced-evict-${crypto.randomUUID()}`;
+      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+
+      await stub.insertMcpServer(
+        "evict-roundtrip-server",
+        "Evict Round Trip Server",
+        "http://nonexistent-mcp.example.com",
+        "http://localhost:3000/callback",
+        null
+      );
+      await stub.resetRestoredFlag();
+      await stub.restoreAndWait(5000);
+      expect(await stub.hasMcpConnection("evict-roundtrip-server")).toBe(true);
+
+      await evictDurableObject(stub);
+
+      // Re-routing through getAgentByName runs the normal Agent startup wrapper.
+      // waitAndReport only waits for that lifecycle-started restore; it does not
+      // manually invoke onStart() or restoreConnectionsFromStorage().
+      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      const result = await stub.waitAndReport(5000);
+
+      expect(result.connectionIds).toContain("evict-roundtrip-server");
+      expect(result.connectionStates["evict-roundtrip-server"]).toBe("failed");
     });
   });
 

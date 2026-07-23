@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.17.0",
+  "version": "0.17.4",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -41,12 +41,12 @@
   "devDependencies": {
     "@ai-sdk/react": "^3.0.204",
     "@modelcontextprotocol/conformance": "0.1.16",
-    "@tanstack/ai": "0.32.0",
+    "@tanstack/ai": "0.38.0",
     "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.9",
-    "@x402/core": "^2.16.0",
-    "@x402/evm": "^2.16.0",
+    "@x402/core": "^2.17.0",
+    "@x402/evm": "^2.17.0",
     "ai": "^6.0.202",
     "chat": "^4.31.0",
     "glob": "^13.0.6",

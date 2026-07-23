@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/codemode",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Code Mode: use LLMs to generate executable code that performs tool calls",
   "repository": {
     "directory": "packages/codemode",
@@ -17,7 +17,7 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
     "@playwright/test": "^1.61.1",
-    "@tanstack/ai": "0.32.0",
+    "@tanstack/ai": "0.38.0",
     "ai": "^6.0.202",
     "vitest": "4.1.9",
     "zod": "^4.4.3"

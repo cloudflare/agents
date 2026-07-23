@@ -11,6 +11,7 @@ import {
   chatSdkMessenger,
   defaultChatSdkEvent,
   defaultConversationName,
+  resolveSelfMention,
   deliverMessengerReply,
   EMPTY_MESSENGER_RESPONSE,
   ERROR_MESSENGER_RESPONSE,
@@ -26,6 +27,7 @@ import {
   TextStreamCallback,
   textDeltaFromStreamChunk,
   ThinkMessengerRuntime,
+  toMessengerAttachment,
   toMessengerUserMessage,
   type MessengerEvent,
   type MessengerThinkHost
@@ -289,6 +291,182 @@ describe("think messengers core", () => {
     ]);
   });
 
+  it("prefixes channel messages with the default fullName cascade", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        text: "hello channel"
+      },
+      thread: { ...baseEvent.thread, isDirectMessage: false }
+    };
+
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      { type: "text", text: "Ada Lovelace: hello channel" }
+    ]);
+  });
+
+  it("falls back through fullName || userName || userId for the default label", () => {
+    const noFullName: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: { userId: "telegram:user", userName: "ada" },
+        text: "hello"
+      }
+    };
+    expect(toMessengerUserMessage(noFullName).parts).toEqual([
+      { type: "text", text: "ada: hello" }
+    ]);
+
+    const idOnly: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: { userId: "telegram:user" },
+        text: "hello"
+      }
+    };
+    expect(toMessengerUserMessage(idOnly).parts).toEqual([
+      { type: "text", text: "telegram:user: hello" }
+    ]);
+  });
+
+  it("accepts a custom channelSpeakerLabel formatter", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        author: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        text: "hello"
+      }
+    };
+
+    expect(
+      toMessengerUserMessage(event, (author) => `@${author.userName}`).parts
+    ).toEqual([{ type: "text", text: "@ada: hello" }]);
+
+    // Returning null/empty suppresses the prefix for that author.
+    expect(toMessengerUserMessage(event, () => null).parts).toEqual([
+      { type: "text", text: "hello" }
+    ]);
+  });
+
+  it("never prefixes direct messages regardless of channelSpeakerLabel", () => {
+    const dmEvent: MessengerEvent = {
+      ...baseEvent,
+      message: {
+        ...baseEvent.message!,
+        attachments: [],
+        text: "hello dm"
+      },
+      thread: { ...baseEvent.thread, isDirectMessage: true }
+    };
+
+    expect(toMessengerUserMessage(dmEvent).parts).toEqual([
+      { type: "text", text: "hello dm" }
+    ]);
+    expect(
+      toMessengerUserMessage(dmEvent, (author) => author.fullName ?? null).parts
+    ).toEqual([{ type: "text", text: "hello dm" }]);
+  });
+
+  it("prefixes channel actions with the resolved speaker label", () => {
+    const channelActionEvent: MessengerEvent = {
+      ...baseEvent,
+      action: {
+        actionId: "approve",
+        messageId: "source-message",
+        user: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        value: "ship-it"
+      },
+      kind: "action",
+      message: undefined,
+      thread: { ...baseEvent.thread, isDirectMessage: false }
+    };
+
+    expect(toMessengerUserMessage(channelActionEvent).parts).toEqual([
+      {
+        type: "text",
+        text: [
+          "Ada Lovelace: Action selected: approve",
+          "Value: ship-it",
+          "Source message: source-message"
+        ].join("\n")
+      }
+    ]);
+
+    expect(
+      toMessengerUserMessage(
+        channelActionEvent,
+        (author) => `@${author.userName}`
+      ).parts
+    ).toEqual([
+      {
+        type: "text",
+        text: [
+          "@ada: Action selected: approve",
+          "Value: ship-it",
+          "Source message: source-message"
+        ].join("\n")
+      }
+    ]);
+  });
+
+  it("never prefixes direct message actions", () => {
+    const dmActionEvent: MessengerEvent = {
+      ...baseEvent,
+      action: {
+        actionId: "approve",
+        messageId: "source-message",
+        user: {
+          fullName: "Ada Lovelace",
+          userId: "telegram:user",
+          userName: "ada"
+        },
+        value: "ship-it"
+      },
+      kind: "action",
+      message: undefined,
+      thread: { ...baseEvent.thread, isDirectMessage: true }
+    };
+
+    const expected = [
+      {
+        type: "text",
+        text: [
+          "Action selected: approve",
+          "Value: ship-it",
+          "Source message: source-message"
+        ].join("\n")
+      }
+    ];
+
+    expect(toMessengerUserMessage(dmActionEvent).parts).toEqual(expected);
+    // A custom label cannot re-introduce a prefix in DMs.
+    expect(
+      toMessengerUserMessage(dmActionEvent, (author) => author.fullName ?? null)
+        .parts
+    ).toEqual(expected);
+  });
+
   it("converts messenger actions to Think user messages", () => {
     const event = defaultChatSdkEvent(
       normalizeMessengers({
@@ -339,6 +517,60 @@ describe("think messengers core", () => {
     ]);
   });
 
+  it("rewrites the bot's own self-mention to the bot handle", () => {
+    expect(
+      resolveSelfMention("@U0BD9EYL52S hi friend", "U0BD9EYL52S", "think_bot")
+    ).toBe("@think_bot hi friend");
+    expect(
+      resolveSelfMention("hey <@U0BD9EYL52S> there", "U0BD9EYL52S", "think_bot")
+    ).toBe("hey @think_bot there");
+    expect(
+      resolveSelfMention(
+        "hey <@!U0BD9EYL52S> there",
+        "U0BD9EYL52S",
+        "think_bot"
+      )
+    ).toBe("hey @think_bot there");
+  });
+
+  it("leaves other users' resolved mentions untouched", () => {
+    expect(
+      resolveSelfMention(
+        "@U0BD9EYL52S ask @Ada about it",
+        "U0BD9EYL52S",
+        "think_bot"
+      )
+    ).toBe("@think_bot ask @Ada about it");
+  });
+
+  it("is a no-op when the adapter exposes no botUserId", () => {
+    expect(resolveSelfMention("@U0BD9EYL52S hi", undefined, "think_bot")).toBe(
+      "@U0BD9EYL52S hi"
+    );
+  });
+
+  it("resolves the self-mention in default events using the bot handle", () => {
+    const [definition] = normalizeMessengers({
+      slack: chatSdkMessenger({
+        adapter: fakeAdapter({ botUserId: "U0BD9EYL52S" }),
+        provider: "slack",
+        userName: "think_bot",
+        verifyWebhook: false
+      })
+    });
+
+    const event = defaultChatSdkEvent(definition!, {
+      eventKind: "mention",
+      message: fakeMessage("@U0BD9EYL52S hi friend"),
+      thread: fakeThread("slack:C123")
+    });
+
+    expect(event.message?.text).toBe("@think_bot hi friend");
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      { type: "text", text: "Ada Lovelace: @think_bot hi friend" }
+    ]);
+  });
+
   it("creates serializable recovery snapshots without live raw data", () => {
     const event = serializableMessengerEvent({
       ...baseEvent,
@@ -349,6 +581,7 @@ describe("think messengers core", () => {
           {
             data: new ArrayBuffer(1),
             fetch: () => Promise.resolve(new ArrayBuffer(1)),
+            fetchMetadata: { fileId: "AgACAgIfileid" },
             mediaType: "text/plain",
             name: "notes.txt",
             raw: { providerFile: true },
@@ -372,7 +605,39 @@ describe("think messengers core", () => {
     expect(cloned.event.message.attachments[0].raw).toBeUndefined();
     expect(cloned.event.message.attachments[0].data).toBeUndefined();
     expect(cloned.event.message.attachments[0].fetch).toBeUndefined();
+    expect(cloned.event.message.attachments[0].fetchMetadata).toEqual({
+      fileId: "AgACAgIfileid"
+    });
     expect(cloned.thread._type).toBe("chat:Thread");
+  });
+
+  it("preserves attachment fetchMetadata and backfills id when converting", () => {
+    const attachment = toMessengerAttachment({
+      fetchData: () => Promise.resolve(Buffer.from("hello")),
+      fetchMetadata: { fileId: "AgACAgItelegram" },
+      mimeType: "image/jpeg",
+      name: "photo.jpg",
+      size: 1024,
+      type: "image",
+      url: "https://example.com/photo.jpg"
+    });
+
+    expect(attachment.fetchMetadata).toEqual({ fileId: "AgACAgItelegram" });
+    expect(attachment.id).toBe("AgACAgItelegram");
+    expect(attachment.raw).toBeDefined();
+  });
+
+  it("leaves attachment id undefined when fetchMetadata has no known id key", () => {
+    const attachment = toMessengerAttachment({
+      fetchMetadata: { region: "us-east" },
+      mimeType: "image/jpeg",
+      name: "photo.jpg",
+      type: "image",
+      url: "https://example.com/photo.jpg"
+    });
+
+    expect(attachment.fetchMetadata).toEqual({ region: "us-east" });
+    expect(attachment.id).toBeUndefined();
   });
 
   it("parses and classifies messenger recovery snapshots", () => {
@@ -924,6 +1189,24 @@ function fakeAdapter(overrides: Partial<Adapter> = {}): Adapter {
     userName: "fake_bot",
     ...overrides
   } as Adapter;
+}
+
+function fakeMessage(text: string) {
+  return {
+    attachments: [],
+    author: {
+      fullName: "Ada Lovelace",
+      isBot: false,
+      isMe: false,
+      userId: "slack:user",
+      userName: "ada"
+    },
+    id: "message-1",
+    isMention: true,
+    metadata: { dateSent: new Date(0), edited: false },
+    raw: {},
+    text
+  } as never;
 }
 
 function fakeThread(id: string) {
