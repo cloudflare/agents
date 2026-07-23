@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.4.3
+
+### Patch Changes
+
+- [#1977](https://github.com/cloudflare/agents/pull/1977) [`412702e`](https://github.com/cloudflare/agents/commit/412702ebea68b5756ca0ddc766d1112c2b06ab13) Thanks [@cjol](https://github.com/cjol)! - Require `@cloudflare/codemode` 0.5.0 or newer.
+
 ## 0.4.2
 
 ### Patch Changes
