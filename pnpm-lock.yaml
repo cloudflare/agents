@@ -3954,7 +3954,7 @@ importers:
   packages/shell:
     dependencies:
       '@cloudflare/codemode':
-        specifier: '>=0.4.0'
+        specifier: '>=0.5.0'
         version: link:../codemode
       isomorphic-git:
         specifier: ^1.38.5
