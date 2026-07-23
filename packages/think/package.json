@@ -9,7 +9,7 @@
     "tools"
   ],
   "type": "module",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
@@ -26,7 +26,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
-    "@cloudflare/codemode": ">=0.4.0",
+    "@cloudflare/codemode": ">=0.5.0",
     "@cloudflare/shell": ">=0.4.0",
     "aywson": "^0.0.16",
     "chat": "^4.31.0",
