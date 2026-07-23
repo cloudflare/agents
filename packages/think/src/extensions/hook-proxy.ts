@@ -226,8 +226,22 @@ export function createStepFinishSnapshot(event: {
           inputTokens: event.usage.inputTokens,
           outputTokens: event.usage.outputTokens,
           totalTokens: event.usage.totalTokens,
-          reasoningTokens: event.usage.reasoningTokens,
-          cachedInputTokens: event.usage.cachedInputTokens
+          reasoningTokens:
+            (
+              event.usage as {
+                outputTokenDetails?: { reasoningTokens?: number };
+                reasoningTokens?: number;
+              }
+            ).outputTokenDetails?.reasoningTokens ??
+            (event.usage as { reasoningTokens?: number }).reasoningTokens,
+          cachedInputTokens:
+            (
+              event.usage as {
+                inputTokenDetails?: { cacheReadTokens?: number };
+                cachedInputTokens?: number;
+              }
+            ).inputTokenDetails?.cacheReadTokens ??
+            (event.usage as { cachedInputTokens?: number }).cachedInputTokens
         }
       : undefined,
     providerMetadata: event.providerMetadata as

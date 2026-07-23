@@ -1066,6 +1066,100 @@ describe("schedule operations", () => {
     });
   });
 
+  describe("alarm memory-limit circuit breaker (#1825)", () => {
+    // A Durable Object memory-limit reset must NOT crash the alarm to the
+    // platform (which auto-retries forever — the OOM loop). The boundary breaker
+    // swallows it (alarm does NOT reject) so the platform stops retrying, while
+    // PRESERVING the looping row under budget so a transient spike can clear on a
+    // fresh isolate. This is a third class, distinct from defer (threw=true,
+    // preserved) and ordinary swallow (threw=false, deleted).
+    it("under budget: swallows the alarm and preserves the row (backed off)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "oom-breaker-under-budget"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      );
+      // Swallowed (loop broken at the boundary, platform won't auto-retry)…
+      expect(threw).toBe(false);
+      // …but the row survives so the breaker can retry it on a fresh isolate.
+      expect(remaining).toBe(1);
+    });
+
+    it("matches a truncated memory-limit surfacing too", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "oom-breaker-truncated"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "the isolate exceeded its memory limit"
+      );
+      expect(threw).toBe(false);
+      expect(remaining).toBe(1);
+    });
+
+    it("at the strike budget: seals + purges the looping row so the loop stops", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "oom-breaker-seal-at-budget"
+      );
+      const oom =
+        "Durable Object's isolate exceeded its memory limit and was reset.";
+      // Default maxAlarmMemoryLimitStrikes = 3. Strikes 1 and 2 preserve the
+      // row (backed off); strike 3 hits the budget and purges it.
+      const first = await agentStub.runOneShotThrowingForTest(oom);
+      expect(first).toEqual({ threw: false, remaining: 1 });
+      const second = await agentStub.runOneShotThrowingForTest(oom);
+      expect(second).toEqual({ threw: false, remaining: 1 });
+      const third = await agentStub.runOneShotThrowingForTest(oom);
+      // Sealed: the executing row is purged so it can never re-trigger.
+      expect(third).toEqual({ threw: false, remaining: 0 });
+    });
+
+    it("a clean alarm resets the strike counter (consecutive, not lifetime)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "oom-breaker-reset-on-success"
+      );
+      const oom =
+        "Durable Object's isolate exceeded its memory limit and was reset.";
+      // One OOM records a strike and backs the row off (preserved).
+      expect(await agentStub.runOneShotThrowingForTest(oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await agentStub.getAlarmStrikesForTest()).toBe(1);
+      // A clean alarm clears the counter so spikes must be CONSECUTIVE to seal.
+      await agentStub.runCleanAlarmForTest();
+      expect(await agentStub.getAlarmStrikesForTest()).toBe(0);
+      // A later OOM therefore starts again at strike 1 (not accumulating toward
+      // the budget across healthy runs).
+      expect(await agentStub.runOneShotThrowingForTest(oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await agentStub.getAlarmStrikesForTest()).toBe(1);
+    });
+
+    it("a non-memory error still rejects/ swallows as before (breaker is OOM-only)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "oom-breaker-passthrough"
+      );
+      // Ordinary error: swallowed + deleted (unchanged).
+      expect(
+        await agentStub.runOneShotThrowingForTest("ordinary error")
+      ).toEqual({ threw: false, remaining: 0 });
+      // Code-update reset: still deferred (alarm rejects, row preserved).
+      expect(
+        await agentStub.runOneShotThrowingForTest(
+          "Durable Object reset because its code was updated."
+        )
+      ).toEqual({ threw: true, remaining: 1 });
+    });
+  });
+
   describe("one-shot defer on retry exhaustion of a platform transient (#1730)", () => {
     // A deploy-reset window outlasts the in-process retry schedule by design
     // (all attempts land inside the same few-seconds storage-unavailable

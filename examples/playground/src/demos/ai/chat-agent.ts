@@ -5,7 +5,7 @@ import {
   convertToModelMessages,
   pruneMessages,
   tool,
-  stepCountIs
+  isStepCount
 } from "ai";
 import { z } from "zod";
 
@@ -19,7 +19,7 @@ export class ChatAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a helpful assistant running on Cloudflare Workers. " +
         "You can check the weather and get the user's timezone.",
       messages: pruneMessages({
@@ -51,7 +51,7 @@ export class ChatAgent extends AIChatAgent<Env> {
           inputSchema: z.object({})
         })
       },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     return result.toUIMessageStreamResponse();

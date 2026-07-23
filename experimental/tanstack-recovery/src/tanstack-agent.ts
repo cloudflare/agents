@@ -82,13 +82,6 @@ import type { TurnModel, TurnProvider } from "./model";
 import { createWorkersAiModel } from "./workers-ai-model";
 import { tanStackRecoveryCodec } from "./tanstack-codec";
 
-export type Env = {
-  TanStackAgent: DurableObjectNamespace<TanStackAgent>;
-  /** Workers AI binding for the OPT-IN real-provider run (the faux model never
-   *  touches it). Present so a `workers-ai` turn can stream a real reply. */
-  AI: Ai;
-};
-
 /** A durable transcript entry. `partial` flags a preserved orphaned partial. */
 interface TranscriptEntry {
   id: string;

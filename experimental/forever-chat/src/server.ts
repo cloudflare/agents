@@ -14,7 +14,7 @@
  * streaming and onChatRecovery for provider-specific recovery.
  */
 import { createWorkersAI } from "workers-ai-provider";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV3, LanguageModelV4 } from "@ai-sdk/provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { routeAgentRequest } from "agents";
@@ -29,7 +29,7 @@ import {
   convertToModelMessages,
   pruneMessages,
   tool,
-  stepCountIs,
+  isStepCount,
   type UIMessage
 } from "ai";
 import { z } from "zod";
@@ -135,7 +135,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
     this.setState({ ...this.state, lastProvider: provider });
 
     // Buffer streaming replay: create a replay model that reads from the
-    // buffer and emits LanguageModelV3StreamPart objects. streamText
+    // buffer and emits the provider's language model stream parts. streamText
     // handles everything natively — tool execution, reasoning, UIMessage
     // conversion. Client sees tokens streaming in.
     const replayBufferId = this._pendingBufferReplay;
@@ -156,7 +156,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
           reasoning: "before-last-message"
         }),
         tools: chatTools,
-        stopWhen: stepCountIs(5),
+        stopWhen: isStepCount(5),
         abortSignal: options?.abortSignal
       });
       return result.toUIMessageStreamResponse();
@@ -169,14 +169,16 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
 
     const result = streamText({
       model: this._getModel(provider, useBuffer),
-      system: recovering ? SYSTEM_PROMPT + RECOVERY_SUFFIX : SYSTEM_PROMPT,
+      instructions: recovering
+        ? SYSTEM_PROMPT + RECOVERY_SUFFIX
+        : SYSTEM_PROMPT,
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message"
       }),
       tools: chatTools,
-      stopWhen: stepCountIs(5),
+      stopWhen: isStepCount(5),
       abortSignal: options?.abortSignal,
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- provider-specific options
       providerOptions: this._getProviderOptions(provider, recovering) as any,
@@ -686,7 +688,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
   private _getReplayModel(
     provider: Provider,
     replayFetch: typeof fetch
-  ): LanguageModelV3 {
+  ): LanguageModelV3 | LanguageModelV4 {
     switch (provider) {
       case "openai":
         return createOpenAI({
@@ -763,7 +765,6 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
     if (provider !== "openai") return {};
 
     return {
-      includeRawChunks: true,
       onChunk: ({ chunk }) => {
         if (chunk.type !== "raw") return;
         const raw = chunk.rawValue as
@@ -780,7 +781,8 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
             this.stash({ responseId: raw.response.id });
           }
         }
-      }
+      },
+      includeRawChunks: true
     };
   }
 }

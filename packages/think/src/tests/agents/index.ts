@@ -8,8 +8,10 @@ export {
 } from "./assistant-agent-loop";
 export {
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkToolsTestAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -28,9 +30,11 @@ export {
   ThinkMediaEvictionAgent,
   ThinkMediaEvictionAutoAgent
 } from "./think-session";
+export { ThinkFetchToolsTestAgent } from "./fetch-tools";
 export { ThinkExecuteToolAgent } from "./execute-tool";
 export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";
 export { ThinkMessengerRouteTestAgent } from "./messengers";
+export { ThinkMcpToolMaterializationAgent } from "./mcp-tool-materialization";

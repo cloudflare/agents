@@ -297,3 +297,29 @@ describe("addMcpServer with RPC binding", () => {
     expect(result.result!.content[0].text).toBe("from-rpc-client");
   });
 });
+
+describe("addMcpServer with RPC binding — Worker-safe JSON Schema validator", () => {
+  it("applies CfWorkerJsonSchemaValidator by default and handles outputSchema tools", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-validator-default"
+    );
+    const result =
+      (await agentStub.testRpcClientUsesWorkerSafeValidator()) as unknown as {
+        success: boolean;
+        usesWorkerSafeValidator?: boolean;
+        structuredContent?: { greeting?: string; nameLength?: number };
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.usesWorkerSafeValidator).toBe(true);
+    expect(result.structuredContent).toEqual({
+      greeting: "Hello, RPC User!",
+      nameLength: "RPC User".length
+    });
+  });
+});

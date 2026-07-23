@@ -1,6 +1,6 @@
 import { routeAgentRequest } from "agents";
 import { AIChatAgent, createToolsFromClientSchemas } from "@cloudflare/ai-chat";
-import { convertToModelMessages, streamText, stepCountIs } from "ai";
+import { convertToModelMessages, streamText, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 export class BrowserCodemode extends AIChatAgent<Env> {
@@ -16,13 +16,13 @@ export class BrowserCodemode extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a browser codemode assistant. " +
         "Use the codemode tool to write JavaScript that calls functions on the `codemode` object. " +
         "The generated code runs in an iframe sandbox in the user's browser and can call browser-provided tools.",
       messages: await convertToModelMessages(this.messages),
       tools: createToolsFromClientSchemas(options?.clientTools),
-      stopWhen: stepCountIs(10)
+      stopWhen: isStepCount(10)
     });
 
     return result.toUIMessageStreamResponse();

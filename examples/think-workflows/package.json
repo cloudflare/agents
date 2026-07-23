@@ -12,12 +12,11 @@
   "dependencies": {
     "@cloudflare/think": "*",
     "agents": "*",
-    "ai": "^6.0.202",
-    "workers-ai-provider": "^3.2.1",
+    "ai": "^7.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260625.1",
+    "@cloudflare/workers-types": "^4.20260629.1",
     "typescript": "^6.0.3",
     "wrangler": "^4.105.0"
   }

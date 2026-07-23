@@ -1,0 +1,45 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sandbox-coding-agent-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  // The orchestrator's planning loop uses Workers AI, and the Sandbox routes
+  // Claude Code's Anthropic egress through this same binding's AI Gateway.
+  "ai": { "binding": "AI", "remote": true },
+  // The AI Gateway id to route Claude Code through. The binding authenticates
+  // via your account, so this is a plaintext name — NOT a secret. Provider
+  // billing is handled by the gateway (Unified Billing or a stored key).
+  "vars": {
+    "GATEWAY_ID": "default"
+  },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  // Top-level Durable Objects:
+  // - CodingOrchestrator: the Think agent the user chats with (planning loop)
+  // - Sandbox: the @cloudflare/sandbox container DO the coding agents run in
+  // ClaudeCodeAgent needs no binding — the orchestrator spawns it as a facet
+  // (sub-agent), but it must still be exported from the Worker entry (server.ts).
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "CodingOrchestrator", "name": "CodingOrchestrator" },
+      { "class_name": "Sandbox", "name": "Sandbox" }
+    ]
+  },
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 5
+    }
+  ],
+  "migrations": [
+    {
+      "new_sqlite_classes": ["CodingOrchestrator", "Sandbox"],
+      "tag": "v1"
+    }
+  ]
+}

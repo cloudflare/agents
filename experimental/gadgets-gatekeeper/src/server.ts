@@ -14,7 +14,7 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, routeAgentRequest, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
+import { streamText, convertToModelMessages, tool, isStepCount } from "ai";
 import { z } from "zod";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -254,7 +254,7 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: `You are a helpful database administrator assistant. You manage a customer database.
+      instructions: `You are a helpful database administrator assistant. You manage a customer database.
 
 You can query the database freely — reads are always allowed. But any changes to the data
 (INSERT, UPDATE, DELETE) will be submitted for human approval before they execute. This is
@@ -334,7 +334,7 @@ can approve or reject it in the action panel. Don't say it's been done — it ha
           }
         })
       },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     return result.toUIMessageStreamResponse();

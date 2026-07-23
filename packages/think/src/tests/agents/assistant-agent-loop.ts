@@ -301,6 +301,9 @@ export class LoopToolTestAgent extends Think {
     toolName: string;
     inputJson: string;
     outputJson: string;
+    toolOutputJson: string;
+    durationMs: number;
+    toolExecutionMs: number;
   }> = [];
 
   getModel(): LanguageModel {
@@ -329,7 +332,7 @@ export class LoopToolTestAgent extends Think {
 
   override maxSteps = 3;
 
-  override onStepFinish(ctx: StepContext): void {
+  override onStepEnd(ctx: StepContext): void {
     this._stepLog.push({
       finishReason: ctx.finishReason,
       toolCallCount: ctx.toolCalls.length,
@@ -350,7 +353,10 @@ export class LoopToolTestAgent extends Think {
       inputJson: JSON.stringify(ctx.input),
       outputJson: ctx.success
         ? JSON.stringify(ctx.output)
-        : JSON.stringify({ error: String(ctx.error) })
+        : JSON.stringify({ error: String(ctx.error) }),
+      toolOutputJson: JSON.stringify(ctx.toolOutput),
+      durationMs: ctx.durationMs,
+      toolExecutionMs: ctx.toolExecutionMs
     });
   }
 
@@ -390,6 +396,9 @@ export class LoopToolTestAgent extends Think {
       toolName: string;
       inputJson: string;
       outputJson: string;
+      toolOutputJson: string;
+      durationMs: number;
+      toolExecutionMs: number;
     }>
   > {
     return this._afterToolCallLog;
@@ -616,7 +625,7 @@ function createProactiveThenReactiveModel(
  *
  * The recovery seam only fires on in-stream error parts, so this test asserts
  * the changeset's central AI-SDK assumption: `streamText` re-enqueues even a
- * thrown/rejected `doStream` as a `{ type: "error" }` fullStream part, so the
+ * thrown/rejected `doStream` as a `{ type: "error" }` stream part, so the
  * seam catches it and recovery still runs. If the SDK ever stopped doing this,
  * this test would fail — surfacing a real gap rather than a silent regression.
  */
@@ -1304,7 +1313,7 @@ export class OverflowRecoveryTestAgent extends Think {
   /**
    * Reactive recovery driven by a provider that REJECTS `doStream` (a top-level
    * throw) rather than emitting an in-stream error part. Asserts the AI SDK
-   * re-enqueues the rejection as a `{ type: "error" }` fullStream part so the
+   * re-enqueues the rejection as a `{ type: "error" }` stream part so the
    * recovery seam still catches it and the turn recovers.
    */
   async testChatThrowingOverflow(message: string): Promise<OverflowChatResult> {

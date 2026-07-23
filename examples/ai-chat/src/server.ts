@@ -11,7 +11,7 @@ import {
   convertToModelMessages,
   pruneMessages,
   tool,
-  stepCountIs
+  isStepCount
 } from "ai";
 import { z } from "zod";
 
@@ -89,7 +89,7 @@ export class ChatAgent extends AIChatAgent {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
         "run calculations, and browse the web. " +
         "For simple one-shot reads, prefer the Quick Action tools: browser_markdown (read a " +
@@ -172,7 +172,7 @@ export class ChatAgent extends AIChatAgent {
           }
         })
       },
-      stopWhen: stepCountIs(20)
+      stopWhen: isStepCount(20)
     });
 
     return result.toUIMessageStreamResponse();

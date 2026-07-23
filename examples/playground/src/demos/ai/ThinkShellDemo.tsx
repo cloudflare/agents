@@ -82,13 +82,10 @@ const codeSections: CodeSection[] = [
     description:
       "Think is the high-level agent base class: chat protocol, persistence, stream resumption, client tools, workspace tools, and lifecycle hooks.",
     code: `import { Think } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
 
 export class Assistant extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {

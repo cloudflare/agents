@@ -1,0 +1,62 @@
+// Test-only wrangler config for the FAST pool-workers unit suite.
+//
+// Deliberately a STRIPPED copy of the production ../wrangler.jsonc: it keeps
+// the DO + binding shape the worker imports need, but drops the two things
+// miniflare can't run and that would otherwise fire in the background and crash
+// tests with "Failed to start container":
+//
+//   - the `containers` entry (Cloudflare Containers don't boot under miniflare)
+//   - the `triggers.crons` warm-pool prime (its alarm tries to start a container)
+//
+// The container path is covered by the e2e suite (wrangler dev --local), not
+// here.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "agent-think",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat", "enable_abortsignal_rpc"],
+
+  "ai": { "binding": "AI" },
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "ThinkAgent", "class_name": "ThinkAgent" },
+      { "name": "WorkspaceAgent", "class_name": "WorkspaceAgent" },
+      { "name": "Sandbox", "class_name": "Sandbox" },
+      { "name": "WarmPool", "class_name": "WarmPool" },
+      // Singleton registry behind the command-center UI (threads + metrics).
+      { "name": "CommandCenter", "class_name": "CommandCenterAgent" },
+      {
+        "name": "AgentThinkPromptTestAgent",
+        "class_name": "AgentThinkPromptTestAgent"
+      }
+    ]
+  },
+
+  "r2_buckets": [
+    { "binding": "R2_SKILLS", "bucket_name": "agent-think-skills" }
+  ],
+
+  // The / and /thread/* routes read env.ASSETS; keep the binding so the
+  // SPA-fallback routes are exercised. Points at a committed fixture (not the
+  // Vite output) so the suite is hermetic on CI with no client build.
+  "assets": {
+    "directory": "client-fixture",
+    "binding": "ASSETS",
+    "run_worker_first": ["/thread/*", "/agents/*", "/api/*"]
+  },
+
+  "vars": {
+    "PUBLIC_BASE_URL": "https://agent-think.test"
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
+    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] },
+    { "tag": "v4", "new_sqlite_classes": ["AgentThinkPromptTestAgent"] },
+    { "tag": "v5", "new_sqlite_classes": ["WorkspaceAgent"] }
+  ]
+}

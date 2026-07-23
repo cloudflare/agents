@@ -12,10 +12,13 @@ import {
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
+  DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+  DEFAULT_CHAT_RECOVERY_MAX_WORK,
   DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
   evaluateChatRecoveryIncident,
   KV_DELETE_MAX_KEYS,
+  listActiveChatRecoveryIncidents,
   readChatRecoveryProgress,
   resolveChatRecoveryConfig,
   selectStaleIncidentKeys,
@@ -46,6 +49,7 @@ function config(
     terminalMessage: DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
     noProgressTimeoutMs: DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
     maxRecoveryWork: Number.POSITIVE_INFINITY,
+    maxOomRetries: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
     ...overrides
   };
 }
@@ -116,7 +120,8 @@ describe("resolveChatRecoveryConfig", () => {
       enabled: true,
       maxAttempts: DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
       noProgressTimeoutMs: DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
-      maxRecoveryWork: Number.POSITIVE_INFINITY,
+      maxRecoveryWork: DEFAULT_CHAT_RECOVERY_MAX_WORK,
+      maxOomRetries: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
       terminalMessage: DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE
     });
   });
@@ -140,13 +145,35 @@ describe("resolveChatRecoveryConfig", () => {
     expect(resolved.noProgressTimeoutMs).toBe(1234);
   });
 
-  it("accepts a finite maxRecoveryWork including 0, rejects negatives", () => {
+  it("accepts a finite maxRecoveryWork including 0, falls back to the default for negatives", () => {
     expect(
       resolveChatRecoveryConfig({ maxRecoveryWork: 0 }).maxRecoveryWork
     ).toBe(0);
     expect(
       resolveChatRecoveryConfig({ maxRecoveryWork: -1 }).maxRecoveryWork
+    ).toBe(DEFAULT_CHAT_RECOVERY_MAX_WORK);
+    // Integrators can still opt back into the pre-#1825 unbounded behavior.
+    expect(
+      resolveChatRecoveryConfig({ maxRecoveryWork: Number.POSITIVE_INFINITY })
+        .maxRecoveryWork
     ).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("defaults, floors, and clamps maxOomRetries (#1825)", () => {
+    expect(resolveChatRecoveryConfig(true).maxOomRetries).toBe(
+      DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES
+    );
+    // 0 is a legitimate "seal on the first OOM" choice and must be preserved.
+    expect(resolveChatRecoveryConfig({ maxOomRetries: 0 }).maxOomRetries).toBe(
+      0
+    );
+    expect(
+      resolveChatRecoveryConfig({ maxOomRetries: 5.9 }).maxOomRetries
+    ).toBe(5);
+    // Negative is invalid → fall back to the default.
+    expect(resolveChatRecoveryConfig({ maxOomRetries: -1 }).maxOomRetries).toBe(
+      DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES
+    );
   });
 
   it("passes through shouldKeepRecovering and onExhausted when present", () => {
@@ -301,6 +328,58 @@ describe("sweepStaleChatRecoveryIncidents", () => {
       5
     ]);
     expect(storage.data.size).toBe(0);
+  });
+});
+
+describe("listActiveChatRecoveryIncidents", () => {
+  function seed(
+    storage: FakeStorage,
+    incidents: { id: string; status: ChatRecoveryIncident["status"] }[]
+  ): void {
+    for (const { id, status } of incidents) {
+      storage.data.set(`${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${id}`, {
+        ...staleIncident(id, T0),
+        status
+      });
+    }
+  }
+
+  it("returns only live incidents (detected/scheduled/attempting), not terminalized ones", async () => {
+    const storage = new FakeStorage();
+    seed(storage, [
+      { id: "detected", status: "detected" },
+      { id: "scheduled", status: "scheduled" },
+      { id: "attempting", status: "attempting" },
+      { id: "exhausted", status: "exhausted" },
+      { id: "failed", status: "failed" }
+    ]);
+    // An unrelated key outside the prefix must never be returned.
+    storage.data.set("cf:chat:last-terminal", { foo: 1 });
+
+    const active = await listActiveChatRecoveryIncidents(
+      storage as unknown as Pick<DurableObjectStorage, "list">
+    );
+
+    expect(storage.listPrefixes).toEqual([CHAT_RECOVERY_INCIDENT_KEY_PREFIX]);
+    expect(active.map((a) => a.incident.incidentId).sort()).toEqual([
+      "attempting",
+      "detected",
+      "scheduled"
+    ]);
+  });
+
+  it("returns an empty list when nothing is live", async () => {
+    const storage = new FakeStorage();
+    seed(storage, [
+      { id: "exhausted", status: "exhausted" },
+      { id: "failed", status: "failed" }
+    ]);
+
+    const active = await listActiveChatRecoveryIncidents(
+      storage as unknown as Pick<DurableObjectStorage, "list">
+    );
+
+    expect(active).toEqual([]);
   });
 });
 
@@ -671,5 +750,98 @@ describe("evaluateChatRecoveryIncident", () => {
     const { incident } = await evaluate({ currentProgress: 4 });
     expect(incident.workBaseline).toBe(4);
     expect(incident.progress).toBe(4);
+  });
+
+  it("seals an OOM-style crash loop via the DEFAULT work budget (#1825)", async () => {
+    // Regression for #1825: an isolate that OOMs mid-stream credits a little
+    // progress before it dies, which resets the attempt cap and refreshes the
+    // no-progress clock on every wake — and because each crash lands inside the
+    // alarm-debounce window the attempt counter is pinned too. Neither
+    // progress-keyed bound can ever fire. Before #1825 `maxRecoveryWork`
+    // defaulted to Infinity, so the loop ran forever; now the generous finite
+    // default is the one meter that still climbs and seals it.
+    const defaults = resolveChatRecoveryConfig(true);
+    const existing: ChatRecoveryIncident = {
+      ...(await evaluate()).incident,
+      attempt: 1,
+      workBaseline: 0,
+      progress: DEFAULT_CHAT_RECOVERY_MAX_WORK, // work accrued by the loop so far
+      lastProgressAt: T0
+    };
+    const { incident, exhausted } = await evaluate({
+      existing,
+      config: defaults,
+      // Fresh progress (crash streamed a bit more) AND inside the debounce
+      // window — exactly the conditions that defeat the attempt + no-progress
+      // bounds. work = (DEFAULT + 1) - 0 > DEFAULT.
+      currentProgress: DEFAULT_CHAT_RECOVERY_MAX_WORK + 1,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(incident.attempt).toBe(1); // attempt cap never advanced (reset on progress)
+    expect(exhausted).toBe(true);
+    expect(incident.reason).toBe("work_budget_exceeded");
+  });
+
+  it("carries oomAttempts forward and seals once over the OOM budget (#1825)", async () => {
+    // The catchable-OOM fast path: `recordOomAndDecide` bumps `oomAttempts`
+    // between begins. A begin-path re-evaluation must (a) preserve the count and
+    // (b) seal with `out_of_memory` once it crosses `maxOomRetries` — even
+    // though the attempt cap and no-progress clock are both reset (fresh
+    // progress) and the wake is inside the debounce window.
+    const defaults = resolveChatRecoveryConfig(true);
+    const base = (await evaluate()).incident;
+
+    // Still within budget (oomAttempts == maxOomRetries): keep recovering, and
+    // the count must survive the rebuild.
+    const within = await evaluate({
+      existing: {
+        ...base,
+        attempt: 1,
+        oomAttempts: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+        lastProgressAt: T0
+      },
+      config: defaults,
+      currentProgress: 5,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(within.exhausted).toBe(false);
+    expect(within.incident.oomAttempts).toBe(
+      DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES
+    );
+
+    // One past the budget → seal with the OOM reason.
+    const over = await evaluate({
+      existing: {
+        ...base,
+        attempt: 1,
+        oomAttempts: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES + 1,
+        lastProgressAt: T0
+      },
+      config: defaults,
+      currentProgress: 6,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(over.incident.attempt).toBe(1); // attempt cap untouched (reset on progress)
+    expect(over.exhausted).toBe(true);
+    expect(over.incident.reason).toBe("out_of_memory");
+  });
+
+  it("does not seal on OOM while a client interaction is pending", async () => {
+    // A parked HITL turn must never be sealed by the OOM budget either.
+    const defaults = resolveChatRecoveryConfig(true);
+    const base = (await evaluate()).incident;
+    const { exhausted } = await evaluate({
+      existing: {
+        ...base,
+        attempt: 1,
+        oomAttempts: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES + 5,
+        lastProgressAt: T0
+      },
+      config: defaults,
+      awaitingClientInteraction: true,
+      currentProgress: 5,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(exhausted).toBe(false);
   });
 });

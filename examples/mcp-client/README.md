@@ -6,6 +6,7 @@ An Agent that acts as an MCP **client** — dynamically connects to remote MCP s
 
 - **`addMcpServer` / `removeMcpServer`** — managing MCP server connections from an Agent
 - **`onMcpUpdate`** — real-time state updates pushed to the React frontend via WebSocket
+- **`this.mcp.configureElicitationHandlers`** — when a server requests input mid-tool-call (elicitation), the Agent registers form and url handlers that broadcast requests to the browser; the human's answer resolves the pending tool call via a `@callable` method
 - **OAuth popup flow** — `configureOAuthCallback` with a custom handler that closes the popup after auth
 - **`agentFetch`** — making HTTP requests to the Agent's custom endpoints from the client
 
@@ -13,12 +14,12 @@ An Agent that acts as an MCP **client** — dynamically connects to remote MCP s
 
 ```sh
 npm install
-npm run dev
+npm run start
 ```
 
-The UI lets you add MCP server URLs, see their connection state, and browse their tools, prompts, and resources.
+The UI lets you add MCP server URLs, see their connection state, browse their tools, prompts, and resources, and run tools. If a tool call triggers an elicitation, a card appears asking for your input.
 
-To test with an authenticated server, run the [`mcp-worker-authenticated`](../mcp-worker-authenticated/) example alongside this one and add its URL.
+To test with an authenticated server, run the [`mcp-worker-authenticated`](../mcp-worker-authenticated/) example alongside this one and add its URL. To test elicitation, run the [`mcp-elicitation`](../mcp-elicitation/) example's server, add it here (the MCP endpoint is at `/mcp`, e.g. `http://localhost:8787/mcp`), and run its `increase-counter` (form-mode) or `connect-account` (url-mode) tool from this UI.
 
 ## Environment variables
 

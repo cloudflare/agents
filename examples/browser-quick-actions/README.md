@@ -37,7 +37,7 @@ To let a model decide when to browse, use the AI SDK tools instead — this is w
 
 ```ts
 import { createQuickActionTools } from "agents/browser/ai";
-import { generateText, stepCountIs } from "ai";
+import { generateText, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 const workersai = createWorkersAI({ binding: this.env.AI });
@@ -48,7 +48,7 @@ const { text } = await generateText({
   model: workersai("@cf/moonshotai/kimi-k2.7-code"),
   prompt: `Page: ${url}\n\nQuestion: ${question}`,
   tools,
-  stopWhen: stepCountIs(6)
+  stopWhen: isStepCount(6)
 });
 ```
 

@@ -15,14 +15,14 @@
     "@cloudflare/voice-telnyx": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "workers-ai-provider": "^3.2.1"
+    "workers-ai-provider": "^4.0.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.42.3",
-    "@cloudflare/workers-types": "^4.20260625.1",
+    "@cloudflare/workers-types": "^4.20260629.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",

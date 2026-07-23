@@ -14,7 +14,7 @@ import {
 } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { generateText, convertToModelMessages, stepCountIs } from "ai";
+import { generateText, convertToModelMessages, isStepCount } from "ai";
 import { Client } from "pg";
 
 export class ChatAgent extends Agent<Env> {
@@ -85,12 +85,12 @@ export class ChatAgent extends Agent<Env> {
 
     const result = await generateText({
       model: this.getAI(),
-      system: await session.freezeSystemPrompt(),
+      instructions: await session.freezeSystemPrompt(),
       messages: await convertToModelMessages(history as UIMessage[], {
         ignoreIncompleteToolCalls: true
       }),
       tools: await session.tools(),
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     const parts: UIMessage["parts"] = [];

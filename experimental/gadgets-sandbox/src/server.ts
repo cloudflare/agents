@@ -44,7 +44,7 @@ import { createWorkersAI } from "workers-ai-provider";
 import { Agent, routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
+import { streamText, convertToModelMessages, tool, isStepCount } from "ai";
 import { z } from "zod";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -420,7 +420,7 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: `You are a helpful assistant that can write and execute JavaScript code to work with a customer database.
+      instructions: `You are a helpful assistant that can write and execute JavaScript code to work with a customer database.
 
 You have access to an executeCode tool. The code you write runs in a SANDBOX — a completely
 isolated environment with no internet access. The only thing the code can do is interact with
@@ -500,7 +500,7 @@ Write clean, readable code. Handle errors gracefully.`,
           }
         })
       },
-      stopWhen: stepCountIs(5)
+      stopWhen: isStepCount(5)
     });
 
     return result.toUIMessageStreamResponse();

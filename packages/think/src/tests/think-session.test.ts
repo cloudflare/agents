@@ -5,7 +5,9 @@ import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
 import type {
   ThinkTestAgent,
+  ThinkPropsTestAgent,
   ThinkSessionTestAgent,
+  ThinkSystemPromptSkillsWarningAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -25,6 +27,13 @@ const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 async function freshAgent(name: string) {
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+    name
+  );
+}
+
+async function freshPropsAgent(name: string) {
+  return getServerByName(
+    env.ThinkPropsTestAgent as unknown as DurableObjectNamespace<ThinkPropsTestAgent>,
     name
   );
 }
@@ -151,6 +160,25 @@ async function freshLegacyConfigMigrationAgent(name: string) {
 // ── Core chat functionality ──────────────────────────────────────
 
 describe("Think — core", () => {
+  it("should forward routed props to onStart", async () => {
+    const room = `props-${crypto.randomUUID()}`;
+    const response = await exports.default.fetch(
+      `http://example.com/agents/think-props-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    expect(ws).toBeDefined();
+    ws.accept();
+
+    try {
+      const agent = await freshPropsAgent(room);
+      expect(await agent.getStartProps()).toEqual({ tenantId: "tenant-1" });
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it("should run a chat turn and persist messages", async () => {
     const agent = await freshAgent("chat-basic");
     const result = await agent.testChat("Hello!");
@@ -370,19 +398,6 @@ describe("Think — core", () => {
     const turnLog = await agent.getBeforeTurnLog();
     expect(turnLog).toHaveLength(1);
     expect(turnLog[0].toolNames).not.toContain("ignoredRuntimeTool");
-  });
-
-  it("should forward turn telemetry to the AI SDK", async () => {
-    const agent = await freshAgent("chat-telemetry");
-
-    await agent.setTurnConfigTelemetry();
-    const result = await agent.testChat("Trace this turn");
-
-    expect(result.done).toBe(true);
-    await expect(agent.getTelemetryEvents()).resolves.toEqual([
-      "start:think-test-turn:think-test",
-      "finish:think-test-turn:think-test"
-    ]);
   });
 
   it("should build assistant message with text parts", async () => {
@@ -1013,6 +1028,27 @@ describe("Think — context blocks", () => {
 
     expect(systemPrompt).toContain("MEMORY");
     expect(systemPrompt).toContain("[writable]");
+  });
+
+  it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const agent = await getServerByName(
+      env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
+      "skills-system-prompt-warning"
+    );
+
+    try {
+      await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
+        done: true
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured"
+        )
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -1672,7 +1708,12 @@ describe("Think — model message conversion", () => {
       content?: Array<{
         output?: {
           type: string;
-          value?: Array<{ type: string; data?: string; mediaType?: string }>;
+          value?: Array<{
+            type: string;
+            data?: unknown;
+            mediaType?: string;
+            filename?: string;
+          }>;
         };
       }>;
     }>;
@@ -1681,9 +1722,10 @@ describe("Think — model message conversion", () => {
       ?.content?.find((part) => part.output?.type === "content")?.output;
 
     expect(toolResult?.value).toContainEqual({
-      type: "image-data",
+      type: "file-data",
       data: "iVBORw0KGgo=",
-      mediaType: "image/png"
+      mediaType: "image/png",
+      filename: "screenshot"
     });
   });
 });
@@ -2709,7 +2751,8 @@ describe("Think — onChatRecovery", () => {
 
   it("a progressing turn survives past the old wall-clock ceiling (rfc-chat-recovery-work-budget)", async () => {
     const agent = await freshRecoveryAgent("recovery-window-survives");
-    // Default config: maxRecoveryWork is Infinity, so duration is never a bound.
+    // Default config: maxRecoveryWork is a generous finite backstop (1000) and
+    // this turn produces ~1 work unit, so duration is never a bound here.
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 6 });
 
     // An incident that opened well past the old 15-minute ceiling.
@@ -4782,6 +4825,38 @@ describe("Think — onChatRecovery", () => {
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
     expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-storage-reset");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage:
+        "Internal error in Durable Object storage caused object to be reset",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+    expect(result.submissionStatus).toBe("running");
+  });
+
+  it("terminalizes an ordinary application SQL error", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-application-sql");
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "constraint failed: application records.slug",
+      errorShape: "sql-wrapped",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(false);
+    expect(result.incidentStatus).toBe("exhausted");
+    expect(result.exhaustedContexts).toBe(1);
+    expect(result.submissionStatus).toBe("error");
   });
 
   it("re-throws a retryable-flagged platform error and does NOT terminalize (#1730)", async () => {

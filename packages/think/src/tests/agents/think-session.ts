@@ -1,6 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, Think } from "../../think";
+import { action, skills, Think } from "../../think";
 import { Agent } from "agents";
 import type {
   AgentToolEventMessage,
@@ -521,6 +521,134 @@ export class ThinkTestAgent extends Think {
     return error;
   }
 
+  private _attachRaceInjection: { runId: string; body: string } | null = null;
+
+  private _progressInjection: {
+    runId: string;
+    progressBody: string;
+    milestoneBody: string;
+  } | null = null;
+
+  /** Slow the streamed turn so the parent tails it while it's still live. */
+  async setStreamChunkDelayForTest(ms: number): Promise<void> {
+    this._streamChunkDelayMs = ms;
+  }
+
+  /**
+   * #1589: arm a one-shot chunk injection that fires from inside
+   * `getAgentToolChunks` — i.e. AFTER the stored snapshot is read but (in the
+   * buggy ordering) BEFORE `tailAgentToolRun` attaches its live forwarder. This
+   * deterministically reproduces the drain↔register window a network-paced
+   * proxied remote stream (a sub-agent returning a remote
+   * `toUIMessageStreamResponse()`) hits constantly.
+   */
+  armAttachRaceInjectionForTest(runId: string, body: string): void {
+    this._attachRaceInjection = { runId, body };
+  }
+
+  /**
+   * Arm a one-shot injection of NON-stored progress + milestone frames (the
+   * `reportProgress` wire shape) that fire from inside `getAgentToolChunks`,
+   * while the parent is still in the stored-replay → live-forwarding handoff.
+   * Unlike a streamed chunk these are broadcast-only — no stored chunk_index —
+   * so they rely on the in-memory live sequence counter to be forwarded. Guards
+   * that they survive the handoff and reach the parent.
+   */
+  armProgressInjectionForTest(
+    runId: string,
+    progressBody: string,
+    milestoneBody: string
+  ): void {
+    this._progressInjection = { runId, progressBody, milestoneBody };
+  }
+
+  /**
+   * Bounded-poll until the live child turn has bound its request id (written to
+   * the child-run row at turn start) and opened its resumable stream, so a test
+   * injection attributes (and, for a stored chunk, persists) exactly like a
+   * real streamed chunk. Returns null if the turn never came up in the window.
+   */
+  private async _waitForLiveTurnForTest(
+    runId: string
+  ): Promise<{ requestId: string; streamId: string } | null> {
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const row = this["_readAgentToolChildRun"](runId);
+      const requestId = row?.request_id ?? undefined;
+      if (requestId) {
+        const streamId =
+          this["_resumableStream"]
+            .getAllStreamMetadata()
+            .find((m) => m.request_id === requestId)?.id ?? undefined;
+        if (streamId) return { requestId, streamId };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return null;
+  }
+
+  override async getAgentToolChunks(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<AgentToolStoredChunk[]> {
+    const chunks = await super.getAgentToolChunks(runId, options);
+
+    const race = this._attachRaceInjection;
+    if (race && race.runId === runId) {
+      this._attachRaceInjection = null;
+      // Land a STORED + broadcast chunk in the drain↔register window. Runs
+      // INSIDE getAgentToolChunks — before tailAgentToolRun's post-drain
+      // forwarder registration in the buggy ordering — so it faithfully lands in
+      // the attach window. With the #1589 fix the forwarder is already attached,
+      // so the chunk is buffered and replayed in order instead of being dropped.
+      const live = await this._waitForLiveTurnForTest(runId);
+      if (live) {
+        this["_resumableStream"].storeChunk(live.streamId, race.body);
+        this["_resumableStream"].flushBuffer();
+        this.broadcast(
+          JSON.stringify({
+            type: "cf_agent_use_chat_response",
+            id: live.requestId,
+            body: race.body,
+            done: false
+          })
+        );
+      }
+    }
+
+    const progress = this._progressInjection;
+    if (progress && progress.runId === runId) {
+      this._progressInjection = null;
+      // Land NON-stored progress + milestone frames in the same window. These
+      // are broadcast-only (exactly like `reportProgress`): no stored
+      // chunk_index, so they depend on the in-memory live sequence to be
+      // forwarded. Sourcing the forward sequence from the stored chunk count
+      // would collide them with the last stored chunk and the tail's high-water
+      // dedupe would silently drop them — the regression this guards against.
+      const live = await this._waitForLiveTurnForTest(runId);
+      if (live) {
+        this.broadcast(
+          JSON.stringify({
+            type: "cf_agent_use_chat_response",
+            id: live.requestId,
+            body: progress.progressBody,
+            done: false
+          })
+        );
+        this.broadcast(
+          JSON.stringify({
+            type: "cf_agent_use_chat_response",
+            id: live.requestId,
+            body: progress.milestoneBody,
+            done: false
+          })
+        );
+      }
+    }
+
+    return chunks;
+  }
+
   /**
    * #1575: broadcast a chat error frame whose request id belongs to no
    * agent-tool run, simulating an unrelated turn failing on this agent
@@ -570,6 +698,7 @@ export class ThinkTestAgent extends Think {
   }> = [];
   private _beforeTurnMessagesJson: string[] = [];
   private _capturedTurnChannels: string[] = [];
+  private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
 
   override configureChannels() {
     return {
@@ -594,7 +723,6 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
-  private _telemetryEvents: string[] = [];
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
@@ -626,11 +754,46 @@ export class ThinkTestAgent extends Think {
     });
     this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
+    this._capturedTurnMetadata.push(this.activeTurnMetadata);
     if (this._turnConfigOverride) return this._turnConfigOverride;
   }
 
   async getCapturedTurnChannelsForTest(): Promise<string[]> {
     return this._capturedTurnChannels;
+  }
+
+  async getCapturedTurnMetadataForTest(): Promise<
+    (Record<string, unknown> | undefined)[]
+  > {
+    return this._capturedTurnMetadata;
+  }
+
+  async getActiveTurnMetadataForTest(): Promise<
+    Record<string, unknown> | undefined
+  > {
+    return this.activeTurnMetadata;
+  }
+
+  async runChatTurnForTest(options: {
+    input?: string;
+    channel?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.chat(options.input ?? "hi", new TestCollectingCallback(), {
+      channel: options.channel,
+      metadata: options.metadata
+    });
+  }
+
+  async persistIncomingMessageForTest(msg: UIMessage): Promise<void> {
+    await (
+      this as unknown as {
+        _persistIncomingMessage(
+          m: UIMessage,
+          serverMessages: readonly UIMessage[]
+        ): Promise<void>;
+      }
+    )._persistIncomingMessage(msg, this.messages);
   }
 
   async runChannelTurnForTest(options: {
@@ -682,29 +845,6 @@ export class ThinkTestAgent extends Think {
    */
   async setTurnConfigOutputText(): Promise<void> {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
-  }
-
-  async setTurnConfigTelemetry(): Promise<void> {
-    this._telemetryEvents = [];
-    this._turnConfigOverride = {
-      experimental_telemetry: {
-        isEnabled: true,
-        functionId: "think-test-turn",
-        metadata: { source: "think-test" },
-        integrations: {
-          onStart: (event) => {
-            this._telemetryEvents.push(
-              `start:${event.functionId}:${event.metadata?.source ?? ""}`
-            );
-          },
-          onFinish: (event) => {
-            this._telemetryEvents.push(
-              `finish:${event.functionId}:${event.metadata?.source ?? ""}`
-            );
-          }
-        }
-      }
-    };
   }
 
   /**
@@ -808,10 +948,6 @@ export class ThinkTestAgent extends Think {
     return this._stepLog;
   }
 
-  async getTelemetryEvents(): Promise<string[]> {
-    return this._telemetryEvents;
-  }
-
   async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {
     return this._lastModelCallSettings;
   }
@@ -859,10 +995,12 @@ export class ThinkTestAgent extends Think {
 
     return {
       toUIMessageStream(options?: { sendReasoning?: boolean }) {
-        const originalStream = result.toUIMessageStream(options);
-        const reader = (
-          originalStream as unknown as ReadableStream<unknown>
-        ).getReader();
+        // `StreamableResult.toUIMessageStream()` returns an `AsyncIterable`
+        // (not a `ReadableStream`), so consume it via its async iterator
+        // rather than `getReader()`.
+        const iterator = (
+          result.toUIMessageStream(options) as AsyncIterable<unknown>
+        )[Symbol.asyncIterator]();
         let chunkCount = 0;
         let shouldThrow = false;
 
@@ -883,10 +1021,10 @@ export class ThinkTestAgent extends Think {
                 }
                 while (true) {
                   if (shouldThrow && config) {
-                    await reader.cancel();
+                    await iterator.return?.();
                     throw new SimulatedChatError(config.message);
                   }
-                  const { done, value } = await reader.read();
+                  const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
                   chunkCount++;
                   if (config && chunkCount >= config.afterChunks) {
@@ -907,7 +1045,7 @@ export class ThinkTestAgent extends Think {
                 }
               },
               async return() {
-                await reader.cancel();
+                await iterator.return?.();
                 return { done: true as const, value: undefined };
               }
             };
@@ -2263,6 +2401,59 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /**
+   * #1589: run a Think child that injects a chunk into the tail attach window
+   * and return the forwarded agent-tool events so the test can assert the chunk
+   * survives the stored-replay → live-forwarding handoff.
+   */
+  async runThinkChildWithAttachRaceForTest(
+    input: string,
+    raceBody: string,
+    chunkDelayMs: number,
+    runId = crypto.randomUUID()
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setStreamChunkDelayForTest(chunkDelayMs);
+    await child.armAttachRaceInjectionForTest(runId, raceBody);
+    const result = await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input,
+      inputPreview: input
+    });
+    return { result, events: this.events };
+  }
+
+  /**
+   * Run a Think child that injects NON-stored progress + milestone frames into
+   * the tail attach window and return the forwarded events, so the test can
+   * assert broadcast-only `reportProgress` frames survive the stored-replay →
+   * live-forwarding handoff (they have no stored chunk_index, so the in-memory
+   * live sequence counter is load-bearing for forwarding them).
+   */
+  async runThinkChildWithProgressInjectionForTest(
+    input: string,
+    progressBody: string,
+    milestoneBody: string,
+    chunkDelayMs: number,
+    runId = crypto.randomUUID()
+  ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setStreamChunkDelayForTest(chunkDelayMs);
+    await child.armProgressInjectionForTest(runId, progressBody, milestoneBody);
+    const result = await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input,
+      inputPreview: input
+    });
+    return { result, events: this.events };
+  }
+
+  /**
    * #1575: run a Think child whose turn dies with an in-band stream error.
    * Used to assert error classification independent of tailer timing and that
    * concurrent runs stay isolated.
@@ -2999,6 +3190,26 @@ export class ThinkAgentToolParent extends Agent {
   }
 }
 
+type ThinkPropsTestProps = {
+  tenantId: string;
+};
+
+export class ThinkPropsTestAgent extends Think<
+  Cloudflare.Env,
+  unknown,
+  ThinkPropsTestProps
+> {
+  private _startProps?: ThinkPropsTestProps;
+
+  override onStart(props?: ThinkPropsTestProps): void {
+    this._startProps = props;
+  }
+
+  getStartProps(): ThinkPropsTestProps | undefined {
+    return this._startProps;
+  }
+}
+
 // ── ThinkSessionTestAgent ───────────────────────────────────
 // Extends Think with Session configuration for context block testing.
 
@@ -3090,6 +3301,47 @@ export class ThinkSessionTestAgent extends Think {
 
   async hostGetContext(label: string): Promise<string | null> {
     return this._hostGetContext(label);
+  }
+}
+
+// ── ThinkSystemPromptSkillsWarningAgent ─────────────────────
+// Repro for #1871: getSkills() registers a Session context block, so an
+// overridden getSystemPrompt() is fallback-only and should warn.
+
+export class ThinkSystemPromptSkillsWarningAgent extends Think {
+  override getModel(): LanguageModel {
+    return createMockModel("Skills warning response");
+  }
+
+  override getSystemPrompt(): string {
+    return "You are Robbie, a pirate. Always answer in pirate speak.";
+  }
+
+  override getSkills() {
+    return [
+      skills.fromManifest({
+        id: "test-skills",
+        fingerprint: "v1",
+        skills: [
+          {
+            name: "knot-tying",
+            description: "How to tie useful knots.",
+            body: "Always double-check the hitch."
+          }
+        ]
+      })
+    ];
+  }
+
+  async runChatTurnForWarningTest(): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat("Ahoy!", cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
   }
 }
 
@@ -3593,6 +3845,7 @@ export class ThinkToolsTestAgent extends Think {
           description: "Echo a message back (streaming)",
           inputSchema: z.object({ message: z.string() }),
           execute: async ({ message }: { message: string }) => {
+            this._echoExecuteCount++;
             async function* gen() {
               yield `echo-prelim-1: ${message}`;
               yield `echo-prelim-2: ${message}`;
@@ -3609,11 +3862,48 @@ export class ThinkToolsTestAgent extends Think {
           description: "Echo a message back (sync streaming)",
           inputSchema: z.object({ message: z.string() }),
           execute: ({ message }: { message: string }) => {
+            this._echoExecuteCount++;
             async function* gen() {
               yield `echo-prelim: ${message}`;
               yield `echo: ${message}`;
             }
             return gen();
+          }
+        })
+      };
+    }
+    if (mode === "async-generator") {
+      // Canonical AI SDK streaming tool: an `async function*` `execute`.
+      // Think preserves preliminary streaming for this form — each yielded
+      // value reaches the model as a `preliminary` tool-result, the last as
+      // the final value.
+      const self = this;
+      return {
+        echo: tool({
+          description: "Echo a message back (async generator streaming)",
+          inputSchema: z.object({ message: z.string() }),
+          execute: async function* ({ message }: { message: string }) {
+            self._echoExecuteCount++;
+            yield `echo-prelim-1: ${message}`;
+            yield `echo-prelim-2: ${message}`;
+            yield `echo: ${message}`;
+          }
+        })
+      };
+    }
+    if (mode === "needs-approval") {
+      // A raw AI SDK `needsApproval` tool (not a Think Action). Used to
+      // verify the dual-gate ordering: the AI SDK approval gate runs first,
+      // then — after approval — `beforeToolCall` is still the outer gate
+      // around the original `execute`.
+      return {
+        echo: tool({
+          description: "Echo a message back (requires approval)",
+          inputSchema: z.object({ message: z.string() }),
+          needsApproval: true,
+          execute: async ({ message }: { message: string }) => {
+            this._echoExecuteCount++;
+            return `echo: ${message}`;
           }
         })
       };
@@ -3649,7 +3939,10 @@ export class ThinkToolsTestAgent extends Think {
       echo: tool({
         description: "Echo a message back",
         inputSchema: z.object({ message: z.string() }),
-        execute: async ({ message }: { message: string }) => `echo: ${message}`
+        execute: async ({ message }: { message: string }) => {
+          this._echoExecuteCount++;
+          return `echo: ${message}`;
+        }
       })
     };
   }
@@ -3834,7 +4127,12 @@ export class ThinkToolsTestAgent extends Think {
     | "default"
     | "async-iterable"
     | "sync-iterable"
+    | "async-generator"
+    | "needs-approval"
     | "add-messages" = "default";
+
+  /** Counts how many times the `echo` tool's `execute` actually runs. */
+  private _echoExecuteCount = 0;
 
   private _midTurnInsideLoop: boolean | null = null;
   private _midTurnPersisted: boolean | null = null;
@@ -3887,9 +4185,20 @@ export class ThinkToolsTestAgent extends Think {
   } | null = null;
 
   async setEchoExecuteMode(
-    mode: "default" | "async-iterable" | "sync-iterable" | "add-messages"
+    mode:
+      | "default"
+      | "async-iterable"
+      | "sync-iterable"
+      | "async-generator"
+      | "needs-approval"
+      | "add-messages"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  /** How many times the `echo` tool's `execute` body actually ran. */
+  async getEchoExecuteCount(): Promise<number> {
+    return this._echoExecuteCount;
   }
 
   async useEchoActionForTest(
@@ -4337,6 +4646,30 @@ export class ThinkToolsTestAgent extends Think {
     });
   }
 
+  // Records every `tool-result` stream part the AI SDK emits, including the
+  // `preliminary: true` ones a streaming tool produces. Lets streaming tests
+  // assert that preliminary chunks survive `beforeToolCall` wrapping.
+  private _toolResultChunkLog: Array<{
+    outputJson: string;
+    preliminary: boolean;
+  }> = [];
+
+  override onChunk(ctx: ChunkContext): void {
+    if (ctx.chunk.type === "tool-result") {
+      const chunk = ctx.chunk as { output: unknown; preliminary?: boolean };
+      this._toolResultChunkLog.push({
+        outputJson: JSON.stringify(chunk.output),
+        preliminary: chunk.preliminary === true
+      });
+    }
+  }
+
+  async getToolResultChunkLog(): Promise<
+    Array<{ outputJson: string; preliminary: boolean }>
+  > {
+    return this._toolResultChunkLog;
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
@@ -4530,6 +4863,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     textChunks: string[];
   } | null = null;
   private _failNextContinueTransient: string | null = null;
+  private _useRecoveryToolModel = false;
+  private _recoveryToolExecutions = 0;
 
   /**
    * Arm a ONE-SHOT platform-transient fault on the next `continueLastTurn`
@@ -4557,6 +4892,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   override getModel(): LanguageModel {
+    if (this._useRecoveryToolModel) return createToolCallingMockModel();
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -4573,6 +4909,32 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     return createMockModel(this._programmaticResponse);
+  }
+
+  override getTools(): ToolSet {
+    if (!this._useRecoveryToolModel) return {};
+    return {
+      echo: tool({
+        description: "Persist one recovery test side effect",
+        inputSchema: z.object({ message: z.string() }),
+        execute: ({ message }: { message: string }) => {
+          this._recoveryToolExecutions++;
+          return `echo: ${message}`;
+        }
+      })
+    };
+  }
+
+  async useRecoveryToolModelForTest(): Promise<void> {
+    this._useRecoveryToolModel = true;
+  }
+
+  async getRecoveryToolExecutionsForTest(): Promise<number> {
+    return this._recoveryToolExecutions;
+  }
+
+  async getMessagesForTest(): Promise<UIMessage[]> {
+    return this.getMessages();
   }
 
   override onChatResponse(result: ChatResponseResult): void {
@@ -5075,6 +5437,47 @@ export class ThinkProgrammaticTestAgent extends Think {
       ],
       options
     );
+  }
+
+  async probeSubmissionAlarmOwnershipForTest(): Promise<{
+    readonly alarmDrainCalls: number;
+    readonly inlineDrainCalls: number;
+    readonly submission: SubmitMessagesResult;
+  }> {
+    const submissionId = `alarm-owned-${crypto.randomUUID()}`;
+    const internal = this as unknown as {
+      _cf_executingScheduleRowId?: string;
+      _drainSubmissions(): Promise<void>;
+      _scheduleSubmissionDrain(): Promise<void>;
+    };
+    const originalDrain = internal._drainSubmissions;
+    let alarmDrainCalls = 0;
+    let inlineDrainCalls = 0;
+    internal._drainSubmissions = async () => {
+      if (internal._cf_executingScheduleRowId === undefined) {
+        inlineDrainCalls += 1;
+      } else {
+        alarmDrainCalls += 1;
+      }
+    };
+
+    try {
+      const submission = await this.testSubmitMessages("alarm owned", {
+        submissionId
+      });
+      // A DO alarm may interleave while this RPC awaits. The base Agent sets
+      // _cf_executingScheduleRowId only around an awaited schedule callback,
+      // which distinguishes the correct owner from the old inline starter.
+      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return { alarmDrainCalls, inlineDrainCalls, submission };
+    } finally {
+      internal._drainSubmissions = originalDrain;
+      // The probe's no-op alarm consumed its schedule row while leaving the
+      // submission pending. Re-arm the real drain for the eventual assertion.
+      await internal._scheduleSubmissionDrain();
+    }
   }
 
   private async _waitForSubmissionForTest(

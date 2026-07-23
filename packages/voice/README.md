@@ -45,7 +45,7 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
-`onTurn()` can also return streaming text, including AI SDK `fullStream` values:
+`onTurn()` can also return streaming text, including AI SDK `stream` values:
 
 ```typescript
 import { streamText } from "ai";
@@ -53,11 +53,11 @@ import { streamText } from "ai";
 async onTurn(transcript: string) {
   const result = streamText({
     model: myModel,
-    system: "You are a helpful voice assistant. Keep replies short.",
+    instructions: "You are a helpful voice assistant. Keep replies short.",
     messages: [{ role: "user", content: transcript }]
   });
 
-  return result.fullStream;
+  return result.stream;
 }
 ```
 
@@ -72,7 +72,7 @@ async onTurn(transcript: string) {
 
 | Method                           | Description                                                                                                    |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `onTurn(transcript, context)`    | **Required.** Handle a user utterance. Return `string`, AI SDK `fullStream`, or `AsyncIterable<string>`.       |
+| `onTurn(transcript, context)`    | **Required.** Handle a user utterance. Return `string`, AI SDK `stream`, or `AsyncIterable<string>`.           |
 | `createTranscriber(connection)`  | Override to create a transcriber dynamically per connection.                                                   |
 | `onCallStart(connection)`        | Called when a voice call begins.                                                                               |
 | `onCallEnd(connection)`          | Called when a voice call ends.                                                                                 |
@@ -192,13 +192,15 @@ All default providers use Workers AI bindings -- no API keys required:
 
 ## Third-party providers
 
-| Package                        | What it provides                         |
-| ------------------------------ | ---------------------------------------- |
-| `@cloudflare/voice-deepgram`   | Continuous STT (Deepgram Nova)           |
-| `@cloudflare/voice-elevenlabs` | TTS (ElevenLabs)                         |
-| `@cloudflare/voice-twilio`     | Telephony adapter (Twilio Media Streams) |
+| Package                        | What it provides                                       |
+| ------------------------------ | ------------------------------------------------------ |
+| `@cloudflare/voice-assemblyai` | Continuous STT (AssemblyAI Universal 3.5 Pro Realtime) |
+| `@cloudflare/voice-deepgram`   | Continuous STT (Deepgram Nova)                         |
+| `@cloudflare/voice-elevenlabs` | Continuous STT and TTS (ElevenLabs)                    |
+| `@cloudflare/voice-telnyx`     | Continuous STT, TTS, and phone transport (Telnyx)      |
+| `@cloudflare/voice-twilio`     | Telephony adapter (Twilio Media Streams)               |
 
 ## Related
 
-- [`examples/voice-agent`](../../examples/voice-agent) -- full voice agent example
+- [`examples/voice-agent`](../../examples/voice-agent) -- full voice agent example with provider toggles
 - [`examples/voice-input`](../../examples/voice-input) -- voice input (dictation) example

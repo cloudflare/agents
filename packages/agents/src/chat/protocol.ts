@@ -5,6 +5,16 @@
  * clients. Both @cloudflare/ai-chat (via its MessageType enum) and
  * @cloudflare/think use these values.
  */
+export const STREAM_RESUME_NONE_REASONS = {
+  /** No active, pending, or terminal stream exists for this agent. */
+  IDLE: "idle",
+  /** An active tool continuation is owned by another live connection. */
+  CONTINUATION_OWNED: "continuation-owned"
+} as const;
+
+export type StreamResumeNoneReason =
+  (typeof STREAM_RESUME_NONE_REASONS)[keyof typeof STREAM_RESUME_NONE_REASONS];
+
 export const CHAT_MESSAGE_TYPES = {
   CHAT_MESSAGES: "cf_agent_chat_messages",
   USE_CHAT_REQUEST: "cf_agent_use_chat_request",

@@ -5,7 +5,7 @@ import {
   createToolsFromClientSchemas
 } from "../src/index";
 import type { UIMessage } from "ai";
-import { streamText, tool, convertToModelMessages, stepCountIs } from "ai";
+import { streamText, tool, convertToModelMessages, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
@@ -75,13 +75,13 @@ export class LlmChatAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a helpful test assistant. Keep responses very short (1-2 sentences max). " +
         "When asked about the weather, use the getWeather tool. " +
         "When asked to add numbers, use the addNumbers tool.",
       messages: await convertToModelMessages(this.messages),
       tools,
-      stopWhen: stepCountIs(3)
+      stopWhen: isStepCount(3)
     });
 
     return result.toUIMessageStreamResponse();
@@ -101,7 +101,7 @@ export class ClientToolAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a test assistant. Always use the getUserLocation tool when asked about location.",
       messages: await convertToModelMessages(this.messages),
       tools: {
@@ -111,7 +111,7 @@ export class ClientToolAgent extends AIChatAgent<Env> {
           // No execute — client must handle via CF_AGENT_TOOL_RESULT
         })
       },
-      stopWhen: stepCountIs(3)
+      stopWhen: isStepCount(3)
     });
 
     return result.toUIMessageStreamResponse();
@@ -133,7 +133,7 @@ export class ClientToolApprovalAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system:
+      instructions:
         "You are a test assistant. Always use the getUserLocation tool when asked about location.",
       messages: await convertToModelMessages(this.messages),
       tools: {
@@ -147,7 +147,7 @@ export class ClientToolApprovalAgent extends AIChatAgent<Env> {
           // No execute — client resolves via CF_AGENT_TOOL_RESULT after approval
         })
       },
-      stopWhen: stepCountIs(3)
+      stopWhen: isStepCount(3)
     });
 
     return result.toUIMessageStreamResponse();
@@ -194,7 +194,7 @@ export class BadKeyAgent extends AIChatAgent<Env> {
 
     const result = streamText({
       model: openai.chat("gpt-4o-mini"),
-      system: "You are a test assistant.",
+      instructions: "You are a test assistant.",
       messages: await convertToModelMessages(this.messages)
     });
 
@@ -290,10 +290,11 @@ export class ResponseLlmAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: "You are a test assistant. Keep responses to 1 sentence max.",
+      instructions:
+        "You are a test assistant. Keep responses to 1 sentence max.",
       messages: await convertToModelMessages(this.messages),
       abortSignal: options?.abortSignal,
-      stopWhen: stepCountIs(2)
+      stopWhen: isStepCount(2)
     });
 
     return result.toUIMessageStreamResponse();
@@ -344,10 +345,11 @@ export class ResponseChainAgent extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: "You are a test assistant. Keep responses to 1 sentence max.",
+      instructions:
+        "You are a test assistant. Keep responses to 1 sentence max.",
       messages: await convertToModelMessages(this.messages),
       abortSignal: options?.abortSignal,
-      stopWhen: stepCountIs(2)
+      stopWhen: isStepCount(2)
     });
 
     return result.toUIMessageStreamResponse();

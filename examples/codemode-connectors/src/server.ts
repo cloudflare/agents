@@ -3,7 +3,7 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createWorkersAI } from "workers-ai-provider";
-import { streamText, convertToModelMessages, stepCountIs } from "ai";
+import { streamText, convertToModelMessages, isStepCount } from "ai";
 import { routeAgentRequest, callable } from "agents";
 import {
   createCodemodeRuntime,
@@ -147,7 +147,7 @@ export class Chat extends AIChatAgent<Env> {
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: [
+      instructions: [
         "You are a helpful assistant with a `codemode` tool that runs TypeScript.",
         "Inside the sandbox:",
         '  - await codemode.search("query") to discover connector methods and saved snippets',
@@ -163,7 +163,7 @@ export class Chat extends AIChatAgent<Env> {
       tools: {
         codemode: this.#runtime().tool()
       },
-      stopWhen: stepCountIs(10)
+      stopWhen: isStepCount(10)
     });
 
     return result.toUIMessageStreamResponse();

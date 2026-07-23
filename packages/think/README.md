@@ -128,14 +128,15 @@ contract from their own subpaths.
 
 Common messenger options:
 
-| Option               | Default                         | Description                                                                     |
-| -------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
-| `path`               | `/messengers/{id}/webhook`      | Webhook path handled before user `onRequest`                                    |
-| `respondTo`          | `["direct-message", "mention"]` | Event kinds that should start a Think reply                                     |
-| `subscribeOnMention` | `true`                          | Subscribe Chat SDK threads after a new mention                                  |
-| `conversation`       | `"thread"`                      | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent |
-| `verifyWebhook`      | required                        | Verification function, or `false` to opt out explicitly                         |
-| `delivery`           | provider defaults               | Streaming limits, text splitting, and safe user-facing failure messages         |
+| Option                | Default                              | Description                                                                                                                              |
+| --------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`                | `/messengers/{id}/webhook`           | Webhook path handled before user `onRequest`                                                                                             |
+| `respondTo`           | `["direct-message", "mention"]`      | Event kinds that should start a Think reply                                                                                              |
+| `subscribeOnMention`  | `true`                               | Subscribe Chat SDK threads after a new mention                                                                                           |
+| `conversation`        | `"thread"`                           | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent                                                          |
+| `channelSpeakerLabel` | `fullName \|\| userName \|\| userId` | Channel (non-DM) messages are rendered as `SpeakerName: text`. Pass a formatter to customize or suppress labels. DMs never get a prefix. |
+| `verifyWebhook`       | required                             | Verification function, or `false` to opt out explicitly                                                                                  |
+| `delivery`            | provider defaults                    | Streaming limits, text splitting, and safe user-facing failure messages                                                                  |
 
 ## Agent tools
 
@@ -216,12 +217,6 @@ Think adds the skill catalog to the prompt and exposes `activate_skill` and
 import { Think, skills } from "@cloudflare/think";
 import bundledSkills from "agents:skills"; // resolves to ./skills next to this file
 
-type Env = {
-  AI: Ai;
-  LOADER: WorkerLoader;
-  SKILLS_BUCKET: R2Bucket;
-};
-
 export class MyAgent extends Think<Env> {
   getSkills() {
     return [
@@ -275,8 +270,9 @@ from other skills.
 
 Skills are on-demand instructions, not always-on system prompt text. The model
 sees the catalog first, then calls `activate_skill` when a user task matches a
-skill description. Use `getSystemPrompt()` or a Session context block for
-behavior that should apply to every turn.
+skill description. Use a Session context block for behavior that should apply to
+every turn, especially when the agent also uses skills. `getSystemPrompt()` is a
+legacy fallback and is ignored once Session context blocks are configured.
 
 Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
 enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
@@ -327,6 +323,7 @@ Script execution requires a Worker Loader binding:
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
@@ -339,7 +336,7 @@ Script execution requires a Worker Loader binding:
 | Method / Property          | Default                            | Description                                                                                                                                                                                                                  |
 | -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `getModel()`               | throws                             | Return the `LanguageModel` to use                                                                                                                                                                                            |
-| `getSystemPrompt()`        | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                                                                                                                              |
+| `getSystemPrompt()`        | careful assistant operating prompt | Legacy system prompt fallback used only when no Session context blocks are configured                                                                                                                                        |
 | `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
 | `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
 | `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |
@@ -352,6 +349,9 @@ Script execution requires a Worker Loader binding:
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
 | `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
+| `fetchTools`               | `false`                            | Opt-in allowlisted HTTP read tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                         |
+| `includeMcpTools`          | `true`                             | Automatically convert connected MCP tools to AI SDK tools and merge them into model turns                                                                                                                                    |
+| `waitForMcpConnections`    | `false`                            | Wait for MCP connections to settle before inference                                                                                                                                                                          |
 | `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
 | `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
 | `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
@@ -561,15 +561,15 @@ errors of Anthropic, OpenAI, Google, Bedrock, and others).
 
 The AI SDK-derived contexts spread the SDK's own types at the top level — no information is dropped:
 
-| Context                        | Backed by                                                                                                                             |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `PrepareStepContext<TOOLS>`    | `Parameters<PrepareStepFunction<TOOLS>>[0]` (`steps`, `stepNumber`, `model`, `messages`, `experimental_context`)                      |
-| `ToolCallContext<TOOLS>`       | `TypedToolCall<TOOLS>` + per-call extras from `OnToolCallStartEvent` (`stepNumber`, `messages`, `abortSignal`)                        |
-| `ToolCallResultContext<TOOLS>` | `TypedToolCall<TOOLS>` + per-call extras (`durationMs`, `messages`, `stepNumber`) + discriminated `success`/`output`/`error` outcome  |
-| `StepContext<TOOLS>`           | `StepResult<TOOLS>` (full step incl. `reasoning`, `sources`, `files`, `usage`, `providerMetadata`, `request`, `response`, `warnings`) |
-| `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                    |
+| Context                        | Backed by                                                                                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PrepareStepContext<TOOLS>`    | `Parameters<PrepareStepFunction<TOOLS>>[0]` (`steps`, `stepNumber`, `model`, `messages`, `experimental_context`)                                                         |
+| `ToolCallContext<TOOLS>`       | `TypedToolCall<TOOLS>` + per-call extras from `OnToolCallStartEvent` (`stepNumber`, `messages`, `abortSignal`)                                                           |
+| `ToolCallResultContext<TOOLS>` | `TypedToolCall<TOOLS>` + per-call extras (`toolExecutionMs`, `messages`, `stepNumber`) + `toolOutput`; deprecated `durationMs`/`success`/`output`/`error` aliases remain |
+| `StepContext<TOOLS>`           | `StepResult<TOOLS>` (full step incl. `reasoning`, `sources`, `files`, `usage`, `providerMetadata`, `request`, `response`, `warnings`)                                    |
+| `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                                                       |
 
-`beforeStep` is wired to the AI SDK's `prepareStep` callback. Return a `StepConfig` to override `model`, `toolChoice`, `activeTools`, `system`, `messages`, `experimental_context`, or `providerOptions` for the current step. The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig` (returned from `beforeTurn`). `beforeStep` is subclass-only; it is not dispatched to extensions because the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
+`beforeStep` is wired to the AI SDK's `prepareStep` callback. Return a `StepConfig` to override `model`, `toolChoice`, `activeTools`, `instructions`, `messages`, `experimental_context`, or `providerOptions` for the current step. The previous `system` name remains as a deprecated alias. The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig` (returned from `beforeTurn`). `beforeStep` is subclass-only; it is not dispatched to extensions because the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
 
 `TurnConfig` also accepts `sendReasoning` to override whether reasoning chunks are emitted for the current UI message stream. The instance-level `sendReasoning` property defaults to `true`; return `{ sendReasoning: false }` from `beforeTurn` to hide reasoning for a single turn, for example on internal continuation turns.
 
@@ -577,9 +577,9 @@ The AI SDK-derived contexts spread the SDK's own types at the top level — no i
 
 `TurnConfig.stopWhen` accepts AI SDK stop conditions such as `hasToolCall("finalAnswer")` for ending a turn early. Think composes these with its own `maxSteps` bound, so a custom condition can stop before the cap without removing the safety limit. Because stop conditions are functions, return `stopWhen` from a Think subclass's `beforeTurn`; sandboxed extension hooks cannot provide it over RPC.
 
-`TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `experimental_telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; consider disabling `recordInputs` or `recordOutputs` if prompts or outputs may contain sensitive data.
+`TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; the previous `experimental_telemetry` name remains as a deprecated alias. Trace payload storage is separately controlled by the agent fields `storeMessages` (chat messages) and `storeTools` (tool arguments/results); both default to `false`. Stored messages follow the OpenTelemetry GenAI schemas: `{ role, parts }`, `{ type, content }` for text/reasoning, `tool_call` / `tool_call_response` for tools, and `finish_reason` on model output.
 
-Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `experimental_onToolCallFinish`) with `durationMs` and a discriminated outcome. `beforeToolCall` can return a `ToolCallDecision` to:
+Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `onToolExecutionEnd`) with `toolExecutionMs` and `toolOutput`. Deprecated `durationMs` and `success`/`output`/`error` aliases remain for compatibility. `beforeToolCall` can return a `ToolCallDecision` to:
 
 - `{ action: "allow", input? }` — run the original `execute`, optionally with a substituted `input`.
 - `{ action: "block", reason? }` — skip `execute`; the model sees `reason` as the tool's output.
@@ -618,14 +618,14 @@ beforeToolCall(ctx: ToolCallContext<typeof tools>) {
 }
 
 afterToolCall(ctx: ToolCallResultContext<typeof tools>) {
-  if (ctx.success) {
-    console.log(`${ctx.toolName} ok in ${ctx.durationMs}ms`, ctx.output);
+  if (ctx.toolOutput.type === "tool-result") {
+    console.log(`${ctx.toolName} ok in ${ctx.toolExecutionMs}ms`, ctx.toolOutput.output);
   } else {
-    console.error(`${ctx.toolName} failed:`, ctx.error);
+    console.error(`${ctx.toolName} failed:`, ctx.toolOutput.error);
   }
 }
 
-onStepFinish(ctx: StepContext<typeof tools>) {
+onStepEnd(ctx: StepContext<typeof tools>) {
   // Provider-specific cache accounting (Anthropic example)
   const anthropic = ctx.providerMetadata?.anthropic as
     | { cacheCreationInputTokens?: number; cacheReadInputTokens?: number }
@@ -634,7 +634,7 @@ onStepFinish(ctx: StepContext<typeof tools>) {
 }
 ```
 
-> Field rename note: the per-tool contexts use the AI SDK's `input`/`output` (formerly `args`/`result` in earlier Think versions). Migrate by renaming references in your hooks. `afterToolCall` is now a discriminated union — read `output` only when `ctx.success === true`.
+> Field rename note: the per-tool contexts use the AI SDK's `input` and `toolOutput` (formerly `args`/`result` in earlier Think versions). Deprecated `success`/`output`/`error` aliases remain, but prefer narrowing on `ctx.toolOutput.type`.
 
 ### Extension hook subscriptions
 
@@ -686,7 +686,9 @@ export class MyAgent extends Think<Env> {
 ```ts
 interface TurnConfig {
   model?: LanguageModel; // override model
-  system?: string; // override system prompt
+  instructions?: string; // override instructions prompt
+  /** @deprecated Prefer instructions. */
+  system?: string;
   messages?: ModelMessage[]; // override assembled messages
   tools?: ToolSet; // extra tools to merge (additive)
   activeTools?: string[]; // limit which tools the model can call
@@ -706,6 +708,8 @@ interface TurnConfig {
   timeout?: TimeoutConfiguration;
   headers?: Record<string, string | undefined>;
   providerOptions?: Record<string, unknown>;
+  telemetry?: TelemetrySettings;
+  /** @deprecated Prefer telemetry. */
   experimental_telemetry?: TelemetrySettings;
 }
 ```
@@ -768,13 +772,24 @@ configureSession(session: Session) {
 
 ### MCP integration
 
-Think inherits MCP client support from the Agent base class. MCP tools are automatically merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
+Think inherits MCP client support from the Agent base class. MCP tools are automatically converted to AI SDK tools and merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
 
 ```ts
 export class MyAgent extends Think<Env> {
   waitForMcpConnections = true; // or { timeout: 10_000 }
 }
 ```
+
+If you expose MCP tools through Code Mode or another mechanism outside Think's automatic tool set, disable direct exposure to the model:
+
+```ts
+export class MyAgent extends Think<Env> {
+  includeMcpTools = false;
+  waitForMcpConnections = true;
+}
+```
+
+This suppresses only Think's automatic `this.mcp.getAITools()` merge. Connection registration, restoration, discovery, waiting, raw listing and calls, Code Mode access, and explicit `this.mcp.getAITools()` calls are unchanged. It also avoids converting a large MCP catalog to Zod when another mechanism exposes the tools. `activeTools: []` is not an equivalent optimization because Think assembles and converts tools before `beforeTurn` runs.
 
 ### Choosing a turn API
 
@@ -866,7 +881,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
 - **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
-- **MCP integration** — MCP tools auto-merged, wait for connections before inference
+- **MCP integration** — MCP tools auto-merged by default, with an opt-out for alternative exposure paths
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
 - **Multi-tab broadcast** — all connected clients see the stream (resume-aware exclusions)
 - **Partial persistence** — on error, the partial assistant message is saved
@@ -902,6 +917,67 @@ getTools() {
 ```
 
 Requires `@cloudflare/codemode` and a `worker_loaders` binding in `wrangler.jsonc`.
+
+## Fetch tool
+
+Give the model a conservative, read-only way to read HTTP resources. It is **off by default** — set the `fetchTools` property (static config) or call `createFetchTools()` inside `getTools()` (dynamic/per-tenant). It registers a generic `fetch_url` tool when a public `allowlist` is configured, plus one `fetch_<name>` tool per binding target.
+
+```ts
+export class DocsAgent extends Think<Env> {
+  getModel() { ... }
+
+  fetchTools = {
+    allowlist: ["https://developers.cloudflare.com/**"],
+    bindings: {
+      docsApi: {
+        binding: this.env.DOCS_API, // a service binding / Fetcher
+        allowlist: ["/v1/docs/**"],
+        headers: { "x-agent": "think" }
+      }
+    }
+  };
+}
+```
+
+For per-tenant allowlists computed at request time, build the tools in `getTools()` (it runs every turn) instead of using the static property:
+
+```ts
+import { createFetchTools } from "@cloudflare/think/tools/fetch";
+
+getTools() {
+  return {
+    ...createFetchTools({ allowlist: this.allowedOriginsForTenant() })
+  };
+}
+```
+
+Behavior and safety:
+
+- **Read-only** — `GET` only. Mutations belong in explicit, approval-gated actions, not here.
+- **Allowlisted** — every request must match the configured allowlist; private, loopback, link-local, and `*.internal` targets are blocked even if the allowlist is misconfigured.
+- **Bounded** — `maxBytes` caps the download, `maxModelChars` truncates the model-facing text, and `response: "workspace"` (or `spillToWorkspace: true` with auto) writes large or binary bodies to a workspace file instead of bloating the transcript.
+- **Header-safe** — only headers in `modelHeaderAllowlist` (default `accept`, `accept-language`, `range`) may be set by the model; fixed binding headers are server-side only and are stripped on cross-origin redirects.
+- **Markdown-first** — a weighted default `Accept` header (`text/markdown` → `text/plain` → `application/json` → `text/html` → `*/*`) nudges content-negotiating endpoints to return clean markdown instead of HTML. Override per call (the model can set `accept`) or globally via `defaultAccept` (set to `""` to disable).
+- **Redirects** — followed only when the final URL is still allowlisted (`followRedirects`); binding targets never follow cross-origin redirects.
+
+Results are structured `{ ok, ... }` values: success carries `status`, `finalUrl`, `contentType`, `bytes`, `truncated`, and the `body`/`json`/`path`; failures carry a `code` (`disallowed_url`, `disallowed_redirect`, `timeout`, `non_2xx`, `unsupported_content_type`, `invalid_json`, `too_large`, `request_failed`). A `tool:fetch` observability event fires for each call, including blocked attempts.
+
+Allowlist semantics:
+
+- A bare origin (`https://example.com`) matches that origin and every subpath under it.
+- Patterns are globs: `**` matches any characters (including `/`), `*` matches any character except `/`. A pattern with an explicit path and no glob matches that path literally (e.g. `https://x.com/v1` matches only `/v1`, not `/v1/a`).
+- Matching ignores the query string and fragment (only scheme + host + port + path are compared); the original query/fragment are still sent.
+- Binding allowlists should be path-based (`/v1/docs/**`); a model-supplied absolute URL is only allowed if it matches the binding's allowlist.
+- `json` responses are bounded by `maxBytes` (not `maxModelChars`, which only truncates `text`). For large JSON APIs, lower `maxBytes` or use `response: "workspace"`.
+
+You do not need new machinery to gate egress: `beforeToolCall` can `block`/`substitute` a fetch, and channel `tools(...)` policy can narrow the available tools.
+
+### When to use what
+
+- **Fetch tool** — read a known, allowlisted URL or service binding. No code generation.
+- **Code execution tool** — compose or transform several calls in sandboxed code (set `globalOutbound` to control its network access).
+- **Browser Run** (`@cloudflare/think/tools/browser`) — rendered pages, auth flows, screenshots, CDP automation.
+- **Typed tools / `agentTool()`** — call a `WorkerEntrypoint`/Durable Object method with a typed schema, or delegate work to a sub-agent. Do not route these through fetch.
 
 ## Extensions
 

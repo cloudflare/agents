@@ -1,5 +1,21 @@
 # @cloudflare/voice
 
+## 0.3.5
+
+### Patch Changes
+
+- [#1912](https://github.com/cloudflare/agents/pull/1912) [`219d59b`](https://github.com/cloudflare/agents/commit/219d59b8524868a9e258ebc3c437618b25e739a1) Thanks [@cjol](https://github.com/cjol)! - Add AssemblyAI and ElevenLabs streaming STT providers for the voice pipeline.
+
+## 0.3.4
+
+### Patch Changes
+
+- [#1909](https://github.com/cloudflare/agents/pull/1909) [`63491bd`](https://github.com/cloudflare/agents/commit/63491bdff0457118ea13139142d2578e5474fd99) Thanks [@cjol](https://github.com/cjol)! - Honor the configured sample rate for raw `pcm16` audio payloads.
+
+  Adds a `sampleRate` option to `VoiceAgentOptions` (default `16000`) that is declared in the server `audio_config` message. `VoiceClient` reads it (exposed via a new `sampleRate` getter) and constructs `AudioBuffer` instances at that rate for raw `pcm16` playback, so providers with a native rate other than 16 kHz (e.g. 24 kHz Gemini TTS) play at the correct speed. Falls back to 16 kHz when the server omits the field.
+
+- [#1891](https://github.com/cloudflare/agents/pull/1891) [`d1cc317`](https://github.com/cloudflare/agents/commit/d1cc317516878c640438de00b854786381a2b08e) Thanks [@korinne](https://github.com/korinne)! - Add transcriber readiness so voice agents wait for streaming STT startup before entering listening state or running call-start hooks.
+
 ## 0.3.3
 
 ### Patch Changes

@@ -10,8 +10,9 @@
  * multi-session support.
  *
  * Configuration overrides:
- *   - getModel()            — return the LanguageModel to use
- *   - getSystemPrompt()     — return the system prompt (fallback when no context blocks)
+ *   - getModel()            — return a model id string (resolved via the
+ *                             built-in workers-ai-provider) or a LanguageModel
+ *   - getSystemPrompt()     — return the legacy fallback system prompt
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
  *   - configureSession()    — add context blocks, compaction, search, skills
@@ -44,11 +45,13 @@
  * @example
  * ```typescript
  * import { Think } from "@cloudflare/think";
- * import { createWorkersAI } from "workers-ai-provider";
  *
  * export class MyAgent extends Think<Env> {
  *   getModel() {
- *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
+ *     // A string is resolved via the built-in workers-ai-provider off env.AI.
+ *     // Use a "@cf/..." id for Workers AI, or a "provider/model" slug like
+ *     // "openai/gpt-5.5" to route through AI Gateway.
+ *     return "@cf/moonshotai/kimi-k2.7-code";
  *   }
  *
  *   getSystemPrompt() {
@@ -81,16 +84,17 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as aiSdk from "ai";
 import type {
   FlexibleSchema,
   InferSchema,
+  InferToolOutput,
   LanguageModel,
   ModelMessage,
   PrepareStepFunction,
   PrepareStepResult,
   StreamTextOnChunkCallback,
-  StreamTextOnStepFinishCallback,
-  StreamTextOnToolCallFinishCallback,
+  GenerateTextOnStepFinishCallback,
   StopCondition,
   ToolSet,
   TypedToolCall,
@@ -100,10 +104,25 @@ import {
   convertToModelMessages,
   hasToolCall,
   jsonSchema,
+  // `stepCountIs` exists in both AI SDK v6 and v7 (v7 keeps it as an alias of
+  // `isStepCount`). Using it keeps Think compatible with both majors.
   stepCountIs,
   streamText,
-  tool
+  tool,
+  wrapLanguageModel
 } from "ai";
+/**
+ * Callback type for the AI SDK tool-execution-finished hook, derived from
+ * `streamText`'s options so it resolves under both AI SDK v6 and v7 (the
+ * exported `OnToolExecutionEndCallback` type is v7-only).
+ */
+type ToolCallFinishCallback = NonNullable<
+  Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
+>;
+import { createAISDKTelemetry, wrapAISDK } from "agents/observability/ai";
+import { createWorkersAI } from "workers-ai-provider";
+import { anthropic } from "workers-ai-provider/anthropic";
+import { openai } from "workers-ai-provider/openai";
 import * as skills from "agents/skills";
 import { SkillRegistry } from "agents/skills";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
@@ -125,11 +144,16 @@ import {
   Agent,
   callable,
   getCurrentAgent,
+  isDurableObjectMemoryLimitReset,
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
+const agentsAISDKTelemetryBrand = Symbol.for(
+  "cloudflare.agents.ai-sdk-telemetry"
+);
+const usesAISDKV7Telemetry = "registerTelemetry" in aiSdk;
 import type {
   AgentToolLifecycleResult,
   AgentToolMilestone,
@@ -190,6 +214,7 @@ import {
   ChatStreamStalledError,
   iterateWithStallWatchdog,
   sweepStaleChatRecoveryIncidents,
+  listActiveChatRecoveryIncidents,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
   recordChatTerminal,
@@ -254,6 +279,8 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { createFetchTools } from "./tools/fetch";
+import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
@@ -290,6 +317,59 @@ export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export type { WorkspaceLike } from "./tools/workspace";
 import type { WorkspaceLike } from "./tools/workspace";
+export type {
+  CreateFetchToolsOptions,
+  FetchBindingTarget,
+  FetchResult,
+  FetchToolEvent,
+  FetchErrorCode,
+  FetchResponseMode,
+  FetchRedirectPolicy
+} from "./tools/fetch";
+
+type AgentSpanAttributes = Readonly<
+  Record<string, string | number | boolean | undefined>
+>;
+
+type UpdateAgentSpan = (attributes: AgentSpanAttributes) => void;
+
+type AgentSpanHost = {
+  _withAgentSpan<T>(
+    operation: string,
+    storagePhase: string,
+    attributes: AgentSpanAttributes,
+    run: (update: UpdateAgentSpan) => T | Promise<T>
+  ): T | Promise<T>;
+};
+
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => Promise<T>
+): Promise<T>;
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => T
+): T;
+function withAgentSpan<T>(
+  host: object,
+  operation: string,
+  storagePhase: string,
+  attributes: AgentSpanAttributes,
+  run: (update: UpdateAgentSpan) => T | Promise<T>
+): T | Promise<T> {
+  return (host as AgentSpanHost)._withAgentSpan(
+    operation,
+    storagePhase,
+    attributes,
+    run
+  );
+}
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
@@ -367,6 +447,83 @@ function streamErrorToString(error: unknown): string {
     return JSON.stringify(error);
   } catch {
     return String(error);
+  }
+}
+
+/**
+ * Normalizes the AI SDK tool-execution-finished event across major versions.
+ *
+ * Think registers a single `experimental_onToolCallFinish` callback, which is
+ * the native option in AI SDK v6 and a supported alias for `onToolExecutionEnd`
+ * in AI SDK v7 (resolved internally — see `ai`'s `streamText`). The two majors
+ * hand the callback different event shapes:
+ *
+ * - v6: `{ toolCall, messages, success, output, error, durationMs, stepNumber }`
+ * - v7: `{ toolCall, messages, toolExecutionMs, toolOutput: { type, output|error } }`
+ *   (no `stepNumber`)
+ *
+ * This collapses both into one shape so the rest of Think stays version-agnostic.
+ */
+function normalizeToolFinishEvent(event: unknown): {
+  toolCall: TypedToolCall<ToolSet>;
+  messages: ModelMessage[];
+  toolExecutionMs: number;
+  stepNumber: number | undefined;
+  success: boolean;
+  output: unknown;
+  error: unknown;
+} {
+  const e = event as {
+    toolCall: TypedToolCall<ToolSet>;
+    messages: ModelMessage[];
+    // v7
+    toolExecutionMs?: number;
+    toolOutput?: { type: string; output?: unknown; error?: unknown };
+    // v6
+    durationMs?: number;
+    success?: boolean;
+    output?: unknown;
+    error?: unknown;
+    stepNumber?: number;
+  };
+  const toolExecutionMs = e.toolExecutionMs ?? e.durationMs ?? 0;
+  if (e.toolOutput) {
+    const success = e.toolOutput.type === "tool-result";
+    return {
+      toolCall: e.toolCall,
+      messages: e.messages,
+      toolExecutionMs,
+      // v7 does not provide a step number on this event.
+      stepNumber: undefined,
+      success,
+      output: success ? e.toolOutput.output : undefined,
+      error: success ? undefined : e.toolOutput.error
+    };
+  }
+  const success = e.success ?? false;
+  return {
+    toolCall: e.toolCall,
+    messages: e.messages,
+    toolExecutionMs,
+    stepNumber: e.stepNumber,
+    success,
+    output: success ? e.output : undefined,
+    error: success ? undefined : e.error
+  };
+}
+
+async function* readableStreamToAsyncIterable<T>(
+  stream: ReadableStream<T>
+): AsyncIterable<T> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -1067,6 +1224,20 @@ export interface ChatOptions {
   onClientToolCall?: ClientToolExecutor;
   /** Channel id this turn belongs to. See {@link RunTurnBase.channel}. */
   channel?: string;
+  /**
+   * Server-supplied metadata for this turn. Persisted on the turn's user
+   * message alongside {@link ChatOptions.channel} (as `metadata.turnMetadata`)
+   * so a recovered/continued turn re-resolves it from durable history, and
+   * readable during the turn via {@link Think.activeTurnMetadata}.
+   *
+   * Trust contract mirrors the channel stamp: only server-side callers can set
+   * it — reserved metadata keys on client-supplied messages are stripped at
+   * intake. This gives messenger/RPC entry points (e.g.
+   * {@link Think.chatWithMessengerContext}) a per-turn, recovery-safe carrier
+   * for facts like "which authenticated principal initiated this turn" without
+   * resorting to mutable agent-wide state.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 /** Input accepted by {@link Think.runTurn}. */
@@ -1348,7 +1519,26 @@ type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 const admittedTurnContext = new AsyncLocalStorage<{
   agent: unknown;
   requestId: string;
+  trigger: TurnTrigger;
+  admission: "queue";
+  channel?: string | undefined;
+  continuation?: boolean | undefined;
+  generation?: number | undefined;
 }>();
+
+// Drains the underlying model stream when a drain loop exits early (in-stream
+// error break, stall abort, user abort). The AI SDK tees its base stream, so
+// an abandoned tee branch would otherwise leave the tracing wrapper's
+// operation span open forever. One registration is associated with both the
+// stable pre-transform result and any wrapper returned by the test seam.
+type InferenceStreamFinalizer = {
+  started: boolean;
+  run: () => Promise<void>;
+};
+const inferenceStreamFinalizers = new WeakMap<
+  object,
+  InferenceStreamFinalizer
+>();
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -1716,6 +1906,13 @@ type ThinkWorkflowPromptContext = {
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 
 /**
+ * Message-metadata keys that are server-written turn context (stamped by
+ * `_stampChannel`) and trusted by hooks and recovery. They are stripped from
+ * client-supplied messages at intake so a client can never forge them.
+ */
+const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
+
+/**
  * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
  * deliver its structured final answer. The agent runs a full multi-step,
  * tool-using turn and ends it by calling this tool with arguments matching the
@@ -1891,9 +2088,15 @@ export interface TurnContext {
  * All fields are optional — return only what you want to change.
  */
 export interface TurnConfig {
-  /** Override the model for this turn (e.g. cheap model for continuations). */
-  model?: LanguageModel;
-  /** Override the assembled system prompt. */
+  /**
+   * Override the model for this turn (e.g. cheap model for continuations).
+   * Accepts a model id string (resolved via the built-in provider, same rules
+   * as {@link Think.getModel}) or a `LanguageModel`.
+   */
+  model?: ThinkModel;
+  /** Override the assembled instructions prompt. */
+  instructions?: string;
+  /** @deprecated Prefer `instructions`. */
   system?: string;
   /** Override the assembled messages. */
   messages?: ModelMessage[];
@@ -1949,7 +2152,14 @@ export interface TurnConfig {
   headers?: Parameters<typeof streamText>[0]["headers"];
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
-  /** Optional AI SDK telemetry configuration for this turn. */
+  /**
+   * Optional AI SDK telemetry configuration for this turn.
+   *
+   * Typed via the `experimental_telemetry` key, which exists in both AI SDK v6
+   * and v7 (`telemetry` is v7-only), so this type resolves under either major.
+   */
+  telemetry?: Parameters<typeof streamText>[0]["experimental_telemetry"];
+  /** @deprecated Prefer `telemetry`. */
   experimental_telemetry?: Parameters<
     typeof streamText
   >[0]["experimental_telemetry"];
@@ -2156,11 +2366,20 @@ export type PrepareStepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
  * Configuration returned by `beforeStep` to override defaults for the
  * current AI SDK step. This is the AI SDK's `PrepareStepResult<TOOLS>` —
  * return only the fields you want to override (`model`, `toolChoice`,
- * `activeTools`, `system`, `messages`, `experimental_context`,
- * `providerOptions`).
+ * `activeTools`, `instructions`, `messages`, `experimental_context`,
+ * `providerOptions`). The previous `system` field remains available as a
+ * deprecated alias.
+ *
+ * `model` is widened to {@link ThinkModel}: like {@link Think.getModel}, you
+ * can return a model id string (resolved via the built-in provider) instead of
+ * a `LanguageModel`. Think resolves it before handing the step to the AI SDK.
  */
-export type StepConfig<TOOLS extends ToolSet = ToolSet> =
-  PrepareStepResult<TOOLS>;
+export type StepConfig<TOOLS extends ToolSet = ToolSet> = Omit<
+  PrepareStepResult<TOOLS>,
+  "model"
+> & {
+  model?: ThinkModel;
+};
 
 /**
  * Context passed to the `beforeToolCall` hook **before** the tool's
@@ -2176,7 +2395,9 @@ export type StepConfig<TOOLS extends ToolSet = ToolSet> =
  * - `messages`   — conversation messages visible at tool execution time
  * - `abortSignal` — signal that aborts if the turn is cancelled
  *
- * Pass an explicit `TOOLS` generic for full input typing:
+ * Pass an explicit `TOOLS` generic for full input typing. With a concrete
+ * tool set, narrowing on `ctx.toolName` narrows `ctx.input` to that tool's
+ * input shape:
  *
  * ```ts
  * import type { ToolCallContext } from "@cloudflare/think";
@@ -2184,20 +2405,41 @@ export type StepConfig<TOOLS extends ToolSet = ToolSet> =
  *
  * beforeToolCall(ctx: ToolCallContext<typeof tools>) {
  *   if (ctx.toolName === "search") {
- *     ctx.input.query; // typed
+ *     ctx.input.query; // typed as string
  *   }
  * }
  * ```
  */
 export type ToolCallContext<TOOLS extends ToolSet = ToolSet> =
-  TypedToolCall<TOOLS> & {
-    /** Zero-based index of the current step where this tool call occurs. */
-    readonly stepNumber: number | undefined;
-    /** The conversation messages available at tool execution time. */
-    readonly messages: ReadonlyArray<ModelMessage>;
-    /** Signal for cancelling the operation. */
-    readonly abortSignal: AbortSignal | undefined;
-  };
+  PerToolCall<TOOLS> & ToolCallContextExtras;
+
+/** Per-call event extras attached to every {@link ToolCallContext}. */
+type ToolCallContextExtras = {
+  /** Zero-based index of the current step where this tool call occurs. */
+  readonly stepNumber: number | undefined;
+  /** The conversation messages available at tool execution time. */
+  readonly messages: ReadonlyArray<ModelMessage>;
+  /** Signal for cancelling the operation. */
+  readonly abortSignal: AbortSignal | undefined;
+};
+
+/**
+ * The `TypedToolCall<TOOLS>` union, re-keyed so that discriminating on
+ * `toolName` narrows `input` per tool.
+ *
+ * The AI SDK's `TypedToolCall` includes a `DynamicToolCall` arm whose
+ * `toolName: string` / `input: unknown` overlaps every static tool name —
+ * leaving it in the union collapses `ctx.input` to `unknown` even after a
+ * `toolName` check. When an explicit `TOOLS` generic is passed (so the keys
+ * are a literal union), we distribute over those keys and drop the dynamic
+ * arm so narrowing works. With the default `ToolSet` (keys are `string`) we
+ * fall back to the raw union, preserving the prior loose behavior.
+ */
+type PerToolCall<TOOLS extends ToolSet> = string extends keyof TOOLS
+  ? TypedToolCall<TOOLS>
+  : {
+      [K in keyof TOOLS]: Extract<TypedToolCall<TOOLS>, { toolName: K }>;
+    }[keyof TOOLS];
 
 /**
  * Decision returned by `beforeToolCall` to control tool execution.
@@ -2230,51 +2472,74 @@ export type ToolCallDecision =
 /**
  * Context passed to the `afterToolCall` hook after a tool executes.
  *
- * Backed by the AI SDK's `OnToolCallFinishEvent` (the parameter of
- * `experimental_onToolCallFinish`). The full `TypedToolCall<TOOLS>`
- * fields (`toolName`, `toolCallId`, `input`, …) are spread at the top
- * level, plus the per-call event extras:
+ * Backed by the AI SDK's `OnToolExecutionEndEvent`. The full
+ * `TypedToolCall<TOOLS>` fields (`toolName`, `toolCallId`, `input`, …) are
+ * spread at the top level, plus the per-call event extras:
  *
  * - `stepNumber`  — index of the current step
  * - `messages`    — conversation messages visible at tool execution time
- * - `durationMs`  — wall-clock execution time in milliseconds
- * - `success`/`output`/`error` — discriminated outcome:
- *   - on success: `success: true`, `output: unknown`
+ * - `toolExecutionMs` — wall-clock execution time in milliseconds
+ * - `durationMs`  — deprecated alias for `toolExecutionMs`
+ * - `toolOutput` — AI SDK v7 discriminated outcome
+ * - `success`/`output`/`error` — deprecated normalized outcome aliases:
+ *   - on success: `success: true`, `output` typed per tool
  *   - on failure: `success: false`, `error: unknown`
  *
- * Pass an explicit `TOOLS` generic for full input typing:
+ * Pass an explicit `TOOLS` generic for full input **and** output typing.
+ * On the success branch, narrowing on `ctx.toolName` narrows `ctx.output`
+ * to that tool's inferred output type (dynamic tools stay `unknown`):
  *
  * ```ts
  * import type { ToolCallResultContext } from "@cloudflare/think";
  * import type { tools } from "./my-tools";
  *
  * afterToolCall(ctx: ToolCallResultContext<typeof tools>) {
- *   if (ctx.success) {
- *     console.log(`${ctx.toolName} took ${ctx.durationMs}ms`, ctx.output);
- *   } else {
- *     console.error(`${ctx.toolName} failed:`, ctx.error);
+ *   if (ctx.toolName === "search" && ctx.success) {
+ *     ctx.output.results; // typed as the `search` tool's output
  *   }
  * }
  * ```
  */
 export type ToolCallResultContext<TOOLS extends ToolSet = ToolSet> =
-  TypedToolCall<TOOLS> & {
-    readonly stepNumber: number | undefined;
-    readonly messages: ReadonlyArray<ModelMessage>;
-    /** Wall-clock execution time in milliseconds. */
-    readonly durationMs: number;
-  } & (
-      | {
-          readonly success: true;
-          readonly output: unknown;
-          readonly error?: never;
-        }
-      | {
-          readonly success: false;
-          readonly output?: never;
-          readonly error: unknown;
-        }
-    );
+  string extends keyof TOOLS
+    ? TypedToolCall<TOOLS> & ToolCallResultBase & ToolCallOutcome<unknown>
+    : {
+        [K in keyof TOOLS]: Extract<TypedToolCall<TOOLS>, { toolName: K }> &
+          ToolCallResultBase &
+          ToolCallOutcome<InferToolOutput<TOOLS[K]>>;
+      }[keyof TOOLS];
+
+/** Per-call extras attached to every {@link ToolCallResultContext}. */
+type ToolCallResultBase = {
+  readonly stepNumber: number | undefined;
+  readonly messages: ReadonlyArray<ModelMessage>;
+  /** Wall-clock execution time in milliseconds. */
+  readonly toolExecutionMs: number;
+  /** @deprecated Prefer `toolExecutionMs`. */
+  readonly durationMs: number;
+};
+
+/**
+ * The discriminated success/failure outcome of a tool call. On success the
+ * `output` is typed (`O`); on failure the `error` is `unknown`.
+ */
+type ToolCallOutcome<O> =
+  | {
+      readonly toolOutput: { type: "tool-result"; output: O };
+      /** @deprecated Prefer `toolOutput.type === "tool-result"`. */
+      readonly success: true;
+      /** @deprecated Prefer `toolOutput.output`. */
+      readonly output: O;
+      readonly error?: never;
+    }
+  | {
+      readonly toolOutput: { type: "tool-error"; error: unknown };
+      /** @deprecated Prefer `toolOutput.type === "tool-error"`. */
+      readonly success: false;
+      readonly output?: never;
+      /** @deprecated Prefer `toolOutput.error`. */
+      readonly error: unknown;
+    };
 
 /**
  * Context passed to the `onStepFinish` hook after each step completes.
@@ -2289,7 +2554,7 @@ export type ToolCallResultContext<TOOLS extends ToolSet = ToolSet> =
  * Pass an explicit `TOOLS` generic for typed `toolCalls`/`toolResults`.
  */
 export type StepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
-  StreamTextOnStepFinishCallback<TOOLS>
+  GenerateTextOnStepFinishCallback<TOOLS>
 >[0];
 
 /**
@@ -2322,10 +2587,55 @@ export interface ExtensionConfig {
 }
 
 /**
+ * @internal The subset of the AI SDK's `ToolExecuteOptions` that Think's
+ * tool wrapper reads when resolving a `beforeToolCall` decision.
+ */
+type ToolDecisionOptions = {
+  toolCallId: string;
+  messages: ModelMessage[];
+  abortSignal?: AbortSignal;
+  context?: unknown;
+  experimental_context?: unknown; // v6 alias kept for local wrappers if present
+};
+
+/**
  * An opinionated chat agent base class.
  *
  * @experimental The API surface may change before stabilizing.
  */
+/**
+ * Keys of the global `AiModels` interface (from `@cloudflare/workers-types`)
+ * whose model type extends `T`. Mirrors the derivation `workers-ai-provider`
+ * uses, so the set stays in sync with the installed workers-types version.
+ */
+type WorkersAIModelIdsExtending<T> = {
+  [K in keyof AiModels]: AiModels[K] extends T ? K : never;
+}[keyof AiModels];
+
+/**
+ * A model id accepted by {@link Think.getModel}.
+ *
+ * Provides editor autocomplete for the Workers AI text-generation catalog
+ * (`@cf/...`) while still accepting **any** string — including
+ * `"<provider>/<model>"` AI Gateway slugs like `"openai/gpt-5.5"`, whose
+ * validity is only known at runtime (the catalog is server-side and changes
+ * independently of these types). The `(string & {})` arm is what keeps
+ * arbitrary strings assignable without collapsing the autocomplete union.
+ */
+export type ThinkModelId =
+  | Exclude<
+      WorkersAIModelIdsExtending<BaseAiTextGeneration>,
+      WorkersAIModelIdsExtending<BaseAiTextToImage>
+    >
+  | (string & {});
+
+/**
+ * What {@link Think.getModel} may return: either a fully-constructed AI SDK
+ * `LanguageModel`, or a {@link ThinkModelId} string resolved through Think's
+ * built-in `workers-ai-provider`. Also the input type of {@link Think.resolveModel}.
+ */
+export type ThinkModel = LanguageModel | ThinkModelId;
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -2348,13 +2658,33 @@ export class Think<
     "skillsFingerprint"
   ] as const;
   /**
-   * Wait for MCP server connections to be ready before the inference
-   * loop. MCP tools are auto-merged into the tool set.
+   * Whether Think automatically converts connected MCP tools to AI SDK tools
+   * and merges them into each model turn.
+   *
+   * Set this to `false` when MCP tools are exposed through Code Mode or another
+   * mechanism outside Think's automatic tool set. Connections, discovery,
+   * `waitForMcpConnections`, raw tool listing and calls, and explicit
+   * `this.mcp.getAITools()` calls are unaffected.
+   *
+   * @default true
+   */
+  includeMcpTools = true;
+
+  /**
+   * Wait for MCP server connections to be ready before the inference loop.
+   * When {@link includeMcpTools} is enabled, their tools are then auto-merged
+   * into the tool set.
    *
    * Set to `true` for a default 10s timeout, or `{ timeout: ms }`
    * for a custom timeout. Defaults to `false` (no waiting).
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
+
+  /** Store model input/output on `chat` spans. */
+  storeMessages = false;
+
+  /** Store tool input/output on `execute_tool` spans. */
+  storeTools = false;
 
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();
@@ -2551,50 +2881,81 @@ export class Think<
     | boolean
     | NonNullable<Parameters<typeof createWorkspaceTools>[1]>["bash"] = true;
 
+  /**
+   * Opt-in HTTP fetch tools. Disabled by default — set to a config object to
+   * register a generic `fetch_url` tool (when `allowlist` is provided) and one
+   * `fetch_<name>` tool per `bindings` target. Read-only (GET), allowlisted,
+   * and bounded; see {@link createFetchTools}.
+   *
+   * The workspace and an observability hook are injected automatically, so omit
+   * `workspace`/`onEvent` here. This property is evaluated at construction, so
+   * use it for static config — for per-tenant/dynamic allowlists call
+   * `createFetchTools()` inside `getTools()` instead (it runs every turn).
+   *
+   * ```ts
+   * fetchTools = { allowlist: ["https://developers.cloudflare.com/**"] };
+   * ```
+   */
+  fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
+    false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async () => {
-      // 1. Workspace initialization
-      if (!this.workspace) {
-        this.workspace = new Workspace({
-          sql: this.ctx.storage.sql,
-          name: () => this.name
-        });
-      }
+    const startThink = async (
+      props: Props | undefined,
+      update: UpdateAgentSpan
+    ) => {
+      await withAgentSpan(
+        this,
+        "initialize_think_session",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        async () => {
+          // 1. Workspace initialization
+          if (!this.workspace) {
+            this.workspace = new Workspace({
+              sql: this.ctx.storage.sql,
+              name: () => this.name
+            });
+          }
 
-      // 2. Session configuration (builder phase — context blocks, compaction, skills)
-      const baseSession = Session.create(this);
-      this.session = await this.configureSession(baseSession);
-      this.session.internal_onMessagesChanged(async (event) => {
-        switch (event.type) {
-          case "append":
-            if (!event.inserted || event.parentId !== undefined) {
-              await this._syncMessages();
-            } else {
-              this._upsertCachedMessage(event.message as UIMessage);
+          // 2. Session configuration (builder phase — context blocks, compaction, skills)
+          const baseSession = Session.create(this);
+          this.session = await this.configureSession(baseSession);
+          this.session.internal_onMessagesChanged(async (event) => {
+            switch (event.type) {
+              case "append":
+                if (!event.inserted || event.parentId !== undefined) {
+                  await this._syncMessages();
+                } else {
+                  this._upsertCachedMessage(event.message as UIMessage);
+                }
+                // The conversation grew — older messages may have aged out of
+                // the keep-recent window. Only schedule the maintenance scan once
+                // this session has actually observed oversized media; otherwise a
+                // normal text-only chat would pay a row-stat read after every turn.
+                this._scheduleMediaEvictionAfterAppend(
+                  event.message as UIMessage
+                );
+                break;
+              case "update":
+                this._patchCachedMessage(event.message as UIMessage);
+                break;
+              case "clear":
+                this._replaceCachedMessages([]);
+                break;
+              case "delete":
+              case "compact":
+                await this._syncMessages();
+                break;
             }
-            // The conversation grew — older messages may have aged out of
-            // the keep-recent window. Only schedule the maintenance scan once
-            // this session has actually observed oversized media; otherwise a
-            // normal text-only chat would pay a row-stat read after every turn.
-            this._scheduleMediaEvictionAfterAppend(event.message as UIMessage);
-            break;
-          case "update":
-            this._patchCachedMessage(event.message as UIMessage);
-            break;
-          case "clear":
-            this._replaceCachedMessages([]);
-            break;
-          case "delete":
-          case "compact":
-            await this._syncMessages();
-            break;
-        }
-      });
+          });
 
-      await this._initializeSkills();
+          await this._initializeSkills();
+        }
+      );
 
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
@@ -2607,66 +2968,102 @@ export class Think<
       // history is untouched and the next safe-boundary `_syncMessages()`
       // retries.
       this._onStartDegradations = [];
-      const hydrated = await this._runBestEffortOnStartStep(
-        "transcript-hydration",
-        () => this._syncMessages(),
-        "The agent is starting with an empty in-memory message view; " +
-          "persisted history is untouched. If the error is SQLITE_NOMEM, " +
-          "the stored transcript is too large to hydrate (often inline " +
-          "base64 media in tool results) — compact or clear the session " +
-          "to recover."
+      await withAgentSpan(
+        this,
+        "hydrate_think_session",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        async () => {
+          const hydrated = await this._runBestEffortOnStartStep(
+            "transcript-hydration",
+            () => this._syncMessages(),
+            "The agent is starting with an empty in-memory message view; " +
+              "persisted history is untouched. If the error is SQLITE_NOMEM, " +
+              "the stored transcript is too large to hydrate (often inline " +
+              "base64 media in tool results) — compact or clear the session " +
+              "to recover."
+          );
+          if (!hydrated) {
+            this._replaceCachedMessages([]);
+          }
+          this._refreshMediaEvictionSignalFromCache();
+        }
       );
-      if (!hydrated) {
-        this._replaceCachedMessages([]);
-      }
-      this._refreshMediaEvictionSignalFromCache();
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
-        await this._initializeExtensions();
+        await withAgentSpan(
+          this,
+          "initialize_think_extensions",
+          "startup",
+          { "cloudflare.agents.component": "think" },
+          () => this._initializeExtensions()
+        );
       }
 
       // 7. Protocol handlers
-      this._resumableStream = new ResumableStream(this.sql.bind(this));
-      this._restoreClientTools();
-      this._restoreBody();
-      this._setupProtocolHandlers();
-      await this._initializeChannels();
+      await withAgentSpan(
+        this,
+        "initialize_think_chat",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        async () => {
+          this._resumableStream = new ResumableStream(this.sql.bind(this));
+          this._restoreClientTools();
+          this._restoreBody();
+          this._setupProtocolHandlers();
+          await this._initializeChannels();
+        }
+      );
 
       // 8. User's onStart
-      await _onStart();
+      await _onStart(props);
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
       // before draining any recovered programmatic work they may enqueue.
       // Best-effort: reconcile runs after the agent is otherwise functional,
       // and a failure (user getScheduledTasks() throwing, storage pressure)
       // must not brick the DO (#1710).
-      await this._runBestEffortOnStartStep(
-        "scheduled-task-reconcile",
-        () => this._reconcileDeclaredScheduledTasks(),
-        "Declared scheduled tasks were not reconciled on this wake; the " +
-          "next successful wake will reconcile them."
+      await withAgentSpan(
+        this,
+        "reconcile_think_schedules",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        () =>
+          this._runBestEffortOnStartStep(
+            "scheduled-task-reconcile",
+            () => this._reconcileDeclaredScheduledTasks(),
+            "Declared scheduled tasks were not reconciled on this wake; the " +
+              "next successful wake will reconcile them."
+          )
       );
 
       // 10. Durable submissions may run user-defined model/hooks, so start them
       // after subclass initialization has completed. Best-effort for the same
       // reason as step 9.
-      await this._runBestEffortOnStartStep(
-        "durable-work-recovery",
-        async () => {
-          await this._sweepActionLedger();
-          await this._sweepActionPendingApprovals();
-          await this._recoverSubmissionsOnStart();
-          this._recoverWorkflowNotifications();
-          if (this._hasPendingSubmissions()) {
-            this._startSubmissionDrain();
-          }
-          if (this._hasPendingWorkflowNotifications()) {
-            this._startWorkflowNotificationDrain();
-          }
-        },
-        "Pending submissions / workflow notifications were not recovered on " +
-          "this wake; the next successful wake will recover them."
+      await withAgentSpan(
+        this,
+        "recover_think_durable_work",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        () =>
+          this._runBestEffortOnStartStep(
+            "durable-work-recovery",
+            async () => {
+              await this._sweepActionLedger();
+              await this._sweepActionPendingApprovals();
+              await this._recoverSubmissionsOnStart();
+              this._recoverWorkflowNotifications();
+              if (this._hasPendingSubmissions()) {
+                await this._scheduleSubmissionDrain();
+              }
+              if (this._hasPendingWorkflowNotifications()) {
+                this._startWorkflowNotificationDrain();
+              }
+            },
+            "Pending submissions / workflow notifications were not recovered on " +
+              "this wake; the next successful wake will recover them."
+          )
       );
 
       // 11. Background bound on the persisted transcript: if hydration was
@@ -2675,7 +3072,24 @@ export class Think<
       if (this._lastHydration?.truncated) {
         this._scheduleMediaEvictionPass({ force: true });
       }
+
+      update({
+        "cloudflare.agents.hydration.messages":
+          this._lastHydration?.hydratedMessages,
+        "cloudflare.agents.hydration.content_bytes":
+          this._lastHydration?.totalContentBytes,
+        "cloudflare.agents.hydration.truncated": this._lastHydration?.truncated,
+        "cloudflare.agents.start.degradations": this._onStartDegradations.length
+      });
     };
+    this.onStart = (props?: Props) =>
+      withAgentSpan(
+        this,
+        "think_start",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        (update) => startThink(props, update)
+      );
   }
 
   /**
@@ -3542,16 +3956,107 @@ export class Think<
   // ── Configuration overrides ─────────────────────────────────────
 
   /**
-   * Return the language model to use for inference.
-   * Must be overridden by subclasses.
+   * Return the model to use for inference. Must be overridden by subclasses.
+   *
+   * The return value can be either:
+   *
+   * - A **string** model id, resolved through the built-in
+   *   {@link https://www.npmjs.com/package/workers-ai-provider | workers-ai-provider}
+   *   off your `AI` binding (see {@link getAIBinding}). A `@cf/...` id hits
+   *   Workers AI directly; any other `"<provider>/<model>"` slug — e.g.
+   *   `"openai/gpt-5.5"`, `"anthropic/claude-sonnet-4-5"`, `"google/gemini-2.5-pro"`
+   *   — is routed through AI Gateway with resumable streaming on by default.
+   *   This is the common case: no extra package to install, no provider to wire.
+   * - A fully-constructed AI SDK `LanguageModel`, for any other provider or for
+   *   full control over provider/gateway options.
+   *
+   * @example String (Workers AI)
+   * ```typescript
+   * getModel() {
+   *   return "@cf/moonshotai/kimi-k2.7-code";
+   * }
+   * ```
+   *
+   * @example String (third-party via AI Gateway)
+   * ```typescript
+   * getModel() {
+   *   return "openai/gpt-5.5";
+   * }
+   * ```
+   *
+   * @example Bring your own provider
+   * ```typescript
+   * import { createOpenAI } from "@ai-sdk/openai";
+   * getModel() {
+   *   return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })("gpt-5.5");
+   * }
+   * ```
    */
-  getModel(): LanguageModel {
-    throw new Error("Override getModel() to return a LanguageModel.");
+  getModel(): ThinkModel {
+    throw new Error(
+      "Override getModel() to return a model id string (e.g. " +
+        '"@cf/moonshotai/kimi-k2.7-code" or "openai/gpt-5.5") or a LanguageModel.'
+    );
   }
 
   /**
-   * Return the system prompt for the assistant.
-   * Used as fallback when no context blocks are configured via `configureSession`.
+   * Return the Workers AI binding used by the built-in default provider when
+   * {@link getModel} returns a string. Defaults to `this.env.AI`. Override if
+   * your binding is named something other than `AI`.
+   */
+  getAIBinding(): Ai {
+    const binding = (this.env as { AI?: Ai }).AI;
+    if (!binding) {
+      throw new Error(
+        "Think's default model provider needs a Workers AI binding named " +
+          '"AI". Add `"ai": { "binding": "AI" }` to wrangler.jsonc, override ' +
+          "getAIBinding() to return your binding, or override getModel() to " +
+          "return a LanguageModel."
+      );
+    }
+    return binding;
+  }
+
+  /**
+   * Lazily-constructed, instance-cached default provider. Bundles the `openai`
+   * and `anthropic` wire-format plugins so a `"<provider>/<model>"` slug routes
+   * through AI Gateway out of the box (covers OpenAI, Anthropic, Google,
+   * xAI/Grok, Groq, and the OpenAI-compatible long tail).
+   *
+   * Cached per instance, which assumes {@link getAIBinding} is stable for the
+   * lifetime of the agent (the default `this.env.AI` always is).
+   */
+  private _defaultProvider?: ReturnType<typeof createWorkersAI>;
+
+  /**
+   * Resolve a model value into a concrete AI SDK `LanguageModel`.
+   *
+   * Defaults to resolving {@link getModel}. A `LanguageModel` is returned as-is;
+   * a string is built through the bundled default provider (see {@link getModel}
+   * for the slug rules). Use this whenever you need a usable model outside the
+   * main turn — e.g. a side `generateText` call for summarization/compaction —
+   * since `getModel()` may return a bare string.
+   */
+  resolveModel(model: ThinkModel = this.getModel()): LanguageModel {
+    if (typeof model !== "string") return model;
+    this._defaultProvider ??= createWorkersAI({
+      binding: this.getAIBinding(),
+      providers: [openai, anthropic]
+    });
+    // `@cf/...` ids take Workers AI chat settings (sessionAffinity improves
+    // prefix-cache hits). Any other slug is a catalog model routed through AI
+    // Gateway; we pass no per-call settings, which avoids forcing options a
+    // given provider/transport would reject.
+    return model.startsWith("@cf/")
+      ? this._defaultProvider(model, { sessionAffinity: this.sessionAffinity })
+      : this._defaultProvider(model);
+  }
+
+  /**
+   * Return the fallback system prompt for the assistant.
+   * Ignored when Session context blocks are configured. Use
+   * `configureSession().withContext()` for always-on instructions that should
+   * coexist with context blocks or skills.
    */
   getSystemPrompt(): string {
     return [
@@ -3641,6 +4146,17 @@ export class Think<
     return this._activeChannelContext;
   }
 
+  /**
+   * The server-supplied metadata stamped on the active turn's user message
+   * ({@link ChatOptions.metadata}). Like the channel stamp, it is persisted on
+   * the durable user message, so recovered/continued turns re-resolve the same
+   * value; client-supplied message metadata can never populate it (reserved
+   * keys are stripped at intake). `undefined` when the turn carried none.
+   */
+  get activeTurnMetadata(): Record<string, unknown> | undefined {
+    return this._turnMetadataFromMessages(this.messages);
+  }
+
   /** Resolve a channel id to a turn-scoped {@link ChannelContext}, if registered. */
   private _resolveChannelContext(
     channel: string | undefined
@@ -3703,14 +4219,16 @@ export class Think<
   }
 
   /**
-   * Stamp the channel id onto user messages so a recovered/continued turn can
-   * re-resolve the channel from durable history.
+   * Stamp the channel id — and, when supplied, the caller's turn metadata —
+   * onto user messages so a recovered/continued turn can re-resolve both from
+   * durable history.
    */
   private _stampChannel(
     messages: UIMessage[],
-    channel: string | undefined
+    channel: string | undefined,
+    turnMetadata?: Record<string, unknown>
   ): UIMessage[] {
-    if (!channel) {
+    if (!channel && !turnMetadata) {
       return messages;
     }
     return messages.map((message) =>
@@ -3719,24 +4237,44 @@ export class Think<
             ...message,
             metadata: {
               ...(message.metadata as Record<string, unknown> | undefined),
-              channel
+              ...(channel ? { channel } : {}),
+              ...(turnMetadata ? { turnMetadata } : {})
             }
           }
         : message
     );
   }
 
-  /** The channel stamped on the latest user message in the given list, if any. */
-  private _channelFromMessages(messages: UIMessage[]): string | undefined {
+  /** Metadata of the latest user message in the given list, if any. */
+  private _latestUserMessageMetadata(
+    messages: UIMessage[]
+  ): Record<string, unknown> | undefined {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (message.role === "user") {
-        const channel = (message.metadata as { channel?: unknown } | undefined)
-          ?.channel;
-        return typeof channel === "string" ? channel : undefined;
+        return message.metadata as Record<string, unknown> | undefined;
       }
     }
     return undefined;
+  }
+
+  /** The channel stamped on the latest user message in the given list, if any. */
+  private _channelFromMessages(messages: UIMessage[]): string | undefined {
+    const channel = this._latestUserMessageMetadata(messages)?.channel;
+    return typeof channel === "string" ? channel : undefined;
+  }
+
+  /** The turn metadata stamped on the latest user message, if any. */
+  private _turnMetadataFromMessages(
+    messages: UIMessage[]
+  ): Record<string, unknown> | undefined {
+    const turnMetadata =
+      this._latestUserMessageMetadata(messages)?.turnMetadata;
+    return turnMetadata &&
+      typeof turnMetadata === "object" &&
+      !Array.isArray(turnMetadata)
+      ? (turnMetadata as Record<string, unknown>)
+      : undefined;
   }
 
   /** Re-resolve the channel for a continuation from the latest user message. */
@@ -3944,6 +4482,9 @@ export class Think<
     const hasExtensionTools =
       toolNames.has("load_extension") || toolNames.has("list_extensions");
     const hasExecuteTool = toolNames.has("execute");
+    const hasFetchTools = [...toolNames].some((name) =>
+      name.startsWith("fetch_")
+    );
 
     const lines = [
       "You are running inside a Think agent.",
@@ -3981,6 +4522,12 @@ export class Think<
     if (hasExecuteTool) {
       lines.push(
         "- If sandboxed execution is available, prefer it for safe, bounded checks or coordinated multi-step operations."
+      );
+    }
+
+    if (hasFetchTools) {
+      lines.push(
+        "- If fetch tools are available, use them to read allowlisted HTTP resources (documentation, APIs). They are read-only and bounded; respect their allowlist and do not assume access to other URLs."
       );
     }
 
@@ -4202,6 +4749,15 @@ export class Think<
     try {
       const sources = await this.getSkills();
       if (sources.length === 0) return;
+
+      if (this.getSystemPrompt !== Think.prototype.getSystemPrompt) {
+        const warning =
+          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureSession().withContext(...) instead.";
+        if (!this._loggedSkillWarnings.has(warning)) {
+          this._loggedSkillWarnings.add(warning);
+          console.warn(`[think] ${warning}`);
+        }
+      }
 
       const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
       await registry.load();
@@ -4480,6 +5036,15 @@ export class Think<
   /**
    * Called after each step completes (initial, continue, tool-result).
    * Override for step-level logging or analytics.
+   */
+  onStepEnd(ctx: StepContext): void | Promise<void> {
+    return this.onStepFinish(ctx);
+  }
+
+  /**
+   * Called after each step completes (initial, continue, tool-result).
+   * Override for step-level logging or analytics.
+   * @deprecated Prefer `onStepEnd`.
    */
   onStepFinish(_ctx: StepContext): void | Promise<void> {}
 
@@ -4838,11 +5403,200 @@ export class Think<
   }
 
   /**
+   * Finalizes the traced inference stream after a drain loop exits: drains the
+   * abandoned tee branch so the operation span closes even on early exits.
+   * Idempotent (the finalizer is removed before it runs); the drain rides
+   * `ctx.waitUntil` so it survives turn completion without blocking it.
+   */
+  private _drainInferenceStream(result: object): void {
+    const finalizer = inferenceStreamFinalizers.get(result);
+    inferenceStreamFinalizers.delete(result);
+    if (!finalizer || finalizer.started) {
+      return;
+    }
+
+    finalizer.started = true;
+    // Invoke exactly once: start the drain, then try to extend its lifetime.
+    // A missing/throwing waitUntil must not start a second tee consumer.
+    const completion = finalizer.run();
+    try {
+      this.ctx.waitUntil(completion);
+    } catch {
+      // waitUntil unavailable (tests, exotic contexts): the drain is already
+      // running; nothing further to attach it to.
+    }
+  }
+
+  /**
+   * Adds default identity and current-turn metadata to the AI SDK telemetry
+   * options. The class identifies the logical agent implementation, the named
+   * instance identifies the agent resource, and the opaque Durable Object id
+   * identifies its one persisted conversation. Caller values override defaults.
+   */
+  private _turnTelemetry(
+    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
+  ): Parameters<typeof streamText>[0]["experimental_telemetry"] {
+    const settings = (base ?? {}) as unknown as Record<string, unknown>;
+    const metadata =
+      typeof settings.metadata === "object" && settings.metadata !== null
+        ? (settings.metadata as Record<string, unknown>)
+        : {};
+    const turn = admittedTurnContext.getStore();
+    return {
+      ...settings,
+      // AI SDK maps functionId to gen_ai.agent.name. Use the class name by
+      // default while preserving an explicit caller label.
+      functionId:
+        typeof settings.functionId === "string"
+          ? settings.functionId
+          : this.constructor.name,
+      metadata: {
+        agentId: this.name,
+        conversationId: this.ctx.id.toString(),
+        ...(turn?.agent === this
+          ? {
+              "cloudflare.agents.turn.request_id": turn.requestId,
+              "cloudflare.agents.turn.trigger": turn.trigger,
+              "cloudflare.agents.turn.admission": turn.admission,
+              ...(turn.channel !== undefined && {
+                "cloudflare.agents.turn.channel": turn.channel
+              }),
+              ...(turn.continuation !== undefined && {
+                "cloudflare.agents.turn.continuation": turn.continuation
+              }),
+              ...(turn.generation !== undefined && {
+                "cloudflare.agents.turn.generation": turn.generation
+              })
+            }
+          : {}),
+        // beforeTurn remains authoritative. metadata.agentName, when supplied,
+        // also takes precedence over functionId in the tracing adapter.
+        ...metadata
+      }
+    } as unknown as Parameters<typeof streamText>[0]["experimental_telemetry"];
+  }
+
+  /** Builds the native AI SDK v7 telemetry settings and identity context. */
+  private _turnTelemetryV7(
+    base: Parameters<typeof streamText>[0]["experimental_telemetry"]
+  ): {
+    options: Record<string, unknown>;
+    runtimeContext: Record<string, unknown>;
+  } {
+    const settings = (base ?? {}) as unknown as Record<string, unknown>;
+    const metadata =
+      typeof settings.metadata === "object" && settings.metadata !== null
+        ? (settings.metadata as Record<string, unknown>)
+        : {};
+    const turn = admittedTurnContext.getStore();
+    const runtimeContext: Record<string, unknown> = {
+      agentId: this.name,
+      conversationId: this.ctx.id.toString(),
+      ...(turn?.agent === this
+        ? {
+            "cloudflare.agents.turn.request_id": turn.requestId,
+            "cloudflare.agents.turn.trigger": turn.trigger,
+            "cloudflare.agents.turn.admission": turn.admission,
+            ...(turn.channel !== undefined && {
+              "cloudflare.agents.turn.channel": turn.channel
+            }),
+            ...(turn.continuation !== undefined && {
+              "cloudflare.agents.turn.continuation": turn.continuation
+            }),
+            ...(turn.generation !== undefined && {
+              "cloudflare.agents.turn.generation": turn.generation
+            })
+          }
+        : {}),
+      ...metadata
+    };
+    const includedContext =
+      typeof settings.includeRuntimeContext === "object" &&
+      settings.includeRuntimeContext !== null
+        ? (settings.includeRuntimeContext as Record<string, boolean>)
+        : {};
+    const localIntegrations = settings.integrations;
+    const globalIntegrations = (
+      globalThis as typeof globalThis & {
+        AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[];
+      }
+    ).AI_SDK_TELEMETRY_INTEGRATIONS;
+    const integrations = [
+      ...(localIntegrations !== undefined
+        ? Array.isArray(localIntegrations)
+          ? localIntegrations
+          : [localIntegrations]
+        : (globalIntegrations ?? []))
+    ];
+    if (
+      !integrations.some(
+        (integration) =>
+          typeof integration === "object" &&
+          integration !== null &&
+          agentsAISDKTelemetryBrand in integration
+      )
+    ) {
+      integrations.push(
+        createAISDKTelemetry({
+          storeMessages: this.storeMessages,
+          storeTools: this.storeTools
+        })
+      );
+    }
+
+    const options: Record<string, unknown> = {
+      ...settings,
+      functionId:
+        typeof settings.functionId === "string"
+          ? settings.functionId
+          : this.constructor.name,
+      includeRuntimeContext: {
+        ...Object.fromEntries(
+          Object.keys(runtimeContext).map((key) => [key, true])
+        ),
+        ...includedContext
+      },
+      integrations
+    };
+    delete options.metadata;
+    return { options, runtimeContext };
+  }
+
+  /**
    * The single convergence point for all chat turn entry paths.
    * Merges tools, assembles context, fires lifecycle hooks, wraps tools
    * for interception, and calls streamText.
    */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
+    const turn = admittedTurnContext.getStore();
+    const invoke = await withAgentSpan(
+      this,
+      "prepare_agent",
+      "turn",
+      {
+        "cloudflare.agents.component": "think",
+        ...(turn?.agent === this
+          ? {
+              "cloudflare.agents.turn.request_id": turn.requestId,
+              "cloudflare.agents.turn.trigger": turn.trigger,
+              "cloudflare.agents.turn.admission": turn.admission,
+              "cloudflare.agents.turn.channel": turn.channel,
+              "cloudflare.agents.turn.continuation": turn.continuation,
+              "cloudflare.agents.turn.generation": turn.generation
+            }
+          : {})
+      },
+      () => this._prepareInferenceInvocation(input)
+    );
+    return invoke();
+  }
+
+  private async _prepareInferenceInvocation(
+    input: TurnInput
+  ): Promise<() => StreamableResult> {
+    // Keep one exposure policy for this inference attempt even if subclass
+    // code changes the instance property while asynchronous setup is running.
+    const includeMcpTools = this.includeMcpTools;
     // Reset the per-turn watchdog override; `beforeTurn` may set it below. A
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
@@ -4862,6 +5616,20 @@ export class Think<
     const workspaceTools = createWorkspaceTools(this.workspace, {
       bash: this.workspaceBash
     });
+    const fetchToolSet: ToolSet = this.fetchTools
+      ? createFetchTools({
+          ...this.fetchTools,
+          workspace: this.workspace,
+          onEvent: (event: FetchToolEvent) => {
+            (
+              this._emit as unknown as (
+                type: string,
+                payload: Record<string, unknown>
+              ) => void
+            ).call(this, "tool:fetch", { ...event });
+          }
+        })
+      : {};
     const baseTools = this.getTools();
     const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
@@ -4876,12 +5644,13 @@ export class Think<
     );
     let tools: ToolSet = {
       ...workspaceTools,
+      ...fetchToolSet,
       ...baseTools,
       ...actionTools,
       ...extensionTools,
       ...contextTools,
       ...skillTools,
-      ...(this.mcp?.getAITools?.() ?? {}),
+      ...(includeMcpTools ? (this.mcp?.getAITools?.() ?? {}) : {}),
       ...clientToolSet
     };
 
@@ -4919,7 +5688,7 @@ export class Think<
       );
     }
 
-    const model = this.getModel();
+    const model = this.resolveModel();
     const ctx: TurnContext = {
       system,
       messages,
@@ -4941,8 +5710,10 @@ export class Think<
       : undefined;
     const wantsStructuredOutput = structuredOutputSchema !== undefined;
 
-    const finalModel = config.model ?? model;
+    const finalModel =
+      config.model != null ? this.resolveModel(config.model) : model;
     const finalSystem =
+      config.instructions ??
       config.system ??
       this._systemPromptForTurn(
         baseSystem,
@@ -5049,8 +5820,12 @@ export class Think<
           : [])
     ];
 
-    const result = streamText({
+    const turnTelemetry = config.telemetry ?? config.experimental_telemetry;
+    const streamTextOptions = {
       model: finalModel,
+      // `system` is accepted by both AI SDK v6 and v7 (v7 also accepts the
+      // renamed `instructions`, but v6 does not). Use `system` for cross-major
+      // compatibility.
       system: turnSystem,
       messages: finalMessages,
       tools: finalTools,
@@ -5077,7 +5852,9 @@ export class Think<
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
-      experimental_telemetry: config.experimental_telemetry,
+      experimental_telemetry: usesAISDKV7Telemetry
+        ? undefined
+        : this._turnTelemetry(turnTelemetry),
       // Forward the per-turn stream transform(s) from TurnConfig so callers
       // can inspect/rewrite the stream (e.g. emit `source` parts derived from
       // tool results) without owning the stream pipeline themselves.
@@ -5119,21 +5896,29 @@ export class Think<
         // force the model to call `final_answer` so the turn always terminates
         // with a schema-shaped result instead of running out of steps. Respect a
         // `toolChoice` the subclass already set for this step.
-        if (
+        const stepResult =
           wantsStructuredOutput &&
           event.stepNumber >= finalMaxSteps - 1 &&
           (withMessages as { toolChoice?: unknown }).toolChoice === undefined
-        ) {
+            ? {
+                ...withMessages,
+                toolChoice: {
+                  type: "tool" as const,
+                  toolName: finalAnswerToolName
+                },
+                activeTools: [finalAnswerToolName]
+              }
+            : withMessages;
+        // `beforeStep` may return a string `model` (StepConfig widens it to
+        // ThinkModel); the AI SDK needs a concrete LanguageModel, so resolve it.
+        const stepModel = (stepResult as { model?: ThinkModel }).model;
+        if (typeof stepModel === "string") {
           return {
-            ...withMessages,
-            toolChoice: {
-              type: "tool" as const,
-              toolName: finalAnswerToolName
-            },
-            activeTools: [finalAnswerToolName]
-          };
+            ...stepResult,
+            model: this.resolveModel(stepModel)
+          } as PrepareStepResult<ToolSet>;
         }
-        return withMessages;
+        return stepResult as PrepareStepResult<ToolSet>;
       }) satisfies PrepareStepFunction<ToolSet>,
       onChunk: async (event) => {
         // Pass the AI SDK's chunk event through unchanged — gives users
@@ -5142,78 +5927,153 @@ export class Think<
         await this.onChunk(event);
         await this._pipelineExtensionChunk(event);
       },
+      // `onStepFinish` is the step callback name in both AI SDK v6 and v7 (v7
+      // also accepts the renamed `onStepEnd`, but v6 does not). Use the shared
+      // name; it still dispatches to Think's `onStepEnd` hook.
       onStepFinish: async (event) => {
         // Pass the full StepResult through — gives users access to
         // reasoning, sources, files, providerMetadata (cache tokens),
         // request/response, warnings, and the full LanguageModelUsage
         // that the AI SDK provides.
-        await this.onStepFinish(event);
+        await this.onStepEnd(event);
         await this._pipelineExtensionStepFinish(event);
       },
       // `beforeToolCall` is dispatched from the wrapped `execute` (see
       // `_wrapToolsWithDecision` above) so the returned `ToolCallDecision`
       // can actually intercept the call. `afterToolCall` is wired through
       // the AI SDK's `experimental_onToolCallFinish` callback so we get
-      // accurate `durationMs` and the discriminated `success`/`error`
+      // accurate execution time and the discriminated `success`/`error`
       // outcome — including failures that propagate out of `execute`.
+      //
+      // We register `experimental_onToolCallFinish` (rather than the v7-only
+      // `onToolExecutionEnd`) because it is the native option in AI SDK v6 and
+      // a supported alias in v7 — `ai` resolves it to `onToolExecutionEnd`
+      // internally and fires it exactly once. `normalizeToolFinishEvent`
+      // reconciles the differing event shapes between the two majors.
       experimental_onToolCallFinish: (async (event) => {
         // The synthetic final-answer tool is internal plumbing for structured
         // workflow turns — do not surface it to user `afterToolCall` hooks or
         // extensions.
-        if (event.toolCall.toolName === finalAnswerToolName) return;
+        const e = normalizeToolFinishEvent(event);
+        if (e.toolCall.toolName === finalAnswerToolName) return;
+        const { success, output, error } = e;
         const base = {
-          ...event.toolCall,
-          stepNumber: event.stepNumber,
-          messages: event.messages,
-          durationMs: event.durationMs
+          ...e.toolCall,
+          stepNumber: e.stepNumber,
+          messages: e.messages,
+          toolExecutionMs: e.toolExecutionMs,
+          durationMs: e.toolExecutionMs
         };
-        const ctx = (
-          event.success
-            ? { ...base, success: true as const, output: event.output }
-            : { ...base, success: false as const, error: event.error }
-        ) as ToolCallResultContext;
+        const ctx = (success
+          ? {
+              ...base,
+              toolOutput: { type: "tool-result" as const, output },
+              success: true as const,
+              output
+            }
+          : {
+              ...base,
+              toolOutput: { type: "tool-error" as const, error },
+              success: false as const,
+              error
+            }) as unknown as ToolCallResultContext;
         await this.afterToolCall(ctx);
-        await this._pipelineExtensionToolCallFinish(event);
-      }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
-    });
+        await this._pipelineExtensionToolCallFinish({
+          toolCall: e.toolCall,
+          stepNumber: e.stepNumber,
+          durationMs: e.toolExecutionMs,
+          success,
+          output,
+          error
+        });
+      }) as ToolCallFinishCallback
+    } satisfies Parameters<typeof streamText>[0];
 
-    const outputPromise = wantsStructuredOutput
-      ? // Structured workflow result = the `final_answer` tool call's INPUT
-        // (its arguments), captured after the stream finishes. Take the last
-        // call in case the model emitted more than one. `result.toolCalls` is a
-        // `PromiseLike`, so wrap it to get a real `Promise` (for `.catch` below).
-        Promise.resolve(result.toolCalls).then((calls) => {
-          const finalCalls = calls.filter(
-            (call) => call.toolName === finalAnswerToolName
-          );
-          const last = finalCalls[finalCalls.length - 1];
-          if (!last) {
-            throw new Error(
-              `Model ended the turn without calling the ${finalAnswerToolName} tool`
-            );
-          }
-          return last.input;
-        })
-      : finalOutput && result.output
-        ? Promise.resolve(result.output)
-        : undefined;
-    if (outputPromise) {
-      // Attach a rejection observer immediately. `_streamResult()` will still
-      // await this promise when captureOutput is enabled, but aborted streams can
-      // reject before the stream consumer reaches that point.
-      void outputPromise.catch(() => {});
+    if (usesAISDKV7Telemetry) {
+      const { options, runtimeContext } = this._turnTelemetryV7(turnTelemetry);
+      const crossMajorOptions = streamTextOptions as unknown as Record<
+        string,
+        unknown
+      >;
+      delete crossMajorOptions.experimental_telemetry;
+      crossMajorOptions.telemetry = options;
+      crossMajorOptions.runtimeContext = runtimeContext;
     }
 
-    const streamResult = {
-      toUIMessageStream: (options) =>
-        result.toUIMessageStream({
-          sendReasoning: options?.sendReasoning ?? finalSendReasoning,
-          onError: options?.onError ?? streamErrorToString
-        }),
-      output: outputPromise
-    } satisfies StreamableResult;
+    const inferenceStreamText: typeof streamText = usesAISDKV7Telemetry
+      ? streamText
+      : wrapAISDK(
+          { streamText, wrapLanguageModel },
+          { storeMessages: this.storeMessages, storeTools: this.storeTools }
+        ).streamText;
 
-    return this._transformInferenceResult(streamResult);
+    return () => {
+      const result = inferenceStreamText(streamTextOptions);
+
+      const outputPromise = wantsStructuredOutput
+        ? // Structured workflow result = the `final_answer` tool call's INPUT
+          // (its arguments), captured after the stream finishes. Take the last
+          // call in case the model emitted more than one. `result.toolCalls` is a
+          // `PromiseLike`, so wrap it to get a real `Promise` (for `.catch` below).
+          Promise.resolve(result.toolCalls).then((calls) => {
+            const finalCalls = calls.filter(
+              (call) => call.toolName === finalAnswerToolName
+            );
+            const last = finalCalls[finalCalls.length - 1];
+            if (!last) {
+              throw new Error(
+                `Model ended the turn without calling the ${finalAnswerToolName} tool`
+              );
+            }
+            return last.input;
+          })
+        : finalOutput && result.output
+          ? Promise.resolve(result.output)
+          : undefined;
+      if (outputPromise) {
+        // Attach a rejection observer immediately. `_streamResult()` will still
+        // await this promise when captureOutput is enabled, but aborted streams can
+        // reject before the stream consumer reaches that point.
+        void outputPromise.catch(() => {});
+      }
+
+      const streamResult = {
+        toUIMessageStream: (options) => {
+          const sendReasoning = options?.sendReasoning ?? finalSendReasoning;
+          const onError = options?.onError ?? streamErrorToString;
+          // Use the result's own `toUIMessageStream()` method rather than the
+          // standalone `toUIMessageStream({ stream })` helper: the method exists
+          // in both AI SDK v6 and v7 (deprecated in v7 but functional), whereas
+          // the standalone helper and the `result.stream` property it needs are
+          // v7-only.
+          const uiStream = (
+            result as {
+              toUIMessageStream: (o: {
+                sendReasoning?: boolean;
+                onError?: (error: unknown) => string;
+              }) => ReadableStream;
+            }
+          ).toUIMessageStream({ sendReasoning, onError });
+          return readableStreamToAsyncIterable(uiStream);
+        },
+        output: outputPromise
+      } satisfies StreamableResult;
+
+      const finalizer: InferenceStreamFinalizer = {
+        started: false,
+        run: () =>
+          // consumeStream never rejects (onError swallows) and is a no-op when
+          // the stream already ran to completion.
+          Promise.resolve(result.consumeStream({ onError: () => {} }))
+      };
+      inferenceStreamFinalizers.set(streamResult, finalizer);
+
+      const finalized = this._transformInferenceResult(streamResult);
+      if (finalized !== streamResult) {
+        inferenceStreamFinalizers.set(finalized, finalizer);
+      }
+      return finalized;
+    };
   }
 
   /** @internal Test seam — override in test agents to wrap the stream (e.g. error injection). */
@@ -5926,17 +6786,26 @@ export class Think<
    *
    * **Streaming tools (AsyncIterable):** the AI SDK supports tools whose
    * `execute` returns `AsyncIterable<output>` to emit preliminary
-   * results before a final value. This works whether the iterator is
-   * returned directly (sync function, `async function*`) or wrapped in
-   * a Promise (`async function execute(...) { return makeIter(); }`).
-   * Because the wrapper must `await beforeToolCall` first, preliminary
-   * chunks are collapsed — only the *final* yielded value reaches the
-   * model. If you need true preliminary streaming, override
-   * `getTools()` to provide such tools and avoid using `beforeToolCall`
-   * for them (or accept the collapse).
+   * results before a final value. The canonical form is an async
+   * generator (`async function* execute(...)`), where calling `execute`
+   * synchronously returns a direct `AsyncIterable`. For that form Think
+   * preserves preliminary streaming: the wrapper is itself an async
+   * generator that `await`s `beforeToolCall` and then yields every
+   * chunk through unchanged. Non-streaming tools keep a scalar wrapper
+   * so they never emit a synthetic `preliminary` tool-result chunk.
+   *
+   * The non-canonical `async function execute(...) { return makeIter(); }`
+   * form returns a `Promise<AsyncIterable>`, which does not stream even
+   * in the raw AI SDK (it would surface the iterator object as the final
+   * output). Think collapses it to the last yielded value instead. If
+   * you need preliminary streaming, use an `async function*` `execute`.
    */
   private _wrapToolsWithDecision(tools: ToolSet): ToolSet {
     const wrapped: ToolSet = {};
+    // Capture `this` lexically so the streaming wrapper (which must be an
+    // async generator function expression, not an arrow) can reach the
+    // shared decision helper without a per-tool `.bind`.
+    const self = this;
     for (const [toolName, originalTool] of Object.entries(tools)) {
       const t = originalTool as Record<string, unknown>;
       const originalExecute = t.execute as
@@ -5953,96 +6822,90 @@ export class Think<
         metadata?.cfThinkAction === true &&
         metadata.cfThinkActionApprovalConfigured === true;
 
-      const wrappedExecute = async (
-        input: unknown,
-        options: {
-          toolCallId: string;
-          messages: ModelMessage[];
-          abortSignal?: AbortSignal;
-          experimental_context?: unknown;
-        }
-      ): Promise<unknown> => {
-        // Build the discriminated `TypedToolCall`-shaped context.
-        const toolCallBase = {
-          type: "tool-call" as const,
-          toolCallId: options.toolCallId,
-          toolName,
-          input,
-          ...(isDynamic ? { dynamic: true as const } : {})
-        };
+      // Canonical AI SDK streaming tools use an async generator `execute`
+      // (`async function* execute(...)`). Detect that form so we can keep
+      // preliminary streaming flowing through `beforeToolCall`. Everything
+      // else routes through the scalar wrapper so non-streaming tools never
+      // emit a synthetic `preliminary` tool-result.
+      const isStreamingExecute =
+        (originalExecute as { constructor?: { name?: string } }).constructor
+          ?.name === "AsyncGeneratorFunction";
 
-        const ctx = {
-          ...toolCallBase,
-          stepNumber: undefined,
-          messages: options.messages,
-          abortSignal: options.abortSignal
-        } as ToolCallContext;
-
-        // Subclass decision first.
-        const decision = await this.beforeToolCall(ctx);
-
-        // Extension observation dispatch — runs after the subclass so
-        // extensions see whatever effect the subclass had on the
-        // decision shape (input substitution shows up in the snapshot).
-        const dispatchInput =
-          decision && decision.action === "allow" && decision.input
-            ? decision.input
-            : input;
-        await this._pipelineExtensionToolCallStart({
-          toolCall: {
-            ...toolCallBase,
-            input: dispatchInput
-          } as TypedToolCall<ToolSet>,
-          stepNumber: undefined
-        });
-
-        // Resolve the decision.
-        if (!decision || decision.action === "allow") {
-          const finalInput = decision?.input ?? input;
-          const approvedInput = isApprovalConfiguredAction
-            ? this._activeTurnApprovedActionInputs.get(options.toolCallId)
-            : undefined;
-          if (
-            approvedInput !== undefined &&
-            !stableJsonEqual(finalInput, approvedInput)
-          ) {
-            return actionApprovalInputErrorEnvelope();
-          }
-          // Await before inspecting so we detect AsyncIterable returns
-          // whether the original `execute` returned them directly (sync
-          // function or `async function*`) or wrapped in a Promise (a
-          // plain async function that returns an iterator). Without the
-          // await, `Symbol.asyncIterator in result` would be false for
-          // any `Promise<AsyncIterable>`, the collapse below would be
-          // skipped, and the AI SDK would treat the iterator instance
-          // itself as the final output value (broken).
-          const result = await originalExecute(finalInput, options);
-          // If the resolved value is an AsyncIterable (streaming tool
-          // emitting preliminary outputs), collapse to the last yielded
-          // value. We trade preliminary streaming for `beforeToolCall`
-          // interception support.
-          if (
-            result != null &&
-            typeof result === "object" &&
-            Symbol.asyncIterator in (result as object)
-          ) {
-            let last: unknown;
-            for await (const part of result as AsyncIterable<unknown>) {
-              last = part;
+      const wrappedExecute = isStreamingExecute
+        ? (input: unknown, options: ToolDecisionOptions) =>
+            // Returning the generator synchronously (via the sync arrow)
+            // keeps it a *direct* AsyncIterable so the AI SDK streams the
+            // preliminary parts instead of awaiting a Promise<AsyncIterable>.
+            (async function* () {
+              const resolved = await self._resolveToolCallDecision(
+                toolName,
+                input,
+                options,
+                isDynamic,
+                isApprovalConfiguredAction
+              );
+              if (!resolved.execute) {
+                // Block/substitute is a scalar outcome, but this wrapper had
+                // to commit to an AsyncIterable shape synchronously (before the
+                // async decision was known) so the execute path can stream.
+                // The AI SDK's `executeTool` turns every yielded value into a
+                // `preliminary` tool-result plus a `final`, so this single
+                // yield surfaces one synthetic `preliminary` chunk to observers
+                // (e.g. onChunk) that the scalar wrapper never emits. The
+                // model-visible final output is identical and correct, and this
+                // matches how any streaming tool that emits a single value
+                // already behaves — so we accept it rather than regress
+                // streaming preservation for the (rare) block/substitute case.
+                yield resolved.output;
+                return;
+              }
+              const result = await originalExecute(
+                resolved.finalInput,
+                options
+              );
+              if (
+                result != null &&
+                typeof result === "object" &&
+                Symbol.asyncIterator in (result as object)
+              ) {
+                // Stream the original tool's preliminary outputs through
+                // unchanged — the AI SDK emits each as a `preliminary`
+                // tool-result and the last as the final value.
+                yield* result as AsyncIterable<unknown>;
+              } else {
+                yield result;
+              }
+            })()
+        : async (
+            input: unknown,
+            options: ToolDecisionOptions
+          ): Promise<unknown> => {
+            const resolved = await self._resolveToolCallDecision(
+              toolName,
+              input,
+              options,
+              isDynamic,
+              isApprovalConfiguredAction
+            );
+            if (!resolved.execute) return resolved.output;
+            // Await before inspecting so we detect a direct AsyncIterable
+            // return even from a non-async-generator `execute` (e.g. a
+            // plain function that returns a generator). Such non-canonical
+            // streaming shapes are collapsed to their last yielded value.
+            const result = await originalExecute(resolved.finalInput, options);
+            if (
+              result != null &&
+              typeof result === "object" &&
+              Symbol.asyncIterator in (result as object)
+            ) {
+              let last: unknown;
+              for await (const part of result as AsyncIterable<unknown>) {
+                last = part;
+              }
+              return last;
             }
-            return last;
-          }
-          return result;
-        }
-        if (decision.action === "block") {
-          return (
-            decision.reason ??
-            `Tool "${toolName}" was blocked by beforeToolCall.`
-          );
-        }
-        // substitute
-        return decision.output;
-      };
+            return result;
+          };
 
       wrapped[toolName] = {
         ...(originalTool as object),
@@ -6050,6 +6913,82 @@ export class Think<
       } as ToolSet[string];
     }
     return wrapped;
+  }
+
+  /**
+   * Shared `beforeToolCall` resolution for both the scalar and streaming
+   * tool wrappers (see {@link _wrapToolsWithDecision}). Builds the
+   * `ToolCallContext`, consults the subclass `beforeToolCall` hook,
+   * dispatches the extension observation snapshot, and resolves the
+   * returned `ToolCallDecision` into either "run `execute` with this
+   * input" or "short-circuit with this output".
+   */
+  private async _resolveToolCallDecision(
+    toolName: string,
+    input: unknown,
+    options: ToolDecisionOptions,
+    isDynamic: boolean,
+    isApprovalConfiguredAction: boolean
+  ): Promise<
+    { execute: true; finalInput: unknown } | { execute: false; output: unknown }
+  > {
+    // Build the discriminated `TypedToolCall`-shaped context.
+    const toolCallBase = {
+      type: "tool-call" as const,
+      toolCallId: options.toolCallId,
+      toolName,
+      input,
+      ...(isDynamic ? { dynamic: true as const } : {})
+    };
+
+    const ctx = {
+      ...toolCallBase,
+      stepNumber: undefined,
+      messages: options.messages,
+      abortSignal: options.abortSignal
+    } as ToolCallContext;
+
+    // Subclass decision first.
+    const decision = await this.beforeToolCall(ctx);
+
+    // Extension observation dispatch — runs after the subclass so
+    // extensions see whatever effect the subclass had on the decision
+    // shape (input substitution shows up in the snapshot).
+    const dispatchInput =
+      decision && decision.action === "allow" && decision.input
+        ? decision.input
+        : input;
+    await this._pipelineExtensionToolCallStart({
+      toolCall: {
+        ...toolCallBase,
+        input: dispatchInput
+      } as TypedToolCall<ToolSet>,
+      stepNumber: undefined
+    });
+
+    // Resolve the decision.
+    if (!decision || decision.action === "allow") {
+      const finalInput = decision?.input ?? input;
+      const approvedInput = isApprovalConfiguredAction
+        ? this._activeTurnApprovedActionInputs.get(options.toolCallId)
+        : undefined;
+      if (
+        approvedInput !== undefined &&
+        !stableJsonEqual(finalInput, approvedInput)
+      ) {
+        return { execute: false, output: actionApprovalInputErrorEnvelope() };
+      }
+      return { execute: true, finalInput };
+    }
+    if (decision.action === "block") {
+      return {
+        execute: false,
+        output:
+          decision.reason ?? `Tool "${toolName}" was blocked by beforeToolCall.`
+      };
+    }
+    // substitute
+    return { execute: false, output: decision.output };
   }
 
   private async _pipelineExtensionToolCallStart(event: {
@@ -6206,7 +7145,32 @@ export class Think<
       // The non-queue (submit/execute-submission) path runs `execute()` here
       // directly — it does NOT pass through `_runInsideAdmittedTurnBody`, so the
       // channel context must be set here too.
-      return this._withChannelContext(spec.channel, () => spec.execute());
+      return withAgentSpan(
+        this,
+        "chat_submission",
+        "submission",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.trigger": spec.trigger,
+          "cloudflare.agents.turn.admission": spec.admission,
+          "cloudflare.agents.turn.channel": spec.channel
+        },
+        () =>
+          withAgentSpan(
+            this,
+            spec.admission === "submit"
+              ? "accept_chat_submission"
+              : "execute_chat_submission",
+            "submission",
+            {
+              "cloudflare.agents.component": "think",
+              "cloudflare.agents.turn.trigger": spec.trigger,
+              "cloudflare.agents.turn.admission": spec.admission,
+              "cloudflare.agents.turn.channel": spec.channel
+            },
+            () => this._withChannelContext(spec.channel, () => spec.execute())
+          )
+      );
     }
 
     if (!spec.allowNested) {
@@ -6236,61 +7200,89 @@ export class Think<
   private async _runInsideAdmittedTurnBody<T>(
     spec: QueueTurnSpec<T>
   ): Promise<T> {
-    return admittedTurnContext.run(
-      { agent: this, requestId: spec.requestId },
-      async () => {
-        const startedAt = Date.now();
-        this._emit("chat:turn:start", {
-          requestId: spec.requestId,
-          trigger: spec.trigger,
-          admission: spec.admission,
-          ...(spec.continuation !== undefined && {
-            continuation: spec.continuation
-          }),
-          ...(spec.generation !== undefined && { generation: spec.generation })
-        });
-
-        this._activeTurnReplyAttachments = [];
-        this._activeTurnReplyAttachmentsRequestId = spec.requestId;
-
-        try {
-          const value = await this._withChannelContext(spec.channel, () =>
-            spec.execute()
-          );
-          this._emit("chat:turn:finish", {
+    return withAgentSpan(
+      this,
+      "chat_turn",
+      "turn",
+      {
+        "cloudflare.agents.component": "think",
+        "cloudflare.agents.turn.request_id": spec.requestId,
+        "cloudflare.agents.turn.trigger": spec.trigger,
+        "cloudflare.agents.turn.admission": spec.admission,
+        "cloudflare.agents.turn.channel": spec.channel,
+        "cloudflare.agents.turn.continuation": spec.continuation,
+        "cloudflare.agents.turn.generation": spec.generation
+      },
+      (update) =>
+        admittedTurnContext.run(
+          {
+            agent: this,
             requestId: spec.requestId,
             trigger: spec.trigger,
             admission: spec.admission,
-            ...(spec.continuation !== undefined && {
-              continuation: spec.continuation
-            }),
-            ...(spec.generation !== undefined && {
-              generation: spec.generation
-            }),
-            status: spec.getStatus?.() ?? "completed",
-            durationMs: Date.now() - startedAt
-          });
-          return value;
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          this._emit("chat:turn:finish", {
-            requestId: spec.requestId,
-            trigger: spec.trigger,
-            admission: spec.admission,
-            ...(spec.continuation !== undefined && {
-              continuation: spec.continuation
-            }),
-            ...(spec.generation !== undefined && {
-              generation: spec.generation
-            }),
-            status: "error",
-            durationMs: Date.now() - startedAt,
-            error: message
-          });
-          throw error;
-        }
-      }
+            channel: spec.channel,
+            continuation: spec.continuation,
+            generation: spec.generation
+          },
+          async () => {
+            const startedAt = Date.now();
+            this._emit("chat:turn:start", {
+              requestId: spec.requestId,
+              trigger: spec.trigger,
+              admission: spec.admission,
+              ...(spec.continuation !== undefined && {
+                continuation: spec.continuation
+              }),
+              ...(spec.generation !== undefined && {
+                generation: spec.generation
+              })
+            });
+
+            this._activeTurnReplyAttachments = [];
+            this._activeTurnReplyAttachmentsRequestId = spec.requestId;
+
+            try {
+              const value = await this._withChannelContext(spec.channel, () =>
+                spec.execute()
+              );
+              const status = spec.getStatus?.() ?? "completed";
+              this._emit("chat:turn:finish", {
+                requestId: spec.requestId,
+                trigger: spec.trigger,
+                admission: spec.admission,
+                ...(spec.continuation !== undefined && {
+                  continuation: spec.continuation
+                }),
+                ...(spec.generation !== undefined && {
+                  generation: spec.generation
+                }),
+                status,
+                durationMs: Date.now() - startedAt
+              });
+              update({ "cloudflare.agents.turn.status": status });
+              return value;
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              this._emit("chat:turn:finish", {
+                requestId: spec.requestId,
+                trigger: spec.trigger,
+                admission: spec.admission,
+                ...(spec.continuation !== undefined && {
+                  continuation: spec.continuation
+                }),
+                ...(spec.generation !== undefined && {
+                  generation: spec.generation
+                }),
+                status: "error",
+                durationMs: Date.now() - startedAt,
+                error: message
+              });
+              update({ "cloudflare.agents.turn.status": "error" });
+              throw error;
+            }
+          }
+        )
     );
   }
 
@@ -6359,7 +7351,11 @@ export class Think<
               ? await userMessage(this.messages)
               : this._normalizeChatMessages(userMessage);
 
-          for (const msg of this._stampChannel(resolved, options?.channel)) {
+          for (const msg of this._stampChannel(
+            resolved,
+            options?.channel,
+            options?.metadata
+          )) {
             await this._appendMessageToHistory(msg);
           }
           this._broadcastMessages();
@@ -7439,7 +8435,15 @@ export class Think<
     let forward: ((chunk: AgentToolStoredChunk) => void) | undefined;
     const detach = () => {
       if (forward) {
-        self._agentToolForwarders.get(runId)?.delete(forward);
+        const set = self._agentToolForwarders.get(runId);
+        set?.delete(forward);
+        // Drop the now-empty set so the broadcast idle-guard
+        // (`_agentToolForwarders.size`) goes cold again. Otherwise a run that
+        // was already terminal at attach — its `_finalizeAgentToolChildRunTailers`
+        // already ran and won't run again — leaves an empty set keyed by runId,
+        // and every subsequent broadcast on this DO keeps paying the
+        // `interceptAgentToolBroadcast` cost forever.
+        if (set && set.size === 0) self._agentToolForwarders.delete(runId);
         forward = undefined;
       }
     };
@@ -7464,26 +8468,16 @@ export class Think<
         }
         signal?.addEventListener("abort", close, { once: true });
 
-        const replayed = await self.getAgentToolChunks(runId, options);
-        for (const chunk of replayed) {
-          if (closed) return;
-          controller.enqueue(
-            agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
-          );
-        }
-        const lastReplay = replayed[replayed.length - 1]?.sequence;
-        if (lastReplay !== undefined) {
-          self._agentToolLiveSequences.set(runId, lastReplay + 1);
-        }
-        const row = self._readAgentToolChildRun(runId);
-        if (!row || row.completed_at !== null) {
-          close();
-          return;
-        }
-        forward = (chunk: AgentToolStoredChunk) => {
-          if (closed || chunk.sequence <= (options?.afterSequence ?? -1)) {
-            return;
-          }
+        // Stored chunk_index and the live forwarder sequence share one
+        // monotonic numbering (see `getAgentToolChunks` + the broadcast snoop),
+        // so a single high-water mark dedupes the stored-replay → live-
+        // forwarding handoff: a chunk that lands in both the drained backlog AND
+        // the live buffer (stored + broadcast during the drain) is emitted
+        // exactly once, in order.
+        let lastEmitted = options?.afterSequence ?? -1;
+        const emit = (chunk: AgentToolStoredChunk) => {
+          if (closed || chunk.sequence <= lastEmitted) return;
+          lastEmitted = chunk.sequence;
           try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
@@ -7497,12 +8491,80 @@ export class Think<
             detach();
           }
         };
+
+        // While draining the stored backlog, park live chunks rather than
+        // emitting them directly, so ordering/dedupe against the backlog is
+        // resolved by `emit` while the forwarder (registered FIRST, below)
+        // already catches everything the child produces.
+        let draining = true;
+        const pending: AgentToolStoredChunk[] = [];
+        forward = (chunk: AgentToolStoredChunk) => {
+          if (closed) return;
+          if (draining) {
+            pending.push(chunk);
+            return;
+          }
+          emit(chunk);
+        };
+
+        // Register the live forwarder BEFORE draining the stored backlog.
+        // Previously it was attached only AFTER `getAgentToolChunks` resolved;
+        // any chunk the child stored AND broadcast during that `await` advanced
+        // the live sequence with no forwarder attached, so it was neither in the
+        // drained snapshot nor live-forwarded — silently dropped from the
+        // parent's forward stream. A network-paced proxied child stream (a sub-
+        // agent returning a remote `toUIMessageStreamResponse()`) hits this
+        // window constantly, leaving tool parts stuck at `input-available`
+        // (#1589).
         const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
         forwarders.add(forward);
         self._agentToolForwarders.set(runId, forwarders);
         const closers = self._agentToolClosers.get(runId) ?? new Set();
         closers.add(close);
         self._agentToolClosers.set(runId, closers);
+
+        try {
+          const replayed = await self.getAgentToolChunks(runId, options);
+          for (const chunk of replayed) {
+            if (closed) return;
+            emit(chunk);
+          }
+
+          // Flush chunks that arrived live during the drain, then switch the
+          // forwarder to direct emit. No `await` between here and the drain loop
+          // means no live chunk can slip past this handoff.
+          draining = false;
+          for (const chunk of pending) emit(chunk);
+          pending.length = 0;
+
+          const row = self._readAgentToolChildRun(runId);
+          if (!row || row.completed_at !== null) {
+            close();
+            return;
+          }
+
+          // Run is still live: realign the live sequence to continue right after
+          // the highest emitted chunk (which now includes any captured during the
+          // drain). Realigning to `lastEmitted + 1` rather than the backlog's last
+          // sequence keeps a post-restart re-attach — where the in-memory counter
+          // is cold — from colliding with already-emitted chunks. Gating on the
+          // terminal check above also avoids repopulating `_agentToolLiveSequences`
+          // for an already-terminal run, which would re-heat the broadcast
+          // idle-guard for the DO's lifetime.
+          if (lastEmitted > (options?.afterSequence ?? -1)) {
+            self._agentToolLiveSequences.set(runId, lastEmitted + 1);
+          }
+        } catch (error) {
+          // A drain/read failure must surface to the consumer; detach first so
+          // the forwarder we registered up front doesn't linger on this run.
+          closed = true;
+          detach();
+          try {
+            controller.error(error);
+          } catch {
+            // Stream already torn down.
+          }
+        }
       },
       cancel() {
         // A consumer detaching from the tail (e.g. a parent's bounded re-attach
@@ -9106,7 +10168,6 @@ export class Think<
         if (existing) {
           if (existing.status === "pending") {
             await this._scheduleSubmissionDrain();
-            this._startSubmissionDrain();
           }
           return {
             ...this._inspectionFromSubmissionRow(existing),
@@ -9145,7 +10206,6 @@ export class Think<
         });
         await this._emitSubmissionStatus(row);
         await this._scheduleSubmissionDrain();
-        this._startSubmissionDrain();
 
         return {
           ...this._inspectionFromSubmissionRow(row),
@@ -9158,12 +10218,6 @@ export class Think<
   private async _scheduleSubmissionDrain(): Promise<void> {
     await this.schedule(0, "_drainThinkSubmissions", undefined, {
       idempotent: true
-    });
-  }
-
-  private _startSubmissionDrain(): void {
-    void this.keepAliveWhile(() => this._drainSubmissions()).catch((error) => {
-      console.error("[Think] Failed to drain submissions", error);
     });
   }
 
@@ -9245,8 +10299,7 @@ export class Think<
           trigger: "submission",
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
-          // The drain runs fire-and-forget (`_startSubmissionDrain` /
-          // `_drainThinkSubmissions` alarm), so it can inherit the ALS of a turn
+          // The alarm-owned drain can inherit the ALS of a turn
           // that called `submitMessages` mid-turn (e.g. a detached-finish notify
           // from a `beforeTurn` hook). `allowNested` skips the
           // not-inside-active-turn guard for that case. Safe on every submission
@@ -10151,7 +11204,20 @@ export class Think<
       if (typeof message === "string") {
         const event = parseProtocolMessage(message);
         if (event) {
-          await this._handleProtocolEvent(connection, event);
+          if (event.type === "chat-request") {
+            await withAgentSpan(
+              this,
+              "chat_interaction",
+              "interaction",
+              {
+                "cloudflare.agents.component": "think",
+                "cloudflare.agents.turn.request_id": event.id
+              },
+              () => this._handleProtocolEvent(connection, event)
+            );
+          } else {
+            await this._handleProtocolEvent(connection, event);
+          }
           return;
         }
       }
@@ -10182,7 +11248,7 @@ export class Think<
   ): Promise<void> {
     switch (event.type) {
       case "stream-resume-request":
-        await this._handleStreamResumeRequest(connection);
+        await this._handleStreamResumeRequest(connection, event.probeId);
         break;
 
       case "stream-resume-ack":
@@ -10255,9 +11321,10 @@ export class Think<
   }
 
   private async _handleStreamResumeRequest(
-    connection: Connection
+    connection: Connection,
+    probeId?: string
   ): Promise<void> {
-    await this._resumeHandshake().handleResumeRequest(connection);
+    await this._resumeHandshake().handleResumeRequest(connection, probeId);
   }
 
   private async _handleStreamResumeAck(
@@ -10330,7 +11397,17 @@ export class Think<
     // gap would surface the previous failed turn's error even though the user
     // has already moved on. Completion clears it too, but only once the turn
     // resolves — which leaves the gap open.
-    await this._clearChatTerminal();
+    await withAgentSpan(
+      this,
+      "clear_previous_chat_state",
+      "interaction",
+      {
+        "cloudflare.agents.component": "think",
+        "cloudflare.agents.turn.request_id": requestId,
+        "cloudflare.agents.turn.trigger": "ws-chat"
+      },
+      () => this._clearChatTerminal()
+    );
 
     // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client that
     // reconnects/re-mounts before the stream starts is parked and told to keep
@@ -10353,18 +11430,30 @@ export class Think<
         rawClientTools && rawClientTools.length > 0
           ? rawClientTools
           : undefined;
-      if (requestClientTools) {
-        this._lastClientTools = requestClientTools;
-        this._persistClientTools();
-      } else if (rawClientTools !== undefined) {
-        this._lastClientTools = undefined;
-        this._persistClientTools();
-      }
-
       const requestBody =
         Object.keys(customBody).length > 0 ? customBody : undefined;
-      this._lastBody = requestBody;
-      this._persistBody();
+      withAgentSpan(
+        this,
+        "persist_chat_request_context",
+        "interaction",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.request_id": requestId,
+          "cloudflare.agents.turn.trigger": "ws-chat"
+        },
+        () => {
+          if (requestClientTools) {
+            this._lastClientTools = requestClientTools;
+            this._persistClientTools();
+          } else if (rawClientTools !== undefined) {
+            this._lastClientTools = undefined;
+            this._persistClientTools();
+          }
+
+          this._lastBody = requestBody;
+          this._persistBody();
+        }
+      );
 
       // ── Reconcile, persist, and broadcast user messages ──────────
       //
@@ -10378,7 +11467,17 @@ export class Think<
       const clientToolsForTurn = this._lastClientTools;
       const bodyForTurn = this._lastBody;
 
-      const serverMessages = await this._readMessagesFromStorage();
+      const serverMessages = await withAgentSpan(
+        this,
+        "load_chat_history",
+        "interaction",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.request_id": requestId,
+          "cloudflare.agents.turn.trigger": "ws-chat"
+        },
+        () => this._readMessagesFromStorage()
+      );
       const reconciled = reconcileMessages(
         incomingMessages,
         serverMessages,
@@ -10390,26 +11489,33 @@ export class Think<
         branchParentId = reconciled[reconciled.length - 1].id;
       }
 
-      if (this._turnQueue.generation !== epoch) {
-        this._completeSkippedRequest(connection, requestId);
-        return;
-      }
+      const persisted = await withAgentSpan(
+        this,
+        "persist_incoming_messages",
+        "interaction",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.request_id": requestId,
+          "cloudflare.agents.turn.trigger": "ws-chat"
+        },
+        async () => {
+          if (this._turnQueue.generation !== epoch) return false;
 
-      for (const msg of reconciled) {
-        if (this._turnQueue.generation !== epoch) {
-          this._completeSkippedRequest(connection, requestId);
-          return;
+          for (const msg of reconciled) {
+            if (this._turnQueue.generation !== epoch) return false;
+            await this._persistIncomingMessage(msg, serverMessages);
+          }
+
+          if (this._turnQueue.generation !== epoch) return false;
+          await this._syncMessages();
+          return true;
         }
-
-        await this._persistIncomingMessage(msg, serverMessages);
-      }
-
-      if (this._turnQueue.generation !== epoch) {
+      );
+      if (!persisted) {
         this._completeSkippedRequest(connection, requestId);
         return;
       }
 
-      await this._syncMessages();
       this._broadcastMessages([connection.id]);
       messagesPersisted = true;
 
@@ -10505,19 +11611,47 @@ export class Think<
                     }
                   : undefined;
 
-                await this._streamResult(requestId, result, abortSignal, {
-                  parentId: branchParentId,
-                  overflowRecovery
-                });
+                await withAgentSpan(
+                  this,
+                  "persist_chat_result",
+                  "turn",
+                  {
+                    "cloudflare.agents.component": "think",
+                    "cloudflare.agents.turn.request_id": requestId,
+                    "cloudflare.agents.turn.trigger": "ws-chat",
+                    "cloudflare.agents.turn.admission": "queue",
+                    "cloudflare.agents.turn.generation": epoch,
+                    "cloudflare.agents.turn.continuation": false
+                  },
+                  () =>
+                    this._streamResult(requestId, result, abortSignal, {
+                      parentId: branchParentId,
+                      overflowRecovery
+                    })
+                );
 
                 if (overflowRequested) {
                   if (
                     attempt < this._overflowMaxRetries &&
                     !abortSignal?.aborted
                   ) {
-                    const shortened = await this._compactForContextOverflow(
-                      "reactive",
-                      { requestId, attempt: attempt + 1 }
+                    const shortened = await withAgentSpan(
+                      this,
+                      "compact_chat_history",
+                      "turn",
+                      {
+                        "cloudflare.agents.component": "think",
+                        "cloudflare.agents.turn.request_id": requestId,
+                        "cloudflare.agents.turn.trigger": "ws-chat",
+                        "cloudflare.agents.turn.admission": "queue",
+                        "cloudflare.agents.turn.generation": epoch,
+                        "cloudflare.agents.turn.continuation": false
+                      },
+                      () =>
+                        this._compactForContextOverflow("reactive", {
+                          requestId,
+                          attempt: attempt + 1
+                        })
                     );
                     // Compaction shortened history → retry. A no-op compaction
                     // can't fix the overflow, so fall through to terminal.
@@ -10968,6 +12102,10 @@ export class Think<
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
+    // True only when the wrapped stream was pulled to natural exhaustion; a
+    // break OR a throw (stall watchdog) leaves it false so the finally drains
+    // the abandoned tee branch.
+    let streamDrainedNaturally = false;
     try {
       this._insideInferenceLoop = true;
       const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
@@ -11064,8 +12202,21 @@ export class Think<
           });
           await callback.onEvent(chunkBody);
         }
+        streamDrainedNaturally = !(
+          aborted ||
+          overflowRetry ||
+          streamError !== undefined
+        );
       } finally {
         this._insideInferenceLoop = false;
+        // Only early exits leave an abandoned tee branch; a naturally
+        // exhausted stream needs no drain (consumeStream is not free — it
+        // tees the base stream and traverses the buffered branch). A thrown
+        // exit (stall watchdog) never reaches the assignment above, so it
+        // drains too.
+        if (!streamDrainedNaturally) {
+          this._drainInferenceStream(result);
+        }
       }
 
       // Recoverable context overflow: discard the partial, close the stream
@@ -11409,6 +12560,10 @@ export class Think<
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
+    // True only when the wrapped stream was pulled to natural exhaustion; a
+    // break OR a throw (stall watchdog) leaves it false so the finally drains
+    // the abandoned tee branch.
+    let streamDrainedNaturally = false;
     try {
       this._insideInferenceLoop = true;
       try {
@@ -11528,8 +12683,21 @@ export class Think<
             ...(continuation && { continuation: true })
           });
         }
+        streamDrainedNaturally = !(
+          streamAborted ||
+          overflowRetry ||
+          streamError !== undefined
+        );
       } finally {
         this._insideInferenceLoop = false;
+        // Only early exits leave an abandoned tee branch; a naturally
+        // exhausted stream needs no drain (consumeStream is not free — it
+        // tees the base stream and traverses the buffered branch). A thrown
+        // exit (stall watchdog) never reaches the assignment above, so it
+        // drains too.
+        if (!streamDrainedNaturally) {
+          this._drainInferenceStream(result);
+        }
       }
 
       // Recoverable context overflow: discard the partial, close this stream
@@ -11791,9 +12959,33 @@ export class Think<
     msg: UIMessage,
     serverMessages: readonly UIMessage[]
   ): Promise<void> {
+    const sanitized = this._stripReservedMessageMetadata(msg);
     const resolved =
-      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
+      sanitized.role === "assistant"
+        ? resolveToolMergeId(sanitized, serverMessages)
+        : sanitized;
     await this._upsertMessageInHistory(resolved);
+  }
+
+  /**
+   * Strip {@link RESERVED_MESSAGE_METADATA_KEYS} from a client-supplied message
+   * at intake. Those keys are server-written turn context (stamped by
+   * `_stampChannel`) that hooks and recovery re-resolve and trust, so a client
+   * must never be able to forge them.
+   */
+  private _stripReservedMessageMetadata(msg: UIMessage): UIMessage {
+    const metadata = msg.metadata as Record<string, unknown> | undefined;
+    if (
+      !metadata ||
+      !RESERVED_MESSAGE_METADATA_KEYS.some((key) => key in metadata)
+    ) {
+      return msg;
+    }
+    const rest = { ...metadata };
+    for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
+      delete rest[key];
+    }
+    return { ...msg, metadata: rest };
   }
 
   private _persistClientTools(): void {
@@ -13424,6 +14616,36 @@ export class Think<
    *    broadcast — the deferred re-run re-fires `onExhausted` + the banner
    *    (the terminal writes themselves are idempotent).
    */
+  /**
+   * Recovery continuation callbacks the alarm-boundary OOM circuit breaker may
+   * back off / purge (#1825). See `Agent._cf_handleAlarmMemoryLimitReset`.
+   */
+  protected override _cf_recoveryAlarmCallbacks(): string[] {
+    return ["_chatRecoveryContinue", "_chatRecoveryRetry"];
+  }
+
+  /**
+   * Seal any still-live recovery incident as an out-of-memory exhaustion when
+   * the alarm circuit breaker trips at its strike budget (#1825). Runs at the
+   * outermost alarm frame (post-unwind), so the terminal banner / `onExhausted`
+   * and the sealed-incident write can land where the mid-turn give-up's writes
+   * OOMed. Reuses the shared give-up spine via `_exhaustRecoveryGiveUp`.
+   */
+  protected override async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+    const active = await listActiveChatRecoveryIncidents(this.ctx.storage);
+    for (const { incident } of active) {
+      const callback: ChatRecoveryScheduleCallback =
+        incident.recoveryKind === "retry"
+          ? "_chatRecoveryRetry"
+          : "_chatRecoveryContinue";
+      await this._exhaustRecoveryGiveUp(
+        callback,
+        { incidentId: incident.incidentId },
+        "out_of_memory"
+      );
+    }
+  }
+
   private _exhaustRecoveryGiveUp(
     callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
@@ -13454,6 +14676,59 @@ export class Think<
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<void> {
     return this._exhaustRecoveryGiveUp(callback, data, "stable_timeout");
+  }
+
+  /**
+   * Apply the tight OOM-retry budget to a recovery error (#1825). Invoked from
+   * `_handleRecoveryCallbackError`, i.e. for an OOM that is *thrown* out of a
+   * recovery turn (typically from recovery bookkeeping or storage/SQL ops that
+   * reject with the memory-limit-reset message after an isolate reset). An OOM
+   * that surfaces as a returned `error` result means `continueLastTurn` already
+   * terminalized the turn (client error frame + `onError`), so it is NOT routed
+   * here — re-driving a terminalized turn would be wasteful and risk a second
+   * terminal signal. `error` may be an Error or a wrapper with a `cause` chain.
+   *
+   * The reliable terminator is the begin-path (`evaluateChatRecoveryIncident`),
+   * which seals once `oomAttempts` exceeds the budget; that runs before the
+   * memory-heavy turn, in the low-memory window where writes succeed. This
+   * method's job is to persist `oomAttempts` (small writes) so the begin path
+   * can act on it, and to schedule a delayed re-run while under budget.
+   *
+   * Returns `true` when the error was an OOM and this method owns the outcome:
+   *  - under budget → a delayed re-run was scheduled (best-effort: a transient
+   *    spike may clear);
+   *  - over budget (or untrackable, or the bookkeeping itself OOMed) →
+   *    terminalized via the give-up path with `reason="out_of_memory"`.
+   * Returns `false` for non-OOM errors so the caller proceeds normally.
+   */
+  private async _handleRecoveryOom(
+    callback: ChatRecoveryScheduleCallback,
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
+    error: unknown
+  ): Promise<boolean> {
+    if (!isDurableObjectMemoryLimitReset(error)) return false;
+    let decision: "rescheduled" | "exhausted" = "exhausted";
+    try {
+      decision = await this._chatRecoveryEngine().recordOomAndDecide({
+        incidentId: data?.incidentId,
+        callback,
+        data,
+        maxOomRetries: this._resolveChatRecoveryConfig().maxOomRetries
+      });
+    } catch (bookkeepingError) {
+      // The bump/reschedule writes can themselves reject in the degraded isolate
+      // that just OOMed. Fail closed (seal) rather than risk a silent wedge; the
+      // finite `maxRecoveryWork` backstop covers anything that slips past.
+      console.error(
+        "[Think] failed to record OOM recovery attempt; terminalizing",
+        bookkeepingError
+      );
+      decision = "exhausted";
+    }
+    if (decision === "exhausted") {
+      await this._exhaustRecoveryGiveUp(callback, data, "out_of_memory");
+    }
+    return true;
   }
 
   /**
@@ -13488,6 +14763,13 @@ export class Think<
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     error: unknown
   ): Promise<void> {
+    // A memory-limit reset is NOT a platform transient (re-running the same
+    // memory-heavy turn re-OOMs deterministically), so it must be classified
+    // BEFORE the transient check and routed through the tight OOM-retry budget
+    // instead of either deferring forever or terminalizing on the first hit
+    // (#1825). Returns true once it has owned the outcome (rescheduled or
+    // sealed); only fall through to the generic handling for non-OOM errors.
+    if (await this._handleRecoveryOom(callback, data, error)) return;
     if (isPlatformTransientError(error)) {
       const message = error instanceof Error ? error.message : String(error);
       try {

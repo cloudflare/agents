@@ -5,12 +5,32 @@ import { execSync } from "node:child_process";
 // So we also run `pnpm install --lockfile-only`, which does this update.
 // This is a workaround until this is handled automatically by `changeset version`.
 // See https://github.com/changesets/changesets/issues/421.
-execSync("pnpm exec changeset version", {
-  stdio: "inherit"
-});
-execSync("pnpm exec oxfmt --write .", {
-  stdio: "inherit"
-});
-execSync("pnpm install --lockfile-only --no-frozen-lockfile", {
-  stdio: "inherit"
-});
+
+// `changeset version` generates changelog entries via the GitHub GraphQL API
+// (@changesets/changelog-github), which intermittently fails with transient
+// network errors like "Premature close". changesets bails cleanly without
+// writing files on that failure, so retrying is safe.
+function run(command: string) {
+  execSync(command, { stdio: "inherit" });
+}
+
+function runWithRetries(command: string, attempts = 3, delayMs = 5000) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      run(command);
+      return;
+    } catch (error) {
+      if (attempt === attempts) {
+        throw error;
+      }
+      console.warn(
+        `"${command}" failed (attempt ${attempt}/${attempts}), retrying in ${delayMs}ms...`
+      );
+      execSync(`sleep ${Math.ceil(delayMs / 1000)}`);
+    }
+  }
+}
+
+runWithRetries("pnpm exec changeset version");
+run("pnpm exec oxfmt --write .");
+run("pnpm install --lockfile-only --no-frozen-lockfile");

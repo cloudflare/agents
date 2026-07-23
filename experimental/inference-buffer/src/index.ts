@@ -38,11 +38,6 @@ import { DurableObject } from "cloudflare:workers";
 // Types
 // ---------------------------------------------------------------------------
 
-interface Env {
-  INFERENCE_BUFFER: DurableObjectNamespace<InferenceBuffer>;
-  AI: Ai;
-}
-
 type BufferStatus =
   | "idle"
   | "streaming"

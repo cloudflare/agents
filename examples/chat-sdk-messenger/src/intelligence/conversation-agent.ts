@@ -1,13 +1,9 @@
 import { Think } from "@cloudflare/think";
-import type { LanguageModel, ToolSet } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
+import type { ToolSet } from "ai";
 
 export class ConversationAgent extends Think {
-  override getModel(): LanguageModel {
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai("@cf/moonshotai/kimi-k2.7-code", {
-      sessionAffinity: this.sessionAffinity
-    });
+  override getModel() {
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   override getSystemPrompt(): string {

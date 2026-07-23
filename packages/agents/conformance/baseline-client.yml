@@ -1,11 +1,6 @@
 # Expected failures for the MCP client conformance suite.
 # Each entry documents a known gap — remove entries as gaps are fixed.
 client:
-  # Elicitation is delegated to the platform (McpAgent.elicitInput / custom
-  # handleElicitationRequest overrides); MCPClientConnection hardcodes the
-  # `elicitation` capability without `form.applyDefaults`, so SEP-1034
-  # client-side defaults are not applied.
-  - elicitation-sep1034-client-defaults
   # SHOULD-level warning only (all checks pass): the client registers via
   # dynamic client registration instead of using a URL-based client ID
   # (client_id_metadata_document, CIMD).

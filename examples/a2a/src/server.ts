@@ -17,11 +17,6 @@ import { Agent, getAgentByName } from "agents";
 import { generateText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
-type Env = {
-  AI: Ai;
-  MyA2A: DurableObjectNamespace<MyA2A>;
-};
-
 const agentCard: AgentCard = {
   capabilities: {
     pushNotifications: false,
@@ -131,7 +126,7 @@ class AIAgentExecutor implements AgentExecutor {
     const workersai = createWorkersAI({ binding: this.getEnv().AI });
     const result = await generateText({
       model: workersai("@cf/moonshotai/kimi-k2.7-code"),
-      system:
+      instructions:
         "You are a helpful AI assistant. Keep responses concise and clear.",
       messages: [{ role: "user", content: userText }]
     });

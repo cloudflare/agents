@@ -30,7 +30,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       model: workersAi("@cf/zai-org/glm-4.7-flash", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: SYSTEM_PROMPT,
+      instructions: SYSTEM_PROMPT,
       messages: [
         ...context.messages.map((message) => ({
           role: message.role as "user" | "assistant",
@@ -40,7 +40,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       ]
     });
 
-    return result.fullStream;
+    return result.stream;
   }
 }
 

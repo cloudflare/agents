@@ -140,7 +140,7 @@ export async function parseReattachText(
   const model = buildReattachModel(args);
   const result = streamText({ model, prompt: "resume" });
   let text = "";
-  for await (const part of result.fullStream) {
+  for await (const part of result.stream) {
     if (part.type === "text-delta") {
       text += (part as unknown as { text?: string }).text ?? "";
     }

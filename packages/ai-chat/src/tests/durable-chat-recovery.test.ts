@@ -487,7 +487,8 @@ describe("onChatRecovery", () => {
   it("a progressing turn survives past the old wall-clock ceiling (rfc-chat-recovery-work-budget)", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
-    // Default config: maxRecoveryWork is Infinity, so duration is never a bound.
+    // Default config: maxRecoveryWork is a generous finite backstop (1000) and
+    // this turn produces ~1 work unit, so duration is never a bound here.
     await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 6 });
 
     // An incident that opened well past the old 15-minute ceiling.

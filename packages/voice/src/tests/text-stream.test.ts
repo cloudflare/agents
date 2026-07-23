@@ -95,15 +95,15 @@ describe("iterateText", () => {
       const chunks = await collect(iterateText(stream));
       expect(chunks).toEqual(["hello"]);
       expect(warn).toHaveBeenCalledWith(
-        "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.fullStream from onTurn() instead."
+        "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.stream from onTurn() instead."
       );
     } finally {
       warn.mockRestore();
     }
   });
 
-  it("iterates AI SDK fullStream text deltas", async () => {
-    async function* fullStream() {
+  it("iterates AI SDK stream text deltas", async () => {
+    async function* stream() {
       yield { type: "start" };
       yield { type: "text-start", id: "a" };
       yield { type: "text-delta", id: "a", text: "hello" };
@@ -112,12 +112,12 @@ describe("iterateText", () => {
       yield { type: "finish" };
     }
 
-    const chunks = await collect(iterateText(fullStream()));
+    const chunks = await collect(iterateText(stream()));
     expect(chunks).toEqual(["hello", " world"]);
   });
 
-  it("adds spaces between fullStream text deltas separated by tool calls", async () => {
-    async function* fullStream() {
+  it("adds spaces between stream text deltas separated by tool calls", async () => {
+    async function* stream() {
       yield { type: "text-start", id: "a" };
       yield { type: "text-delta", id: "a", text: "I can help." };
       yield { type: "text-end", id: "a" };
@@ -128,12 +128,12 @@ describe("iterateText", () => {
       yield { type: "text-end", id: "b" };
     }
 
-    const chunks = await collect(iterateText(fullStream()));
+    const chunks = await collect(iterateText(stream()));
     expect(chunks).toEqual(["I can help.", " ", "The weather is warm"]);
   });
 
-  it("emits stream boundaries before later fullStream text deltas", async () => {
-    async function* fullStream() {
+  it("emits stream boundaries before later stream text deltas", async () => {
+    async function* stream() {
       yield { type: "text-start", id: "a" };
       yield { type: "text-delta", id: "a", text: "I can help." };
       yield { type: "text-end", id: "a" };
@@ -143,7 +143,7 @@ describe("iterateText", () => {
       yield { type: "text-end", id: "b" };
     }
 
-    const events = await collectEvents(iterateTextEvents(fullStream()));
+    const events = await collectEvents(iterateTextEvents(stream()));
     expect(events).toEqual([
       { type: "text", text: "I can help." },
       { type: "boundary" },

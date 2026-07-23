@@ -9,13 +9,13 @@
     "deploy": "astro build && wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^14.0.0",
+    "@astrojs/cloudflare": "^14.0.1",
     "@astrojs/react": "^6.0.0",
     "@chonkiejs/core": "^0.0.11",
     "@gsap/react": "^2.1.2",
     "@orama/orama": "^3.1.18",
     "@use-it/interval": "^1.0.0",
-    "astro": "^7.0.2",
+    "astro": "^7.0.3",
     "clsx": "^2.1.1",
     "effect": "^3.21.4",
     "framer-motion": "^12.42.0",
@@ -24,7 +24,7 @@
     "react-dom": "^19.2.7",
     "react-wrap-balancer": "^1.1.1",
     "shiki": "^4.3.0",
-    "tailwindcss": "^4.3.1"
+    "tailwindcss": "^4.3.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

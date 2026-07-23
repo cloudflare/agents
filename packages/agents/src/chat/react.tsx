@@ -10,6 +10,7 @@ import type {
 import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutgoingMessage } from "./wire-types";
+import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
 import {
   transition as broadcastTransition,
@@ -1001,9 +1002,10 @@ export function useAgentChat<
       }
     });
   }
-  // Always point the transport at the latest socket so sends/listeners
-  // go through the current connection after _pk changes.
-  customTransportRef.current.agent = agentRef.current;
+  // Always point the transport at the latest socket so sends/listeners go
+  // through the current connection after _pk changes. setAgent also settles a
+  // handshake owned by a genuinely replaced agent/Chat generation.
+  customTransportRef.current.setAgent(agentRef.current);
   customTransportRef.current.setCancelOnClientAbort(cancelOnClientAbort);
   const customTransport = customTransportRef.current;
 
@@ -1019,9 +1021,11 @@ export function useAgentChat<
     messages: initialMessages,
     transport: customTransport,
     id: stableChatIdRef.current,
-    // Pass resume so useChat calls transport.reconnectToStream().
-    // This lets the AI SDK track status ("streaming") during resume.
-    resume
+    // useAgentChat owns the mount effect below so every resume entry point
+    // (mount, reconnect, tool continuation, and the public helper) shares one
+    // full-lifetime serialization gate. The resumed stream still flows through
+    // AI SDK and drives its normal status transitions.
+    resume: false
   });
 
   // Destructure stable method references from useChatHelpers.
@@ -1035,7 +1039,7 @@ export function useAgentChat<
     addToolResult,
     addToolApprovalResponse,
     sendMessage,
-    resumeStream,
+    resumeStream: rawResumeStream,
     status,
     stop
   } = useChatHelpers;
@@ -1043,16 +1047,56 @@ export function useAgentChat<
   const statusRef = useRef(status);
   statusRef.current = status;
 
-  // Latest resumeStream, read by the reconnect re-probe effect without making
-  // it a dependency (it would re-register the socket listeners on every render).
+  // AI SDK Chat.makeRequest has one mutable activeResponse and no resume
+  // concurrency guard (#1837). Serialize the complete AI SDK promise — not just
+  // its transport handshake — across mount, reconnect, tool, and public calls.
+  const resumeGenerationRef = useRef(0);
+  const resumeOperationRef = useRef<{
+    generation: number;
+    promise: Promise<void>;
+  } | null>(null);
+  const reconnectProbePendingRef = useRef(false);
+  const reconnectProbeRunnerRef = useRef<(() => void) | null>(null);
+  const invalidateResumeGeneration = useCallback(() => {
+    resumeGenerationRef.current++;
+    resumeOperationRef.current = null;
+  }, []);
+
+  const resumeStream = useCallback(
+    (...args: Parameters<typeof rawResumeStream>): Promise<void> => {
+      const active = resumeOperationRef.current;
+      if (active) return active.promise;
+
+      const operation = {
+        generation: resumeGenerationRef.current,
+        promise: Promise.resolve()
+      };
+      // Publish ownership before invoking the async AI SDK method, but invoke it
+      // synchronously so StrictMode cleanup can always cancel the resolver it
+      // creates (rather than leaving an untracked queued invocation behind).
+      resumeOperationRef.current = operation;
+      operation.promise = rawResumeStream(...args).finally(() => {
+        if (
+          resumeOperationRef.current !== operation ||
+          resumeGenerationRef.current !== operation.generation
+        ) {
+          return;
+        }
+        resumeOperationRef.current = null;
+        // An open event suppressed while this operation was active is an
+        // edge-triggered signal; retry it now rather than losing it forever.
+        reconnectProbeRunnerRef.current?.();
+      });
+      return operation.promise;
+    },
+    [rawResumeStream]
+  );
+
+  // Read by the socket effect without re-registering listeners on ordinary
+  // renders. A new Chat generation changes the callback and intentionally
+  // re-runs that effect.
   const resumeStreamRef = useRef(resumeStream);
   resumeStreamRef.current = resumeStream;
-
-  // Whether the socket has opened at least once. The AI SDK fires its own
-  // resume on mount, so we only re-probe on SUBSEQUENT opens (transparent 1006
-  // reconnects that don't remount the component) — see the reconnect re-probe
-  // in the socket effect below (#1784).
-  const hasConnectedOnceRef = useRef(false);
 
   const resumingToolContinuationRef = useRef(false);
   const pendingToolContinuationRef = useRef(false);
@@ -1104,38 +1148,49 @@ export function useAgentChat<
       return;
     }
 
-    continuationLaunchTimerRef.current = setTimeout(() => {
-      continuationLaunchTimerRef.current = null;
+    const timer = setTimeout(() => {
+      void (async () => {
+        // A mount/reconnect resume may still own AI SDK activeResponse while
+        // status is lagging at ready. Wait for that serialized operation before
+        // arming the transport's special continuation mode.
+        while (resumeOperationRef.current) {
+          await resumeOperationRef.current.promise.catch(() => {});
+        }
 
-      if (
-        !pendingToolContinuationRef.current ||
-        statusRef.current !== "ready"
-      ) {
-        return;
-      }
+        if (continuationLaunchTimerRef.current === timer) {
+          continuationLaunchTimerRef.current = null;
+        }
+        if (
+          !pendingToolContinuationRef.current ||
+          statusRef.current !== "ready"
+        ) {
+          return;
+        }
 
-      pendingToolContinuationRef.current = false;
-      const myGeneration = continuationGenerationRef.current;
-      customTransport.expectToolContinuation();
+        pendingToolContinuationRef.current = false;
+        const myGeneration = continuationGenerationRef.current;
+        customTransport.expectToolContinuation();
 
-      void resumeStream()
-        .catch((error) => {
-          console.error(
-            "[useAgentChat] Tool continuation resume failed:",
-            error
-          );
-        })
-        .finally(() => {
-          // Bail if a reset (clearHistory / cross-tab clear) or a newer
-          // continuation has taken over since we started — otherwise this
-          // stale settlement would flip the flags off while a newer
-          // continuation is still in flight, and reopen the re-entry
-          // guard spuriously.
-          if (continuationGenerationRef.current !== myGeneration) return;
-          resumingToolContinuationRef.current = false;
-          setIsToolContinuation(false);
-        });
+        await resumeStream()
+          .catch((error) => {
+            console.error(
+              "[useAgentChat] Tool continuation resume failed:",
+              error
+            );
+          })
+          .finally(() => {
+            // Bail if a reset (clearHistory / cross-tab clear) or a newer
+            // continuation has taken over since we started — otherwise this
+            // stale settlement would flip the flags off while a newer
+            // continuation is still in flight, and reopen the re-entry
+            // guard spuriously.
+            if (continuationGenerationRef.current !== myGeneration) return;
+            resumingToolContinuationRef.current = false;
+            setIsToolContinuation(false);
+          });
+      })();
     }, 0);
+    continuationLaunchTimerRef.current = timer;
   }, [customTransport, resumeStream]);
 
   const startToolContinuation = useCallback(() => {
@@ -1923,11 +1978,28 @@ export function useAgentChat<
           });
           break;
 
-        case MessageType.CF_AGENT_STREAM_RESUME_NONE:
-          // Server confirmed no active stream — let the transport
-          // resolve reconnectToStream immediately with null.
-          customTransport.handleStreamResumeNone();
+        case MessageType.CF_AGENT_STREAM_RESUME_NONE: {
+          // Every matching NONE settles the transport probe, but only a
+          // correlated idle reason proves inactivity for that probe. The same
+          // frame type also means another connection owns a continuation; older or
+          // delayed unreasoned frames are likewise non-authoritative (#1914).
+          const handled = customTransport.handleStreamResumeNone(data);
+          if (
+            handled &&
+            data.reason === STREAM_RESUME_NONE_REASONS.IDLE &&
+            typeof data.probeId === "string"
+          ) {
+            const result = broadcastTransition(streamStateRef.current, {
+              type: "clear"
+            });
+            streamStateRef.current = result.state;
+            setIsServerStreaming(result.isStreaming);
+            if (observedToolContinuationRequestIdRef.current !== null) {
+              resetToolContinuation();
+            }
+          }
           break;
+        }
 
         case MessageType.CF_AGENT_STREAM_PENDING:
           // Server accepted a turn but its stream hasn't started yet (#1784):
@@ -2083,6 +2155,9 @@ export function useAgentChat<
               localResponseIds.delete(data.id);
               localRequestIdsRef.current.delete(data.id);
               fallbackAckedResumeRequestIdsRef.current.delete(data.id);
+              if (observedToolContinuationRequestIdRef.current === data.id) {
+                resetToolContinuation();
+              }
             }
             return;
           }
@@ -2188,47 +2263,89 @@ export function useAgentChat<
     const fallbackAckedResumeRequestIds =
       fallbackAckedResumeRequestIdsRef.current;
 
-    // A closed socket invalidates the per-socket resume-ACK dedupe: after a
-    // reconnect the server sees a brand-new connection and must be ACKed
-    // (and replay) again, so the previous entries must not suppress it.
-    function onAgentClose() {
-      fallbackAckedResumeRequestIds.clear();
-    }
+    let socketIsOpen = false;
+    let sawClose = false;
+    let disposed = false;
 
-    // Reconnect re-probe (#1784): a transparent socket reconnect (e.g. a 1006
-    // drop) does NOT remount the component, so the AI SDK's mount-time resume
-    // never re-fires and a turn that was still pre-stream when the socket
-    // dropped would leave AI SDK `status` stuck at "ready" even after the
-    // server starts streaming. On every reconnect (not the first open) re-probe
-    // through the transport so `status` recovers, mirroring a fresh mount. The
-    // proactive STREAM_RESUMING the server also sends on connect is reconciled
-    // with this probe by the existing #1733 dual-notify dedupe.
-    function onAgentOpen() {
-      if (!hasConnectedOnceRef.current) {
-        hasConnectedOnceRef.current = true;
+    const clearFallbackObserver = () => {
+      const result = broadcastTransition(streamStateRef.current, {
+        type: "clear"
+      });
+      streamStateRef.current = result.state;
+      setIsServerStreaming(result.isStreaming);
+      if (observedToolContinuationRequestIdRef.current !== null) {
+        resetToolContinuation();
+      }
+    };
+
+    // An open is an edge, not durable state. Keep it pending while AI SDK status,
+    // a tool continuation, or the #1837 full-lifetime gate is ineligible. If a
+    // handshake itself crossed the disconnect, retransmit that same request on
+    // the replacement socket instead of starting a second Chat resume.
+    const tryPendingReconnectProbe = () => {
+      if (disposed || !socketIsOpen || !reconnectProbePendingRef.current) {
         return;
       }
+      if (!resume) {
+        reconnectProbePendingRef.current = false;
+        return;
+      }
+      if (customTransport.retryPendingResume()) {
+        reconnectProbePendingRef.current = false;
+        return;
+      }
+
+      const canReconcileObservedContinuation =
+        observedToolContinuationRequestIdRef.current !== null;
       if (
-        !resume ||
-        statusRef.current !== "ready" ||
-        resumingToolContinuationRef.current ||
-        customTransport.isAwaitingResume()
+        (statusRef.current !== "ready" && statusRef.current !== "error") ||
+        (resumingToolContinuationRef.current &&
+          !canReconcileObservedContinuation) ||
+        resumeOperationRef.current !== null
       ) {
         return;
       }
-      void Promise.resolve(resumeStreamRef.current?.()).catch(() => {});
+
+      reconnectProbePendingRef.current = false;
+      void resumeStreamRef.current().catch(() => {});
+    };
+    reconnectProbeRunnerRef.current = tryPendingReconnectProbe;
+
+    // Track an actual close→open transition rather than counting open events.
+    // This correctly handles useAgentChat mounting after the parent socket was
+    // already open: its first observed open after a close is still a reconnect.
+    function onAgentClose() {
+      socketIsOpen = false;
+      sawClose = true;
+      fallbackAckedResumeRequestIds.clear();
+
+      // resume:false opts out of recovering disconnected streams. There can be
+      // no future authoritative probe, so stop claiming that a disconnected
+      // fallback observer is live; pending client tool work remains folded into
+      // the public flag independently.
+      if (!resume) {
+        clearFallbackObserver();
+      }
+    }
+
+    function onAgentOpen() {
+      socketIsOpen = true;
+      if (!sawClose) return;
+      sawClose = false;
+      reconnectProbePendingRef.current = true;
+      tryPendingReconnectProbe();
     }
 
     agent.addEventListener("message", onAgentMessage);
     agent.addEventListener("close", onAgentClose);
     agent.addEventListener("open", onAgentOpen);
 
-    // Stream resume is now primarily handled by the transport's
-    // reconnectToStream (which sends CF_AGENT_STREAM_RESUME_REQUEST).
-    // The onAgentMessage handler above serves as fallback for cross-tab
-    // broadcasts and cases where the transport didn't handle the resume.
-
     return () => {
+      disposed = true;
+      if (reconnectProbeRunnerRef.current === tryPendingReconnectProbe) {
+        reconnectProbeRunnerRef.current = null;
+      }
+      reconnectProbePendingRef.current = false;
       agent.removeEventListener("message", onAgentMessage);
       agent.removeEventListener("close", onAgentClose);
       agent.removeEventListener("open", onAgentOpen);
@@ -2238,6 +2355,12 @@ export function useAgentChat<
       setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
+
+      // Invalidate both sides of an old agent/Chat generation. Transport
+      // callbacks/timers settle identity-safely; the token prevents its late AI
+      // SDK finalizer from reopening the serialization gate under a new Chat.
+      customTransport.resetResumeState();
+      invalidateResumeGeneration();
     };
   }, [
     agent,
@@ -2248,8 +2371,24 @@ export function useAgentChat<
     resetToolContinuation,
     resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,
-    resetLocalChatState
+    resetLocalChatState,
+    invalidateResumeGeneration
   ]);
+
+  // Own mount/chat-generation resumption so StrictMode, reconnects, tool
+  // continuations, and public calls all use the same #1837 serialization gate.
+  // This effect is declared after the socket handler so a synchronous server
+  // response cannot beat message-listener registration.
+  useEffect(() => {
+    if (!resume) return;
+    void resumeStream().catch(() => {});
+  }, [resume, resumeStream]);
+
+  // Flush an open edge that arrived while status/tool state was temporarily
+  // ineligible. Full-lifetime resume settlement also calls the same runner.
+  useEffect(() => {
+    reconnectProbeRunnerRef.current?.();
+  }, [isToolContinuation, status]);
 
   // ── DEPRECATED: addToolResult wrapper with confirmation batching ────
   // This wrapper is deprecated. Use addToolOutput or addToolApprovalResponse instead.
@@ -2493,6 +2632,7 @@ export function useAgentChat<
 
   return {
     ...useChatHelpers,
+    resumeStream,
     messages: messagesWithToolResults,
     isServerStreaming: effectiveIsServerStreaming,
     isStreaming,

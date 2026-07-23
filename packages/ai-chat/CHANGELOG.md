@@ -1,5 +1,104 @@
 # @cloudflare/ai-chat
 
+## 0.10.0
+
+### Minor Changes
+
+- [#1922](https://github.com/cloudflare/agents/pull/1922) [`cb4c1c7`](https://github.com/cloudflare/agents/commit/cb4c1c722d5a556ce68228d8e60f9c1df604ef81) Thanks [@cjol](https://github.com/cjol)! - Support both AI SDK v6 and v7.
+
+  The `ai` peer range is `ai@^6 || ^7` (and `@ai-sdk/react` is `@^3 || ^4`) across
+  `agents`, `@cloudflare/ai-chat`, `@cloudflare/codemode`, and `@cloudflare/think`.
+  Consumers can adopt AI SDK v7 or stay on v6 — no forced AI SDK upgrade when
+  bumping these packages.
+
+  Only the current implementations are covered. New optimisations and APIs made
+  available by AI SDK v7 (broader result-shape audits, stream helper migrations,
+  etc.) are intentionally out of scope.
+
+  How dual-version support works — `@cloudflare/think` calls the AI SDK through the
+  option names present in both majors (v7 keeps the v6 names as aliases), and
+  normalizes the genuine divergences at the boundary:
+
+  - Uses `stepCountIs`, `system`, `experimental_telemetry`, `onStepFinish`, and
+    `experimental_onToolCallFinish` (in v7 this alias resolves to
+    `onToolExecutionEnd` and fires once).
+  - The tool-execution-finished event is normalized across majors: v6's
+    `{ success, output, error, durationMs, stepNumber }` and v7's
+    `{ toolOutput, toolExecutionMs }` collapse to one `ToolCallResultContext`.
+    `stepNumber` is `undefined` under v7 (the v7 event no longer provides it).
+  - The UI message stream is built via the result's `toUIMessageStream()` method
+    (present in both majors); the standalone `toUIMessageStream({ stream })`
+    helper and `result.stream` are v7-only.
+  - The workspace read tool emits `{ type: "file-data", data, mediaType, filename }`
+    model output, accepted by both majors (v7's newer `{ type: "file", data: {
+type: "data", data } }` shape does not exist in v6).
+
+  Public API notes:
+
+  - `@cloudflare/think` keeps `system`, `onStepFinish`, and `experimental_telemetry`
+    where callers already use them, and also accepts `TurnConfig.telemetry`
+    (forwarded ahead of `experimental_telemetry` when present).
+  - `@cloudflare/ai-chat` updates the `AIChatAgent.onChatMessage` callback type
+    from `StreamTextOnFinishCallback` to `GenerateTextOnFinishCallback`.
+
+  Verified against both `ai@6` and `ai@7`: `@cloudflare/think` type-checks with
+  zero errors and its full workers test suite passes under each major.
+
+  Known limitations:
+
+  - `workers-ai-provider` (Think's default model provider) is fixed at v4 for AI
+    SDK v7. Consumers on `ai@6` who rely on Think's built-in default model may hit
+    a provider-version mismatch; passing their own `LanguageModel` avoids this.
+  - `chat@4.31.0` currently declares an `ai@^6` peer and does not yet advertise
+    v7 support; tracked separately.
+  - CI should exercise both an `ai@6` and an `ai@7` resolution to guard the matrix.
+
+## 0.9.4
+
+### Patch Changes
+
+- [#1860](https://github.com/cloudflare/agents/pull/1860) [`f5b1dd8`](https://github.com/cloudflare/agents/commit/f5b1dd814b5d7b415152afda053b5a52e086e12e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Group SDK-managed initialization, startup, chat interactions, turns, and durable submissions into semantic phases. Storage-heavy setup, hydration, recovery, request persistence, and response persistence each receive a named bucket, keeping inference and tool spans visible without discarding lower-level Durable Object SQLite spans. Each span records agent identity, storage phase, a stable marker for UI grouping, and operation-specific metadata. No-op on runtimes without the `tracing` API.
+
+- [#1963](https://github.com/cloudflare/agents/pull/1963) [`3ce98ff`](https://github.com/cloudflare/agents/commit/3ce98ff084fcd5f0f8433e1f20352f0a170e3e4a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Reconcile stale `useAgentChat` server-streaming state after an errored client reconnects.
+
+  Reconnect probes now include correlation IDs, and `STREAM_RESUME_NONE` distinguishes globally idle agents from active continuations owned by another connection. The hook clears fallback streaming state only for a correlated idle response. Reconnect opens are retained while a prior resume or status transition settles, in-flight handshakes are retransmitted on replacement sockets, and all AI SDK resume entry points share one serialization gate.
+
+## 0.9.3
+
+### Patch Changes
+
+- [`58eea18`](https://github.com/cloudflare/agents/commit/58eea18f74dec943a5e9df3d78135f8980c445c4) Thanks [@threepointone](https://github.com/threepointone)! - trigger a release
+
+## 0.9.2
+
+### Patch Changes
+
+- [#1827](https://github.com/cloudflare/agents/pull/1827) [`e5e6b57`](https://github.com/cloudflare/agents/commit/e5e6b5731e1c316a7edfeac47dfef6a9cadfe3a3) Thanks [@threepointone](https://github.com/threepointone)! - Fix sub-agent tool events getting stuck at `input-available` when an agent-tool child proxies a remote `toUIMessageStreamResponse()` ([#1589](https://github.com/cloudflare/agents/issues/1589)).
+
+  `tailAgentToolRun` (in both `AIChatAgent` and `Think`) drained the stored chunk backlog and only afterwards attached its live forwarder, with `await` boundaries in between. Any chunk the child stored and broadcast in that window was neither in the drained snapshot nor live-forwarded, so it silently vanished from the parent's stream — leaving tool parts (notably `tool-output-available`) stuck at `input-available` in `useAgentToolEvents`. A network-paced proxied remote stream hits this window constantly, while a fast local child mostly avoids it. The forwarder is now registered before the backlog is drained, with live chunks buffered and replayed in order and deduped by sequence, closing the gap.
+
+  Both `AIChatAgent` and `Think` also realign the in-memory live sequence to the stored high-water mark after draining. Without this, a re-attach after the child's Durable Object restarts or wakes from hibernation (where the live counter is cold but the durable backlog sits at N) would hand the recovered turn's new chunks sequences from 0, which the high-water dedupe silently drops — leaving the parent permanently stuck with no post-restart chunks.
+
+## 0.9.1
+
+### Patch Changes
+
+- [#1826](https://github.com/cloudflare/agents/pull/1826) [`1bbd9bc`](https://github.com/cloudflare/agents/commit/1bbd9bca45834e7699969d83d203ec82f53a9bac) Thanks [@threepointone](https://github.com/threepointone)! - Add a tight, OOM-specific retry budget to chat recovery so a memory-limit crash loop seals fast and attributably ([#1825](https://github.com/cloudflare/agents/issues/1825)).
+
+  When a recovery turn hits a Durable Object memory-limit reset (the isolate exceeded its 128 MB limit), recovery now classifies it as a distinct, deterministic failure rather than a deploy-style transient. A memory reset re-OOMs on re-run (the turn's working set, not the platform, is the cause), so it must NOT be deferred and retried forever like a code-update/connection-lost transient. Each such crash bumps a durable per-incident `oomAttempts` counter; recovery retries a small number of times (new `chatRecovery.maxOomRetries`, default `3`) — in case the OOM was a transient spike — then seals with `reason="out_of_memory"`. This is far tighter than the generic `maxRecoveryWork` backstop because an OOM is attributable and each re-run re-runs the model.
+
+  This complements the finite `maxRecoveryWork` default: the OOM budget is the fast path for memory resets that surface as catchable errors thrown from recovery bookkeeping (e.g. storage/SQL rejections after the reset), while `maxRecoveryWork` remains a backstop for the hard-kill case where no in-isolate code runs to record the OOM.
+
+  Adds an **alarm-boundary circuit breaker** (`agents`) as the universal backstop for the case the in-DO budgets can't catch ([#1825](https://github.com/cloudflare/agents/issues/1825)): a memory-limit reset that bypasses them entirely — thrown before the budget code runs (e.g. boot-time state hydration OOMs), or whose own small writes also OOM under memory pressure. Left unhandled, such an error propagates out of `alarm()` and the platform auto-retries the alarm forever, re-running the doomed, billable turn each cycle. `Agent.alarm()` now intercepts ONLY Durable Object memory-limit resets at the outermost frame — where the heavy turn has unwound and GC has reclaimed its footprint, so the seal/purge writes can land where mid-turn ones OOMed. A durable strike counter tolerates a few resets (new `static options.maxAlarmMemoryLimitStrikes`, default `3`) — backing off the looping rows so the retry is not a hot loop — then seals the recovery (`out_of_memory`) and surgically purges only the looping schedule rows, leaving unrelated scheduled tasks intact. A new `alarm:memory_limit_reset` observability event is emitted. Everything except memory-limit resets re-throws exactly as before.
+
+  Also broadens and exports the `isDurableObjectMemoryLimitReset(error)` predicate from `agents` (a sibling to `isDurableObjectCodeUpdateReset` / `isPlatformTransientError`): it now matches the shared `"exceeded its memory limit"` fragment so truncated/reworded surfacings (observed in real [#1825](https://github.com/cloudflare/agents/issues/1825) logs) still classify.
+
+- [#1826](https://github.com/cloudflare/agents/pull/1826) [`1bbd9bc`](https://github.com/cloudflare/agents/commit/1bbd9bca45834e7699969d83d203ec82f53a9bac) Thanks [@threepointone](https://github.com/threepointone)! - Fix neverending chat-recovery retries when a Durable Object isolate runs out of memory mid-turn ([#1825](https://github.com/cloudflare/agents/issues/1825)).
+
+  `chatRecovery.maxRecoveryWork` now defaults to a generous finite backstop (`1000`) instead of `Infinity`. An isolate that exceeds its memory limit and is reset mid-stream has usually already streamed a little content, which bumps the durable progress counter. On the next wake recovery reads that as forward progress and **resets both progress-keyed bounds** — the attempt cap (`maxAttempts`) and the no-progress window (`noProgressTimeoutMs`) — and because each crash lands inside the alarm-debounce window the attempt counter is pinned too. With the work budget disabled (`Infinity`), no instrument could ever seal the turn, so recovery re-ran the turn (and its LLM calls) forever. The work meter is the one signal that keeps climbing across such a loop, so a finite default seals a runaway with `reason="work_budget_exceeded"` instead of looping.
+
+  Work only accrues from the first interruption until the turn completes, so a normal interrupted turn never approaches the cap. A very long agentic turn that legitimately produces a large amount of content under heavy interruption can raise `maxRecoveryWork` (or set it to `Infinity` to restore the previous fully-unbounded behavior, ideally paired with a `shouldKeepRecovering` predicate that bounds the runaway via real token/cost accounting).
+
 ## 0.9.0
 
 ### Minor Changes

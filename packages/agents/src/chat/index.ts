@@ -52,7 +52,11 @@ export {
   type ClientToolExecutor
 } from "./client-tools";
 
-export { CHAT_MESSAGE_TYPES } from "./protocol";
+export {
+  CHAT_MESSAGE_TYPES,
+  STREAM_RESUME_NONE_REASONS,
+  type StreamResumeNoneReason
+} from "./protocol";
 
 export { MessageType } from "./wire-types";
 export type { OutgoingMessage, IncomingMessage } from "./wire-types";
@@ -193,6 +197,7 @@ export {
 export {
   resolveChatRecoveryConfig,
   sweepStaleChatRecoveryIncidents,
+  listActiveChatRecoveryIncidents,
   classifyAgentToolChildRecovery,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
@@ -211,6 +216,7 @@ export {
   CHAT_LAST_TERMINAL_KEY,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_MAX_WORK,
+  DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
   DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS,
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,

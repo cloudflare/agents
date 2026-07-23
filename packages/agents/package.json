@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.17.0",
+  "version": "0.19.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -26,7 +26,7 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^8.0.2",
     "@cfworker/json-schema": "^4.1.1",
-    "@cloudflare/codemode": ">=0.4.0",
+    "@cloudflare/codemode": ">=0.5.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
@@ -39,15 +39,15 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/react": "^3.0.204",
+    "@ai-sdk/react": "^4.0.0",
     "@modelcontextprotocol/conformance": "0.1.16",
-    "@tanstack/ai": "0.32.0",
+    "@tanstack/ai": "0.38.0",
     "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.9",
-    "@x402/core": "^2.16.0",
-    "@x402/evm": "^2.16.0",
-    "ai": "^6.0.202",
+    "@x402/core": "^2.17.0",
+    "@x402/evm": "^2.17.0",
+    "ai": "^7.0.0",
     "chat": "^4.31.0",
     "glob": "^13.0.6",
     "just-bash": "^3.0.2",
@@ -56,11 +56,11 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@ai-sdk/react": "^3.0.204",
+    "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
-    "ai": "^6.0.0",
+    "ai": "^6.0.0 || ^7.0.0",
     "chat": "^4.29.0",
     "just-bash": "^3.0.0",
     "react": "^19.0.0",
@@ -139,6 +139,11 @@
       "types": "./dist/observability/index.d.ts",
       "import": "./dist/observability/index.js",
       "require": "./dist/observability/index.js"
+    },
+    "./observability/ai": {
+      "types": "./dist/observability/ai/index.d.ts",
+      "import": "./dist/observability/ai/index.js",
+      "require": "./dist/observability/ai/index.js"
     },
     "./react": {
       "types": "./dist/react.d.ts",

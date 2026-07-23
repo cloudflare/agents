@@ -695,6 +695,67 @@ export class ChatRecoveryEngine {
   }
 
   /**
+   * Record that a recovery callback observed a Durable Object memory-limit reset
+   * (the isolate exceeded its 128 MB limit — `isDurableObjectMemoryLimitReset`)
+   * and decide what to do next (#1825).
+   *
+   * Bumps the incident's durable `oomAttempts` counter, then:
+   *  - if it is still within `maxOomRetries`, issues a delayed, NON-idempotent
+   *    reschedule of the SAME callback (same machinery as
+   *    {@link rescheduleAfterStableTimeout}: the executing one-shot row is
+   *    deleted only after the callback returns, so an idempotent reschedule
+   *    would dedup onto that doomed row) and returns `"rescheduled"`. The small
+   *    delay lets a transient memory spike clear before the re-run;
+   *  - otherwise leaves the incremented count persisted (so a begin-path
+   *    re-evaluation agrees) and returns `"exhausted"` — the caller then
+   *    terminalizes via the give-up path with `reason="out_of_memory"`.
+   *
+   * Returns `"exhausted"` when there is no incident to track against (no id /
+   * record gone): an OOM we cannot bound must seal rather than loop. Unlike a
+   * stable-state retry this is gated by the OOM-specific budget, NOT the generic
+   * attempt cap — re-running an OOM streams a little "progress" that would
+   * otherwise reset the attempt cap forever (the #1825 loop).
+   */
+  async recordOomAndDecide(input: {
+    incidentId: string | undefined;
+    callback: ChatRecoveryScheduleCallback;
+    data: Record<string, unknown> | undefined;
+    maxOomRetries: number;
+  }): Promise<"rescheduled" | "exhausted"> {
+    const { adapter } = this;
+    if (!input.incidentId) return "exhausted";
+    const key = chatRecoveryIncidentKey(input.incidentId);
+    const incident = await adapter.getIncident(key);
+    if (!incident) return "exhausted";
+    const oomAttempts = (incident.oomAttempts ?? 0) + 1;
+    if (oomAttempts > input.maxOomRetries) {
+      // Persist the crossed count so the begin-path backstop in
+      // `evaluateChatRecoveryIncident` agrees, then let the caller terminalize.
+      await adapter.putIncident(key, {
+        ...incident,
+        oomAttempts,
+        lastAttemptAt: adapter.now(),
+        reason: "out_of_memory"
+      });
+      return "exhausted";
+    }
+    await adapter.putIncident(key, {
+      ...incident,
+      oomAttempts,
+      status: "scheduled",
+      lastAttemptAt: adapter.now(),
+      reason: "oom_retry"
+    });
+    await adapter.scheduleRecovery(
+      input.callback,
+      input.data ?? {},
+      "stable_timeout_retry",
+      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+    );
+    return "rescheduled";
+  }
+
+  /**
    * Give up on a recovery turn whose retry budget drained, terminalizing it so
    * it can never become an eternal spinner (#1645). The shared spine both
    * packages repeated verbatim:

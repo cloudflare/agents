@@ -1,14 +1,16 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { MCPClientManager } from "../../mcp/client";
 import {
   MCPClientConnection,
   type MCPConnectionState
 } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
-import type { ToolCallOptions } from "ai";
+import type { ToolExecutionOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
+import { z } from "zod";
 
 function createMockStateStorage() {
   const storage = new Map<string, { serverId: string; createdAt: number }>();
@@ -171,6 +173,13 @@ describe("MCPClientManager OAuth Integration", () => {
           server.auth_url = null;
           mockStorageData.set(id, server);
         }
+      } else if (query.includes("UPDATE") && query.includes("SET id = ?")) {
+        const [newId, oldId] = values as [string, string];
+        const server = mockStorageData.get(oldId);
+        if (server) {
+          mockStorageData.delete(oldId);
+          mockStorageData.set(newId, { ...server, id: newId });
+        }
       } else if (query.includes("SELECT")) {
         if (query.includes("WHERE callback_url")) {
           const url = values[0] as string;
@@ -180,6 +189,9 @@ describe("MCPClientManager OAuth Integration", () => {
               break;
             }
           }
+        } else if (query.includes("WHERE id = ?")) {
+          const server = mockStorageData.get(values[0] as string);
+          if (server) results.push(server as unknown as T);
         } else {
           results.push(
             ...(Array.from(mockStorageData.values()) as unknown as T[])
@@ -199,6 +211,8 @@ describe("MCPClientManager OAuth Integration", () => {
       put: async (key: string, value: unknown) => {
         mockKVData.set(key, value);
       },
+      list: async () => new Map(),
+      delete: vi.fn(),
       kv: {
         get: <T>(key: string) => mockKVData.get(key) as T | undefined,
         put: (key: string, value: unknown) => {
@@ -302,6 +316,109 @@ describe("MCPClientManager OAuth Integration", () => {
         "test-auth-code"
       );
       expect(authProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Worker-safe JSON Schema validator defaults", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("connect() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const { id } = await manager.connect("http://example.com", {
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("connect() preserves a caller-supplied jsonSchemaValidator", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      const { id } = await manager.connect("http://example.com", {
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBe(customValidator);
+    });
+
+    it("registerServer() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      await manager.registerServer("validator-default-id", {
+        url: "http://example.com",
+        name: "validator-default",
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections["validator-default-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("registerServer() does not persist a caller-supplied jsonSchemaValidator", async () => {
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      await manager.registerServer("validator-persist-id", {
+        url: "http://example.com",
+        name: "validator-persist",
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      // The live connection keeps the caller's validator...
+      expect(
+        manager.mcpConnections["validator-persist-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBe(customValidator);
+
+      // ...but a validator instance cannot survive JSON serialization, so it
+      // must not be written to storage at all.
+      const row = mockStorageData.get("validator-persist-id");
+      const persisted = JSON.parse(row?.server_options ?? "{}");
+      expect(persisted.client).not.toHaveProperty("jsonSchemaValidator");
+    });
+
+    it("restore falls back to the Worker-safe default when persisted options contain a serialization-degraded validator", async () => {
+      // Simulate a row written by a caller that passed a custom validator:
+      // JSON.stringify degrades the instance to a plain object.
+      saveServerToMock({
+        id: "restored-degraded-validator",
+        name: "Degraded Validator Server",
+        server_url: "http://example.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: "https://auth.example.com/authorize",
+        server_options: JSON.stringify({
+          transport: { type: "auto" },
+          client: { jsonSchemaValidator: {} }
+        })
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      expect(
+        manager.mcpConnections["restored-degraded-validator"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
     });
   });
 
@@ -575,7 +692,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.serverId).toBe(serverId);
     });
 
-    it("should fail connection when callback received for connection in failed state", async () => {
+    it("should complete a genuine callback received for a connection in failed state", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -603,6 +720,12 @@ describe("MCPClientManager OAuth Integration", () => {
       connection.init = vi.fn().mockResolvedValue(undefined);
       connection.client.close = vi.fn().mockResolvedValue(undefined);
       connection.connectionState = "failed";
+      connection.connectionError = "spurious failure";
+      const completeAuthSpy = vi
+        .spyOn(connection, "completeAuthorization")
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
 
       manager.mcpConnections[serverId] = connection;
 
@@ -612,10 +735,11 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       const result = await manager.handleCallbackRequest(callbackRequest);
-      expect(result.authSuccess).toBe(false);
-      expect(result.authError).toBe(
-        'Failed to authenticate: the client is in "failed" state, expected "authenticating"'
-      );
+      expect(result.authSuccess).toBe(true);
+      expect(completeAuthSpy).toHaveBeenCalledWith("test", {
+        alreadyAccepted: true
+      });
+      expect(connection.connectionError).toBe(null);
     });
 
     it("should recognize custom callback paths that do not contain '/callback'", async () => {
@@ -652,6 +776,83 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(
         manager.isCallbackRequest(new Request(`${customCallbackUrl}?code=test`))
       ).toBe(false);
+    });
+  });
+
+  describe("OAuth Callback Robustness", () => {
+    const serverId = "test-server";
+    const callbackUrl = "http://localhost:3000/callback";
+    const authUrl = "https://auth.example.com/authorize";
+
+    function setupAuthenticatingConnection(
+      stateStorage: ReturnType<typeof createMockStateStorage>
+    ) {
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: authUrl,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId] = connection;
+      return connection;
+    }
+
+    it("ignores an error callback whose state nonce was never issued", async () => {
+      const stateStorage = createMockStateStorage();
+      const connection = setupAuthenticatingConnection(stateStorage);
+
+      const strayState = `${nanoid()}.${serverId}`;
+      const result = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?error=access_denied&state=${strayState}`)
+      );
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("access_denied");
+      expect(connection.connectionState).toBe("authenticating");
+      expect(mockStorageData.get(serverId)?.auth_url).toBe(authUrl);
+    });
+
+    it("completes a genuine callback after a stray code callback", async () => {
+      const stateStorage = createMockStateStorage();
+      const connection = setupAuthenticatingConnection(stateStorage);
+      const completeAuthSpy = vi
+        .spyOn(connection, "completeAuthorization")
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+
+      const state = stateStorage.createState(serverId);
+
+      const strayResult = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=x&state=${nanoid()}.${serverId}`)
+      );
+      expect(strayResult.authSuccess).toBe(false);
+      expect(connection.connectionState).toBe("authenticating");
+
+      const result = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=auth-code&state=${state}`)
+      );
+
+      expect(result.authSuccess).toBe(true);
+      expect(completeAuthSpy).toHaveBeenCalledWith("auth-code", {
+        alreadyAccepted: true
+      });
     });
   });
 
@@ -753,6 +954,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const result2 = await manager.handleCallbackRequest(callbackRequest2);
       expect(result2.authSuccess).toBe(false);
       expect(result2.authError).toBe("State not found or already used");
+      expect(connection.connectionState).toBe("authenticating");
     });
 
     it("should reject expired state (10 minute TTL)", async () => {
@@ -792,6 +994,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const result = await manager.handleCallbackRequest(callbackRequest);
       expect(result.authSuccess).toBe(false);
       expect(result.authError).toBe("State expired");
+      expect(connection.connectionState).toBe("authenticating");
     });
 
     it("should only match callbacks with valid state for existing servers", async () => {
@@ -2465,7 +2668,8 @@ describe("MCPClientManager OAuth Integration", () => {
         name: "Test Server",
         callbackUrl: "http://localhost:3000/callback",
         client: {},
-        transport: { type: "auto" }
+        transport: { type: "auto" },
+        retry: { maxAttempts: 1 }
       });
 
       let resolveInit!: () => void;
@@ -2593,7 +2797,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Test tool execution
       const result = await tool.execute!(
         { message: "test" },
-        {} as ToolCallOptions
+        {} as ToolExecutionOptions<unknown>
       );
       expect(result).toBeDefined();
       expect(conn.client.callTool).toHaveBeenCalledWith(
@@ -2675,7 +2879,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(tools[tool2Key].description).toBe("Tool from server 2");
 
       // Test both tools execute correctly
-      await tools[tool1Key].execute!({}, {} as ToolCallOptions);
+      await tools[tool1Key].execute!({}, {} as ToolExecutionOptions<unknown>);
       expect(conn1.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_one",
@@ -2685,7 +2889,7 @@ describe("MCPClientManager OAuth Integration", () => {
         undefined
       );
 
-      await tools[tool2Key].execute!({}, {} as ToolCallOptions);
+      await tools[tool2Key].execute!({}, {} as ToolExecutionOptions<unknown>);
       expect(conn2.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_two",
@@ -2694,6 +2898,282 @@ describe("MCPClientManager OAuth Integration", () => {
         undefined,
         undefined
       );
+    });
+
+    describe("caches MCP schema conversion", () => {
+      function makeTool(name: string): Tool {
+        return {
+          name,
+          description: `Description for ${name}`,
+          inputSchema: {
+            type: "object",
+            properties: { value: { type: "string" } }
+          },
+          outputSchema: {
+            type: "object",
+            properties: { echoed: { type: "string" } }
+          }
+        };
+      }
+
+      function makeConnection(catalog: Tool[]): MCPClientConnection {
+        const connection = new MCPClientConnection(
+          new URL("http://example.com/mcp"),
+          { name: "test", version: "1.0" },
+          { transport: { type: "sse" }, client: {} }
+        );
+        connection.connectionState = "ready";
+        connection.tools = catalog;
+        connection.client.callTool = vi
+          .fn()
+          .mockImplementation(async ({ name }: { name: string }) => ({
+            content: [{ type: "text", text: `Result from ${name}` }]
+          }));
+        return connection;
+      }
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it("reuses schemas across unchanged filtered and unfiltered calls without caching ToolSets", () => {
+        const selected = makeConnection([makeTool("selected_tool")]);
+        const filteredOut = makeConnection([makeTool("filtered_out_tool")]);
+        manager.mcpConnections.selected = selected;
+        manager.mcpConnections.filtered = filteredOut;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const selectedOnly = manager.getAITools({ serverId: "selected" });
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        const all = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        const selectedAgain = manager.getAITools({ serverId: "selected" });
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        const key = "tool_selected_selected_tool";
+        expect(all[key]).not.toBe(selectedOnly[key]);
+        expect(selectedAgain[key]).not.toBe(selectedOnly[key]);
+        expect(all[key].execute).not.toBe(selectedOnly[key].execute);
+        expect(all[key].inputSchema).toBe(selectedOnly[key].inputSchema);
+        expect(all[key].outputSchema).toBe(selectedOnly[key].outputSchema);
+      });
+
+      it("materializes 313 input and output schemas once for an unchanged catalog", () => {
+        const connection = makeConnection(
+          Array.from({ length: 313 }, (_, index) =>
+            makeTool(`bulk_tool_${index}`)
+          )
+        );
+        manager.mcpConnections.bulk = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        expect(Object.keys(manager.getAITools())).toHaveLength(313);
+        expect(conversionSpy).toHaveBeenCalledTimes(626);
+
+        expect(Object.keys(manager.getAITools())).toHaveLength(313);
+        expect(conversionSpy).toHaveBeenCalledTimes(626);
+      });
+
+      it("refreshes changed slots when a catalog array is edited in place", () => {
+        const stringTool = makeTool("string_tool");
+        const numberTool = makeTool("number_tool");
+        numberTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "number" } }
+        };
+        numberTool.outputSchema = {
+          type: "object",
+          properties: { echoed: { type: "number" } }
+        };
+        const connection = makeConnection([stringTool, numberTool]);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        connection.tools.reverse();
+        const reordered = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(8);
+        expect(
+          reordered.tool_server_number_tool.inputSchema.safeParse({ value: 1 })
+            .success
+        ).toBe(true);
+        expect(
+          reordered.tool_server_string_tool.inputSchema.safeParse({
+            value: "one"
+          }).success
+        ).toBe(true);
+
+        const booleanTool = makeTool("boolean_tool");
+        booleanTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "boolean" } }
+        };
+        booleanTool.outputSchema = {
+          type: "object",
+          properties: { echoed: { type: "boolean" } }
+        };
+        connection.tools.splice(0, 1, booleanTool);
+        const spliced = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(10);
+        expect(spliced.tool_server_number_tool).toBeUndefined();
+        expect(
+          spliced.tool_server_boolean_tool.inputSchema.safeParse({
+            value: true
+          }).success
+        ).toBe(true);
+      });
+
+      it("recompiles when a tool replaces its schema objects in place", () => {
+        const mutableTool = makeTool("mutable_tool");
+        const connection = makeConnection([mutableTool]);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const first = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        mutableTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "number" } }
+        };
+        mutableTool.outputSchema = {
+          type: "object",
+          properties: { echoed: { type: "number" } }
+        };
+        const second = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+        expect(second.tool_server_mutable_tool.inputSchema).not.toBe(
+          first.tool_server_mutable_tool.inputSchema
+        );
+        expect(
+          second.tool_server_mutable_tool.inputSchema.safeParse({ value: 1 })
+            .success
+        ).toBe(true);
+        expect(
+          second.tool_server_mutable_tool.inputSchema.safeParse({
+            value: "stale"
+          }).success
+        ).toBe(false);
+      });
+
+      it("caches failed conversions until their schema source changes", () => {
+        const unsupportedTool = makeTool("unsupported_tool");
+        unsupportedTool.inputSchema = {
+          type: "object",
+          unevaluatedProperties: false
+        } as Tool["inputSchema"];
+        unsupportedTool.outputSchema = undefined;
+        const connection = makeConnection([
+          unsupportedTool,
+          makeTool("valid_tool")
+        ]);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+        const warningSpy = vi
+          .spyOn(console, "warn")
+          .mockImplementation(() => undefined);
+
+        const first = manager.getAITools();
+        expect(first.tool_server_unsupported_tool).toBeUndefined();
+        expect(first.tool_server_valid_tool).toBeDefined();
+        expect(conversionSpy).toHaveBeenCalledTimes(3);
+        expect(warningSpy).toHaveBeenCalledTimes(1);
+
+        const second = manager.getAITools();
+        expect(second.tool_server_unsupported_tool).toBeUndefined();
+        expect(second.tool_server_valid_tool).toBeDefined();
+        expect(conversionSpy).toHaveBeenCalledTimes(3);
+        expect(warningSpy).toHaveBeenCalledTimes(1);
+
+        unsupportedTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "boolean" } }
+        };
+        const repaired = manager.getAITools();
+        expect(repaired.tool_server_unsupported_tool).toBeDefined();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+      });
+
+      it("drops superseded catalog revisions", () => {
+        const firstCatalog = [makeTool("old_tool")];
+        const connection = makeConnection(firstCatalog);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const first = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        connection.tools = [makeTool("new_tool")];
+        const second = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+        expect(second.tool_server_new_tool).toBeDefined();
+        expect(second.tool_server_old_tool).toBeUndefined();
+
+        connection.tools = firstCatalog;
+        const revisited = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(6);
+        expect(revisited.tool_server_old_tool.inputSchema).not.toBe(
+          first.tool_server_old_tool.inputSchema
+        );
+      });
+
+      it("recompiles for a replacement connection and routes existing closures through the current mapping", async () => {
+        const catalog = [makeTool("route_tool")];
+        const oldConnection = makeConnection(catalog);
+        manager.mcpConnections.server = oldConnection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const first = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        const currentConnection = makeConnection(catalog);
+        manager.mcpConnections.server = currentConnection;
+        manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        await first.tool_server_route_tool.execute({ value: "current" });
+        expect(oldConnection.client.callTool).not.toHaveBeenCalled();
+        expect(currentConnection.client.callTool).toHaveBeenCalledWith(
+          { name: "route_tool", arguments: { value: "current" } },
+          undefined,
+          undefined
+        );
+      });
+
+      it("reuses server-independent schemas after a server id rename", async () => {
+        const connection = makeConnection([makeTool("renamed_tool")]);
+        manager.mcpConnections["old-server"] = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const beforeRename = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        await manager.migrateServerId(
+          "old-server",
+          "new-server",
+          "test-client"
+        );
+        const afterRename = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        const oldKey = "tool_oldserver_renamed_tool";
+        const newKey = "tool_newserver_renamed_tool";
+        expect(afterRename[oldKey]).toBeUndefined();
+        expect(afterRename[newKey].inputSchema).toBe(
+          beforeRename[oldKey].inputSchema
+        );
+
+        await afterRename[newKey].execute({ value: "renamed" });
+        expect(connection.client.callTool).toHaveBeenCalledWith(
+          { name: "renamed_tool", arguments: { value: "renamed" } },
+          undefined,
+          undefined
+        );
+      });
     });
 
     describe("MCPServerFilter", () => {
@@ -2964,7 +3444,7 @@ describe("MCPClientManager OAuth Integration", () => {
           const key = toolKey("server-1", "create_charge");
           const result = await tools[key].execute!(
             { input: "test" },
-            {} as ToolCallOptions
+            {} as ToolExecutionOptions<unknown>
           );
 
           expect(result).toBeDefined();
@@ -4457,6 +4937,170 @@ describe("MCPClientManager OAuth Integration", () => {
       resolveNew();
       await waitPromise;
       expect(waited).toBe(true);
+    });
+  });
+
+  describe("connection recovery regressions", () => {
+    function storeServer(id: string, maxAttempts = 3) {
+      saveServerToMock({
+        id,
+        name: "Test Server",
+        server_url: "http://example.com/mcp",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: null,
+        server_options: JSON.stringify({
+          retry: { maxAttempts, baseDelayMs: 1, maxDelayMs: 2 },
+          transport: { type: "streamable-http" }
+        })
+      });
+    }
+
+    async function restore() {
+      await manager.restoreConnectionsFromStorage("test-agent");
+      await manager.waitForConnections();
+    }
+
+    it("retries resolved connection failures during restore", async () => {
+      storeServer("retry-restore");
+      const connect = vi
+        .spyOn(manager, "connectToServer")
+        .mockResolvedValueOnce({ state: "failed", error: "transient" })
+        .mockResolvedValueOnce({ state: "failed", error: "transient" })
+        .mockResolvedValueOnce({ state: "connected" });
+      const discover = vi
+        .spyOn(manager, "discoverIfConnected")
+        .mockResolvedValue({ success: true, state: "ready" });
+
+      await restore();
+
+      expect(connect).toHaveBeenCalledTimes(3);
+      expect(discover).toHaveBeenCalledWith("retry-restore");
+    });
+
+    it("stops after the configured retry budget", async () => {
+      storeServer("retry-exhausted", 2);
+      const connect = vi
+        .spyOn(manager, "connectToServer")
+        .mockResolvedValue({ state: "failed", error: "offline" });
+
+      await restore();
+
+      expect(connect).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not retry a connection waiting for OAuth", async () => {
+      storeServer("retry-oauth");
+      const connect = vi.spyOn(manager, "connectToServer").mockResolvedValue({
+        state: "authenticating",
+        authUrl: "https://example.com/authorize"
+      });
+
+      await restore();
+
+      expect(connect).toHaveBeenCalledOnce();
+    });
+
+    it("uses the same retry budget after OAuth completion", async () => {
+      await manager.registerServer("retry-establish", {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 }
+      });
+      const connection = manager.mcpConnections["retry-establish"];
+      connection.discover = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+        return { success: true };
+      });
+      const connect = vi
+        .spyOn(manager, "connectToServer")
+        .mockResolvedValueOnce({ state: "failed", error: "transient" })
+        .mockResolvedValueOnce({ state: "connected" });
+
+      await manager.establishConnection("retry-establish");
+
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(connection.discover).toHaveBeenCalledOnce();
+    });
+
+    it("finishes restore work before migrating a server id", async () => {
+      storeServer("old-id", 1);
+      const pending = createDeferred<{
+        state: typeof MCPConnectionState.CONNECTED;
+      }>();
+      vi.spyOn(manager, "connectToServer").mockReturnValue(pending.promise);
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      const connection = manager.mcpConnections["old-id"];
+      const discover = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+        return { success: true };
+      });
+      connection.discover = discover;
+
+      const migration = manager.migrateServerId(
+        "old-id",
+        "stable-id",
+        "test-agent"
+      );
+      pending.resolve({ state: "connected" });
+      await migration;
+
+      expect(discover).toHaveBeenCalledOnce();
+      expect(manager.mcpConnections["stable-id"]).toBe(connection);
+      expect(mockStorageData.has("old-id")).toBe(false);
+    });
+
+    it("drains replacement work registered while migration waits", async () => {
+      const first = createDeferred<void>();
+      const second = createDeferred<void>();
+      manager.trackConnection("old-id", first.promise);
+
+      let migrated = false;
+      const migration = manager
+        .migrateServerId("old-id", "stable-id", "test-agent")
+        .then(() => {
+          migrated = true;
+        });
+      manager.trackConnection("old-id", second.promise);
+      first.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(migrated).toBe(false);
+
+      second.resolve();
+      await migration;
+      expect(migrated).toBe(true);
+    });
+
+    it("closes a connection replaced through connect() and clears its session", async () => {
+      await manager.registerServer("replace", {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        transport: {
+          type: "streamable-http",
+          sessionId: "old-session"
+        }
+      });
+      const replaced = manager.mcpConnections.replace;
+      replaced.close = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        success: true,
+        state: "ready"
+      });
+
+      await manager.connect("http://example.com/mcp", {
+        reconnect: { id: "replace" }
+      });
+
+      expect(replaced.close).toHaveBeenCalledOnce();
+      expect(manager.mcpConnections.replace).not.toBe(replaced);
+      const options = JSON.parse(
+        mockStorageData.get("replace")?.server_options ?? "{}"
+      );
+      expect(options.transport.sessionId).toBeUndefined();
     });
   });
 

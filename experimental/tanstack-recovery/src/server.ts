@@ -9,7 +9,7 @@
  * @internal Validation fixture, not a published package.
  */
 import { getAgentByName, routeAgentRequest } from "agents";
-import { TanStackAgent, type Env } from "./tanstack-agent";
+import { TanStackAgent } from "./tanstack-agent";
 
 export { TanStackAgent };
 

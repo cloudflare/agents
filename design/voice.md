@@ -310,6 +310,8 @@ Callbacks fire during the session:
 
 Session is created at `start_call` and lives for the entire call. All audio is fed continuously — no pre-roll needed since there is no gap between speech onset and session creation. The model handles turn detection (Flux `EndOfTurn`, Nova 3 `speech_final` + endpointing). On interrupt, the LLM+TTS pipeline is aborted but the transcriber session stays alive. On `end_call` or disconnect, `session.close()` releases resources.
 
+`TranscriberSession` may implement `waitUntilReady()`. `withVoice()` waits for that optional readiness signal before sending `listening` or running `onCallStart()`, and reports a visible startup error if readiness rejects. This sequencing is currently implemented by `WorkersAIFluxSTT`; `withVoiceInput()` and Nova 3 readiness are intentionally left for a follow-up.
+
 ### Interaction with VAD
 
 VAD still runs on end-of-speech. If VAD rejects, the session stays alive. The VAD retry timer ensures eventual processing.

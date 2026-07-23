@@ -1,5 +1,17 @@
 # @cloudflare/shell
 
+## 0.4.3
+
+### Patch Changes
+
+- [#1977](https://github.com/cloudflare/agents/pull/1977) [`412702e`](https://github.com/cloudflare/agents/commit/412702ebea68b5756ca0ddc766d1112c2b06ab13) Thanks [@cjol](https://github.com/cjol)! - Require `@cloudflare/codemode` 0.5.0 or newer.
+
+## 0.4.2
+
+### Patch Changes
+
+- [#1716](https://github.com/cloudflare/agents/pull/1716) [`8ecdb61`](https://github.com/cloudflare/agents/commit/8ecdb618ada65fa393367374ea8b852d52bc92b5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - fix(shell): replace LIKE pattern matching with primary-key range scans in `Workspace.rm({ recursive: true })` and the `glob` prefilter. D1 can reject the previous `LIKE ? ESCAPE ?` queries with `D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR`; the range predicate (`path >= '{dir}/' AND path < '{dir}0'`) avoids that limit, scans the `path` index directly, and needs no escaping of `%`/`_` in path names.
+
 ## 0.4.1
 
 ### Patch Changes

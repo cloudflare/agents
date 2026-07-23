@@ -437,6 +437,21 @@ export class TestScheduleAgent extends Agent {
     return { threw, remaining: rows[0].count };
   }
 
+  // Current durable memory-limit strike count (#1825), for asserting the
+  // breaker counts CONSECUTIVE resets (a clean alarm must reset it).
+  async getAlarmStrikesForTest(): Promise<number> {
+    return (
+      (await this.ctx.storage.get<number>("cf_agents:oom_alarm_strikes")) ?? 0
+    );
+  }
+
+  // Drive a clean alarm (no due throwing row) so `_cf_runAlarmBody` completes
+  // successfully and the strike counter is cleared.
+  async runCleanAlarmForTest(): Promise<void> {
+    this._platformErrorForTest = "";
+    await this.alarm();
+  }
+
   // --- Exhaustion-defer (platform-transient) test helpers (#1730) ---
 
   private _errorSequenceForTest: Array<{

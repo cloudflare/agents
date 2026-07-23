@@ -1,0 +1,61 @@
+name: AI SDK compat
+
+# `@cloudflare/think` (and the packages it builds on) declare an
+# `ai@^6 || ^7` peer range. This matrix installs and exercises each AI SDK
+# major so neither can silently regress: a single installed `ai` version
+# resolves across `agents`, `@cloudflare/ai-chat`, `@cloudflare/codemode`, and
+# `@cloudflare/think`, then Think is type-checked and its workers tests run.
+
+on:
+  pull_request:
+    paths:
+      - "packages/agents/**"
+      - "packages/ai-chat/**"
+      - "packages/codemode/**"
+      - "packages/think/**"
+      - "scripts/use-ai-sdk-major.mjs"
+      - ".github/workflows/ai-sdk-compat.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NX_PARALLEL: "2"
+
+jobs:
+  think-compat:
+    name: think (ai@${{ matrix.ai-major }})
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ai-major: ["6", "7"]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: tree:0
+
+      - uses: ./.github/actions/install
+
+      # Build Think and its workspace dependencies against the installed
+      # (lockfile / v7) AI SDK, mirroring the published dist that consumers
+      # actually resolve against their own `ai`.
+      - run: pnpm exec nx run @cloudflare/think:build
+
+      # For the v6 leg, repin the AI SDK deps to v6 and re-resolve so a single
+      # `ai@6` is shared across the workspace packages, then re-run against the
+      # already-built (v7) dist — the real consumer-on-v6 scenario.
+      - name: Pin AI SDK to v6
+        if: matrix.ai-major == '6'
+        run: |
+          node scripts/use-ai-sdk-major.mjs 6
+          pnpm install --no-frozen-lockfile
+
+      - name: Typecheck @cloudflare/think
+        run: cd packages/think && pnpm exec tsc --noEmit -p tsconfig.json
+
+      - name: Test @cloudflare/think (workers)
+        run: cd packages/think && pnpm run test:workers

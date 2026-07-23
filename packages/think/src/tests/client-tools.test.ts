@@ -2695,7 +2695,7 @@ describe("resume coordination during pending continuation", () => {
     await closeWS(ws);
   });
 
-  it("sends STREAM_RESUME_NONE to non-initiating connections during active continuation", async () => {
+  it("correlates idle STREAM_RESUME_NONE after a continuation completes", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws: ws1 } = await connectWS(room);
@@ -2751,10 +2751,19 @@ describe("resume coordination during pending continuation", () => {
     await delay(100);
 
     const nonePromise = waitForMessageOfType(ws2, MSG_STREAM_RESUME_NONE, 3000);
-    ws2.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+    ws2.send(
+      JSON.stringify({
+        type: MSG_STREAM_RESUME_REQUEST,
+        probeId: "probe-idle-continuation"
+      })
+    );
 
     const noneMsg = await nonePromise;
-    expect(noneMsg.type).toBe(MSG_STREAM_RESUME_NONE);
+    expect(noneMsg).toMatchObject({
+      type: MSG_STREAM_RESUME_NONE,
+      reason: "idle",
+      probeId: "probe-idle-continuation"
+    });
 
     await closeWS(ws1);
     await closeWS(ws2);

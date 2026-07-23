@@ -17,29 +17,28 @@
     "check": "npm run format:check && npm run lint && npm run typecheck"
   },
   "dependencies": {
-    "@ai-sdk/react": "^3.0.204",
+    "@ai-sdk/react": "^4.0.0",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/think": "workspace:*",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "agents": "workspace:*",
-    "ai": "^6.0.202",
+    "ai": "^7.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",
-    "workers-ai-provider": "^3.2.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.42.3",
-    "@cloudflare/workers-types": "^4.20260625.1",
+    "@cloudflare/workers-types": "^4.20260629.1",
     "@tailwindcss/vite": "^4",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "oxfmt": "^0.56.0",
     "oxlint": "^1.71.0",
-    "tailwindcss": "^4.3.1",
+    "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
     "wrangler": "^4.105.0"
