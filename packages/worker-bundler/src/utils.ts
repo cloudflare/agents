@@ -21,6 +21,7 @@ export const DEFAULT_ENTRY_POINTS = [
   "src/index.mjs",
   "index.ts",
   "index.js",
+  "index.py",
   "src/worker.ts",
   "src/worker.js"
 ] as const;
