@@ -4,12 +4,6 @@ import {
   defaultContextOverflowClassifier,
   type Session
 } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
-
-type Env = {
-  AI: Ai;
-  ContextOverflowAgent: DurableObjectNamespace<ContextOverflowAgent>;
-};
 
 type CompactionEntry = {
   at: number;
@@ -48,10 +42,7 @@ export class ContextOverflowAgent extends Think<Env> {
   override classifyChatError = defaultContextOverflowClassifier;
 
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/meta/llama-3.1-8b-instruct",
-      { sessionAffinity: this.sessionAffinity }
-    );
+    return "@cf/meta/llama-3.1-8b-instruct";
   }
 
   getSystemPrompt() {

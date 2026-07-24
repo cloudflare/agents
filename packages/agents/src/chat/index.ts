@@ -193,6 +193,7 @@ export {
 export {
   resolveChatRecoveryConfig,
   sweepStaleChatRecoveryIncidents,
+  listActiveChatRecoveryIncidents,
   classifyAgentToolChildRecovery,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
@@ -211,6 +212,7 @@ export {
   CHAT_LAST_TERMINAL_KEY,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_MAX_WORK,
+  DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
   DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS,
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,

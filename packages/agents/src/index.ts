@@ -44,12 +44,15 @@ import {
   type RetryOptions,
   tryN,
   isDurableObjectCodeUpdateReset,
+  isDurableObjectMemoryLimitReset,
   isErrorRetryable,
   isPlatformTransientError,
   validateRetryOptions
 } from "./retries";
 export {
   isDurableObjectCodeUpdateReset,
+  isDurableObjectMemoryLimitReset,
+  isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
 import {
@@ -1318,7 +1321,16 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
    */
   agentToolReattachMaxWindowMs: DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,
   detachedMaxBudgetMs: DEFAULT_DETACHED_MAX_BUDGET_MS,
-  detachedNoProgressBudgetMs: DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS
+  detachedNoProgressBudgetMs: DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS,
+  /**
+   * Consecutive alarm invocations that may end in a Durable Object memory-limit
+   * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
+   * circuit breaker stops the platform's auto-retry loop and seals the looping
+   * work (#1825). A small budget tolerates a genuinely transient memory spike;
+   * a deterministic OOM (the work's footprint, not the platform, is the cause)
+   * is bounded here regardless of whether the in-DO recovery budgets could run.
+   */
+  maxAlarmMemoryLimitStrikes: 3
 };
 
 /**
@@ -1337,6 +1349,7 @@ interface ResolvedAgentOptions {
   agentToolReattachMaxWindowMs: number;
   detachedMaxBudgetMs: number;
   detachedNoProgressBudgetMs: number;
+  maxAlarmMemoryLimitStrikes: number;
 }
 
 /**
@@ -1425,6 +1438,20 @@ export interface AgentStaticOptions {
    * `detached: { noProgressBudgetMs }`.
    */
   detachedNoProgressBudgetMs?: number;
+  /**
+   * Consecutive alarm invocations that may end in a Durable Object memory-limit
+   * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
+   * circuit breaker stops the platform's auto-retry loop and seals the looping
+   * recovery work (#1825). Default: 3. Set to `0` to seal on the first such
+   * reset. This is the universal backstop for the case where the in-DO recovery
+   * budgets (`chatRecovery.maxOomRetries` / `maxRecoveryWork`) can't engage
+   * because the OOM bypasses them — e.g. it is thrown before the budget code
+   * runs, or its own writes also OOM. The boundary handler runs at the outermost
+   * alarm frame, after the heavy turn has unwound and GC has reclaimed its
+   * footprint, so its small seal/purge writes can land where mid-turn writes
+   * could not.
+   */
+  maxAlarmMemoryLimitStrikes?: number;
 }
 
 /**
@@ -1797,7 +1824,10 @@ export class Agent<
         DEFAULT_AGENT_STATIC_OPTIONS.detachedMaxBudgetMs,
       detachedNoProgressBudgetMs:
         ctor.options?.detachedNoProgressBudgetMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.detachedNoProgressBudgetMs
+        DEFAULT_AGENT_STATIC_OPTIONS.detachedNoProgressBudgetMs,
+      maxAlarmMemoryLimitStrikes:
+        ctor.options?.maxAlarmMemoryLimitStrikes ??
+        DEFAULT_AGENT_STATIC_OPTIONS.maxAlarmMemoryLimitStrikes
     };
     return this._cachedOptions;
   }
@@ -2610,6 +2640,10 @@ export class Agent<
           }
 
           await this._tryCatch(async () => {
+            // Restore MCP connections before fiber/chat recovery so recovered
+            // turns see MCP tools. Restored connections re-advertise the
+            // capabilities persisted from the previous session; the handlers
+            // behind them attach when onStart() configures them.
             await this.mcp.restoreConnectionsFromStorage(this.name);
             await this._restoreRpcMcpServers();
             this.broadcastMcpServers();
@@ -6152,6 +6186,15 @@ export class Agent<
           isOneShotSchedule && isDurableObjectCodeUpdateReset(error);
         const shouldDeferOnExhaustion = (error: unknown): boolean =>
           isOneShotSchedule && isPlatformTransientError(error);
+        // A memory-limit reset is re-thrown (not swallowed) so the one-shot row
+        // is preserved and the error reaches the alarm-boundary circuit breaker
+        // (#1825), which bounds it: it tolerates a few strikes (a transient
+        // spike may clear on a fresh isolate) and then seals + purges the
+        // looping row. Deferral is only SAFE because that breaker bounds it —
+        // re-running a deterministic OOM forever is exactly what we must avoid,
+        // and without the breaker this would amplify the loop (see retries.ts).
+        const shouldDeferMemoryLimit = (error: unknown): boolean =>
+          isOneShotSchedule && isDurableObjectMemoryLimitReset(error);
 
         try {
           this._emit("schedule:execute", {
@@ -6193,6 +6236,12 @@ export class Agent<
           if (shouldDeferOnExhaustion(e)) {
             console.warn(
               `Deferring scheduled callback "${row.callback}" after exhausting in-process retries on a transient platform error; the one-shot row is preserved and the alarm will re-run once the platform recovers.`
+            );
+            throw e;
+          }
+          if (shouldDeferMemoryLimit(e)) {
+            console.warn(
+              `Deferring scheduled callback "${row.callback}" to the alarm memory-limit circuit breaker after a Durable Object memory-limit reset; the one-shot row is preserved so the breaker can bound the retry loop and seal it (#1825).`
             );
             throw e;
           }
@@ -6395,6 +6444,32 @@ export class Agent<
       return;
     }
 
+    // Outermost alarm frame: a Durable Object memory-limit reset (#1825) that
+    // propagates here would otherwise be re-thrown to the platform, which
+    // auto-retries the alarm forever — the OOM crash loop. Intercept ONLY that
+    // class (everything else re-throws, unchanged) and break the loop from the
+    // boundary, where the heavy turn has unwound and GC has reclaimed its
+    // footprint, so the seal/purge writes can land where mid-turn ones OOMed.
+    try {
+      await this._cf_runAlarmBody();
+      // A clean alarm clears the strike counter so the breaker bounds
+      // CONSECUTIVE memory-limit resets, not lifetime ones (#1825). Without
+      // this a Durable Object that hits rare, non-consecutive transient
+      // spikes (e.g. one a month) would eventually reach the strike budget
+      // and wrongly seal healthy recovery work.
+      await this._cf_clearAlarmMemoryLimitStrikes();
+    } catch (error) {
+      if (!isDurableObjectMemoryLimitReset(error)) throw error;
+      await this._cf_handleAlarmMemoryLimitReset(error);
+    }
+  }
+
+  /**
+   * The alarm body: PartyServer init + due-schedule processing + housekeeping +
+   * next-alarm arm. Extracted from {@link alarm} so the memory-limit circuit
+   * breaker can wrap it at the outermost frame (see {@link alarm}).
+   */
+  private async _cf_runAlarmBody() {
     // Ensure PartyServer initialization (name resolution, onStart) runs
     // before processing any scheduled tasks.
     await super.alarm();
@@ -6502,7 +6577,13 @@ export class Agent<
             continue;
           }
         } else {
+          // Record the row id so the alarm-boundary circuit breaker can purge
+          // the exact looping row if this callback ends in a memory-limit reset
+          // (#1825). Cleared only on success; on a throw it propagates with the
+          // id still set, and the breaker clears it.
+          this._cf_executingScheduleRowId = row.id;
           await this._executeScheduleCallback(row);
+          this._cf_executingScheduleRowId = undefined;
           executed = true;
         }
 
@@ -6539,6 +6620,176 @@ export class Agent<
 
     // Schedule the next alarm
     await this._scheduleNextAlarm();
+  }
+
+  /**
+   * Durable storage key for the alarm memory-limit strike counter (#1825).
+   */
+  private static readonly _CF_OOM_ALARM_STRIKES_KEY =
+    "cf_agents:oom_alarm_strikes";
+
+  /**
+   * The schedule row id currently executing in the alarm loop, so the
+   * memory-limit circuit breaker can purge the exact looping row (#1825).
+   * `undefined` outside a callback (e.g. an OOM from `super.alarm()`/onStart).
+   */
+  private _cf_executingScheduleRowId?: string;
+
+  /**
+   * The schedule-callback names whose alarm rows drive a recovery loop that can
+   * deterministically OOM. The base agent has none; chat hosts (`Think`,
+   * `AIChatAgent`) override this to return their recovery continuation callbacks
+   * so the circuit breaker can surgically back them off / purge them WITHOUT
+   * disturbing unrelated scheduled tasks. See {@link _cf_handleAlarmMemoryLimitReset}.
+   */
+  protected _cf_recoveryAlarmCallbacks(): string[] {
+    return [];
+  }
+
+  /**
+   * Hook for a host to terminalize ("seal") any in-flight recovery work as an
+   * out-of-memory exhaustion when the alarm circuit breaker trips at its strike
+   * budget (#1825). Runs at the outermost alarm frame (post-unwind, so writes
+   * can land). Default: no-op. Chat hosts override to fire `onExhausted` + the
+   * terminal banner and persist the sealed incident.
+   */
+  protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {}
+
+  /**
+   * Clear the durable memory-limit strike counter after a clean alarm so the
+   * circuit breaker counts CONSECUTIVE resets rather than lifetime ones
+   * (#1825). Reads first (cheap, usually cached) and only writes when a strike
+   * is actually recorded, so the common no-strike path costs no write.
+   * Best-effort: a stale strike only costs one extra tolerated spike later.
+   */
+  private async _cf_clearAlarmMemoryLimitStrikes(): Promise<void> {
+    try {
+      const prior = await this.ctx.storage.get<number>(
+        Agent._CF_OOM_ALARM_STRIKES_KEY
+      );
+      if (typeof prior === "number" && prior > 0) {
+        await this.ctx.storage.delete(Agent._CF_OOM_ALARM_STRIKES_KEY);
+      }
+    } catch {
+      // best-effort: a leftover strike is harmless beyond one extra tolerated spike
+    }
+  }
+
+  /**
+   * Alarm-boundary circuit breaker for Durable Object memory-limit resets
+   * (#1825). The in-DO recovery budgets (`chatRecovery.maxOomRetries` /
+   * `maxRecoveryWork`) only engage if their code runs AND its writes land; a
+   * severe OOM can defeat both — thrown before the budget runs (boot hydration),
+   * or its own small writes also OOM under memory pressure. In that case the
+   * error reaches {@link alarm} and, unhandled, the platform auto-retries the
+   * alarm indefinitely (re-running the doomed, billable turn each cycle).
+   *
+   * This runs at the OUTERMOST frame: the heavy turn has unwound and GC has
+   * reclaimed its footprint, so the small writes here can land where mid-turn
+   * ones (e.g. give-up's incident read) OOMed. A durable strike counter tolerates
+   * a few resets (a transient spike may clear), backing off the recovery rows so
+   * the retry is not a hot loop. At the `maxAlarmMemoryLimitStrikes` budget it
+   * seals the recovery work and purges the looping rows so the loop — and the
+   * bill — stops. Each step is best-effort: even these tiny writes can OOM, but
+   * swallowing (not re-throwing) still halts the platform's auto-retry, and a
+   * later wake re-arms legitimate schedules.
+   */
+  private async _cf_handleAlarmMemoryLimitReset(error: unknown): Promise<void> {
+    const key = Agent._CF_OOM_ALARM_STRIKES_KEY;
+    let strikes = 1;
+    try {
+      const prior = await this.ctx.storage.get<number>(key);
+      strikes = (typeof prior === "number" ? prior : 0) + 1;
+      await this.ctx.storage.put(key, strikes);
+    } catch {
+      // Even the strike write OOMed; proceed treating this as a strike so the
+      // breaker still progresses toward sealing rather than deadlocking.
+    }
+
+    const limit = this._resolvedOptions.maxAlarmMemoryLimitStrikes;
+    const sealed = strikes >= limit;
+    const recoveryCallbacks = this._cf_recoveryAlarmCallbacks();
+    const executingRowId = this._cf_executingScheduleRowId;
+    this._cf_executingScheduleRowId = undefined;
+
+    console.error(
+      `Alarm hit a Durable Object memory-limit reset (strike ${strikes}/${limit}` +
+        `${sealed ? ", sealing recovery" : ", will retry with backoff"}). ` +
+        "Breaking the platform alarm-retry loop (#1825).",
+      error instanceof Error ? error.message : String(error)
+    );
+
+    if (sealed) {
+      // Surgical purge: remove ONLY the looping rows (the recovery callbacks and
+      // the exact row that was executing) so they stop re-triggering; unrelated
+      // scheduled tasks survive.
+      for (const cb of recoveryCallbacks) {
+        try {
+          this.sql`DELETE FROM cf_agents_schedules WHERE callback = ${cb}`;
+        } catch {
+          // best-effort
+        }
+      }
+      if (executingRowId) {
+        try {
+          this
+            .sql`DELETE FROM cf_agents_schedules WHERE id = ${executingRowId}`;
+        } catch {
+          // best-effort
+        }
+      }
+      try {
+        await this._cf_sealMemoryLimitedRecovery();
+      } catch {
+        // best-effort terminalization; the purge above already broke the loop.
+      }
+      try {
+        await this.ctx.storage.delete(key);
+      } catch {
+        // best-effort counter reset
+      }
+    } else {
+      // Under budget: delay the looping rows so the next attempt runs on a fresh
+      // isolate after a backoff rather than immediately re-OOMing in a hot loop.
+      // A genuinely transient spike can clear in the meantime.
+      const backoffSeconds = Math.min(300, 30 * strikes);
+      const nextTime = Math.floor(Date.now() / 1000) + backoffSeconds;
+      for (const cb of recoveryCallbacks) {
+        try {
+          this
+            .sql`UPDATE cf_agents_schedules SET time = ${nextTime} WHERE callback = ${cb} AND time <= ${nextTime}`;
+        } catch {
+          // best-effort
+        }
+      }
+      if (executingRowId) {
+        try {
+          this
+            .sql`UPDATE cf_agents_schedules SET time = ${nextTime} WHERE id = ${executingRowId} AND time <= ${nextTime}`;
+        } catch {
+          // best-effort
+        }
+      }
+    }
+
+    try {
+      this._emit("alarm:memory_limit_reset", {
+        strikes,
+        limit,
+        sealed,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } catch {
+      // event emission is non-critical
+    }
+
+    // Re-arm so non-recovery schedules continue. Wrapped because it can itself
+    // OOM; if it does, the next external wake re-arms.
+    try {
+      await this._scheduleNextAlarm();
+    } catch {
+      // best-effort
+    }
   }
 
   // ── Sub-agent routing (external addressability for facets) ──────────────
@@ -12013,15 +12264,51 @@ export class Agent<
 
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
-      if (
-        conn.connectionState === MCPConnectionState.AUTHENTICATING &&
-        conn.options.transport.authProvider?.authUrl
-      ) {
-        return {
-          id: existingServer.id,
-          state: MCPConnectionState.AUTHENTICATING,
-          authUrl: conn.options.transport.authProvider.authUrl
-        };
+      if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
+        const liveAuthUrl = conn.options.transport.authProvider?.authUrl;
+        const authUrl =
+          liveAuthUrl ||
+          (this._isAbsoluteHttpUrl(existingServer.auth_url)
+            ? existingServer.auth_url
+            : undefined);
+        if (authUrl) {
+          return {
+            id: existingServer.id,
+            state: MCPConnectionState.AUTHENTICATING,
+            authUrl
+          };
+        }
+
+        const reconnectResult = await this.mcp.connectToServer(
+          existingServer.id
+        );
+        if (reconnectResult.state === MCPConnectionState.AUTHENTICATING) {
+          if (!reconnectResult.authUrl) {
+            throw new Error("OAuth configuration incomplete: missing authUrl");
+          }
+          return {
+            id: existingServer.id,
+            state: reconnectResult.state,
+            authUrl: reconnectResult.authUrl
+          };
+        }
+        if (reconnectResult.state === MCPConnectionState.CONNECTED) {
+          const discoverResult = await this.mcp.discoverIfConnected(
+            existingServer.id
+          );
+          if (!discoverResult?.success) {
+            throw new Error(
+              `Failed to discover MCP server capabilities: ${discoverResult?.error ?? "connection not found"}`
+            );
+          }
+          return {
+            id: existingServer.id,
+            state: MCPConnectionState.READY
+          };
+        }
+        throw new Error(
+          `Failed to connect to MCP server at ${normalizedUrl}: ${reconnectResult.error}`
+        );
       }
       if (conn.connectionState === MCPConnectionState.FAILED) {
         throw new Error(
@@ -12156,7 +12443,7 @@ export class Agent<
         : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
     }
 
-    const id = requestedId ?? nanoid(8);
+    const id = requestedId ?? existingServer?.id ?? nanoid(8);
 
     // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
     let authProvider:
@@ -12233,6 +12520,18 @@ export class Agent<
     }
 
     return { id, state: MCPConnectionState.READY };
+  }
+
+  private _isAbsoluteHttpUrl(
+    value: string | null | undefined
+  ): value is string {
+    if (!value) return false;
+    try {
+      const url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+      return false;
+    }
   }
 
   async removeMcpServer(id: string) {

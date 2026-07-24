@@ -7,7 +7,7 @@
  */
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "./worker";
 
 // --- Helpers ---
@@ -70,6 +70,48 @@ function waitForType(ws: WebSocket, type: string) {
       m !== null &&
       (m as Record<string, unknown>).type === type
   );
+}
+
+async function waitForAck(ws: WebSocket, command: string): Promise<void> {
+  await waitForMessageMatching(
+    ws,
+    (m) =>
+      typeof m === "object" &&
+      m !== null &&
+      (m as Record<string, unknown>).type === "_ack" &&
+      (m as Record<string, unknown>).command === command
+  );
+}
+
+function collectMessagesUntil(
+  ws: WebSocket,
+  predicate: (msg: Record<string, unknown>) => boolean,
+  timeout = 5000
+): Promise<Record<string, unknown>[]> {
+  return new Promise((resolve, reject) => {
+    const messages: Record<string, unknown>[] = [];
+    const timer = setTimeout(
+      () => reject(new Error("Timeout collecting messages")),
+      timeout
+    );
+    const handler = (e: MessageEvent) => {
+      if (typeof e.data !== "string") return;
+
+      const msg = JSON.parse(e.data) as Record<string, unknown>;
+      messages.push(msg);
+      if (predicate(msg)) {
+        clearTimeout(timer);
+        ws.removeEventListener("message", handler);
+        resolve(messages);
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
+}
+
+async function waitForMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 let instanceCounter = 0;
@@ -235,17 +277,91 @@ describe("VoiceInput — continuous STT pipeline", () => {
 });
 
 describe("VoiceInput — beforeCallStart rejection", () => {
-  it("does not start call when beforeCallStart returns false", async () => {
+  it("returns an error and idle when beforeCallStart returns false", async () => {
     const { ws } = await connectWS(
       uniquePath("test-reject-call-voice-input-agent")
     );
     await waitForStatus(ws, "idle");
 
+    const errorPromise = waitForType(ws, "error");
+    const idlePromise = waitForStatus(ws, "idle");
     sendJSON(ws, { type: "start_call" });
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await errorPromise).toEqual({
+      type: "error",
+      message: "Voice call was rejected"
+    });
+    expect(await idlePromise).toEqual({ type: "status", status: "idle" });
 
     ws.close();
+  });
+
+  it("ignores stale startup after end_call while beforeCallStart is pending", async () => {
+    const { ws } = await connectWS(uniquePath("test-voice-input-agent"));
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "_set_before_call_start", value: "pending" });
+    await waitForAck(ws, "_set_before_call_start");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForType(ws, "_startup_pending");
+
+    sendJSON(ws, { type: "end_call" });
+    await waitForStatus(ws, "idle");
+
+    const afterEnd = collectMessagesUntil(ws, (msg) => msg.type === "_state");
+    sendJSON(ws, { type: "_resolve_before_call_start", value: true });
+    sendJSON(ws, { type: "_get_state" });
+    const afterEndMessages = await afterEnd;
+
+    expect(afterEndMessages).not.toContainEqual({
+      type: "status",
+      status: "listening"
+    });
+    expect(afterEndMessages.some((msg) => msg.type === "error")).toBe(false);
+    expect(afterEndMessages.at(-1)).toMatchObject({
+      type: "_state",
+      callStart: 0,
+      callEnd: 1
+    });
+
+    ws.close();
+  });
+
+  it("does not treat onCallStart exceptions as startup failures", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath("test-voice-input-agent"));
+    try {
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, { type: "_set_on_call_start_throw", value: true });
+      await waitForAck(ws, "_set_on_call_start_throw");
+
+      const startupMessages = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "_state"
+      );
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+      await waitForMicrotasks();
+      sendJSON(ws, { type: "_get_state" });
+      const messages = await startupMessages;
+
+      expect(messages).toContainEqual({
+        type: "status",
+        status: "listening"
+      });
+      expect(messages.some((msg) => msg.type === "error")).toBe(false);
+      expect(messages).not.toContainEqual({ type: "status", status: "idle" });
+      expect(messages.at(-1)).toMatchObject({
+        type: "_state",
+        callStart: 1,
+        callEnd: 0
+      });
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
   });
 });
 

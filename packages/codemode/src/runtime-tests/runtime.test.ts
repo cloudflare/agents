@@ -142,6 +142,45 @@ describe("codemode durable runtime (e2e)", () => {
     expect((await h.sideEffects()).created).toEqual([{ title: "hello" }]);
   });
 
+  it("echoes the tool-call log on the output across pause and completion", async () => {
+    const h = host();
+    const code = `async () => {
+      const before = await items.list_items();
+      const created = await items.create_item({ title: "logged" });
+      return { beforeCount: before.length, created };
+    }`;
+    const first = (await h.run(code)) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // The paused output carries the log so far: the applied read and the
+    // pending approval-gated action, with args and states.
+    expect(first.calls).toHaveLength(2);
+    expect(first.calls?.[0]).toMatchObject({
+      connector: "items",
+      method: "list_items",
+      requiresApproval: false,
+      state: "applied"
+    });
+    expect(first.calls?.[1]).toMatchObject({
+      connector: "items",
+      method: "create_item",
+      args: { title: "logged" },
+      requiresApproval: true,
+      state: "pending"
+    });
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    if (resumed.status !== "completed") return;
+    expect(resumed.calls).toHaveLength(2);
+    expect(resumed.calls?.[1]).toMatchObject({
+      method: "create_item",
+      state: "applied",
+      result: { id: 1, title: "logged" }
+    });
+  });
+
   it("replays prior reads from the log instead of re-executing them", async () => {
     const h = host();
     // A read before the approval pause. On resume the read must NOT run again.

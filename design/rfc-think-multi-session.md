@@ -466,7 +466,7 @@ These are features we explicitly decided not to build in v1 to keep the surface 
 
 ## Open questions
 
-- **`Chats` in `@cloudflare/think` vs a new `@cloudflare/chats`.** I lean Think: chat vocabulary is baked into the RPC shapes (titles, previews). Easier DX in one package.
+- **`Chats` in `@cloudflare/think` vs a new `@cloudflare/chats` vs _don't ship a base class at all_.** A third option surfaced while designing [`rfc-coding-agent.md`](./rfc-coding-agent.md) and is now the leaning answer: **don't ship a `Chats` base class.** The directory CRUD is ~40 lines of userland, and the fixed `chats_index` / `ChatSummary` schema is the part people outgrow immediately — any domain (coding sessions wanting `repo`/`branch`/`status`/`lastDiff`, support tickets, etc.) needs its own columns. Ship the load-bearing primitives instead (`subAgent` + Props, `parentAgent()`/`parentPath`, `RemoteContextProvider`/`RemoteSearchProvider`), optionally a thin `useChildAgent`-style client hook over `useAgent({ sub })` (the one correctness-sensitive piece), and cover the directory itself with examples. This keeps the rigid-schema liability out of the package while still shipping the genuinely-hard bits.
 - **Should shared-context writes go through a lock?** Answer (in v1): no — DO is single-threaded, and we document `appendSharedContext` as the safe additive primitive. Revisit if we see lost updates in practice.
 - **Should `RemoteContextProvider` live in `agents/` or `think/`?** Leaning `agents/experimental/memory/session/providers` — it's Session-generic and has no Think dependency.
 

@@ -66,10 +66,6 @@ import type {
 import { PiRecoveryCodec, renderAssistantText } from "./pi-codec";
 import { createFauxPiModel, type FauxPiModel } from "./pi-model";
 
-export type Env = {
-  PiAgent: DurableObjectNamespace<PiAgent>;
-};
-
 /**
  * A durable transcript entry: a stable id paired with a real pi message.
  * `partial` flags a reconstructed-but-not-yet-finished assistant message (the

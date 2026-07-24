@@ -22,13 +22,7 @@
 import { getAgentByName, routeAgentRequest } from "agents";
 import { Think } from "@cloudflare/think";
 import { jsonSchema, tool, type ToolSet } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
 import type { ThinkScheduledTasks } from "@cloudflare/think";
-
-type Env = {
-  AI: Ai;
-  OpsApprovalAgent: DurableObjectNamespace<OpsApprovalAgent>;
-};
 
 type OpsState = {
   /**
@@ -60,7 +54,7 @@ export class OpsApprovalAgent extends Think<Env, OpsState> {
   }
 
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(MODEL_ID);
+    return MODEL_ID;
   }
 
   getSystemPrompt() {

@@ -47,8 +47,11 @@ class ItemsConnector extends CodemodeConnector<Env> {
   disposed: Array<{ executionId: string; status: ExecutionEndStatus }> = [];
   // Per-pass lifecycle — onPassEnd fires for EVERY pass, including pauses.
   passEnds: Array<{ executionId: string; status: PassEndStatus }> = [];
-  // Counts real executions of the ephemeral read — replays must re-execute.
+  // Counts real executions so forced-eviction tests can distinguish durable
+  // replay from accidentally running a recorded read again.
   ephemeralReads = 0;
+  listItemsExecutions = 0;
+  getBytesExecutions = 0;
 
   name() {
     return "items";
@@ -58,7 +61,10 @@ class ItemsConnector extends CodemodeConnector<Env> {
     return {
       list_items: {
         description: "List all items.",
-        execute: () => [...this.created]
+        execute: () => {
+          this.listItemsExecutions++;
+          return [...this.created];
+        }
       },
       read_counter: {
         // Ephemeral read: result is never stored in the durable log; replay
@@ -71,7 +77,10 @@ class ItemsConnector extends CodemodeConnector<Env> {
         // Binary result — exercises the storage codec roundtrip through the
         // durable log (record on first pass, replay decoded on resume).
         description: "Return binary data.",
-        execute: () => new Uint8Array([1, 2, 3, 4, 5])
+        execute: () => {
+          this.getBytesExecutions++;
+          return new Uint8Array([1, 2, 3, 4, 5]);
+        }
       },
       big_result: {
         description: "Return a result too large for the durable log.",
@@ -263,6 +272,14 @@ export class CodemodeTestHost extends DurableObject<Env> {
 
   passEnds() {
     return this.#items().passEnds;
+  }
+
+  executionCounts() {
+    const connector = this.#items();
+    return {
+      listItems: connector.listItemsExecutions,
+      getBytes: connector.getBytesExecutions
+    };
   }
 
   /**

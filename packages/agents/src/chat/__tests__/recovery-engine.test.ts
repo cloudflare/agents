@@ -830,6 +830,194 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
 });
 
 /**
+ * Layer-2 seam test for `ChatRecoveryEngine.recordOomAndDecide` (#1825) — the
+ * tight OOM-retry budget both packages call when a recovery callback observes a
+ * Durable Object memory-limit reset. Pins: the durable `oomAttempts` bump, the
+ * under-budget delayed non-idempotent reschedule (same machinery as the
+ * stable-timeout reschedule), the over-budget "exhausted" verdict (caller
+ * terminalizes), and the untrackable short-circuits (no id / record gone).
+ */
+describe("ChatRecoveryEngine.recordOomAndDecide (fake adapter)", () => {
+  type ScheduleCall = {
+    callback: ChatRecoveryScheduleCallback;
+    data: Record<string, unknown>;
+    reason: ChatRecoveryScheduleReason;
+    delaySeconds: number;
+  };
+
+  function makeFakeAdapter() {
+    const storage = new Map<string, ChatRecoveryIncident>();
+    const events: ChatRecoveryIncidentEvent[] = [];
+    const recovering: Array<{ active: boolean; requestId?: string }> = [];
+    const schedules: ScheduleCall[] = [];
+
+    const adapter: ChatRecoveryAdapter = {
+      resolveConfig: () => resolveChatRecoveryConfig(undefined),
+      now: () => 4_242,
+      sweepStaleIncidents: () => Promise.resolve(),
+      getIncident: (key) => Promise.resolve(storage.get(key) ?? null),
+      readProgress: () => Promise.resolve(0),
+      isAwaitingClientInteraction: () => false,
+      putIncident: (key, incident) => {
+        storage.set(key, incident);
+        return Promise.resolve();
+      },
+      deleteIncident: (key) => {
+        storage.delete(key);
+        return Promise.resolve();
+      },
+      emitRecoveryEvent: (event) => {
+        events.push(event);
+      },
+      scheduleRecovery: (callback, data, reason, delaySeconds) => {
+        schedules.push({ callback, data, reason, delaySeconds });
+        return Promise.resolve();
+      },
+      setRecovering: (active, requestId) => {
+        recovering.push({ active, requestId });
+        return Promise.resolve();
+      },
+      onShouldKeepRecoveringError: () => {},
+      exhaustChatRecovery: () => Promise.resolve(),
+      resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
+      getPartialStreamText: () => ({
+        text: "",
+        parts: [],
+        hasSettledToolResults: false
+      }),
+      activeChatRecoveryRootRequestId: () => undefined,
+      onGiveUpBookkeepingError: () => {}
+    };
+
+    return { adapter, storage, events, recovering, schedules };
+  }
+
+  function seed(
+    storage: Map<string, ChatRecoveryIncident>,
+    overrides: Partial<ChatRecoveryIncident> = {}
+  ): ChatRecoveryIncident {
+    const incident: ChatRecoveryIncident = {
+      incidentId: "root-1:user-1",
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "attempting",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 1_000,
+      ...overrides
+    };
+    storage.set(chatRecoveryIncidentKey(incident.incidentId), incident);
+    return incident;
+  }
+
+  it("bumps oomAttempts and reschedules a delayed non-idempotent retry while under budget", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const incident = seed(fake.storage); // oomAttempts undefined → first OOM
+
+    const decision = await engine.recordOomAndDecide({
+      incidentId: incident.incidentId,
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: incident.incidentId },
+      maxOomRetries: 3
+    });
+
+    expect(decision).toBe("rescheduled");
+    const stored = fake.storage.get(
+      chatRecoveryIncidentKey(incident.incidentId)
+    );
+    expect(stored).toMatchObject({
+      oomAttempts: 1,
+      status: "scheduled",
+      reason: "oom_retry",
+      lastAttemptAt: 4_242
+    });
+    // The attempt cap is deliberately NOT bumped — OOM has its own budget.
+    expect(stored?.attempt).toBe(1);
+    expect(fake.schedules).toHaveLength(1);
+    expect(fake.schedules[0]).toMatchObject({
+      callback: "_chatRecoveryContinue",
+      reason: "stable_timeout_retry",
+      delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+    });
+    expect(
+      chatRecoverySchedulePolicy(fake.schedules[0].reason).idempotent
+    ).toBe(false);
+  });
+
+  it("returns exhausted (caller terminalizes) once the bump crosses the budget", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    // Already at the budget: this OOM (→ 4) is one past maxOomRetries = 3.
+    const incident = seed(fake.storage, { oomAttempts: 3 });
+
+    const decision = await engine.recordOomAndDecide({
+      incidentId: incident.incidentId,
+      callback: "_chatRecoveryContinue",
+      data: {},
+      maxOomRetries: 3
+    });
+
+    expect(decision).toBe("exhausted");
+    // The crossed count is persisted so the begin-path backstop agrees, but NO
+    // reschedule is enqueued (the caller routes to the give-up path).
+    expect(
+      fake.storage.get(chatRecoveryIncidentKey(incident.incidentId))
+        ?.oomAttempts
+    ).toBe(4);
+    expect(fake.schedules).toHaveLength(0);
+  });
+
+  it("seals on the first OOM when maxOomRetries is 0", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const incident = seed(fake.storage);
+
+    const decision = await engine.recordOomAndDecide({
+      incidentId: incident.incidentId,
+      callback: "_chatRecoveryContinue",
+      data: {},
+      maxOomRetries: 0
+    });
+
+    expect(decision).toBe("exhausted");
+    expect(fake.schedules).toHaveLength(0);
+  });
+
+  it("returns exhausted without scheduling when the incident id is missing", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    const decision = await engine.recordOomAndDecide({
+      incidentId: undefined,
+      callback: "_chatRecoveryContinue",
+      data: {},
+      maxOomRetries: 3
+    });
+
+    expect(decision).toBe("exhausted");
+    expect(fake.schedules).toHaveLength(0);
+  });
+
+  it("returns exhausted when no incident record exists", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    const decision = await engine.recordOomAndDecide({
+      incidentId: "gone:incident",
+      callback: "_chatRecoveryRetry",
+      data: {},
+      maxOomRetries: 3
+    });
+
+    expect(decision).toBe("exhausted");
+    expect(fake.schedules).toHaveLength(0);
+  });
+});
+
+/**
  * Layer-2 seam test for `ChatRecoveryEngine.exhaustRecoveryGiveUp` (slice 4d-1)
  * — the give-up spine both packages ran verbatim to terminalize a turn whose
  * retry budget drained (#1645). Pins the sequence + its invariants: best-effort

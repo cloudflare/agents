@@ -6,8 +6,6 @@ import {
 } from "agents";
 import {
   withVoice,
-  WorkersAIFluxSTT,
-  WorkersAINova3STT,
   WorkersAITTS,
   type VoiceTurnContext,
   type Transcriber
@@ -15,6 +13,10 @@ import {
 import { streamText, tool, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
+import {
+  createVoiceTranscriber,
+  getMissingSttProviderKey
+} from "./stt-providers";
 
 const VoiceAgent = withVoice(Agent);
 
@@ -31,12 +33,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   tts = new WorkersAITTS(this.env.AI);
 
   createTranscriber(connection: Connection): Transcriber {
-    const url = new URL(connection.uri ?? "http://localhost");
-    const model = url.searchParams.get("model");
-    if (model === "nova-3") {
-      return new WorkersAINova3STT(this.env.AI);
-    }
-    return new WorkersAIFluxSTT(this.env.AI);
+    return createVoiceTranscriber(connection, this.env);
   }
 
   // --- Single-speaker enforcement ---
@@ -48,6 +45,12 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   #activeSpeakerId: string | null = null;
 
   beforeCallStart(connection: Connection): boolean {
+    const missingKey = getMissingSttProviderKey(connection, this.env);
+    if (missingKey) {
+      connection.send(JSON.stringify({ type: "error", message: missingKey }));
+      return false;
+    }
+
     if (this.#activeSpeakerId && this.#activeSpeakerId !== connection.id) {
       connection.send(
         JSON.stringify({

@@ -106,7 +106,7 @@ Oxlint does **not** handle formatting — Oxfmt does.
 
 ### Formatting — Oxfmt
 
-- Run `pnpm run format` or rely on lint-staged (auto-formats on commit via husky)
+- Run `pnpm run format` to format all files
 - Config in `.oxfmtrc.json` (`trailingComma: "none"`, `printWidth: 80`)
 
 ### Workers conventions

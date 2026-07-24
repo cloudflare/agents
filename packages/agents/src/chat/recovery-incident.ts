@@ -87,6 +87,18 @@ export type ChatRecoveryIncident = {
    * from an older build is never falsely sealed.
    */
   workBaseline?: number;
+  /**
+   * Count of recovery attempts for this incident that ended in a Durable Object
+   * memory-limit reset (the isolate exceeded its 128 MB limit — see
+   * `isDurableObjectMemoryLimitReset`). An OOM is a poison signal: re-running the
+   * same memory-heavy turn deterministically re-OOMs, so unlike a deploy/eviction
+   * it must NOT credit forward progress and must be bounded by a tight,
+   * OOM-specific budget (`maxOomRetries`) rather than the generic attempt cap
+   * (which resets on progress). Bumped by `ChatRecoveryEngine.recordOomAndDecide`
+   * when a recovery callback observes an OOM; exceeding `maxOomRetries` seals the
+   * incident with `reason="out_of_memory"` (#1825). Optional for backward-compat.
+   */
+  oomAttempts?: number;
 };
 
 // ── Persisted storage keys (cutover contract) ──────────────────────────────
@@ -122,12 +134,42 @@ export const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
  */
 export const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
 /**
- * Runaway-loop guard default. `Infinity` = no SDK-imposed work cap: a turn that
- * keeps making forward progress is never terminated by the framework on its own
- * (rfc-chat-recovery-work-budget). Integrators bound a content-emitting runaway
- * by setting `maxRecoveryWork` or a `shouldKeepRecovering` predicate.
+ * Runaway-loop guard default — the framework-imposed backstop on cumulative
+ * recovery WORK (produced content/tool units) since an incident opened.
+ *
+ * Originally `Infinity` (rfc-chat-recovery-work-budget): the SDK shipped the
+ * *mechanism* but no default cap, so a progressing turn was never terminated on
+ * its own. Production issue #1825 showed that this is a footgun: an isolate that
+ * OOMs mid-stream still credits a little progress before it dies, which resets
+ * BOTH progress-keyed bounds (the attempt cap and the no-progress window) on
+ * every wake — and a fast crash loop (each attempt inside the alarm-debounce
+ * window) pins the attempt counter too. With `maxRecoveryWork = Infinity` the
+ * ONLY instrument whose meter still climbs across such a loop is disabled, so
+ * recovery re-runs the turn (and its LLM calls) forever.
+ *
+ * A finite default closes that loop out of the box: work climbs regardless of
+ * debounce/progress resets, so a content-emitting runaway is always sealed with
+ * `reason="work_budget_exceeded"`. The value is deliberately generous — it
+ * bounds wasted re-run cost without clipping a normal interrupted turn (work
+ * only accrues from the first interruption until the turn completes, after which
+ * the incident is deleted). A very long agentic turn under heavy interruption
+ * that legitimately needs more should raise `maxRecoveryWork` (or set it to
+ * `Infinity` to restore the pre-#1825 unbounded behavior).
  */
-export const DEFAULT_CHAT_RECOVERY_MAX_WORK = Number.POSITIVE_INFINITY;
+export const DEFAULT_CHAT_RECOVERY_MAX_WORK = 1000;
+/**
+ * Tight, OOM-specific retry budget (#1825). A Durable Object memory-limit reset
+ * (`isDurableObjectMemoryLimitReset`) is usually deterministic — the turn's
+ * working set no longer fits in the isolate's 128 MB — so re-running it re-OOMs.
+ * But a single OOM CAN be a transient spike (the isolate's 128 MB is shared
+ * across the global scope / noisy neighbors), so recovery retries a small number
+ * of times before sealing with `reason="out_of_memory"` rather than abandoning a
+ * turn that one more attempt might have completed. Far tighter than the generic
+ * `maxRecoveryWork` backstop because an OOM is attributable and re-running it is
+ * expensive (it re-runs the model). Counts attempts that ended in an OOM, not
+ * total attempts, so a turn interrupted by deploys (no OOM) is unaffected.
+ */
+export const DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES = 3;
 export const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
 /**
  * Delay before retrying a recovery that timed out waiting for stable state.
@@ -198,6 +240,10 @@ export function resolveChatRecoveryConfig(
       typeof custom?.maxRecoveryWork === "number" && custom.maxRecoveryWork >= 0
         ? custom.maxRecoveryWork
         : DEFAULT_CHAT_RECOVERY_MAX_WORK,
+    maxOomRetries:
+      typeof custom?.maxOomRetries === "number" && custom.maxOomRetries >= 0
+        ? Math.floor(custom.maxOomRetries)
+        : DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
     ...(custom?.shouldKeepRecovering
       ? { shouldKeepRecovering: custom.shouldKeepRecovering }
       : {}),
@@ -268,6 +314,33 @@ export async function sweepStaleChatRecoveryIncidents(
   for (let i = 0; i < staleKeys.length; i += KV_DELETE_MAX_KEYS) {
     await storage.delete(staleKeys.slice(i, i + KV_DELETE_MAX_KEYS));
   }
+}
+
+/**
+ * List the persisted recovery incidents that are still live (status
+ * `detected` / `scheduled` / `attempting`) — i.e. NOT yet terminalized
+ * (`exhausted` / `failed`). Used by the alarm-boundary OOM circuit breaker
+ * (#1825) to find the incident(s) it must seal when the in-DO budgets could not.
+ * Lists by the incident key prefix so the storage layout stays encapsulated.
+ */
+export async function listActiveChatRecoveryIncidents(
+  storage: Pick<DurableObjectStorage, "list">
+): Promise<{ key: string; incident: ChatRecoveryIncident }[]> {
+  const entries = await storage.list<ChatRecoveryIncident>({
+    prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
+  });
+  const active: { key: string; incident: ChatRecoveryIncident }[] = [];
+  for (const [key, incident] of entries) {
+    if (
+      incident &&
+      (incident.status === "detected" ||
+        incident.status === "scheduled" ||
+        incident.status === "attempting")
+    ) {
+      active.push({ key, incident });
+    }
+  }
+  return active;
 }
 
 /**
@@ -622,6 +695,21 @@ export async function evaluateChatRecoveryIncident(
     Number.isFinite(config.maxRecoveryWork) &&
     work > config.maxRecoveryWork;
 
+  // OOM budget (#1825). `oomAttempts` is bumped out-of-band by
+  // `recordOomAndDecide` when a recovery callback observes a memory-limit reset;
+  // it is carried forward across begins here so the count is not lost, and seals
+  // the incident once it crosses the tight OOM-specific budget. Unlike the
+  // attempt cap this never resets on progress — an OOM that streams a little
+  // before it dies must still count, since that "progress" is the very re-run
+  // that re-OOMs. The seal authority is shared with `recordOomAndDecide` (which
+  // seals on the catchable path); this begin-path check is the backstop for a
+  // fiber re-detection that reopens the incident after the count crossed.
+  const oomAttempts = existing?.oomAttempts ?? 0;
+  const oomBudgetExceeded =
+    existing != null &&
+    !awaitingClientInteraction &&
+    oomAttempts > config.maxOomRetries;
+
   const debounced =
     existing != null &&
     !madeProgress &&
@@ -644,6 +732,7 @@ export async function evaluateChatRecoveryIncident(
     config.shouldKeepRecovering &&
     !noProgressExceeded &&
     !workBudgetExceeded &&
+    !oomBudgetExceeded &&
     attempt <= config.maxAttempts
   ) {
     try {
@@ -666,7 +755,8 @@ export async function evaluateChatRecoveryIncident(
 
   const exhausted =
     !awaitingClientInteraction &&
-    (noProgressExceeded ||
+    (oomBudgetExceeded ||
+      noProgressExceeded ||
       workBudgetExceeded ||
       abortedByCaller ||
       attempt > config.maxAttempts);
@@ -684,15 +774,20 @@ export async function evaluateChatRecoveryIncident(
     lastProgressAt,
     progress,
     workBaseline,
+    // Carry the OOM count forward so a begin-path re-evaluation never loses what
+    // `recordOomAndDecide` accrued between begins.
+    ...(oomAttempts > 0 ? { oomAttempts } : {}),
     ...(exhausted
       ? {
-          reason: workBudgetExceeded
-            ? "work_budget_exceeded"
-            : noProgressExceeded
-              ? "no_progress_timeout"
-              : abortedByCaller
-                ? "recovery_aborted"
-                : "max_attempts_exceeded"
+          reason: oomBudgetExceeded
+            ? "out_of_memory"
+            : workBudgetExceeded
+              ? "work_budget_exceeded"
+              : noProgressExceeded
+                ? "no_progress_timeout"
+                : abortedByCaller
+                  ? "recovery_aborted"
+                  : "max_attempts_exceeded"
         }
       : {})
   };

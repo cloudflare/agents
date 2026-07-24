@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { MCPClientManager } from "../../mcp/client";
 import {
   MCPClientConnection,
@@ -9,6 +10,7 @@ import type { ToolCallOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
+import { z } from "zod";
 
 function createMockStateStorage() {
   const storage = new Map<string, { serverId: string; createdAt: number }>();
@@ -302,6 +304,109 @@ describe("MCPClientManager OAuth Integration", () => {
         "test-auth-code"
       );
       expect(authProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Worker-safe JSON Schema validator defaults", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("connect() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const { id } = await manager.connect("http://example.com", {
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("connect() preserves a caller-supplied jsonSchemaValidator", async () => {
+      vi.spyOn(MCPClientConnection.prototype, "init").mockResolvedValue(
+        undefined
+      );
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      const { id } = await manager.connect("http://example.com", {
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections[id]?.options.client?.jsonSchemaValidator
+      ).toBe(customValidator);
+    });
+
+    it("registerServer() applies CfWorkerJsonSchemaValidator when no client options are provided", async () => {
+      await manager.registerServer("validator-default-id", {
+        url: "http://example.com",
+        name: "validator-default",
+        transport: { type: "auto" }
+      });
+
+      expect(
+        manager.mcpConnections["validator-default-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
+    });
+
+    it("registerServer() does not persist a caller-supplied jsonSchemaValidator", async () => {
+      const customValidator = new CfWorkerJsonSchemaValidator();
+      await manager.registerServer("validator-persist-id", {
+        url: "http://example.com",
+        name: "validator-persist",
+        client: { jsonSchemaValidator: customValidator },
+        transport: { type: "auto" }
+      });
+
+      // The live connection keeps the caller's validator...
+      expect(
+        manager.mcpConnections["validator-persist-id"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBe(customValidator);
+
+      // ...but a validator instance cannot survive JSON serialization, so it
+      // must not be written to storage at all.
+      const row = mockStorageData.get("validator-persist-id");
+      const persisted = JSON.parse(row?.server_options ?? "{}");
+      expect(persisted.client).not.toHaveProperty("jsonSchemaValidator");
+    });
+
+    it("restore falls back to the Worker-safe default when persisted options contain a serialization-degraded validator", async () => {
+      // Simulate a row written by a caller that passed a custom validator:
+      // JSON.stringify degrades the instance to a plain object.
+      saveServerToMock({
+        id: "restored-degraded-validator",
+        name: "Degraded Validator Server",
+        server_url: "http://example.com",
+        callback_url: "http://localhost:3000/callback",
+        client_id: null,
+        auth_url: "https://auth.example.com/authorize",
+        server_options: JSON.stringify({
+          transport: { type: "auto" },
+          client: { jsonSchemaValidator: {} }
+        })
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      expect(
+        manager.mcpConnections["restored-degraded-validator"]?.options.client
+          ?.jsonSchemaValidator
+      ).toBeInstanceOf(CfWorkerJsonSchemaValidator);
     });
   });
 
@@ -2694,6 +2799,282 @@ describe("MCPClientManager OAuth Integration", () => {
         undefined,
         undefined
       );
+    });
+
+    describe("caches MCP schema conversion", () => {
+      function makeTool(name: string): Tool {
+        return {
+          name,
+          description: `Description for ${name}`,
+          inputSchema: {
+            type: "object",
+            properties: { value: { type: "string" } }
+          },
+          outputSchema: {
+            type: "object",
+            properties: { echoed: { type: "string" } }
+          }
+        };
+      }
+
+      function makeConnection(catalog: Tool[]): MCPClientConnection {
+        const connection = new MCPClientConnection(
+          new URL("http://example.com/mcp"),
+          { name: "test", version: "1.0" },
+          { transport: { type: "sse" }, client: {} }
+        );
+        connection.connectionState = "ready";
+        connection.tools = catalog;
+        connection.client.callTool = vi
+          .fn()
+          .mockImplementation(async ({ name }: { name: string }) => ({
+            content: [{ type: "text", text: `Result from ${name}` }]
+          }));
+        return connection;
+      }
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it("reuses schemas across unchanged filtered and unfiltered calls without caching ToolSets", () => {
+        const selected = makeConnection([makeTool("selected_tool")]);
+        const filteredOut = makeConnection([makeTool("filtered_out_tool")]);
+        manager.mcpConnections.selected = selected;
+        manager.mcpConnections.filtered = filteredOut;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const selectedOnly = manager.getAITools({ serverId: "selected" });
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        const all = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        const selectedAgain = manager.getAITools({ serverId: "selected" });
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        const key = "tool_selected_selected_tool";
+        expect(all[key]).not.toBe(selectedOnly[key]);
+        expect(selectedAgain[key]).not.toBe(selectedOnly[key]);
+        expect(all[key].execute).not.toBe(selectedOnly[key].execute);
+        expect(all[key].inputSchema).toBe(selectedOnly[key].inputSchema);
+        expect(all[key].outputSchema).toBe(selectedOnly[key].outputSchema);
+      });
+
+      it("materializes 313 input and output schemas once for an unchanged catalog", () => {
+        const connection = makeConnection(
+          Array.from({ length: 313 }, (_, index) =>
+            makeTool(`bulk_tool_${index}`)
+          )
+        );
+        manager.mcpConnections.bulk = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        expect(Object.keys(manager.getAITools())).toHaveLength(313);
+        expect(conversionSpy).toHaveBeenCalledTimes(626);
+
+        expect(Object.keys(manager.getAITools())).toHaveLength(313);
+        expect(conversionSpy).toHaveBeenCalledTimes(626);
+      });
+
+      it("refreshes changed slots when a catalog array is edited in place", () => {
+        const stringTool = makeTool("string_tool");
+        const numberTool = makeTool("number_tool");
+        numberTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "number" } }
+        };
+        numberTool.outputSchema = {
+          type: "object",
+          properties: { echoed: { type: "number" } }
+        };
+        const connection = makeConnection([stringTool, numberTool]);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        connection.tools.reverse();
+        const reordered = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(8);
+        expect(
+          reordered.tool_server_number_tool.inputSchema.safeParse({ value: 1 })
+            .success
+        ).toBe(true);
+        expect(
+          reordered.tool_server_string_tool.inputSchema.safeParse({
+            value: "one"
+          }).success
+        ).toBe(true);
+
+        const booleanTool = makeTool("boolean_tool");
+        booleanTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "boolean" } }
+        };
+        booleanTool.outputSchema = {
+          type: "object",
+          properties: { echoed: { type: "boolean" } }
+        };
+        connection.tools.splice(0, 1, booleanTool);
+        const spliced = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(10);
+        expect(spliced.tool_server_number_tool).toBeUndefined();
+        expect(
+          spliced.tool_server_boolean_tool.inputSchema.safeParse({
+            value: true
+          }).success
+        ).toBe(true);
+      });
+
+      it("recompiles when a tool replaces its schema objects in place", () => {
+        const mutableTool = makeTool("mutable_tool");
+        const connection = makeConnection([mutableTool]);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const first = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        mutableTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "number" } }
+        };
+        mutableTool.outputSchema = {
+          type: "object",
+          properties: { echoed: { type: "number" } }
+        };
+        const second = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+        expect(second.tool_server_mutable_tool.inputSchema).not.toBe(
+          first.tool_server_mutable_tool.inputSchema
+        );
+        expect(
+          second.tool_server_mutable_tool.inputSchema.safeParse({ value: 1 })
+            .success
+        ).toBe(true);
+        expect(
+          second.tool_server_mutable_tool.inputSchema.safeParse({
+            value: "stale"
+          }).success
+        ).toBe(false);
+      });
+
+      it("caches failed conversions until their schema source changes", () => {
+        const unsupportedTool = makeTool("unsupported_tool");
+        unsupportedTool.inputSchema = {
+          type: "object",
+          unevaluatedProperties: false
+        } as Tool["inputSchema"];
+        unsupportedTool.outputSchema = undefined;
+        const connection = makeConnection([
+          unsupportedTool,
+          makeTool("valid_tool")
+        ]);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+        const warningSpy = vi
+          .spyOn(console, "warn")
+          .mockImplementation(() => undefined);
+
+        const first = manager.getAITools();
+        expect(first.tool_server_unsupported_tool).toBeUndefined();
+        expect(first.tool_server_valid_tool).toBeDefined();
+        expect(conversionSpy).toHaveBeenCalledTimes(3);
+        expect(warningSpy).toHaveBeenCalledTimes(1);
+
+        const second = manager.getAITools();
+        expect(second.tool_server_unsupported_tool).toBeUndefined();
+        expect(second.tool_server_valid_tool).toBeDefined();
+        expect(conversionSpy).toHaveBeenCalledTimes(3);
+        expect(warningSpy).toHaveBeenCalledTimes(1);
+
+        unsupportedTool.inputSchema = {
+          type: "object",
+          properties: { value: { type: "boolean" } }
+        };
+        const repaired = manager.getAITools();
+        expect(repaired.tool_server_unsupported_tool).toBeDefined();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+      });
+
+      it("drops superseded catalog revisions", () => {
+        const firstCatalog = [makeTool("old_tool")];
+        const connection = makeConnection(firstCatalog);
+        manager.mcpConnections.server = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const first = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        connection.tools = [makeTool("new_tool")];
+        const second = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+        expect(second.tool_server_new_tool).toBeDefined();
+        expect(second.tool_server_old_tool).toBeUndefined();
+
+        connection.tools = firstCatalog;
+        const revisited = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(6);
+        expect(revisited.tool_server_old_tool.inputSchema).not.toBe(
+          first.tool_server_old_tool.inputSchema
+        );
+      });
+
+      it("recompiles for a replacement connection and routes existing closures through the current mapping", async () => {
+        const catalog = [makeTool("route_tool")];
+        const oldConnection = makeConnection(catalog);
+        manager.mcpConnections.server = oldConnection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const first = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        const currentConnection = makeConnection(catalog);
+        manager.mcpConnections.server = currentConnection;
+        manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(4);
+
+        await first.tool_server_route_tool.execute({ value: "current" });
+        expect(oldConnection.client.callTool).not.toHaveBeenCalled();
+        expect(currentConnection.client.callTool).toHaveBeenCalledWith(
+          { name: "route_tool", arguments: { value: "current" } },
+          undefined,
+          undefined
+        );
+      });
+
+      it("reuses server-independent schemas after a server id rename", async () => {
+        const connection = makeConnection([makeTool("renamed_tool")]);
+        manager.mcpConnections["old-server"] = connection;
+        const conversionSpy = vi.spyOn(z, "fromJSONSchema");
+
+        const beforeRename = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        await manager.migrateServerId(
+          "old-server",
+          "new-server",
+          "test-client"
+        );
+        const afterRename = manager.getAITools();
+        expect(conversionSpy).toHaveBeenCalledTimes(2);
+
+        const oldKey = "tool_oldserver_renamed_tool";
+        const newKey = "tool_newserver_renamed_tool";
+        expect(afterRename[oldKey]).toBeUndefined();
+        expect(afterRename[newKey].inputSchema).toBe(
+          beforeRename[oldKey].inputSchema
+        );
+
+        await afterRename[newKey].execute({ value: "renamed" });
+        expect(connection.client.callTool).toHaveBeenCalledWith(
+          { name: "renamed_tool", arguments: { value: "renamed" } },
+          undefined,
+          undefined
+        );
+      });
     });
 
     describe("MCPServerFilter", () => {

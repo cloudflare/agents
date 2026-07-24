@@ -50,11 +50,22 @@ function startWrangler(): ChildProcess {
     ],
     {
       cwd: __dirname,
-      stdio: ["pipe", "pipe", "pipe"],
+      // No stdin pipe: `wrangler dev` never reads it here, and leaving a live
+      // writable pipe open is one more surface that can emit an unhandled EPIPE
+      // (and crash this forked vitest worker) when we SIGKILL the process group.
+      stdio: ["ignore", "pipe", "pipe"],
       detached: true,
       env: { ...process.env, NODE_ENV: "test" }
     }
   );
+
+  // A kill-time EPIPE/ECONNRESET on the child or its pipes must never become an
+  // uncaught exception — that would take down the whole forked vitest worker and
+  // make tinypool report "Worker exited unexpectedly" even though every test
+  // passed. These no-op error handlers stay attached for the child's lifetime.
+  child.on("error", () => {});
+  child.stdout?.on("error", () => {});
+  child.stderr?.on("error", () => {});
 
   child.stdout?.on("data", (data: Buffer) => {
     const line = data.toString().trim();
@@ -87,7 +98,31 @@ function killProcess(child: ChildProcess): Promise<void> {
       resolve();
       return;
     }
-    child.on("exit", () => resolve());
+
+    // Detach the data relays and stop reading the pipes BEFORE killing. We
+    // SIGKILL the whole `wrangler dev` process group (workerd + Chromium
+    // included) while its stdio is piped into this forked vitest worker; a
+    // kill-time EPIPE or late write would otherwise race the worker's own
+    // shutdown and make tinypool report "Worker exited unexpectedly" (failing
+    // the run even though every test passed).
+    //
+    // NOTE: only the "data" listeners are removed — the no-op "error" handlers
+    // installed in startWrangler MUST stay attached, otherwise a teardown EPIPE
+    // becomes an uncaught exception and crashes this worker.
+    child.stdout?.removeAllListeners("data");
+    child.stderr?.removeAllListeners("data");
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.unref();
+
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    child.once("exit", done);
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch {
@@ -97,7 +132,7 @@ function killProcess(child: ChildProcess): Promise<void> {
         // already dead
       }
     }
-    setTimeout(resolve, 3000);
+    setTimeout(done, 3000).unref();
   });
 }
 

@@ -43,6 +43,9 @@ type ThinkSubmissionTestStub = {
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
+  useRecoveryToolModelForTest(): Promise<void>;
+  getRecoveryToolExecutionsForTest(): Promise<number>;
+  getMessagesForTest(): Promise<UIMessage[]>;
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
@@ -1267,6 +1270,73 @@ describe("Think durable submissions", () => {
       status: "aborted",
       error: "stop"
     });
+  });
+
+  it("preserves a successful tool result across an exact storage reset and never re-executes the tool", async () => {
+    const agent = await freshAgent();
+    await agent.useRecoveryToolModelForTest();
+
+    const seed = await agent.testSubmitMessages("run the tool", {
+      submissionId: "sub-storage-reset-tool-seed"
+    });
+    await waitForSubmission(
+      agent,
+      seed.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    expect(await agent.getRecoveryToolExecutionsForTest()).toBe(1);
+
+    const before = await agent.getMessagesForTest();
+    expect(
+      before.some((message) =>
+        message.parts?.some(
+          (part) =>
+            typeof part === "object" &&
+            part !== null &&
+            "state" in part &&
+            part.state === "output-available"
+        )
+      )
+    ).toBe(true);
+
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-storage-reset-tool-recovery",
+      requestId: "sub-storage-reset-tool-recovery",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+    await agent.failNextRecoveredContinueForTest(
+      "Internal error in Durable Object storage caused object to be reset"
+    );
+
+    await expect(
+      agent.continueRecoveredChatCatchingForTest(
+        "sub-storage-reset-tool-recovery"
+      )
+    ).resolves.toContain(
+      "Internal error in Durable Object storage caused object to be reset"
+    );
+    await expect(
+      agent.inspectSubmissionForTest("sub-storage-reset-tool-recovery")
+    ).resolves.toMatchObject({ status: "running" });
+    expect(await agent.getRecoveryToolExecutionsForTest()).toBe(1);
+    expect(await agent.getMessagesForTest()).toEqual(before);
+
+    await agent.continueRecoveredChatForTest("sub-storage-reset-tool-recovery");
+    await expect(
+      agent.inspectSubmissionForTest("sub-storage-reset-tool-recovery")
+    ).resolves.toMatchObject({ status: "completed" });
+    expect(await agent.getRecoveryToolExecutionsForTest()).toBe(1);
+    expect(
+      (await agent.getMessagesForTest()).some((message) =>
+        message.parts?.some(
+          (part) =>
+            part.type === "text" &&
+            "text" in part &&
+            part.text.includes("Done with tools")
+        )
+      )
+    ).toBe(true);
   });
 
   it("defers a recovered continuation on a platform transient and completes it on the re-run (#1730)", async () => {

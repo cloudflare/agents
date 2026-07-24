@@ -341,14 +341,17 @@ const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
 // `think-starters/basic/package.json`). This avoids fresh projects pulling an
 // untested major (e.g. a new `vite`/`ai`/`wrangler`). Kept in sync with the
 // starter by a test in `src/cli-tests/cli.test.ts`.
+// `workers-ai-provider` is intentionally NOT listed here: `@cloudflare/think`
+// depends on it directly and resolves string models through it, so scaffolded
+// projects get it transitively. Add it explicitly only if you import
+// `createWorkersAI` yourself.
 export const THIRD_PARTY_DEPENDENCIES: Record<string, string> = {
-  ai: "^6.0.202",
-  "workers-ai-provider": "^3.2.1"
+  ai: "^6.0.202"
 };
 
 export const THIRD_PARTY_DEV_DEPENDENCIES: Record<string, string> = {
   "@cloudflare/vite-plugin": "^1.42.3",
-  "@cloudflare/workers-types": "^4.20260625.1",
+  "@cloudflare/workers-types": "^4.20260629.1",
   oxfmt: "^0.56.0",
   oxlint: "^1.71.0",
   typescript: "^6.0.3",
@@ -405,20 +408,14 @@ function viteConfig(routePrefix: string | undefined): string {
 function agentSource(): string {
   return [
     `import { Think, skills } from "@cloudflare/think";`,
-    `import { createWorkersAI } from "workers-ai-provider";`,
     `import bundledSkills from "agents:skills";`,
-    "",
-    "type Env = Cloudflare.Env & {",
-    "  AI: Ai;",
-    "  LOADER: WorkerLoader;",
-    "};",
     "",
     "export class Assistant extends Think<Env> {",
     "  override getModel() {",
-    "    return createWorkersAI({ binding: this.env.AI })(",
-    '      "@cf/moonshotai/kimi-k2.7-code",',
-    "      { sessionAffinity: this.sessionAffinity }",
-    "    );",
+    "    // Resolved via the built-in workers-ai-provider off env.AI. Use a",
+    '    // "@cf/..." id for Workers AI, or a "provider/model" slug like',
+    '    // "openai/gpt-5.5" to route through AI Gateway.',
+    '    return "@cf/moonshotai/kimi-k2.7-code";',
     "  }",
     "",
     "  override getSystemPrompt() {",

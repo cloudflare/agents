@@ -1,0 +1,107 @@
+// agent-think — a Think agent that reproduces and fixes cloudflare/agents
+// issues in a container-backed Workspace. The gh-app webhook service (private,
+// GitLab) calls the AgentThink entrypoint over a service binding, passing a
+// short-lived GitHub App installation token; this worker holds no App creds.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-think",
+  "account_id": "b8afc92c7a87f699592038b756153d22",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-11",
+  // `enable_abortsignal_rpc` is required: CloudflareContainerBackend's health
+  // probe passes an AbortSignal into `host.fetchPort(...)`, and the cross-DO
+  // topology (Agent DO -> Sandbox DO) sends that call over Workers RPC.
+  // Without the flag workerd rejects it with "AbortSignal serialization is
+  // not enabled." and the backend never reaches readiness — every container
+  // attach fails at stage=health and the backend restarts healthy containers.
+  "compatibility_flags": ["nodejs_compat", "enable_abortsignal_rpc"],
+
+  // Workers AI powers the model (see MODEL_ID in src/agent.ts).
+  "ai": { "binding": "AI" },
+
+  // Private token broker. GitHub App credentials remain in gh-app; this
+  // binding mints a fresh short-lived installation token for continuations.
+  "services": [
+    {
+      "binding": "GITHUB_AUTH",
+      "service": "gh-app",
+      "entrypoint": "AgentThinkTokenBroker"
+    }
+  ],
+
+  // Worker Loader: the Workspace's "shell" backend (just-bash) runs in a
+  // Dynamic Worker loaded through this binding.
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  // The container image runs wsd. It is hosted by the SEPARATE `Sandbox` DO
+  // (not the Agent) so the compute host is decoupled from the Agent DO and can
+  // be pre-warmed / recycled by the warm pool. Full Linux userland (gh, git,
+  // npm, node, wrangler, curl) for repro deploys + fix verification.
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 10
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      // Owns only the Think turn, transcript, and submission state.
+      { "name": "ThinkAgent", "class_name": "ThinkAgent" },
+      // Same stable per-issue name; exclusively owns Workspace SQLite/VFS.
+      { "name": "WorkspaceAgent", "class_name": "WorkspaceAgent" },
+      // Container host, handed out by the warm pool.
+      { "name": "Sandbox", "class_name": "Sandbox" },
+      // Keeps one container pre-warmed; resolves session -> Sandbox.
+      { "name": "WarmPool", "class_name": "WarmPool" },
+      // Singleton registry behind the command-center UI (threads + metrics).
+      { "name": "CommandCenter", "class_name": "CommandCenterAgent" }
+    ]
+  },
+
+  // Skills mounted read-only into every Workspace at /workspace/.agents.
+  // Seed with `npm run seed:r2` (uploads skills/**/SKILL.md under `.agents/`).
+  "r2_buckets": [
+    {
+      "binding": "R2_SKILLS",
+      "bucket_name": "agent-think-skills"
+    }
+  ],
+
+  // The read-only thread UI (React SPA) is built by Vite into dist/client and
+  // served as static assets. `run_worker_first` for /thread/* so the worker's
+  // fetch handler serves index.html for those routes (SPA fallback); other
+  // asset paths (JS/CSS) are served directly.
+  "assets": {
+    "directory": "dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": ["/thread/*", "/agents/*", "/api/*"]
+  },
+
+  // Public origin used to build the live-thread share link returned to gh-app.
+  // e.g. "https://agent-think.<account>.workers.dev" or a custom route. The
+  // worker can't reliably know its own external hostname (custom domains), so
+  // this is configured, not derived.
+  "vars": {
+    "PUBLIC_BASE_URL": "https://agent-think.agents-b8a.workers.dev"
+  },
+
+  // Prime the fixed one-container warm pool every minute.
+  "triggers": { "crons": ["* * * * *"] },
+
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": true },
+    "traces": { "enabled": true }
+  },
+
+  // ThinkAgent already existed (v1). Sandbox + WarmPool are new sqlite DOs.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThinkAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox", "WarmPool"] },
+    { "tag": "v3", "new_sqlite_classes": ["CommandCenterAgent"] },
+    { "tag": "v4", "new_sqlite_classes": ["WorkspaceAgent"] }
+  ]
+}

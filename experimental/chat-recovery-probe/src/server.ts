@@ -30,10 +30,6 @@ import type {
 } from "@cloudflare/think";
 import { createSyntheticModel, type SyntheticConfig } from "./synthetic-model";
 
-type Env = {
-  ProbeAgent: DurableObjectNamespace<ProbeAgent>;
-};
-
 type RecoveryKnobs = {
   maxAttempts?: number;
   noProgressTimeoutMs?: number;

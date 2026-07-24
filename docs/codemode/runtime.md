@@ -24,6 +24,8 @@ const runtime = createCodemodeRuntime({
 | Handle method                                        | Purpose                                                                                                                                    |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                                                                                  |
+| `runtime.execute({ code })`                          | Run code directly from a non-AI-SDK host, such as an MCP tool handler                                                                      |
+| `runtime.search(query)` / `runtime.describe(target)` | Search connector methods and snippets, then fetch one target's on-demand TypeScript documentation                                          |
 | `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs                                                          |
 | `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                                                                         |
 | `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution. Returns `false` if it was a no-op (action no longer pending — approved or rejected elsewhere) |
@@ -33,6 +35,20 @@ const runtime = createCodemodeRuntime({
 | `runtime.deleteExecution(id)` / `pruneExecutions(n)` | Drop one execution / keep only the newest N terminal ones                                                                                  |
 | `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md)                                                                       |
 | `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                                                                                               |
+
+`execute()`, `search()`, and `describe()` expose the same runtime to hosts that are not using the AI SDK. For example, an MCP server can register separate `search` and `execute` tools without reaching through `runtime.tool().execute` or duplicating connector discovery:
+
+```ts
+server.registerTool("search", searchOptions, async ({ query }) =>
+  toMcpResult(await runtime.search(query))
+);
+
+server.registerTool("execute", executeOptions, async ({ code }) =>
+  toMcpResult(await runtime.execute({ code }))
+);
+```
+
+Search and describe results mark methods with `requiresApproval: true` when their connector annotation requires it.
 
 ## The sandbox API (`codemode.*`)
 
@@ -140,6 +156,8 @@ type ToolLogEntry = {
 A call is logged `executing` the moment the runtime decides to run it, and only flips to `applied` once its result is recorded. So a crash between those two points replays as a fresh execution (re-run) rather than replaying a missing result. Once a run pauses or terminates, every further call/step gets a pause decision and records nothing — model code that catches the pause and keeps going cannot apply extra effects.
 
 The log lives in the facet's SQLite database — one row per entry, so recording a call appends a row instead of rewriting the whole execution.
+
+The tool's output echoes the log on every outcome as `calls?: ToolLogEntry[]` (see [Tool output](./approvals.md#tool-output)), so a UI can render the run's audit trail directly from the tool result; `runtime.executions()` remains the durable source for past runs.
 
 ### Ephemeral entries
 

@@ -31,6 +31,9 @@
       "new_sqlite_classes": ["DeployChurnSubAgentChild"]
     }
   ],
+  "secrets": {
+    "required": ["ANTHROPIC_API_KEY"]
+  },
   // Required so the deployed Worker's structured logs are queryable via the
   // dashboard / Workers Observability MCP server after a churn run.
   "observability": {

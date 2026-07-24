@@ -111,6 +111,45 @@ await this.addMcpServer("github", "https://mcp.github.com/mcp", {
 
 These options are persisted and used when reconnecting after hibernation or after OAuth completion. Default: 3 attempts, 500ms base delay, 5s max delay. See [Retries](./retries.md) for more details.
 
+### Elicitation
+
+MCP servers can request input from the client during a tool call (`elicitation/create`). To respond, configure an elicitation handler before MCP connections are registered or restored:
+
+```typescript
+import { Agent } from "agents";
+
+class MyAgent extends Agent<Env> {
+  onStart() {
+    this.mcp.configureElicitationHandlers({
+      url: async (request, serverId) => {
+        // Deliver a url-mode elicitation link out-of-band
+        return { action: "accept" as const, content: {} };
+      },
+      form: async (request, serverId) => {
+        // Collect values matching request.params.requestedSchema
+        return { action: "accept" as const, content: {} };
+      }
+    });
+  }
+}
+```
+
+The advertised modes are persisted with each MCP server, so a connection restored from storage after hibernation re-advertises the same modes at the handshake; the handlers themselves re-attach when `onStart()` runs. Configuring a handler after an MCP connection is already active updates the in-memory handler, but the server only sees new advertised elicitation modes after that connection reconnects.
+
+Connections advertise only the elicitation modes with configured handlers at the `initialize` handshake: configure `form` to advertise form-mode elicitation, `url` to advertise url-mode elicitation (MCP spec 2025-11-25 — url mode is used for sensitive flows like OAuth URLs), or both to advertise both modes. Without handlers, connections advertise no elicitation capability, so spec-compliant servers use their non-elicitation fallbacks instead of sending requests the agent cannot answer.
+
+To override the advertised modes, declare them explicitly — an explicit declaration always wins and is persisted with the server options, surviving hibernation:
+
+```typescript
+await this.addMcpServer("portal", "https://portal.example.com/mcp", {
+  client: {
+    capabilities: {
+      elicitation: { form: {} } // form-mode only, even with both handlers configured
+    }
+  }
+});
+```
+
 ### URL Security
 
 MCP server URLs are validated before connection to prevent Server-Side Request Forgery (SSRF). The following URL targets are blocked:
@@ -266,16 +305,19 @@ Once connected, access the server's capabilities:
 
 ### Getting Available Tools
 
-```typescript
-const state = this.getMcpServers();
+Use `listTools()` when you need to discover or inspect the raw MCP catalog without preparing tools for an AI SDK model call:
 
-// All tools from all connected servers
-for (const tool of state.tools) {
+```typescript
+const tools = this.mcp.listTools();
+
+for (const tool of tools) {
   console.log(`Tool: ${tool.name}`);
   console.log(`  From server: ${tool.serverId}`);
   console.log(`  Description: ${tool.description}`);
 }
 ```
+
+`getMcpServers().tools` exposes the same raw tool shape as part of the full client state sent to connected applications. Neither API converts JSON Schemas to Zod.
 
 ### Resources and Prompts
 
@@ -322,7 +364,13 @@ async function chat(prompt: string) {
 }
 ```
 
-> **Note:** `getMcpServers().tools` returns raw MCP `Tool` objects for inspection. Use `this.mcp.getAITools()` when passing tools to the AI SDK.
+> **Note:** Use `this.mcp.listTools()` or `getMcpServers().tools` for discovery and inspection. Call `this.mcp.getAITools()` only when preparing tools for the AI SDK because it converts each MCP input and output JSON Schema to Zod.
+
+### AI tool schema conversion lifetime
+
+`getAITools()` reuses converted schemas while a live connection keeps the same current catalog. Repeated filtered or unfiltered calls still return fresh tool records and execute closures. Connections excluded by a filter are not converted.
+
+The next call converts schemas again after discovery replaces a catalog or the live connection changes. If a custom integration mutates a schema, assign a new `inputSchema` or `outputSchema` object, or replace the catalog array, so `getAITools()` detects the change.
 
 ## Managing Servers
 

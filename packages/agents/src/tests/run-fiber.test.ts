@@ -212,6 +212,30 @@ describe("runFiber", () => {
   // ── Recovery ──────────────────────────────────────────────────
 
   describe("recovery", () => {
+    it("restores MCP connections before fiber recovery runs", async () => {
+      // Unique name: DO storage persists across test runs, and a leftover
+      // server row would make the ordering assertion vacuous.
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        `recovery-mcp-ordering-${crypto.randomUUID()}`
+      );
+
+      // Simulate pre-eviction state: a stored MCP server and an interrupted
+      // fiber, then re-run the wake sequence the wrapped onStart performs.
+      await agent.seedMcpServerRow("mcp-seeded");
+      await agent.insertInterruptedFiber("fiber-mcp", "mcp-ordering");
+      await agent.rerunWakeSequence();
+
+      const recovered =
+        (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
+      expect(recovered.some((fiber) => fiber.id === "fiber-mcp")).toBe(true);
+
+      // The recovered fiber ran with the restored connection already
+      // registered — a recovered chat turn can wait on it and see MCP tools.
+      const seen = await agent.getRecoveryMcpConnections();
+      expect(seen["fiber-mcp"]).toContain("mcp-seeded");
+    });
+
     it("should detect an interrupted fiber and call onFiberRecovered", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,

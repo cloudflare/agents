@@ -11,6 +11,7 @@ concurrency:
 
 env:
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+  NX_PARALLEL: "2"
 
 jobs:
   release:
@@ -34,22 +35,6 @@ jobs:
 
       - run: pnpm run build
       - run: pnpm run check
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
-
-      - run: CI=true pnpm exec nx run-many -t test
 
       - id: changesets
         uses: changesets/action@v1.7.0

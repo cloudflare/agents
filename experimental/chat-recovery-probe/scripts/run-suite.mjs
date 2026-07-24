@@ -85,6 +85,41 @@ async function waitForLive(base, attempts = 30, delayMs = 2000) {
   throw new Error(`probe route did not go live within ${attempts * delayMs}ms`);
 }
 
+/**
+ * The HTTP control surface (`/probe/debug`) can be live a few seconds before the
+ * agent WebSocket route is. Several scenarios (a6/a8) speak the use-chat WS
+ * protocol as their FIRST action, so warm up that transport too — otherwise the
+ * suite starts driving while a WS upgrade still transiently errors against the
+ * freshly-deployed route.
+ */
+async function waitForWsLive(base, attempts = 20, delayMs = 2000) {
+  const url = `${base.replace(/^http/, "ws")}/agents/probe-agent/__probe_ws_ready__`;
+  for (let i = 0; i < attempts; i++) {
+    const ok = await new Promise((resolve) => {
+      let settled = false;
+      const ws = new WebSocket(url);
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        try {
+          ws.close();
+        } catch {
+          // already closed
+        }
+        resolve(value);
+      };
+      ws.addEventListener("open", () => done(true), { once: true });
+      ws.addEventListener("error", () => done(false), { once: true });
+      setTimeout(() => done(false), delayMs);
+    });
+    if (ok) return;
+    await sleep(delayMs);
+  }
+  throw new Error(
+    `probe WS route did not go live within ${attempts * delayMs}ms`
+  );
+}
+
 function destroy() {
   try {
     const out = execFileSync(
@@ -110,21 +145,34 @@ try {
   console.log(`[probe-suite] base=${base}`);
   console.log("[probe-suite] waiting for the route to go live ...");
   await waitForLive(base);
+  await waitForWsLive(base);
   console.log(`[probe-suite] scenarios: ${SCENARIOS.join(", ")}`);
 
+  // This is a real-edge smoke suite; a single transient blip against the live
+  // worker shouldn't redden the nightly. Each scenario starts with
+  // `post("reset")`, so a clean re-run is safe.
+  const ATTEMPTS = 2;
   for (const scenario of SCENARIOS) {
-    console.log(`\n[probe-suite] ── running ${scenario} ──`);
-    const res = spawnSync("node", ["scripts/driver.mjs", scenario], {
-      cwd: PROBE_DIR,
-      stdio: "inherit",
-      timeout: 600_000,
-      env: {
-        ...process.env,
-        BASE: base,
-        SESSION: `${scenario}-suite-${Date.now()}`
+    let ok = false;
+    for (let attempt = 1; attempt <= ATTEMPTS && !ok; attempt++) {
+      const label =
+        attempt > 1 ? `${scenario} (retry ${attempt - 1})` : scenario;
+      console.log(`\n[probe-suite] ── running ${label} ──`);
+      const res = spawnSync("node", ["scripts/driver.mjs", scenario], {
+        cwd: PROBE_DIR,
+        stdio: "inherit",
+        timeout: 600_000,
+        env: {
+          ...process.env,
+          BASE: base,
+          SESSION: `${scenario}-suite-${Date.now()}`
+        }
+      });
+      ok = res.status === 0;
+      if (!ok && attempt < ATTEMPTS) {
+        console.log(`[probe-suite] ${scenario} failed — retrying once ...`);
       }
-    });
-    const ok = res.status === 0;
+    }
     results.push({ scenario, ok });
     console.log(`[probe-suite] ${scenario} => ${ok ? "PASS" : "FAIL"}`);
   }

@@ -1201,6 +1201,184 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
   });
 });
 
+// ── beforeToolCall gates whether execute runs (invocation counter) ──
+
+describe("Think — beforeToolCall gates whether execute runs", () => {
+  it("runs execute exactly once on a void decision", async () => {
+    const agent = await freshToolAgent("gate-void");
+    await agent.setToolCallDecision(null);
+    await agent.testChat("call echo");
+
+    expect(await agent.getEchoExecuteCount()).toBe(1);
+  });
+
+  it("runs execute exactly once when 'allow' substitutes the input", async () => {
+    const agent = await freshToolAgent("gate-allow");
+    await agent.setToolCallDecision({
+      action: "allow",
+      input: { message: "rewritten" }
+    });
+    await agent.testChat("call echo");
+
+    expect(await agent.getEchoExecuteCount()).toBe(1);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: rewritten");
+  });
+
+  it("never runs execute when the call is blocked", async () => {
+    // Counter-based proof (vs. the indirect output assertion): if `execute`
+    // had run, the count would be 1 and the output would be "echo: hello",
+    // not the block reason.
+    const agent = await freshToolAgent("gate-block");
+    await agent.setToolCallDecision({ action: "block", reason: "nope" });
+    await agent.testChat("call echo");
+
+    expect(await agent.getEchoExecuteCount()).toBe(0);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("nope");
+  });
+
+  it("never runs execute when the result is substituted", async () => {
+    const agent = await freshToolAgent("gate-substitute");
+    await agent.setToolCallDecision({
+      action: "substitute",
+      output: "cached value"
+    });
+    await agent.testChat("call echo");
+
+    expect(await agent.getEchoExecuteCount()).toBe(0);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("cached value");
+  });
+});
+
+// ── Streaming tool preservation through beforeToolCall ──────────
+
+describe("Think — streaming tool preservation", () => {
+  it("preserves preliminary chunks for an async-generator execute", async () => {
+    const agent = await freshToolAgent("stream-preserve");
+    await agent.setEchoExecuteMode("async-generator");
+    await agent.testChat("call echo");
+
+    const chunks = await agent.getToolResultChunkLog();
+    const preliminary = chunks
+      .filter((c) => c.preliminary)
+      .map((c) => JSON.parse(c.outputJson));
+    // The tool yields two preliminary values before the final value; the
+    // AI SDK surfaces each yield as a `preliminary` tool-result.
+    expect(preliminary).toContain("echo-prelim-1: hello");
+    expect(preliminary).toContain("echo-prelim-2: hello");
+
+    const final = chunks
+      .filter((c) => !c.preliminary)
+      .map((c) => JSON.parse(c.outputJson));
+    expect(final).toEqual(["echo: hello"]);
+
+    // afterToolCall still sees the final value, and execute ran once.
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+    expect(await agent.getEchoExecuteCount()).toBe(1);
+  });
+
+  it("emits no synthetic preliminary chunk for a scalar execute", async () => {
+    // The scalar wrapper must not turn an ordinary tool into a streaming one.
+    const agent = await freshToolAgent("stream-scalar");
+    await agent.setEchoExecuteMode("default");
+    await agent.testChat("call echo");
+
+    const chunks = await agent.getToolResultChunkLog();
+    expect(chunks.some((c) => c.preliminary)).toBe(false);
+    const final = chunks
+      .filter((c) => !c.preliminary)
+      .map((c) => JSON.parse(c.outputJson));
+    expect(final).toEqual(["echo: hello"]);
+  });
+
+  it("collapses a Promise<AsyncIterable> (non-canonical) execute", async () => {
+    // `async () => makeIterator()` returns a Promise<AsyncIterable>, which
+    // does not stream even in the raw AI SDK — Think collapses it to the
+    // last yielded value rather than leaking the iterator object.
+    const agent = await freshToolAgent("stream-collapse");
+    await agent.setEchoExecuteMode("async-iterable");
+    await agent.testChat("call echo");
+
+    const chunks = await agent.getToolResultChunkLog();
+    expect(chunks.some((c) => c.preliminary)).toBe(false);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+  });
+});
+
+// ── Raw needsApproval + beforeToolCall ordering ─────────────────
+
+describe("Think — raw needsApproval tool + beforeToolCall ordering", () => {
+  it("keeps beforeToolCall as the outer gate after approval (block)", async () => {
+    // Dual gate: the AI SDK `needsApproval` gate prompts first; after the
+    // user approves, `beforeToolCall` still gets the final say and blocks
+    // `execute` from ever running.
+    const room = `needs-approval-block-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.setEchoExecuteMode("needs-approval");
+    await agent.setToolCallDecision({
+      action: "block",
+      reason: "blocked after approval"
+    });
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo");
+    await initialDone;
+    // Approval gate held execution before the prompt.
+    expect(await agent.getEchoExecuteCount()).toBe(0);
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect(await agent.getEchoExecuteCount()).toBe(0);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("blocked after approval");
+
+    await closeWS(ws);
+  });
+
+  it("runs execute exactly once when both gates allow", async () => {
+    const room = `needs-approval-allow-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.setEchoExecuteMode("needs-approval");
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo");
+    await initialDone;
+    expect(await agent.getEchoExecuteCount()).toBe(0);
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect(await agent.getEchoExecuteCount()).toBe(1);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+
+    await closeWS(ws);
+  });
+});
+
 // ── Extension hook dispatch ─────────────────────────────────────
 
 async function freshExtensionHookAgent(name: string) {

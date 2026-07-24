@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.4.3
+
+### Patch Changes
+
+- [#1904](https://github.com/cloudflare/agents/pull/1904) [`88f7f69`](https://github.com/cloudflare/agents/commit/88f7f69df92de9b36987980be1091056d1557b29) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Echo the durable tool-call log on the proxy tool output. `ProxyToolOutput` now carries an optional `calls` field (the execution's `ToolLogEntry[]`) on completed, paused and error outcomes, so UIs can render an audit trail of every connector call and step — name, args, result, approval requirement and state — without a separate `executions()` round trip.
+
 ## 0.4.2
 
 ### Patch Changes

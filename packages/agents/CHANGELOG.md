@@ -1,5 +1,92 @@
 # @cloudflare/agents
 
+## 0.17.4
+
+### Patch Changes
+
+- [#1902](https://github.com/cloudflare/agents/pull/1902) [`a9d78c0`](https://github.com/cloudflare/agents/commit/a9d78c01379e7715f7fe33046e71bd9eaf3611ef) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Always apply the Worker-safe `CfWorkerJsonSchemaValidator` to MCP client connections by default.
+
+  `MCPClientConnection` now owns the default (merged in its constructor), so every construction path uses the Worker-safe validator unless the caller supplies their own — including the RPC `addMcpServer(name, namespace)` path via `MCPClientManager.connect()`, which previously skipped it. Without the default, the MCP SDK fell back to its AJV validator when a server exposed tools with `outputSchema`; AJV compiles schemas with `new Function`, which Workers disallows, failing discovery with "Code generation from strings disallowed for this context".
+
+  `connect()` now builds connections through `createConnection()` instead of duplicating construction, so the two paths can no longer drift. Caller-supplied `client.jsonSchemaValidator` overrides are respected on the live connection; because validator instances cannot survive JSON serialization, they are no longer persisted, and a previously persisted, serialization-degraded validator is ignored on restore — after hibernation the connection falls back to the Worker-safe default instead of failing discovery.
+
+- [#1903](https://github.com/cloudflare/agents/pull/1903) [`3ba6a78`](https://github.com/cloudflare/agents/commit/3ba6a78c1d585948453803524093d686394ce4d4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: url-mode elicitation support with a real elicitation handler
+
+  - Agents can now respond to server-initiated `elicitation/create` requests by
+    calling `this.mcp.configureElicitationHandlers({ form, url })`, typically in
+    `onStart()`. The advertised modes are persisted with each MCP server, so
+    connections restored after Durable Object hibernation re-advertise them at
+    the handshake and the handlers re-attach when onStart runs.
+  - Connections advertise elicitation modes based on what can actually be
+    handled: they advertise exactly the modes with configured handlers at the
+    initialize handshake; without handlers they advertise no elicitation
+    capability. An explicit
+    `client.capabilities.elicitation` (e.g. via `addMcpServer`) always wins,
+    is persisted with the server options, and survives hibernation — it is no
+    longer clobbered by a hardcoded value.
+
+- [#1925](https://github.com/cloudflare/agents/pull/1925) [`762998d`](https://github.com/cloudflare/agents/commit/762998da1c873701305a44c598e9c029617047b4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: consume the persisted capability seed at first use instead of at restore-time read
+
+  The capability stamp persisted on each MCP server row (used to re-advertise elicitation modes at the handshake after Durable Object hibernation) was read-and-cleared when the connection object was created, before any connection attempt. Wakes that never reached a handshake burned it: a restore that parked on a pending OAuth flow, or a wake interrupted between restore and `onStart` re-stamping the rows, left the next wake's connections negotiating without the elicitation capability until some later reconnect.
+
+  The stamp is now read without clearing and only cleared once a seeded handshake actually completes in a session that has not configured handlers, preserving the one-successful-restore semantics: after the seed is used in a completed handshake it no longer re-advertises stale modes, and any `configureElicitationHandlers` call still re-stamps every row. Sessions with handlers configured own their row stamps, so a handshake there (e.g. re-adding a server under a stable id) keeps the fresh stamp in place for the next wake.
+
+- [#1910](https://github.com/cloudflare/agents/pull/1910) [`9e1b733`](https://github.com/cloudflare/agents/commit/9e1b733426620642ae67b70a6fea63459e8a1e8c) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: advertise no elicitation capability when no handler is configured
+
+  Connections without an elicitation handler previously advertised form-mode
+  elicitation while rejecting every elicitation request that arrived, so
+  spec-compliant servers chose elicitation over their fallback flows and the
+  tool call failed mid-flight. Connections now advertise the elicitation
+  capability only when it can be handled: form mode, URL mode, or both, based on
+  handlers configured via `this.mcp.configureElicitationHandlers({ form, url })`.
+  Connections without handlers advertise no elicitation capability, letting
+  servers fall back gracefully.
+
+  An explicit `client.capabilities.elicitation` declaration remains authoritative.
+  Only advertise modes your Agent can handle.
+
+- [#1869](https://github.com/cloudflare/agents/pull/1869) [`f274903`](https://github.com/cloudflare/agents/commit/f274903ee06123bc12cd5834d5187b7ffec4722e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix `addMcpServer()` reporting `ready` for an HTTP MCP connection that was restored while OAuth is still in progress.
+
+  For an existing `AUTHENTICATING` connection, `addMcpServer()` now prefers the live authorization URL, otherwise returns a persisted absolute HTTP(S) authorization URL. If neither is available, it reconnects the existing connection without re-registering it: a new authorization URL is returned and persisted, a connected result is discovered before returning `ready`, and failed or incomplete OAuth results throw instead of falling through to `ready`.
+
+## 0.17.3
+
+### Patch Changes
+
+- [`58eea18`](https://github.com/cloudflare/agents/commit/58eea18f74dec943a5e9df3d78135f8980c445c4) Thanks [@threepointone](https://github.com/threepointone)! - trigger a release
+
+## 0.17.2
+
+### Patch Changes
+
+- [#1836](https://github.com/cloudflare/agents/pull/1836) [`0544aa2`](https://github.com/cloudflare/agents/commit/0544aa2c2ac6cb8e3d3438153efe53ca711aebe2) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgentToolEvents` doubling streamed text in React StrictMode / SSR frameworks ([#1835](https://github.com/cloudflare/agents/issues/1835)).
+
+  The agent-tool-event reducer (`applyAgentToolEvent` → `applyToRun`) shallow-copied a run's `parts` array with `[...seeded.parts]` and then handed it to `applyChunkToParts`, which mutates part objects in place (e.g. `lastTextPart.text += delta`). Because the copied array still shared its element references with the previous state, those in-place mutations leaked back into `prev`. React double-invokes `setState` updaters in StrictMode and during dev hydration, so each `text-delta` chunk was applied twice against the same already-mutated `prev`, doubling every word. Affected Next.js, TanStack Start, Remix, and any `<React.StrictMode>` app. The reducer now clones each part before mutating, keeping it pure.
+
+- [#1838](https://github.com/cloudflare/agents/pull/1838) [`cc21f09`](https://github.com/cloudflare/agents/commit/cc21f094f49b287201ee7550548206dd0c3365ae) Thanks [@threepointone](https://github.com/threepointone)! - Fix reconnect-driven resume overlap throwing `Cannot read properties of undefined (reading 'state')` in `useAgentChat` ([#1837](https://github.com/cloudflare/agents/issues/1837)).
+
+  With `resume: true` (the default), the hook re-probes the stream from its WebSocket `onAgentOpen` handler on every reconnect. The AI SDK's `Chat.makeRequest` has no concurrency guard — every resume shares the single mutable `this.activeResponse`, and its `finally` finalizer reads `this.activeResponse.state.message` with a bare (unguarded) read before clearing it. Under a reconnect storm (flaky mobile link, or a Durable Object bounce on redeploy), a second resume could overwrite + clear `activeResponse` before an earlier resume's finalizer ran, so the earlier finalizer read `undefined` and threw. The old guard didn't close the window: `isAwaitingResume()` only covers the handshake (it flips false the instant `STREAM_RESUMING` resolves, before the AI SDK sets status to `submitted` in a later microtask) and `statusRef` is lagging React state. Resumes are now serialized via an in-flight flag, so a re-probe `resumeStream()` is never issued while one is still outstanding.
+
+## 0.17.1
+
+### Patch Changes
+
+- [#1826](https://github.com/cloudflare/agents/pull/1826) [`1bbd9bc`](https://github.com/cloudflare/agents/commit/1bbd9bca45834e7699969d83d203ec82f53a9bac) Thanks [@threepointone](https://github.com/threepointone)! - Add a tight, OOM-specific retry budget to chat recovery so a memory-limit crash loop seals fast and attributably ([#1825](https://github.com/cloudflare/agents/issues/1825)).
+
+  When a recovery turn hits a Durable Object memory-limit reset (the isolate exceeded its 128 MB limit), recovery now classifies it as a distinct, deterministic failure rather than a deploy-style transient. A memory reset re-OOMs on re-run (the turn's working set, not the platform, is the cause), so it must NOT be deferred and retried forever like a code-update/connection-lost transient. Each such crash bumps a durable per-incident `oomAttempts` counter; recovery retries a small number of times (new `chatRecovery.maxOomRetries`, default `3`) — in case the OOM was a transient spike — then seals with `reason="out_of_memory"`. This is far tighter than the generic `maxRecoveryWork` backstop because an OOM is attributable and each re-run re-runs the model.
+
+  This complements the finite `maxRecoveryWork` default: the OOM budget is the fast path for memory resets that surface as catchable errors thrown from recovery bookkeeping (e.g. storage/SQL rejections after the reset), while `maxRecoveryWork` remains a backstop for the hard-kill case where no in-isolate code runs to record the OOM.
+
+  Adds an **alarm-boundary circuit breaker** (`agents`) as the universal backstop for the case the in-DO budgets can't catch ([#1825](https://github.com/cloudflare/agents/issues/1825)): a memory-limit reset that bypasses them entirely — thrown before the budget code runs (e.g. boot-time state hydration OOMs), or whose own small writes also OOM under memory pressure. Left unhandled, such an error propagates out of `alarm()` and the platform auto-retries the alarm forever, re-running the doomed, billable turn each cycle. `Agent.alarm()` now intercepts ONLY Durable Object memory-limit resets at the outermost frame — where the heavy turn has unwound and GC has reclaimed its footprint, so the seal/purge writes can land where mid-turn ones OOMed. A durable strike counter tolerates a few resets (new `static options.maxAlarmMemoryLimitStrikes`, default `3`) — backing off the looping rows so the retry is not a hot loop — then seals the recovery (`out_of_memory`) and surgically purges only the looping schedule rows, leaving unrelated scheduled tasks intact. A new `alarm:memory_limit_reset` observability event is emitted. Everything except memory-limit resets re-throws exactly as before.
+
+  Also broadens and exports the `isDurableObjectMemoryLimitReset(error)` predicate from `agents` (a sibling to `isDurableObjectCodeUpdateReset` / `isPlatformTransientError`): it now matches the shared `"exceeded its memory limit"` fragment so truncated/reworded surfacings (observed in real [#1825](https://github.com/cloudflare/agents/issues/1825) logs) still classify.
+
+- [#1826](https://github.com/cloudflare/agents/pull/1826) [`1bbd9bc`](https://github.com/cloudflare/agents/commit/1bbd9bca45834e7699969d83d203ec82f53a9bac) Thanks [@threepointone](https://github.com/threepointone)! - Fix neverending chat-recovery retries when a Durable Object isolate runs out of memory mid-turn ([#1825](https://github.com/cloudflare/agents/issues/1825)).
+
+  `chatRecovery.maxRecoveryWork` now defaults to a generous finite backstop (`1000`) instead of `Infinity`. An isolate that exceeds its memory limit and is reset mid-stream has usually already streamed a little content, which bumps the durable progress counter. On the next wake recovery reads that as forward progress and **resets both progress-keyed bounds** — the attempt cap (`maxAttempts`) and the no-progress window (`noProgressTimeoutMs`) — and because each crash lands inside the alarm-debounce window the attempt counter is pinned too. With the work budget disabled (`Infinity`), no instrument could ever seal the turn, so recovery re-ran the turn (and its LLM calls) forever. The work meter is the one signal that keeps climbing across such a loop, so a finite default seals a runaway with `reason="work_budget_exceeded"` instead of looping.
+
+  Work only accrues from the first interruption until the turn completes, so a normal interrupted turn never approaches the cap. A very long agentic turn that legitimately produces a large amount of content under heavy interruption can raise `maxRecoveryWork` (or set it to `Infinity` to restore the previous fully-unbounded behavior, ideally paired with a `shouldKeepRecovering` predicate that bounds the runaway via real token/cost accounting).
+
 ## 0.17.0
 
 ### Minor Changes

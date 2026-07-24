@@ -35,6 +35,17 @@ if (!BASE) {
   process.exit(1);
 }
 
+// A single stray rejection (e.g. a WebSocket `ErrorEvent` from a transient
+// connect failure against a just-deployed worker) must not crash the driver
+// with an opaque ERR_UNHANDLED_REJECTION. Exit non-zero with context instead.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "[driver] unhandledRejection:",
+    reason?.stack ?? reason?.message ?? reason
+  );
+  process.exit(1);
+});
+
 /**
  * Real deploy = the faithful interruption for #1672: the in-flight fiber is
  * interrupted and the SAME incident is continued on restart, incrementing
@@ -54,6 +65,30 @@ const scenario = process.argv[2] ?? "debug";
 const SESSION = process.env.SESSION ?? scenario;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Retry a flaky async op with linear backoff. The probe runs against a freshly
+ *  deployed `*.workers.dev` route, so the first calls can transiently fail
+ *  while the worker/DO warms up. */
+async function withRetry(label, op, { tries = 5, baseMs = 1000 } = {}) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await op();
+    } catch (error) {
+      lastErr = error;
+      const waitMs = baseMs * (i + 1);
+      console.warn(
+        `  [retry] ${label} failed (attempt ${i + 1}/${tries}): ${
+          error?.message ?? error
+        }; retrying in ${waitMs}ms`
+      );
+      await sleep(waitMs);
+    }
+  }
+  throw new Error(
+    `${label} failed after ${tries} attempts: ${lastErr?.message ?? lastErr}`
+  );
+}
 
 async function post(action, body) {
   const res = await fetch(`${BASE}/probe/${action}?session=${SESSION}`, {
@@ -75,6 +110,23 @@ async function startChat(opts) {
   return post("start-chat", opts);
 }
 
+/**
+ * POST /probe/start and assert the turn was actually accepted. A cold,
+ * just-deployed worker can transiently 500 here; the worker returns an
+ * `{ error }` shape (HTTP 500) that otherwise looks like a successful submit
+ * with `synth`/`submissionId` undefined and silently decays into a 60s
+ * "progress:0" timeout downstream. Fail loudly with the server's error instead.
+ */
+async function startTurn(body) {
+  const res = await post("start", body);
+  if (!res || res.error || !res.submissionId) {
+    throw new Error(
+      `/probe/start did not accept the turn: ${JSON.stringify(res)}`
+    );
+  }
+  return res;
+}
+
 // ── WebSocket (the a6 HITL scenario acts as the SPA) ──────────────
 // A pending CLIENT tool call only exists when a real chat request registers the
 // tool via `clientTools` and the client later replays a `cf_agent_tool_result`.
@@ -90,12 +142,31 @@ function wsUrl() {
   return `${BASE.replace(/^http/, "ws")}/agents/probe-agent/${SESSION}`;
 }
 
-function openWS() {
+function openWSOnce() {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl());
     ws.addEventListener("open", () => resolve(ws), { once: true });
-    ws.addEventListener("error", (e) => reject(e), { once: true });
+    // Normalize the undici `ErrorEvent` into a real `Error` — a bare
+    // ErrorEvent rejection surfaces as the useless reason "#<_ErrorEvent>".
+    ws.addEventListener(
+      "error",
+      (e) =>
+        reject(
+          new Error(
+            `WebSocket open failed: ${
+              e?.message ?? e?.error?.message ?? "connection error"
+            }`
+          )
+        ),
+      { once: true }
+    );
   });
+}
+
+/** Open a WS to the agent route, tolerating transient connect failures against
+ *  a just-deployed route. */
+function openWS() {
+  return withRetry("openWS", openWSOnce, { tries: 5, baseMs: 1000 });
 }
 
 function sendChat(ws, text, clientTools) {
@@ -380,7 +451,7 @@ async function scenarioA6() {
   // 2. Submit the HITL turn. Tight budget so the PRE-FIX build seals within the
   //    churn window; the FIXED build completes the submission at park, so these
   //    bounds never bite.
-  const start = await post("start", {
+  const start = await startTurn({
     synth: { mode: "hitl" },
     recovery: {
       noProgressTimeoutMs: 20000,
@@ -463,7 +534,7 @@ async function churnRounds(tag) {
  */
 async function scenarioA7() {
   await post("reset");
-  const start = await post("start", {
+  const start = await startTurn({
     synth: { mode: "server-orphan" },
     recovery: {
       noProgressTimeoutMs: 15000,
@@ -503,7 +574,7 @@ async function scenarioA7() {
  */
 async function scenarioA8() {
   await post("reset");
-  const start = await post("start", {
+  const start = await startTurn({
     synth: { mode: "approval" },
     recovery: {
       noProgressTimeoutMs: 20000,
@@ -640,7 +711,7 @@ async function scenarioIdem() {
   await post("reset");
   const key = "idem-key-1";
   const synth = { mode: "progress", targetSteps: 6, intervalMs: 1500 };
-  const r1 = await post("start", { synth, idempotencyKey: key });
+  const r1 = await startTurn({ synth, idempotencyKey: key });
   console.log(
     `idem: submit#1 id=${r1.submissionId?.slice(0, 8)} accepted=${r1.accepted}`
   );
@@ -651,7 +722,7 @@ async function scenarioIdem() {
     await sleep(3000);
   }
   // A real client retry resends the SAME submissionId + idempotencyKey.
-  const r2 = await post("start", {
+  const r2 = await startTurn({
     synth,
     submissionId: r1.submissionId,
     idempotencyKey: key
@@ -811,4 +882,12 @@ if (!fn) {
   console.error(`Unknown scenario: ${scenario}`);
   process.exit(1);
 }
-fn().then((pass) => process.exit(pass === false ? 1 : 0));
+fn()
+  .then((pass) => process.exit(pass === false ? 1 : 0))
+  .catch((error) => {
+    console.error(
+      `[driver] scenario "${scenario}" threw:`,
+      error?.stack ?? error?.message ?? error
+    );
+    process.exit(1);
+  });

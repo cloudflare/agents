@@ -26,10 +26,6 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, tool, stepCountIs, type LanguageModel } from "ai";
 import { z } from "zod";
 
-interface Env {
-  AI: Ai;
-}
-
 type RunBinding = {
   run(
     model: string,

@@ -128,14 +128,15 @@ contract from their own subpaths.
 
 Common messenger options:
 
-| Option               | Default                         | Description                                                                     |
-| -------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
-| `path`               | `/messengers/{id}/webhook`      | Webhook path handled before user `onRequest`                                    |
-| `respondTo`          | `["direct-message", "mention"]` | Event kinds that should start a Think reply                                     |
-| `subscribeOnMention` | `true`                          | Subscribe Chat SDK threads after a new mention                                  |
-| `conversation`       | `"thread"`                      | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent |
-| `verifyWebhook`      | required                        | Verification function, or `false` to opt out explicitly                         |
-| `delivery`           | provider defaults               | Streaming limits, text splitting, and safe user-facing failure messages         |
+| Option                | Default                              | Description                                                                                                                              |
+| --------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`                | `/messengers/{id}/webhook`           | Webhook path handled before user `onRequest`                                                                                             |
+| `respondTo`           | `["direct-message", "mention"]`      | Event kinds that should start a Think reply                                                                                              |
+| `subscribeOnMention`  | `true`                               | Subscribe Chat SDK threads after a new mention                                                                                           |
+| `conversation`        | `"thread"`                           | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent                                                          |
+| `channelSpeakerLabel` | `fullName \|\| userName \|\| userId` | Channel (non-DM) messages are rendered as `SpeakerName: text`. Pass a formatter to customize or suppress labels. DMs never get a prefix. |
+| `verifyWebhook`       | required                             | Verification function, or `false` to opt out explicitly                                                                                  |
+| `delivery`            | provider defaults                    | Streaming limits, text splitting, and safe user-facing failure messages                                                                  |
 
 ## Agent tools
 
@@ -215,12 +216,6 @@ Think adds the skill catalog to the prompt and exposes `activate_skill` and
 ```ts
 import { Think, skills } from "@cloudflare/think";
 import bundledSkills from "agents:skills"; // resolves to ./skills next to this file
-
-type Env = {
-  AI: Ai;
-  LOADER: WorkerLoader;
-  SKILLS_BUCKET: R2Bucket;
-};
 
 export class MyAgent extends Think<Env> {
   getSkills() {
@@ -327,6 +322,7 @@ Script execution requires a Worker Loader binding:
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
@@ -352,6 +348,9 @@ Script execution requires a Worker Loader binding:
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
 | `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
+| `fetchTools`               | `false`                            | Opt-in allowlisted HTTP read tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                         |
+| `includeMcpTools`          | `true`                             | Automatically convert connected MCP tools to AI SDK tools and merge them into model turns                                                                                                                                    |
+| `waitForMcpConnections`    | `false`                            | Wait for MCP connections to settle before inference                                                                                                                                                                          |
 | `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
 | `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
 | `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
@@ -768,13 +767,24 @@ configureSession(session: Session) {
 
 ### MCP integration
 
-Think inherits MCP client support from the Agent base class. MCP tools are automatically merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
+Think inherits MCP client support from the Agent base class. MCP tools are automatically converted to AI SDK tools and merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
 
 ```ts
 export class MyAgent extends Think<Env> {
   waitForMcpConnections = true; // or { timeout: 10_000 }
 }
 ```
+
+If you expose MCP tools through Code Mode or another mechanism outside Think's automatic tool set, disable direct exposure to the model:
+
+```ts
+export class MyAgent extends Think<Env> {
+  includeMcpTools = false;
+  waitForMcpConnections = true;
+}
+```
+
+This suppresses only Think's automatic `this.mcp.getAITools()` merge. Connection registration, restoration, discovery, waiting, raw listing and calls, Code Mode access, and explicit `this.mcp.getAITools()` calls are unchanged. It also avoids converting a large MCP catalog to Zod when another mechanism exposes the tools. `activeTools: []` is not an equivalent optimization because Think assembles and converts tools before `beforeTurn` runs.
 
 ### Choosing a turn API
 
@@ -866,7 +876,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
 - **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
-- **MCP integration** — MCP tools auto-merged, wait for connections before inference
+- **MCP integration** — MCP tools auto-merged by default, with an opt-out for alternative exposure paths
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
 - **Multi-tab broadcast** — all connected clients see the stream (resume-aware exclusions)
 - **Partial persistence** — on error, the partial assistant message is saved
@@ -902,6 +912,67 @@ getTools() {
 ```
 
 Requires `@cloudflare/codemode` and a `worker_loaders` binding in `wrangler.jsonc`.
+
+## Fetch tool
+
+Give the model a conservative, read-only way to read HTTP resources. It is **off by default** — set the `fetchTools` property (static config) or call `createFetchTools()` inside `getTools()` (dynamic/per-tenant). It registers a generic `fetch_url` tool when a public `allowlist` is configured, plus one `fetch_<name>` tool per binding target.
+
+```ts
+export class DocsAgent extends Think<Env> {
+  getModel() { ... }
+
+  fetchTools = {
+    allowlist: ["https://developers.cloudflare.com/**"],
+    bindings: {
+      docsApi: {
+        binding: this.env.DOCS_API, // a service binding / Fetcher
+        allowlist: ["/v1/docs/**"],
+        headers: { "x-agent": "think" }
+      }
+    }
+  };
+}
+```
+
+For per-tenant allowlists computed at request time, build the tools in `getTools()` (it runs every turn) instead of using the static property:
+
+```ts
+import { createFetchTools } from "@cloudflare/think/tools/fetch";
+
+getTools() {
+  return {
+    ...createFetchTools({ allowlist: this.allowedOriginsForTenant() })
+  };
+}
+```
+
+Behavior and safety:
+
+- **Read-only** — `GET` only. Mutations belong in explicit, approval-gated actions, not here.
+- **Allowlisted** — every request must match the configured allowlist; private, loopback, link-local, and `*.internal` targets are blocked even if the allowlist is misconfigured.
+- **Bounded** — `maxBytes` caps the download, `maxModelChars` truncates the model-facing text, and `response: "workspace"` (or `spillToWorkspace: true` with auto) writes large or binary bodies to a workspace file instead of bloating the transcript.
+- **Header-safe** — only headers in `modelHeaderAllowlist` (default `accept`, `accept-language`, `range`) may be set by the model; fixed binding headers are server-side only and are stripped on cross-origin redirects.
+- **Markdown-first** — a weighted default `Accept` header (`text/markdown` → `text/plain` → `application/json` → `text/html` → `*/*`) nudges content-negotiating endpoints to return clean markdown instead of HTML. Override per call (the model can set `accept`) or globally via `defaultAccept` (set to `""` to disable).
+- **Redirects** — followed only when the final URL is still allowlisted (`followRedirects`); binding targets never follow cross-origin redirects.
+
+Results are structured `{ ok, ... }` values: success carries `status`, `finalUrl`, `contentType`, `bytes`, `truncated`, and the `body`/`json`/`path`; failures carry a `code` (`disallowed_url`, `disallowed_redirect`, `timeout`, `non_2xx`, `unsupported_content_type`, `invalid_json`, `too_large`, `request_failed`). A `tool:fetch` observability event fires for each call, including blocked attempts.
+
+Allowlist semantics:
+
+- A bare origin (`https://example.com`) matches that origin and every subpath under it.
+- Patterns are globs: `**` matches any characters (including `/`), `*` matches any character except `/`. A pattern with an explicit path and no glob matches that path literally (e.g. `https://x.com/v1` matches only `/v1`, not `/v1/a`).
+- Matching ignores the query string and fragment (only scheme + host + port + path are compared); the original query/fragment are still sent.
+- Binding allowlists should be path-based (`/v1/docs/**`); a model-supplied absolute URL is only allowed if it matches the binding's allowlist.
+- `json` responses are bounded by `maxBytes` (not `maxModelChars`, which only truncates `text`). For large JSON APIs, lower `maxBytes` or use `response: "workspace"`.
+
+You do not need new machinery to gate egress: `beforeToolCall` can `block`/`substitute` a fetch, and channel `tools(...)` policy can narrow the available tools.
+
+### When to use what
+
+- **Fetch tool** — read a known, allowlisted URL or service binding. No code generation.
+- **Code execution tool** — compose or transform several calls in sandboxed code (set `globalOutbound` to control its network access).
+- **Browser Run** (`@cloudflare/think/tools/browser`) — rendered pages, auth flows, screenshots, CDP automation.
+- **Typed tools / `agentTool()`** — call a `WorkerEntrypoint`/Durable Object method with a typed schema, or delegate work to a sub-agent. Do not route these through fetch.
 
 ## Extensions
 

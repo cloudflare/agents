@@ -63,6 +63,7 @@ class FakeAudioContext {
   currentTime = 0;
   source: FakeAudioBufferSourceNode | null = null;
   sources: FakeAudioBufferSourceNode[] = [];
+  createdBuffers: Array<{ length: number; sampleRate: number }> = [];
   deferDecode = false;
   pendingDecode: (() => void) | null = null;
   destination = {};
@@ -86,6 +87,7 @@ class FakeAudioContext {
     length: number,
     sampleRate: number
   ): AudioBuffer {
+    this.createdBuffers.push({ length, sampleRate });
     return {
       duration: length / sampleRate,
       getChannelData: () => new Float32Array(length)
@@ -176,6 +178,32 @@ class FakeAudioInput implements VoiceAudioInput {
   }
 }
 
+class DeferredAudioInput implements VoiceAudioInput {
+  onAudioLevel: ((rms: number) => void) | null = null;
+  onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
+  startCalled = false;
+  running = false;
+  stopCount = 0;
+  #resolveStart: (() => void) | null = null;
+
+  async start(): Promise<void> {
+    this.startCalled = true;
+    await new Promise<void>((resolve) => {
+      this.#resolveStart = resolve;
+    });
+    this.running = true;
+  }
+
+  stop(): void {
+    this.stopCount++;
+    this.running = false;
+  }
+
+  resolveStart(): void {
+    this.#resolveStart?.();
+  }
+}
+
 let originalAudioContext: typeof AudioContext | undefined;
 let originalAudio: typeof Audio | undefined;
 let audioContext: FakeAudioContext;
@@ -207,6 +235,16 @@ async function waitForSourceCount(
   throw new Error(
     `expected ${count} audio sources, got ${audioContext.sources.length}`
   );
+}
+
+async function waitForAudioInputStart(
+  audioInput: DeferredAudioInput
+): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    if (audioInput.startCalled) return;
+    await Promise.resolve();
+  }
+  throw new Error("expected audio input start to be called");
 }
 
 beforeEach(() => {
@@ -648,21 +686,183 @@ describe("VoiceClient playback interrupt", () => {
   });
 });
 
+describe("VoiceClient errors", () => {
+  it("preserves a server error when an idle status follows it", () => {
+    const transport = new MockTransport();
+    const errors: Array<string | null> = [];
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    client.addEventListener("error", (error) => errors.push(error));
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition failed to start"
+      })
+    );
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.error).toBe("Speech recognition failed to start");
+    expect(errors.at(-1)).toBe("Speech recognition failed to start");
+
+    transport.receive(JSON.stringify({ type: "status", status: "listening" }));
+
+    expect(client.error).toBeNull();
+    expect(errors.at(-1)).toBeNull();
+  });
+
+  it("stops local audio when a startup error returns the call to idle", async () => {
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    await client.startCall();
+
+    expect(audioInput.started).toBe(true);
+    expect(audioInput.stopped).toBe(false);
+    expect(audioInput.onAudioLevel).not.toBeNull();
+    expect(audioInput.onAudioData).not.toBeNull();
+
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition failed to start"
+      })
+    );
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.status).toBe("idle");
+    expect(client.error).toBe("Speech recognition failed to start");
+    expect(audioInput.stopped).toBe(true);
+    expect(audioInput.onAudioLevel).toBeNull();
+    expect(audioInput.onAudioData).toBeNull();
+    expect(transport.sentJSON).not.toContainEqual({ type: "end_call" });
+
+    transport.disconnect();
+    transport.connect();
+
+    expect(
+      transport.sentJSON.filter((message) => message.type === "start_call")
+    ).toHaveLength(1);
+  });
+
+  it("stops local audio if startup fails before audio input start resolves", async () => {
+    const transport = new MockTransport();
+    const audioInput = new DeferredAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    const startCall = client.startCall();
+    await waitForAudioInputStart(audioInput);
+
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition failed to start"
+      })
+    );
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.status).toBe("idle");
+    expect(client.error).toBe("Speech recognition failed to start");
+    expect(audioInput.stopCount).toBe(1);
+    expect(audioInput.running).toBe(false);
+
+    audioInput.resolveStart();
+    await startCall;
+
+    expect(audioInput.running).toBe(false);
+    expect(audioInput.stopCount).toBe(2);
+    expect(audioInput.onAudioLevel).toBeNull();
+    expect(audioInput.onAudioData).toBeNull();
+  });
+
+  it("does not stop local audio for the initial idle status during startup", async () => {
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    await client.startCall();
+
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.status).toBe("idle");
+    expect(audioInput.started).toBe(true);
+    expect(audioInput.stopped).toBe(false);
+    expect(audioInput.onAudioLevel).not.toBeNull();
+    expect(audioInput.onAudioData).not.toBeNull();
+
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(JSON.stringify({ type: "status", status: "listening" }));
+
+    expect(client.status).toBe("listening");
+    expect(audioInput.stopped).toBe(false);
+  });
+});
+
 describe("VoiceClient gapless playback", () => {
   // 1600 samples of 16-bit PCM = 0.1s at 16kHz
   function pcm16Chunk(): ArrayBuffer {
     return new ArrayBuffer(1600 * 2);
   }
 
-  function startPcm16Call(): { transport: MockTransport; client: VoiceClient } {
+  function startPcm16Call(sampleRate?: number): {
+    transport: MockTransport;
+    client: VoiceClient;
+  } {
     const transport = new MockTransport();
     const client = new VoiceClient({ agent: "test-agent", transport });
     client.connect();
     transport.receive(
-      JSON.stringify({ type: "audio_config", format: "pcm16" })
+      JSON.stringify({
+        type: "audio_config",
+        format: "pcm16",
+        ...(sampleRate !== undefined ? { sampleRate } : {})
+      })
     );
     return { transport, client };
   }
+
+  it("uses the sampleRate from audio_config when playing pcm16", async () => {
+    const { transport, client } = startPcm16Call(24000);
+    expect(client.sampleRate).toBe(24000);
+
+    // 2400 samples at 24kHz = 0.1s
+    transport.receive(new ArrayBuffer(2400 * 2));
+    await waitForSourceCount(1);
+
+    expect(audioContext.createdBuffers).toEqual([
+      { length: 2400, sampleRate: 24000 }
+    ]);
+    expect(audioContext.sources[0]?.startedAt).toBe(0);
+  });
+
+  it("defaults pcm16 sampleRate to 16000 when audio_config omits it", async () => {
+    const { transport, client } = startPcm16Call();
+    expect(client.sampleRate).toBe(16000);
+
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(1);
+
+    expect(audioContext.createdBuffers).toEqual([
+      { length: 1600, sampleRate: 16000 }
+    ]);
+  });
 
   it("schedules consecutive chunks back-to-back instead of waiting for ended", async () => {
     const { transport } = startPcm16Call();

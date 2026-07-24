@@ -13,17 +13,17 @@
     "test:e2e": "vitest run --config e2e/vitest.config.ts"
   },
   "dependencies": {
-    "@cloudflare/tanstack-ai": "^0.1.10",
-    "@tanstack/ai": "0.32.0",
-    "@tanstack/ai-client": "0.18.0",
-    "@tanstack/ai-react": "0.15.9",
+    "@cloudflare/tanstack-ai": "^0.2.0",
+    "@tanstack/ai": "0.38.0",
+    "@tanstack/ai-client": "0.19.0",
+    "@tanstack/ai-react": "0.16.0",
     "agents": "*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.42.3",
-    "@cloudflare/workers-types": "^4.20260625.1",
+    "@cloudflare/workers-types": "^4.20260629.1",
     "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

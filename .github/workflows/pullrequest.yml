@@ -13,6 +13,7 @@ concurrency:
 
 env:
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+  NX_PARALLEL: "2"
 
 jobs:
   ci:

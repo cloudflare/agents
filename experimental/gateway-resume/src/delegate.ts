@@ -27,10 +27,6 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 
-interface Env {
-  AI: Ai;
-}
-
 // ---------------------------------------------------------------------------
 // Slug parsing (RFC §3)
 // ---------------------------------------------------------------------------
