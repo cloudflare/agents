@@ -760,7 +760,7 @@ function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | undefined {
  * release so a stable release is preferred.
  * TODO: full PEP 440 ordering (post-releases, local versions, epochs) if needed.
  */
-function comparePythonVersions(a: string, b: string): number {
+export function comparePythonVersions(a: string, b: string): number {
   const parse = (v: string) => {
     const releaseMatch = v.match(/^[0-9]+(?:\.[0-9]+)*/);
     const release = (releaseMatch?.[0] ?? "0").split(".").map(Number);

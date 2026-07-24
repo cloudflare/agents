@@ -8,6 +8,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
 import { createTypescriptLanguageService } from "../typescript";
+import { comparePythonVersions } from "../installer";
 
 let testId = 0;
 
@@ -1147,3 +1148,26 @@ describe("createWorker with pyproject.toml", () => {
     expect(body.typing_inspection).toBe("typing_inspection");
   });
 }, 20000);
+
+describe("comparePythonVersions", () => {
+  it("accurately compares versions", () => {
+    expect(comparePythonVersions("1.0.0", "1.0.0")).toBe(0);
+    expect(comparePythonVersions("2.0.0", "1.0.0")).toBeGreaterThan(0);
+    expect(comparePythonVersions("1.0.0", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("1.2.3", "1.2.4")).toBeLessThan(0);
+    expect(comparePythonVersions("1.2.4", "1.2.3")).toBeGreaterThan(0);
+    expect(comparePythonVersions("1.10.0", "1.2.0")).toBeGreaterThan(0);
+    expect(comparePythonVersions("1.0.1", "1.0")).toBeGreaterThan(0);
+  });
+
+  it("considers non-release versions (a/b/rc/alpha/beta/dev/pre) to be lower versions than numeric ones", () => {
+    expect(comparePythonVersions("2.0.0a1", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0", "2.0.0a1")).toBeGreaterThan(0);
+    expect(comparePythonVersions("2.0.0b1", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0rc1", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0-alpha", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0beta", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0dev", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0pre", "2.0.0")).toBeLessThan(0);
+  });
+})
