@@ -104,6 +104,8 @@ export type ExecutionState = {
    * resume can verify the required connectors are still configured.
    */
   connectors?: string[];
+  /** Validator names required to resume this execution safely. */
+  validators?: string[];
   /** Epoch ms the execution was created. */
   createdAt: number;
   /** Epoch ms of the last state change. */
@@ -138,6 +140,8 @@ export type BeginOptions = {
   maxExecutions?: number;
   /** Connector names configured on the runtime starting this execution. */
   connectors?: string[];
+  /** Validator names configured on the runtime starting this execution. */
+  validators?: string[];
 };
 
 /** Default number of terminal executions to retain per runtime. */
@@ -217,6 +221,7 @@ type ExecutionRow = {
   error: string | null;
   logs: string | null;
   connectors: string | null;
+  validators: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -308,6 +313,7 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         error TEXT,
         logs TEXT,
         connectors TEXT,
+        validators TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -334,6 +340,14 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         connectors TEXT
       );
     `);
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE cm_executions ADD COLUMN validators TEXT"
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("duplicate column")) throw error;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -360,11 +374,12 @@ export class CodemodeRuntime extends DurableObject<unknown> {
     const id = `exec_${now.toString().padStart(16, "0")}_${crypto.randomUUID()}`;
     this.ctx.storage.sql.exec(
       `INSERT INTO cm_executions
-        (id, code, status, connectors, created_at, updated_at)
-        VALUES (?, ?, 'running', ?, ?, ?)`,
+        (id, code, status, connectors, validators, created_at, updated_at)
+        VALUES (?, ?, 'running', ?, ?, ?, ?)`,
       id,
       code,
       options?.connectors ? JSON.stringify(options.connectors) : null,
+      options?.validators ? JSON.stringify(options.validators) : null,
       now,
       now
     );
@@ -1021,6 +1036,9 @@ export class CodemodeRuntime extends DurableObject<unknown> {
       logs: row.logs ? (JSON.parse(row.logs) as string[]) : undefined,
       connectors: row.connectors
         ? (JSON.parse(row.connectors) as string[])
+        : undefined,
+      validators: row.validators
+        ? (JSON.parse(row.validators) as string[])
         : undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at
