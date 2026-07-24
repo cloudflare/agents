@@ -80,6 +80,8 @@ describe("createAISDKV7Telemetry", () => {
     ]);
     expect(tracing.spans[0]?.ended).toBe(true);
     expect(tracing.spans[1]?.name).toBe("chat test-model");
+    expect(tracing.rootSpans).toHaveLength(1);
+    expect(tracing.spans[1]?.parent).toBe(tracing.spans[0]);
     expect(tracing.spans[1]?.attributes).toMatchObject({
       "cloudflare.agents.call.id": "call-1",
       "cloudflare.agents.operation.name": "doGenerate",
@@ -407,6 +409,7 @@ describe("createAISDKV7Telemetry", () => {
     expect(toolSpan?.attributes).not.toHaveProperty([
       "cloudflare.agents.tool_context.multiply.token"
     ]);
+    expect(toolSpan?.parent).toBe(tracing.rootSpans[0]);
     expect(toolSpan?.children[0]?.name).toBe("inside.tool");
     expect(toolSpan?.ended).toBe(true);
   });
@@ -617,6 +620,14 @@ describe("createAISDKV7Telemetry", () => {
     const secondSpan = toolSpans.find(
       (span) => span.attributes["cloudflare.agents.call.id"] === "op-2"
     );
+    const firstRoot = tracing.rootSpans.find(
+      (span) => span.attributes["cloudflare.agents.call.id"] === "op-1"
+    );
+    const secondRoot = tracing.rootSpans.find(
+      (span) => span.attributes["cloudflare.agents.call.id"] === "op-2"
+    );
+    expect(firstSpan?.parent).toBe(firstRoot);
+    expect(secondSpan?.parent).toBe(secondRoot);
     expect(firstSpan?.attributes).toMatchObject({
       "gen_ai.tool.call.id": sharedToolCallId,
       "gen_ai.tool.name": "first"

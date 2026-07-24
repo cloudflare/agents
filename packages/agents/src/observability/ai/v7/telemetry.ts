@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { extractAIGatewayLogId } from "../ai-gateway";
 import {
   inputMessageAttributes,
@@ -36,19 +37,25 @@ type AISDKV7OperationName =
   | "streamObject"
   | "streamText";
 
+/** Re-enters the native span context captured while a parent was active. */
+type ContextSnapshot = <R>(run: () => R) => R;
+
 type OperationState = {
   readonly callId: string;
+  readonly inSpanContext: ContextSnapshot;
   readonly operationName: AISDKV7OperationName;
   readonly span: AgentSpan;
 };
 
 type ModelState = {
+  readonly inParentContext: ContextSnapshot;
   readonly spanSpec: ReturnType<typeof modelCallSpan>;
   span?: AgentSpan | undefined;
 };
 
 type ToolState = {
   readonly callId: string;
+  readonly inParentContext: ContextSnapshot;
   readonly spanSpec: ReturnType<typeof toolCallSpan>;
   span?: AgentSpan | undefined;
 };
@@ -120,15 +127,22 @@ export function createAISDKV7Telemetry(
         provider: readString(event.provider),
         request: requestSummaryFromEvent(event, operationName)
       });
+      // AI SDK v7 invokes model and tool lifecycle hooks after this callback
+      // returns. Capture the active invoke_agent context so those later hooks
+      // can create real children instead of sibling root spans.
       const operation = instrumentation.tracer.openSpan(
         span.name,
         span.attributes,
-        (activeSpan) => activeSpan
+        (activeSpan) => ({
+          inSpanContext: AsyncLocalStorage.snapshot() as ContextSnapshot,
+          span: activeSpan
+        })
       );
       operations.set(event.callId, {
         callId: event.callId,
+        inSpanContext: operation.inSpanContext,
         operationName,
-        span: operation
+        span: operation.span
       });
     },
 
@@ -152,7 +166,10 @@ export function createAISDKV7Telemetry(
         request: requestSummaryFromEvent(event, state.operationName)
       });
       const spans = modelSpans.get(event.callId) ?? [];
-      spans.push({ spanSpec: span });
+      spans.push({
+        inParentContext: state.inSpanContext,
+        spanSpec: span
+      });
       modelSpans.set(event.callId, spans);
     },
 
@@ -162,13 +179,7 @@ export function createAISDKV7Telemetry(
         return;
       }
 
-      const span =
-        state.span ??
-        instrumentation.tracer.openSpan(
-          state.spanSpec.name,
-          state.spanSpec.attributes,
-          (activeSpan) => activeSpan
-        );
+      const span = state.span ?? openStateSpan(state, instrumentation.tracer);
       span.finish({
         ...finishAttributesFromEvent(event, {
           includeAIGatewayLog: true,
@@ -181,7 +192,8 @@ export function createAISDKV7Telemetry(
 
     onToolExecutionStart(event) {
       const toolCallId = readString(event.toolCall.toolCallId);
-      if (toolCallId === undefined || !operations.has(event.callId)) {
+      const operation = operations.get(event.callId);
+      if (toolCallId === undefined || !operation) {
         return;
       }
 
@@ -193,6 +205,7 @@ export function createAISDKV7Telemetry(
       });
       toolSpans.set(toolSpanKey(event.callId, toolCallId), {
         callId: event.callId,
+        inParentContext: operation.inSpanContext,
         spanSpec: {
           name: span.name,
           attributes: {
@@ -216,13 +229,7 @@ export function createAISDKV7Telemetry(
         return;
       }
 
-      const span =
-        state.span ??
-        instrumentation.tracer.openSpan(
-          state.spanSpec.name,
-          state.spanSpec.attributes,
-          (activeSpan) => activeSpan
-        );
+      const span = state.span ?? openStateSpan(state, instrumentation.tracer);
       if (event.toolOutput?.type === "tool-error") {
         span.fail(event.toolOutput.error);
       } else {
@@ -286,33 +293,35 @@ export function createAISDKV7Telemetry(
         return options.execute();
       }
 
-      return instrumentation.tracer.openSpan(
-        state.spanSpec.name,
-        state.spanSpec.attributes,
-        (span) => {
-          state.span = span;
-          try {
-            return Promise.resolve(options.execute()).catch(
-              (cause: unknown) => {
-                writeSpanAttributes(
-                  span,
-                  aiGatewayLogAttributes(extractAIGatewayLogId(cause))
-                );
-                span.fail(cause);
-                removeModelState(modelSpans, options.callId, state);
-                throw cause;
-              }
-            );
-          } catch (cause: unknown) {
-            writeSpanAttributes(
-              span,
-              aiGatewayLogAttributes(extractAIGatewayLogId(cause))
-            );
-            span.fail(cause);
-            removeModelState(modelSpans, options.callId, state);
-            throw cause;
+      return state.inParentContext(() =>
+        instrumentation.tracer.openSpan(
+          state.spanSpec.name,
+          state.spanSpec.attributes,
+          (span) => {
+            state.span = span;
+            try {
+              return Promise.resolve(options.execute()).catch(
+                (cause: unknown) => {
+                  writeSpanAttributes(
+                    span,
+                    aiGatewayLogAttributes(extractAIGatewayLogId(cause))
+                  );
+                  span.fail(cause);
+                  removeModelState(modelSpans, options.callId, state);
+                  throw cause;
+                }
+              );
+            } catch (cause: unknown) {
+              writeSpanAttributes(
+                span,
+                aiGatewayLogAttributes(extractAIGatewayLogId(cause))
+              );
+              span.fail(cause);
+              removeModelState(modelSpans, options.callId, state);
+              throw cause;
+            }
           }
-        }
+        )
       );
     },
 
@@ -324,27 +333,29 @@ export function createAISDKV7Telemetry(
         return options.execute();
       }
 
-      return instrumentation.tracer.openSpan(
-        state.spanSpec.name,
-        state.spanSpec.attributes,
-        (span) => {
-          state.span = span;
-          try {
-            return Promise.resolve(options.execute()).catch(
-              (cause: unknown) => {
-                span.fail(cause);
-                toolSpans.delete(
-                  toolSpanKey(options.callId, options.toolCallId)
-                );
-                throw cause;
-              }
-            );
-          } catch (cause: unknown) {
-            span.fail(cause);
-            toolSpans.delete(toolSpanKey(options.callId, options.toolCallId));
-            throw cause;
+      return state.inParentContext(() =>
+        instrumentation.tracer.openSpan(
+          state.spanSpec.name,
+          state.spanSpec.attributes,
+          (span) => {
+            state.span = span;
+            try {
+              return Promise.resolve(options.execute()).catch(
+                (cause: unknown) => {
+                  span.fail(cause);
+                  toolSpans.delete(
+                    toolSpanKey(options.callId, options.toolCallId)
+                  );
+                  throw cause;
+                }
+              );
+            } catch (cause: unknown) {
+              span.fail(cause);
+              toolSpans.delete(toolSpanKey(options.callId, options.toolCallId));
+              throw cause;
+            }
           }
-        }
+        )
       );
     }
   };
@@ -367,6 +378,20 @@ function supportedOperationName(
 
 function isStreamOperation(operationName: AISDKV7OperationName): boolean {
   return operationName === "streamObject" || operationName === "streamText";
+}
+
+/** Opens a deferred model/tool span under its captured operation parent. */
+function openStateSpan(
+  state: ModelState | ToolState,
+  tracer: AgentTracer
+): AgentSpan {
+  return state.inParentContext(() =>
+    tracer.openSpan(
+      state.spanSpec.name,
+      state.spanSpec.attributes,
+      (activeSpan) => activeSpan
+    )
+  );
 }
 
 function shiftModelSpan(
@@ -412,13 +437,7 @@ function finishOpenModelSpans(
   }
 
   for (const state of states) {
-    const span =
-      state.span ??
-      tracer.openSpan(
-        state.spanSpec.name,
-        state.spanSpec.attributes,
-        (activeSpan) => activeSpan
-      );
+    const span = state.span ?? openStateSpan(state, tracer);
     if (cause === undefined) {
       span.finish();
     } else {
@@ -439,13 +458,7 @@ function finishOpenToolSpans(
       continue;
     }
 
-    const span =
-      state.span ??
-      tracer.openSpan(
-        state.spanSpec.name,
-        state.spanSpec.attributes,
-        (activeSpan) => activeSpan
-      );
+    const span = state.span ?? openStateSpan(state, tracer);
     if (cause === undefined) {
       span.finish();
     } else {
