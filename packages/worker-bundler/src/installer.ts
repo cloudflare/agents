@@ -995,7 +995,6 @@ function parsePythonVersionString(spec: string): { name: string } {
 
 /**
  * Check if files contain a package.json or pyproject.toml with dependencies that need installing.
-||||||| parent of 8516a12f (Reconstitute work on this repo)
  * Check if files contain a package.json with dependencies that need installing.
  */
 export function hasDependencies(files: FileSystem): boolean {
