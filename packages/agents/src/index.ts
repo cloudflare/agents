@@ -82,6 +82,7 @@ import {
   type Observability,
   type ObservabilityEvent
 } from "./observability";
+import { agentSpanAttributes } from "./observability/agent-span-attributes";
 import { tracer } from "./observability/tracing/cloudflare";
 import {
   writeSpanAttributes,
@@ -1890,8 +1891,11 @@ export class Agent<
     return tracer.withSpan(
       operation,
       {
-        "cloudflare.agents.agent.id": agentId,
-        "cloudflare.agents.agent.name": this._ParentClass.name,
+        ...agentSpanAttributes({
+          agentClassName: this._ParentClass.name,
+          sessionId: this.ctx.id.toString(),
+          sessionName: agentId
+        }),
         "cloudflare.agents.operation.name": operation,
         "cloudflare.agents.storage.grouped": true,
         "cloudflare.agents.storage.system": "durable_object",

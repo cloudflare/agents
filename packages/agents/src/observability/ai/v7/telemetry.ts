@@ -13,6 +13,7 @@ import {
   operationSpan,
   toolCallSpan
 } from "../../genai/telemetry";
+import type { SemanticContext } from "../../genai/telemetry";
 import { writeSpanAttributes } from "../../tracing/tracer";
 import type { TraceAttributes } from "../../tracing/tracer";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
@@ -38,6 +39,7 @@ type AISDKV7OperationName =
 
 type OperationState = {
   readonly callId: string;
+  readonly context: SemanticContext;
   readonly operationName: AISDKV7OperationName;
   readonly span: AgentSpan;
 };
@@ -108,12 +110,13 @@ export function createAISDKV7Telemetry(
         return;
       }
 
+      const context = semanticContextFromEvent(event);
       const span = operationSpan({
         attributes: {
           ...correlationAttributes({ callId: event.callId }),
           ...runtimeContextAttributes(event.runtimeContext)
         },
-        context: semanticContextFromEvent(event),
+        context,
         integration: "ai-sdk",
         model: readString(event.modelId),
         operation: operationName,
@@ -127,6 +130,7 @@ export function createAISDKV7Telemetry(
       );
       operations.set(event.callId, {
         callId: event.callId,
+        context,
         operationName,
         span: operation
       });
@@ -143,6 +147,7 @@ export function createAISDKV7Telemetry(
           ...correlationAttributes({ callId: event.callId }),
           ...inputMessageAttributes(event, storeMessages)
         },
+        context: state.context,
         integration: "ai-sdk",
         model: readString(event.modelId),
         operation: isStreamOperation(state.operationName)
@@ -181,12 +186,14 @@ export function createAISDKV7Telemetry(
 
     onToolExecutionStart(event) {
       const toolCallId = readString(event.toolCall.toolCallId);
-      if (toolCallId === undefined || !operations.has(event.callId)) {
+      const operation = operations.get(event.callId);
+      if (toolCallId === undefined || operation === undefined) {
         return;
       }
 
       const toolName = readString(event.toolCall.toolName) ?? "tool";
       const span = toolCallSpan({
+        context: operation.context,
         integration: "ai-sdk",
         operation: "tool.execute",
         toolName

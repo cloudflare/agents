@@ -191,6 +191,17 @@ export function operationSpanName(agentName: string | undefined): string {
   );
 }
 
+function semanticContextAttributes(
+  context: SemanticContext | undefined
+): TraceAttributes {
+  return {
+    [TraceAttribute.GenAI.AgentID]: context?.agentId,
+    [TraceAttribute.GenAI.AgentName]: context?.agentName,
+    [TraceAttribute.GenAI.AgentVersion]: context?.agentVersion,
+    [TraceAttribute.GenAI.ConversationID]: context?.conversationId
+  };
+}
+
 /** Builds the root span for an SDK operation such as generateText or streamText. */
 export function operationSpan(input: {
   readonly attributes: TraceAttributes | undefined;
@@ -206,10 +217,7 @@ export function operationSpan(input: {
       ...input.attributes,
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
-      [TraceAttribute.GenAI.AgentID]: input.context?.agentId,
-      [TraceAttribute.GenAI.AgentName]: input.context?.agentName,
-      [TraceAttribute.GenAI.AgentVersion]: input.context?.agentVersion,
-      [TraceAttribute.GenAI.ConversationID]: input.context?.conversationId,
+      ...semanticContextAttributes(input.context),
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueInvokeAgent,
       [TraceAttribute.GenAI.ProviderName]: normalizeProviderName(
@@ -227,6 +235,7 @@ export function operationSpan(input: {
 /** Builds the child span for an underlying model call. */
 export function modelCallSpan(input: {
   readonly attributes?: TraceAttributes | undefined;
+  readonly context?: SemanticContext | undefined;
   readonly integration: IntegrationName;
   readonly model: string | undefined;
   readonly operation: string;
@@ -238,6 +247,7 @@ export function modelCallSpan(input: {
       ...input.attributes,
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
+      ...semanticContextAttributes(input.context),
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueChat,
       [TraceAttribute.GenAI.ProviderName]: normalizeProviderName(
@@ -271,6 +281,7 @@ function requestAttributes(
 
 /** Builds the child span for a tool execution. */
 export function toolCallSpan(input: {
+  readonly context?: SemanticContext | undefined;
   readonly integration: IntegrationName;
   readonly operation: string;
   readonly toolCallId?: string | undefined;
@@ -280,6 +291,7 @@ export function toolCallSpan(input: {
     attributes: {
       [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
+      ...semanticContextAttributes(input.context),
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueExecuteTool,
       [TraceAttribute.GenAI.ToolCallID]: input.toolCallId,
@@ -295,6 +307,7 @@ export function toolCallSpan(input: {
 
 /** Builds a bounded child span for one tool-approval lifecycle segment. */
 export function toolApprovalSpan(input: {
+  readonly context?: SemanticContext | undefined;
   readonly state: "approved" | "denied" | "requested";
   readonly toolCallId?: string | undefined;
   readonly toolName: string;
@@ -304,6 +317,7 @@ export function toolApprovalSpan(input: {
       [TraceAttribute.Cloudflare.IntegrationName]: "ai-sdk",
       [TraceAttribute.Cloudflare.OperationName]: "tool.approval",
       [TraceAttribute.Cloudflare.ToolApprovalState]: input.state,
+      ...semanticContextAttributes(input.context),
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueExecuteTool,
       [TraceAttribute.GenAI.ToolCallID]: input.toolCallId,

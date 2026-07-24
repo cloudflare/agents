@@ -149,16 +149,19 @@ function createOperationWrapper(
             return operation(params, ...args);
           }
 
+          const context = semanticContext(params);
           const span = operationSpanForCall(
             operationName,
             extractModelInfo(params.model),
             params,
-            instrumentation.options
+            instrumentation.options,
+            context
           );
           writeSpanAttributes(operationSpan, span.attributes);
           recordDeniedApprovalResponses(
             instrumentation.tracer,
-            params.messages
+            params.messages,
+            context
           );
 
           const startedAtMs = Date.now();
@@ -168,7 +171,8 @@ function createOperationWrapper(
               operationName,
               wrapLanguageModel,
               instrumentation.tracer,
-              storage
+              storage,
+              context
             ),
             ...args
           );
@@ -192,14 +196,20 @@ function createOperationWrapper(
           return operation(params, ...args);
         }
 
+        const context = semanticContext(params);
         const span = operationSpanForCall(
           operationName,
           extractModelInfo(params.model),
           params,
-          instrumentation.options
+          instrumentation.options,
+          context
         );
         writeSpanAttributes(operationSpan, span.attributes);
-        recordDeniedApprovalResponses(instrumentation.tracer, params.messages);
+        recordDeniedApprovalResponses(
+          instrumentation.tracer,
+          params.messages,
+          context
+        );
 
         const result = await operation(
           operationParamsForCall(
@@ -207,7 +217,8 @@ function createOperationWrapper(
             operationName,
             wrapLanguageModel,
             instrumentation.tracer,
-            storage
+            storage,
+            context
           ),
           ...args
         );
@@ -250,12 +261,15 @@ function operationParamsForCall(
   operationName: AISDKV6OperationName,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   tracer: AgentTracer,
-  storage: ResolvedAISDKStorageOptions
+  storage: ResolvedAISDKStorageOptions,
+  context: SemanticContext
 ): AISDKV6CallParams {
   return {
     ...params,
     ...(shouldWrapTools(operationName) && params.tools !== undefined
-      ? { tools: wrapTools(tracer, params.tools, storage.storeTools) }
+      ? {
+          tools: wrapTools(tracer, params.tools, storage.storeTools, context)
+        }
       : {}),
     ...(params.model !== undefined
       ? {
@@ -264,7 +278,8 @@ function operationParamsForCall(
             wrapLanguageModel,
             params.model,
             operationName,
-            storage.storeMessages
+            storage.storeMessages,
+            context
           )
         }
       : {})
@@ -305,14 +320,15 @@ function operationSpanForCall(
   operation: string,
   model: ModelInfo | undefined,
   params: AISDKV6CallParams,
-  options: AISDKInstrumentationOptions | undefined
+  options: AISDKInstrumentationOptions | undefined,
+  context: SemanticContext
 ): ReturnType<typeof operationSpan> {
   return operationSpan({
     attributes: {
       ...metadataAttributes(telemetryMetadata(params)),
       ...contextAttributes(params, options)
     },
-    context: semanticContext(params),
+    context,
     integration: "ai-sdk",
     model: model?.modelId,
     operation,
