@@ -682,6 +682,11 @@ type RootFacetRpcSurface = {
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<{ schedule: Schedule<T>; created: boolean }>;
+  _cf_rearmWorkflowCleanupForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    nextCleanupAt: number | null,
+    fired?: boolean
+  ): Promise<void>;
   _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
@@ -1098,7 +1103,9 @@ type AgentToolRecoveryInspection =
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 11;
+const CURRENT_SCHEMA_VERSION = 12;
+const DEFAULT_WORKFLOW_RETENTION_SECONDS = 30 * 24 * 60 * 60;
+const WORKFLOW_RECONCILIATION_SECONDS = 24 * 60 * 60;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -2107,9 +2114,34 @@ export class Agent<
           error_message TEXT,
           created_at INTEGER NOT NULL DEFAULT (unixepoch()),
           updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-          completed_at INTEGER
+          completed_at INTEGER,
+          success_retention_seconds INTEGER NOT NULL DEFAULT 2592000,
+          error_retention_seconds INTEGER NOT NULL DEFAULT 2592000,
+          expires_at INTEGER
         )
       `;
+
+      addColumnIfNotExists(
+        `ALTER TABLE cf_agents_workflows ADD COLUMN success_retention_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_WORKFLOW_RETENTION_SECONDS}`
+      );
+      addColumnIfNotExists(
+        `ALTER TABLE cf_agents_workflows ADD COLUMN error_retention_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_WORKFLOW_RETENTION_SECONDS}`
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_workflows ADD COLUMN expires_at INTEGER"
+      );
+
+      if (schemaVersion < 12) {
+        this.ctx.storage.sql.exec(`
+          UPDATE cf_agents_workflows
+          SET expires_at = completed_at + CASE
+            WHEN status = 'complete' THEN success_retention_seconds
+            WHEN status IN ('errored', 'terminated') THEN error_retention_seconds
+            ELSE NULL
+          END
+          WHERE completed_at IS NOT NULL AND expires_at IS NULL
+        `);
+      }
 
       this.sql`
         CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)
@@ -2117,6 +2149,10 @@ export class Agent<
 
       this.sql`
         CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_workflows_expires_at ON cf_agents_workflows(expires_at)
       `;
 
       // Clean up legacy STATE_WAS_CHANGED rows from the single-row state optimization
@@ -5965,6 +6001,76 @@ export class Agent<
   async _onAlarmHousekeeping(): Promise<void> {
     await this._checkRunFibers();
     await this._checkFacetRunFibers();
+    await this._cleanupWorkflowTracking();
+  }
+
+  /** @internal */
+  protected async _cleanupWorkflowTracking(): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    this.sql`
+      DELETE FROM cf_agents_workflows
+      WHERE expires_at IS NOT NULL AND expires_at <= ${now}
+    `;
+
+    // Rows without an expiry are still active or missed their terminal
+    // callback. Poll only when their bounded reconciliation wake is due. This
+    // gives an idle, one-shot Agent a durable recovery path after eviction.
+    const rows = this.sql<{
+      workflow_id: string;
+      workflow_name: string;
+    }>`
+      SELECT workflow_id, workflow_name
+      FROM cf_agents_workflows
+      WHERE expires_at IS NULL
+        AND updated_at + ${WORKFLOW_RECONCILIATION_SECONDS} <= ${now}
+    `;
+    for (const row of rows) {
+      const workflow = this._findWorkflowBindingByName(row.workflow_name);
+      if (!workflow) {
+        this.sql`
+          UPDATE cf_agents_workflows SET updated_at = ${now}
+          WHERE workflow_id = ${row.workflow_id}
+        `;
+        continue;
+      }
+      try {
+        const instance = await workflow.get(row.workflow_id);
+        const status = await instance.status();
+        await this._updateWorkflowTracking(row.workflow_id, status);
+      } catch (error) {
+        // Platform state can be temporarily unavailable. Keep the local row
+        // and retry on the next bounded reconciliation wake.
+        console.warn(
+          `[Agent] Could not reconcile Workflow ${row.workflow_name}/${row.workflow_id}; retrying later.`,
+          error
+        );
+        this.sql`
+          UPDATE cf_agents_workflows SET updated_at = ${now}
+          WHERE workflow_id = ${row.workflow_id}
+        `;
+      }
+    }
+
+    this.sql`
+      DELETE FROM cf_agents_workflows
+      WHERE expires_at IS NOT NULL AND expires_at <= ${now}
+    `;
+  }
+
+  /** @internal Alarm callback used when this Agent is a facet. */
+  async _cf_cleanupWorkflowTrackingAlarm(): Promise<void> {
+    await this._cleanupWorkflowTracking();
+    if (this._isFacet) {
+      await (
+        await this._rootAlarmOwner()
+      )._cf_rearmWorkflowCleanupForFacet(
+        this.selfPath,
+        this._nextWorkflowCleanupAt(),
+        true
+      );
+    } else {
+      await this._rearmWorkflowCleanup();
+    }
   }
 
   private _isSameAgentPathPrefix(
@@ -6552,6 +6658,24 @@ export class Agent<
         nextTimeMs === null ? recoveryMs : Math.min(nextTimeMs, recoveryMs);
     }
 
+    const workflowCleanup = this.sql<{ next_cleanup_at: number | null }>`
+      SELECT MIN(
+        CASE
+          WHEN expires_at IS NOT NULL THEN expires_at
+          ELSE updated_at + ${WORKFLOW_RECONCILIATION_SECONDS}
+        END
+      ) AS next_cleanup_at
+      FROM cf_agents_workflows
+    `;
+    const workflowCleanupAt = workflowCleanup[0]?.next_cleanup_at;
+    if (workflowCleanupAt !== null && workflowCleanupAt !== undefined) {
+      const workflowCleanupMs = Math.max(workflowCleanupAt * 1000, nowMs + 1);
+      nextTimeMs =
+        nextTimeMs === null
+          ? workflowCleanupMs
+          : Math.min(nextTimeMs, workflowCleanupMs);
+    }
+
     const facetRuns = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_facet_runs
     `;
@@ -6568,6 +6692,79 @@ export class Agent<
     } else {
       await this.ctx.storage.deleteAlarm();
     }
+  }
+
+  /**
+   * Recompute the Agent's single physical alarm after a Workflow tracking
+   * insert or terminal update. Kept narrow so Workflow integrations can reuse
+   * the cleanup invariant without exposing a user lifecycle hook.
+   * @internal
+   */
+  protected async _rearmWorkflowCleanup(): Promise<void> {
+    if (this._isFacet) {
+      await (
+        await this._rootAlarmOwner()
+      )._cf_rearmWorkflowCleanupForFacet(
+        this.selfPath,
+        this._nextWorkflowCleanupAt()
+      );
+      return;
+    }
+    await this._scheduleNextAlarm();
+  }
+
+  private _nextWorkflowCleanupAt(): number | null {
+    const rows = this.sql<{ next_cleanup_at: number | null }>`
+      SELECT MIN(
+        CASE
+          WHEN expires_at IS NOT NULL THEN expires_at
+          ELSE updated_at + ${WORKFLOW_RECONCILIATION_SECONDS}
+        END
+      ) AS next_cleanup_at
+      FROM cf_agents_workflows
+    `;
+    return rows[0]?.next_cleanup_at ?? null;
+  }
+
+  /** @internal Root-owned alarm row for a facet's local Workflow table. */
+  async _cf_rearmWorkflowCleanupForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    nextCleanupAt: number | null,
+    fired = false
+  ): Promise<void> {
+    const callback = "_cf_cleanupWorkflowTrackingAlarm";
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    if (nextCleanupAt === null || fired) {
+      this.sql`
+        DELETE FROM cf_agents_schedules
+        WHERE callback = ${callback} AND owner_path_key = ${ownerPathKey}
+      `;
+    }
+    if (nextCleanupAt === null) {
+      await this._scheduleNextAlarm();
+      return;
+    }
+
+    const existing = this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_schedules
+      WHERE callback = ${callback} AND owner_path_key = ${ownerPathKey}
+      LIMIT 1
+    `;
+    if (existing[0]) {
+      this.sql`
+        UPDATE cf_agents_schedules SET time = ${nextCleanupAt}
+        WHERE id = ${existing[0].id}
+      `;
+    } else {
+      await this._insertScheduleForOwner(
+        ownerPath,
+        new Date(nextCleanupAt * 1000),
+        callback,
+        undefined,
+        { idempotent: true }
+      );
+    }
+    await this._scheduleNextAlarm();
   }
 
   /**
@@ -11239,6 +11436,11 @@ export class Agent<
 
     this._emit("workflow:start", { workflowId: instance.id, workflowName });
 
+    // Arm from the first durable tracking write, before a terminal timestamp
+    // exists. This reconciliation wake closes the eviction/crash window where
+    // a one-shot Agent never receives (or finishes persisting) its callback.
+    await this._rearmWorkflowCleanup();
+
     return instance.id;
   }
 
@@ -11397,7 +11599,7 @@ export class Agent<
 
     // Update tracking table with new status
     const status = await instance.status();
-    this._updateWorkflowTracking(workflowId, status);
+    await this._updateWorkflowTracking(workflowId, status);
 
     this._emit("workflow:terminated", {
       workflowId,
@@ -11442,7 +11644,7 @@ export class Agent<
     });
 
     const status = await instance.status();
-    this._updateWorkflowTracking(workflowId, status);
+    await this._updateWorkflowTracking(workflowId, status);
 
     this._emit("workflow:paused", {
       workflowId,
@@ -11486,7 +11688,7 @@ export class Agent<
     });
 
     const status = await instance.status();
-    this._updateWorkflowTracking(workflowId, status);
+    await this._updateWorkflowTracking(workflowId, status);
 
     this._emit("workflow:resumed", {
       workflowId,
@@ -11550,14 +11752,16 @@ export class Agent<
             created_at = ${now},
             updated_at = ${now},
             completed_at = NULL,
+            expires_at = NULL,
             error_name = NULL,
             error_message = NULL
         WHERE workflow_id = ${workflowId}
       `;
+      await this._rearmWorkflowCleanup();
     } else {
       // Just update status from Cloudflare
       const status = await instance.status();
-      this._updateWorkflowTracking(workflowId, status);
+      await this._updateWorkflowTracking(workflowId, status);
     }
 
     this._emit("workflow:restarted", {
@@ -11626,7 +11830,7 @@ export class Agent<
     const status = await instance.status();
 
     // Update the tracking record
-    this._updateWorkflowTracking(workflowId, status);
+    await this._updateWorkflowTracking(workflowId, status);
 
     return status;
   }
@@ -11937,10 +12141,10 @@ export class Agent<
   /**
    * Update workflow tracking record from InstanceStatus
    */
-  private _updateWorkflowTracking(
+  protected async _updateWorkflowTracking(
     workflowId: string,
     status: InstanceStatus
-  ): void {
+  ): Promise<void> {
     const statusName = status.status;
     const now = Math.floor(Date.now() / 1000);
 
@@ -11951,6 +12155,9 @@ export class Agent<
       "terminated"
     ];
     const completedAt = completedStatuses.includes(statusName) ? now : null;
+    const expiresAt = completedAt
+      ? this._workflowExpiry(workflowId, statusName, completedAt)
+      : null;
 
     // Extract error info if present
     const errorName = status.error?.name ?? null;
@@ -11962,9 +12169,32 @@ export class Agent<
           error_name = ${errorName},
           error_message = ${errorMessage},
           updated_at = ${now},
-          completed_at = ${completedAt}
+          completed_at = ${completedAt},
+          expires_at = ${expiresAt}
       WHERE workflow_id = ${workflowId}
     `;
+    await this._rearmWorkflowCleanup();
+  }
+
+  private _workflowExpiry(
+    workflowId: string,
+    status: WorkflowStatus,
+    completedAt: number
+  ): number {
+    const rows = this.sql<{
+      success_retention_seconds: number;
+      error_retention_seconds: number;
+    }>`
+      SELECT success_retention_seconds, error_retention_seconds
+      FROM cf_agents_workflows
+      WHERE workflow_id = ${workflowId}
+    `;
+    const row = rows[0];
+    const retention =
+      status === "complete"
+        ? row?.success_retention_seconds
+        : row?.error_retention_seconds;
+    return completedAt + (retention ?? DEFAULT_WORKFLOW_RETENTION_SECONDS);
   }
 
   /**
@@ -12133,9 +12363,15 @@ export class Agent<
       case "complete":
         // Update tracking status to "complete"
         // Don't overwrite if already terminated/paused (race condition protection)
+        const completeExpiresAt = this._workflowExpiry(
+          callback.workflowId,
+          "complete",
+          now
+        );
         this.sql`
           UPDATE cf_agents_workflows
-          SET status = 'complete', updated_at = ${now}, completed_at = ${now}
+          SET status = 'complete', updated_at = ${now}, completed_at = ${now},
+              expires_at = ${completeExpiresAt}
           WHERE workflow_id = ${callback.workflowId}
             AND status NOT IN ('terminated', 'paused')
         `;
@@ -12144,14 +12380,21 @@ export class Agent<
           callback.workflowId,
           callback.result
         );
+        await this._rearmWorkflowCleanup();
         break;
       case "error":
         // Update tracking status to "errored"
         // Don't overwrite if already terminated/paused (race condition protection)
+        const errorExpiresAt = this._workflowExpiry(
+          callback.workflowId,
+          "errored",
+          now
+        );
         this.sql`
           UPDATE cf_agents_workflows
           SET status = 'errored', updated_at = ${now}, completed_at = ${now},
-              error_name = 'WorkflowError', error_message = ${callback.error}
+              error_name = 'WorkflowError', error_message = ${callback.error},
+              expires_at = ${errorExpiresAt}
           WHERE workflow_id = ${callback.workflowId}
             AND status NOT IN ('terminated', 'paused')
         `;
@@ -12160,6 +12403,7 @@ export class Agent<
           callback.workflowId,
           callback.error
         );
+        await this._rearmWorkflowCleanup();
         break;
       case "event":
         // No status change for events - they can occur at any stage
