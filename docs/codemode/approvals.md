@@ -83,10 +83,13 @@ type PendingAction = {
   connector: string;
   method: string;
   args: unknown;
+  resolution?: "approval" | "client";
 };
 ```
 
 Every outcome also carries `calls` — the execution's [tool-call log](./runtime.md#the-tool-call-log) as it stands at the end of the pass: each connector call and `codemode.step`, with args, recorded result, approval requirement, and state. Render it to show the user what a run actually did (and what is still pending) without a separate `executions()` round trip.
+
+`resolution` tells the UI what kind of answer the pending action needs: `"approval"` (the default) is a yes/no — approve and the host executes the tool server-side; `"client"` means the tool never executes server-side and the run stays paused until the host supplies the tool's result via `resolve()` — see [Client-resolved tools](#client-resolved-tools).
 
 ## Resolving approvals
 
@@ -101,6 +104,10 @@ await runtime.pending();
 
 // Approve the pending action(s) and continue
 await runtime.approve({ executionId });
+
+// Supply a client-resolved call's result and continue — for pending actions
+// with resolution: "client" (see below); approve() cannot satisfy these.
+await runtime.resolve({ executionId, seq, result });
 
 // Reject — ends the execution. Does NOT undo actions already applied earlier
 // in the same run; call rollback() for that. Returns false if the action was
@@ -131,6 +138,47 @@ export class Chat extends AIChatAgent<Env> {
   }
 }
 ```
+
+## Client-resolved tools
+
+Some tools can't execute server-side at all — their result comes from the client (a browser API like `getUserTimezone`, an `ask_user` prompt, a device sensor). Mark them `resolution: "client"`: calling one pauses the run durably, exactly like an approval, but instead of approving you **supply the result**:
+
+```ts
+protected tools() {
+  return {
+    get_user_timezone: {
+      description: "The user's IANA timezone, read from the browser.",
+      requiresApproval: true,
+      resolution: "client",
+      execute: () => {
+        throw new Error("client-resolved — supplied via resolve()");
+      }
+    }
+  };
+}
+```
+
+For an AI SDK `ToolSet` wrapped in a `ToolSetConnector`, execute-less tools are skipped by default (advertising a method the sandbox can't call would send the model down a dead end). Opt them in instead with `clientTools: "pause"` — they're then exposed in the sandbox and the generated types as client-resolved tools:
+
+```ts
+new ToolSetConnector(ctx, { name: "tools", tools, clientTools: "pause" });
+```
+
+The flow mirrors approvals, with `resolve()` in place of `approve()`:
+
+```
+Model code calls tools.get_user_timezone()
+  → run pauses; pending action carries resolution: "client"
+  → agent surfaces it to the client (same channel as approvals)
+  → client computes the value and calls back
+  → runtime.resolve({ executionId, seq, result: "Europe/London" })
+  → the result is recorded as the call's value; the run replays and continues —
+    the model's code sees it as the call's ordinary return value
+```
+
+`approve()` can never satisfy a client-resolved call — on such a run it just returns the same `paused` outcome again. `resolve()` has the same safety properties as `reject()`: it only lands on an action that is still pending on a paused run, and a stale/duplicate resolve returns an error outcome rather than throwing or double-applying. A client that never answers is covered by [`expirePaused`](./runtime.md#retention), same as an approval nobody answers.
+
+The client-supplied result is recorded in the durable log and replayed as ground truth — it is **trusted**. Validate it at the agent boundary (the `@callable` method) if the client isn't.
 
 ## Rollback
 

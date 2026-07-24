@@ -29,6 +29,14 @@ export interface ToolSetConnectorOptions {
   instructions?: string;
   /** The AI SDK tools to expose. */
   tools: ToolSet;
+  /**
+   * What to do with execute-less tools (client-side / provider-executed).
+   * `"skip"` (the default) excludes them from bindings and types — calling
+   * one from the sandbox is impossible. `"pause"` includes them as
+   * client-resolved tools: calling one pauses the run durably until the host
+   * supplies the result via `resolve()` (they never execute server-side).
+   */
+  clientTools?: "skip" | "pause";
 }
 
 export class ToolSetConnector extends CodemodeConnector {
@@ -45,9 +53,11 @@ export class ToolSetConnector extends CodemodeConnector {
 
   /**
    * Only tools with an `execute` function can run inside the sandbox.
-   * Execute-less tools (client-side / provider-executed) are excluded from
-   * both the runtime bindings and the generated types — advertising a method
-   * the sandbox can't call would send the model down a dead end.
+   * By default (`clientTools: "skip"`), execute-less tools (client-side /
+   * provider-executed) are excluded from both the runtime bindings and the
+   * generated types — advertising a method the sandbox can't call would send
+   * the model down a dead end. With `clientTools: "pause"` they are exposed
+   * as client-resolved tools instead (see `#clientTools`).
    */
   #executableTools(): ToolSet {
     const executable: ToolSet = {};
@@ -59,7 +69,11 @@ export class ToolSetConnector extends CodemodeConnector {
         skipped.push(toolName);
       }
     }
-    if (skipped.length > 0 && !this.#warnedSkipped) {
+    if (
+      skipped.length > 0 &&
+      this.#options.clientTools !== "pause" &&
+      !this.#warnedSkipped
+    ) {
       this.#warnedSkipped = true;
       console.warn(
         `[codemode] ToolSetConnector "${this.name()}" skipped tools without ` +
@@ -68,6 +82,22 @@ export class ToolSetConnector extends CodemodeConnector {
       );
     }
     return executable;
+  }
+
+  /**
+   * Execute-less tools exposed as client-resolved (only with
+   * `clientTools: "pause"`). Calling one pauses the run durably; the host
+   * supplies the result via `resolve()`.
+   */
+  #clientTools(): ToolSet {
+    if (this.#options.clientTools !== "pause") return {};
+    const client: ToolSet = {};
+    for (const [toolName, t] of Object.entries(this.#options.tools)) {
+      if (!("execute" in t && typeof t.execute === "function")) {
+        client[toolName] = t;
+      }
+    }
+    return client;
   }
 
   override name(): string {
@@ -124,18 +154,60 @@ export class ToolSetConnector extends CodemodeConnector {
           : (args: unknown) => execute(args)
       };
     }
+
+    // Client-resolved tools (clientTools: "pause"): included so the sandbox
+    // can call them, but they never execute server-side — the call pauses
+    // durably and the host supplies the result via resolve(). The execute here
+    // is a safety net for a path that should be unreachable.
+    for (const [toolName, t] of Object.entries(this.#clientTools())) {
+      const name = sanitizeToolName(toolName);
+      const existing = sources.get(name);
+      if (existing !== undefined) {
+        throw new Error(
+          `Tools "${existing}" and "${toolName}" on ${this.name()} both ` +
+            `map to "${name}" — rename one of them.`
+        );
+      }
+      sources.set(name, toolName);
+
+      const rawSchema =
+        "inputSchema" in t
+          ? t.inputSchema
+          : (t as Record<string, unknown>).parameters;
+      const schema =
+        rawSchema != null
+          ? asSchema(rawSchema as Parameters<typeof asSchema>[0])
+          : undefined;
+
+      out[name] = {
+        description: t.description,
+        inputSchema: schema?.jsonSchema as JSONSchema7 | undefined,
+        requiresApproval: true,
+        resolution: "client",
+        execute: () => {
+          throw new Error(
+            `Tool "${toolName}" on ${this.name()} is client-resolved and ` +
+              `cannot execute server-side — supply its result via resolve().`
+          );
+        }
+      };
+    }
     return out;
   }
 
   /**
    * Generate the sandbox type block from the original AI SDK schemas (Zod or
    * `jsonSchema()` wrappers) rather than the converted JSON Schema, preserving
-   * field descriptions as `@param` lines. Restricted to the same executable
-   * subset that `tools()` exposes, so the types never advertise a method the
+   * field descriptions as `@param` lines. Restricted to the same subset that
+   * `tools()` exposes — executable tools plus, with `clientTools: "pause"`,
+   * the client-resolved ones — so the types never advertise a method the
    * sandbox can't call.
    */
   override async getTypeScriptTypes(): Promise<string> {
-    return generateTypes(this.#executableTools(), this.name());
+    return generateTypes(
+      { ...this.#executableTools(), ...this.#clientTools() },
+      this.name()
+    );
   }
 }
 

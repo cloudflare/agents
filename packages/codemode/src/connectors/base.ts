@@ -27,6 +27,13 @@ export type ConnectorTool = {
   /** Pause for user approval before executing. Omit to execute immediately. */
   requiresApproval?: boolean;
   /**
+   * How the paused call is satisfied. `"approval"` (the default when
+   * `requiresApproval` is set) executes the tool server-side once approved;
+   * `"client"` keeps the run paused until the host supplies the result via
+   * `resolve()` — the tool's `execute` never runs server-side.
+   */
+  resolution?: "approval" | "client";
+  /**
    * Replay policy for the durable log. `"reexecute"` marks the call ephemeral:
    * its result is never stored durably, and a replay re-executes the call
    * instead of replaying a recorded result. Use it for idempotent reads whose
@@ -167,10 +174,11 @@ export abstract class CodemodeConnector<
         inputSchema: toolInputSchema(t),
         outputSchema: t.outputSchema
       };
-      if (t.requiresApproval || t.replay === "reexecute") {
+      if (t.requiresApproval || t.replay === "reexecute" || t.resolution) {
         annotations[name] = {
           ...(t.requiresApproval ? { requiresApproval: true } : {}),
-          ...(t.replay === "reexecute" ? { replay: "reexecute" as const } : {})
+          ...(t.replay === "reexecute" ? { replay: "reexecute" as const } : {}),
+          ...(t.resolution ? { resolution: t.resolution } : {})
         };
       }
     }
