@@ -544,8 +544,8 @@ function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | undefined {
   // Filter to universal wheels (py3-none-any or py2.py3-none-any)
   const universal = wheels.filter(
     (w) =>
-      w.filename.includes("-py3-none-any.whl") ||
-      w.filename.includes("-py2.py3-none-any.whl")
+      w.filename.endsWith("-py3-none-any.whl") ||
+      w.filename.endsWith("-py2.py3-none-any.whl")
   );
 
   const candidates = universal.length > 0 ? universal : wheels;
@@ -612,7 +612,6 @@ export function comparePythonVersions(a: string, b: string): number {
  * With no build tag (5 parts): distribution-version-python-abi-platform.whl
  * With build tag (6+ parts): distribution-version-build-python-abi-platform.whl
  *
- * TODO: handle edge cases with distribution names containing hyphens
  */
 function parseWheelVersion(filename: string): string | undefined {
   const parts = filename.replace(/\.whl$/, "").split("-");
@@ -672,6 +671,7 @@ function parseRequiresDist(metadata: string): string[] {
   const lines = metadata.split(/\r?\n/);
   let current: string | undefined;
 
+  const requiresDistKey = "requires-dist:";
   for (const raw of lines) {
     // Continuation line (starts with whitespace)
     if (raw.startsWith(" ") || raw.startsWith("\t")) {
@@ -682,16 +682,16 @@ function parseRequiresDist(metadata: string): string[] {
     }
 
     // Process previous header if it was Requires-Dist
-    if (current !== undefined && current.startsWith("Requires-Dist:")) {
-      requires.push(current.slice("Requires-Dist:".length).trim());
+    if (current !== undefined && current.startsWith(requiresDistKey)) {
+      requires.push(current.slice(requiresDistKey.length).trim());
     }
 
-    current = raw;
+    current = raw.toLowerCase();
   }
 
   // Process last header
-  if (current !== undefined && current.startsWith("Requires-Dist:")) {
-    requires.push(current.slice("Requires-Dist:".length).trim());
+  if (current !== undefined && current.startsWith(requiresDistKey)) {
+    requires.push(current.slice(requiresDistKey.length).trim());
   }
 
   return requires;
