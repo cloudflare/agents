@@ -1,3 +1,4 @@
+import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../../../internal_context";
 import type {
   AISDKInstrumentationOptions,
   ResolvedAISDKStorageOptions
@@ -19,7 +20,11 @@ import {
 import type { ModelInfo } from "./extract";
 import { wrapModel } from "./model";
 import { finishWhenStreamCompletes } from "./streams";
-import { recordDeniedApprovalResponses, wrapTools } from "./tools";
+import {
+  recordDeniedApprovalResponses,
+  wrapToolApprovalPolicy,
+  wrapTools
+} from "./tools";
 import type {
   AISDKV6CallParams,
   AISDKV6Operation,
@@ -138,6 +143,7 @@ function createOperationWrapper(
   // is listening, so untraced calls never touch caller getters beyond that.
   if (isStreamOperation(operationName)) {
     return (params, ...args) => {
+      const finishAtHandoff = isAISDKInvocationBounded(params);
       return instrumentation.tracer.openSpan(
         operationSpanName(agentNameForCall(params)),
         {},
@@ -168,11 +174,17 @@ function createOperationWrapper(
               operationName,
               wrapLanguageModel,
               instrumentation.tracer,
-              storage
+              storage,
+              finishAtHandoff
             ),
             ...args
           );
           const hasModelSpan = canWrapModel(wrapLanguageModel, params.model);
+
+          if (finishAtHandoff) {
+            operationSpan.finish();
+            return result;
+          }
 
           return finishWhenStreamCompletes(result, operationSpan, {
             includeResponse: !hasModelSpan,
@@ -229,10 +241,10 @@ function createOperationWrapper(
  * projection to `gen_ai.agent.name`; an explicit metadata name takes priority.
  */
 function agentNameForCall(params: AISDKV6CallParams): string | undefined {
+  const telemetryValue = params.telemetry ?? params.experimental_telemetry;
   const telemetry =
-    typeof params.experimental_telemetry === "object" &&
-    params.experimental_telemetry !== null
-      ? (params.experimental_telemetry as Record<string, unknown>)
+    typeof telemetryValue === "object" && telemetryValue !== null
+      ? (telemetryValue as Record<string, unknown>)
       : undefined;
   const metadata =
     typeof telemetry?.metadata === "object" && telemetry.metadata !== null
@@ -250,12 +262,31 @@ function operationParamsForCall(
   operationName: AISDKV6OperationName,
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   tracer: AgentTracer,
-  storage: ResolvedAISDKStorageOptions
+  storage: ResolvedAISDKStorageOptions,
+  finishOnAsyncHandoff = false
 ): AISDKV6CallParams {
+  const approvedToolCalls = new Map<string, string>();
   return {
     ...params,
     ...(shouldWrapTools(operationName) && params.tools !== undefined
-      ? { tools: wrapTools(tracer, params.tools, storage.storeTools) }
+      ? {
+          tools: wrapTools(
+            tracer,
+            params.tools,
+            storage.storeTools,
+            finishOnAsyncHandoff,
+            approvedToolCalls
+          )
+        }
+      : {}),
+    ...(params.toolApproval !== undefined
+      ? {
+          toolApproval: wrapToolApprovalPolicy(
+            tracer,
+            params.toolApproval,
+            approvedToolCalls
+          )
+        }
       : {}),
     ...(params.model !== undefined
       ? {
@@ -264,7 +295,8 @@ function operationParamsForCall(
             wrapLanguageModel,
             params.model,
             operationName,
-            storage.storeMessages
+            storage.storeMessages,
+            finishOnAsyncHandoff
           )
         }
       : {})
@@ -325,10 +357,10 @@ function operationSpanForCall(
 function telemetryMetadata(
   params: AISDKV6CallParams
 ): Record<string, unknown> | undefined {
+  const telemetryValue = params.telemetry ?? params.experimental_telemetry;
   const telemetry =
-    typeof params.experimental_telemetry === "object" &&
-    params.experimental_telemetry !== null
-      ? (params.experimental_telemetry as Record<string, unknown>)
+    typeof telemetryValue === "object" && telemetryValue !== null
+      ? (telemetryValue as Record<string, unknown>)
       : undefined;
 
   return typeof telemetry?.metadata === "object" && telemetry.metadata !== null
@@ -343,31 +375,33 @@ function telemetryMetadata(
  * takes priority. Other semantic fields come only from metadata.
  */
 function semanticContext(params: AISDKV6CallParams): SemanticContext {
+  const telemetryValue = params.telemetry ?? params.experimental_telemetry;
   const telemetry =
-    typeof params.experimental_telemetry === "object" &&
-    params.experimental_telemetry !== null
-      ? (params.experimental_telemetry as Record<string, unknown>)
+    typeof telemetryValue === "object" && telemetryValue !== null
+      ? (telemetryValue as Record<string, unknown>)
       : undefined;
   const metadata =
     typeof telemetry?.metadata === "object" && telemetry.metadata !== null
       ? (telemetry.metadata as Record<string, unknown>)
       : undefined;
+  const runtimeContext =
+    typeof params.runtimeContext === "object" && params.runtimeContext !== null
+      ? (params.runtimeContext as Record<string, unknown>)
+      : undefined;
 
   return {
-    agentId: metadataValue(metadata, "agentId", "gen_ai.agent.id"),
+    agentId:
+      metadataValue(metadata, "agentId", "gen_ai.agent.id") ??
+      metadataValue(runtimeContext, "agentId", "gen_ai.agent.id"),
     agentName:
       metadataValue(metadata, "agentName", "gen_ai.agent.name") ??
       readString(telemetry?.functionId),
-    agentVersion: metadataValue(
-      metadata,
-      "agentVersion",
-      "gen_ai.agent.version"
-    ),
-    conversationId: metadataValue(
-      metadata,
-      "conversationId",
-      "gen_ai.conversation.id"
-    )
+    agentVersion:
+      metadataValue(metadata, "agentVersion", "gen_ai.agent.version") ??
+      metadataValue(runtimeContext, "agentVersion", "gen_ai.agent.version"),
+    conversationId:
+      metadataValue(metadata, "conversationId", "gen_ai.conversation.id") ??
+      metadataValue(runtimeContext, "conversationId", "gen_ai.conversation.id")
   };
 }
 
@@ -385,11 +419,11 @@ function contextAttributes(
 ): Record<string, string | number | boolean> | undefined {
   const attributes: Record<string, string | number | boolean> = {};
 
+  const runtimeContextValue =
+    params.runtimeContext ?? params.experimental_context;
   const runtimeContext =
-    typeof params.experimental_context === "object" &&
-    params.experimental_context !== null
-      ? // SAFETY: AI SDK experimental_context is a user-provided record of scalar values.
-        (params.experimental_context as Record<string, unknown>)
+    typeof runtimeContextValue === "object" && runtimeContextValue !== null
+      ? (runtimeContextValue as Record<string, unknown>)
       : undefined;
 
   for (const key of options?.includeRuntimeContext ?? []) {
@@ -400,6 +434,17 @@ function contextAttributes(
   }
 
   return Object.keys(attributes).length > 0 ? attributes : undefined;
+}
+
+const invocationBounded = Symbol.for(
+  "cloudflare.agents.ai-sdk.invocation-bounded"
+);
+
+function isAISDKInvocationBounded(params: AISDKV6CallParams): boolean {
+  return (
+    (params as Record<PropertyKey, unknown>)[invocationBounded] === true ||
+    agentContext.getStore()?.connection !== undefined
+  );
 }
 
 function isScalarAttributeValue(

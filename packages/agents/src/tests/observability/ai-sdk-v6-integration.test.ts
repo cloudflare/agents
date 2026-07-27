@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as ai from "ai";
 import { convertArrayToReadableStream, MockLanguageModelV3 } from "ai/test";
 import { createWorkersAI } from "workers-ai-provider";
-import { RecordingTracer } from "./recording-tracer";
+import { deferred, RecordingTracer } from "./recording-tracer";
 import { createAISDKV6Wrapper } from "../../observability/ai/v6/wrap";
 
 type ProviderStreamResult = Awaited<
@@ -12,6 +12,16 @@ type ProviderStreamPart =
   ProviderStreamResult["stream"] extends ReadableStream<infer Part>
     ? Part
     : never;
+
+const boundaryUsage = {
+  inputTokens: {
+    cacheRead: undefined,
+    cacheWrite: undefined,
+    noCache: 3,
+    total: 3
+  },
+  outputTokens: { reasoning: undefined, text: 2, total: 2 }
+};
 
 /** A mock model whose stream produces "Hello world" plus usage metadata. */
 function textStreamModel(): MockLanguageModelV3 {
@@ -118,6 +128,103 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     expect(typeof timeToFirstChunk).toBe("number");
     expect(timeToFirstChunk).toBeGreaterThanOrEqual(0);
     expect(chatSpan?.ended).toBe(true);
+  });
+
+  it("closes WebSocket spans before delayed tool and model work completes", async () => {
+    const tracing = new RecordingTracer();
+    const toolStarted = deferred();
+    const continueTool = deferred();
+    const secondModelStarted = deferred();
+    const finishSecondModel = deferred<ProviderStreamResult>();
+    let modelCall = 0;
+    const model = new MockLanguageModelV3({
+      modelId: "boundary-model",
+      provider: "mock-provider",
+      doStream: async () => {
+        modelCall += 1;
+        if (modelCall === 1) {
+          return {
+            stream: convertArrayToReadableStream<ProviderStreamPart>([
+              { type: "stream-start", warnings: [] },
+              {
+                type: "tool-call",
+                input: JSON.stringify({ value: 21 }),
+                toolCallId: "double-1",
+                toolName: "double"
+              },
+              {
+                type: "finish",
+                finishReason: { raw: "tool-calls", unified: "tool-calls" },
+                usage: boundaryUsage
+              }
+            ])
+          };
+        }
+        secondModelStarted.resolve();
+        return finishSecondModel.promise;
+      }
+    });
+
+    const result = createAISDKV6Wrapper(ai, { tracer: tracing }).streamText({
+      [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+      model,
+      prompt: "Double 21",
+      stopWhen: ai.stepCountIs(2),
+      tools: {
+        double: ai.tool({
+          inputSchema: ai.jsonSchema<{ value: number }>({
+            properties: { value: { type: "number" } },
+            required: ["value"],
+            type: "object"
+          }),
+          execute: async ({ value }) => {
+            toolStarted.resolve();
+            await continueTool.promise;
+            return value * 2;
+          }
+        })
+      }
+    } as Parameters<typeof ai.streamText>[0]);
+    const consume = (async () => {
+      for await (const _part of result.fullStream) {
+        // Consume the complete multi-step stream.
+      }
+    })();
+
+    await toolStarted.promise;
+    expect(
+      tracing.spans.find(
+        (span) => span.attributes["gen_ai.operation.name"] === "invoke_agent"
+      )?.ended
+    ).toBe(true);
+    expect(
+      tracing.spans.find(
+        (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
+      )?.ended
+    ).toBe(true);
+
+    continueTool.resolve();
+    await secondModelStarted.promise;
+    const chats = tracing.spans.filter(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chats).toHaveLength(2);
+    expect(chats[1]?.ended).toBe(true);
+
+    finishSecondModel.resolve({
+      stream: convertArrayToReadableStream<ProviderStreamPart>([
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "text-2" },
+        { type: "text-delta", id: "text-2", delta: "42" },
+        { type: "text-end", id: "text-2" },
+        {
+          type: "finish",
+          finishReason: { raw: "stop", unified: "stop" },
+          usage: boundaryUsage
+        }
+      ])
+    });
+    await consume;
   });
 
   it("records an AI Gateway log id exposed in provider response headers", async () => {

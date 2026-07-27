@@ -19,6 +19,12 @@ export type SpanRuntime = {
   startActiveSpan<T>(name: string, run: (span: SpanWriter) => T): T;
 };
 
+/** Optional automatic lifetime policy for invocation-bounded spans. */
+export type SpanLifetime = {
+  /** Finish as soon as the callback hands asynchronous work to its caller. */
+  readonly finishOnAsyncHandoff?: boolean;
+};
+
 /** AgentTracer seam used by integrations. */
 export type AgentTracer = {
   /**
@@ -32,7 +38,8 @@ export type AgentTracer = {
   withSpan<T>(
     name: string,
     attributes: TraceAttributes,
-    run: (span: AgentSpan) => MaybePromise<T>
+    run: (span: AgentSpan) => MaybePromise<T>,
+    lifetime?: SpanLifetime
   ): T | Promise<T>;
   /**
    * Activates a span and returns whatever `activate` returns (typically the
@@ -46,7 +53,8 @@ export type AgentTracer = {
   openSpan<T>(
     name: string,
     attributes: TraceAttributes,
-    activate: (span: AgentSpan) => T
+    activate: (span: AgentSpan) => T,
+    lifetime?: SpanLifetime
   ): T;
 };
 
@@ -78,11 +86,15 @@ class RuntimeTracer implements AgentTracer {
   withSpan<T>(
     name: string,
     attributes: TraceAttributes,
-    run: (span: AgentSpan) => MaybePromise<T>
+    run: (span: AgentSpan) => MaybePromise<T>,
+    lifetime?: SpanLifetime
   ): T | Promise<T> {
     return this.activate(name, attributes, (span) => {
       const result = run(span);
       if (isPromiseLike(result)) {
+        if (lifetime?.finishOnAsyncHandoff) {
+          span.finish();
+        }
         return Promise.resolve(result)
           .catch((cause: unknown) => {
             span.fail(cause);
@@ -101,9 +113,20 @@ class RuntimeTracer implements AgentTracer {
   openSpan<T>(
     name: string,
     attributes: TraceAttributes,
-    activate: (span: AgentSpan) => T
+    activate: (span: AgentSpan) => T,
+    lifetime?: SpanLifetime
   ): T {
-    return this.activate(name, attributes, activate);
+    if (!lifetime?.finishOnAsyncHandoff) {
+      return this.activate(name, attributes, activate);
+    }
+
+    return this.activate(name, attributes, (span) => {
+      const result = activate(span);
+      if (isPromiseLike(result)) {
+        span.finish();
+      }
+      return result;
+    });
   }
 
   /**

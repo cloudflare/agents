@@ -21,12 +21,17 @@ export class RecordingTracer implements AgentTracer {
     });
   }
 
-  withSpan: AgentTracer["withSpan"] = (name, attributes, run) => {
-    return this.#tracer.withSpan(name, attributes, run);
+  withSpan: AgentTracer["withSpan"] = (name, attributes, run, lifetime) => {
+    return this.#tracer.withSpan(name, attributes, run, lifetime);
   };
 
-  openSpan: AgentTracer["openSpan"] = (name, attributes, activate) => {
-    return this.#tracer.openSpan(name, attributes, activate);
+  openSpan: AgentTracer["openSpan"] = (
+    name,
+    attributes,
+    activate,
+    lifetime
+  ) => {
+    return this.#tracer.openSpan(name, attributes, activate, lifetime);
   };
 
   recordSpan<T>(
@@ -49,6 +54,17 @@ export class RecordingTracer implements AgentTracer {
 
     return this.#activeSpan.run(span, () => callback(span));
   }
+}
+
+export function deferred<T = void>(): {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 export class RecordingSpan implements SpanWriter {

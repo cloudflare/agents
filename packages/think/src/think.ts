@@ -108,8 +108,7 @@ import {
   // `isStepCount`). Using it keeps Think compatible with both majors.
   stepCountIs,
   streamText,
-  tool,
-  wrapLanguageModel
+  tool
 } from "ai";
 /**
  * Callback type for the AI SDK tool-execution-finished hook, derived from
@@ -119,7 +118,7 @@ import {
 type ToolCallFinishCallback = NonNullable<
   Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
 >;
-import { createAISDKTelemetry, wrapAISDK } from "agents/observability/ai";
+import { wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
@@ -150,8 +149,8 @@ import {
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
-const agentsAISDKTelemetryBrand = Symbol.for(
-  "cloudflare.agents.ai-sdk-telemetry"
+const agentsAISDKInvocationBounded = Symbol.for(
+  "cloudflare.agents.ai-sdk.invocation-bounded"
 );
 const usesAISDKV7Telemetry = "registerTelemetry" in aiSdk;
 import type {
@@ -5528,22 +5527,6 @@ export class Think<
           : [localIntegrations]
         : (globalIntegrations ?? []))
     ];
-    if (
-      !integrations.some(
-        (integration) =>
-          typeof integration === "object" &&
-          integration !== null &&
-          agentsAISDKTelemetryBrand in integration
-      )
-    ) {
-      integrations.push(
-        createAISDKTelemetry({
-          storeMessages: this.storeMessages,
-          storeTools: this.storeTools
-        })
-      );
-    }
-
     const options: Record<string, unknown> = {
       ...settings,
       functionId:
@@ -5989,23 +5972,24 @@ export class Think<
       }) as ToolCallFinishCallback
     } satisfies Parameters<typeof streamText>[0];
 
+    const crossMajorOptions = streamTextOptions as unknown as Record<
+      PropertyKey,
+      unknown
+    >;
     if (usesAISDKV7Telemetry) {
       const { options, runtimeContext } = this._turnTelemetryV7(turnTelemetry);
-      const crossMajorOptions = streamTextOptions as unknown as Record<
-        string,
-        unknown
-      >;
       delete crossMajorOptions.experimental_telemetry;
       crossMajorOptions.telemetry = options;
       crossMajorOptions.runtimeContext = runtimeContext;
     }
+    if (admittedTurnContext.getStore()?.trigger === "ws-chat") {
+      crossMajorOptions[agentsAISDKInvocationBounded] = true;
+    }
 
-    const inferenceStreamText: typeof streamText = usesAISDKV7Telemetry
-      ? streamText
-      : wrapAISDK(
-          { streamText, wrapLanguageModel },
-          { storeMessages: this.storeMessages, storeTools: this.storeTools }
-        ).streamText;
+    const inferenceStreamText = wrapAISDK(aiSdk, {
+      storeMessages: this.storeMessages,
+      storeTools: this.storeTools
+    }).streamText;
 
     return () => {
       const result = inferenceStreamText(streamTextOptions);

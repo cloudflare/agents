@@ -1899,7 +1899,10 @@ export class Agent<
         ...attributes
       },
       (span) =>
-        run((finishAttributes) => writeSpanAttributes(span, finishAttributes))
+        run((finishAttributes) => writeSpanAttributes(span, finishAttributes)),
+      agentContext.getStore()?.connection === undefined
+        ? undefined
+        : { finishOnAsyncHandoff: true }
     );
   }
 

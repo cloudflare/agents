@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RecordingTracer } from "./recording-tracer";
+import { deferred, RecordingTracer } from "./recording-tracer";
 
 describe("createTracer", () => {
   describe("withSpan (managed lifetime)", () => {
@@ -23,6 +23,20 @@ describe("createTracer", () => {
 
       expect(value).toBe("done");
       expect(tracing.rootSpans[0]?.ended).toBe(true);
+    });
+
+    it("finishes when invocation-bounded work hands off a promise", async () => {
+      const tracing = new RecordingTracer();
+      const pending = deferred<string>();
+
+      const result = tracing.withSpan("op", {}, () => pending.promise, {
+        finishOnAsyncHandoff: true
+      });
+
+      expect(tracing.rootSpans[0]?.ended).toBe(true);
+      pending.resolve("done");
+      await expect(result).resolves.toBe("done");
+      expect(tracing.rootSpans[0]?.endCount).toBe(1);
     });
 
     it("marks the span errored when the sync callback throws", () => {

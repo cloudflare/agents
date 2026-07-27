@@ -20,7 +20,8 @@ export function wrapModel(
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   model: unknown,
   parentOperation: string,
-  storeMessages: boolean
+  storeMessages: boolean,
+  finishOnAsyncHandoff = false
 ): unknown {
   if (!wrapLanguageModel) {
     return model;
@@ -100,7 +101,8 @@ export function wrapModel(
               modelCall.fail(cause);
               throw cause;
             }
-          }
+          },
+          finishOnAsyncHandoff ? { finishOnAsyncHandoff: true } : undefined
         );
       }
     }
