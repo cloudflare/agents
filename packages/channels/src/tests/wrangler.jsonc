@@ -1,0 +1,20 @@
+{
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TestBed",
+        "name": "TestBed"
+      }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["TestBed"],
+      "tag": "v1"
+    }
+  ],
+  "name": "channels-turn-engine-tests"
+}

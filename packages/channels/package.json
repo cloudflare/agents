@@ -1,0 +1,47 @@
+{
+  "name": "@cloudflare/channels",
+  "version": "0.0.0",
+  "description": "A durable turn engine for stateful agents on Cloudflare Workers",
+  "repository": {
+    "directory": "packages/channels",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "ai": "^7.0.0",
+    "vitest": "4.1.9"
+  },
+  "peerDependencies": {
+    "ai": "^7.0.0"
+  },
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest --run -c src/tests/vitest.config.ts"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "channels",
+    "durable-objects",
+    "turn-engine",
+    "ai"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ]
+}
