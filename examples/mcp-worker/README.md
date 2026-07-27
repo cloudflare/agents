@@ -11,8 +11,8 @@ The simplest way to run a stateless MCP server on Cloudflare Workers. Uses `crea
 ## Running
 
 ```sh
-npm install
-npm run dev
+pnpm install
+pnpm start
 ```
 
 Open the browser to see the built-in tool tester, or connect with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) at `http://localhost:5173/mcp`.
@@ -39,7 +39,11 @@ function createServer() {
   return server;
 }
 
-export default createMcpHandler(createServer);
+export default {
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer).fetch(request, env, ctx);
+  }
+} satisfies ExportedHandler;
 ```
 
 ## Related examples

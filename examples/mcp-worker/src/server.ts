@@ -29,4 +29,8 @@ function createServer() {
   return server;
 }
 
-export default createMcpHandler(createServer);
+export default {
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer).fetch(request, env, ctx);
+  }
+} satisfies ExportedHandler;

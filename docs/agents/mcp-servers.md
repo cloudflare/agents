@@ -47,7 +47,11 @@ function createServer() {
   return server;
 }
 
-export default createMcpHandler(createServer);
+export default {
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer).fetch(request, env, ctx);
+  }
+} satisfies ExportedHandler;
 ```
 
 `createMcpHandler` requires a factory so concurrent Worker requests receive isolated server instances. A function input is always treated as an SDK v2 factory.
@@ -509,7 +513,15 @@ function createServer() {
   return server;
 }
 
-export default createMcpHandler(createServer, { legacy: "reject" });
+export default {
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer, { legacy: "reject" }).fetch(
+      request,
+      env,
+      ctx
+    );
+  }
+} satisfies ExportedHandler;
 ```
 
 See [`examples/mcp-elicitation-mrtr`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr) for a two-round Stateless Elicitation example.

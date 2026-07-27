@@ -1,10 +1,12 @@
 import {
   McpServer,
   acceptedContent,
+  createRequestStateCodec,
   inputRequired,
   inputResponse,
   type CallToolResult,
-  type InputRequiredResult
+  type InputRequiredResult,
+  type RequestStateCodec
 } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
@@ -12,11 +14,22 @@ import { z } from "zod";
 const amountSchema = z.object({ amount: z.number() });
 const confirmationSchema = z.object({ confirm: z.boolean() });
 
-function createServer() {
-  const server = new McpServer({
-    name: "stateless-mrtr-elicitation-demo",
-    version: "1.0.0"
-  });
+type CounterRequestState =
+  | { step: "amount"; current: number }
+  | { step: "confirmation"; current: number; amount: number };
+
+type Env = { MRTR_REQUEST_STATE_KEY: string };
+
+function createServer(
+  requestStateCodec: RequestStateCodec<CounterRequestState>
+) {
+  const server = new McpServer(
+    {
+      name: "stateless-mrtr-elicitation-demo",
+      version: "1.0.0"
+    },
+    { requestState: { verify: requestStateCodec.verify } }
+  );
 
   server.registerTool(
     "increase-counter",
@@ -31,23 +44,8 @@ function createServer() {
       { current },
       context
     ): Promise<CallToolResult | InputRequiredResult> => {
-      const amountResponse = inputResponse(
-        context.mcpReq.inputResponses,
-        "amount"
-      );
-      if (
-        amountResponse.kind === "elicit" &&
-        amountResponse.action !== "accept"
-      ) {
-        return cancelled();
-      }
-
-      const amount = acceptedContent(
-        context.mcpReq.inputResponses,
-        "amount",
-        amountSchema
-      );
-      if (!amount) {
+      const state = context.mcpReq.requestState<CounterRequestState>();
+      if (!state) {
         return inputRequired({
           inputRequests: {
             amount: inputRequired.elicit({
@@ -64,7 +62,57 @@ function createServer() {
                 required: ["amount"]
               }
             })
-          }
+          },
+          requestState: await requestStateCodec.mint(
+            { step: "amount", current },
+            context
+          )
+        });
+      }
+
+      if (state.step === "amount") {
+        const amountResponse = inputResponse(
+          context.mcpReq.inputResponses,
+          "amount"
+        );
+        if (
+          amountResponse.kind === "elicit" &&
+          amountResponse.action !== "accept"
+        ) {
+          return cancelled();
+        }
+
+        const amount = acceptedContent(
+          context.mcpReq.inputResponses,
+          "amount",
+          amountSchema
+        );
+        if (!amount) return cancelled();
+
+        return inputRequired({
+          inputRequests: {
+            confirmation: inputRequired.elicit({
+              message: `Increase ${state.current} by ${amount.amount}?`,
+              requestedSchema: {
+                type: "object",
+                properties: {
+                  confirm: {
+                    type: "boolean",
+                    title: "Confirm increase"
+                  }
+                },
+                required: ["confirm"]
+              }
+            })
+          },
+          requestState: await requestStateCodec.mint(
+            {
+              step: "confirmation",
+              current: state.current,
+              amount: amount.amount
+            },
+            context
+          )
         });
       }
 
@@ -84,33 +132,14 @@ function createServer() {
         "confirmation",
         confirmationSchema
       );
-      if (!confirmation) {
-        return inputRequired({
-          inputRequests: {
-            confirmation: inputRequired.elicit({
-              message: `Increase ${current} by ${amount.amount}?`,
-              requestedSchema: {
-                type: "object",
-                properties: {
-                  confirm: {
-                    type: "boolean",
-                    title: "Confirm increase"
-                  }
-                },
-                required: ["confirm"]
-              }
-            })
-          }
-        });
-      }
+      if (!confirmation?.confirm) return cancelled();
 
-      if (!confirmation.confirm) return cancelled();
-      const next = current + amount.amount;
+      const next = state.current + state.amount;
       return {
         content: [
           {
             type: "text",
-            text: `Counter increased by ${amount.amount}; next value is ${next}`
+            text: `Counter increased by ${state.amount}; next value is ${next}`
           }
         ]
       };
@@ -126,7 +155,18 @@ function cancelled(): CallToolResult {
   };
 }
 
-export default createMcpHandler(createServer, {
-  route: "/mcp",
-  legacy: "reject"
-});
+export default {
+  fetch(request, env, ctx) {
+    if (!env.MRTR_REQUEST_STATE_KEY) {
+      throw new Error("MRTR_REQUEST_STATE_KEY must be configured");
+    }
+    const requestStateCodec = createRequestStateCodec<CounterRequestState>({
+      key: env.MRTR_REQUEST_STATE_KEY,
+      bind: ({ mcpReq }) => mcpReq.method
+    });
+    return createMcpHandler(() => createServer(requestStateCodec), {
+      route: "/mcp",
+      legacy: "reject"
+    }).fetch(request, env, ctx);
+  }
+} satisfies ExportedHandler<Env>;

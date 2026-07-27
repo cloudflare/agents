@@ -495,7 +495,15 @@ function createServer() {
   return server;
 }
 
-export default createMcpHandler(createServer, { legacy: "reject" });
+export default {
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer, { legacy: "reject" }).fetch(
+      request,
+      env,
+      ctx
+    );
+  }
+} satisfies ExportedHandler;
 ```
 
 The MCP client renders the JSON Schema form and the original operation remains pending from the application's perspective while the SDK completes the rounds.

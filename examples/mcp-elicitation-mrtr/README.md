@@ -4,20 +4,25 @@ A Stateless MCP server demonstrating Stateless Elicitation through multi-round-t
 
 The `increase-counter` tool is write-once and stateless. One tool call progresses through two input rounds:
 
-1. The server returns `input_required` to ask for an amount.
-2. The client retries with the amount; the server returns `input_required` again to ask for confirmation.
-3. The client retries with both responses; the server returns the ordinary final tool result.
+1. The server returns `input_required` to ask for an amount and seals the current value into `requestState`.
+2. The client retries with the amount. The server seals the current value and accepted amount into new `requestState`, then asks for confirmation.
+3. The client retries with the confirmation and latest `requestState`. The server verifies and reads that state before returning the ordinary final tool result.
 
-The SDK carries and validates `requestState` between rounds. The tool does not suspend a Worker or store a pending Promise. The caller supplies the current counter value, and the final result contains the next value.
+Each retry carries only that round's input responses. The signed `requestState` carries trusted intermediate data between fresh Worker requests. The tool does not suspend a Worker, store a pending Promise, or share a server instance between requests.
 
 For existing Legacy deployments that require pushed `elicitation/create`, Durable Object session state, and SSE replay, see the [`mcp-elicitation`](../mcp-elicitation/) **Legacy Elicitation** example.
 
 ## Run
 
+Create a local signing secret of at least 32 bytes, then run the Worker:
+
 ```sh
+printf 'MRTR_REQUEST_STATE_KEY=replace-with-at-least-32-random-bytes\n' > .dev.vars
 pnpm install
 pnpm run dev
 ```
+
+Before deploying, store a production secret with `wrangler secret put MRTR_REQUEST_STATE_KEY`. Do not reuse the local example value.
 
 Connect a Stateless MCP client to `http://localhost:8787/mcp`, then call:
 
@@ -31,13 +36,9 @@ Connect a Stateless MCP client to `http://localhost:8787/mcp`, then call:
 ## Key pattern
 
 ```ts
-const amount = acceptedContent(
-  context.mcpReq.inputResponses,
-  "amount",
-  z.object({ amount: z.number() })
-);
+const state = context.mcpReq.requestState<CounterRequestState>();
 
-if (!amount) {
+if (!state) {
   return inputRequired({
     inputRequests: {
       amount: inputRequired.elicit({
@@ -48,7 +49,11 @@ if (!amount) {
           required: ["amount"]
         }
       })
-    }
+    },
+    requestState: await requestStateCodec.mint(
+      { step: "amount", current },
+      context
+    )
   });
 }
 ```
