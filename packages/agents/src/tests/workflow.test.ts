@@ -25,6 +25,25 @@ async function getTestAgent(name: string) {
 
 describe("workflow operations", () => {
   describe("workflow tracking", () => {
+    it("starts and tracks a workflow with custom retention", async () => {
+      const agentStub = await getTestAgent("workflow-retention-test");
+      const workflowId = "workflow-with-retention";
+
+      const instanceId = await agentStub.runSimpleWorkflowWithRetentionTest(
+        workflowId,
+        {
+          successRetention: "1 day",
+          errorRetention: "2 weeks"
+        }
+      );
+
+      expect(instanceId).toBe(workflowId);
+      expect(await agentStub.getWorkflowById(workflowId)).toMatchObject({
+        workflowId,
+        workflowName: "SIMPLE_WORKFLOW"
+      });
+    });
+
     it("should insert and retrieve a workflow tracking record", async () => {
       const agentStub = await getTestAgent("workflow-tracking-test-1");
 
