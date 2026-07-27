@@ -11,7 +11,7 @@ import type { FileSystem } from "./file-system";
 import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
-const PYPI_JSON_API = "https://pypi.org/pypi";
+const PYPI_SIMPLE_API = "https://pypi.org/simple";
 const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
 /**
@@ -68,6 +68,20 @@ interface NpmPackageMetadata {
   name: string;
   "dist-tags": Record<string, string>;
   versions: Record<string, PackageJson>;
+}
+
+interface PypiSimpleFile {
+  filename: string;
+  url: string;
+  hashes?: Record<string, string>;
+  "requires-python"?: string;
+  "core-metadata"?: boolean | { hash?: string; url?: string };
+  yanked?: boolean | string;
+}
+
+interface PypiSimpleMetadata {
+  name: string;
+  files: PypiSimpleFile[];
 }
 
 interface InstallOptions {
@@ -213,7 +227,7 @@ async function installDependenciesPython(
         fileSystem,
         installedPackages,
         inProgress,
-        PYPI_JSON_API // hardcoding this for now to keep the implementation light
+        PYPI_SIMPLE_API
       )
     )
   );
@@ -353,15 +367,8 @@ async function installPythonPackage(
     try {
       const metadata = await fetchPythonPackageMetadata(name, registry);
 
-      const version = metadata.info.version;
-      const wheel = metadata.urls.find(
-        (url) => url.packagetype === "bdist_wheel"
-      );
-      if (!wheel) {
-        throw new Error(
-          `No wheel distribution found for ${name}@${version} on PyPI`
-        );
-      }
+      const version = metadata.version;
+      const wheel = metadata.wheel;
       const wheelUrl = wheel.url;
 
       const response = await fetchWithTimeout(
@@ -390,16 +397,21 @@ async function installPythonPackage(
         fileSystem.write(`python_modules/${filePath}`, content);
       }
 
-      const dependencies = [...(metadata.info.requires_dist ?? [])];
+      // Fetch requires_dist from core metadata if available
+      const metadataUrl = getCoreMetadataUrl(wheel);
+      const requiresDist = metadataUrl
+        ? await fetchPythonRequiresDist(metadataUrl)
+        : [];
+
       await Promise.all(
-        dependencies.map((dep) =>
+        requiresDist.map((dep) =>
           installPythonPackage(
             parsePythonVersionString(dep)["name"], // This will change (ie look nicer) after we've completely fleshed out what this should return
             result,
             fileSystem,
             installedPackages,
             inProgress,
-            PYPI_JSON_API // hardcoding this for now to keep the implementation light
+            PYPI_SIMPLE_API
           )
         )
       );
@@ -476,10 +488,23 @@ async function fetchPackageMetadata(
   return (await response.json()) as NpmPackageMetadata;
 }
 
-async function fetchPythonPackageMetadata(name: string, registry: string) {
-  // Fetch package metadata from PyPI JSON API
-  // TODO: Redo this to use the PyPA simple repository API
-  const metadataResponse = await fetchWithTimeout(`${registry}/${name}/json`);
+async function fetchPythonPackageMetadata(
+  name: string,
+  registry: string
+): Promise<{ version: string; wheel: PypiSimpleFile }> {
+  // Normalize package name per PEP 503 (lowercase, replace [-_.] with -)
+  const normalizedName = name.toLowerCase().replace(/[-_.]+/g, "-");
+
+  // Fetch package metadata from PyPI Simple API
+  const metadataResponse = await fetchWithTimeout(
+    `${registry}/${normalizedName}/`,
+    {
+      headers: {
+        Accept: "application/vnd.pypi.simple.v1+json"
+      }
+    }
+  );
+
   if (!metadataResponse.ok) {
     const hint =
       metadataResponse.status === 404
@@ -489,19 +514,187 @@ async function fetchPythonPackageMetadata(name: string, registry: string) {
       `PyPI returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
     );
   }
-  const metadata = (await metadataResponse.json()) as {
-    info: {
-      version: string;
-      requires_dist?: string[];
-    };
+  const metadata = (await metadataResponse.json()) as PypiSimpleMetadata;
 
-    urls: Array<{
-      filename: string;
-      url: string;
-      packagetype: string;
-    }>;
+  const wheel = selectWheel(metadata.files);
+  if (!wheel) {
+    throw new Error(`No compatible wheel found for ${name} on PyPI`);
+  }
+
+  const version = parseWheelVersion(wheel.filename);
+  if (!version) {
+    throw new Error(
+      `Could not parse version from wheel filename: ${wheel.filename}`
+    );
+  }
+
+  return { version, wheel };
+}
+
+/**
+ * Select a compatible wheel from PyPI Simple API files list.
+ * Prefers py3-none-any or py2.py3-none-any wheels for maximum compatibility.
+ * Selects the latest version from compatible wheels.
+ * TODO: implement proper platform/python version matching
+ */
+function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | null {
+  const wheels = files.filter((f) => f.filename.endsWith(".whl"));
+  if (wheels.length === 0) return null;
+
+  // Filter to universal wheels (py3-none-any or py2.py3-none-any)
+  const universal = wheels.filter(
+    (w) =>
+      w.filename.endsWith("-py3-none-any.whl") ||
+      w.filename.endsWith("-py2.py3-none-any.whl")
+  );
+
+  const candidates = universal.length > 0 ? universal : wheels;
+
+  // Select the wheel with the highest version
+  let latest: PypiSimpleFile | null = null;
+  let latestVersion: string | undefined;
+
+  for (const wheel of candidates) {
+    const version = parseWheelVersion(wheel.filename);
+    if (!version) continue;
+
+    if (
+      !latest ||
+      !latestVersion ||
+      comparePythonVersions(version, latestVersion) > 0
+    ) {
+      latest = wheel;
+      latestVersion = version;
+    }
+  }
+
+  return latest;
+}
+
+/**
+ * Compare two PEP 440 version strings.
+ * Returns >0 if a > b, <0 if a < b, 0 if equal.
+ *
+ * Python versions (PEP 440) are not semver-compatible (e.g. "3.6.2.1" has four
+ * release segments), so semver cannot be used here. This is a minimal
+ * comparison: it compares the dotted numeric release segments, and treats
+ * pre-release/dev versions (a/b/rc/alpha/beta/dev/pre) as lower than the same
+ * release so a stable release is preferred.
+ * TODO: full PEP 440 ordering (post-releases, local versions, epochs) if needed.
+ */
+export function comparePythonVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const releaseMatch = v.match(/^[0-9]+(?:\.[0-9]+)*/);
+    const release = (releaseMatch?.[0] ?? "0").split(".").map(Number);
+    const rest = v.slice(releaseMatch?.[0].length ?? 0);
+    const isPre = /^[.\-_]?(a|b|c|rc|alpha|beta|dev|pre)/i.test(rest);
+    return { release, isPre };
   };
-  return metadata;
+
+  const av = parse(a);
+  const bv = parse(b);
+
+  const len = Math.max(av.release.length, bv.release.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (av.release[i] ?? 0) - (bv.release[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+
+  // Same release: a stable version outranks a pre-release/dev version
+  if (av.isPre !== bv.isPre) return av.isPre ? -1 : 1;
+  return 0;
+}
+
+/**
+ * Parse version from a wheel filename.
+ * Wheel format: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
+ *
+ * With no build tag (5 parts): distribution-version-python-abi-platform.whl
+ * With build tag (6+ parts): distribution-version-build-python-abi-platform.whl
+ *
+ */
+function parseWheelVersion(filename: string): string | undefined {
+  const parts = filename.replace(/\.whl$/, "").split("-");
+  if (parts.length < 5) return undefined;
+
+  // The last three parts are always: python_tag, abi_tag, platform_tag
+  // For 5 parts: distribution, version, py, abi, platform -> version is parts[1]
+  // For 6+ parts: distribution, version, build?, py, abi, platform -> version is parts[1]
+  return parts[1];
+}
+
+/**
+ * Get the core metadata URL from a PyPI Simple API file entry.
+ * Returns undefined if core metadata is not available.
+ *
+ * Per PEP 714: if core-metadata is true or an object (with hash),
+ * metadata is available at {file_url}.metadata unless a separate URL is provided.
+ */
+function getCoreMetadataUrl(file: PypiSimpleFile): string | undefined {
+  const cm = file["core-metadata"];
+  if (!cm) return undefined;
+
+  // If it's an object with an explicit URL, use that
+  if (typeof cm === "object" && cm.url) return cm.url;
+
+  // Otherwise (boolean true or object with just hash), use .metadata suffix
+  if (cm === true || typeof cm === "object") return `${file.url}.metadata`;
+
+  return undefined;
+}
+
+/**
+ * Fetch and parse Requires-Dist from a Python package's core metadata.
+ * Returns empty array if metadata is unavailable or parsing fails.
+ */
+async function fetchPythonRequiresDist(url: string): Promise<string[]> {
+  try {
+    const response = await fetchWithTimeout(url);
+    if (!response.ok) return [];
+    const contentType = response.headers.get("content-type") ?? "";
+    // PyPI tends to send this as `binary/octet-stream` even though it's actually text, this avoids an unhelpful warning
+    const text = contentType.startsWith("text/")
+      ? await response.text()
+      : new TextDecoder().decode(await response.arrayBuffer());
+    return parseRequiresDist(text);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Parse Requires-Dist headers from Python package METADATA file (RFC 822 format).
+ * Handles continuation lines (starting with whitespace).
+ */
+function parseRequiresDist(metadata: string): string[] {
+  const requires: string[] = [];
+  const lines = metadata.split(/\r?\n/);
+  let current: string | undefined;
+
+  const requiresDistKey = "requires-dist:";
+  for (const raw of lines) {
+    // Continuation line (starts with whitespace)
+    if (raw.startsWith(" ") || raw.startsWith("\t")) {
+      if (current !== undefined) {
+        current += " " + raw.trim();
+      }
+      continue;
+    }
+
+    // Process previous header if it was Requires-Dist
+    if (current !== undefined && current.startsWith(requiresDistKey)) {
+      requires.push(current.slice(requiresDistKey.length).trim());
+    }
+
+    current = raw.toLowerCase();
+  }
+
+  // Process last header
+  if (current !== undefined && current.startsWith(requiresDistKey)) {
+    requires.push(current.slice(requiresDistKey.length).trim());
+  }
+
+  return requires;
 }
 
 /**
