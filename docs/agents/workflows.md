@@ -265,7 +265,10 @@ const instanceId = await this.runWorkflow(
 - `options.retention` - Workflow instance retention passed unchanged to
   [`Workflow.create()`](https://developers.cloudflare.com/workflows/build/workers-api/#workflowinstancecreateoptions).
   Use `successRetention` for successful instances and `errorRetention` for
-  errored or terminated instances.
+  errored or terminated instances. The Agent stores the normalized values in
+  SQLite so its local tracking row follows the same terminal-outcome policy.
+  When either value is omitted, local tracking uses a 30-day fallback because
+  the SDK cannot detect whether the account is Workers Free or Workers Paid.
 
 **Returns:** Workflow instance ID
 
@@ -396,6 +399,9 @@ type WorkflowPage = {
 
 Delete a single workflow tracking record.
 
+This removes only the Agent's local SQLite tracking row. It does not delete or
+terminate the underlying Workflow instance.
+
 ```typescript
 const deleted = this.deleteWorkflow(instanceId);
 // true if deleted, false if not found
@@ -403,7 +409,9 @@ const deleted = this.deleteWorkflow(instanceId);
 
 #### `deleteWorkflows(criteria?)`
 
-Delete workflow tracking records matching criteria. Useful for cleanup.
+Delete workflow tracking records matching criteria before automatic retention
+expires. This affects only local Agent SQLite tracking, not underlying Workflow
+instances or their state.
 
 ```typescript
 // Delete all completed workflows older than 7 days
@@ -533,18 +541,21 @@ Workflows started with `runWorkflow()` are automatically tracked in the originat
 
 ### `cf_agents_workflows` Table
 
-| Column          | Type    | Description                     |
-| --------------- | ------- | ------------------------------- |
-| `id`            | TEXT    | Internal row ID                 |
-| `workflow_id`   | TEXT    | Cloudflare workflow instance ID |
-| `workflow_name` | TEXT    | Workflow binding name           |
-| `status`        | TEXT    | Current status                  |
-| `metadata`      | TEXT    | JSON metadata (for querying)    |
-| `error_name`    | TEXT    | Error name (if failed)          |
-| `error_message` | TEXT    | Error message (if failed)       |
-| `created_at`    | INTEGER | Unix timestamp                  |
-| `updated_at`    | INTEGER | Unix timestamp                  |
-| `completed_at`  | INTEGER | Unix timestamp (when done)      |
+| Column                      | Type    | Description                       |
+| --------------------------- | ------- | --------------------------------- |
+| `id`                        | TEXT    | Internal row ID                   |
+| `workflow_id`               | TEXT    | Cloudflare workflow instance ID   |
+| `workflow_name`             | TEXT    | Workflow binding name             |
+| `status`                    | TEXT    | Current status                    |
+| `metadata`                  | TEXT    | JSON metadata (for querying)      |
+| `error_name`                | TEXT    | Error name (if failed)            |
+| `error_message`             | TEXT    | Error message (if failed)         |
+| `created_at`                | INTEGER | Unix timestamp                    |
+| `updated_at`                | INTEGER | Unix timestamp                    |
+| `completed_at`              | INTEGER | Unix timestamp (when done)        |
+| `success_retention_seconds` | INTEGER | Local success retention           |
+| `error_retention_seconds`   | INTEGER | Local error/termination retention |
+| `expires_at`                | INTEGER | Indexed local cleanup timestamp   |
 
 Note: Workflow params and output are not stored by default. Use `metadata` to store queryable information, and store large payloads in your own tables if needed.
 
@@ -845,25 +856,18 @@ const approvalData = await this.waitForApproval(step, { timeout: "7 days" });
 2. **Use meaningful step names** - Helps with debugging and observability
 3. **Report progress regularly** - Keeps users informed
 4. **Handle errors gracefully** - Use `reportError()` before throwing
-5. **Clean up completed workflows** - The `cf_agents_workflows` table can grow unbounded, so implement a retention policy:
-
-```typescript
-// Option 1: Cleanup immediately on completion
-async onWorkflowComplete(workflowName, instanceId, result) {
-  // Process result first, then delete
-  this.deleteWorkflow(instanceId);
-}
-
-// Option 2: Scheduled cleanup (keep recent history)
-// Call this periodically via a scheduled task or cron
-this.deleteWorkflows({
-  status: ["complete", "errored"],
-  createdBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // 7 days
-});
-
-// Option 3: Keep all history for compliance/auditing
-// Don't call deleteWorkflows() - query historical data as needed
-```
+5. **Treat Workflow tracking as bounded operational state** - The SDK
+   automatically deletes terminal rows from `cf_agents_workflows` after 30
+   days. It arms cleanup when tracking starts, computes expiry from the
+   terminal completion time, and recovers cleanup after Agent eviction without
+   requiring `onStart()` or `onReady()` hooks. This is a bounded local fallback
+   aligned with the maximum default Workflow retention on Workers Paid; it is
+   not indefinite audit history. Workers Free retains underlying Workflow state
+   for less time, so a local tracking row can temporarily outlive platform
+   state. Use an external durable store for compliance or long-term history.
+   `deleteWorkflow()` and `deleteWorkflows()` remain available for earlier
+   removal. Automatic and manual deletion affect only Agent SQLite tracking,
+   never the underlying Workflow instance or state.
 
 6. **Handle workflow binding renames carefully** - If you rename a workflow binding in `wrangler.jsonc`, existing tracked workflows will reference the old name. The agent will warn on startup if it detects this. Use `migrateWorkflowBinding()` to update them:
 
