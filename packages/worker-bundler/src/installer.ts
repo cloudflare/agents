@@ -866,26 +866,11 @@ function parseRequiresDist(metadata: string): string[] {
   const lines = metadata.split(/\r?\n/);
   let current: string | undefined;
 
-  for (const raw of lines) {
-    // Continuation line (starts with whitespace)
-    if (raw.startsWith(" ") || raw.startsWith("\t")) {
-      if (current !== undefined) {
-        current += " " + raw.trim();
-      }
-      continue;
-    }
-
+  for (const line of lines) {
     // Process previous header if it was Requires-Dist
-    if (current !== undefined && current.startsWith("Requires-Dist:")) {
-      requires.push(current.slice("Requires-Dist:".length).trim());
+    if (line !== undefined && line.startsWith("Requires-Dist:")) {
+      requires.push(line.slice("Requires-Dist:".length).trim());
     }
-
-    current = raw;
-  }
-
-  // Process last header
-  if (current !== undefined && current.startsWith("Requires-Dist:")) {
-    requires.push(current.slice("Requires-Dist:".length).trim());
   }
 
   return requires;
