@@ -11,7 +11,8 @@ import type { FileSystem } from "./file-system";
 import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
-const PYPI_JSON_API = "https://pypi.org/pypi";
+const PYPI_SIMPLE_API = "https://pypi.org/simple";
+const PYODIDE_VERSION = "v0.28.2"; // Used for retrieving a pyodide lockfile, which is done per Pyodide version
 const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
 /**
@@ -70,6 +71,51 @@ interface NpmPackageMetadata {
   versions: Record<string, PackageJson>;
 }
 
+interface PypiSimpleFile {
+  filename: string;
+  url: string;
+  hashes?: Record<string, string>;
+  "requires-python"?: string;
+  "core-metadata"?: boolean | { hash?: string; url?: string };
+  yanked?: boolean | string;
+}
+
+interface PypiSimpleMetadata {
+  name: string;
+  files: PypiSimpleFile[];
+}
+
+// Describes the packages that are available on the Pyodide CDN for a given Pyodide version
+interface PyodideLockfile {
+  info: {
+    abi_version: string;
+    arch: "wasm32";
+    platform: string;
+    python: string;
+    version: string;
+  };
+  packages: Record<string, PyodideLockfilePackage>;
+}
+
+interface PyodideLockfilePackage {
+  name: string;
+  version: string;
+  file_name: string;
+  sha256: string;
+  package_type:
+    | "package"
+    | "cpython_module"
+    | "shared_library"
+    | "static_library";
+  install_dir: "site" | "dynlib";
+  imports: string[];
+  depends: string[];
+}
+
+// Making this global so it will only need to be fetched once per invocation
+// TODO: Consider distributing this with Pyodide itself since it's not likely to change very much between runs
+let pyodideLockfile: PyodideLockfile | null = null;
+
 interface InstallOptions {
   /**
    * Include devDependencies (default: false)
@@ -80,6 +126,11 @@ interface InstallOptions {
    * Registry URL (default: https://registry.npmjs.org)
    */
   registry?: string;
+
+  /**
+   * If installing Python packages, set whether to prefer the Pyodide index (default: true)
+   */
+  preferPyodideIndex?: boolean;
 }
 
 export interface InstallResult {
@@ -109,7 +160,11 @@ export async function installDependencies(
   fileSystem: FileSystem,
   options: InstallOptions = {}
 ): Promise<InstallResult> {
-  const { dev = false, registry = NPM_REGISTRY } = options;
+  const {
+    dev = false,
+    registry = NPM_REGISTRY,
+    preferPyodideIndex = true
+  } = options;
 
   const result: InstallResult = {
     installed: [],
@@ -164,7 +219,11 @@ export async function installDependencies(
       )
     );
   } else if (pyprojectTomlContent) {
-    return await installDependenciesPython(fileSystem, pyprojectTomlContent);
+    return await installDependenciesPython(
+      fileSystem,
+      pyprojectTomlContent,
+      preferPyodideIndex
+    );
   }
   return result;
 }
@@ -174,7 +233,8 @@ export async function installDependencies(
  */
 async function installDependenciesPython(
   fileSystem: FileSystem,
-  pyprojectTomlContent: string
+  pyprojectTomlContent: string,
+  preferPyodideIndex: boolean
 ): Promise<InstallResult> {
   const result: InstallResult = {
     installed: [],
@@ -199,6 +259,17 @@ async function installDependenciesPython(
     depsToInstall[name] = "*"; // in the future this should be a version specifier, if one was set
   }
 
+  if (!pyodideLockfile) {
+    try {
+      pyodideLockfile = await fetchPyodideLockfile(PYODIDE_VERSION);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      result.warnings.push(
+        `Could not retrieve Pyodide lockfile, attempts to retrieve packages from the Pyodide CDN may fail. Error: ${message}`
+      );
+    }
+  }
+
   // Track installed packages to avoid duplicates
   const installedPackages = new Map<string, string>(); // name -> version
   // Track in-progress installations to avoid duplicate work
@@ -213,7 +284,8 @@ async function installDependenciesPython(
         fileSystem,
         installedPackages,
         inProgress,
-        PYPI_JSON_API // hardcoding this for now to keep the implementation light
+        PYPI_SIMPLE_API,
+        preferPyodideIndex
       )
     )
   );
@@ -333,7 +405,8 @@ async function installPythonPackage(
   fileSystem: FileSystem,
   installedPackages: Map<string, string>,
   inProgress: Map<string, Promise<void>>,
-  registry: string
+  registry: string,
+  preferPyodideIndex: boolean
 ): Promise<void> {
   // Skip if already installed in this run
   if (installedPackages.has(name)) {
@@ -351,35 +424,91 @@ async function installPythonPackage(
 
   const installPromise = (async () => {
     try {
-      const metadata = await fetchPythonPackageMetadata(name, registry);
+      // Setting default values since some of the errors below access these and they may not all be set in all cases
+      let response: Response = {} as Response;
+      let wheel: PypiSimpleFile = {} as PypiSimpleFile;
+      let version: string = "";
 
-      const version = metadata.info.version;
-      const wheel = metadata.urls.find(
-        (url) => url.packagetype === "bdist_wheel"
-      );
-      if (!wheel) {
-        throw new Error(
-          `No wheel distribution found for ${name}@${version} on PyPI`
+      // Putting the logic for retrieving a wheel from PyPI and the Pyodide index into their own functions here
+      // This is so either one can be used as a fallback for the other in a (relatively) tidy way
+      const retrieveFromPyPI = async (
+        name: string,
+        registry: string
+      ): Promise<[Response, PypiSimpleFile, string, string[]] | null> => {
+        const metadata = await fetchPythonPackageMetadata(name, registry);
+        const version = metadata.version;
+        const wheel = metadata.wheel;
+
+        const response = await fetchWithTimeout(
+          wheel.url,
+          {},
+          DEFAULT_TIMEOUT_MS * 2
         );
-      }
-      const wheelUrl = wheel.url;
 
-      const response = await fetchWithTimeout(
-        wheelUrl,
-        {},
-        DEFAULT_TIMEOUT_MS * 2
-      );
-      if (!response.ok) {
-        throw new Error(
-          `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheelUrl})`
+        if (!response.ok) {
+          return null;
+        }
+
+        return [response, wheel, version];
+      };
+
+      const retrieveFromPyodide = async (
+        name: string
+      ): Promise<[Response, PypiSimpleFile, string, string[]] | null> => {
+        const pyodideWheel = getPyodideWheel(name);
+        if (!pyodideWheel) {
+          return null;
+        }
+
+        const response = await fetchWithTimeout(
+          pyodideWheel.url,
+          {},
+          DEFAULT_TIMEOUT_MS * 2
         );
-      }
+        if (!response.ok) {
+          return null;
+        }
 
+        const version = pyodideWheel.package.version;
+        const wheel = pyodideWheel.file;
+        return [response, wheel, version];
+      };
+
+      // Try either PyPI or the Pyodide index, then fall back to the other one if that one fails
+      if (preferPyodideIndex) {
+        let registryResult = await retrieveFromPyodide(name);
+        if (registryResult) {
+          [response, wheel, version] = registryResult;
+        } else {
+          registryResult = await retrieveFromPyPI(name, registry);
+          if (registryResult) {
+            [response, wheel, version] = registryResult;
+          } else {
+            throw new Error(
+              `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheel.url})`
+            );
+          }
+        }
+      } else {
+        let registryResult = await retrieveFromPyPI(name, registry);
+        if (registryResult) {
+          [response, wheel, version] = registryResult;
+        } else {
+          registryResult = await retrieveFromPyodide(name);
+          if (registryResult) {
+            [response, wheel, version] = registryResult;
+          } else {
+            throw new Error(
+              `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheel.url})`
+            );
+          }
+        }
+      }
       const buffer = await response.arrayBuffer();
 
-      const packageFilesWheel = stripWheelToPackage(
-        extractWheel(new Uint8Array(buffer), result)
-      );
+      const wheelContents = extractWheel(new Uint8Array(buffer), result);
+      const dependencies = getDependenciesFromWheel(wheelContents);
+      const packageFilesWheel = stripWheelToPackage(wheelContents);
 
       // Mark as installed before writing to prevent cycles
       installedPackages.set(name, version);
@@ -390,7 +519,6 @@ async function installPythonPackage(
         fileSystem.write(`python_modules/${filePath}`, content);
       }
 
-      const dependencies = [...(metadata.info.requires_dist ?? [])];
       await Promise.all(
         dependencies.map((dep) =>
           installPythonPackage(
@@ -399,7 +527,8 @@ async function installPythonPackage(
             fileSystem,
             installedPackages,
             inProgress,
-            PYPI_JSON_API // hardcoding this for now to keep the implementation light
+            PYPI_SIMPLE_API,
+            preferPyodideIndex
           )
         )
       );
@@ -476,10 +605,85 @@ async function fetchPackageMetadata(
   return (await response.json()) as NpmPackageMetadata;
 }
 
-async function fetchPythonPackageMetadata(name: string, registry: string) {
-  // Fetch package metadata from PyPI JSON API
-  // TODO: Redo this to use the PyPA simple repository API
-  const metadataResponse = await fetchWithTimeout(`${registry}/${name}/json`);
+/**
+ * Fetch the Pyodide lockfile for a given Pyodide version.
+ *
+ * The lockfile lists all pre-built packages available in the Pyodide
+ * distribution, including their wheel URLs, hashes, and dependencies.
+ */
+async function fetchPyodideLockfile(
+  version: string
+): Promise<PyodideLockfile | null> {
+  const url = `https://cdn.jsdelivr.net/pyodide/${version}/full/pyodide-lock.json`;
+  try {
+    const response = await fetchWithTimeout(url);
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as PyodideLockfile;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalize a Python package name per PEP 503.
+ *
+ * Lowercases the name and collapses runs of `-`, `_`, and `.` into a single `-`.
+ */
+function normalizePythonName(name: string): string {
+  return name.toLowerCase().replace(/[-_.]+/g, "-");
+}
+
+/**
+ * Look up a package in the loaded Pyodide lockfile and return the URL and a
+ * Simple-API-shaped file entry for its wheel.
+ *
+ * Returns `null` if the lockfile is not loaded or the package is not present.
+ */
+function getPyodideWheel(name: string): {
+  package: PyodideLockfilePackage;
+  url: string;
+  file: PypiSimpleFile;
+} | null {
+  if (!pyodideLockfile) return null;
+
+  const normalizedName = normalizePythonName(name);
+  const pkg = pyodideLockfile.packages[normalizedName];
+  if (!pkg) return null;
+
+  const baseUrl = `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full`;
+  const url = pkg.file_name.startsWith("http")
+    ? pkg.file_name
+    : `${baseUrl}/${pkg.file_name}`;
+
+  return {
+    package: pkg,
+    url,
+    file: {
+      filename: pkg.file_name,
+      url,
+      hashes: { sha256: pkg.sha256 }
+    }
+  };
+}
+
+async function fetchPythonPackageMetadata(
+  name: string,
+  registry: string
+): Promise<{ version: string; wheel: PypiSimpleFile }> {
+  const normalizedName = normalizePythonName(name);
+
+  // Fetch package metadata from PyPI Simple API
+  const metadataResponse = await fetchWithTimeout(
+    `${registry}/${normalizedName}/`,
+    {
+      headers: {
+        Accept: "application/vnd.pypi.simple.v1+json"
+      }
+    }
+  );
+
   if (!metadataResponse.ok) {
     const hint =
       metadataResponse.status === 404
@@ -489,19 +693,202 @@ async function fetchPythonPackageMetadata(name: string, registry: string) {
       `PyPI returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
     );
   }
-  const metadata = (await metadataResponse.json()) as {
-    info: {
-      version: string;
-      requires_dist?: string[];
-    };
+  const metadata = (await metadataResponse.json()) as PypiSimpleMetadata;
 
-    urls: Array<{
-      filename: string;
-      url: string;
-      packagetype: string;
-    }>;
+  const wheel = selectWheel(metadata.files);
+  if (!wheel) {
+    throw new Error(`No compatible wheel found for ${name} on PyPI`);
+  }
+
+  const version = parseWheelVersion(wheel.filename);
+  if (!version) {
+    throw new Error(
+      `Could not parse version from wheel filename: ${wheel.filename}`
+    );
+  }
+
+  return { version, wheel };
+}
+
+/**
+ * Select a compatible wheel from PyPI Simple API files list.
+ * Prefers py3-none-any or py2.py3-none-any wheels for maximum compatibility.
+ * Selects the latest version from compatible wheels.
+ * TODO: implement proper platform/python version matching
+ */
+function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | undefined {
+  const wheels = files.filter((f) => f.filename.endsWith(".whl"));
+  if (wheels.length === 0) return undefined;
+
+  // Filter to universal wheels (py3-none-any or py2.py3-none-any)
+  const universal = wheels.filter(
+    (w) =>
+      w.filename.includes("-py3-none-any.whl") ||
+      w.filename.includes("-py2.py3-none-any.whl")
+  );
+
+  const candidates = universal.length > 0 ? universal : wheels;
+
+  // Select the wheel with the highest version
+  let latest: PypiSimpleFile | undefined;
+  let latestVersion: string | undefined;
+
+  for (const wheel of candidates) {
+    const version = parseWheelVersion(wheel.filename);
+    if (!version) continue;
+
+    if (
+      !latest ||
+      !latestVersion ||
+      comparePythonVersions(version, latestVersion) > 0
+    ) {
+      latest = wheel;
+      latestVersion = version;
+    }
+  }
+
+  return latest;
+}
+
+/**
+ * Compare two PEP 440 version strings.
+ * Returns >0 if a > b, <0 if a < b, 0 if equal.
+ *
+ * Python versions (PEP 440) are not semver-compatible (e.g. "3.6.2.1" has four
+ * release segments), so semver cannot be used here. This is a minimal
+ * comparison: it compares the dotted numeric release segments, and treats
+ * pre-release/dev versions (a/b/rc/alpha/beta/dev/pre) as lower than the same
+ * release so a stable release is preferred.
+ * TODO: full PEP 440 ordering (post-releases, local versions, epochs) if needed.
+ */
+function comparePythonVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const releaseMatch = v.match(/^[0-9]+(?:\.[0-9]+)*/);
+    const release = (releaseMatch?.[0] ?? "0").split(".").map(Number);
+    const rest = v.slice(releaseMatch?.[0].length ?? 0);
+    const isPre = /^[.\-_]?(a|b|c|rc|alpha|beta|dev|pre)/i.test(rest);
+    return { release, isPre };
   };
-  return metadata;
+
+  const av = parse(a);
+  const bv = parse(b);
+
+  const len = Math.max(av.release.length, bv.release.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (av.release[i] ?? 0) - (bv.release[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+
+  // Same release: a stable version outranks a pre-release/dev version
+  if (av.isPre !== bv.isPre) return av.isPre ? -1 : 1;
+  return 0;
+}
+
+/**
+ * Parse version from a wheel filename.
+ * Wheel format: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
+ *
+ * With no build tag (5 parts): distribution-version-python-abi-platform.whl
+ * With build tag (6+ parts): distribution-version-build-python-abi-platform.whl
+ *
+ * TODO: handle edge cases with distribution names containing hyphens
+ */
+function parseWheelVersion(filename: string): string | undefined {
+  const parts = filename.replace(/\.whl$/, "").split("-");
+  if (parts.length < 5) return undefined;
+
+  // The last three parts are always: python_tag, abi_tag, platform_tag
+  // For 5 parts: distribution, version, py, abi, platform -> version is parts[1]
+  // For 6+ parts: distribution, version, build?, py, abi, platform -> version is parts[1]
+  return parts[1];
+}
+
+/**
+ * Get the core metadata URL from a PyPI Simple API file entry.
+ * Returns undefined if core metadata is not available.
+ *
+ * Per PEP 714: if core-metadata is true or an object (with hash),
+ * metadata is available at {file_url}.metadata unless a separate URL is provided.
+ */
+function getCoreMetadataUrl(file: PypiSimpleFile): string | undefined {
+  const cm = file["core-metadata"];
+  if (!cm) return undefined;
+
+  // If it's an object with an explicit URL, use that
+  if (typeof cm === "object" && cm.url) return cm.url;
+
+  // Otherwise (boolean true or object with just hash), use .metadata suffix
+  if (cm === true || typeof cm === "object") return `${file.url}.metadata`;
+
+  return undefined;
+}
+
+/**
+ * Fetch and parse Requires-Dist from a Python package's core metadata.
+ * Returns empty array if metadata is unavailable or parsing fails.
+ */
+async function fetchPythonRequiresDist(url: string): Promise<string[]> {
+  try {
+    const response = await fetchWithTimeout(url);
+    if (!response.ok) return [];
+    const contentType = response.headers.get("content-type") ?? "";
+    // PyPI tends to send this as `binary/octet-stream` even though it's actually text, this avoids an unhelpful warning
+    const text = contentType.startsWith("text/")
+      ? await response.text()
+      : new TextDecoder().decode(await response.arrayBuffer());
+    return parseRequiresDist(text);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Extract Requires-Dist entries from a wheel's *.dist-info/METADATA file.
+ * Accepts the file record returned by `extractWheel`.
+ * Returns an empty array if METADATA is missing or contains no dependencies.
+ */
+function getDependenciesFromWheel(files: Record<string, string>): string[] {
+  const metadataPath = Object.keys(files).find((path) =>
+    path.endsWith(".dist-info/METADATA")
+  );
+  if (!metadataPath) return [];
+  const metadata = files[metadataPath];
+  if (!metadata) return [];
+  return parseRequiresDist(metadata);
+}
+
+/**
+ * Parse Requires-Dist headers from Python package METADATA file (RFC 822 format).
+ * Handles continuation lines (starting with whitespace).
+ */
+function parseRequiresDist(metadata: string): string[] {
+  const requires: string[] = [];
+  const lines = metadata.split(/\r?\n/);
+  let current: string | undefined;
+
+  for (const raw of lines) {
+    // Continuation line (starts with whitespace)
+    if (raw.startsWith(" ") || raw.startsWith("\t")) {
+      if (current !== undefined) {
+        current += " " + raw.trim();
+      }
+      continue;
+    }
+
+    // Process previous header if it was Requires-Dist
+    if (current !== undefined && current.startsWith("Requires-Dist:")) {
+      requires.push(current.slice("Requires-Dist:".length).trim());
+    }
+
+    current = raw;
+  }
+
+  // Process last header
+  if (current !== undefined && current.startsWith("Requires-Dist:")) {
+    requires.push(current.slice("Requires-Dist:".length).trim());
+  }
+
+  return requires;
 }
 
 /**
@@ -580,7 +967,15 @@ function extractWheel(
   const textDecoder = new TextDecoder();
 
   for (const [path, content] of Object.entries(unzipped)) {
-    // Todo: Remove this check once it's confirmed that compiled wasm binaries are working
+    // Keep the wheel's core metadata file so callers can read Requires-Dist from it.
+    // This file has no extension, so it would otherwise be rejected by isTextFile.
+    // TODO: Remove this after we clear the other todo constraining down to just text files
+    if (path.endsWith(".dist-info/METADATA")) {
+      files[path] = textDecoder.decode(content);
+      continue;
+    }
+
+    // TODO: Remove this check once it's confirmed that compiled wasm binaries are working
     // (blocking this for now so any such packages will fail gracefully in the interim)
     if (!isTextFile(path)) {
       result.warnings.push(

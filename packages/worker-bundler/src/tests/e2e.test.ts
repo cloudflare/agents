@@ -1043,7 +1043,8 @@ describe("createWorker with pyproject.toml", () => {
           "def greet(name: str) -> str:",
           '    return f"hello, {name}"'
         ].join("\n")
-      }
+      },
+      preferPyodideIndex: false
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1083,7 +1084,8 @@ describe("createWorker with pyproject.toml", () => {
           // `attrs` has zero dependencies
           'dependencies = ["typing_extensions", "typing_inspection", "attrs"]'
         ].join("\n")
-      }
+      },
+      preferPyodideIndex: false
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1124,7 +1126,49 @@ describe("createWorker with pyproject.toml", () => {
           // typing_inspection depends on typing_extensions
           'dependencies = ["typing_inspection"]'
         ].join("\n")
-      }
+      },
+      preferPyodideIndex: false
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, string>;
+    expect(body.typing_extensions).toBe("typing_extensions");
+    expect(body.typing_inspection).toBe("typing_inspection");
+  });
+
+  it("works with the pyodide index", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import typing_inspection",
+          "import typing_extensions", // If nothing has gone wrong with nested deps, this will work fine
+          // TODO: Fix nested deps when resolving from pyodide so the above will work
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    return Response.json({",
+          '      "typing_extensions": typing_extensions.__name__,',
+          '      "typing_inspection": typing_inspection.__name__,',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          // typing_inspection depends on typing_extensions
+          'dependencies = ["typing_inspection"]'
+        ].join("\n")
+      },
+      preferPyodideIndex: true
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
