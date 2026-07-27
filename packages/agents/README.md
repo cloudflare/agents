@@ -448,7 +448,7 @@ function createServer() {
 
 export default {
   fetch(request, env, ctx) {
-    return createMcpHandler(createServer).fetch(request, env, ctx);
+    return createMcpHandler(createServer)(request, env, ctx);
   }
 } satisfies ExportedHandler;
 ```

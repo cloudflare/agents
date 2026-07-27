@@ -497,7 +497,7 @@ function createServer() {
 
 export default {
   fetch(request, env, ctx) {
-    return createMcpHandler(createServer, { legacy: "reject" }).fetch(
+    return createMcpHandler(createServer, { legacy: "reject" })(
       request,
       env,
       ctx

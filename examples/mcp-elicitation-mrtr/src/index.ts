@@ -167,6 +167,6 @@ export default {
     return createMcpHandler(() => createServer(requestStateCodec), {
       route: "/mcp",
       legacy: "reject"
-    }).fetch(request, env, ctx);
+    })(request, env, ctx);
   }
 } satisfies ExportedHandler<Env>;
