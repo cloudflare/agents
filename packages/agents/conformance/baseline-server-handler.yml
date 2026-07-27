@@ -6,7 +6,7 @@ server:
   # verbatim by SDK v1 server registrations.
   - json-schema-2020-12
 
-  # WorkerTransport emits the 2025-11-25 priming event, but alpha.9 reports no
+  # WorkerTransport emits the 2025-11-25 priming event, but alpha.10 reports no
   # retry hint and no pending tool response after Last-Event-ID reconnection.
   # Impact if unchanged: reconnecting SSE clients may use their own retry delay,
   # and a disconnected in-flight response may not resume on the new stream.

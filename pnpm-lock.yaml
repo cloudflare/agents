@@ -3903,8 +3903,8 @@ importers:
         specifier: 2.0.0-beta.5
         version: 2.0.0-beta.5
       '@modelcontextprotocol/conformance-v2':
-        specifier: npm:@modelcontextprotocol/conformance@0.2.0-alpha.9
-        version: '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)'
+        specifier: npm:@modelcontextprotocol/conformance@0.2.0-alpha.10
+        version: '@modelcontextprotocol/conformance@0.2.0-alpha.10(@cfworker/json-schema@4.1.1)'
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
@@ -6355,8 +6355,8 @@ packages:
     resolution: {integrity: sha512-YuuNm5f2TMoFQRje1UqVP8TJRjijCXMz4ckvoVpx1cUXuBEmykWQ2d8R536pek6UKcXT41T5nWc4qR1JFIbEmg==}
     engines: {node: '>=20'}
 
-  '@modelcontextprotocol/conformance@0.2.0-alpha.9':
-    resolution: {integrity: sha512-Bi5P5TQlOQGPJxCT7UAHbpG7wsR7sNZskHGtCoZBo6vDu416D2FXPgM4wKbg91teIgj4HjGkhnzlvP7U2dszfQ==}
+  '@modelcontextprotocol/conformance@0.2.0-alpha.10':
+    resolution: {integrity: sha512-0V/HZDdWHcg6j0zVBzBsXcPZ571IVi6umKgTpnBhtTx/jm/LONmGF6cIWL2k4Xjyps0OiHV6B37nj2s0pUg0nQ==}
     hasBin: true
 
   '@modelcontextprotocol/core@2.0.0-beta.5':
@@ -13985,7 +13985,7 @@ snapshots:
       pkce-challenge: 5.0.1
       zod: 4.4.3
 
-  '@modelcontextprotocol/conformance@0.2.0-alpha.9(@cfworker/json-schema@4.1.1)':
+  '@modelcontextprotocol/conformance@0.2.0-alpha.10(@cfworker/json-schema@4.1.1)':
     dependencies:
       '@modelcontextprotocol/sdk': 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@octokit/rest': 22.0.1

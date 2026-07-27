@@ -1,7 +1,7 @@
 # MCP conformance tests
 
 Runs the exact-pinned MCP referee,
-`@modelcontextprotocol/conformance@0.2.0-alpha.9`, against Agents inside
+`@modelcontextprotocol/conformance@0.2.0-alpha.10`, against Agents inside
 workerd via `wrangler dev`.
 
 `conformance/run-suite.mjs` delegates each scenario to the official CLI. It
@@ -25,7 +25,7 @@ the current protocol lane.
 
 | Command                              | Server protocol/referee selection | Scenarios | Current result                 |
 | ------------------------------------ | --------------------------------- | --------- | ------------------------------ |
-| `test:conformance:client:stateless`  | `2026-07-28`                      | 32        | 27 clean / 5 expected failures |
+| `test:conformance:client:stateless`  | `2026-07-28`                      | 32        | 28 clean / 4 expected failures |
 | `test:conformance:client:2025-11-25` | `2025-11-25`                      | 18        | 16 clean / 2 expected failures |
 | `test:conformance:client:2025-06-18` | `2025-06-18`                      | 5         | 5 clean                        |
 | `test:conformance:client:2025-03-26` | `2025-03-26` OAuth/backcompat     | 2         | 2 clean                        |
@@ -35,16 +35,17 @@ A new selected scenario missing from that manifest fails before the lane runs.
 
 ## Server lanes
 
-| Command                                         | Protocol/lifecycle              | Endpoint              | Current result                         |
-| ----------------------------------------------- | ------------------------------- | --------------------- | -------------------------------------- |
-| `test:conformance:server:handler`               | Stateless (`2026-07-28`)        | `/mcp-handler`        | 39 clean / 1 expected referee mismatch |
-| `test:conformance:server:handler:legacy-compat` | Legacy compatibility, stateless | `/mcp-handler`        | 26 clean / 6 expected failures         |
-| `test:conformance:server:handler:legacy`        | Legacy, sessionful              | `/mcp-handler-legacy` | 29 clean / 3 expected failures         |
-| `test:conformance:server:mcp-agent`             | Legacy, sessionful              | `/mcp-agent`          | 29 clean / 3 expected failures         |
+| Command                                         | Protocol/lifecycle              | Endpoint              | Current result                 |
+| ----------------------------------------------- | ------------------------------- | --------------------- | ------------------------------ |
+| `test:conformance:server:handler`               | stateless (`2026-07-28`)        | `/mcp-handler`        | 40 clean                       |
+| `test:conformance:server:handler:legacy-compat` | legacy compatibility, stateless | `/mcp-handler`        | 26 clean / 6 expected failures |
+| `test:conformance:server:handler:legacy`        | legacy, sessionful              | `/mcp-handler-legacy` | 29 clean / 3 expected failures |
+| `test:conformance:server:mcp-agent`             | legacy, sessionful              | `/mcp-agent`          | 29 clean / 3 expected failures |
 
-Each lane has a dedicated non-empty baseline. Comments beside every expected
-failure explain its practical impact and whether the behavior belongs to
-Agents, SDK v1, or the alpha referee fixture.
+The compatibility lanes have dedicated, non-empty baselines. Comments beside
+every expected failure explain its practical impact and whether the behavior
+belongs to Agents, SDK v1, or the alpha referee fixture. The stateless handler
+has no expected failures.
 
 Optional extensions are not release gates for this SDK migration. Unsupported
 Tasks and client-credentials scenarios remain outside this core/compatibility

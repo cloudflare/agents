@@ -205,7 +205,7 @@ async function runScenario(name) {
     args.push("--url", url);
   }
   const result = await runNode(args, { timeoutMs: scenarioTimeoutMs });
-  // Alpha.9's server command reports WARNING checks but exits zero. Warnings
+  // Alpha.10's server command reports WARNING checks but exits zero. Warnings
   // remain non-conformant unless the scenario is explicitly baselined.
   const warned = /"status"\s*:\s*"WARNING"/.test(result.stdout);
   const failed = result.code !== 0 || result.timedOut || warned;

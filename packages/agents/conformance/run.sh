@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the newest published MCP conformance referee (alpha.9) against Agents
+# Runs the exact-pinned MCP conformance referee (alpha.10) against Agents
 # implementations inside workerd. run-suite.mjs bounds client concurrency,
 # makes baseline coverage fail-closed, and treats client process failures and
 # server warning checks as failures even when the referee exits successfully.
@@ -81,16 +81,17 @@ run_client() {
 }
 
 run_server() {
-  local url="$1" version="$2" baseline="$3"
+  local url="$1" version="$2" baseline="${3:-}"
   shift 3
-  node conformance/run-suite.mjs server \
-    --conformance "$CONFORMANCE" \
-    --baseline "$baseline" \
-    --url "$url" \
-    --spec-version "$version" \
-    --concurrency 1 \
-    --scenario-timeout 150000 \
-    "$@"
+  local args=(
+    --conformance "$CONFORMANCE"
+    --url "$url"
+    --spec-version "$version"
+    --concurrency 1
+    --scenario-timeout 150000
+  )
+  [ -n "$baseline" ] && args+=(--baseline "$baseline")
+  node conformance/run-suite.mjs server "${args[@]}" "$@"
 }
 
 case "$MODE" in
@@ -107,8 +108,7 @@ case "$MODE" in
     run_client 2025-03-26 "" "$@"
     ;;
   server-handler)
-    run_server "$WORKER_ORIGIN/mcp-handler" 2026-07-28 \
-      conformance/baseline-server-handler-v2.yml "$@"
+    run_server "$WORKER_ORIGIN/mcp-handler" 2026-07-28 "" "$@"
     ;;
   server-handler-legacy-compat)
     run_server "$WORKER_ORIGIN/mcp-handler" 2025-11-25 \
