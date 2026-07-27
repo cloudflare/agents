@@ -224,7 +224,6 @@ describe("createMcpHandler SDK v2", () => {
 
     expect(buffered).toContain(": keepalive\n\n");
     expect(buffered).not.toContain("event: ping");
-    await handler.close();
   });
 
   it("clears a Legacy compatibility keepalive when the response is cancelled", async () => {
@@ -247,7 +246,6 @@ describe("createMcpHandler SDK v2", () => {
 
     expect(clearInterval).toHaveBeenCalled();
     releaseTool();
-    await handler.close();
   });
 
   it("supports strict Stateless-only serving", async () => {
@@ -435,12 +433,16 @@ describe("createMcpHandler SDK v2", () => {
     }
   );
 
-  it("exposes the upstream close, notify, and bus controls", () => {
+  it("exposes only fetch and typed notification controls", () => {
     const handler = createMcpHandler(() => createServer());
 
-    expect(typeof handler.close).toBe("function");
+    expect(typeof handler.fetch).toBe("function");
     expect(typeof handler.notify.toolsChanged).toBe("function");
-    expect(typeof handler.bus.publish).toBe("function");
+    expect(typeof handler.notify.promptsChanged).toBe("function");
+    expect(typeof handler.notify.resourcesChanged).toBe("function");
+    expect(typeof handler.notify.resourceUpdated).toBe("function");
+    expect("close" in handler).toBe(false);
+    expect("bus" in handler).toBe(false);
   });
 
   it("does not construct a Legacy compatibility server for an aborted request", async () => {
@@ -458,110 +460,6 @@ describe("createMcpHandler SDK v2", () => {
 
     expect(response.status).toBe(499);
     expect(factoryCalls).toBe(0);
-  });
-
-  it("does not serve Legacy compatibility requests after close", async () => {
-    let factoryCalls = 0;
-    const handler = createMcpHandler(() => {
-      factoryCalls++;
-      return createServer();
-    });
-
-    await handler.close();
-
-    await expect(handler.fetch(legacyInitializeRequest())).rejects.toThrow(
-      "This MCP handler has been closed"
-    );
-    expect(factoryCalls).toBe(0);
-  });
-
-  it("does not start a legacy server when close wins request classification", async () => {
-    let factoryCalls = 0;
-    let releaseClassification!: () => void;
-    let markClassificationStarted!: () => void;
-    const classificationStarted = new Promise<void>((resolve) => {
-      markClassificationStarted = resolve;
-    });
-    const classificationGate = new Promise<void>((resolve) => {
-      releaseClassification = resolve;
-    });
-    const request = legacyInitializeRequest();
-    const cloneRequest = request.clone.bind(request);
-    Object.defineProperty(request, "clone", {
-      value: () => {
-        const clone = cloneRequest();
-        const readBody = clone.text.bind(clone);
-        Object.defineProperty(clone, "text", {
-          value: async () => {
-            markClassificationStarted();
-            await classificationGate;
-            return readBody();
-          }
-        });
-        return clone;
-      }
-    });
-    const handler = createMcpHandler(() => {
-      factoryCalls++;
-      return createServer();
-    });
-    const pendingResponse = handler.fetch(request);
-    await classificationStarted;
-
-    await handler.close();
-    releaseClassification();
-
-    await expect(pendingResponse).rejects.toThrow(
-      "This MCP handler has been closed"
-    );
-    expect(factoryCalls).toBe(0);
-  });
-
-  it("closes active Legacy compatibility servers", async () => {
-    let serverClosed = false;
-    const handler = createMcpHandler(() => {
-      const server = createServer();
-      server.server.onclose = () => {
-        serverClosed = true;
-      };
-      return server;
-    });
-    const response = await handler.fetch(legacyInitializeRequest());
-
-    await handler.close();
-
-    expect(serverClosed).toBe(true);
-    await response.body?.cancel();
-  });
-
-  it("closes a Legacy compatibility server whose factory resolves during close", async () => {
-    let resolveFactory!: (server: McpServer) => void;
-    let markFactoryStarted!: () => void;
-    const factoryStarted = new Promise<void>((resolve) => {
-      markFactoryStarted = resolve;
-    });
-    let serverClosed = false;
-    const handler = createMcpHandler(() => {
-      markFactoryStarted();
-      return new Promise<McpServer>((resolve) => {
-        resolveFactory = resolve;
-      });
-    });
-    const pendingResponse = handler.fetch(legacyInitializeRequest());
-    await factoryStarted;
-    const closing = handler.close();
-    const server = createServer();
-    const closeServer = server.close.bind(server);
-    server.close = async () => {
-      serverClosed = true;
-      await closeServer();
-    };
-
-    resolveFactory(server);
-    await closing;
-    await pendingResponse;
-
-    expect(serverClosed).toBe(true);
   });
 
   it("requires a factory for SDK v2 servers", () => {
@@ -723,6 +621,12 @@ describe("createMcpHandler SDK v2", () => {
       }
     });
     expect(seenAuthProps).toBe(props);
+  });
+
+  it("rejects the upstream bus implementation detail", () => {
+    expect(() =>
+      createMcpHandler(() => createServer(), { bus: {} } as never)
+    ).toThrow('option "bus" is not exposed by the Agents SDK');
   });
 
   it("rejects v1-only options for a v2 server", () => {

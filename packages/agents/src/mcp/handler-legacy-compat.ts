@@ -20,17 +20,14 @@ import { KEEPALIVE_FRAME, KEEPALIVE_INTERVAL_MS } from "./sse-keepalive";
  *
  * - impossible stateless server-to-client requests fail immediately rather
  *   than leaving the tool handler waiting for a session response;
- * - active request resources are tracked so the parent handler can close them;
  * - streamed POST responses receive Cloudflare's 25-second SSE keepalive.
  *
- * Remove this adapter once the SDK exposes all three policies directly.
+ * Remove this adapter once the SDK exposes both policies directly.
  */
 export function createLegacyCompatibilityRequestHandler(
   factory: McpServerFactory,
   onerror?: (error: Error) => void
 ) {
-  const activeTeardowns = new Set<() => Promise<void>>();
-
   const fetch = async (
     request: Request,
     options: McpHandlerRequestOptions | undefined
@@ -56,29 +53,16 @@ export function createLegacyCompatibilityRequestHandler(
     let product: McpServer | Server | undefined;
     let transport: WebStandardStreamableHTTPServerTransport | undefined;
     let clearResponseKeepalive = () => {};
-    let markResourcesReady!: () => void;
-    const resourcesReady = new Promise<void>((resolve) => {
-      markResourcesReady = resolve;
-    });
-    let resourcesAreReady = false;
-    const ready = () => {
-      if (resourcesAreReady) return;
-      resourcesAreReady = true;
-      markResourcesReady();
-    };
     let teardownPromise: Promise<void> | undefined;
     const teardown = () =>
       (teardownPromise ??= (async () => {
         clearResponseKeepalive();
-        await resourcesReady;
-        activeTeardowns.delete(teardown);
         await Promise.all([
           transport?.close().catch(() => {}),
           product?.close().catch(() => {})
         ]);
       })());
     const onAbort = () => void teardown();
-    activeTeardowns.add(teardown);
 
     try {
       product = await factory({
@@ -89,11 +73,6 @@ export function createLegacyCompatibilityRequestHandler(
       transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined
       });
-      ready();
-      if (teardownPromise) {
-        await teardown();
-        throw new Error("This MCP handler has been closed");
-      }
 
       const send = transport.send.bind(transport);
       transport.send = async (message, sendOptions) => {
@@ -191,7 +170,6 @@ export function createLegacyCompatibilityRequestHandler(
         headers: response.headers
       });
     } catch (error) {
-      ready();
       request.signal.removeEventListener("abort", onAbort);
       await teardown();
       reportHandlerError(onerror, error);
@@ -201,8 +179,5 @@ export function createLegacyCompatibilityRequestHandler(
     }
   };
 
-  return {
-    fetch,
-    close: () => Promise.all(Array.from(activeTeardowns, (close) => close()))
-  };
+  return { fetch };
 }

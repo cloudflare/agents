@@ -60,8 +60,8 @@ The tradeoff is one additional import and direct peer installation. That is pref
 1. The client sends `server/discover`.
 2. Each catalog or operation request constructs a fresh `McpServer`/`Server` from the factory.
 3. The handler connects it to a single-exchange transport and returns JSON or SSE.
-4. The server and transport close when the response completes, is cancelled, aborts, or the handler closes.
-5. Stateless Elicitation returns `input_required`; the SDK carries `requestState` and `inputResponses` between requests.
+4. The server and transport close when the response completes, is cancelled, or aborts.
+5. Stateless Elicitation returns `input_required`; each retry carries the latest `requestState` and that round's `inputResponses`.
 
 ### Legacy compatibility
 

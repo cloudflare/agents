@@ -33,6 +33,9 @@ const statelessOptions: CreateStatelessMcpHandlerOptions = {
 const wildcardOriginOptions: CreateServerMcpHandlerOptions = {
   allowedOriginHostnames: "*"
 };
+// @ts-expect-error bus is an upstream implementation detail, not an Agents option.
+const hiddenBusOptions: CreateServerMcpHandlerOptions = { bus: {} };
+void hiddenBusOptions;
 
 const highLevelHandler: StatelessMcpHandler = createMcpHandler(
   () => highLevel,
@@ -42,7 +45,15 @@ const lowLevelHandler: StatelessMcpHandler = createMcpHandler(() => lowLevel);
 const factoryHandler: StatelessMcpHandler = createMcpHandler(
   () => new McpServer({ name: "factory", version: "1.0.0" })
 );
-void highLevelHandler;
+void highLevelHandler.fetch;
+void highLevelHandler.notify.toolsChanged;
+void highLevelHandler.notify.promptsChanged;
+void highLevelHandler.notify.resourcesChanged;
+void highLevelHandler.notify.resourceUpdated;
+// @ts-expect-error close is an upstream lifecycle implementation detail.
+void highLevelHandler.close;
+// @ts-expect-error bus is an upstream subscription implementation detail.
+void highLevelHandler.bus;
 void lowLevelHandler;
 void factoryHandler;
 void AgentsMcpServer;

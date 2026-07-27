@@ -8,8 +8,8 @@ import {
   type AuthInfo,
   type CreateMcpHandlerOptions as SdkCreateMcpHandlerOptions,
   type McpHandlerRequestOptions,
-  type McpHttpHandler,
-  type McpServerFactory
+  type McpServerFactory,
+  type ServerNotifier
 } from "@modelcontextprotocol/server";
 import {
   getVerifiedOAuthAuthInfo,
@@ -20,7 +20,10 @@ import { internalErrorResponse, reportHandlerError } from "./handler-errors";
 import { createLegacyCompatibilityRequestHandler } from "./handler-legacy-compat";
 import type { CORSOptions } from "./types";
 
-export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOptions {
+export interface CreateStatelessMcpHandlerOptions extends Omit<
+  SdkCreateMcpHandlerOptions,
+  "bus"
+> {
   /** Exact pathname handled by this Worker wrapper. @default "/mcp" */
   route?: string;
   /** CORS headers applied by the Worker wrapper. Pass `false` to disable. */
@@ -43,12 +46,13 @@ export interface CreateStatelessMcpHandlerOptions extends SdkCreateMcpHandlerOpt
   authContext?: McpAuthContext;
 }
 
-export type StatelessMcpHandler = Omit<McpHttpHandler, "fetch"> & {
+export type StatelessMcpHandler = {
   (request: Request, env: unknown, ctx: ExecutionContext): Promise<Response>;
   fetch: {
     (request: Request, options?: McpHandlerRequestOptions): Promise<Response>;
     (request: Request, env: unknown, ctx: ExecutionContext): Promise<Response>;
   };
+  notify: ServerNotifier;
 };
 
 export type StatelessMcpServerInput = McpServerFactory;
@@ -132,6 +136,11 @@ export function createStatelessMcpHandler(
   options: CreateStatelessMcpHandlerOptions = {}
 ): StatelessMcpHandler {
   const optionRecord = options as Record<string, unknown>;
+  if (optionRecord.bus !== undefined) {
+    throw new TypeError(
+      'createMcpHandler option "bus" is not exposed by the Agents SDK.'
+    );
+  }
   const legacyOnlyOption = [
     "transport",
     "storage",
@@ -169,15 +178,12 @@ export function createStatelessMcpHandler(
     legacy === "stateless"
       ? createLegacyCompatibilityRequestHandler(factory, sdkOptions.onerror)
       : undefined;
-  let closed = false;
 
   const serve = async (
     request: Request,
     requestOptions?: McpHandlerRequestOptions,
     workerCtx?: ExecutionContext
   ): Promise<Response> => {
-    if (closed) throw new Error("This MCP handler has been closed");
-
     const requestUrl = new URL(request.url);
     if (requestUrl.pathname !== route) {
       return withCors(new Response("Not Found", { status: 404 }), corsOptions);
@@ -242,7 +248,6 @@ export function createStatelessMcpHandler(
     const legacyRequest =
       legacyCompatibilityHandler !== undefined &&
       (await isLegacyRequest(request, requestOptions?.parsedBody));
-    if (closed) throw new Error("This MCP handler has been closed");
 
     try {
       const verified = workerCtx
@@ -302,14 +307,6 @@ export function createStatelessMcpHandler(
 
   return Object.assign(callable, {
     fetch,
-    notify: sdkHandler.notify,
-    bus: sdkHandler.bus,
-    close: async () => {
-      closed = true;
-      await Promise.all([
-        sdkHandler.close(),
-        legacyCompatibilityHandler?.close()
-      ]);
-    }
+    notify: sdkHandler.notify
   }) as StatelessMcpHandler;
 }

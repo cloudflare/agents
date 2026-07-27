@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import { createMcpHandler } from "../../mcp/server";
@@ -39,10 +39,7 @@ function lifecycleServer() {
 function connectionFor(
   methods: string[],
   mode: "auto" | "legacy"
-): {
-  connection: MCPClientConnection;
-  closeHandler: () => Promise<void>;
-} {
+): MCPClientConnection {
   const handler = createMcpHandler(() => lifecycleServer());
   const connection = new MCPClientConnection(
     new URL("https://example.com/mcp"),
@@ -64,7 +61,7 @@ function connectionFor(
       }
     }
   );
-  return { connection, closeHandler: () => handler.close() };
+  return connection;
 }
 
 async function exerciseLifecycle(connection: MCPClientConnection) {
@@ -103,16 +100,9 @@ async function exerciseLifecycle(connection: MCPClientConnection) {
 }
 
 describe("MCP client/server lifecycle", () => {
-  const cleanups: Array<() => Promise<void>> = [];
-
-  afterEach(async () => {
-    while (cleanups.length > 0) await cleanups.pop()!();
-  });
-
   it("exercises discovery, catalogs, operations, and close on Stateless MCP", async () => {
     const methods: string[] = [];
-    const { connection, closeHandler } = connectionFor(methods, "auto");
-    cleanups.push(closeHandler);
+    const connection = connectionFor(methods, "auto");
 
     await exerciseLifecycle(connection);
     expect(connection.client.getProtocolEra()).toBe("modern");
@@ -124,8 +114,7 @@ describe("MCP client/server lifecycle", () => {
 
   it("exercises initialize, catalogs, operations, and close through Legacy compatibility", async () => {
     const methods: string[] = [];
-    const { connection, closeHandler } = connectionFor(methods, "legacy");
-    cleanups.push(closeHandler);
+    const connection = connectionFor(methods, "legacy");
 
     await exerciseLifecycle(connection);
     expect(connection.client.getProtocolEra()).toBe("legacy");
