@@ -45,7 +45,15 @@ const lowLevelHandler: StatelessMcpHandler = createMcpHandler(() => lowLevel);
 const factoryHandler: StatelessMcpHandler = createMcpHandler(
   () => new McpServer({ name: "factory", version: "1.0.0" })
 );
-void highLevelHandler.fetch;
+declare const request: Request;
+declare const workerEnv: unknown;
+declare const workerCtx: ExecutionContext;
+declare const authInfo: import("@modelcontextprotocol/server").AuthInfo;
+void highLevelHandler(request, workerEnv, workerCtx);
+void highLevelHandler.fetch(request);
+void highLevelHandler.fetch(request, { authInfo, parsedBody: {} });
+// @ts-expect-error Worker env/context belong on the callable, not fetch.
+void highLevelHandler.fetch(request, workerEnv, workerCtx);
 void highLevelHandler.notify.toolsChanged;
 void highLevelHandler.notify.promptsChanged;
 void highLevelHandler.notify.resourcesChanged;

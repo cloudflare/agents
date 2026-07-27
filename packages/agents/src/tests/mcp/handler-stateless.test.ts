@@ -279,9 +279,7 @@ describe("createMcpHandler SDK v2", () => {
       new Request("http://example.com/custom", {
         method: "OPTIONS",
         headers: { Origin: "https://client.example" }
-      }),
-      env,
-      ctx
+      })
     );
 
     expect(missing.status).toBe(404);
@@ -437,6 +435,8 @@ describe("createMcpHandler SDK v2", () => {
     const handler = createMcpHandler(() => createServer());
 
     expect(typeof handler.fetch).toBe("function");
+    expect(handler.length).toBe(3);
+    expect(handler.fetch.length).toBe(2);
     expect(typeof handler.notify.toolsChanged).toBe("function");
     expect(typeof handler.notify.promptsChanged).toBe("function");
     expect(typeof handler.notify.resourcesChanged).toBe("function");

@@ -48,10 +48,10 @@ export interface CreateStatelessMcpHandlerOptions extends Omit<
 
 export type StatelessMcpHandler = {
   (request: Request, env: unknown, ctx: ExecutionContext): Promise<Response>;
-  fetch: {
-    (request: Request, options?: McpHandlerRequestOptions): Promise<Response>;
-    (request: Request, env: unknown, ctx: ExecutionContext): Promise<Response>;
-  };
+  fetch(
+    request: Request,
+    options?: McpHandlerRequestOptions
+  ): Promise<Response>;
   notify: ServerNotifier;
 };
 
@@ -298,12 +298,8 @@ export function createStatelessMcpHandler(
     serve(request, undefined, ctx);
   const fetch = (
     request: Request,
-    optionsOrEnv?: McpHandlerRequestOptions | unknown,
-    ctx?: ExecutionContext
-  ) =>
-    ctx
-      ? serve(request, undefined, ctx)
-      : serve(request, optionsOrEnv as McpHandlerRequestOptions | undefined);
+    requestOptions?: McpHandlerRequestOptions
+  ) => serve(request, requestOptions);
 
   return Object.assign(callable, {
     fetch,
