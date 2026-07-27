@@ -34,7 +34,10 @@ import { DurableObjectEventStore } from "./event-store";
 import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 
 /**
- * @deprecated For new servers, use createMcpHandler from agents/mcp/server.
+ * @deprecated McpAgent is feature-frozen. Migrate to an SDK v2 factory with
+ * createMcpHandler from agents/mcp/server. When sessionful features prevent an
+ * immediate migration, run the stateless route beside the existing McpAgent
+ * route until clients transition and sessions drain.
  */
 export abstract class McpAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,

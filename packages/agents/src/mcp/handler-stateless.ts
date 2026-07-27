@@ -296,10 +296,8 @@ export function createStatelessMcpHandler(
 
   const callable = (request: Request, _env: unknown, ctx: ExecutionContext) =>
     serve(request, undefined, ctx);
-  const fetch = (
-    request: Request,
-    requestOptions?: McpHandlerRequestOptions
-  ) => serve(request, requestOptions);
+  const fetch = (request: Request, requestOptions?: McpHandlerRequestOptions) =>
+    serve(request, requestOptions);
 
   return Object.assign(callable, {
     fetch,

@@ -16,9 +16,9 @@ import { warnLegacyCreateMcpHandlerOverload } from "./handler-warning";
 
 /**
  * @deprecated Passing an SDK v1 server to createMcpHandler is deprecated and
- * removed in the next major version. Use createLegacyMcpHandler for an
- * explicit WorkerTransport handler, or pass an SDK v2 factory to
- * createMcpHandler.
+ * will be removed in the next major version. Pass an SDK v2 factory to
+ * createMcpHandler. Use createLegacyMcpHandler only to temporarily retain
+ * sessionful SDK v1 behavior while migrating.
  */
 export function createMcpHandler(
   server: LegacyMcpServer | LegacyServer,
@@ -60,8 +60,10 @@ export function createMcpHandler(
 let didWarnAboutExperimentalCreateMcpHandler = false;
 
 /**
- * @deprecated Use createLegacyMcpHandler for an SDK v1 server.
+ * @deprecated Pass an SDK v2 factory to createMcpHandler.
  * experimental_createMcpHandler will be removed in the next major version.
+ * Use createLegacyMcpHandler only to temporarily retain sessionful SDK v1
+ * behavior while migrating.
  */
 export function experimental_createMcpHandler(
   server: LegacyMcpServer | LegacyServer,
@@ -71,8 +73,9 @@ export function experimental_createMcpHandler(
     didWarnAboutExperimentalCreateMcpHandler = true;
     console.warn(
       "experimental_createMcpHandler is deprecated and will be removed in " +
-        "the next major version. Use createLegacyMcpHandler for an MCP SDK " +
-        "v1 server."
+        "the next major version. Pass an @modelcontextprotocol/server " +
+        "factory to createMcpHandler. To temporarily retain sessionful SDK " +
+        "v1 behavior while migrating, use createLegacyMcpHandler."
     );
   }
   return createLegacyMcpHandler(server, options);

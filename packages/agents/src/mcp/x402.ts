@@ -311,7 +311,10 @@ export interface X402AugmentedClient {
     params: CallToolRequest["params"],
     options?: CallToolRequestOptions
   ): Promise<CallToolResult>;
-  /** @deprecated The result schema argument is used only with SDK v1 clients. */
+  /**
+   * @deprecated Prefer the request-options overload. Explicit legacy result
+   * schemas remain honored through the SDK v2 request funnel.
+   */
   callTool(
     x402ConfirmationCallback:
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
