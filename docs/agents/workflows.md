@@ -265,7 +265,10 @@ const instanceId = await this.runWorkflow(
 - `options.retention` - Workflow instance retention passed unchanged to
   [`Workflow.create()`](https://developers.cloudflare.com/workflows/build/workers-api/#workflowinstancecreateoptions).
   Use `successRetention` for successful instances and `errorRetention` for
-  errored or terminated instances.
+  errored or terminated instances. The Agent stores the normalized values in
+  SQLite so its local tracking row follows the same terminal-outcome policy.
+  When either value is omitted, local tracking uses a 30-day fallback because
+  the SDK cannot detect whether the account is Workers Free or Workers Paid.
 
 **Returns:** Workflow instance ID
 
@@ -538,18 +541,21 @@ Workflows started with `runWorkflow()` are automatically tracked in the originat
 
 ### `cf_agents_workflows` Table
 
-| Column          | Type    | Description                     |
-| --------------- | ------- | ------------------------------- |
-| `id`            | TEXT    | Internal row ID                 |
-| `workflow_id`   | TEXT    | Cloudflare workflow instance ID |
-| `workflow_name` | TEXT    | Workflow binding name           |
-| `status`        | TEXT    | Current status                  |
-| `metadata`      | TEXT    | JSON metadata (for querying)    |
-| `error_name`    | TEXT    | Error name (if failed)          |
-| `error_message` | TEXT    | Error message (if failed)       |
-| `created_at`    | INTEGER | Unix timestamp                  |
-| `updated_at`    | INTEGER | Unix timestamp                  |
-| `completed_at`  | INTEGER | Unix timestamp (when done)      |
+| Column                      | Type    | Description                       |
+| --------------------------- | ------- | --------------------------------- |
+| `id`                        | TEXT    | Internal row ID                   |
+| `workflow_id`               | TEXT    | Cloudflare workflow instance ID   |
+| `workflow_name`             | TEXT    | Workflow binding name             |
+| `status`                    | TEXT    | Current status                    |
+| `metadata`                  | TEXT    | JSON metadata (for querying)      |
+| `error_name`                | TEXT    | Error name (if failed)            |
+| `error_message`             | TEXT    | Error message (if failed)         |
+| `created_at`                | INTEGER | Unix timestamp                    |
+| `updated_at`                | INTEGER | Unix timestamp                    |
+| `completed_at`              | INTEGER | Unix timestamp (when done)        |
+| `success_retention_seconds` | INTEGER | Local success retention           |
+| `error_retention_seconds`   | INTEGER | Local error/termination retention |
+| `expires_at`                | INTEGER | Indexed local cleanup timestamp   |
 
 Note: Workflow params and output are not stored by default. Use `metadata` to store queryable information, and store large payloads in your own tables if needed.
 

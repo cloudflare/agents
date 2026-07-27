@@ -37,6 +37,7 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+import { normalizeWorkflowRetention } from "./workflow-retention";
 export { camelCaseToKebabCase } from "./utils";
 import {
   type RetryOptions,
@@ -11424,10 +11425,18 @@ export class Agent<
     const metadataJson = options?.metadata
       ? JSON.stringify(options.metadata)
       : null;
+    const { successRetentionSeconds, errorRetentionSeconds } =
+      normalizeWorkflowRetention(options?.retention);
     try {
       this.sql`
-        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
-        VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
+        INSERT INTO cf_agents_workflows (
+          id, workflow_id, workflow_name, status, metadata,
+          success_retention_seconds, error_retention_seconds
+        )
+        VALUES (
+          ${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson},
+          ${successRetentionSeconds}, ${errorRetentionSeconds}
+        )
       `;
     } catch (e) {
       if (
