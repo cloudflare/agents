@@ -394,9 +394,9 @@ async function installPackage(
 /**
  * Install a single Python package from PyPI.
  *
- * This is a minimal implementation: it downloads the latest version of the
- * package as a source distribution and adds it to python_modules/. It does not
- * resolve version ranges or install transitive dependencies.
+ * This is an in-progress minimal implementation: it downloads the
+ * latest version of the wheel and adds it to python_modules/. It does not
+ * resolve version ranges.
  */
 async function installPythonPackage(
   name: string,

@@ -1082,7 +1082,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           // typing_extensions has zero dependencies. typing_inspection depends on typing_extensions
           // `attrs` has zero dependencies
-          'dependencies = ["typing_extensions==4.16.0", "typing_inspection==0.4.2", "attrs==26.1.0"]',
+          'dependencies = ["typing_extensions==4.16.0", "typing_inspection==0.4.2", "attrs==26.1.0"]'
         ].join("\n")
       },
       preferPyodideIndex: false
@@ -1125,7 +1125,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           // typing_inspection depends on typing_extensions
           'dependencies = ["typing_inspection==0.4.2"]'
-        ].join("\n"),
+        ].join("\n")
       },
       preferPyodideIndex: false
     });
@@ -1151,8 +1151,7 @@ describe("createWorker with pyproject.toml", () => {
         "index.py": [
           "from workers import Response, WorkerEntrypoint",
           "import typing_inspection",
-          "import typing_extensions", // If nothing has gone wrong with nested deps, this will work fine
-          // TODO: Fix nested deps when resolving from pyodide so the above will work
+          "import typing_extensions", // If nothing has gone wrong with nested deps when using the Pyodide index, this will work fine
           "class Default(WorkerEntrypoint):",
           "  async def fetch(self, request):",
           "    return Response.json({",
@@ -1166,7 +1165,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           // typing_inspection depends on typing_extensions
           'dependencies = ["typing_inspection==0.4.2"]'
-        ].join("\n"),
+        ].join("\n")
       },
       preferPyodideIndex: true
     });
