@@ -21,8 +21,8 @@ npx wrangler kv namespace create OAUTH_KV
 Update the `kv_namespaces` binding in `wrangler.jsonc` with the returned ID, then:
 
 ```sh
-npm install
-npm run dev
+pnpm install
+pnpm start
 ```
 
 Open the browser to see the server info page. To test the tools, use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) — it will handle the OAuth flow automatically.
