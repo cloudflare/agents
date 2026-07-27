@@ -170,7 +170,11 @@ const EXEC_TOUCH_INTERVAL_MS = 60 * 1000;
 const LIVE_VIEW_URL_TTL_MS = 5 * 60 * 1000;
 
 function isMissingBrowserSession(error: unknown): boolean {
-  return error instanceof BrowserRenderingError && error.status === 404;
+  // Browser Run uses 404 for unknown ids and 410 after keep_alive expiry.
+  return (
+    error instanceof BrowserRenderingError &&
+    (error.status === 404 || error.status === 410)
+  );
 }
 
 /**

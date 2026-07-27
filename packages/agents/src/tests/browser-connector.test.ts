@@ -613,6 +613,86 @@ describe("BrowserConnector", () => {
     expect(deletesFor(requests, "session-1")).toHaveLength(1);
   });
 
+  it.each([404, 410])(
+    "recycles a shared session when Browser Run returns %i",
+    async (status) => {
+      const { browser, requests } = createFakeBrowser({
+        listStatuses: [status]
+      });
+      const store = new MemorySessionStore();
+      store.set("cdp:reuse:team", {
+        sessionId: "session-expired",
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      });
+      const connector = new BrowserConnector(fakeCtx, {
+        browser,
+        store,
+        session: { mode: "reuse", key: "team" }
+      });
+
+      await expect(
+        connector.executeTool(
+          "send",
+          { method: "Browser.getVersion" },
+          { executionId: "exec-a" }
+        )
+      ).resolves.toEqual({ echo: "Browser.getVersion" });
+
+      expect(store.sessions.get("cdp:reuse:team")?.sessionId).toBe("session-1");
+      expect(
+        requests.filter((request) => request.method === "POST")
+      ).toHaveLength(1);
+    }
+  );
+
+  it("clears an expired shared session from sessionInfo on HTTP 410", async () => {
+    const { browser } = createFakeBrowser({ listStatuses: [410] });
+    const store = new MemorySessionStore();
+    store.set("cdp:reuse:default", {
+      sessionId: "session-expired",
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { mode: "reuse" }
+    });
+
+    await expect(connector.sessionInfo()).resolves.toBeUndefined();
+    expect(store.sessions.has("cdp:reuse:default")).toBe(false);
+  });
+
+  it("does not recycle a shared session on other Browser Run errors", async () => {
+    const { browser, requests } = createFakeBrowser({ listStatuses: [500] });
+    const store = new MemorySessionStore();
+    store.set("cdp:reuse:default", {
+      sessionId: "session-unavailable",
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { mode: "reuse" }
+    });
+
+    await expect(
+      connector.executeTool(
+        "send",
+        { method: "Browser.getVersion" },
+        { executionId: "exec-a" }
+      )
+    ).rejects.toThrow("500");
+    expect(store.sessions.get("cdp:reuse:default")?.sessionId).toBe(
+      "session-unavailable"
+    );
+    expect(
+      requests.filter((request) => request.method === "POST")
+    ).toHaveLength(0);
+  });
+
   it("shares one stored session across executions in reuse mode", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
