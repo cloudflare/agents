@@ -132,6 +132,49 @@ describe("workflow operations", () => {
       expect(state?.alarm).not.toBeNull();
     });
 
+    it("stores normalized retention for local outcome cleanup", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-retention");
+      const workflowId = "wf-cleanup-retention";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: "1 day",
+        errorRetention: "2 weeks"
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(2 * 7 * 24 * 60 * 60);
+      expect(state?.expiresAt).toBeNull();
+      expect(state?.alarm).not.toBeNull();
+    });
+
+    it("rounds numeric retention up from milliseconds", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-numeric");
+      const workflowId = "wf-cleanup-numeric";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: 60_001,
+        errorRetention: 120_000
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(61);
+      expect(state?.errorRetentionSeconds).toBe(120);
+    });
+
+    it("uses the 30-day fallback for an omitted outcome", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-partial");
+      const workflowId = "wf-cleanup-partial";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: "1 day"
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(30 * 24 * 60 * 60);
+    });
+
     it.each([
       ["complete", "successRetentionSeconds"],
       ["errored", "errorRetentionSeconds"],
