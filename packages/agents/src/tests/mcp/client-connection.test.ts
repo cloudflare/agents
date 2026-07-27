@@ -1,9 +1,9 @@
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
-  McpError,
-  type ServerCapabilities
-} from "@modelcontextprotocol/sdk/types.js";
+  ProtocolError,
+  StreamableHTTPClientTransport
+} from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
@@ -227,24 +227,20 @@ describe("MCP Client Connection Integration", () => {
       connection.client.getInstructions = vi
         .fn()
         .mockResolvedValue("Test instructions");
-      connection.client.listTools = vi.fn().mockResolvedValue({
-        tools: [
-          {
-            name: "test-tool",
-            description: "A test tool",
-            inputSchema: { type: "object" }
-          }
-        ]
+      connection.client.request = vi.fn().mockImplementation(({ method }) => {
+        if (method === "tools/list") {
+          return Promise.resolve({
+            tools: [
+              {
+                name: "test-tool",
+                description: "A test tool",
+                inputSchema: { type: "object" }
+              }
+            ]
+          });
+        }
+        return Promise.reject({ code: -32601 });
       });
-      connection.client.listResources = vi
-        .fn()
-        .mockRejectedValue({ code: -32601 });
-      connection.client.listPrompts = vi
-        .fn()
-        .mockRejectedValue({ code: -32601 });
-      connection.client.listResourceTemplates = vi
-        .fn()
-        .mockRejectedValue({ code: -32601 });
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
@@ -286,18 +282,23 @@ describe("MCP Client Connection Integration", () => {
       connection.connectionState = "connected";
       connection.client.getServerCapabilities = vi.fn();
       connection.client.getInstructions = vi.fn();
-      connection.client.listTools = vi
-        .fn()
-        .mockRejectedValue(new McpError(404, "Application resource missing"));
-      connection.client.listResources = vi
-        .fn()
-        .mockResolvedValue({ resources: [] });
-      connection.client.listPrompts = vi
-        .fn()
-        .mockResolvedValue({ prompts: [] });
-      connection.client.listResourceTemplates = vi
-        .fn()
-        .mockResolvedValue({ resourceTemplates: [] });
+      connection.client.request = vi.fn().mockImplementation(({ method }) => {
+        if (method === "tools/list") {
+          return Promise.reject(
+            new ProtocolError(404, "Application resource missing")
+          );
+        }
+        if (method === "resources/list") {
+          return Promise.resolve({ resources: [] });
+        }
+        if (method === "prompts/list") {
+          return Promise.resolve({ prompts: [] });
+        }
+        if (method === "resources/templates/list") {
+          return Promise.resolve({ resourceTemplates: [] });
+        }
+        return Promise.reject(new Error(`Unexpected method: ${method}`));
+      });
       connection.client.setNotificationHandler = vi.fn();
 
       expect(await connection.discover()).toMatchObject({
@@ -507,6 +508,29 @@ describe("MCP Client Connection Integration", () => {
   });
 
   describe("Discovery Failure Handling", () => {
+    it("should preserve authenticating state when discovery requires OAuth", async () => {
+      const connection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http" },
+          client: {}
+        }
+      );
+      connection.connectionState = "connected";
+      connection.discoverAndRegister = vi
+        .fn()
+        .mockRejectedValue(new Error("Unauthorized: authorization required"));
+
+      const result = await connection.discover();
+
+      expect(result).toMatchObject({
+        success: false,
+        error: expect.stringContaining("Unauthorized")
+      });
+      expect(connection.connectionState).toBe("authenticating");
+    });
+
     it("should fail discovery when any capability fails", async () => {
       const connection = new MCPClientConnection(
         new URL(serverUrl),

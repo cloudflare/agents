@@ -2,6 +2,8 @@
 
 Demonstrates how to wrap any MCP server with `codeMcpServer` so an LLM gets a single `code` tool instead of a long list of individual tools.
 
+> `@cloudflare/codemode` currently produces an MCP SDK v1 server, so this example intentionally uses the retained `createLegacyMcpHandler` API. Migrating Codemode's in-memory client/server bridge to SDK v2 is separate work.
+
 ## What this shows
 
 A normal MCP server with N tools floods the LLM's context and requires a separate round-trip per tool call. `codeMcpServer` collapses the whole server into one `code` tool: every upstream tool becomes a typed method on `codemode.*`, and the LLM can chain calls, branch on results, and do logic — all in a single code execution.
@@ -25,6 +27,7 @@ Connect an MCP client (e.g. Claude Desktop, MCP Inspector) to `http://localhost:
 ```ts
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { codeMcpServer } from "@cloudflare/codemode/mcp";
+import { createLegacyMcpHandler } from "agents/mcp";
 
 const upstream = new McpServer({ name: "my-tools", version: "1.0.0" });
 upstream.registerTool(
@@ -37,7 +40,7 @@ export default {
   async fetch(request, env, ctx) {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = await codeMcpServer({ server: upstream, executor });
-    return createMcpHandler(server)(request, env, ctx);
+    return createLegacyMcpHandler(server)(request, env, ctx);
   }
 };
 ```

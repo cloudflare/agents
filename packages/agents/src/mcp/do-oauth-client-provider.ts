@@ -1,10 +1,11 @@
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
-  OAuthClientInformation,
-  OAuthClientInformationFull,
+  OAuthClientInformationContext,
   OAuthClientMetadata,
-  OAuthTokens
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+  OAuthClientProvider,
+  OAuthDiscoveryState,
+  StoredOAuthClientInformation,
+  StoredOAuthTokens
+} from "@modelcontextprotocol/client";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { nanoid } from "nanoid";
 
@@ -153,43 +154,71 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     return `${this.keyPrefix(clientId)}/client_info/`;
   }
 
-  async clientInformation(): Promise<OAuthClientInformation | undefined> {
-    if (!this._clientId_) {
-      return undefined;
-    }
+  discoveryStateKey() {
+    return `/${this.clientName}/${this.serverId}/oauth_discovery`;
+  }
+
+  async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
+    await this.storage.put(this.discoveryStateKey(), state);
+  }
+
+  async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
     return (
-      (await this.storage.get<OAuthClientInformation>(
+      (await this.storage.get<OAuthDiscoveryState>(this.discoveryStateKey())) ??
+      undefined
+    );
+  }
+
+  async clientInformation(
+    _context?: OAuthClientInformationContext
+  ): Promise<StoredOAuthClientInformation | undefined> {
+    if (!this._clientId_) return undefined;
+    return (
+      (await this.storage.get<StoredOAuthClientInformation>(
         this.clientInfoKey(this.clientId)
       )) ?? undefined
     );
   }
 
   async saveClientInformation(
-    clientInformation: OAuthClientInformationFull
+    clientInformation: StoredOAuthClientInformation,
+    _context?: OAuthClientInformationContext
   ): Promise<void> {
+    this.clientId = clientInformation.client_id;
+    // Round-trip the SDK's issuer stamp verbatim. The SDK treats a credential
+    // stamped for another issuer as absent, so one durable slot per MCP server
+    // is both sufficient and safer than maintaining our own issuer index.
     await this.storage.put(
       this.clientInfoKey(clientInformation.client_id),
       clientInformation
     );
-    this.clientId = clientInformation.client_id;
   }
 
   tokenKey(clientId: string) {
     return `${this.keyPrefix(clientId)}/token`;
   }
 
-  async tokens(): Promise<OAuthTokens | undefined> {
-    if (!this._clientId_) {
-      return undefined;
-    }
+  async tokens(
+    _context?: OAuthClientInformationContext
+  ): Promise<StoredOAuthTokens | undefined> {
+    if (!this._clientId_) return undefined;
     return (
-      (await this.storage.get<OAuthTokens>(this.tokenKey(this.clientId))) ??
-      undefined
+      (await this.storage.get<StoredOAuthTokens>(
+        this.tokenKey(this.clientId)
+      )) ?? undefined
     );
   }
 
-  async saveTokens(tokens: OAuthTokens): Promise<void> {
+  async saveTokens(
+    tokens: StoredOAuthTokens,
+    _context?: OAuthClientInformationContext
+  ): Promise<void> {
+    // Keep the SDK-owned issuer stamp intact for SEP-2352 validation. Discovery
+    // is needed across the browser redirect, but once token issuance succeeds
+    // it must not pin later re-authorization to this AS: a subsequent 401 must
+    // re-read PRM so an authorization-server migration can be observed.
     await this.storage.put(this.tokenKey(this.clientId), tokens);
+    await this.storage.delete(this.discoveryStateKey());
   }
 
   get authUrl() {
@@ -296,28 +325,33 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   }
 
   async invalidateCredentials(
-    scope: "all" | "client" | "tokens" | "verifier"
+    scope: "all" | "client" | "tokens" | "verifier" | "discovery"
   ): Promise<void> {
-    if (!this._clientId_) return;
-
     const deleteKeys: string[] = [];
 
-    if (scope === "all" || scope === "client") {
-      deleteKeys.push(this.clientInfoKey(this.clientId));
+    if (scope === "all" || scope === "discovery") {
+      deleteKeys.push(this.discoveryStateKey());
     }
-    if (scope === "all" || scope === "tokens") {
-      deleteKeys.push(this.tokenKey(this.clientId));
-    }
-    if (scope === "all" || scope === "verifier") {
-      deleteKeys.push(
-        ...(await this.codeVerifierKeys(this.clientId, {
-          includeChallengeKeys: true
-        }))
-      );
+
+    if (this._clientId_) {
+      const clientId = this.clientId;
+      if (scope === "all" || scope === "client") {
+        deleteKeys.push(this.clientInfoKey(clientId));
+      }
+      if (scope === "all" || scope === "tokens") {
+        deleteKeys.push(this.tokenKey(clientId));
+      }
+      if (scope === "all" || scope === "verifier") {
+        deleteKeys.push(
+          ...(await this.codeVerifierKeys(clientId, {
+            includeChallengeKeys: true
+          }))
+        );
+      }
     }
 
     if (deleteKeys.length > 0) {
-      await this.storage.delete(deleteKeys);
+      await this.storage.delete([...new Set(deleteKeys)]);
     }
   }
 

@@ -1,14 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+import { Agent, getAgentByName } from "agents";
 import {
-  createMcpHandler,
+  createLegacyMcpHandler,
   DurableObjectEventStore,
   type TransportState,
   WorkerTransport
 } from "agents/mcp";
+import { env as bindings } from "cloudflare:workers";
 import * as z from "zod";
-import { Agent, getAgentByName } from "agents";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
-import { env } from "cloudflare:workers";
 
 const STATE_KEY = "mcp_transport_state";
 
@@ -16,10 +16,15 @@ interface State {
   counter: number;
 }
 
-export class MyAgent extends Agent<Cloudflare.Env, State> {
+/**
+ * Retained Legacy stateful elicitation example.
+ *
+ * New stateless servers should use examples/mcp-elicitation-mrtr instead.
+ */
+export class LegacyElicitationAgent extends Agent<Cloudflare.Env, State> {
   server = new McpServer(
     {
-      name: "test",
+      name: "legacy-elicitation-demo",
       version: "1.0.0"
     },
     {
@@ -30,106 +35,92 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
   transport = new WorkerTransport({
     sessionIdGenerator: () => this.name,
     storage: {
-      get: () => {
-        return this.ctx.storage.kv.get<TransportState>(STATE_KEY);
-      },
+      get: () => this.ctx.storage.kv.get<TransportState>(STATE_KEY),
       set: (state: TransportState) => {
         this.ctx.storage.kv.put<TransportState>(STATE_KEY, state);
       }
     },
-    // Persist SSE events to DO storage so clients can reconnect with
-    // `Last-Event-ID` and replay missed messages after the Cloudflare
-    // edge closes an idle stream. Also disables the server-side
-    // keepalive on the standalone GET stream — reconnect is the
-    // recovery path, no bytes burnt while idle.
+    // Persist SSE events so 2025 clients can reconnect with Last-Event-ID.
     eventStore: new DurableObjectEventStore(this.ctx.storage)
   });
 
-  initialState = {
-    counter: 0
-  };
+  handler = createLegacyMcpHandler(this.server, {
+    route: "/mcp",
+    transport: this.transport
+  });
 
-  onStart(): void | Promise<void> {
+  initialState = { counter: 0 };
+
+  onStart(): void {
+    this.registerFormElicitationTool();
     this.registerUrlElicitationTool();
+  }
+
+  private registerFormElicitationTool() {
     this.server.registerTool(
       "increase-counter",
       {
-        description: "Increase the counter",
+        description: "Increase a persistent counter after asking for an amount",
         inputSchema: {
           confirm: z.boolean().describe("Do you want to increase the counter?")
         }
       },
       async ({ confirm }, extra) => {
-        if (!confirm) {
-          return {
-            content: [{ type: "text", text: "Counter increase cancelled." }]
-          };
-        }
-        try {
-          const basicInfo = await this.server.server.elicitInput(
-            {
-              message: "By how much do you want to increase the counter?",
-              requestedSchema: {
-                type: "object",
-                properties: {
-                  amount: {
-                    type: "number",
-                    title: "Amount",
-                    description: "The amount to increase the counter by"
-                  }
-                },
-                required: ["amount"]
-              }
-            },
-            { relatedRequestId: extra.requestId }
-          );
+        if (!confirm) return this.cancelled("Counter increase");
 
-          if (basicInfo.action !== "accept" || !basicInfo.content) {
-            return {
-              content: [{ type: "text", text: "Counter increase cancelled." }]
-            };
-          }
-
-          if (basicInfo.content.amount && Number(basicInfo.content.amount)) {
-            this.setState({
-              ...this.state,
-              counter: this.state.counter + Number(basicInfo.content.amount)
-            });
-
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Counter increased by ${basicInfo.content.amount}, current value is ${this.state.counter}`
+        const result = await this.server.server.elicitInput(
+          {
+            message: "By how much do you want to increase the counter?",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                amount: {
+                  type: "number",
+                  title: "Amount",
+                  description: "The amount to increase the counter by"
                 }
-              ]
-            };
-          }
+              },
+              required: ["amount"]
+            }
+          },
+          { relatedRequestId: extra.requestId }
+        );
 
+        if (result.action !== "accept" || !result.content) {
+          return this.cancelled("Counter increase");
+        }
+        const amount = Number(result.content.amount);
+        if (!Number.isFinite(amount)) {
           return {
             content: [
-              { type: "text", text: "Counter increase failed, invalid amount." }
+              {
+                type: "text" as const,
+                text: "Counter increase failed, invalid amount."
+              }
             ]
           };
-        } catch (error) {
-          console.log(error);
-
-          return {
-            content: [{ type: "text", text: "Counter increase failed." }]
-          };
         }
+
+        const counter = this.state.counter + amount;
+        this.setState({ ...this.state, counter });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Counter increased by ${amount}, current value is ${counter}`
+            }
+          ]
+        };
       }
     );
   }
 
-  registerUrlElicitationTool() {
+  private registerUrlElicitationTool() {
     this.server.registerTool(
       "connect-account",
       {
         description:
-          "Pretends to link an external account. Demonstrates url-mode " +
-          "elicitation: the sensitive URL goes to the user out-of-band " +
-          "instead of into tool-result text.",
+          "Pretends to link an external account using 2025 url-mode elicitation",
         inputSchema: {}
       },
       async (_args, extra) => {
@@ -145,14 +136,12 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
         );
 
         if (result.action !== "accept") {
-          return {
-            content: [{ type: "text", text: "Account connection cancelled." }]
-          };
+          return this.cancelled("Account connection");
         }
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text: "Account connection page opened. Complete it in your browser."
             }
           ]
@@ -161,10 +150,14 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
     );
   }
 
-  async onMcpRequest(request: Request) {
-    return createMcpHandler(this.server, {
-      transport: this.transport
-    })(request, this.env, {} as ExecutionContext);
+  private cancelled(action: string) {
+    return {
+      content: [{ type: "text" as const, text: `${action} cancelled.` }]
+    };
+  }
+
+  onMcpRequest(request: Request) {
+    return this.handler(request, this.env, {} as ExecutionContext);
   }
 }
 
@@ -172,7 +165,10 @@ export default {
   async fetch(request: Request) {
     const sessionId =
       request.headers.get("mcp-session-id") ?? crypto.randomUUID();
-    const agent = await getAgentByName(env.MyAgent, sessionId);
-    return await agent.onMcpRequest(request);
+    const agent = await getAgentByName(
+      bindings.LegacyElicitationAgent,
+      sessionId
+    );
+    return agent.onMcpRequest(request);
   }
 };

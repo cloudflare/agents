@@ -1,5 +1,5 @@
-import { createMcpHandler } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
 function createServer() {
@@ -30,8 +30,7 @@ function createServer() {
 }
 
 export default {
-  fetch: async (request: Request, env: Env, ctx: ExecutionContext) => {
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer)(request, env, ctx);
   }
-};
+} satisfies ExportedHandler;

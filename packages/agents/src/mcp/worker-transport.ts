@@ -1,7 +1,7 @@
 /**
- * WorkerTransport
+ * WorkerTransport — retained sessionful Legacy transport
  *
- * Thin Cloudflare-Workers wrapper around the official MCP SDK
+ * Thin Cloudflare-Workers wrapper around the official MCP SDK v1
  * `WebStandardStreamableHTTPServerTransport`. The wrapper layers a couple of
  * Workers-specific concerns on top of the SDK transport without forking it:
  *
@@ -21,7 +21,8 @@
  *     POST response streams always keepalive (no resumption path during a
  *     mid-flight tool call). See cloudflare/agents#1583.
  *
- * Everything else (session validation, SSE streaming, protocol-version
+ * Stateless handlers do not import this module. Everything else (session
+ * validation, SSE streaming, protocol-version
  * negotiation, event-store resumability, etc.) is delegated to the SDK
  * transport.
  */

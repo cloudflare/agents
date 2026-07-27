@@ -19,6 +19,66 @@ import {
  * Core MCP protocol tests that should work regardless of transport
  */
 describe("MCP Protocol Core Functionality", () => {
+  describe("McpAgent protocol ceiling", () => {
+    it("rejects unsupported follow-up versions before session lookup", async () => {
+      const response = await worker.fetch(
+        new Request("http://example.com/mcp", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "Mcp-Session-Id": crypto.randomUUID(),
+            "MCP-Protocol-Version": "2026-07-28"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          })
+        }),
+        env,
+        createExecutionContext()
+      );
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as {
+        error: { message: string };
+      };
+      expect(body.error.message).toContain("Unsupported protocol version");
+      expect(body.error.message).toContain("2025-11-25");
+    });
+
+    it("leaves initialize negotiation to SDK v1", async () => {
+      const response = await worker.fetch(
+        new Request("http://example.com/mcp", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: "2026-07-28",
+              capabilities: {},
+              clientInfo: { name: "modern-client", version: "1.0.0" }
+            }
+          })
+        }),
+        env,
+        createExecutionContext()
+      );
+
+      expect(response.status).toBe(200);
+      const event = await readSSEEvent(response);
+      const result = parseSSEData(event) as {
+        result: { protocolVersion: string };
+      };
+      expect(result.result.protocolVersion).toBe("2025-11-25");
+    });
+  });
+
   describe("Tool Operations", () => {
     it("should list available tools via streamable HTTP", async () => {
       const ctx = createExecutionContext();

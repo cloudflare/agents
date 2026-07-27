@@ -12,7 +12,8 @@ Tracked issues from the examples audit. See `AGENTS.md` in this folder for the c
 Most examples should be full-stack (frontend + backend). Focused server-only MCP examples stay minimal when the server setup is the point:
 
 - [x] `email-agent/` — added a full-stack Email Service demo UI
-- [x] `mcp-elicitation/` — restored server-only elicitation example for MCP clients
+- [x] `mcp-elicitation/` — retained server-only Legacy Elicitation example
+- [x] `mcp-elicitation-mrtr/` — added server-only Stateless Elicitation example
 - [x] `mcp-server/` — restored raw transport server-only example
 - [x] `mcp-worker/` — added MCP tool tester frontend
 - [x] `mcp-worker-authenticated/` — added info page with endpoint docs
@@ -61,6 +62,6 @@ Migrate examples to use Kumo components and Tailwind.
 - [x] `mcp-client/` — migrated from custom CSS to Kumo, replaced agentFetch with @callable
 - [x] `mcp-worker/` — added Kumo frontend
 - [x] `mcp-worker-authenticated/` — added Kumo frontend
-- [x] `mcp-elicitation/` — intentionally server-only; elicitation requires an MCP client
+- [x] `mcp-elicitation/` and `mcp-elicitation-mrtr/` — intentionally server-only; elicitation requires an MCP client
 - [x] `x402/` — migrated from worker-only to Kumo frontend
 - [x] `x402-mcp/` — migrated from inline HTML to React+Kumo, replaced raw WebSocket with useAgent

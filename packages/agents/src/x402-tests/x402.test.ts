@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client as V2MCPClient } from "@modelcontextprotocol/client";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 // --- Mock setup for @x402 modules ---
 
@@ -701,6 +703,42 @@ describe("withX402Client", () => {
     );
     expect(result.tools[2].description).toContain(
       "you will be charged an unknown amount"
+    );
+  });
+
+  it("preserves v1 and v2 callTool argument positions", async () => {
+    const legacy = createMockMcpClient();
+    const originalLegacyCallTool = legacy.callTool;
+    originalLegacyCallTool.mockResolvedValue({ content: [] });
+    const legacyAugmented = withX402Client(legacy, {
+      account: mockSigner as unknown as X402ClientConfig["account"]
+    });
+    const options = { timeout: 123 };
+    await legacyAugmented.callTool(
+      null,
+      { name: "legacy" },
+      CallToolResultSchema,
+      options
+    );
+    expect(originalLegacyCallTool).toHaveBeenCalledWith(
+      { name: "legacy" },
+      CallToolResultSchema,
+      options
+    );
+
+    const originalModernCallTool = vi.fn().mockResolvedValue({ content: [] });
+    const modern = {
+      getProtocolEra: () => "modern",
+      listTools: vi.fn(),
+      callTool: originalModernCallTool
+    } as unknown as V2MCPClient;
+    const modernAugmented = withX402Client(modern, {
+      account: mockSigner as unknown as X402ClientConfig["account"]
+    });
+    await modernAugmented.callTool(null, { name: "modern" }, options);
+    expect(originalModernCallTool).toHaveBeenCalledWith(
+      { name: "modern" },
+      options
     );
   });
 

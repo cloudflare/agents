@@ -4,15 +4,15 @@ The simplest way to run a stateless MCP server on Cloudflare Workers. Uses `crea
 
 ## What it demonstrates
 
-- **`createMcpHandler`** — the Agents SDK helper that wraps an `McpServer` into a Worker-compatible fetch handler
-- **Minimal setup** — define tools on an `McpServer`, pass it to `createMcpHandler`, done
+- **`createMcpHandler`** — the Agents SDK helper that turns an `McpServer` factory into a Worker-compatible fetch handler
+- **Minimal setup** — define tools in a factory, pass the factory to `createMcpHandler`, done
 - **Stateless** — no Durable Objects, no persistent state, each request is independent
 
 ## Running
 
 ```sh
-npm install
-npm run dev
+pnpm install
+pnpm start
 ```
 
 Open the browser to see the built-in tool tester, or connect with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) at `http://localhost:5173/mcp`.
@@ -20,8 +20,8 @@ Open the browser to see the built-in tool tester, or connect with the [MCP Inspe
 ## How it works
 
 ```typescript
-import { createMcpHandler } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
 function createServer() {
@@ -40,11 +40,10 @@ function createServer() {
 }
 
 export default {
-  fetch: async (request, env, ctx) => {
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer)(request, env, ctx);
   }
-};
+} satisfies ExportedHandler;
 ```
 
 ## Related examples

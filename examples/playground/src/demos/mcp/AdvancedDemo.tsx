@@ -80,28 +80,33 @@ const advancedPatterns = [
       "Wrap a server with OAuth when tools need user identity. The agent can inspect auth context and expose only the tools/resources the user should see.",
     snippet: `import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
 
-server.registerTool("whoami", { description: "Who am I?" }, async () => {
+server.registerTool("whoami", { description: "Who am I?" }, async (context) => {
   const auth = getMcpAuthContext();
   return {
-    content: [{ type: "text", text: JSON.stringify(auth?.props) }]
+    content: [{ type: "text", text: JSON.stringify({
+      clientId: context.http?.authInfo?.clientId,
+      scopes: context.http?.authInfo?.scopes,
+      props: auth?.props
+    }) }]
   };
 });
 
-return createMcpHandler(server)(request, env, ctx);`
+const apiHandler = createMcpHandler(createServer);
+return apiHandler(request, env, ctx);`
   },
   {
     title: "Codemode MCP",
     description:
-      "Collapse a large API surface into a single code tool. This lets the model write small programs against a typed tool provider instead of choosing from dozens of narrow tools.",
+      "Collapse a large API surface into a single code tool. The current Codemode MCP adapter remains on the SDK v1 compatibility lane while its client/server bridge is migrated separately.",
     snippet: `import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { codeMcpServer } from "@cloudflare/codemode/mcp";
-import { createMcpHandler } from "agents/mcp";
+import { createLegacyMcpHandler } from "agents/mcp";
 
 const upstream = createUpstreamServer();
 const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 const server = await codeMcpServer({ server: upstream, executor });
 
-return createMcpHandler(server, { route: "/codemode" })(
+return createLegacyMcpHandler(server, { route: "/codemode" })(
   request,
   env,
   ctx
@@ -296,7 +301,8 @@ export function AdvancedMcpDemo() {
             <div className="space-y-2">
               {[
                 ["RPC transport", "examples/mcp-rpc-transport"],
-                ["Elicitation", "examples/mcp-elicitation"],
+                ["Stateless Elicitation", "examples/mcp-elicitation-mrtr"],
+                ["Legacy Elicitation", "examples/mcp-elicitation"],
                 ["OAuth server", "examples/mcp-worker-authenticated"],
                 ["Codemode MCP", "examples/codemode-mcp"],
                 ["OpenAPI MCP", "examples/codemode-mcp-openapi"],

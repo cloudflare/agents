@@ -1,21 +1,46 @@
 import type { JSONSchema7 } from "json-schema";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Tool as McpTool } from "@modelcontextprotocol/sdk/types.js";
 import { sanitizeToolName } from "../utils";
 import { CodemodeConnector, type ConnectorTools } from "./base";
 
-type CallToolResult = Awaited<ReturnType<Client["callTool"]>>;
+type CallToolResult = {
+  toolResult?: unknown;
+  isError?: boolean;
+  structuredContent?: unknown;
+  content?: Array<{ type: string; text?: string; [key: string]: unknown }>;
+};
 
+type McpJsonSchema = {
+  type?: string;
+  properties?: Record<string, unknown>;
+  required?: string[];
+  [key: string]: unknown;
+};
+
+/** Structural tool shape shared by MCP SDK v1 and v2. */
+export type McpTool = {
+  name: string;
+  description?: string;
+  inputSchema: McpJsonSchema;
+  outputSchema?: McpJsonSchema;
+  [key: string]: unknown;
+};
+
+/** Structural boundary compatible with both the legacy and v2 MCP clients. */
 export interface McpConnectionLike {
   name?: string;
-  client: Pick<Client, "callTool">;
+  client: {
+    callTool(params: {
+      name: string;
+      arguments?: Record<string, unknown>;
+    }): Promise<CallToolResult>;
+  };
   instructions?: string;
   tools?: McpTool[];
   fetchTools?: () => Promise<McpTool[]>;
 }
 
 function unwrapMcpResult(result: CallToolResult): unknown {
-  if ("toolResult" in result) return result.toolResult;
+  if (result.toolResult !== undefined) return result.toolResult;
   if (result.isError) {
     const msg =
       result.content
@@ -25,13 +50,13 @@ function unwrapMcpResult(result: CallToolResult): unknown {
     throw new Error(msg);
   }
   if (result.structuredContent != null) return result.structuredContent;
+  const content = result.content;
   const allText =
-    result.content?.length > 0 &&
-    result.content.every((c) => c.type === "text");
+    content !== undefined &&
+    content.length > 0 &&
+    content.every((c) => c.type === "text");
   if (!allText) return result;
-  const text = result.content
-    .map((c) => ("text" in c ? c.text : ""))
-    .join("\n");
+  const text = content.map((c) => c.text ?? "").join("\n");
   try {
     return JSON.parse(text);
   } catch {

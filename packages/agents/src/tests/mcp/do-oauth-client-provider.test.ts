@@ -106,6 +106,17 @@ describe("DurableObjectOAuthClientProvider PKCE binding", () => {
     });
   });
 
+  describe("discovery lifecycle", () => {
+    it("clears redirect-scoped discovery after tokens are saved", async () => {
+      const result = await agent().testSaveTokensClearsRedirectDiscovery();
+
+      expect(result.discoveryBefore).toBe(true);
+      expect(result.discoveryAfter).toBe(false);
+      expect(result.tokenRoundTrips).toBe(true);
+      expect(result.clientRoundTrips).toBe(true);
+    });
+  });
+
   describe("invalidateCredentials", () => {
     it("sweeps every pending verifier (bound and orphaned), not a single slot", async () => {
       const result = await agent().testInvalidateVerifierDeletesAllPending();
@@ -117,6 +128,17 @@ describe("DurableObjectOAuthClientProvider PKCE binding", () => {
       expect(result.withChallengeBefore).toBe(3);
       // invalidateCredentials("verifier") sweeps all three, including the orphan.
       expect(result.after).toBe(0);
+    });
+
+    it("persists discovery state and invalidates SDK-stamped credentials", async () => {
+      const result = await agent().testDiscoveryStateAndIssuerInvalidation();
+
+      expect(result.discoveryRoundTrips).toBe(true);
+      expect(result.discoveryCleared).toBe(true);
+      expect(result.scopedTokenBefore).toBe(true);
+      expect(result.scopedTokenAfter).toBe(false);
+      expect(result.scopedClientBefore).toBe(true);
+      expect(result.scopedClientAfter).toBe(false);
     });
   });
 });

@@ -1,6 +1,6 @@
 # Stateful MCP Server
 
-A stateful MCP server using `McpAgent` backed by a Durable Object. State persists across requests — the built-in UI lets you call tools and read resources to see it in action.
+A deprecated, feature-frozen stateful MCP server retained only for existing deployments during migration. State persists across requests through `McpAgent` and a Durable Object. New servers should use the stateless SDK v2 `createMcpHandler` path.
 
 ## What it demonstrates
 
@@ -13,8 +13,8 @@ A stateful MCP server using `McpAgent` backed by a Durable Object. State persist
 ## Running
 
 ```sh
-npm install
-npm run dev
+pnpm install
+pnpm start
 ```
 
 Open the browser to see the built-in tool tester. You can also connect with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) — set the transport to **Streamable HTTP** and URL to `http://localhost:5173/mcp`.

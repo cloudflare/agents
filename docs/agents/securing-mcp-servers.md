@@ -6,14 +6,15 @@ Cloudflare's `workers-oauth-provider` lets you secure your MCP Server (or any ap
 
 ```typescript
 import { OAuthProvider, OAuthError } from "@cloudflare/workers-oauth-provider";
-import { createMcpHandler } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
 
 // A Worker that exposes an MCP server
-const apiHandler = {
-  async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    return createMcpHandler(server)(request, env, ctx);
-  }
-};
+function createServer() {
+  return new McpServer({ name: "authenticated-server", version: "1.0.0" });
+}
+
+const apiHandler = createMcpHandler(createServer);
 
 // Wrap with OAuth protection
 export default new OAuthProvider({
@@ -27,6 +28,8 @@ export default new OAuthProvider({
   defaultHandler: AuthHandler // Handles consent flow
 });
 ```
+
+For provider-issued tokens, SDK v2 tool callbacks receive standard metadata at `context.http.authInfo`, while `getMcpAuthContext().props` retains the existing application-props shape. Treat `authInfo.token` and `authInfo.extra.props` as sensitive and do not log or return them.
 
 However, most MCP servers aren't just servers, they can actually be OAuth clients too. Your MCP server might sit between Claude Desktop and a third-party API like GitHub or Google. To Claude, you're a server. To GitHub, you're a client. This allows your users to authenticate and use their GitHub credentials to access your MCP server. We call this a proxy server.
 
