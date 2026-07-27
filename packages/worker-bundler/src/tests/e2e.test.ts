@@ -1082,7 +1082,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           // typing_extensions has zero dependencies. typing_inspection depends on typing_extensions
           // `attrs` has zero dependencies
-          'dependencies = ["typing_extensions", "typing_inspection", "attrs"]'
+          'dependencies = ["typing_extensions==4.16.0", "typing_inspection==0.4.2", "attrs==26.1.0"]',
         ].join("\n")
       },
       preferPyodideIndex: false
@@ -1124,8 +1124,8 @@ describe("createWorker with pyproject.toml", () => {
           'name = "dummy"',
           'version = "0.0.0"',
           // typing_inspection depends on typing_extensions
-          'dependencies = ["typing_inspection"]'
-        ].join("\n")
+          'dependencies = ["typing_inspection==0.4.2"]'
+        ].join("\n"),
       },
       preferPyodideIndex: false
     });
@@ -1165,8 +1165,8 @@ describe("createWorker with pyproject.toml", () => {
           'name = "dummy"',
           'version = "0.0.0"',
           // typing_inspection depends on typing_extensions
-          'dependencies = ["typing_inspection"]'
-        ].join("\n")
+          'dependencies = ["typing_inspection==0.4.2"]'
+        ].join("\n"),
       },
       preferPyodideIndex: true
     });
