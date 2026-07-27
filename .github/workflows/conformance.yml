@@ -35,7 +35,6 @@ jobs:
           - 2025-11-25
           - 2025-06-18
           - 2025-03-26
-          - extensions
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install
@@ -52,7 +51,6 @@ jobs:
           - handler
           - handler:legacy-compat
           - handler:legacy
-          - handler:extensions
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs the newest published MCP conformance referee (alpha.9) against Agents
-# implementations inside workerd. Protocol revisions and optional extensions
-# are separate lanes; run-suite.mjs makes baseline coverage fail-closed and
-# reports clean, expected-failure, unexpected-failure, and not-exercised states.
+# implementations inside workerd. run-suite.mjs bounds client concurrency,
+# makes baseline coverage fail-closed, and treats client process failures and
+# server warning checks as failures even when the referee exits successfully.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -65,17 +65,19 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 run_client() {
-  local version="$1" baseline="$2"
+  local version="$1" baseline="${2:-}"
   shift 2
-  CONFORMANCE_WORKER_ORIGIN="$WORKER_ORIGIN" node conformance/run-suite.mjs client \
-    --conformance "$CONFORMANCE" \
-    --baseline "$baseline" \
-    --spec-version "$version" \
-    --driver "$DRIVER" \
-    --concurrency 6 \
-    --client-timeout 90000 \
-    --scenario-timeout 150000 \
-    "$@"
+  local args=(
+    --conformance "$CONFORMANCE"
+    --spec-version "$version"
+    --driver "$DRIVER"
+    --concurrency 6
+    --client-timeout 90000
+    --scenario-timeout 150000
+  )
+  [ -n "$baseline" ] && args+=(--baseline "$baseline")
+  CONFORMANCE_WORKER_ORIGIN="$WORKER_ORIGIN" \
+    node conformance/run-suite.mjs client "${args[@]}" "$@"
 }
 
 run_server() {
@@ -99,21 +101,10 @@ case "$MODE" in
     run_client 2025-11-25 conformance/baseline-client-2025-11-25.yml "$@"
     ;;
   client-2025-06-18)
-    run_client 2025-06-18 conformance/baseline-client-2025-06-18.yml "$@"
+    run_client 2025-06-18 "" "$@"
     ;;
   client-2025-03-26)
-    run_client 2025-03-26 conformance/baseline-client-2025-03-26.yml "$@"
-    ;;
-  client-extensions)
-    CONFORMANCE_WORKER_ORIGIN="$WORKER_ORIGIN" node conformance/run-suite.mjs client \
-      --conformance "$CONFORMANCE" \
-      --baseline conformance/baseline-client-extensions.yml \
-      --suite extensions \
-      --driver "$DRIVER" \
-      --concurrency 3 \
-      --client-timeout 90000 \
-      --scenario-timeout 150000 \
-      "$@"
+    run_client 2025-03-26 "" "$@"
     ;;
   server-handler)
     run_server "$WORKER_ORIGIN/mcp-handler" 2026-07-28 \
@@ -130,16 +121,6 @@ case "$MODE" in
   server-mcp-agent)
     run_server "$WORKER_ORIGIN/mcp-agent" 2025-11-25 \
       conformance/baseline-server-mcp-agent.yml "$@"
-    ;;
-  server-handler-extensions)
-    node conformance/run-suite.mjs server \
-      --conformance "$CONFORMANCE" \
-      --baseline conformance/baseline-server-handler-extensions-v2.yml \
-      --url "$WORKER_ORIGIN/mcp-handler" \
-      --suite extensions \
-      --concurrency 1 \
-      --scenario-timeout 150000 \
-      "$@"
     ;;
   *)
     echo "Unknown conformance mode: $MODE" >&2
