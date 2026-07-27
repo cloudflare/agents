@@ -537,9 +537,9 @@ async function fetchPythonPackageMetadata(
  * Selects the latest version from compatible wheels.
  * TODO: implement proper platform/python version matching
  */
-function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | undefined {
+function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | null {
   const wheels = files.filter((f) => f.filename.endsWith(".whl"));
-  if (wheels.length === 0) return undefined;
+  if (wheels.length === 0) return null;
 
   // Filter to universal wheels (py3-none-any or py2.py3-none-any)
   const universal = wheels.filter(
@@ -551,7 +551,7 @@ function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | undefined {
   const candidates = universal.length > 0 ? universal : wheels;
 
   // Select the wheel with the highest version
-  let latest: PypiSimpleFile | undefined;
+  let latest: PypiSimpleFile | null = null;
   let latestVersion: string | undefined;
 
   for (const wheel of candidates) {
