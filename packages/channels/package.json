@@ -1,0 +1,22 @@
+{
+  "name": "@cloudflare/channels",
+  "version": "0.0.0",
+  "description": "Durable, identity-aware communication channels for Cloudflare Agents",
+  "repository": {
+    "directory": "packages/channels",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "channels"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "private": true
+}

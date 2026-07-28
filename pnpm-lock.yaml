@@ -3902,6 +3902,8 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
 
+  packages/channels: {}
+
   packages/codemode:
     dependencies:
       '@types/json-schema':
