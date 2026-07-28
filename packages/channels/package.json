@@ -19,6 +19,9 @@
   "license": "MIT",
   "type": "module",
   "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "test": "vitest --run -c src/tests/vitest.config.ts"
   },

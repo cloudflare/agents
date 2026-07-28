@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "channels-playground",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ChannelGateway",
+        "name": "CHANNEL_GATEWAY"
+      },
+      {
+        "class_name": "FakeAgent",
+        "name": "FAKE_AGENT"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ChannelGateway", "FakeAgent"],
+      "tag": "v1"
+    }
+  ]
+}
