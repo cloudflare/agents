@@ -859,7 +859,6 @@ function getDependenciesFromWheel(files: Record<string, string>): string[] {
 
 /**
  * Parse Requires-Dist headers from Python package METADATA file (RFC 822 format).
- * Handles continuation lines (starting with whitespace).
  */
 function parseRequiresDist(metadata: string): string[] {
   const requires: string[] = [];
