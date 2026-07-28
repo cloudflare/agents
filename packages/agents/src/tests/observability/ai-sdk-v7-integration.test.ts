@@ -21,9 +21,6 @@ const usage = {
   }
 };
 
-/** Marks a call as belonging to one invocation, the way Think does for ws-chat. */
-const BOUND = Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded");
-
 /** First span recorded for a `gen_ai.operation.name`. */
 function spanFor(tracing: RecordingTracer, operation: string) {
   return tracing.spans.find(
