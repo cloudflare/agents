@@ -63,6 +63,7 @@ Goal: an inbound request can be acknowledged quickly, stored once, and eventuall
 9. **Implement the first agent dispatch**
    - Send the canonical envelope to the selected agent.
    - Include stable submission and turn IDs in every request.
+   - Implemented by [`AgentDispatcher`](./src/agent-dispatch.ts).
 
 10. **Record individual delivery attempts**
     - Store attempt number, start and end time, outcome, and a bounded error description.

@@ -1,3 +1,10 @@
+// TODO: Keep dispatch behind the durable attempt coordinator once it exists.
+export {
+  AgentDispatcher,
+  type AgentTargetResolver,
+  type AgentTurnReceiver,
+  type AgentTurnRequest
+} from "./agent-dispatch";
 export type { AgentDelivery } from "./agent-deliveries";
 export {
   createSubmissionRouter,
