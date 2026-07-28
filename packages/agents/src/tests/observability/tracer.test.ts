@@ -115,6 +115,46 @@ describe("createTracer", () => {
       });
     });
 
+    it("starts a fresh boundary for work that opens a scope under an ended one", async () => {
+      const tracing = new RecordingTracer();
+      const resumed = deferred();
+      const finishWork = deferred();
+      let escaped: Promise<void> | undefined;
+
+      await withInvocationScope(async () => {
+        // The shape of a Think turn admitted from a timer: it resumes carrying
+        // the context of the handler that armed it, long after that handler
+        // returned, and declares its own boundary.
+        escaped = (async () => {
+          await resumed.promise;
+          await withInvocationScope(async () => {
+            const span = tracing.openSpan("turn", {}, (span) => span, {
+              boundToInvocation: true
+            });
+            await finishWork.promise;
+            span.finish({ "gen_ai.usage.input_tokens": 7 });
+          });
+        })();
+      });
+
+      resumed.resolve();
+      await Promise.resolve();
+      const span = tracing.rootSpans.find((s) => s.name === "turn");
+      // Bound to the turn's own boundary, not truncated against the dead one.
+      expect(span?.ended).toBe(false);
+
+      finishWork.resolve();
+      await escaped;
+
+      expect(span?.attributes).toMatchObject({
+        "gen_ai.usage.input_tokens": 7
+      });
+      expect(
+        span?.attributes["cloudflare.agents.span.truncated"]
+      ).toBeUndefined();
+      expect(span?.ended).toBe(true);
+    });
+
     it("leaves invocation-bounded spans alone outside any scope", async () => {
       const tracing = new RecordingTracer();
       const pending = deferred<string>();

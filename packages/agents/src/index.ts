@@ -6,6 +6,12 @@ import {
   type AgentEmail
 } from "./internal_context";
 export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
+/**
+ * @internal — This is an internal implementation detail shared with the Think
+ * package so it can declare a turn's invocation boundary. Importing or relying
+ * on this symbol **will** break your code in a future release.
+ */
+export { withInvocationScope as __DO_NOT_USE_WILL_BREAK__withInvocationScope } from "./observability/tracing/tracer";
 import {
   SUB_PREFIX,
   parseSubAgentPath as _parseSubAgentPath

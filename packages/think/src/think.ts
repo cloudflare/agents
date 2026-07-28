@@ -145,7 +145,8 @@ import {
   getCurrentAgent,
   isDurableObjectMemoryLimitReset,
   isPlatformTransientError,
-  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
@@ -7184,53 +7185,39 @@ export class Think<
   private async _runInsideAdmittedTurnBody<T>(
     spec: QueueTurnSpec<T>
   ): Promise<T> {
-    return withAgentSpan(
-      this,
-      "chat_turn",
-      "turn",
-      {
-        "cloudflare.agents.component": "think",
-        "cloudflare.agents.turn.request_id": spec.requestId,
-        "cloudflare.agents.turn.trigger": spec.trigger,
-        "cloudflare.agents.turn.admission": spec.admission,
-        "cloudflare.agents.turn.channel": spec.channel,
-        "cloudflare.agents.turn.continuation": spec.continuation,
-        "cloudflare.agents.turn.generation": spec.generation
-      },
-      (update) =>
-        admittedTurnContext.run(
-          {
-            agent: this,
-            requestId: spec.requestId,
-            trigger: spec.trigger,
-            admission: spec.admission,
-            channel: spec.channel,
-            continuation: spec.continuation,
-            generation: spec.generation
-          },
-          async () => {
-            const startedAt = Date.now();
-            this._emit("chat:turn:start", {
+    // A turn is one unit of traced work. Admitted from a handler it nests in
+    // that handler's invocation; admitted from a timer or a fire-and-forget
+    // continuation there is no live invocation to nest in, and without a
+    // boundary of its own every span in the turn would be bound to the dead
+    // context it inherited and truncated on sight.
+    return withInvocationScope(() =>
+      withAgentSpan(
+        this,
+        "chat_turn",
+        "turn",
+        {
+          "cloudflare.agents.component": "think",
+          "cloudflare.agents.turn.request_id": spec.requestId,
+          "cloudflare.agents.turn.trigger": spec.trigger,
+          "cloudflare.agents.turn.admission": spec.admission,
+          "cloudflare.agents.turn.channel": spec.channel,
+          "cloudflare.agents.turn.continuation": spec.continuation,
+          "cloudflare.agents.turn.generation": spec.generation
+        },
+        (update) =>
+          admittedTurnContext.run(
+            {
+              agent: this,
               requestId: spec.requestId,
               trigger: spec.trigger,
               admission: spec.admission,
-              ...(spec.continuation !== undefined && {
-                continuation: spec.continuation
-              }),
-              ...(spec.generation !== undefined && {
-                generation: spec.generation
-              })
-            });
-
-            this._activeTurnReplyAttachments = [];
-            this._activeTurnReplyAttachmentsRequestId = spec.requestId;
-
-            try {
-              const value = await this._withChannelContext(spec.channel, () =>
-                spec.execute()
-              );
-              const status = spec.getStatus?.() ?? "completed";
-              this._emit("chat:turn:finish", {
+              channel: spec.channel,
+              continuation: spec.continuation,
+              generation: spec.generation
+            },
+            async () => {
+              const startedAt = Date.now();
+              this._emit("chat:turn:start", {
                 requestId: spec.requestId,
                 trigger: spec.trigger,
                 admission: spec.admission,
@@ -7239,34 +7226,55 @@ export class Think<
                 }),
                 ...(spec.generation !== undefined && {
                   generation: spec.generation
-                }),
-                status,
-                durationMs: Date.now() - startedAt
+                })
               });
-              update({ "cloudflare.agents.turn.status": status });
-              return value;
-            } catch (error) {
-              const message =
-                error instanceof Error ? error.message : String(error);
-              this._emit("chat:turn:finish", {
-                requestId: spec.requestId,
-                trigger: spec.trigger,
-                admission: spec.admission,
-                ...(spec.continuation !== undefined && {
-                  continuation: spec.continuation
-                }),
-                ...(spec.generation !== undefined && {
-                  generation: spec.generation
-                }),
-                status: "error",
-                durationMs: Date.now() - startedAt,
-                error: message
-              });
-              update({ "cloudflare.agents.turn.status": "error" });
-              throw error;
+
+              this._activeTurnReplyAttachments = [];
+              this._activeTurnReplyAttachmentsRequestId = spec.requestId;
+
+              try {
+                const value = await this._withChannelContext(spec.channel, () =>
+                  spec.execute()
+                );
+                const status = spec.getStatus?.() ?? "completed";
+                this._emit("chat:turn:finish", {
+                  requestId: spec.requestId,
+                  trigger: spec.trigger,
+                  admission: spec.admission,
+                  ...(spec.continuation !== undefined && {
+                    continuation: spec.continuation
+                  }),
+                  ...(spec.generation !== undefined && {
+                    generation: spec.generation
+                  }),
+                  status,
+                  durationMs: Date.now() - startedAt
+                });
+                update({ "cloudflare.agents.turn.status": status });
+                return value;
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                this._emit("chat:turn:finish", {
+                  requestId: spec.requestId,
+                  trigger: spec.trigger,
+                  admission: spec.admission,
+                  ...(spec.continuation !== undefined && {
+                    continuation: spec.continuation
+                  }),
+                  ...(spec.generation !== undefined && {
+                    generation: spec.generation
+                  }),
+                  status: "error",
+                  durationMs: Date.now() - startedAt,
+                  error: message
+                });
+                update({ "cloudflare.agents.turn.status": "error" });
+                throw error;
+              }
             }
-          }
-        )
+          )
+      )
     );
   }
 

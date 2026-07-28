@@ -359,11 +359,12 @@ describe("wrapAISDK with the real AI SDK v7", () => {
       provider: "mock-provider",
       doStream: async () => {
         modelCall += 1;
-        return {
-          stream: ai.simulateReadableStream({
-            chunks: modelCall === 1 ? toolCallChunks() : textChunks()
-          })
-        };
+        if (modelCall === 1) {
+          return {
+            stream: ai.simulateReadableStream({ chunks: toolCallChunks() })
+          };
+        }
+        return { stream: ai.simulateReadableStream({ chunks: textChunks() }) };
       }
     });
 
