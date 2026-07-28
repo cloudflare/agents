@@ -11,6 +11,13 @@ export type ResolvedAISDKStorageOptions = {
 
 /** Instrumentation options for the AI SDK v6 adapter. */
 export type AISDKInstrumentationOptions = AISDKStorageOptions & {
-  /** AI SDK v6 `experimental_context` keys to emit as scalar attributes. */
+  /**
+   * Context keys to emit as `cloudflare.agents.runtime_context.{key}`, set
+   * once for the wrapper rather than per call.
+   *
+   * Distinct from the AI SDK's own per-call `telemetry.includeRuntimeContext`,
+   * which shares the name but selects keys that map onto the canonical
+   * `cloudflare.agents.turn.*` / `cloudflare.agents.metadata.*` attributes.
+   */
   readonly includeRuntimeContext?: readonly string[];
 };

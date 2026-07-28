@@ -143,13 +143,19 @@ const CONSUMED_METADATA_KEYS = new Set([
 ]);
 
 /**
- * Projects the AI SDK's per-call `experimental_telemetry.metadata` onto root
- * span attributes: reserved keys map to their dedicated attributes, any other
- * SCALAR entry passes through as `cloudflare.agents.metadata.{key}`, and
- * object/array values are dropped (scalar-only attribute rule).
+ * Projects a per-call telemetry record onto root span attributes: reserved
+ * keys map to their dedicated attributes, any other SCALAR entry passes
+ * through under `passthroughPrefix`, and object/array values are dropped
+ * (scalar-only attribute rule).
+ *
+ * v6 passes `experimental_telemetry.metadata` and keeps the default prefix;
+ * v7 has no metadata option and passes the included subset of `runtimeContext`
+ * under its own prefix. Reserved keys land on the same attribute either way,
+ * so turn identity does not move namespace between SDK majors.
  */
 export function metadataAttributes(
-  metadata: Record<string, unknown> | undefined
+  metadata: Record<string, unknown> | undefined,
+  passthroughPrefix: string = TraceAttribute.Cloudflare.MetadataPrefix
 ): TraceAttributes {
   if (metadata === undefined) {
     return {};
@@ -171,9 +177,7 @@ export function metadataAttributes(
     const reserved = Object.hasOwn(RESERVED_METADATA_ATTRIBUTES, key)
       ? RESERVED_METADATA_ATTRIBUTES[key]
       : undefined;
-    attributes[
-      reserved ?? `${TraceAttribute.Cloudflare.MetadataPrefix}${key}`
-    ] = value;
+    attributes[reserved ?? `${passthroughPrefix}${key}`] = value;
   }
 
   return attributes;

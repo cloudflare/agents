@@ -4,6 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createAISDKV6Wrapper } from "../../observability/ai/v6/wrap";
+import { withInvocationScope } from "../../observability/tracing/tracer";
 import { deferred, RecordingTracer } from "./recording-tracer";
 
 const usage = {
@@ -19,6 +20,13 @@ const usage = {
     total: 2
   }
 };
+
+/** First span recorded for a `gen_ai.operation.name`. */
+function spanFor(tracing: RecordingTracer, operation: string) {
+  return tracing.spans.find(
+    (span) => span.attributes["gen_ai.operation.name"] === operation
+  );
+}
 
 const wrap = (tracing: RecordingTracer) =>
   createAISDKV6Wrapper(ai, { tracer: tracing });
@@ -114,6 +122,146 @@ describe("wrapAISDK with the real AI SDK v7", () => {
     expect(tracing.spans.every((span) => span.ended)).toBe(true);
   });
 
+  it("records the same identity attributes from v7 runtime context as from v6 metadata", async () => {
+    const model = () =>
+      new MockLanguageModelV4({
+        modelId: "identity-model",
+        provider: "mock-provider",
+        doGenerate: async () => ({
+          content: [{ type: "text", text: "ok" }],
+          finishReason: { raw: "stop", unified: "stop" as const },
+          usage,
+          warnings: []
+        })
+      });
+
+    const v6 = new RecordingTracer();
+    await wrap(v6).generateText({
+      experimental_telemetry: {
+        functionId: "ClassName",
+        metadata: { agentName: "booking-agent", tier: "gold" }
+      },
+      model: model(),
+      prompt: "hi"
+    } as Parameters<typeof ai.generateText>[0]);
+
+    const v7 = new RecordingTracer();
+    await wrap(v7).generateText({
+      model: model(),
+      prompt: "hi",
+      runtimeContext: { agentName: "booking-agent", tier: "gold" },
+      telemetry: {
+        functionId: "ClassName",
+        includeRuntimeContext: { agentName: true, tier: true }
+      }
+    } as Parameters<typeof ai.generateText>[0]);
+
+    const v6Root = v6.rootSpans[0];
+    const v7Root = v7.rootSpans[0];
+    expect(v7Root?.attributes["gen_ai.agent.name"]).toBe("booking-agent");
+    expect(v7Root?.name).toBe(v6Root?.name);
+    // Non-reserved keys keep each major's documented namespace...
+    expect(v6Root?.attributes["cloudflare.agents.metadata.tier"]).toBe("gold");
+    expect(v7Root?.attributes["cloudflare.agents.runtime_context.tier"]).toBe(
+      "gold"
+    );
+    // ...but everything else, identity included, matches attribute for
+    // attribute, so a query written against v6 traces still matches v7 ones.
+    const withoutPassthrough = (attributes: Record<string, unknown>) =>
+      Object.fromEntries(
+        Object.entries(attributes).filter(
+          ([key]) =>
+            !key.startsWith("cloudflare.agents.metadata.") &&
+            !key.startsWith("cloudflare.agents.runtime_context.")
+        )
+      );
+    expect(withoutPassthrough(v7Root?.attributes ?? {})).toEqual(
+      withoutPassthrough(v6Root?.attributes ?? {})
+    );
+  });
+
+  it("keeps Think turn metadata on its canonical attributes across majors", async () => {
+    const model = () =>
+      new MockLanguageModelV4({
+        modelId: "identity-model",
+        provider: "mock-provider",
+        doGenerate: async () => ({
+          content: [{ type: "text", text: "ok" }],
+          finishReason: { raw: "stop", unified: "stop" as const },
+          usage,
+          warnings: []
+        })
+      });
+    // The shape Think builds for a v7 turn: identity and turn keys in runtime
+    // context, every one of them marked included.
+    const turn = {
+      agentId: "agent-1",
+      "cloudflare.agents.turn.admission": "queue",
+      "cloudflare.agents.turn.request_id": "req-1",
+      "cloudflare.agents.turn.trigger": "ws-chat",
+      conversationId: "conv-1"
+    };
+
+    const tracing = new RecordingTracer();
+    await wrap(tracing).generateText({
+      model: model(),
+      prompt: "hi",
+      runtimeContext: turn,
+      telemetry: {
+        functionId: "ProbeAgent",
+        includeRuntimeContext: Object.fromEntries(
+          Object.keys(turn).map((key) => [key, true])
+        )
+      }
+    } as Parameters<typeof ai.generateText>[0]);
+
+    expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+      "cloudflare.agents.turn.admission": "queue",
+      "cloudflare.agents.turn.request_id": "req-1",
+      "cloudflare.agents.turn.trigger": "ws-chat",
+      "gen_ai.agent.id": "agent-1",
+      "gen_ai.conversation.id": "conv-1"
+    });
+    // Identity keys are consumed into gen_ai.* rather than passed through.
+    expect(
+      tracing.rootSpans[0]?.attributes[
+        "cloudflare.agents.runtime_context.agentId"
+      ]
+    ).toBeUndefined();
+  });
+
+  it("keeps runtime context off spans unless the caller includes it", async () => {
+    const tracing = new RecordingTracer();
+    await wrap(tracing).generateText({
+      model: new MockLanguageModelV4({
+        modelId: "identity-model",
+        provider: "mock-provider",
+        doGenerate: async () => ({
+          content: [{ type: "text", text: "ok" }],
+          finishReason: { raw: "stop", unified: "stop" as const },
+          usage,
+          warnings: []
+        })
+      }),
+      prompt: "hi",
+      runtimeContext: {
+        authToken: "sk-secret",
+        tier: "gold",
+        userEmail: "alice@example.com"
+      },
+      telemetry: { functionId: "f", includeRuntimeContext: { tier: true } }
+    } as Parameters<typeof ai.generateText>[0]);
+
+    const attributes = tracing.rootSpans[0]?.attributes ?? {};
+    expect(attributes["cloudflare.agents.runtime_context.tier"]).toBe("gold");
+    expect(
+      attributes["cloudflare.agents.runtime_context.authToken"]
+    ).toBeUndefined();
+    expect(
+      attributes["cloudflare.agents.runtime_context.userEmail"]
+    ).toBeUndefined();
+  });
+
   it("records requested, approved, and denied tool approvals", async () => {
     let executions = 0;
     const deploy = ai.tool({
@@ -201,10 +349,110 @@ describe("wrapAISDK with the real AI SDK v7", () => {
     }
   );
 
-  it("closes WebSocket spans before delayed tool and model work completes", async () => {
+  it("keeps WebSocket spans open for work that completes inside the invocation", async () => {
     const tracing = new RecordingTracer();
     const toolStarted = deferred();
     const continueTool = deferred();
+    let modelCall = 0;
+    const model = new MockLanguageModelV4({
+      modelId: "boundary-model",
+      provider: "mock-provider",
+      doStream: async () => {
+        modelCall += 1;
+        return {
+          stream: ai.simulateReadableStream({
+            chunks: modelCall === 1 ? toolCallChunks() : textChunks()
+          })
+        };
+      }
+    });
+
+    await withInvocationScope(async () => {
+      const result = createAISDKV6Wrapper(ai, {
+        options: { storeTools: true },
+        tracer: tracing
+      }).streamText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model,
+        prompt: "Double 21",
+        stopWhen: ai.isStepCount(2),
+        tools: {
+          double: ai.tool({
+            inputSchema: z.object({ value: z.number() }),
+            execute: async ({ value }) => {
+              toolStarted.resolve();
+              await continueTool.promise;
+              return value * 2;
+            }
+          })
+        }
+      } as Parameters<typeof ai.streamText>[0]);
+      const consume = (async () => {
+        for await (const _part of result.fullStream) {
+          // Consume the complete multi-step stream.
+        }
+      })();
+
+      await toolStarted.promise;
+      // Work still in flight inside its own invocation: closing here is what
+      // used to discard every finish attribute.
+      expect(spanFor(tracing, "invoke_agent")?.ended).toBe(false);
+      expect(spanFor(tracing, "execute_tool")?.ended).toBe(false);
+
+      continueTool.resolve();
+      await consume;
+    });
+
+    // Same attribute set the v6 path records for the same turn — the point of
+    // routing both SDK majors through one wrapper.
+    const operation = spanFor(tracing, "invoke_agent");
+    expect(operation?.ended).toBe(true);
+    expect(operation?.attributes).toMatchObject({
+      "cloudflare.agents.integration.name": "ai-sdk",
+      "cloudflare.agents.operation.name": "streamText",
+      "cloudflare.agents.response.finish_reason": "stop",
+      "cloudflare.agents.tool.count": 1,
+      "cloudflare.agents.usage.total_tokens": 10,
+      "gen_ai.provider.name": "mock-provider",
+      "gen_ai.request.model": "boundary-model",
+      "gen_ai.request.stream": true,
+      "gen_ai.usage.input_tokens": 6,
+      "gen_ai.usage.output_tokens": 4
+    });
+    expect(
+      operation?.attributes["cloudflare.agents.span.truncated"]
+    ).toBeUndefined();
+
+    const tool = spanFor(tracing, "execute_tool");
+    expect(tool?.attributes).toMatchObject({
+      "gen_ai.tool.call.arguments": JSON.stringify({ value: 21 }),
+      "gen_ai.tool.call.id": "double-1",
+      "gen_ai.tool.call.result": "42",
+      "gen_ai.tool.name": "double",
+      "gen_ai.tool.type": "function"
+    });
+
+    const chats = tracing.spans.filter(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) {
+      expect(chat.ended).toBe(true);
+      expect(chat.parent).toBe(operation);
+      expect(chat.attributes).toMatchObject({
+        "cloudflare.agents.operation.name": "doStream",
+        "cloudflare.agents.usage.total_tokens": 5,
+        "gen_ai.usage.input_tokens": 3,
+        "gen_ai.usage.output_tokens": 2
+      });
+      expect(
+        typeof chat.attributes["gen_ai.response.time_to_first_chunk"]
+      ).toBe("number");
+    }
+  });
+
+  it("truncates WebSocket spans whose work escapes the invocation", async () => {
+    const tracing = new RecordingTracer();
     const secondModelStarted = deferred();
     const finishSecondModel =
       deferred<Awaited<ReturnType<MockLanguageModelV4["doStream"]>>>();
@@ -224,40 +472,38 @@ describe("wrapAISDK with the real AI SDK v7", () => {
       }
     });
 
-    const result = wrap(tracing).streamText({
-      [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
-      model,
-      prompt: "Double 21",
-      stopWhen: ai.isStepCount(2),
-      tools: {
-        double: ai.tool({
-          inputSchema: z.object({ value: z.number() }),
-          execute: async ({ value }) => {
-            toolStarted.resolve();
-            await continueTool.promise;
-            return value * 2;
-          }
-        })
-      }
-    } as Parameters<typeof ai.streamText>[0]);
-    const consume = (async () => {
-      for await (const _part of result.fullStream) {
-        // Consume the complete multi-step stream.
-      }
-    })();
+    // Held outside the scope: returning it would make the scope await the very
+    // work that is supposed to escape it.
+    let escaped: Promise<void> | undefined;
+    await withInvocationScope(async () => {
+      const result = wrap(tracing).streamText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model,
+        prompt: "Double 21",
+        stopWhen: ai.isStepCount(2),
+        tools: {
+          double: ai.tool({
+            inputSchema: z.object({ value: z.number() }),
+            execute: async ({ value }) => value * 2
+          })
+        }
+      } as Parameters<typeof ai.streamText>[0]);
+      escaped = (async () => {
+        for await (const _part of result.fullStream) {
+          // Consume the complete multi-step stream.
+        }
+      })();
 
-    await toolStarted.promise;
-    const operation = tracing.spans.find(
-      (span) => span.attributes["gen_ai.operation.name"] === "invoke_agent"
-    );
-    const tool = tracing.spans.find(
-      (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
-    );
+      // The invocation ends while the second model call is still open.
+      await secondModelStarted.promise;
+    });
+
+    const operation = spanFor(tracing, "invoke_agent");
+    const tool = spanFor(tracing, "execute_tool");
     expect(operation?.ended).toBe(true);
-    expect(tool?.ended).toBe(true);
-
-    continueTool.resolve();
-    await secondModelStarted.promise;
+    expect(operation?.attributes["cloudflare.agents.span.truncated"]).toBe(
+      true
+    );
     const chats = tracing.spans.filter(
       (span) => span.attributes["gen_ai.operation.name"] === "chat"
     );
@@ -270,7 +516,9 @@ describe("wrapAISDK with the real AI SDK v7", () => {
     finishSecondModel.resolve({
       stream: ai.simulateReadableStream({ chunks: textChunks() })
     });
-    await consume;
+    await escaped;
+    // Work that lands after the invocation cannot reopen a closed span.
+    expect(operation?.attributes["gen_ai.usage.input_tokens"]).toBeUndefined();
   });
 });
 

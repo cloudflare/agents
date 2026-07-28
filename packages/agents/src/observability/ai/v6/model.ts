@@ -21,7 +21,7 @@ export function wrapModel(
   model: unknown,
   parentOperation: string,
   storeMessages: boolean,
-  finishOnAsyncHandoff = false
+  boundToInvocation = false
 ): unknown {
   if (!wrapLanguageModel) {
     return model;
@@ -102,7 +102,7 @@ export function wrapModel(
               throw cause;
             }
           },
-          finishOnAsyncHandoff ? { finishOnAsyncHandoff: true } : undefined
+          boundToInvocation ? { boundToInvocation: true } : undefined
         );
       }
     }

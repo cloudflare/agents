@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /** Attribute values accepted by custom spans. */
 export type TraceAttributeValue = string | number | boolean | undefined;
 
@@ -21,8 +23,12 @@ export type SpanRuntime = {
 
 /** Optional automatic lifetime policy for invocation-bounded spans. */
 export type SpanLifetime = {
-  /** Finish as soon as the callback hands asynchronous work to its caller. */
-  readonly finishOnAsyncHandoff?: boolean;
+  /**
+   * Close the span no later than the end of the surrounding
+   * {@link withInvocationScope}, so it cannot outlive the native invocation
+   * that owns its tracing context. Ignored outside such a scope.
+   */
+  readonly boundToInvocation?: boolean;
 };
 
 /** AgentTracer seam used by integrations. */
@@ -75,6 +81,89 @@ export type AgentSpan = {
   fail(cause: unknown): void;
 };
 
+type InvocationScope = {
+  /** Bounded spans still open. Emptied when the invocation ends. */
+  readonly open: Set<ManagedSpan>;
+  /** Whether the invocation this scope represents has already ended. */
+  ended: boolean;
+};
+
+export type InvocationScopeOptions = {
+  /**
+   * Open a scope even inside a live one, for work deliberately detached from
+   * the handler that started it — `ctx.waitUntil` bodies, queue drains — which
+   * runs on past that handler and must not be cut off with it.
+   */
+  readonly detached?: boolean;
+};
+
+/**
+ * Spans that asked to be invocation-bounded while a scope was active. Closed
+ * when that scope ends; see {@link withInvocationScope}.
+ */
+const invocationScope = new AsyncLocalStorage<InvocationScope>();
+
+/**
+ * Runs `body` as one traced invocation.
+ *
+ * Work that escapes its native invocation cannot be traced from the context it
+ * started in: the still-open span is force-closed against the invocation that
+ * owned that context, which reports a negative duration or `span_not_ended`.
+ * Spans opened with {@link SpanLifetime.boundToInvocation} inside this scope
+ * are therefore closed before `body` settles — but not one moment earlier, so
+ * everything that completes during the invocation (the normal case: a chat
+ * turn is awaited by the handler that received it) still records its finish
+ * attributes. A span truncated this way is marked
+ * `cloudflare.agents.span.truncated` rather than passing as complete.
+ */
+export function withInvocationScope<T>(
+  body: () => T,
+  options?: InvocationScopeOptions
+): T {
+  // Nested scopes would truncate spans at an inner boundary that is not an
+  // invocation edge, so the outermost live scope owns the lifetime. A scope
+  // that has already ended is not an enclosing invocation at all — it is a
+  // leftover context on work that resumed later — so `body` starts a new one.
+  const current = invocationScope.getStore();
+  if (options?.detached !== true && current !== undefined && !current.ended) {
+    return body();
+  }
+
+  const scope: InvocationScope = { ended: false, open: new Set() };
+  const endInvocation = () => {
+    scope.ended = true;
+    for (const span of scope.open) {
+      // Fail open: this runs on the return path of every agent handler, so a
+      // span writer that throws must not take the handler's result with it,
+      // nor stop the remaining spans from closing.
+      try {
+        span.truncate();
+      } catch {
+        // Nothing useful to do with a broken span writer.
+      }
+    }
+    scope.open.clear();
+  };
+
+  return invocationScope.run(scope, () => {
+    let result: T;
+    try {
+      result = body();
+    } catch (cause: unknown) {
+      endInvocation();
+      throw cause;
+    }
+
+    if (isPromiseLike(result)) {
+      // SAFETY: T is promise-like here, so the settled promise is still a T.
+      return Promise.resolve(result).finally(endInvocation) as T;
+    }
+
+    endInvocation();
+    return result;
+  });
+}
+
 /** Creates a tracer from a runtime span capability. */
 export function createTracer(runtime: SpanRuntime): AgentTracer {
   return new RuntimeTracer(runtime);
@@ -92,8 +181,8 @@ class RuntimeTracer implements AgentTracer {
     return this.activate(name, attributes, (span) => {
       const result = run(span);
       if (isPromiseLike(result)) {
-        if (lifetime?.finishOnAsyncHandoff) {
-          span.finish();
+        if (lifetime?.boundToInvocation && bindToInvocation(span)) {
+          span.truncate();
         }
         return Promise.resolve(result)
           .catch((cause: unknown) => {
@@ -116,16 +205,23 @@ class RuntimeTracer implements AgentTracer {
     activate: (span: AgentSpan) => T,
     lifetime?: SpanLifetime
   ): T {
-    if (!lifetime?.finishOnAsyncHandoff) {
+    if (!lifetime?.boundToInvocation) {
       return this.activate(name, attributes, activate);
     }
 
     return this.activate(name, attributes, (span) => {
-      const result = activate(span);
-      if (isPromiseLike(result)) {
-        span.finish();
+      const invocationEnded = bindToInvocation(span);
+      try {
+        return activate(span);
+      } finally {
+        // Truncate only once `activate` has had its turn: callers that open
+        // with an empty attribute set and write the real one lazily (the AI
+        // operation span does, to stay cheap for untraced calls) would
+        // otherwise be closed before writing anything at all.
+        if (invocationEnded) {
+          span.truncate();
+        }
       }
-      return result;
     });
   }
 
@@ -211,6 +307,45 @@ class ManagedSpan implements AgentSpan {
     this.#closed = true;
     this.span.end();
   }
+
+  /**
+   * Closes a span whose work has not finished because its invocation is ending.
+   * The marker distinguishes "this span has no tokens because the turn escaped
+   * its invocation" from "this span completed and reported none".
+   */
+  truncate(): void {
+    if (this.#closed) {
+      return;
+    }
+
+    setAttributes(this.span, { "cloudflare.agents.span.truncated": true });
+    this.close();
+  }
+}
+
+/**
+ * Registers a span for closure at the end of the current invocation, and
+ * reports whether that invocation has already ended.
+ *
+ * Outside any scope the span keeps its natural lifetime: with no known
+ * invocation boundary there is nothing to bound it to, and closing early would
+ * discard finish attributes for no gain. Inside a scope that has already
+ * ended — work resumed later while still carrying this context — the span
+ * cannot outlive an invocation that is already gone, so the caller truncates
+ * it as soon as it has written what it knows.
+ */
+function bindToInvocation(span: ManagedSpan): boolean {
+  const scope = invocationScope.getStore();
+  if (scope === undefined) {
+    return false;
+  }
+
+  if (scope.ended) {
+    return true;
+  }
+
+  scope.open.add(span);
+  return false;
 }
 
 /**

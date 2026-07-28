@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentContextStore,
   type AgentEmail
 } from "./internal_context";
 export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
@@ -84,7 +85,9 @@ import {
 } from "./observability";
 import { tracer } from "./observability/tracing/cloudflare";
 import {
+  withInvocationScope,
   writeSpanAttributes,
+  type InvocationScopeOptions,
   type TraceAttributes
 } from "./observability/tracing/tracer";
 import { DisposableStore } from "./core/events";
@@ -234,6 +237,20 @@ export type RPCResponse = {
       error: string;
     }
 );
+
+/**
+ * Enters an agent invocation: the context every handler reads, plus the span
+ * scope that stops invocation-bounded spans from outliving it. Scopes do not
+ * nest, so the outermost live entry point owns the boundary — pass
+ * `detached` for work that deliberately runs on past its caller.
+ */
+function runInInvocation<T>(
+  store: AgentContextStore,
+  body: () => T,
+  options?: InvocationScopeOptions
+): T {
+  return agentContext.run(store, () => withInvocationScope(body, options));
+}
 
 function isClosedWebSocketSendError(error: unknown): boolean {
   return (
@@ -1543,7 +1560,7 @@ function withAgentContext<T extends (...args: any[]) => any>(
     }
     // Crossing to a different Agent must not carry native I/O handles
     // from the previous request/WebSocket/email turn into the new DO.
-    return agentContext.run(
+    return runInInvocation(
       {
         agent: this,
         connection: undefined,
@@ -1902,7 +1919,7 @@ export class Agent<
         run((finishAttributes) => writeSpanAttributes(span, finishAttributes)),
       agentContext.getStore()?.connection === undefined
         ? undefined
-        : { finishOnAsyncHandoff: true }
+        : { boundToInvocation: true }
     );
   }
 
@@ -2405,7 +2422,7 @@ export class Agent<
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
-      return agentContext.run(
+      return runInInvocation(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
           // Handle MCP OAuth callback if this is one
@@ -2425,7 +2442,7 @@ export class Agent<
         return;
       }
       this._ensureConnectionWrapped(connection);
-      return agentContext.run(
+      return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
           if (typeof message !== "string") {
@@ -2571,7 +2588,7 @@ export class Agent<
       }
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
-      return agentContext.run(
+      return runInInvocation(
         { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
           // Check if connection should be readonly before sending any messages
@@ -2678,7 +2695,7 @@ export class Agent<
       ) {
         return;
       }
-      return agentContext.run(
+      return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
         () => {
           this._emit("disconnect", {
@@ -2696,7 +2713,7 @@ export class Agent<
       props: Props | undefined,
       update: (attributes: TraceAttributes) => void
     ) => {
-      return agentContext.run(
+      return runInInvocation(
         {
           agent: this,
           connection: undefined,
@@ -2934,12 +2951,15 @@ export class Agent<
     this.ctx.waitUntil(
       (async () => {
         try {
-          await agentContext.run(
+          await runInInvocation(
             { agent: this, connection, request, email },
             async () => {
               this._emit("state:update");
               await this._callStatePersistenceHook(nextState, source);
-            }
+            },
+            // Runs past the handler that set the state, on waitUntil's own
+            // extension of the invocation.
+            { detached: true }
           );
         } catch (e) {
           // onStateChanged/onStateUpdate errors should not affect state or broadcasts
@@ -3340,7 +3360,7 @@ export class Agent<
         payload._bridge.reply(options)
     };
 
-    return agentContext.run(
+    return runInInvocation(
       { agent: this, connection: undefined, request: undefined, email },
       async () => {
         this._emit("email:receive", {
@@ -3729,7 +3749,7 @@ export class Agent<
             continue;
           }
           const { connection, request, email } = agentContext.getStore() || {};
-          await agentContext.run(
+          await runInInvocation(
             {
               agent: this,
               connection,
@@ -3783,7 +3803,10 @@ export class Agent<
               } finally {
                 this.dequeue(row.id);
               }
-            }
+            },
+            // The drain loop is started with `void` and routinely outlives the
+            // handler that enqueued the item.
+            { detached: true }
           );
         }
       }
@@ -6282,7 +6305,7 @@ export class Agent<
       return;
     }
 
-    await agentContext.run(
+    await runInInvocation(
       {
         agent: this,
         connection: undefined,
@@ -8844,14 +8867,15 @@ export class Agent<
       await invoke();
       return;
     }
-    await agentContext.run(
+    await runInInvocation(
       {
         agent: this,
         connection: undefined,
         request: undefined,
         email: undefined
       },
-      invoke
+      invoke,
+      { detached: true }
     );
   }
 
@@ -10677,7 +10701,7 @@ export class Agent<
     // Clear native context handles before the child facet RPC so workerd
     // never sees parent-owned I/O attached to child initialization.
     try {
-      await agentContext.run(
+      await runInInvocation(
         {
           agent: this,
           connection: undefined,

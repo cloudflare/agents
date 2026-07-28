@@ -4,6 +4,7 @@ import { convertArrayToReadableStream, MockLanguageModelV3 } from "ai/test";
 import { createWorkersAI } from "workers-ai-provider";
 import { deferred, RecordingTracer } from "./recording-tracer";
 import { createAISDKV6Wrapper } from "../../observability/ai/v6/wrap";
+import { withInvocationScope } from "../../observability/tracing/tracer";
 
 type ProviderStreamResult = Awaited<
   ReturnType<MockLanguageModelV3["doStream"]>
@@ -12,6 +13,13 @@ type ProviderStreamPart =
   ProviderStreamResult["stream"] extends ReadableStream<infer Part>
     ? Part
     : never;
+
+/** First span recorded for a `gen_ai.operation.name`. */
+function spanFor(tracing: RecordingTracer, operation: string) {
+  return tracing.spans.find(
+    (span) => span.attributes["gen_ai.operation.name"] === operation
+  );
+}
 
 const boundaryUsage = {
   inputTokens: {
@@ -130,10 +138,118 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     expect(chatSpan?.ended).toBe(true);
   });
 
-  it("closes WebSocket spans before delayed tool and model work completes", async () => {
+  it("keeps WebSocket spans open for work that completes inside the invocation", async () => {
     const tracing = new RecordingTracer();
     const toolStarted = deferred();
     const continueTool = deferred();
+    let modelCall = 0;
+    const model = new MockLanguageModelV3({
+      modelId: "boundary-model",
+      provider: "mock-provider",
+      doStream: async () => {
+        modelCall += 1;
+        if (modelCall === 1) {
+          return {
+            stream: convertArrayToReadableStream<ProviderStreamPart>([
+              { type: "stream-start", warnings: [] },
+              {
+                type: "tool-call",
+                input: JSON.stringify({ value: 21 }),
+                toolCallId: "double-1",
+                toolName: "double"
+              },
+              {
+                type: "finish",
+                finishReason: { raw: "tool-calls", unified: "tool-calls" },
+                usage: boundaryUsage
+              }
+            ])
+          };
+        }
+        return {
+          stream: convertArrayToReadableStream<ProviderStreamPart>([
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "text-2" },
+            { type: "text-delta", id: "text-2", delta: "42" },
+            { type: "text-end", id: "text-2" },
+            {
+              type: "finish",
+              finishReason: { raw: "stop", unified: "stop" },
+              usage: boundaryUsage
+            }
+          ])
+        };
+      }
+    });
+
+    await withInvocationScope(async () => {
+      const result = createAISDKV6Wrapper(ai, {
+        options: { storeTools: true },
+        tracer: tracing
+      }).streamText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model,
+        prompt: "Double 21",
+        stopWhen: ai.stepCountIs(2),
+        tools: {
+          double: ai.tool({
+            inputSchema: ai.jsonSchema<{ value: number }>({
+              properties: { value: { type: "number" } },
+              required: ["value"],
+              type: "object"
+            }),
+            execute: async ({ value }) => {
+              toolStarted.resolve();
+              await continueTool.promise;
+              return value * 2;
+            }
+          })
+        }
+      } as Parameters<typeof ai.streamText>[0]);
+      const consume = (async () => {
+        for await (const _part of result.fullStream) {
+          // Consume the complete multi-step stream.
+        }
+      })();
+
+      await toolStarted.promise;
+      // Work still in flight inside its own invocation: closing here is what
+      // used to discard every finish attribute.
+      expect(spanFor(tracing, "invoke_agent")?.ended).toBe(false);
+      expect(spanFor(tracing, "execute_tool")?.ended).toBe(false);
+
+      continueTool.resolve();
+      await consume;
+    });
+
+    const root = spanFor(tracing, "invoke_agent");
+    expect(root?.ended).toBe(true);
+    expect(root?.attributes).toMatchObject({
+      "cloudflare.agents.response.finish_reason": "stop",
+      "cloudflare.agents.usage.total_tokens": 10,
+      "gen_ai.usage.input_tokens": 6,
+      "gen_ai.usage.output_tokens": 4
+    });
+    expect(
+      root?.attributes["cloudflare.agents.span.truncated"]
+    ).toBeUndefined();
+
+    const tool = spanFor(tracing, "execute_tool");
+    expect(tool?.ended).toBe(true);
+    expect(tool?.attributes["gen_ai.tool.call.result"]).toBe("42");
+
+    const chats = tracing.spans.filter(
+      (span) => span.attributes["gen_ai.operation.name"] === "chat"
+    );
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) {
+      expect(chat.ended).toBe(true);
+      expect(chat.attributes["gen_ai.usage.input_tokens"]).toBe(3);
+    }
+  });
+
+  it("truncates WebSocket spans whose work escapes the invocation", async () => {
+    const tracing = new RecordingTracer();
     const secondModelStarted = deferred();
     const finishSecondModel = deferred<ProviderStreamResult>();
     let modelCall = 0;
@@ -165,46 +281,39 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
       }
     });
 
-    const result = createAISDKV6Wrapper(ai, { tracer: tracing }).streamText({
-      [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
-      model,
-      prompt: "Double 21",
-      stopWhen: ai.stepCountIs(2),
-      tools: {
-        double: ai.tool({
-          inputSchema: ai.jsonSchema<{ value: number }>({
-            properties: { value: { type: "number" } },
-            required: ["value"],
-            type: "object"
-          }),
-          execute: async ({ value }) => {
-            toolStarted.resolve();
-            await continueTool.promise;
-            return value * 2;
-          }
-        })
-      }
-    } as Parameters<typeof ai.streamText>[0]);
-    const consume = (async () => {
-      for await (const _part of result.fullStream) {
-        // Consume the complete multi-step stream.
-      }
-    })();
+    // Held outside the scope: returning it would make the scope await the very
+    // work that is supposed to escape it.
+    let escaped: Promise<void> | undefined;
+    await withInvocationScope(async () => {
+      const result = createAISDKV6Wrapper(ai, { tracer: tracing }).streamText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model,
+        prompt: "Double 21",
+        stopWhen: ai.stepCountIs(2),
+        tools: {
+          double: ai.tool({
+            inputSchema: ai.jsonSchema<{ value: number }>({
+              properties: { value: { type: "number" } },
+              required: ["value"],
+              type: "object"
+            }),
+            execute: async ({ value }) => value * 2
+          })
+        }
+      } as Parameters<typeof ai.streamText>[0]);
+      escaped = (async () => {
+        for await (const _part of result.fullStream) {
+          // Consume the complete multi-step stream.
+        }
+      })();
 
-    await toolStarted.promise;
-    expect(
-      tracing.spans.find(
-        (span) => span.attributes["gen_ai.operation.name"] === "invoke_agent"
-      )?.ended
-    ).toBe(true);
-    expect(
-      tracing.spans.find(
-        (span) => span.attributes["gen_ai.operation.name"] === "execute_tool"
-      )?.ended
-    ).toBe(true);
+      // The invocation ends while the second model call is still open.
+      await secondModelStarted.promise;
+    });
 
-    continueTool.resolve();
-    await secondModelStarted.promise;
+    const root = spanFor(tracing, "invoke_agent");
+    expect(root?.ended).toBe(true);
+    expect(root?.attributes["cloudflare.agents.span.truncated"]).toBe(true);
     const chats = tracing.spans.filter(
       (span) => span.attributes["gen_ai.operation.name"] === "chat"
     );
@@ -224,7 +333,9 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
         }
       ])
     });
-    await consume;
+    await escaped;
+    // Work that lands after the invocation cannot reopen a closed span.
+    expect(root?.attributes["gen_ai.usage.input_tokens"]).toBeUndefined();
   });
 
   it("records an AI Gateway log id exposed in provider response headers", async () => {

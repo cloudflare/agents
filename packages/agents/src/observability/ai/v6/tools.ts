@@ -11,7 +11,7 @@ export function wrapTools(
   tracer: AgentTracer,
   tools: unknown,
   storeTools: boolean,
-  finishAtHandoff = false,
+  boundToInvocation = false,
   approvedToolCalls?: Map<string, string>
 ): unknown {
   if (typeof tools !== "object" || tools === null) {
@@ -27,7 +27,7 @@ export function wrapTools(
       toolName,
       tool,
       storeTools,
-      finishAtHandoff,
+      boundToInvocation,
       approvedToolCalls
     );
   }
@@ -39,7 +39,7 @@ function wrapTool(
   toolName: string,
   tool: unknown,
   storeTools: boolean,
-  finishAtHandoff: boolean,
+  boundToInvocation: boolean,
   approvedToolCalls: Map<string, string> | undefined
 ): unknown {
   if (typeof tool !== "object" || tool === null) {
@@ -90,40 +90,41 @@ function wrapTool(
     };
     // The span may outlive this call frame (streaming tools yield after
     // returning), so the wrapper owns the span lifetime via openSpan.
-    return tracer.openSpan(span.name, attributes, (toolSpan) => {
-      // Captured inside the activation so generator bodies (which resume at
-      // the consumer's next() call sites) can be re-entered into the tool
-      // span's async context.
-      const inSpanContext = AsyncLocalStorage.snapshot() as ContextSnapshot;
-      const toolCallId = extractToolCallId(args[1]);
-      const approval = approvalResponseForOptions(args[1], toolCallId);
-      if (
-        approval?.approved === true ||
-        (toolCallId !== undefined &&
-          approvedToolCalls?.get(toolCallId) === toolName)
-      ) {
-        recordApprovalChild(tracer, toolName, toolCallId, "approved");
-        if (toolCallId !== undefined) approvedToolCalls?.delete(toolCallId);
-      }
-      const result = originalExecute(...args);
-      if (finishAtHandoff) {
-        toolSpan.finish();
-        return result;
-      }
+    return tracer.openSpan(
+      span.name,
+      attributes,
+      (toolSpan) => {
+        // Captured inside the activation so generator bodies (which resume at
+        // the consumer's next() call sites) can be re-entered into the tool
+        // span's async context.
+        const inSpanContext = AsyncLocalStorage.snapshot() as ContextSnapshot;
+        const toolCallId = extractToolCallId(args[1]);
+        const approval = approvalResponseForOptions(args[1], toolCallId);
+        if (
+          approval?.approved === true ||
+          (toolCallId !== undefined &&
+            approvedToolCalls?.get(toolCallId) === toolName)
+        ) {
+          recordApprovalChild(tracer, toolName, toolCallId, "approved");
+          if (toolCallId !== undefined) approvedToolCalls?.delete(toolCallId);
+        }
+        const result = originalExecute(...args);
 
-      if (isPromiseLike(result)) {
-        return Promise.resolve(result).then(
-          (resolved) =>
-            settleToolResult(resolved, toolSpan, inSpanContext, storeTools),
-          (cause: unknown) => {
-            toolSpan.fail(cause);
-            throw cause;
-          }
-        );
-      }
+        if (isPromiseLike(result)) {
+          return Promise.resolve(result).then(
+            (resolved) =>
+              settleToolResult(resolved, toolSpan, inSpanContext, storeTools),
+            (cause: unknown) => {
+              toolSpan.fail(cause);
+              throw cause;
+            }
+          );
+        }
 
-      return settleToolResult(result, toolSpan, inSpanContext, storeTools);
-    });
+        return settleToolResult(result, toolSpan, inSpanContext, storeTools);
+      },
+      boundToInvocation ? { boundToInvocation: true } : undefined
+    );
   };
 
   return wrappedTool;
