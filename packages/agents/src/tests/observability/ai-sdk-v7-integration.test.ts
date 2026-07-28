@@ -21,6 +21,9 @@ const usage = {
   }
 };
 
+/** Marks a call as belonging to one invocation, the way Think does for ws-chat. */
+const BOUND = Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded");
+
 /** First span recorded for a `gen_ai.operation.name`. */
 function spanFor(tracing: RecordingTracer, operation: string) {
   return tracing.spans.find(
@@ -450,6 +453,44 @@ describe("wrapAISDK with the real AI SDK v7", () => {
         typeof chat.attributes["gen_ai.response.time_to_first_chunk"]
       ).toBe("number");
     }
+  });
+
+  it("bounds generateText to its invocation, not just streaming operations", async () => {
+    const tracing = new RecordingTracer();
+    const release = deferred();
+    let escaped: Promise<unknown> | undefined;
+
+    await withInvocationScope(async () => {
+      escaped = wrap(tracing).generateText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model: new MockLanguageModelV4({
+          modelId: "slow-model",
+          provider: "mock-provider",
+          doGenerate: async () => {
+            await release.promise;
+            return {
+              content: [{ type: "text", text: "ok" }],
+              finishReason: { raw: "stop", unified: "stop" as const },
+              usage,
+              warnings: []
+            };
+          }
+        }),
+        prompt: "hi"
+      } as Parameters<typeof ai.generateText>[0]);
+      // The model call is still in flight as the invocation ends.
+    });
+
+    const operation = spanFor(tracing, "invoke_agent");
+    expect(operation?.ended).toBe(true);
+    expect(operation?.attributes["cloudflare.agents.span.truncated"]).toBe(
+      true
+    );
+
+    release.resolve();
+    await escaped;
+    // A result arriving after the invocation cannot reopen the span.
+    expect(operation?.attributes["gen_ai.usage.input_tokens"]).toBeUndefined();
   });
 
   it("truncates WebSocket spans whose work escapes the invocation", async () => {

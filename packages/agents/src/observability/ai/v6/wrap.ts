@@ -12,6 +12,7 @@ import {
 } from "../../genai/telemetry";
 import type { SemanticContext } from "../../genai/telemetry";
 import { writeSpanAttributes } from "../../tracing/tracer";
+import type { TraceAttributes } from "../../tracing/tracer";
 import type { AgentTracer } from "../../tracing/tracer";
 import {
   extractModelInfo,
@@ -193,6 +194,7 @@ function createOperationWrapper(
   }
 
   return async (params, ...args) => {
+    const boundToInvocation = isAISDKInvocationBounded(params);
     return instrumentation.tracer.withSpan(
       operationSpanName(agentNameForCall(params)),
       {},
@@ -216,7 +218,8 @@ function createOperationWrapper(
             operationName,
             wrapLanguageModel,
             instrumentation.tracer,
-            storage
+            storage,
+            boundToInvocation
           ),
           ...args
         );
@@ -227,7 +230,8 @@ function createOperationWrapper(
           })
         );
         return result;
-      }
+      },
+      boundToInvocation ? { boundToInvocation: true } : undefined
     );
   };
 }
@@ -241,10 +245,7 @@ function createOperationWrapper(
 function agentNameForCall(params: AISDKV6CallParams): string | undefined {
   const telemetry = telemetryOptions(params);
   const metadata = telemetryMetadata(params);
-  const runtimeContext =
-    typeof params.runtimeContext === "object" && params.runtimeContext !== null
-      ? (params.runtimeContext as Record<string, unknown>)
-      : undefined;
+  const runtimeContext = runtimeContextRecord(params);
 
   return (
     metadataValue(metadata, "agentName", "gen_ai.agent.name") ??
@@ -364,6 +365,21 @@ function telemetryMetadata(
     : undefined;
 }
 
+/**
+ * The caller's application-data channel: `runtimeContext` on v7, the
+ * `experimental_context` it replaced on v6. Read through one accessor so the
+ * two majors cannot drift on which one identity and metadata come from.
+ */
+function runtimeContextRecord(
+  params: AISDKV6CallParams
+): Record<string, unknown> | undefined {
+  const value = params.runtimeContext ?? params.experimental_context;
+
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 function telemetryOptions(
   params: AISDKV6CallParams
 ): Record<string, unknown> | undefined {
@@ -385,41 +401,80 @@ function telemetryOptions(
  * a query written against v6 traces still matches v7 ones. Everything else
  * passes through as documented, under `cloudflare.agents.runtime_context.*`.
  *
- * Runtime context the caller did not mark as included stays off the span: on
- * v7 it is a general application-data channel, not a telemetry bag.
+ * Runtime context the caller did not mark as included stays off the span as a
+ * passthrough attribute: on v7 this is a general application-data channel, not
+ * a telemetry bag. Identity (`agentId`, `agentName`, `agentVersion`,
+ * `conversationId`) is separate — {@link semanticContext} reads it regardless,
+ * because it names the operation rather than describing it, and v7 left
+ * callers nowhere else to put it.
  */
 function includedRuntimeContext(
   params: AISDKV6CallParams
 ): Record<string, unknown> | undefined {
-  const runtimeContextValue =
-    params.runtimeContext ?? params.experimental_context;
-  const runtimeContext =
-    typeof runtimeContextValue === "object" && runtimeContextValue !== null
-      ? (runtimeContextValue as Record<string, unknown>)
-      : undefined;
+  const runtimeContext = runtimeContextRecord(params);
   if (runtimeContext === undefined) {
     return undefined;
   }
 
-  // The SDK's own shape: `{ [key]: boolean }`, where a key is included only
-  // when explicitly true. There is deliberately no "include everything"
-  // shorthand — runtime context routinely carries credentials and user data
-  // that no one asked to put on a span.
-  const included = telemetryOptions(params)?.includeRuntimeContext;
-  if (typeof included !== "object" || included === null) {
+  const included = includedContextKeys(telemetryOptions(params));
+  if (included === undefined) {
     return undefined;
   }
 
   const projected: Record<string, unknown> = {};
-  for (const [key, enabled] of Object.entries(
-    included as Record<string, unknown>
-  )) {
-    if (enabled === true && Object.hasOwn(runtimeContext, key)) {
+  for (const key of included) {
+    if (Object.hasOwn(runtimeContext, key)) {
       projected[key] = runtimeContext[key];
     }
   }
 
   return projected;
+}
+
+/**
+ * The keys a caller marked as telemetry-visible.
+ *
+ * The SDK's own shape is `{ [key]: boolean }`, included only when explicitly
+ * true; a plain array of key names is accepted too, since that is the shape of
+ * the wrapper's option of the same name and silently ignoring it would be
+ * worse than honouring it. There is deliberately no "include everything"
+ * shorthand — runtime context routinely carries credentials and user data that
+ * no one asked to put on a span.
+ */
+function includedContextKeys(
+  telemetry: Record<string, unknown> | undefined
+): string[] | undefined {
+  const included = telemetry?.includeRuntimeContext;
+  if (Array.isArray(included)) {
+    return included.filter((key): key is string => typeof key === "string");
+  }
+  if (typeof included !== "object" || included === null) {
+    return undefined;
+  }
+
+  return Object.entries(included as Record<string, unknown>)
+    .filter(([, enabled]) => enabled === true)
+    .map(([key]) => key);
+}
+
+/**
+ * Whether the caller explicitly opted a key OUT. Identity is read from runtime
+ * context without an opt-in — on v7 there is nowhere else to put it, and
+ * requiring one would silently cost every caller `gen_ai.agent.id` — but an
+ * explicit `false` is a stated intention and is honoured.
+ */
+function isExcludedFromContext(
+  params: AISDKV6CallParams,
+  key: string
+): boolean {
+  const included = telemetryOptions(params)?.includeRuntimeContext;
+
+  return (
+    typeof included === "object" &&
+    included !== null &&
+    !Array.isArray(included) &&
+    (included as Record<string, unknown>)[key] === false
+  );
 }
 
 /**
@@ -431,25 +486,27 @@ function includedRuntimeContext(
 function semanticContext(params: AISDKV6CallParams): SemanticContext {
   const telemetry = telemetryOptions(params);
   const metadata = telemetryMetadata(params);
-  const runtimeContext =
-    typeof params.runtimeContext === "object" && params.runtimeContext !== null
-      ? (params.runtimeContext as Record<string, unknown>)
-      : undefined;
+  const runtimeContext = runtimeContextRecord(params);
+
+  const fromContext = (key: string, semanticKey: string) =>
+    isExcludedFromContext(params, key)
+      ? undefined
+      : metadataValue(runtimeContext, key, semanticKey);
 
   return {
     agentId:
       metadataValue(metadata, "agentId", "gen_ai.agent.id") ??
-      metadataValue(runtimeContext, "agentId", "gen_ai.agent.id"),
+      fromContext("agentId", "gen_ai.agent.id"),
     agentName:
       metadataValue(metadata, "agentName", "gen_ai.agent.name") ??
-      metadataValue(runtimeContext, "agentName", "gen_ai.agent.name") ??
+      fromContext("agentName", "gen_ai.agent.name") ??
       readString(telemetry?.functionId),
     agentVersion:
       metadataValue(metadata, "agentVersion", "gen_ai.agent.version") ??
-      metadataValue(runtimeContext, "agentVersion", "gen_ai.agent.version"),
+      fromContext("agentVersion", "gen_ai.agent.version"),
     conversationId:
       metadataValue(metadata, "conversationId", "gen_ai.conversation.id") ??
-      metadataValue(runtimeContext, "conversationId", "gen_ai.conversation.id")
+      fromContext("conversationId", "gen_ai.conversation.id")
   };
 }
 
@@ -461,27 +518,37 @@ function metadataValue(
   return readString(metadata?.[key] ?? metadata?.[semanticKey]);
 }
 
+/**
+ * The wrapper-level allowlist, set once for the instrumentation rather than
+ * per call. It selects from the same context and lands on the same attributes
+ * as the SDK's per-call allowlist: selecting a key through both must produce
+ * one attribute, not a canonical one and a `runtime_context.*` near-duplicate.
+ */
 function contextAttributes(
   params: AISDKV6CallParams,
   options: AISDKInstrumentationOptions | undefined
-): Record<string, string | number | boolean> | undefined {
-  const attributes: Record<string, string | number | boolean> = {};
+): TraceAttributes | undefined {
+  const included = options?.includeRuntimeContext;
+  if (included === undefined || included.length === 0) {
+    return undefined;
+  }
 
-  const runtimeContextValue =
-    params.runtimeContext ?? params.experimental_context;
-  const runtimeContext =
-    typeof runtimeContextValue === "object" && runtimeContextValue !== null
-      ? (runtimeContextValue as Record<string, unknown>)
-      : undefined;
+  const runtimeContext = runtimeContextRecord(params);
+  if (runtimeContext === undefined) {
+    return undefined;
+  }
 
-  for (const key of options?.includeRuntimeContext ?? []) {
-    const value = runtimeContext?.[key];
-    if (isScalarAttributeValue(value)) {
-      attributes[`cloudflare.agents.runtime_context.${key}`] = value;
+  const projected: Record<string, unknown> = {};
+  for (const key of included) {
+    if (Object.hasOwn(runtimeContext, key)) {
+      projected[key] = runtimeContext[key];
     }
   }
 
-  return Object.keys(attributes).length > 0 ? attributes : undefined;
+  return metadataAttributes(
+    projected,
+    TraceAttribute.Cloudflare.RuntimeContextPrefix
+  );
 }
 
 const invocationBounded = Symbol.for(
@@ -492,15 +559,5 @@ function isAISDKInvocationBounded(params: AISDKV6CallParams): boolean {
   return (
     (params as Record<PropertyKey, unknown>)[invocationBounded] === true ||
     agentContext.getStore()?.connection !== undefined
-  );
-}
-
-function isScalarAttributeValue(
-  value: unknown
-): value is string | number | boolean {
-  return (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
   );
 }

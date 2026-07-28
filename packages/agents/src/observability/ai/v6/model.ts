@@ -66,7 +66,8 @@ export function wrapModel(
               recordAIGatewayLogOnError(modelCall, cause, aiGatewayLog.get());
               throw cause;
             }
-          }
+          },
+          boundToInvocation ? { boundToInvocation: true } : undefined
         );
       },
       wrapStream: async ({ doStream, params }) => {
