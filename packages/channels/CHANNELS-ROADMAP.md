@@ -43,6 +43,7 @@ Goal: an inbound request can be acknowledged quickly, stored once, and eventuall
 5. **Implement atomic idempotent acceptance**
    - Require adapters to derive globally unique keys from provider identity and authenticated application context.
    - Repeated submissions with the same key and payload return the original submission ID.
+   - Implemented by [`SubmissionStore.accept()`](./src/storage/submission-store.ts).
 
 6. **Reject idempotency-key payload conflicts**
    - Reusing a key with materially different input returns a deterministic conflict.

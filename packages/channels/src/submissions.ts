@@ -15,16 +15,8 @@ export interface SubmissionSource {
   id?: string;
 }
 
-/**
- * The immutable durable representation of an accepted submission.
- *
- * @see {@link ../SUBMISSION-ENVELOPE.md}
- */
-export interface SubmissionEnvelope {
-  /** Version of the persisted envelope shape. */
-  schemaVersion: 1;
-  /** Channels-owned identity of this submission. */
-  submissionId: string;
+/** Adapter-supplied immutable input for accepting a submission. */
+export interface SubmissionInput {
   /** Adapter-owned identity used to deduplicate acceptance. */
   idempotencyKey: string;
   /** Stable name that the host application resolves to an agent. */
@@ -33,10 +25,30 @@ export interface SubmissionEnvelope {
   payload: JsonValue;
   /** Minimal provenance for the external event. */
   source: SubmissionSource;
-  /** RFC 3339 time at which Channels accepted the submission. */
-  createdAt: string;
   /** Opaque input to later conversation resolution. */
   conversationHint?: string;
+}
+
+/**
+ * The immutable durable representation of an accepted submission.
+ *
+ * @see {@link ../SUBMISSION-ENVELOPE.md}
+ */
+export interface SubmissionEnvelope extends SubmissionInput {
+  /** Version of the persisted envelope shape. */
+  schemaVersion: 1;
+  /** Channels-owned identity of this submission. */
+  submissionId: string;
+  /** RFC 3339 time at which Channels accepted the submission. */
+  createdAt: string;
+}
+
+/** Result of atomically accepting new or previously accepted input. */
+export interface SubmissionAcceptance {
+  /** Whether this call created the submission or found an existing one. */
+  outcome: "accepted" | "duplicate";
+  /** Channels-owned identity allocated by the first successful acceptance. */
+  submissionId: string;
 }
 
 /** Durable lifecycle state for delivery of a submission to its agent. */

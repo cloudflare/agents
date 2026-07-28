@@ -1,10 +1,52 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { SubmissionStore } from "../storage/submission-store";
-import type { SubmissionEnvelope } from "../submissions";
+import type { SubmissionEnvelope, SubmissionInput } from "../submissions";
 import { submissionStoreStub } from "./test-utils";
 
 describe("SubmissionStore", () => {
+  it("atomically returns one identity for repeated acceptance", async () => {
+    // Arrange
+    const stub = submissionStoreStub(`acceptance-${crypto.randomUUID()}`);
+    const input: SubmissionInput = {
+      idempotencyKey: "tenant-acme:slack:T123:event:Ev01ABC",
+      agentTarget: "support-agent/acme",
+      payload: {
+        type: "message",
+        text: "Where is order 1234?"
+      },
+      source: {
+        type: "slack-webhook",
+        id: "Ev01ABC"
+      },
+      conversationHint: "slack:T123:C456:thread:1712345678.000100"
+    };
+
+    // Act
+    const [first, second] = await Promise.all([
+      runInDurableObject(stub, (_instance, state) =>
+        new SubmissionStore(state.storage.sql).accept(input)
+      ),
+      runInDurableObject(stub, (_instance, state) =>
+        new SubmissionStore(state.storage.sql).accept(input)
+      )
+    ]);
+    const stored = await runInDurableObject(stub, (_instance, state) =>
+      new SubmissionStore(state.storage.sql).get(first.submissionId)
+    );
+
+    // Assert
+    expect([first.outcome, second.outcome].sort()).toEqual([
+      "accepted",
+      "duplicate"
+    ]);
+    expect(second.submissionId).toBe(first.submissionId);
+    expect(stored).toMatchObject({
+      envelope: input,
+      state: "pending"
+    });
+  });
+
   it("retains an accepted submission after Durable Object eviction", async () => {
     // Arrange
     const stub = submissionStoreStub(`submission-${crypto.randomUUID()}`);

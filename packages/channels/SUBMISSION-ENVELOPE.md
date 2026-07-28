@@ -11,9 +11,10 @@ normalization belongs in later roadmap milestones.
 
 ## Shape
 
-The acceptance input omits `schemaVersion`, `submissionId`, and `createdAt`
-from `SubmissionEnvelope`. Channels assigns those fields as part of the atomic
-acceptance commit. The adapter supplies the remaining input fields.
+[`SubmissionInput`](./src/submissions.ts) omits `schemaVersion`,
+`submissionId`, and `createdAt` from `SubmissionEnvelope`. Channels assigns
+those fields as part of the atomic acceptance commit. The adapter supplies the
+remaining input fields.
 
 ## Fields
 

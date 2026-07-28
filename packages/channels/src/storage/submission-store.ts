@@ -1,6 +1,8 @@
 import type {
   StoredSubmission,
+  SubmissionAcceptance,
   SubmissionEnvelope,
+  SubmissionInput,
   SubmissionState
 } from "../submissions";
 
@@ -29,6 +31,10 @@ type SubmissionRow = Record<string, SqlStorageValue> & {
   state: SubmissionState;
 };
 
+type SubmissionIdRow = Record<string, SqlStorageValue> & {
+  submission_id: string;
+};
+
 /** Persists immutable submissions in a Durable Object's SQLite storage. */
 export class SubmissionStore {
   readonly #sql: SqlStorage;
@@ -40,19 +46,43 @@ export class SubmissionStore {
   }
 
   persist(envelope: SubmissionEnvelope): StoredSubmission {
-    this.#sql.exec(
-      `INSERT INTO cf_channels_submissions (
-        submission_id,
-        idempotency_key,
-        envelope_json,
-        state
-      ) VALUES (?, ?, ?, 'pending')`,
-      envelope.submissionId,
-      envelope.idempotencyKey,
-      JSON.stringify(envelope)
-    );
-
+    this.#insert(envelope);
     return { envelope, state: "pending" };
+  }
+
+  /**
+   * Creates one pending submission or returns the identity previously claimed
+   * by the input's idempotency key.
+   */
+  accept(input: SubmissionInput): SubmissionAcceptance {
+    const envelope: SubmissionEnvelope = {
+      ...input,
+      schemaVersion: 1,
+      submissionId: `sub_${crypto.randomUUID()}`,
+      createdAt: new Date().toISOString()
+    };
+
+    if (this.#insert(envelope, true)) {
+      return { outcome: "accepted", submissionId: envelope.submissionId };
+    }
+
+    const [existing] = this.#sql
+      .exec<SubmissionIdRow>(
+        `SELECT submission_id
+         FROM cf_channels_submissions
+         WHERE idempotency_key = ?`,
+        input.idempotencyKey
+      )
+      .toArray();
+
+    if (existing === undefined) {
+      throw new Error("The idempotency claim disappeared during acceptance");
+    }
+
+    return {
+      outcome: "duplicate",
+      submissionId: existing.submission_id
+    };
   }
 
   get(submissionId: string): StoredSubmission | undefined {
@@ -73,5 +103,28 @@ export class SubmissionStore {
       envelope: JSON.parse(row.envelope_json) as SubmissionEnvelope,
       state: row.state
     };
+  }
+
+  #insert(envelope: SubmissionEnvelope, ignoreDuplicateKey = false): boolean {
+    const conflictClause = ignoreDuplicateKey
+      ? "ON CONFLICT (idempotency_key) DO NOTHING"
+      : "";
+    const inserted = this.#sql
+      .exec<SubmissionIdRow>(
+        `INSERT INTO cf_channels_submissions (
+          submission_id,
+          idempotency_key,
+          envelope_json,
+          state
+        ) VALUES (?, ?, ?, 'pending')
+        ${conflictClause}
+        RETURNING submission_id`,
+        envelope.submissionId,
+        envelope.idempotencyKey,
+        JSON.stringify(envelope)
+      )
+      .toArray();
+
+    return inserted.length === 1;
   }
 }
