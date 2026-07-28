@@ -551,7 +551,7 @@ async function installPythonPackage(
  * Strip a Python wheel down to just the package contents.
  *
  * TODO: Re-review this function once we've cleared issues with file extension limits
- * in workerd; it excludes certain metadata files in *.dist-info/ for now but it shouldn't remain this way
+ * in workerd; this function excludes certain metadata files in *.dist-info/ for now but it shouldn't remain this way
  */
 function stripWheelToPackage(
   files: Record<string, string>
