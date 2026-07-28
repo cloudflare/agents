@@ -1144,6 +1144,7 @@ describe("createWorker with pyproject.toml", () => {
     expect(body.typing_inspection).toBe("typing_inspection");
   });
 
+  // Checks that the Pyodide index works the same way we expect PyPI to work
   it("works with the pyodide index", async () => {
     const id = "test-worker-" + testId++;
     const createWorkerResult = await createWorker({

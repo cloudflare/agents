@@ -550,9 +550,8 @@ async function installPythonPackage(
 /**
  * Strip a Python wheel down to just the package contents.
  *
- * Wheels contain the importable package alongside `.dist-info` metadata and
- * `.data` directories. This removes those supporting directories and flattens
- * the package directory so its files are at the root of the returned record.
+ * TODO: Re-review this function once we've cleared issues with file extension limits
+ * in workerd; it excludes certain metadata files in *.dist-info/ for now but it shouldn't remain this way
  */
 function stripWheelToPackage(
   files: Record<string, string>
