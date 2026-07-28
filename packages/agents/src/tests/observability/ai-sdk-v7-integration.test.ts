@@ -490,6 +490,74 @@ describe("wrapAISDK with the real AI SDK v7", () => {
     expect(operation?.attributes["gen_ai.usage.input_tokens"]).toBeUndefined();
   });
 
+  it("marks approval spans decided after the invocation ended", async () => {
+    const tracing = new RecordingTracer();
+    const decided = deferred<boolean>();
+    let escaped: Promise<unknown> | undefined;
+
+    await withInvocationScope(async () => {
+      escaped = wrap(tracing).generateText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model: approvalRequestModel(),
+        prompt: "Deploy",
+        tools: {
+          deploy: ai.tool({
+            execute: async () => "deployed",
+            inputSchema: z.object({ target: z.string() }),
+            // The decision lands after the invocation is over, so the approval
+            // spans are opened against a context that is already gone.
+            needsApproval: async () => decided.promise
+          })
+        }
+      } as Parameters<typeof ai.generateText>[0]);
+    });
+
+    decided.resolve(true);
+    await escaped;
+
+    const approval = tracing.spans.find(
+      (span) => span.name === "tool_approval deploy"
+    );
+    // Still recorded, and still says what it decided...
+    expect(approval?.attributes["cloudflare.agents.tool.approval.state"]).toBe(
+      "requested"
+    );
+    // ...but not passed off as part of an invocation that had already ended.
+    expect(approval?.attributes["cloudflare.agents.span.truncated"]).toBe(true);
+    expect(
+      approval?.parent?.attributes["cloudflare.agents.span.truncated"]
+    ).toBe(true);
+  });
+
+  it("leaves approval spans decided inside the invocation unmarked", async () => {
+    const tracing = new RecordingTracer();
+
+    await withInvocationScope(async () => {
+      await wrap(tracing).generateText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model: approvalRequestModel(),
+        prompt: "Deploy",
+        tools: {
+          deploy: ai.tool({
+            execute: async () => "deployed",
+            inputSchema: z.object({ target: z.string() }),
+            needsApproval: async () => true
+          })
+        }
+      } as Parameters<typeof ai.generateText>[0]);
+    });
+
+    const approval = tracing.spans.find(
+      (span) => span.name === "tool_approval deploy"
+    );
+    expect(approval?.attributes["cloudflare.agents.tool.approval.state"]).toBe(
+      "requested"
+    );
+    expect(
+      approval?.attributes["cloudflare.agents.span.truncated"]
+    ).toBeUndefined();
+  });
+
   it("truncates WebSocket spans whose work escapes the invocation", async () => {
     const tracing = new RecordingTracer();
     const secondModelStarted = deferred();

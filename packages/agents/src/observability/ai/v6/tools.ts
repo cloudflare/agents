@@ -63,7 +63,14 @@ function wrapTool(
     execute: (...args: readonly unknown[]) => unknown;
   };
   if (hasApproval) {
-    wrapApprovalCheck(tracer, wrappedTool, toolRecord, tool, toolName);
+    wrapApprovalCheck(
+      tracer,
+      wrappedTool,
+      toolRecord,
+      tool,
+      toolName,
+      boundToInvocation
+    );
   }
   if (!hasExecute) {
     return wrappedTool;
@@ -105,7 +112,13 @@ function wrapTool(
           (toolCallId !== undefined &&
             approvedToolCalls?.get(toolCallId) === toolName)
         ) {
-          recordApprovalChild(tracer, toolName, toolCallId, "approved");
+          recordApprovalChild(
+            tracer,
+            toolName,
+            toolCallId,
+            "approved",
+            boundToInvocation
+          );
           if (toolCallId !== undefined) approvedToolCalls?.delete(toolCallId);
         }
         const result = originalExecute(...args);
@@ -135,7 +148,8 @@ function wrapApprovalCheck(
   wrappedTool: Record<string, unknown>,
   toolRecord: Record<string, unknown>,
   tool: object,
-  toolName: string
+  toolName: string,
+  boundToInvocation: boolean
 ): void {
   const approval = toolRecord.needsApproval;
   const original =
@@ -148,7 +162,13 @@ function wrapApprovalCheck(
     const recordRequested = (needed: unknown): unknown => {
       const toolCallId = extractToolCallId(args[1]);
       if (needed === true && !hasApprovalResponse(args[1], toolCallId)) {
-        recordApprovalSegment(tracer, toolName, toolCallId, "requested");
+        recordApprovalSegment(
+          tracer,
+          toolName,
+          toolCallId,
+          "requested",
+          boundToInvocation
+        );
       }
       return needed;
     };
@@ -163,7 +183,8 @@ function wrapApprovalCheck(
 export function wrapToolApprovalPolicy(
   tracer: AgentTracer,
   policy: unknown,
-  approvedToolCalls: Map<string, string>
+  approvedToolCalls: Map<string, string>,
+  boundToInvocation = false
 ): unknown {
   if (typeof policy === "function") {
     return (...args: readonly unknown[]) => {
@@ -174,7 +195,8 @@ export function wrapToolApprovalPolicy(
         readString(toolCall?.toolName) ?? "tool",
         readString(toolCall?.toolCallId),
         tracer,
-        approvedToolCalls
+        approvedToolCalls,
+        boundToInvocation
       );
     };
   }
@@ -190,7 +212,8 @@ export function wrapToolApprovalPolicy(
             toolName,
             extractToolCallId(args[1]),
             tracer,
-            approvedToolCalls
+            approvedToolCalls,
+            boundToInvocation
           )
       ]
     )
@@ -202,7 +225,8 @@ function observePolicyResult(
   toolName: string,
   toolCallId: string | undefined,
   tracer: AgentTracer,
-  approvedToolCalls: Map<string, string>
+  approvedToolCalls: Map<string, string>,
+  boundToInvocation = false
 ): unknown {
   const observe = (status: unknown): unknown => {
     if (toolCallId === undefined) return status;
@@ -217,7 +241,8 @@ function observePolicyResult(
         tracer,
         toolName,
         toolCallId,
-        type === "denied" ? "denied" : "requested"
+        type === "denied" ? "denied" : "requested",
+        boundToInvocation
       );
     }
     return status;
@@ -248,7 +273,8 @@ function recordApprovalSegment(
   tracer: AgentTracer,
   toolName: string,
   toolCallId: string | undefined,
-  state: "approved" | "denied" | "requested"
+  state: "approved" | "denied" | "requested",
+  boundToInvocation = false
 ): void {
   const tool = toolCallSpan({
     integration: "ai-sdk",
@@ -256,19 +282,36 @@ function recordApprovalSegment(
     toolCallId,
     toolName
   });
-  tracer.withSpan(tool.name, tool.attributes, () => {
-    recordApprovalChild(tracer, toolName, toolCallId, state);
-  });
+  tracer.withSpan(
+    tool.name,
+    tool.attributes,
+    () => {
+      recordApprovalChild(
+        tracer,
+        toolName,
+        toolCallId,
+        state,
+        boundToInvocation
+      );
+    },
+    boundToInvocation ? { boundToInvocation: true } : undefined
+  );
 }
 
 function recordApprovalChild(
   tracer: AgentTracer,
   toolName: string,
   toolCallId: string | undefined,
-  state: "approved" | "denied" | "requested"
+  state: "approved" | "denied" | "requested",
+  boundToInvocation = false
 ): void {
   const approval = toolApprovalSpan({ state, toolCallId, toolName });
-  tracer.withSpan(approval.name, approval.attributes, () => undefined);
+  tracer.withSpan(
+    approval.name,
+    approval.attributes,
+    () => undefined,
+    boundToInvocation ? { boundToInvocation: true } : undefined
+  );
 }
 
 function hasApprovalResponse(

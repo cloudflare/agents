@@ -179,9 +179,13 @@ class RuntimeTracer implements AgentTracer {
     lifetime?: SpanLifetime
   ): T | Promise<T> {
     return this.activate(name, attributes, (span) => {
+      // Ask before running: a span that opens and closes in one tick still
+      // needs to know whether that tick happened after its invocation ended.
+      const outOfBand =
+        lifetime?.boundToInvocation === true && bindToInvocation(span);
       const result = run(span);
       if (isPromiseLike(result)) {
-        if (lifetime?.boundToInvocation && bindToInvocation(span)) {
+        if (outOfBand) {
           span.truncate();
         }
         return Promise.resolve(result)
@@ -194,6 +198,9 @@ class RuntimeTracer implements AgentTracer {
           });
       }
 
+      if (outOfBand) {
+        span.truncate();
+      }
       span.close();
       return result;
     });
