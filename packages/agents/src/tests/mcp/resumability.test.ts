@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../worker";
 import {
   initializeStreamableHTTPServer,
@@ -19,6 +19,12 @@ import {
  */
 describe("McpAgent SSE resumability (#1583)", () => {
   const baseUrl = "http://example.com/mcp";
+
+  const responseReader = (response: Response) => {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Expected an SSE response body");
+    return reader;
+  };
 
   /**
    * Extract `id: <value>` from the most recent SSE event chunk.
@@ -57,6 +63,71 @@ describe("McpAgent SSE resumability (#1583)", () => {
     }
   });
 
+  it("applies one comment-frame keepalive to the McpAgent POST bridge", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+
+    try {
+      const response = await worker.fetch(
+        new Request(baseUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": sessionId
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 98,
+            method: "tools/call",
+            params: {
+              name: "deferredGreet",
+              arguments: { name: "keepalive", delayMs: 100 }
+            }
+          })
+        }),
+        env,
+        ctx
+      );
+
+      expect(response.status).toBe(200);
+      const keepaliveCalls = setIntervalSpy.mock.calls
+        .map((call, index) => ({ call, index }))
+        .filter(({ call }) => call[1] === 25_000);
+      expect(keepaliveCalls).toHaveLength(1);
+      const keepaliveCall = keepaliveCalls[0];
+      if (!keepaliveCall) throw new Error("Expected a keepalive timer");
+      const tick = keepaliveCall.call[0];
+      if (typeof tick !== "function") {
+        throw new Error("Expected a callable keepalive timer");
+      }
+      const timer = setIntervalSpy.mock.results.at(keepaliveCall.index)?.value;
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Expected an SSE response body");
+      const decoder = new TextDecoder();
+      let buffered = "";
+      const drain = (async () => {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffered += decoder.decode(value, { stream: true });
+        }
+      })();
+
+      tick();
+      await drain;
+
+      expect(buffered).toContain(": keepalive\n\n");
+      expect(buffered).not.toContain("event: ping");
+      expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("emits no `event: ping` keepalive frames on POST tool-call streams", async () => {
     const ctx = createExecutionContext();
     const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
@@ -87,7 +158,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/event-stream");
 
-    const reader = response.body!.getReader();
+    const reader = responseReader(response);
     const decoder = new TextDecoder();
     let buffered = "";
     let sawResult = false;
@@ -128,7 +199,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
       ctx
     );
 
-    const reader = response.body!.getReader();
+    const reader = responseReader(response);
     const decoder = new TextDecoder();
     let buf = "";
     while (true) {
@@ -174,7 +245,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
       env,
       ctx
     );
-    const reader = callResponse.body!.getReader();
+    const reader = responseReader(callResponse);
     const decoder = new TextDecoder();
     let buf = "";
     while (true) {
@@ -186,6 +257,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
     await reader.cancel();
     const eventId = extractEventId(buf);
     expect(eventId).toBeTruthy();
+    if (!eventId) throw new Error("Expected an SSE event id");
 
     // Now reconnect the standalone GET stream with that id. The server SHOULD
     // accept the resumption attempt (200 OK, text/event-stream).
@@ -195,7 +267,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
         headers: {
           Accept: "text/event-stream",
           "mcp-session-id": sessionId,
-          "Last-Event-ID": eventId!
+          "Last-Event-ID": eventId
         }
       }),
       env,
@@ -246,7 +318,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
     // Read the POST stream just until the progress notification
     // arrives — that gives us an event id while the tool is still
     // running. Crucially, we do NOT wait for the final result.
-    const reader = callResponse.body!.getReader();
+    const reader = responseReader(callResponse);
     const decoder = new TextDecoder();
     let postBuf = "";
     for (let i = 0; i < 20; i++) {
@@ -261,6 +333,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
       progressEventId,
       `expected an SSE id on the progress notification, got:\n${postBuf}`
     ).toBeTruthy();
+    if (!progressEventId) throw new Error("Expected a progress event id");
 
     // Guard against a timing regression: if the test runner ran slow
     // enough that the tool already completed, the resumed GET would
@@ -284,7 +357,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
         headers: {
           Accept: "text/event-stream",
           "mcp-session-id": sessionId,
-          "Last-Event-ID": progressEventId!
+          "Last-Event-ID": progressEventId
         }
       }),
       env,
@@ -292,7 +365,7 @@ describe("McpAgent SSE resumability (#1583)", () => {
     );
     expect(resumeResponse.status).toBe(200);
 
-    const resumeReader = resumeResponse.body!.getReader();
+    const resumeReader = responseReader(resumeResponse);
     let resumeBuf = "";
     // Bound the loop so the test can't hang. The tool sleeps for
     // 600ms and then writes one result frame.

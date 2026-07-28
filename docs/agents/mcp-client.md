@@ -18,7 +18,7 @@ The MCP client capability lets your agent:
 Install the exact MCP client peer used by this Agents release:
 
 ```sh
-pnpm add agents @modelcontextprotocol/client@2.0.0-beta.5
+pnpm add agents @modelcontextprotocol/client@2.0.0
 ```
 
 ```typescript
