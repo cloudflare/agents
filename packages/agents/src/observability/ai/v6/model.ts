@@ -20,7 +20,8 @@ export function wrapModel(
   wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
   model: unknown,
   parentOperation: string,
-  storeMessages: boolean
+  storeMessages: boolean,
+  boundToInvocation = false
 ): unknown {
   if (!wrapLanguageModel) {
     return model;
@@ -65,7 +66,8 @@ export function wrapModel(
               recordAIGatewayLogOnError(modelCall, cause, aiGatewayLog.get());
               throw cause;
             }
-          }
+          },
+          boundToInvocation ? { boundToInvocation: true } : undefined
         );
       },
       wrapStream: async ({ doStream, params }) => {
@@ -100,7 +102,8 @@ export function wrapModel(
               modelCall.fail(cause);
               throw cause;
             }
-          }
+          },
+          boundToInvocation ? { boundToInvocation: true } : undefined
         );
       }
     }

@@ -10,7 +10,9 @@ type ContextSnapshot = <R>(fn: () => R) => R;
 export function wrapTools(
   tracer: AgentTracer,
   tools: unknown,
-  storeTools: boolean
+  storeTools: boolean,
+  boundToInvocation = false,
+  approvedToolCalls?: Map<string, string>
 ): unknown {
   if (typeof tools !== "object" || tools === null) {
     return tools;
@@ -20,7 +22,14 @@ export function wrapTools(
   const toolRecord = tools as Record<string, unknown>;
   const wrappedTools: Record<string, unknown> = {};
   for (const [toolName, tool] of Object.entries(toolRecord)) {
-    wrappedTools[toolName] = wrapTool(tracer, toolName, tool, storeTools);
+    wrappedTools[toolName] = wrapTool(
+      tracer,
+      toolName,
+      tool,
+      storeTools,
+      boundToInvocation,
+      approvedToolCalls
+    );
   }
   return wrappedTools;
 }
@@ -29,7 +38,9 @@ function wrapTool(
   tracer: AgentTracer,
   toolName: string,
   tool: unknown,
-  storeTools: boolean
+  storeTools: boolean,
+  boundToInvocation: boolean,
+  approvedToolCalls: Map<string, string> | undefined
 ): unknown {
   if (typeof tool !== "object" || tool === null) {
     return tool;
@@ -52,7 +63,14 @@ function wrapTool(
     execute: (...args: readonly unknown[]) => unknown;
   };
   if (hasApproval) {
-    wrapApprovalCheck(tracer, wrappedTool, toolRecord, tool, toolName);
+    wrapApprovalCheck(
+      tracer,
+      wrappedTool,
+      toolRecord,
+      tool,
+      toolName,
+      boundToInvocation
+    );
   }
   if (!hasExecute) {
     return wrappedTool;
@@ -79,33 +97,47 @@ function wrapTool(
     };
     // The span may outlive this call frame (streaming tools yield after
     // returning), so the wrapper owns the span lifetime via openSpan.
-    return tracer.openSpan(span.name, attributes, (toolSpan) => {
-      // Captured inside the activation so generator bodies (which resume at
-      // the consumer's next() call sites) can be re-entered into the tool
-      // span's async context.
-      const inSpanContext = AsyncLocalStorage.snapshot() as ContextSnapshot;
-      const approval = approvalResponseForOptions(
-        args[1],
-        extractToolCallId(args[1])
-      );
-      if (approval?.approved === true) {
-        recordApprovalChild(tracer, toolName, approval.toolCallId, "approved");
-      }
-      const result = originalExecute(...args);
+    return tracer.openSpan(
+      span.name,
+      attributes,
+      (toolSpan) => {
+        // Captured inside the activation so generator bodies (which resume at
+        // the consumer's next() call sites) can be re-entered into the tool
+        // span's async context.
+        const inSpanContext = AsyncLocalStorage.snapshot() as ContextSnapshot;
+        const toolCallId = extractToolCallId(args[1]);
+        const approval = approvalResponseForOptions(args[1], toolCallId);
+        if (
+          approval?.approved === true ||
+          (toolCallId !== undefined &&
+            approvedToolCalls?.get(toolCallId) === toolName)
+        ) {
+          recordApprovalChild(
+            tracer,
+            toolName,
+            toolCallId,
+            "approved",
+            boundToInvocation
+          );
+          if (toolCallId !== undefined) approvedToolCalls?.delete(toolCallId);
+        }
+        const result = originalExecute(...args);
 
-      if (isPromiseLike(result)) {
-        return Promise.resolve(result).then(
-          (resolved) =>
-            settleToolResult(resolved, toolSpan, inSpanContext, storeTools),
-          (cause: unknown) => {
-            toolSpan.fail(cause);
-            throw cause;
-          }
-        );
-      }
+        if (isPromiseLike(result)) {
+          return Promise.resolve(result).then(
+            (resolved) =>
+              settleToolResult(resolved, toolSpan, inSpanContext, storeTools),
+            (cause: unknown) => {
+              toolSpan.fail(cause);
+              throw cause;
+            }
+          );
+        }
 
-      return settleToolResult(result, toolSpan, inSpanContext, storeTools);
-    });
+        return settleToolResult(result, toolSpan, inSpanContext, storeTools);
+      },
+      boundToInvocation ? { boundToInvocation: true } : undefined
+    );
   };
 
   return wrappedTool;
@@ -116,7 +148,8 @@ function wrapApprovalCheck(
   wrappedTool: Record<string, unknown>,
   toolRecord: Record<string, unknown>,
   tool: object,
-  toolName: string
+  toolName: string,
+  boundToInvocation: boolean
 ): void {
   const approval = toolRecord.needsApproval;
   const original =
@@ -129,7 +162,13 @@ function wrapApprovalCheck(
     const recordRequested = (needed: unknown): unknown => {
       const toolCallId = extractToolCallId(args[1]);
       if (needed === true && !hasApprovalResponse(args[1], toolCallId)) {
-        recordApprovalSegment(tracer, toolName, toolCallId, "requested");
+        recordApprovalSegment(
+          tracer,
+          toolName,
+          toolCallId,
+          "requested",
+          boundToInvocation
+        );
       }
       return needed;
     };
@@ -138,6 +177,79 @@ function wrapApprovalCheck(
       ? Promise.resolve(result).then(recordRequested)
       : recordRequested(result);
   };
+}
+
+/** Instruments AI SDK v7's top-level tool approval policy. */
+export function wrapToolApprovalPolicy(
+  tracer: AgentTracer,
+  policy: unknown,
+  approvedToolCalls: Map<string, string>,
+  boundToInvocation = false
+): unknown {
+  if (typeof policy === "function") {
+    return (...args: readonly unknown[]) => {
+      const options = recordValue(args[0]);
+      const toolCall = recordValue(options?.toolCall);
+      return observePolicyResult(
+        policy(...args),
+        readString(toolCall?.toolName) ?? "tool",
+        readString(toolCall?.toolCallId),
+        tracer,
+        approvedToolCalls,
+        boundToInvocation
+      );
+    };
+  }
+  if (typeof policy !== "object" || policy === null) return policy;
+
+  return Object.fromEntries(
+    Object.entries(policy as Record<string, unknown>).map(
+      ([toolName, setting]) => [
+        toolName,
+        (...args: readonly unknown[]) =>
+          observePolicyResult(
+            typeof setting === "function" ? setting(...args) : setting,
+            toolName,
+            extractToolCallId(args[1]),
+            tracer,
+            approvedToolCalls,
+            boundToInvocation
+          )
+      ]
+    )
+  );
+}
+
+function observePolicyResult(
+  result: unknown,
+  toolName: string,
+  toolCallId: string | undefined,
+  tracer: AgentTracer,
+  approvedToolCalls: Map<string, string>,
+  boundToInvocation = false
+): unknown {
+  const observe = (status: unknown): unknown => {
+    if (toolCallId === undefined) return status;
+    const type =
+      typeof status === "string"
+        ? status
+        : readString(recordValue(status)?.type);
+    if (type === "approved") {
+      approvedToolCalls.set(toolCallId, toolName);
+    } else if (type === "user-approval" || type === "denied") {
+      recordApprovalSegment(
+        tracer,
+        toolName,
+        toolCallId,
+        type === "denied" ? "denied" : "requested",
+        boundToInvocation
+      );
+    }
+    return status;
+  };
+  return isPromiseLike(result)
+    ? Promise.resolve(result).then(observe)
+    : observe(result);
 }
 
 /** Records denied responses, whose tool never reaches execute(). */
@@ -161,7 +273,8 @@ function recordApprovalSegment(
   tracer: AgentTracer,
   toolName: string,
   toolCallId: string | undefined,
-  state: "approved" | "denied" | "requested"
+  state: "approved" | "denied" | "requested",
+  boundToInvocation = false
 ): void {
   const tool = toolCallSpan({
     integration: "ai-sdk",
@@ -169,19 +282,36 @@ function recordApprovalSegment(
     toolCallId,
     toolName
   });
-  tracer.withSpan(tool.name, tool.attributes, () => {
-    recordApprovalChild(tracer, toolName, toolCallId, state);
-  });
+  tracer.withSpan(
+    tool.name,
+    tool.attributes,
+    () => {
+      recordApprovalChild(
+        tracer,
+        toolName,
+        toolCallId,
+        state,
+        boundToInvocation
+      );
+    },
+    boundToInvocation ? { boundToInvocation: true } : undefined
+  );
 }
 
 function recordApprovalChild(
   tracer: AgentTracer,
   toolName: string,
   toolCallId: string | undefined,
-  state: "approved" | "denied" | "requested"
+  state: "approved" | "denied" | "requested",
+  boundToInvocation = false
 ): void {
   const approval = toolApprovalSpan({ state, toolCallId, toolName });
-  tracer.withSpan(approval.name, approval.attributes, () => undefined);
+  tracer.withSpan(
+    approval.name,
+    approval.attributes,
+    () => undefined,
+    boundToInvocation ? { boundToInvocation: true } : undefined
+  );
 }
 
 function hasApprovalResponse(
@@ -357,6 +487,12 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
     typeof (value as Record<PropertyKey, unknown>)[Symbol.asyncIterator] ===
       "function"
   );
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {

@@ -9,6 +9,7 @@ import {
   Agent,
   isDurableObjectMemoryLimitReset,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
   type AgentToolLifecycleResult,
   type AgentToolMilestone,
   type AgentToolProgress,
@@ -2649,17 +2650,26 @@ export class AIChatAgent<
       result = await this._turnQueue.enqueue(
         requestId,
         () =>
-          withAgentSpan(
-            this,
-            "chat_turn",
-            "turn",
-            {
-              "cloudflare.agents.component": "ai_chat",
-              "cloudflare.agents.turn.request_id": requestId,
-              "cloudflare.agents.turn.admission": "queue",
-              "cloudflare.agents.turn.generation": generation
-            },
-            fn
+          // A turn owns its own traced boundary, never that of whatever
+          // admitted it: an auto-continuation fires from a coalescing timer
+          // long after the handler that armed it returned, and a turn started
+          // without being awaited outlives its caller. Either way the caller's
+          // boundary would close every span in a turn that is still running.
+          withInvocationScope(
+            () =>
+              withAgentSpan(
+                this,
+                "chat_turn",
+                "turn",
+                {
+                  "cloudflare.agents.component": "ai_chat",
+                  "cloudflare.agents.turn.request_id": requestId,
+                  "cloudflare.agents.turn.admission": "queue",
+                  "cloudflare.agents.turn.generation": generation
+                },
+                fn
+              ),
+            { detached: true }
           ),
         { generation }
       );

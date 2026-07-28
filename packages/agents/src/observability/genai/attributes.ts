@@ -15,6 +15,7 @@ export const TraceAttribute = {
     MetadataPrefix: "cloudflare.agents.metadata.",
     OperationName: "cloudflare.agents.operation.name",
     ResponseFinishReason: "cloudflare.agents.response.finish_reason",
+    RuntimeContextPrefix: "cloudflare.agents.runtime_context.",
     ToolApprovalState: "cloudflare.agents.tool.approval.state",
     ToolCount: "cloudflare.agents.tool.count",
     TurnAdmission: "cloudflare.agents.turn.admission",

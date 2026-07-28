@@ -466,8 +466,9 @@ exists:
 | `cloudflare.agents.runtime_context.{key}`                                               | Explicitly included scalar runtime context                              |
 | `cloudflare.agents.tool_context.{tool}.{key}`                                           | Explicitly included scalar context on the executed tool span            |
 | `cloudflare.agents.metadata.{key}`                                                      | Other scalar v6 telemetry metadata                                      |
-| `cloudflare.agents.turn.{request_id,trigger,admission,channel,continuation,generation}` | Think turn context                                                      |
+| `cloudflare.agents.turn.{request_id,trigger,admission,channel,continuation,generation}` | Think turn context, from v6 metadata or v7 runtime context              |
 | `cloudflare.agents.canceled`                                                            | Recognized cancellation, not a failure                                  |
+| `cloudflare.agents.span.truncated`                                                      | Span closed by its invocation ending before the work finished           |
 
 `gen_ai.response.finish_reasons` and `gen_ai.request.stop_sequences` are arrays
 in OTel. Workers' custom `Span.setAttribute` currently accepts only a string,

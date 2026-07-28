@@ -108,8 +108,7 @@ import {
   // `isStepCount`). Using it keeps Think compatible with both majors.
   stepCountIs,
   streamText,
-  tool,
-  wrapLanguageModel
+  tool
 } from "ai";
 /**
  * Callback type for the AI SDK tool-execution-finished hook, derived from
@@ -119,7 +118,7 @@ import {
 type ToolCallFinishCallback = NonNullable<
   Parameters<typeof streamText>[0]["experimental_onToolCallFinish"]
 >;
-import { createAISDKTelemetry, wrapAISDK } from "agents/observability/ai";
+import { wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
@@ -146,12 +145,13 @@ import {
   getCurrentAgent,
   isDurableObjectMemoryLimitReset,
   isPlatformTransientError,
-  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
-const agentsAISDKTelemetryBrand = Symbol.for(
-  "cloudflare.agents.ai-sdk-telemetry"
+const agentsAISDKInvocationBounded = Symbol.for(
+  "cloudflare.agents.ai-sdk.invocation-bounded"
 );
 const usesAISDKV7Telemetry = "registerTelemetry" in aiSdk;
 import type {
@@ -5528,22 +5528,6 @@ export class Think<
           : [localIntegrations]
         : (globalIntegrations ?? []))
     ];
-    if (
-      !integrations.some(
-        (integration) =>
-          typeof integration === "object" &&
-          integration !== null &&
-          agentsAISDKTelemetryBrand in integration
-      )
-    ) {
-      integrations.push(
-        createAISDKTelemetry({
-          storeMessages: this.storeMessages,
-          storeTools: this.storeTools
-        })
-      );
-    }
-
     const options: Record<string, unknown> = {
       ...settings,
       functionId:
@@ -5989,23 +5973,24 @@ export class Think<
       }) as ToolCallFinishCallback
     } satisfies Parameters<typeof streamText>[0];
 
+    const crossMajorOptions = streamTextOptions as unknown as Record<
+      PropertyKey,
+      unknown
+    >;
     if (usesAISDKV7Telemetry) {
       const { options, runtimeContext } = this._turnTelemetryV7(turnTelemetry);
-      const crossMajorOptions = streamTextOptions as unknown as Record<
-        string,
-        unknown
-      >;
       delete crossMajorOptions.experimental_telemetry;
       crossMajorOptions.telemetry = options;
       crossMajorOptions.runtimeContext = runtimeContext;
     }
+    if (admittedTurnContext.getStore()?.trigger === "ws-chat") {
+      crossMajorOptions[agentsAISDKInvocationBounded] = true;
+    }
 
-    const inferenceStreamText: typeof streamText = usesAISDKV7Telemetry
-      ? streamText
-      : wrapAISDK(
-          { streamText, wrapLanguageModel },
-          { storeMessages: this.storeMessages, storeTools: this.storeTools }
-        ).streamText;
+    const inferenceStreamText = wrapAISDK(aiSdk, {
+      storeMessages: this.storeMessages,
+      storeTools: this.storeTools
+    }).streamText;
 
     return () => {
       const result = inferenceStreamText(streamTextOptions);
@@ -7200,89 +7185,99 @@ export class Think<
   private async _runInsideAdmittedTurnBody<T>(
     spec: QueueTurnSpec<T>
   ): Promise<T> {
-    return withAgentSpan(
-      this,
-      "chat_turn",
-      "turn",
-      {
-        "cloudflare.agents.component": "think",
-        "cloudflare.agents.turn.request_id": spec.requestId,
-        "cloudflare.agents.turn.trigger": spec.trigger,
-        "cloudflare.agents.turn.admission": spec.admission,
-        "cloudflare.agents.turn.channel": spec.channel,
-        "cloudflare.agents.turn.continuation": spec.continuation,
-        "cloudflare.agents.turn.generation": spec.generation
-      },
-      (update) =>
-        admittedTurnContext.run(
+    // A turn is one unit of traced work and owns its own boundary, never that
+    // of whatever admitted it. A handler that awaits its turn ends at the same
+    // moment anyway; one that does not — an ack-and-return submit, or an
+    // auto-continuation fired from a timer — would otherwise close every span
+    // in a turn that is still running, or hand it a context already dead.
+    return withInvocationScope(
+      () =>
+        withAgentSpan(
+          this,
+          "chat_turn",
+          "turn",
           {
-            agent: this,
-            requestId: spec.requestId,
-            trigger: spec.trigger,
-            admission: spec.admission,
-            channel: spec.channel,
-            continuation: spec.continuation,
-            generation: spec.generation
+            "cloudflare.agents.component": "think",
+            "cloudflare.agents.turn.request_id": spec.requestId,
+            "cloudflare.agents.turn.trigger": spec.trigger,
+            "cloudflare.agents.turn.admission": spec.admission,
+            "cloudflare.agents.turn.channel": spec.channel,
+            "cloudflare.agents.turn.continuation": spec.continuation,
+            "cloudflare.agents.turn.generation": spec.generation
           },
-          async () => {
-            const startedAt = Date.now();
-            this._emit("chat:turn:start", {
-              requestId: spec.requestId,
-              trigger: spec.trigger,
-              admission: spec.admission,
-              ...(spec.continuation !== undefined && {
-                continuation: spec.continuation
-              }),
-              ...(spec.generation !== undefined && {
+          (update) =>
+            admittedTurnContext.run(
+              {
+                agent: this,
+                requestId: spec.requestId,
+                trigger: spec.trigger,
+                admission: spec.admission,
+                channel: spec.channel,
+                continuation: spec.continuation,
                 generation: spec.generation
-              })
-            });
+              },
+              async () => {
+                const startedAt = Date.now();
+                this._emit("chat:turn:start", {
+                  requestId: spec.requestId,
+                  trigger: spec.trigger,
+                  admission: spec.admission,
+                  ...(spec.continuation !== undefined && {
+                    continuation: spec.continuation
+                  }),
+                  ...(spec.generation !== undefined && {
+                    generation: spec.generation
+                  })
+                });
 
-            this._activeTurnReplyAttachments = [];
-            this._activeTurnReplyAttachmentsRequestId = spec.requestId;
+                this._activeTurnReplyAttachments = [];
+                this._activeTurnReplyAttachmentsRequestId = spec.requestId;
 
-            try {
-              const value = await this._withChannelContext(spec.channel, () =>
-                spec.execute()
-              );
-              const status = spec.getStatus?.() ?? "completed";
-              this._emit("chat:turn:finish", {
-                requestId: spec.requestId,
-                trigger: spec.trigger,
-                admission: spec.admission,
-                ...(spec.continuation !== undefined && {
-                  continuation: spec.continuation
-                }),
-                ...(spec.generation !== undefined && {
-                  generation: spec.generation
-                }),
-                status,
-                durationMs: Date.now() - startedAt
-              });
-              update({ "cloudflare.agents.turn.status": status });
-              return value;
-            } catch (error) {
-              const message =
-                error instanceof Error ? error.message : String(error);
-              this._emit("chat:turn:finish", {
-                requestId: spec.requestId,
-                trigger: spec.trigger,
-                admission: spec.admission,
-                ...(spec.continuation !== undefined && {
-                  continuation: spec.continuation
-                }),
-                ...(spec.generation !== undefined && {
-                  generation: spec.generation
-                }),
-                status: "error",
-                durationMs: Date.now() - startedAt,
-                error: message
-              });
-              update({ "cloudflare.agents.turn.status": "error" });
-              throw error;
-            }
-          }
-        )
+                try {
+                  const value = await this._withChannelContext(
+                    spec.channel,
+                    () => spec.execute()
+                  );
+                  const status = spec.getStatus?.() ?? "completed";
+                  this._emit("chat:turn:finish", {
+                    requestId: spec.requestId,
+                    trigger: spec.trigger,
+                    admission: spec.admission,
+                    ...(spec.continuation !== undefined && {
+                      continuation: spec.continuation
+                    }),
+                    ...(spec.generation !== undefined && {
+                      generation: spec.generation
+                    }),
+                    status,
+                    durationMs: Date.now() - startedAt
+                  });
+                  update({ "cloudflare.agents.turn.status": status });
+                  return value;
+                } catch (error) {
+                  const message =
+                    error instanceof Error ? error.message : String(error);
+                  this._emit("chat:turn:finish", {
+                    requestId: spec.requestId,
+                    trigger: spec.trigger,
+                    admission: spec.admission,
+                    ...(spec.continuation !== undefined && {
+                      continuation: spec.continuation
+                    }),
+                    ...(spec.generation !== undefined && {
+                      generation: spec.generation
+                    }),
+                    status: "error",
+                    durationMs: Date.now() - startedAt,
+                    error: message
+                  });
+                  update({ "cloudflare.agents.turn.status": "error" });
+                  throw error;
+                }
+              }
+            )
+        ),
+      { detached: true }
     );
   }
 
