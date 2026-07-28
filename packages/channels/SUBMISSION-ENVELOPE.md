@@ -1,8 +1,9 @@
 # Canonical submission envelope
 
-This document defines the smallest durable representation of an accepted
-submission. It is a protocol shape, not yet a TypeScript API, HTTP request, or
-storage schema.
+This document defines the semantics of the smallest durable representation of
+an accepted submission. The authoritative TypeScript shape is
+[`SubmissionEnvelope`](./src/submissions.ts); this document records the
+protocol rationale rather than duplicating that interface.
 
 The envelope intentionally carries only enough information to identify,
 deduplicate, inspect, and eventually deliver one logical turn. Channel-specific
@@ -10,33 +11,9 @@ normalization belongs in later roadmap milestones.
 
 ## Shape
 
-```ts
-interface SubmissionEnvelope {
-  /** Version of the persisted envelope shape. */
-  schemaVersion: 1;
-  /** Channels-owned identity of this submission. */
-  submissionId: string;
-  /** Adapter-owned identity used to deduplicate acceptance. */
-  idempotencyKey: string;
-  /** Stable name that the host application resolves to an agent. */
-  agentTarget: string;
-  /** Durable, JSON-compatible input for the agent. */
-  payload: JsonValue;
-  /** Minimal provenance for the external event. */
-  source: {
-    type: string;
-    id?: string;
-  };
-  /** RFC 3339 time at which Channels accepted the submission. */
-  createdAt: string;
-  /** Opaque input to later conversation resolution. */
-  conversationHint?: string;
-}
-```
-
-The acceptance input omits `schemaVersion`, `submissionId`, and `createdAt`.
-Channels assigns those fields as part of the atomic acceptance commit. The
-adapter supplies the remaining input fields.
+The acceptance input omits `schemaVersion`, `submissionId`, and `createdAt`
+from `SubmissionEnvelope`. Channels assigns those fields as part of the atomic
+acceptance commit. The adapter supplies the remaining input fields.
 
 ## Fields
 

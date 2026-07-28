@@ -1,0 +1,19 @@
+{
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "submission-store.worker.ts",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SUBMISSIONS",
+        "class_name": "SubmissionStorageTestObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SubmissionStorageTestObject"]
+    }
+  ]
+}

@@ -18,5 +18,8 @@
   "author": "Cloudflare Inc.",
   "license": "MIT",
   "type": "module",
-  "private": true
+  "private": true,
+  "scripts": {
+    "test": "vitest --run -c src/tests/vitest.config.ts"
+  }
 }

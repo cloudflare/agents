@@ -38,6 +38,7 @@ Goal: an inbound request can be acknowledged quickly, stored once, and eventuall
 4. **Implement durable storage for a submission**
    - Persist the envelope before returning successful acceptance.
    - Add a storage-level test proving the record survives instance restart or eviction.
+   - Implemented by [`SubmissionStore`](./src/storage/submission-store.ts), with forced-eviction coverage.
 
 5. **Implement atomic idempotent acceptance**
    - Require adapters to derive globally unique keys from provider identity and authenticated application context.
