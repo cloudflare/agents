@@ -48,14 +48,17 @@ Goal: an inbound request can be acknowledged quickly, stored once, and eventuall
 6. **Reject idempotency-key payload conflicts**
    - Reusing a key with materially different input returns a deterministic conflict.
    - Add tests for equivalent and conflicting payloads.
+   - Implemented by the payload-equivalence check in [`SubmissionStore.accept()`](./src/storage/submission-store.ts).
 
 7. **Expose the submission acceptance endpoint**
    - Validate the envelope, persist it, and return an acknowledgement without waiting for the agent.
    - Return enough information to retrieve status later.
+   - Implemented by [`createSubmissionRouter()`](./src/submission-endpoint.ts).
 
 8. **Create one logical agent-delivery record**
    - Associate exactly one turn ID and delivery record with each accepted submission.
    - Prove duplicate acceptance cannot create a second logical turn.
+   - Implemented by [`SubmissionStore.accept()`](./src/storage/submission-store.ts).
 
 9. **Implement the first agent dispatch**
    - Send the canonical envelope to the selected agent.

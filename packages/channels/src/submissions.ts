@@ -44,12 +44,23 @@ export interface SubmissionEnvelope extends SubmissionInput {
 }
 
 /** Result of atomically accepting new or previously accepted input. */
-export interface SubmissionAcceptance {
-  /** Whether this call created the submission or found an existing one. */
-  outcome: "accepted" | "duplicate";
-  /** Channels-owned identity allocated by the first successful acceptance. */
-  submissionId: string;
-}
+export type SubmissionAcceptance =
+  | {
+      /** This call created a new durable submission. */
+      outcome: "accepted";
+      /** Channels-owned identity allocated by this acceptance. */
+      submissionId: string;
+    }
+  | {
+      /** Equivalent input was previously accepted under the same key. */
+      outcome: "duplicate";
+      /** Channels-owned identity allocated by the original acceptance. */
+      submissionId: string;
+    }
+  | {
+      /** The idempotency key is already bound to materially different input. */
+      outcome: "conflict";
+    };
 
 /** Durable lifecycle state for delivery of a submission to its agent. */
 export type SubmissionState =

@@ -21,5 +21,9 @@
   "private": true,
   "scripts": {
     "test": "vitest --run -c src/tests/vitest.config.ts"
+  },
+  "dependencies": {
+    "hono": "^4.12.27",
+    "zod": "^4.4.3"
   }
 }
