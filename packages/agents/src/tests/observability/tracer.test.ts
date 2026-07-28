@@ -155,6 +155,40 @@ describe("createTracer", () => {
       expect(span?.ended).toBe(true);
     });
 
+    it("does not cut detached work short when its caller's scope is still live", async () => {
+      const tracing = new RecordingTracer();
+      const finishWork = deferred();
+      let detached: Promise<void> | undefined;
+
+      // A handler that starts work and returns without awaiting it: the work
+      // outlives the handler, so the handler's boundary is the wrong one.
+      await withInvocationScope(async () => {
+        detached = withInvocationScope(
+          async () => {
+            const span = tracing.openSpan("turn", {}, (span) => span, {
+              boundToInvocation: true
+            });
+            await finishWork.promise;
+            span.finish({ "gen_ai.usage.input_tokens": 11 });
+          },
+          { detached: true }
+        );
+      });
+
+      const span = tracing.rootSpans.find((s) => s.name === "turn");
+      expect(span?.ended).toBe(false);
+
+      finishWork.resolve();
+      await detached;
+
+      expect(span?.attributes).toMatchObject({
+        "gen_ai.usage.input_tokens": 11
+      });
+      expect(
+        span?.attributes["cloudflare.agents.span.truncated"]
+      ).toBeUndefined();
+    });
+
     it("leaves invocation-bounded spans alone outside any scope", async () => {
       const tracing = new RecordingTracer();
       const pending = deferred<string>();
