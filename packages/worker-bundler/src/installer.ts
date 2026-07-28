@@ -253,7 +253,7 @@ async function installDependenciesPython(
   const depsToInstall: Record<string, string> = {};
   depsToInstall["workers-runtime-sdk"] = "*"; // TODO: Should this always take the latest?
   for (const dep of pyprojectToml.project?.dependencies ?? []) {
-    const name = parsePythonVersionString(dep.trim())["name"];
+    const { name } = parsePythonVersionString(dep.trim());
     if (!name) continue;
 
     depsToInstall[name] = "*"; // in the future this should be a version specifier, if one was set
