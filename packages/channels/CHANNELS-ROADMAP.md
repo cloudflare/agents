@@ -21,23 +21,26 @@ A retry creates another delivery attempt, **not another turn**.
 Goal: an inbound request can be acknowledged quickly, stored once, and eventually submitted to an agent despite transient failures.
 
 1. **Write the submission invariants**
-   - Specify identifier ownership, idempotency scope, state transitions, and acknowledgement semantics.
+   - Specify identifier ownership, idempotency semantics, state transitions, and acknowledgement semantics.
    - Done when duplicate and failure scenarios have unambiguous expected outcomes.
+   - Defined in [SUBMISSION-INVARIANTS.md](./SUBMISSION-INVARIANTS.md).
 
 2. **Define the minimal canonical submission envelope**
    - Include submission ID, idempotency key, agent target, payload, source, creation time, and optional conversation hint.
    - Do not attempt to normalize every channel format yet.
+   - Defined in [SUBMISSION-ENVELOPE.md](./SUBMISSION-ENVELOPE.md).
 
 3. **Define the submission state machine**
-   - Suggested states: `accepted → pending → delivering → delivered`, plus `retrying`, `failed`, and `cancelled`.
+   - Use `pending → delivering → delivered`, plus `retrying`, `failed`, and `cancelled`; acceptance is the operation that atomically creates the initial `pending` state.
    - Define which transitions are legal and terminal.
+   - Defined in [SUBMISSION-STATE-MACHINE.md](./SUBMISSION-STATE-MACHINE.md).
 
 4. **Implement durable storage for a submission**
    - Persist the envelope before returning successful acceptance.
    - Add a storage-level test proving the record survives instance restart or eviction.
 
 5. **Implement atomic idempotent acceptance**
-   - Scope the idempotency key, for example by tenant and ingress endpoint.
+   - Require adapters to derive globally unique keys from provider identity and authenticated application context.
    - Repeated submissions with the same key and payload return the original submission ID.
 
 6. **Reject idempotency-key payload conflicts**
