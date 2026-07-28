@@ -127,6 +127,50 @@ describe("submission acceptance endpoint", () => {
     }
   });
 
+  it("exposes submission status without the payload", async () => {
+    // Arrange
+    const storeName = `endpoint-${crypto.randomUUID()}`;
+    const input = exampleSubmissionInput();
+
+    // Act
+    const accepted = await acceptanceResponse(
+      storeName,
+      submissionRequest(JSON.stringify(input))
+    );
+    const { submissionId } = (await accepted.json()) as {
+      submissionId: string;
+    };
+    const found = await acceptanceResponse(
+      storeName,
+      new Request(`https://channels.example/${submissionId}`)
+    );
+    const foundBody = (await found.json()) as Record<string, unknown>;
+    const missing = await acceptanceResponse(
+      storeName,
+      new Request("https://channels.example/sub_missing")
+    );
+    const wrongMethod = await acceptanceResponse(
+      storeName,
+      new Request(`https://channels.example/${submissionId}`, {
+        method: "DELETE"
+      })
+    );
+
+    // Assert
+    expect(found.status).toBe(200);
+    expect(foundBody).toMatchObject({
+      submissionId,
+      state: "pending",
+      attemptCount: 0,
+      turnId: expect.stringMatching(/^turn_/)
+    });
+    expect(JSON.stringify(foundBody)).not.toContain("Where is order 1234?");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "not_found" });
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.get("allow")).toBe("GET");
+  });
+
   it("reports an indeterminate outcome without exposing internal errors", async () => {
     // Arrange
     const request = submissionRequest(JSON.stringify(exampleSubmissionInput()));

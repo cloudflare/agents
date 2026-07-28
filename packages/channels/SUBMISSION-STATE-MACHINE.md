@@ -177,15 +177,20 @@ rewriting prior outcomes.
 
 ## Deferred details
 
-This state machine deliberately does not yet choose:
+This state machine deliberately does not choose:
 
-- the storage schema or whether status and delivery use separate records;
-- timestamp, error, retry-counter, and lease field shapes;
 - the transport encoding and authentication mechanism for agent
-  acknowledgement;
-- timeout values, retryable error classes, backoff, jitter, or terminal limits;
-- cancellation and replay API shapes or authorization policy;
+  acknowledgement (roadmap item 21; the in-process boundary today requires a
+  turn-bound acknowledgement per
+  [AGENT-DELIVERY-CONTRACT.md](./AGENT-DELIVERY-CONTRACT.md));
+- authorization policy for cancellation and replay (milestone 7);
 - turn execution, event, emission, and outbound delivery states.
 
-Those decisions may add metadata and internal substates, but they must not add
-externally visible transitions that contradict this lifecycle.
+Several details this document originally deferred are now decided by roadmap
+items 11–19 without adding externally visible transitions: attempt outcome
+classification and timeout handling (`AGENT-DELIVERY-CONTRACT.md`), backoff,
+jitter, lease, and terminal-limit shapes (`src/delivery-policy.ts`), and the
+store-level cancellation, status, and replay APIs
+(`src/storage/submission-store.ts`). Later decisions may add metadata and
+internal substates, but they must not add externally visible transitions that
+contradict this lifecycle.

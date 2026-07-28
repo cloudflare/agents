@@ -1,3 +1,5 @@
+import type { AgentDeliveryAttemptOutcome } from "./agent-delivery-attempts";
+
 /** A value that can be represented without loss in durable JSON storage. */
 export type JsonValue =
   | null
@@ -78,3 +80,72 @@ export interface StoredSubmission {
   /** Current durable delivery state. */
   state: SubmissionState;
 }
+
+/**
+ * The operator-facing projection of a submission's delivery progress.
+ *
+ * It deliberately excludes the payload and conversation hint so status can be
+ * inspected and returned over HTTP without exposing message content.
+ */
+export interface SubmissionStatus {
+  /** Channels-owned identity of the submission. */
+  submissionId: string;
+  /** Stable logical turn identity shared by every delivery attempt. */
+  turnId: string;
+  /** Current durable delivery state. */
+  state: SubmissionState;
+  /** Stable name that the host application resolves to an agent. */
+  agentTarget: string;
+  /** Adapter-defined source category of the inbound event. */
+  sourceType: string;
+  /** RFC 3339 time at which Channels accepted the submission. */
+  createdAt: string;
+  /** Physical delivery attempts made so far, including the active one. */
+  attemptCount: number;
+  /** Retries scheduled in the current delivery cycle. */
+  retryCount: number;
+  /** Times the submission has been manually replayed after terminal failure. */
+  replayCount: number;
+  /** RFC 3339 time before which no further attempt starts, when scheduled. */
+  nextAttemptAt?: string;
+  /** RFC 3339 expiry of the active delivery lease, while `delivering`. */
+  leaseExpiresAt?: string;
+  /** Most recent attempt's classified outcome, once one has settled. */
+  lastOutcome?: AgentDeliveryAttemptOutcome;
+  /** RFC 3339 start time of the most recent attempt. */
+  lastAttemptAt?: string;
+  /** Bounded description of why automatic delivery stopped, when `failed`. */
+  terminalError?: string;
+}
+
+/** One audited manual replay of a terminally failed submission. */
+export interface SubmissionReplay {
+  /** Channels-owned identity of this replay operation. */
+  replayId: string;
+  /** The replayed submission; its turn ID is retained. */
+  submissionId: string;
+  /** Operator or system identity that initiated the replay. */
+  requestedBy: string;
+  /** RFC 3339 time at which the replay was committed. */
+  requestedAt: string;
+}
+
+/** Result of requesting a manual replay. */
+export type SubmissionReplayResult =
+  | { outcome: "replayed"; replay: SubmissionReplay }
+  | { outcome: "not_found" }
+  | {
+      /** Only `failed` submissions can be replayed. */
+      outcome: "not_replayable";
+      state: SubmissionState;
+    };
+
+/** Result of requesting cancellation of further delivery. */
+export type SubmissionCancellationResult =
+  | { outcome: "cancelled" }
+  | { outcome: "not_found" }
+  | {
+      /** The submission had already reached a terminal state. */
+      outcome: "not_cancellable";
+      state: SubmissionState;
+    };

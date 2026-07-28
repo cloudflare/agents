@@ -2,7 +2,11 @@ import { Hono } from "hono";
 import type { Context, Env } from "hono";
 import { z } from "zod";
 import { jsonValueSchema, nonEmptyStringSchema } from "./schema-utils";
-import type { SubmissionAcceptance, SubmissionInput } from "./submissions";
+import type {
+  SubmissionAcceptance,
+  SubmissionInput,
+  SubmissionStatus
+} from "./submissions";
 
 const submissionInputSchema: z.ZodType<SubmissionInput> = z.strictObject({
   idempotencyKey: nonEmptyStringSchema,
@@ -23,6 +27,14 @@ export interface SubmissionAcceptor {
   ): SubmissionAcceptance | Promise<SubmissionAcceptance>;
 }
 
+/** Durable status capability required by the HTTP status endpoint. */
+export interface SubmissionStatusReader {
+  /** Return the delivery-progress projection of one submission. */
+  getStatus(
+    submissionId: string
+  ): SubmissionStatus | undefined | Promise<SubmissionStatus | undefined>;
+}
+
 /** Configuration for a host-mounted submission acceptance router. */
 export interface SubmissionRouterOptions<E extends Env> {
   /**
@@ -32,6 +44,14 @@ export interface SubmissionRouterOptions<E extends Env> {
   acceptor(
     context: Context<E>
   ): SubmissionAcceptor | Promise<SubmissionAcceptor>;
+  /**
+   * Resolve the durable status reader selected by authenticated host context.
+   * When provided, `GET /:submissionId` returns the submission status
+   * projection, which excludes the payload and conversation hint.
+   */
+  reader?(
+    context: Context<E>
+  ): SubmissionStatusReader | Promise<SubmissionStatusReader>;
 }
 
 /**
@@ -93,6 +113,24 @@ export function createSubmissionRouter<E extends Env>(
     context.header("Allow", "POST");
     return context.json({ error: "method_not_allowed" }, 405);
   });
+
+  const reader = options.reader?.bind(options);
+  if (reader !== undefined) {
+    router.get("/:submissionId", async (context) => {
+      const status = await (
+        await reader(context)
+      ).getStatus(context.req.param("submissionId"));
+      if (status === undefined) {
+        return context.json({ error: "not_found" }, 404);
+      }
+      return context.json(status, 200);
+    });
+
+    router.all("/:submissionId", (context) => {
+      context.header("Allow", "GET");
+      return context.json({ error: "method_not_allowed" }, 405);
+    });
+  }
 
   return router;
 }

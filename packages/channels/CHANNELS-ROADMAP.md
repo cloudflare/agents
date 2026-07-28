@@ -73,41 +73,51 @@ Goal: an inbound request can be acknowledged quickly, stored once, and eventuall
 11. **Add delivery timeouts**
     - Classify timeout separately from explicit rejection.
     - Ensure a timed-out attempt releases or expires its processing lease.
+    - Implemented by [`AgentDeliveryCoordinator`](./src/agent-delivery-coordinator.ts): a timed-out dispatch records a `timeout` outcome and releases its claim into the retry schedule.
 
 12. **Add retry classification**
     - Retry transient network errors, timeouts, and selected server errors.
     - Do not retry malformed input, authentication failures, or permanent agent rejection.
+    - Implemented by [`classifyDispatchError` and `PermanentDispatchError`](./src/retry-classification.ts); hosts can inject a custom classifier.
 
 13. **Add bounded exponential backoff**
     - Persist the next-attempt time and retry count.
     - Add jitter and make the schedule testable with an injected clock.
+    - Implemented by [`retryDelayMs`](./src/delivery-policy.ts) and [`SubmissionStore`](./src/storage/submission-store.ts), with an injected clock and jitter source.
 
 14. **Make retry scheduling durable**
     - Ensure retries still happen after the runtime is restarted or evicted.
     - Avoid relying only on in-memory timers.
+    - Implemented by [`AgentDeliveryScheduler`](./src/delivery-scheduler.ts) over `SubmissionStore.listDueSubmissions()` / `nextDeliveryEventAt()`, with forced-eviction coverage.
 
 15. **Protect dispatch with a lease**
     - Prevent concurrent workers or alarms from dispatching the same logical delivery simultaneously.
     - Define lease expiry and recovery behavior.
+    - Implemented by [`SubmissionStore.beginAgentDeliveryAttempt()`](./src/storage/submission-store.ts) and `recoverExpiredLeases()`.
 
 16. **Add agent-side deduplication guidance or contract**
     - Require agents to deduplicate using the stable turn ID.
     - Document that a lost acknowledgement can cause the same turn to be delivered again.
+    - Defined in [AGENT-DELIVERY-CONTRACT.md](./AGENT-DELIVERY-CONTRACT.md).
 
 17. **Add terminal failure and dead-letter behavior**
     - Stop after a configured attempt or age limit.
     - Preserve the submission and attempt history for inspection or replay.
+    - Implemented by the per-cycle limits in [`DeliveryPolicy`](./src/delivery-policy.ts) and [`SubmissionStore`](./src/storage/submission-store.ts).
 
 18. **Expose submission status**
     - Return current state, timestamps, attempt count, and terminal error without exposing sensitive payloads unnecessarily.
+    - Implemented by [`SubmissionStore.getStatus()`](./src/storage/submission-store.ts) and the `GET /:submissionId` route in [`createSubmissionRouter()`](./src/submission-endpoint.ts).
 
 19. **Add manual replay**
     - Permit an operator to retry a terminal delivery while retaining the same logical turn ID.
     - Record who or what initiated the replay.
+    - Implemented by [`SubmissionStore.replay()`](./src/storage/submission-store.ts) with an audited replay ledger.
 
 20. **Add an end-to-end fault test**
     - Simulate acceptance, dispatch failure, restart, retry, successful agent receipt, and duplicate inbound submission.
     - This is the completion gate for durable submission.
+    - Implemented by [`end-to-end-fault.test.ts`](./src/tests/end-to-end-fault.test.ts).
 
 At this point, Channels has its first meaningful product slice: **durable acceptance plus idempotent, at-least-once submission to an agent**.
 

@@ -1,4 +1,7 @@
-export { AgentDeliveryCoordinator } from "./agent-delivery-coordinator";
+export {
+  AgentDeliveryCoordinator,
+  type AgentDeliveryCoordinatorOptions
+} from "./agent-delivery-coordinator";
 export {
   AGENT_DELIVERY_ERROR_DESCRIPTION_MAX_LENGTH,
   type AgentDeliveryAttempt,
@@ -6,29 +9,51 @@ export {
   type AgentDeliveryAttemptOutcome,
   type ClaimedAgentDeliveryAttempt
 } from "./agent-delivery-attempts";
-// TODO: Remove direct dispatch access once the coordinator owns leases and retries.
 export {
   AgentDispatcher,
   type AgentTargetResolver,
+  type AgentTurnAcknowledgement,
   type AgentTurnReceiver,
   type AgentTurnRequest
 } from "./agent-dispatch";
 export type { AgentDelivery } from "./agent-deliveries";
 export {
+  DEFAULT_DELIVERY_POLICY,
+  type DeliveryPolicy,
+  retryDelayMs
+} from "./delivery-policy";
+export {
+  AgentDeliveryScheduler,
+  type AgentDeliverySchedulerOptions,
+  type DeliveryAlarms
+} from "./delivery-scheduler";
+export {
+  PermanentDispatchError,
+  classifyDispatchError,
+  type DispatchErrorClass,
+  type DispatchErrorClassifier
+} from "./retry-classification";
+export {
   createSubmissionRouter,
   type SubmissionAcceptor,
-  type SubmissionRouterOptions
+  type SubmissionRouterOptions,
+  type SubmissionStatusReader
 } from "./submission-endpoint";
 export {
   SubmissionStore,
-  type SubmissionStorage
+  type SubmissionStorage,
+  type SubmissionStoreOptions
 } from "./storage/submission-store";
 export type {
   JsonValue,
   StoredSubmission,
   SubmissionAcceptance,
+  SubmissionCancellationResult,
   SubmissionEnvelope,
   SubmissionInput,
+  SubmissionReplay,
+  SubmissionReplayResult,
   SubmissionSource,
-  SubmissionState
+  SubmissionState,
+  SubmissionStatus
 } from "./submissions";

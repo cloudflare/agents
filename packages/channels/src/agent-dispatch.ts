@@ -9,10 +9,33 @@ export interface AgentTurnRequest {
   turnId: string;
 }
 
+/**
+ * A positive, turn-bound acknowledgement that the agent has durably accepted
+ * responsibility for the turn.
+ *
+ * Echoing the turn ID binds the acknowledgement to the delivered turn, so an
+ * unrelated success response cannot be mistaken for delivery.
+ *
+ * @see {@link ../AGENT-DELIVERY-CONTRACT.md}
+ */
+export interface AgentTurnAcknowledgement {
+  /** Must equal the turn ID of the delivered request. */
+  turnId: string;
+}
+
 /** Agent-facing boundary capable of receiving a logical turn. */
 export interface AgentTurnReceiver {
-  /** Send one turn to the selected agent. */
-  receiveTurn(request: AgentTurnRequest): Promise<void>;
+  /**
+   * Receive one turn and acknowledge responsibility for it.
+   *
+   * Delivery is at least once: the same turn ID may arrive again if a prior
+   * acknowledgement was lost, so receivers must deduplicate on the turn ID.
+   * Throw a {@link PermanentDispatchError | permanently classified error} to
+   * stop automatic retries; any other thrown error is retried.
+   */
+  receiveTurn(
+    request: AgentTurnRequest
+  ): AgentTurnAcknowledgement | Promise<AgentTurnAcknowledgement>;
 }
 
 /** Resolves an opaque submission target using host-application configuration. */
@@ -31,15 +54,14 @@ export class AgentDispatcher {
   /**
    * Sends the canonical envelope together with its stable turn ID.
    *
-   * This transport boundary does not interpret a successful return as durable
-   * agent acknowledgement or mutate submission state. Attempt recording,
-   * acknowledgement, and state transitions are owned by later delivery
-   * milestones.
+   * This transport boundary returns the receiver's raw acknowledgement without
+   * validating or recording it. Attempt recording, acknowledgement validation,
+   * and state transitions belong to the delivery coordinator and store.
    */
   async dispatch(
     submission: SubmissionEnvelope,
     delivery: AgentDelivery
-  ): Promise<void> {
+  ): Promise<AgentTurnAcknowledgement> {
     if (delivery.submissionId !== submission.submissionId) {
       throw new Error(
         `Agent delivery for ${delivery.submissionId} cannot dispatch submission ${submission.submissionId}`
@@ -47,6 +69,6 @@ export class AgentDispatcher {
     }
 
     const receiver = await this.#resolveTarget(submission.agentTarget);
-    await receiver.receiveTurn({ submission, turnId: delivery.turnId });
+    return receiver.receiveTurn({ submission, turnId: delivery.turnId });
   }
 }

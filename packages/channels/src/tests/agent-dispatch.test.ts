@@ -28,13 +28,14 @@ describe("AgentDispatcher", () => {
     const resolveTarget = vi.fn(() => ({
       async receiveTurn(request: AgentTurnRequest) {
         received.push(request);
+        return { turnId: request.turnId };
       }
     }));
     const dispatcher = new AgentDispatcher(resolveTarget);
 
     // Act
-    await dispatcher.dispatch(submission, delivery);
-    await dispatcher.dispatch(submission, delivery);
+    const firstAck = await dispatcher.dispatch(submission, delivery);
+    const secondAck = await dispatcher.dispatch(submission, delivery);
 
     // Assert
     expect(resolveTarget).toHaveBeenNthCalledWith(1, submission.agentTarget);
@@ -43,6 +44,8 @@ describe("AgentDispatcher", () => {
       { submission, turnId: delivery.turnId },
       { submission, turnId: delivery.turnId }
     ]);
+    expect(firstAck).toEqual({ turnId: delivery.turnId });
+    expect(secondAck).toEqual({ turnId: delivery.turnId });
   });
 
   it("rejects a delivery belonging to another submission", async () => {

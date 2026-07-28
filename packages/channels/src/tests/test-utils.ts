@@ -1,7 +1,10 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { createSubmissionRouter } from "../submission-endpoint";
-import { SubmissionStore } from "../storage/submission-store";
+import {
+  SubmissionStore,
+  type SubmissionStoreOptions
+} from "../storage/submission-store";
 import type { SubmissionInput } from "../submissions";
 import type { SubmissionStorageTestObject } from "./submission-store.worker";
 
@@ -11,7 +14,8 @@ interface TestEnv {
 
 export async function acceptanceResponse(
   storeName: string,
-  request: Request
+  request: Request,
+  storeOptions: SubmissionStoreOptions = {}
 ): Promise<Response> {
   const stub = submissionStoreStub(storeName);
   const router = createSubmissionRouter({
@@ -19,7 +23,18 @@ export async function acceptanceResponse(
       return {
         accept(input) {
           return runInDurableObject(stub, (_instance, state) =>
-            new SubmissionStore(state.storage).accept(input)
+            new SubmissionStore(state.storage, storeOptions).accept(input)
+          );
+        }
+      };
+    },
+    reader() {
+      return {
+        getStatus(submissionId) {
+          return runInDurableObject(stub, (_instance, state) =>
+            new SubmissionStore(state.storage, storeOptions).getStatus(
+              submissionId
+            )
           );
         }
       };
