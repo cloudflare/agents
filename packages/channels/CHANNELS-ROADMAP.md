@@ -68,6 +68,7 @@ Goal: an inbound request can be acknowledged quickly, stored once, and eventuall
 10. **Record individual delivery attempts**
     - Store attempt number, start and end time, outcome, and a bounded error description.
     - Keep attempts separate from the logical delivery record.
+    - Implemented by [`AgentDeliveryCoordinator`](./src/agent-delivery-coordinator.ts) and [`SubmissionStore`](./src/storage/submission-store.ts).
 
 11. **Add delivery timeouts**
     - Classify timeout separately from explicit rejection.

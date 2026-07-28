@@ -1,4 +1,12 @@
-// TODO: Keep dispatch behind the durable attempt coordinator once it exists.
+export { AgentDeliveryCoordinator } from "./agent-delivery-coordinator";
+export {
+  AGENT_DELIVERY_ERROR_DESCRIPTION_MAX_LENGTH,
+  type AgentDeliveryAttempt,
+  type AgentDeliveryAttemptCompletion,
+  type AgentDeliveryAttemptOutcome,
+  type ClaimedAgentDeliveryAttempt
+} from "./agent-delivery-attempts";
+// TODO: Remove direct dispatch access once the coordinator owns leases and retries.
 export {
   AgentDispatcher,
   type AgentTargetResolver,
