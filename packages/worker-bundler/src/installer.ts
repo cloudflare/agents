@@ -431,49 +431,6 @@ async function installPythonPackage(
 
       // Putting the logic for retrieving a wheel from PyPI and the Pyodide index into their own functions here
       // This is so either one can be used as a fallback for the other in a (relatively) tidy way
-      const retrieveFromPyPI = async (
-        name: string,
-        registry: string
-      ): Promise<[Response, PypiSimpleFile, string, string[]] | null> => {
-        const metadata = await fetchPythonPackageMetadata(name, registry);
-        const version = metadata.version;
-        const wheel = metadata.wheel;
-
-        const response = await fetchWithTimeout(
-          wheel.url,
-          {},
-          DEFAULT_TIMEOUT_MS * 2
-        );
-
-        if (!response.ok) {
-          return null;
-        }
-
-        return [response, wheel, version];
-      };
-
-      const retrieveFromPyodide = async (
-        name: string
-      ): Promise<[Response, PypiSimpleFile, string, string[]] | null> => {
-        const pyodideWheel = getPyodideWheel(name);
-        if (!pyodideWheel) {
-          return null;
-        }
-
-        const response = await fetchWithTimeout(
-          pyodideWheel.url,
-          {},
-          DEFAULT_TIMEOUT_MS * 2
-        );
-        if (!response.ok) {
-          return null;
-        }
-
-        const version = pyodideWheel.package.version;
-        const wheel = pyodideWheel.file;
-        return [response, wheel, version];
-      };
-
       // Try either PyPI or the Pyodide index, then fall back to the other one if that one fails
       if (preferPyodideIndex) {
         let registryResult = await retrieveFromPyodide(name);
@@ -546,6 +503,49 @@ async function installPythonPackage(
     inProgress.delete(name);
   }
 }
+
+async function retrieveFromPyPI (
+  name: string,
+  registry: string
+): Promise<[Response, PypiSimpleFile, string, string[]] | null> {
+  const metadata = await fetchPythonPackageMetadata(name, registry);
+  const version = metadata.version;
+  const wheel = metadata.wheel;
+
+  const response = await fetchWithTimeout(
+    wheel.url,
+    {},
+    DEFAULT_TIMEOUT_MS * 2
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return [response, wheel, version];
+}
+
+async function retrieveFromPyodide (
+  name: string
+): Promise<[Response, PypiSimpleFile, string, string[]] | null> {
+  const pyodideWheel = getPyodideWheel(name);
+  if (!pyodideWheel) {
+    return null;
+  }
+
+  const response = await fetchWithTimeout(
+    pyodideWheel.url,
+    {},
+    DEFAULT_TIMEOUT_MS * 2
+  );
+  if (!response.ok) {
+    return null;
+  }
+
+  const version = pyodideWheel.package.version;
+  const wheel = pyodideWheel.file;
+  return [response, wheel, version];
+};
 
 /**
  * Strip a Python wheel down to just the package contents.
