@@ -565,6 +565,56 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     expect(tracing.rootSpans[0]?.ended).toBe(true);
   });
 
+  it("keeps the usage a failed turn already reported", async () => {
+    const tracing = new RecordingTracer();
+    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    // The step reports its usage, then the stream fails. Those tokens were
+    // really spent, so reporting nothing for the turn is worse than reporting
+    // the partial truth.
+    const parts: ProviderStreamPart[] = [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "text-1" },
+      { type: "text-delta", delta: "partial", id: "text-1" },
+      { type: "text-end", id: "text-1" },
+      {
+        type: "finish",
+        finishReason: { raw: "stop", unified: "stop" },
+        usage: boundaryUsage
+      },
+      { type: "error", error: new RangeError("after the tokens were spent") }
+    ];
+    const model = new MockLanguageModelV3({
+      modelId: "mock-model",
+      provider: "mock-provider",
+      doStream: async () => ({
+        stream: convertArrayToReadableStream(parts)
+      })
+    });
+
+    const result = wrapped.streamText({
+      model,
+      onError: () => {
+        // Swallow the SDK's default console logging for the expected error.
+      },
+      prompt: "fail after a step"
+    });
+    for await (const _part of result.fullStream) {
+      // Drain.
+    }
+
+    for (const span of [
+      spanFor(tracing, "invoke_agent"),
+      spanFor(tracing, "chat")
+    ]) {
+      expect(span?.attributes).toMatchObject({
+        "cloudflare.agents.usage.total_tokens": 5,
+        "error.type": "RangeError",
+        "gen_ai.usage.input_tokens": 3,
+        "gen_ai.usage.output_tokens": 2
+      });
+    }
+  });
+
   it("marks the root span errored when the provider emits an in-band error part", async () => {
     const tracing = new RecordingTracer();
     const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });

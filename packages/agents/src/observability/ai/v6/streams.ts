@@ -48,7 +48,7 @@ export function finishWhenStreamCompletes(
           )
         );
       },
-      onError: (cause, observedAIGatewayLogId) => {
+      onError: (cause, observedAIGatewayLogId, observed) => {
         if (options.includeAIGatewayLog) {
           writeSpanAttributes(
             span,
@@ -56,6 +56,22 @@ export function finishWhenStreamCompletes(
               observedAIGatewayLogId ??
                 extractAIGatewayLogId(cause) ??
                 options.aiGatewayLogId
+            )
+          );
+        }
+        // A turn that fails or is cancelled part-way still spent the tokens it
+        // already reported. `fail` records only the classification, so write
+        // what the stream did tell us first — otherwise the turn reads as
+        // having used nothing at all.
+        if (observed !== undefined) {
+          writeSpanAttributes(
+            span,
+            finishAttributesFromStreamSummary(
+              observed,
+              options.includeResponse === true,
+              options.includeAIGatewayLog === true,
+              options.aiGatewayLogId,
+              options.storeMessages === true
             )
           );
         }
@@ -98,7 +114,8 @@ function patchStreamFields(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (
       cause: unknown,
-      aiGatewayLogId: string | undefined
+      aiGatewayLogId: string | undefined,
+      observed?: StreamSummary
     ) => void;
   },
   startedAtMs: number | undefined,
@@ -126,13 +143,14 @@ function patchStreamFields(
 
   const errorOnce = (
     cause: unknown,
-    observedAIGatewayLogId: string | undefined
+    observedAIGatewayLogId: string | undefined,
+    observed?: StreamSummary
   ) => {
     if (closed) {
       return;
     }
     closed = true;
-    hooks.onError(cause, observedAIGatewayLogId);
+    hooks.onError(cause, observedAIGatewayLogId, observed);
   };
 
   // Instrumentation must fail open: if the SDK's private stream fields change
@@ -245,7 +263,8 @@ function wrapReadableStream(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (
       cause: unknown,
-      aiGatewayLogId: string | undefined
+      aiGatewayLogId: string | undefined,
+      observed?: StreamSummary
     ) => void;
   },
   startedAtMs: number | undefined,
@@ -325,7 +344,8 @@ function wrapAsyncIterable(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (
       cause: unknown,
-      aiGatewayLogId: string | undefined
+      aiGatewayLogId: string | undefined,
+      observed?: StreamSummary
     ) => void;
   },
   startedAtMs: number | undefined,
@@ -362,7 +382,8 @@ function createStreamState(
     readonly onComplete: (summary: StreamSummary | undefined) => void;
     readonly onError: (
       cause: unknown,
-      aiGatewayLogId: string | undefined
+      aiGatewayLogId: string | undefined,
+      observed?: StreamSummary
     ) => void;
   },
   startedAtMs: number | undefined,
@@ -386,9 +407,24 @@ function createStreamState(
   let firstChunkAtMs: number | undefined;
   const output = createStreamMessages();
 
+  /** What the stream reported before it stopped, complete or not. */
+  const observedSummary = (): StreamSummary =>
+    streamSummaryFromParts({
+      aiGatewayLogId,
+      finishReason,
+      outputMessages: storeMessages ? output.messages(finishReason) : undefined,
+      response,
+      timeToFirstChunkSeconds:
+        firstChunkAtMs === undefined || startedAtMs === undefined
+          ? undefined
+          : (firstChunkAtMs - startedAtMs) / 1000,
+      toolCallCount,
+      usage
+    });
+
   const settleObserved = (): boolean => {
     if (observedError) {
-      hooks.onError(observedError.cause, aiGatewayLogId);
+      hooks.onError(observedError.cause, aiGatewayLogId, observedSummary());
       return true;
     }
 
@@ -397,7 +433,7 @@ function createStreamState(
       // completes the stream normally — it never rejects with an AbortError.
       // Surface a structurally AbortError-shaped cause so the tracer
       // classifies the span as canceled instead of a false success.
-      hooks.onError({ name: "AbortError" }, aiGatewayLogId);
+      hooks.onError({ name: "AbortError" }, aiGatewayLogId, observedSummary());
       return true;
     }
 
