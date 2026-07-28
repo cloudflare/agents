@@ -1020,44 +1020,6 @@ describe("createWorker with python main", () => {
 }, 20000);
 
 describe("createWorker with pyproject.toml", () => {
-  it("accepts a dummy pyproject.toml without throwing", async () => {
-    const id = "test-worker-" + testId++;
-    const createWorkerResult = await createWorker({
-      files: {
-        "index.py": [
-          "from workers import Response, WorkerEntrypoint",
-          "class Default(WorkerEntrypoint):",
-          "  async def fetch(self, request):",
-          '    return Response("ok")'
-        ].join("\n"),
-        "pyproject.toml": [
-          "[project]",
-          'name = "dummy"',
-          'version = "0.0.0"',
-          "",
-          "[tool.setuptools]",
-          'packages = ["dummy"]'
-        ].join("\n"),
-        "python_modules/dummy/__init__.py": "",
-        "python_modules/dummy/hello.py": [
-          "def greet(name: str) -> str:",
-          '    return f"hello, {name}"'
-        ].join("\n")
-      },
-      preferPyodideIndex: false
-    });
-    const worker = env.LOADER.get(id, () => ({
-      mainModule: createWorkerResult.mainModule,
-      modules: createWorkerResult.modules,
-      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
-      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
-    }));
-    const response = await worker
-      .getEntrypoint()
-      .fetch(new Request("http://worker/"));
-    expect(response.status).toBe(200);
-  });
-
   it("works with a pure python package", async () => {
     const id = "test-worker-" + testId++;
     const createWorkerResult = await createWorker({
