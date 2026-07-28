@@ -4,8 +4,8 @@
 v2 conformance fixture:
 
 - repository: `https://github.com/modelcontextprotocol/typescript-sdk`
-- package tag: `@modelcontextprotocol/server@2.0.0-beta.5`
-- commit: `1e1392e3f91583884fe82a0b4b91335875c3fba6`
+- package tag: `@modelcontextprotocol/server@2.0.0`
+- commit: `cc4b41617ce3601b1290d67216ea0b194a3cd9ac`
 - source: `test/conformance/src/everythingServer.ts`
 - source SHA-256: `3a94417774fa20b17971e8162f9865b1cefd2650c7d88fdcd17f971d91213852`
 

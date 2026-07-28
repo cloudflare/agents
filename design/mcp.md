@@ -27,7 +27,7 @@ import { createMcpHandler } from "agents/mcp/server";
 
 Agents does not re-export `McpServer`. Keeping the ownership boundary explicit has three benefits:
 
-1. applications declare and can audit the exact SDK beta they use;
+1. applications declare and can audit the exact SDK release they use;
 2. upstream SDK documentation and types map directly to the import;
 3. multiple installed SDK copies are less likely to be hidden behind an Agents alias.
 
@@ -39,14 +39,14 @@ The tradeoff is one additional import and direct peer installation. That is pref
 
 - `server.ts` — public, tree-shakeable entry.
 - `handler-stateless.ts` — Worker route, CORS, Host/Origin policy, auth context, and dispatch between Stateless and Legacy compatibility requests.
-- `handler-legacy-compat.ts` — per-request SDK v2 transport for Legacy compatibility, including fail-fast reverse requests, close tracking, and Cloudflare SSE keepalives.
+- `handler-legacy-compat.ts` — per-request SDK v2 transport for Legacy compatibility, including fail-fast reverse requests and close tracking. SSE keepalives are owned by the SDK transport.
 
 ### Legacy
 
 - `legacy-agent.ts` — deprecated, feature-frozen `McpAgent` implementation.
 - `handler-legacy.ts` — explicit SDK v1 handler.
-- `worker-transport.ts` — SDK v1 Worker transport with session persistence and SSE keepalives.
-- `transport.ts` and `event-store.ts` — sessionful McpAgent transport and replay support.
+- `worker-transport.ts` — SDK v1 Worker transport with session persistence; SDK v1 owns its SSE keepalives.
+- `transport.ts` and `event-store.ts` — sessionful McpAgent transport and replay support. The WebSocket-to-SSE bridge retains the only Agents-owned MCP keepalive timer.
 
 ### Compatibility
 

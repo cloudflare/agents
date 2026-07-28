@@ -13,13 +13,9 @@
  *     survive DO hibernation / eviction. On the first request after a cold
  *     start, the saved initialize params are replayed through the `Server`
  *     so client capabilities are re-established.
- *  3. **SSE keepalive** — SSE responses are wrapped in a TransformStream that
- *     injects a `: keepalive\n\n` comment frame every 25s so the Cloudflare
- *     edge ~5min idle-stream watchdog doesn't kill long-running tool calls.
- *     Disabled on the standalone GET stream when an `eventStore` is
- *     configured — clients recover idle drops via `Last-Event-ID` instead.
- *     POST response streams always keepalive (no resumption path during a
- *     mid-flight tool call). See cloudflare/agents#1583.
+ *  3. **SSE keepalive** — delegated to the SDK transport, which writes SSE
+ *     comment frames and owns timer cleanup. Configure the cadence with the
+ *     inherited `keepAliveMs` option.
  *
  * Stateless handlers do not import this module. Everything else (session
  * validation, SSE streaming, protocol-version
@@ -42,7 +38,6 @@ import {
   type RequestId
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CORSOptions } from "./types";
-import { KEEPALIVE_FRAME, KEEPALIVE_INTERVAL_MS } from "./sse-keepalive";
 
 /** Sentinel id used when replaying the persisted initialize request. */
 const RESTORE_REQUEST_ID = "__worker_transport_restore__";
@@ -105,22 +100,6 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
   ) => void | Promise<void>;
   private _bridgeInstalled = false;
   /**
-   * Tracks keepalive interval cleanups so we can fire them eagerly when the
-   * SDK closes the underlying SSE stream via `closeSSEStream(requestId)` or
-   * `closeStandaloneSSEStream()`. Keyed by the JSON-RPC request id that
-   * triggered the stream, or the sentinel for the standalone GET stream.
-   */
-  private readonly _keepaliveCleanups = new Map<
-    RequestId | "_standalone",
-    () => void
-  >();
-  /**
-   * Most recent JSON-RPC request id seen on an incoming POST. Used to key
-   * keepalive cleanups when the response is an SSE stream tied to that
-   * request (so `closeSSEStream(id)` can find and clear the interval).
-   */
-  private _pendingRequestId?: RequestId;
-  /**
    * Request ids whose SSE stream was deliberately torn down via
    * `closeSSEStream`. The SDK's `send()` throws "No connection established"
    * when a request id has no stream — a race that surfaces whenever the
@@ -165,8 +144,7 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
   /**
    * Top-level request entry point. Handles CORS preflight, restores any
    * persisted state on first invocation, then delegates to the SDK transport
-   * and finally appends CORS headers + keepalive to whatever response comes
-   * back.
+   * and finally appends CORS headers to whatever response comes back.
    */
   override async handleRequest(
     request: Request,
@@ -183,11 +161,8 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
 
     // Capture the initialize params before delegating, so we can persist
     // them alongside the session id that the SDK assigns inside
-    // handleRequest. Also captures the JSON-RPC request id of any POSTed
-    // request so we can key the keepalive cleanup to it.
+    // handleRequest.
     await this.captureInitializeParams(request, options);
-    const requestIdForKeepalive =
-      request.method === "GET" ? "_standalone" : this._pendingRequestId;
 
     const response = await super.handleRequest(request, options);
 
@@ -199,12 +174,7 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
     // neither the pre-refactor behaviour (one write at init) nor the intent of
     // the storage adapter.
 
-    return this.withCorsHeaders(
-      this.withKeepalive(
-        this.normalizeAllowHeader(response),
-        requestIdForKeepalive
-      )
-    );
+    return this.withCorsHeaders(this.normalizeAllowHeader(response));
   }
 
   /**
@@ -226,23 +196,11 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
   }
 
   override closeSSEStream(requestId: RequestId): void {
-    this._keepaliveCleanups.get(requestId)?.();
-    this._keepaliveCleanups.delete(requestId);
     this._closedRequestIds.add(requestId);
     super.closeSSEStream(requestId);
   }
 
-  override closeStandaloneSSEStream(): void {
-    this._keepaliveCleanups.get("_standalone")?.();
-    this._keepaliveCleanups.delete("_standalone");
-    super.closeStandaloneSSEStream();
-  }
-
   override async close(): Promise<void> {
-    for (const cleanup of Array.from(this._keepaliveCleanups.values())) {
-      cleanup();
-    }
-    this._keepaliveCleanups.clear();
     this._closedRequestIds.clear();
     await super.close();
   }
@@ -281,99 +239,6 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
       return;
     }
     await super.send(message, options);
-  }
-
-  // ── SSE keepalive ──────────────────────────────────────────────────────
-
-  /**
-   * If the response is an SSE stream, tee the body through a TransformStream
-   * that injects a `: keepalive\n\n` comment frame every 25s. The interval
-   * is cleared when the wrapped stream closes — which happens both when the
-   * SDK ends the underlying stream naturally and when `closeSSEStream` is
-   * called.
-   *
-   * Keepalive policy:
-   *   - POST response streams (`key` is a request id): always keepalive.
-   *     In-progress tool calls have no recovery path — if the stream drops
-   *     mid-execution the result is lost — so we keep it under the
-   *     Cloudflare edge ~5min idle watchdog.
-   *   - Standalone GET stream (`key === "_standalone"`): keepalive only
-   *     when no `eventStore` is configured. When resumability is enabled,
-   *     clients reconnect with `Last-Event-ID` after an idle drop, so we
-   *     skip the keepalive and let the DO hibernate.
-   *
-   * Uses the shared `sse-keepalive` constants so both this wrapper and
-   * `McpAgent.serve()` write identical frames at the same cadence.
-   * See cloudflare/agents#1583.
-   */
-  private withKeepalive(
-    response: Response,
-    key: RequestId | "_standalone" | undefined
-  ): Response {
-    const contentType = response.headers.get("Content-Type") ?? "";
-    if (!contentType.includes("text/event-stream") || !response.body) {
-      return response;
-    }
-
-    // Skip keepalive on the standalone GET stream when an event store is
-    // configured — the recovery path is Last-Event-ID reconnects, not
-    // bytes-on-the-wire.
-    if (key === "_standalone" && this.eventStoreConfigured()) {
-      return response;
-    }
-
-    const encoder = new TextEncoder();
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-    let controllerRef: TransformStreamDefaultController<Uint8Array> | undefined;
-
-    const clear = () => {
-      if (intervalId !== undefined) {
-        clearInterval(intervalId);
-        intervalId = undefined;
-      }
-      if (key !== undefined) this._keepaliveCleanups.delete(key);
-    };
-
-    const transform = new TransformStream<Uint8Array, Uint8Array>({
-      start: (controller) => {
-        controllerRef = controller;
-        intervalId = setInterval(() => {
-          try {
-            controllerRef?.enqueue(encoder.encode(KEEPALIVE_FRAME));
-          } catch {
-            clear();
-          }
-        }, KEEPALIVE_INTERVAL_MS);
-        if (key !== undefined) this._keepaliveCleanups.set(key, clear);
-      },
-      transform(chunk, controller) {
-        controller.enqueue(chunk);
-      },
-      flush() {
-        clear();
-      },
-      cancel() {
-        clear();
-      }
-    });
-
-    const piped = response.body.pipeThrough(transform);
-    return new Response(piped, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers
-    });
-  }
-
-  /**
-   * Does the SDK transport have an `eventStore`? Reaches into the SDK's
-   * private field because the option isn't surfaced on the public API —
-   * we only need a yes/no for keepalive policy.
-   */
-  private eventStoreConfigured(): boolean {
-    return (
-      (this as unknown as { _eventStore?: unknown })._eventStore !== undefined
-    );
   }
 
   // ── CORS ───────────────────────────────────────────────────────────────
@@ -428,7 +293,6 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
     request: Request,
     handleOptions?: { parsedBody?: unknown }
   ): Promise<void> {
-    this._pendingRequestId = undefined;
     if (request.method !== "POST") return;
     try {
       const parsed =
@@ -444,19 +308,6 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
           clientInfo: init.params.clientInfo,
           protocolVersion: init.params.protocolVersion
         };
-      }
-      // Record the first JSON-RPC request id so we can key keepalive cleanup
-      // to it. Batch requests share a single SSE stream in the SDK, so we
-      // pick the first request id we see. Eager cleanup via `closeSSEStream`
-      // only matches that first id; closing any other id in the batch tears
-      // down the same shared stream, and the keepalive interval is cleared by
-      // the TransformStream's flush/cancel when that stream actually closes.
-      const firstRequest = messages.find(
-        (m): m is JSONRPCMessage & { id: RequestId } =>
-          typeof m === "object" && m !== null && "id" in m && "method" in m
-      );
-      if (firstRequest) {
-        this._pendingRequestId = firstRequest.id;
       }
     } catch {
       // Body wasn't JSON or already consumed — the SDK transport will

@@ -19,7 +19,7 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 The simplest way to create an MCP server. Install the exact SDK v2 server peer, then use the isolated server entry point so legacy Agents transports and MCP clients stay out of your Worker bundle:
 
 ```sh
-pnpm add agents @modelcontextprotocol/server@2.0.0-beta.5 zod
+pnpm add agents @modelcontextprotocol/server@2.0.0 zod
 ```
 
 ```typescript

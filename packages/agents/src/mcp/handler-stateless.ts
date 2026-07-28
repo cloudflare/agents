@@ -176,7 +176,10 @@ export function createStatelessMcpHandler(
   });
   const legacyCompatibilityHandler =
     legacy === "stateless"
-      ? createLegacyCompatibilityRequestHandler(factory, sdkOptions.onerror)
+      ? createLegacyCompatibilityRequestHandler(factory, {
+          keepAliveMs: sdkOptions.keepAliveMs,
+          onerror: sdkOptions.onerror
+        })
       : undefined;
 
   const serve = async (

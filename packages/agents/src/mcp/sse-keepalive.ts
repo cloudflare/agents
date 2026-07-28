@@ -1,21 +1,14 @@
 /**
- * Shared SSE keepalive utility for MCP transports.
+ * SSE keepalive for the retained McpAgent WebSocket-to-SSE bridge.
  *
- * Cloudflare's edge closes idle SSE responses after ~5 minutes. Writers
- * that may sit silent for that long (long-running tool calls, idle
- * standalone GET streams) arm a keepalive to keep the response under the
- * watchdog.
+ * SDK-backed HTTP transports own their keepalive timers. This helper remains
+ * only for the custom bridge, where long-running POST tool calls can otherwise
+ * sit silent until Cloudflare's edge closes the idle stream.
  *
  * See cloudflare/agents#1583.
  */
 
-/** Interval between SSE keepalive comment frames, in ms.
- *
- * The WHATWG SSE spec recommends a comment line every "15 seconds or so"
- * (html.spec.whatwg.org §9.2.7). 25s gives comfortable headroom below
- * both the ~30s post-handler background-work cancellation window on
- * Workers and the ~5min Cloudflare edge idle-stream watchdog.
- */
+/** Interval between bridge SSE keepalive comment frames, in ms. */
 export const KEEPALIVE_INTERVAL_MS = 25_000;
 
 /** SSE comment frame the parser drops before any event dispatch. */

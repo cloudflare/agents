@@ -82,6 +82,35 @@ function createServer() {
   return new McpServer({ name: "test", version: "1.0.0" });
 }
 
+function createHangingServer() {
+  let releaseTool: (() => void) | undefined;
+  const toolReleased = new Promise<void>((resolve) => {
+    releaseTool = resolve;
+  });
+  const server = createServer();
+  server.registerTool("hang", { inputSchema: {} }, async () => {
+    await toolReleased;
+    return { content: [{ type: "text" as const, text: "done" }] };
+  });
+  return {
+    release: () => releaseTool?.(),
+    server
+  };
+}
+
+function requireBody(response: Response): ReadableStream<Uint8Array> {
+  if (!response.body) throw new Error("Expected an SSE response body");
+  return response.body;
+}
+
+type KeepaliveLane = "modern" | "legacy";
+
+function keepaliveRequest(lane: KeepaliveLane): Request {
+  return lane === "modern"
+    ? statelessRequest("tools/call", { name: "hang", arguments: {} })
+    : legacyToolRequest("hang");
+}
+
 describe("createMcpHandler SDK v2", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -191,62 +220,76 @@ describe("createMcpHandler SDK v2", () => {
     expect(body).toContain("sessionful transport");
   });
 
-  it("keeps long-running Legacy compatibility POST streams alive", async () => {
-    let releaseTool!: () => void;
-    const toolReleased = new Promise<void>((resolve) => {
-      releaseTool = resolve;
-    });
-    const handler = createMcpHandler(() => {
-      const server = createServer();
-      server.registerTool("hang", { inputSchema: {} }, async () => {
-        await toolReleased;
-        return { content: [{ type: "text" as const, text: "done" }] };
+  it.each<KeepaliveLane>(["modern", "legacy"])(
+    "delegates one %s SSE keepalive to SDK v2",
+    async (lane) => {
+      vi.useFakeTimers();
+      const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+      const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+      const { release, server } = createHangingServer();
+      const handler = createMcpHandler(() => server, {
+        keepAliveMs: 7_000,
+        responseMode: "sse"
       });
-      return server;
-    });
 
-    vi.useFakeTimers();
-    const response = await handler.fetch(legacyToolRequest("hang"));
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffered = "";
-    const drain = (async () => {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffered += decoder.decode(value, { stream: true });
-      }
-    })();
+      const response = await handler.fetch(keepaliveRequest(lane));
+      const keepaliveCall = setIntervalSpy.mock.calls.findIndex(
+        (call) => call[1] === 7_000
+      );
+      expect(keepaliveCall).toBeGreaterThanOrEqual(0);
+      expect(
+        setIntervalSpy.mock.calls.filter((call) => call[1] === 7_000)
+      ).toHaveLength(1);
+      const timer = setIntervalSpy.mock.results.at(keepaliveCall)?.value;
 
-    await vi.advanceTimersByTimeAsync(51_000);
-    releaseTool();
-    await drain;
+      const reader = requireBody(response).getReader();
+      const decoder = new TextDecoder();
+      let buffered = "";
+      const drain = (async () => {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffered += decoder.decode(value, { stream: true });
+        }
+      })();
 
-    expect(buffered).toContain(": keepalive\n\n");
-    expect(buffered).not.toContain("event: ping");
-  });
+      await vi.advanceTimersByTimeAsync(7_001);
+      release();
+      await drain;
 
-  it("clears a Legacy compatibility keepalive when the response is cancelled", async () => {
-    let releaseTool!: () => void;
-    const toolReleased = new Promise<void>((resolve) => {
-      releaseTool = resolve;
-    });
-    const clearInterval = vi.spyOn(globalThis, "clearInterval");
-    const handler = createMcpHandler(() => {
-      const server = createServer();
-      server.registerTool("hang", { inputSchema: {} }, async () => {
-        await toolReleased;
-        return { content: [{ type: "text" as const, text: "done" }] };
+      expect(buffered).toContain(": keepalive\n\n");
+      expect(buffered).not.toContain("event: ping");
+      expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
+    }
+  );
+
+  it.each<KeepaliveLane>(["modern", "legacy"])(
+    "clears the SDK v2 %s keepalive when its response is cancelled",
+    async (lane) => {
+      const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+      const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+      const { release, server } = createHangingServer();
+      const handler = createMcpHandler(() => server, {
+        keepAliveMs: 7_000,
+        responseMode: "sse"
       });
-      return server;
-    });
-    const response = await handler.fetch(legacyToolRequest("hang"));
 
-    await response.body!.cancel();
+      const response = await handler.fetch(keepaliveRequest(lane));
+      const keepaliveCall = setIntervalSpy.mock.calls.findIndex(
+        (call) => call[1] === 7_000
+      );
+      expect(keepaliveCall).toBeGreaterThanOrEqual(0);
+      expect(
+        setIntervalSpy.mock.calls.filter((call) => call[1] === 7_000)
+      ).toHaveLength(1);
+      const timer = setIntervalSpy.mock.results.at(keepaliveCall)?.value;
 
-    expect(clearInterval).toHaveBeenCalled();
-    releaseTool();
-  });
+      await requireBody(response).cancel();
+
+      expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
+      release();
+    }
+  );
 
   it("supports strict Stateless-only serving", async () => {
     const handler = createMcpHandler(() => createServer(), {

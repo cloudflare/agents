@@ -1,6 +1,7 @@
 import {
   WebStandardStreamableHTTPServerTransport,
   isJSONRPCRequest,
+  type CreateMcpHandlerOptions,
   type McpHandlerRequestOptions,
   type McpServer,
   type McpServerFactory,
@@ -11,26 +12,25 @@ import {
   reportHandlerError,
   requestIdFromParsedBody
 } from "./handler-errors";
-import { KEEPALIVE_FRAME, KEEPALIVE_INTERVAL_MS } from "./sse-keepalive";
-
 /**
  * Temporary adapter for Legacy compatibility on the SDK v2 transport.
  *
  * Local deltas from the upstream stateless fallback:
  *
  * - impossible stateless server-to-client requests fail immediately rather
- *   than leaving the tool handler waiting for a session response;
- * - streamed POST responses receive Cloudflare's 25-second SSE keepalive.
+ *   than leaving the tool handler waiting for a session response.
  *
- * Remove this adapter once the SDK exposes both policies directly.
+ * Streaming and keepalive behavior remain delegated to the SDK transport.
+ * Remove this adapter once the SDK exposes the reverse-request policy directly.
  */
 export function createLegacyCompatibilityRequestHandler(
   factory: McpServerFactory,
-  onerror?: (error: Error) => void
+  handlerOptions: Pick<CreateMcpHandlerOptions, "keepAliveMs" | "onerror"> = {}
 ) {
+  const { keepAliveMs, onerror } = handlerOptions;
   const fetch = async (
     request: Request,
-    options: McpHandlerRequestOptions | undefined
+    requestOptions: McpHandlerRequestOptions | undefined
   ): Promise<Response> => {
     // Match the upstream Legacy fallback: GET and DELETE are session operations
     // and cannot be served by a fresh per-request transport. Reject
@@ -52,11 +52,9 @@ export function createLegacyCompatibilityRequestHandler(
 
     let product: McpServer | Server | undefined;
     let transport: WebStandardStreamableHTTPServerTransport | undefined;
-    let clearResponseKeepalive = () => {};
     let teardownPromise: Promise<void> | undefined;
     const teardown = () =>
       (teardownPromise ??= (async () => {
-        clearResponseKeepalive();
         await Promise.all([
           transport?.close().catch(() => {}),
           product?.close().catch(() => {})
@@ -67,10 +65,13 @@ export function createLegacyCompatibilityRequestHandler(
     try {
       product = await factory({
         era: "legacy",
-        ...(options?.authInfo !== undefined && { authInfo: options.authInfo }),
+        ...(requestOptions?.authInfo !== undefined && {
+          authInfo: requestOptions.authInfo
+        }),
         requestInfo: request
       });
       transport = new WebStandardStreamableHTTPServerTransport({
+        keepAliveMs,
         sessionIdGenerator: undefined
       });
 
@@ -100,11 +101,11 @@ export function createLegacyCompatibilityRequestHandler(
       }
       request.signal.addEventListener("abort", onAbort, { once: true });
       const response = await transport.handleRequest(request, {
-        ...(options?.authInfo !== undefined && {
-          authInfo: options.authInfo
+        ...(requestOptions?.authInfo !== undefined && {
+          authInfo: requestOptions.authInfo
         }),
-        ...(options?.parsedBody !== undefined && {
-          parsedBody: options.parsedBody
+        ...(requestOptions?.parsedBody !== undefined && {
+          parsedBody: requestOptions.parsedBody
         })
       });
 
@@ -118,32 +119,11 @@ export function createLegacyCompatibilityRequestHandler(
       }
 
       const reader = response.body.getReader();
-      const encoder = new TextEncoder();
-      let keepalive: ReturnType<typeof setInterval> | undefined;
-      const clearKeepalive = () => {
-        if (keepalive !== undefined) {
-          clearInterval(keepalive);
-          keepalive = undefined;
-        }
-      };
-      clearResponseKeepalive = clearKeepalive;
-
       const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          if (teardownPromise) return;
-          keepalive = setInterval(() => {
-            try {
-              controller.enqueue(encoder.encode(KEEPALIVE_FRAME));
-            } catch {
-              clearKeepalive();
-            }
-          }, KEEPALIVE_INTERVAL_MS);
-        },
         async pull(controller) {
           try {
             const { done, value } = await reader.read();
             if (done) {
-              clearKeepalive();
               request.signal.removeEventListener("abort", onAbort);
               await teardown();
               controller.close();
@@ -151,14 +131,12 @@ export function createLegacyCompatibilityRequestHandler(
               controller.enqueue(value);
             }
           } catch (error) {
-            clearKeepalive();
             request.signal.removeEventListener("abort", onAbort);
             await teardown();
             controller.error(error);
           }
         },
         async cancel(reason) {
-          clearKeepalive();
           request.signal.removeEventListener("abort", onAbort);
           await reader.cancel(reason).catch(() => {});
           await teardown();
@@ -174,7 +152,7 @@ export function createLegacyCompatibilityRequestHandler(
       await teardown();
       reportHandlerError(onerror, error);
       return internalErrorResponse(
-        requestIdFromParsedBody(options?.parsedBody)
+        requestIdFromParsedBody(requestOptions?.parsedBody)
       );
     }
   };
