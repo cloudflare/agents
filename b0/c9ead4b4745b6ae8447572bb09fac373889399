@@ -1,0 +1,31 @@
+packages/agents/src/observability/ai/index.ts
+  s_aafd844c7d936e::t_c82204570be821 2,12
+packages/agents/src/observability/ai/wrapper/model.ts
+  s_aafd844c7d936e::t_9aea1d78eb6da0 16,20
+packages/agents/src/observability/ai/wrapper/streams.ts
+  s_aafd844c7d936e::t_06f4e98f36d924 11,513
+packages/agents/src/observability/ai/wrapper/wrap.ts
+  s_aafd844c7d936e::t_58878fc731e08f 31-33,36,42,44-45,51-52,54,56,61,72,88,94-96,99,101-102,131-135,245,258-260,264,305,315,319,325,337,359,374,384,412,466,483,525,555
+packages/agents/src/tests/observability/ai-sdk-v6-integration.test.ts
+  s_aafd844c7d936e::t_9bb73ab2889a11 6,67,70,186,288,343,382,414,451,476,570,620,659
+packages/agents/src/tests/observability/ai-sdk-v7-integration.test.ts
+  s_aafd844c7d936e::t_a191f5ab1ed99f 6,32,372
+packages/agents/src/tests/observability/ai-sdk-wrap.test.ts
+  s_aafd844c7d936e::t_52707e6f3ce623 4-6,14,31,51,118,135,171,187,209,213,235,255,299,336,399,436,479,516,549,567,585,597,618,641,666,680,707,723,755,776,798,805,828,832,843,876,913,943,950,986,993,1034,1041,1078,1091,1108,1118,1137,1141,1155,1159,1176,1180,1210,1214,1231,1235,1259,1263,1280,1284,1310,1315,1323,1338,1356,1369,1384,1394,1414,1425,1441,1449,1466,1471-1473,1485,1502,1517,1536,1582,1651,1676,1702,1744,1771
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b0c9ead4b4745b6ae8447572bb09fac373889399",
+  "prompts": {},
+  "sessions": {
+    "s_aafd844c7d936e": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019fad06-1fa4-76e5-9bd2-6fca00020385",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
