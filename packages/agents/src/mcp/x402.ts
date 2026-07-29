@@ -1,6 +1,11 @@
 /**
  * X402 MCP Integration (v2)
  *
+ * @deprecated The Agents SDK x402 integration is feature-frozen and not
+ * recommended for new projects. Cloudflare is developing integrated
+ * monetization capabilities through Monetization Gateway. See
+ * https://blog.cloudflare.com/monetization-gateway/
+ *
  * Based on:
  * - Coinbase's x402 (Apache 2.0): https://github.com/coinbase/x402
  * - @ethanniser and his work at https://github.com/ethanniser/x402-mcp

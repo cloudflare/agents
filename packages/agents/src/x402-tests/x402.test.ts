@@ -110,21 +110,16 @@ const mockSigner = {
 };
 
 describe("deprecation warnings", () => {
-  it("warns once for each x402 wrapper", async () => {
-    vi.resetModules();
-    const {
-      withX402: deprecatedWithX402,
-      withX402Client: deprecatedWithX402Client
-    } = await import("../mcp/x402");
+  it("warns once for each x402 wrapper", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     try {
-      deprecatedWithX402(createMockMcpServer(), defaultServerConfig);
-      deprecatedWithX402(createMockMcpServer(), defaultServerConfig);
-      deprecatedWithX402Client(createMockMcpClient(), {
+      withX402(createMockMcpServer(), defaultServerConfig);
+      withX402(createMockMcpServer(), defaultServerConfig);
+      withX402Client(createMockMcpClient(), {
         account: mockSigner as unknown as X402ClientConfig["account"]
       });
-      deprecatedWithX402Client(createMockMcpClient(), {
+      withX402Client(createMockMcpClient(), {
         account: mockSigner as unknown as X402ClientConfig["account"]
       });
 

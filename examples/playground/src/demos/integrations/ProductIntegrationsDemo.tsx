@@ -75,15 +75,15 @@ const stories: Array<{
   },
   {
     id: "x402",
-    title: "Paid Tool Call",
-    product: "Payments before expensive actions",
+    title: "Paid HTTP Request",
+    product: "OSS x402 payment libraries",
     description:
-      "A paid endpoint or MCP tool returns payment requirements. The client confirms, pays with x402, and retries the protected call.",
+      "A protected HTTP endpoint returns payment requirements. The client confirms, pays with the OSS x402 libraries, and retries the request.",
     events: [
       ["payment_required", { price: "0.01 USDC" }],
       ["user_confirmed", { maxPaymentValue: "0.10 USDC" }],
       ["payment_attached", { network: "base-sepolia" }],
-      ["tool_completed", { result: "premium result" }]
+      ["request_completed", { result: "premium result" }]
     ],
     examplePath: "examples/x402"
   },
