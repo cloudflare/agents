@@ -292,9 +292,9 @@ metadata fields for applications with a different identity model. Payload
 storage is off by default. Set `storeMessages` and/or `storeTools` on the Think
 agent to opt in; these are wrapper settings, not span attributes.
 
-### AI SDK v6
+### AI SDK v6 and v7
 
-Wrap the SDK namespace:
+Wrap the SDK namespace and call the wrapped functions:
 
 ```ts
 import * as ai from "ai";
@@ -303,14 +303,17 @@ import { wrapAISDK } from "agents/observability/ai";
 const { generateText, streamText } = wrapAISDK(ai);
 ```
 
-`wrapAISDK` instruments `generateText`, `streamText`, `generateObject`, and
-`streamObject`. Span names use `{operation} {target}` and fall back to the bare
-operation past 64 UTF-8 bytes; the full target remains on its semantic
-attribute. A model object is wrapped with the SDK's `wrapLanguageModel` helper,
-so provider work is a `chat {model}` child of the operation span. Tool
-execution is wrapped as `execute_tool {tool}`. AI SDK v6 approval lifecycle
-segments appear as bounded `tool_approval {tool}` children of an
-`execute_tool {tool}` span, correlated by `gen_ai.tool.call.id` and carrying
+`wrapAISDK` supports AI SDK v6 and v7. It instruments `generateText`,
+`streamText`, `generateObject`, and `streamObject`. You do not need to register a
+telemetry integration for Agents tracing on AI SDK v7.
+
+Span names use `{operation} {target}` and fall back to the bare operation past
+64 UTF-8 bytes; the full target remains on its semantic attribute. A model
+object is wrapped with the SDK's `wrapLanguageModel` helper, so provider work is
+a `chat {model}` child of the `invoke_agent {agent}` operation span. Tool
+execution is wrapped as `execute_tool {tool}`. Approval lifecycle segments
+appear as bounded `tool_approval {tool}` children of an `execute_tool {tool}`
+span, correlated by `gen_ai.tool.call.id` and carrying
 `cloudflare.agents.tool.approval.state` (`requested`, `approved`, or `denied`).
 They never remain open while waiting for a human across invocations. Stream
 spans close on completion, cancellation, an in-band error, or early consumer
@@ -329,46 +332,10 @@ const traced = wrapAISDK(ai, {
 });
 ```
 
-### AI SDK v7
-
-AI SDK v7 ships a first-class telemetry lifecycle. Register the adapter once and
-every `generateText`, `streamText`, `generateObject`, and `streamObject` call is
-instrumented:
-
-```ts
-import { registerTelemetry } from "ai";
-import { createAISDKTelemetry } from "agents/observability/ai";
-
-registerTelemetry(
-  createAISDKTelemetry({ storeMessages: true, storeTools: true })
-);
-```
-
-Or scope it to a single call through `experimental_telemetry`:
-
-```ts
-import { createAISDKTelemetry } from "agents/observability/ai";
-
-await generateText({
-  model,
-  prompt: "...",
-  experimental_telemetry: {
-    integrations: [createAISDKTelemetry()]
-  }
-});
-```
-
-The v7 adapter uses `cloudflare.agents.call.id` to correlate operation, model,
-and tool spans. Its execution hooks keep provider work under the `chat` span and
-nested work performed by a tool under the `execute_tool` span. It handles both
-`onEnd` and `onAbort` terminal paths. `wrapAISDK` and `createAISDKTelemetry`
-project into the same span schema, so the two SDK versions are dashboard-
-compatible.
-
 When a gateway-backed provider exposes its AI Gateway log ID through response
 headers, provider metadata, or the Workers AI binding, the corresponding
 `chat` span includes `cloudflare.ai_gateway.log.id`. The attribute is omitted
-when no actual response exposes an ID; the adapter does not infer one or make an
+when no actual response exposes an ID; the wrapper does not infer one or make an
 extra request.
 
 ### Identity
@@ -445,13 +412,13 @@ await generateText({
 | `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.cache_read.input_tokens` | Provider cache usage when reported                                                           |
 | `gen_ai.usage.reasoning.output_tokens`                                             | Reasoning output usage when reported                                                         |
 | `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`                      | Tool identity; call ID also correlates approval lifecycle segments                           |
-| `cloudflare.agents.tool.approval.state`                                            | AI SDK v6 approval lifecycle segment: `requested`, `approved`, or `denied`                   |
+| `cloudflare.agents.tool.approval.state`                                            | Approval lifecycle segment: `requested`, `approved`, or `denied`                             |
 | `gen_ai.input.messages`, `gen_ai.output.messages`                                  | Opt-in OTel-schema model messages on `chat`, including tool parts and output finish reasons  |
 | `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                            | Opt-in tool arguments/results on `execute_tool`                                              |
 | `user.id`                                                                          | Explicit v6 metadata key `user.id`                                                           |
 | `error.type`                                                                       | Low-cardinality error class; raw error messages are never recorded                           |
 
-The adapter also emits a small vendor namespace where no standard equivalent
+The wrapper also emits a small vendor namespace where no standard equivalent
 exists:
 
 | Attribute                                                                               | Meaning                                                                 |
@@ -459,12 +426,10 @@ exists:
 | `cloudflare.ai_gateway.log.id`                                                          | AI Gateway log reference on `chat`, when exposed by the actual response |
 | `cloudflare.agents.integration.name`                                                    | Instrumentation source (`ai-sdk`)                                       |
 | `cloudflare.agents.operation.name`                                                      | Original SDK operation (`streamText`, `doStream`, `tool.execute`, etc.) |
-| `cloudflare.agents.call.id`                                                             | AI SDK v7 callback correlation ID                                       |
 | `cloudflare.agents.response.finish_reason`                                              | One finish reason as a scalar                                           |
 | `cloudflare.agents.tool.count`                                                          | Precomputed tool-call count for dashboards                              |
 | `cloudflare.agents.usage.total_tokens`                                                  | Provider total, or input plus output when both are known                |
 | `cloudflare.agents.runtime_context.{key}`                                               | Explicitly included scalar runtime context                              |
-| `cloudflare.agents.tool_context.{tool}.{key}`                                           | Explicitly included scalar context on the executed tool span            |
 | `cloudflare.agents.metadata.{key}`                                                      | Other scalar v6 telemetry metadata                                      |
 | `cloudflare.agents.turn.{request_id,trigger,admission,channel,continuation,generation}` | Think turn context, from v6 metadata or v7 runtime context              |
 | `cloudflare.agents.canceled`                                                            | Recognized cancellation, not a failure                                  |
@@ -472,16 +437,16 @@ exists:
 
 `gen_ai.response.finish_reasons` and `gen_ai.request.stop_sequences` are arrays
 in OTel. Workers' custom `Span.setAttribute` currently accepts only a string,
-number, or boolean, so the adapter omits those attributes rather than placing
+number, or boolean, so the wrapper omits those attributes rather than placing
 JSON text under an array-typed key. Similarly, span status is state rather than
-an attribute: failures emit `error.type`, but the adapter does not invent an
+an attribute: failures emit `error.type`, but the wrapper does not invent an
 `otel.status_code` attribute when Workers exposes no custom-span status setter.
 
 ### Context and safety
 
 Payload storage is explicit and off by default. `storeMessages` writes only
 `gen_ai.input.messages` / `gen_ai.output.messages` on `chat`; when the message
-attribute exceeds its budget, the adapter repeatedly drops the oldest
+attribute exceeds its budget, the wrapper repeatedly drops the oldest
 unprotected message (index 2), preserving the first two messages and newest
 tail. `storeTools` writes only `gen_ai.tool.call.arguments` /
 `gen_ai.tool.call.result` on `execute_tool`. The flags themselves are never
@@ -489,7 +454,7 @@ written to telemetry metadata or spans.
 
 System instructions that the AI SDK presents to the model as a system-role chat
 message remain in `gen_ai.input.messages`, which OTel explicitly permits for
-instructions that are part of chat history. The adapter does not separately
+instructions that are part of chat history. The wrapper does not separately
 copy the raw `system` parameter into `gen_ai.system_instructions`. Schemas,
 request headers, provider options, and raw error messages are never recorded.
 The optional AI Gateway reference is a bounded opaque log ID; response headers
@@ -514,27 +479,18 @@ await traced.generateText({
 });
 ```
 
-For v7, the AI SDK filters runtime and per-tool context before the adapter sees
-it. Its allowlists are boolean maps, not arrays:
+For v7, put application context in `runtimeContext` and select telemetry-visible
+keys with the AI SDK's boolean-map allowlist:
 
 ```ts
 await generateText({
   model,
   prompt: "Will I need an umbrella?",
   runtimeContext: { requestId: "req-123", tenantId: "tenant-42" },
-  toolsContext: {
-    weather: { defaultUnit: "celsius", cacheHit: true }
-  },
   telemetry: {
     includeRuntimeContext: {
       requestId: true,
       tenantId: true
-    },
-    includeToolsContext: {
-      weather: {
-        defaultUnit: true,
-        cacheHit: true
-      }
     }
   }
 });

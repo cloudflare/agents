@@ -133,7 +133,6 @@ function modelCallSpanForModel(
       ? (params as Record<string, unknown>)
       : {};
   const span = modelCallSpan({
-    integration: "ai-sdk",
     model: model?.modelId,
     operation,
     provider: model?.provider,

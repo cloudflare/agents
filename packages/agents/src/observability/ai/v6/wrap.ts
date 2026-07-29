@@ -347,7 +347,6 @@ function operationSpanForCall(
       ...contextAttributes(params, options)
     },
     context: semanticContext(params),
-    integration: "ai-sdk",
     model: model?.modelId,
     operation,
     provider: model?.provider,
