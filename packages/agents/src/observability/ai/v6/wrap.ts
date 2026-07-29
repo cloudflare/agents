@@ -281,7 +281,8 @@ function operationParamsForCall(
           toolApproval: wrapToolApprovalPolicy(
             tracer,
             params.toolApproval,
-            approvedToolCalls
+            approvedToolCalls,
+            boundToInvocation
           )
         }
       : {}),

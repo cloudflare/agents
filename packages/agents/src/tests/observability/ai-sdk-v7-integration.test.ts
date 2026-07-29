@@ -529,6 +529,41 @@ describe("wrapAISDK with the real AI SDK v7", () => {
     ).toBe(true);
   });
 
+  it("marks top-level approval spans decided after the invocation ended", async () => {
+    const tracing = new RecordingTracer();
+    const decided = deferred<"user-approval">();
+    let escaped: Promise<unknown> | undefined;
+
+    await withInvocationScope(async () => {
+      escaped = wrap(tracing).generateText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model: approvalRequestModel(),
+        prompt: "Deploy",
+        toolApproval: async () => decided.promise,
+        tools: {
+          deploy: ai.tool({
+            execute: async () => "deployed",
+            inputSchema: z.object({ target: z.string() })
+          })
+        }
+      } as Parameters<typeof ai.generateText>[0]);
+    });
+
+    decided.resolve("user-approval");
+    await escaped;
+
+    const approval = tracing.spans.find(
+      (span) => span.name === "tool_approval deploy"
+    );
+    expect(approval?.attributes["cloudflare.agents.tool.approval.state"]).toBe(
+      "requested"
+    );
+    expect(approval?.attributes["cloudflare.agents.span.truncated"]).toBe(true);
+    expect(
+      approval?.parent?.attributes["cloudflare.agents.span.truncated"]
+    ).toBe(true);
+  });
+
   it("leaves approval spans decided inside the invocation unmarked", async () => {
     const tracing = new RecordingTracer();
 
