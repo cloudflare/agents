@@ -691,6 +691,13 @@ export class TestWorkflowAgent extends Agent {
     return this.runWorkflow("TEST_WORKFLOW", params, { id: workflowId });
   }
 
+  async runIdempotentWorkflowTest(
+    idempotencyKey: string,
+    params: { taskId: string; shouldFail?: boolean; waitForApproval?: boolean }
+  ): Promise<string> {
+    return this.runWorkflow("TEST_WORKFLOW", params, { idempotencyKey });
+  }
+
   // Start a simple workflow
   async runSimpleWorkflowTest(
     workflowId: string,

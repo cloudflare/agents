@@ -202,6 +202,8 @@ export type WorkflowTrackingRow = {
   id: string;
   /** Cloudflare Workflow instance ID */
   workflow_id: string;
+  /** Logical key that deduplicates active workflow instances */
+  idempotency_key: string | null;
   /** Workflow binding name */
   workflow_name: string;
   /** Current workflow status */
@@ -230,6 +232,13 @@ export type RunWorkflowOptions = {
   metadata?: Record<string, unknown>;
   /** Agent binding name (auto-detected from class name if not provided) */
   agentBinding?: string;
+  /**
+   * Return the existing active workflow for this key instead of creating a
+   * duplicate. The key is scoped to the workflow binding and originating
+   * Agent (or sub-agent facet), and becomes available again when the tracked
+   * workflow reaches a terminal status.
+   */
+  idempotencyKey?: string;
 };
 
 /**
@@ -250,6 +259,8 @@ export type WorkflowInfo = {
   id: string;
   /** Cloudflare Workflow instance ID */
   workflowId: string;
+  /** Logical key used to deduplicate active workflow instances */
+  idempotencyKey: string | null;
   /** Workflow binding name */
   workflowName: string;
   /** Current workflow status */
