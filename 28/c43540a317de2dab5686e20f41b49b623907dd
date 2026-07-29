@@ -1,0 +1,21 @@
+docs/agents/workflows.md
+  s_7453737e55b5e8::t_113b7d696d1f51 249-250,262,530-542,546-547
+packages/agents/src/index.ts
+  s_7453737e55b5e8::t_78c5ee07487d72 1128,2129,2153-2163,11246-11250,11253-11285,11299,11301-11331,12072
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "28c43540a317de2dab5686e20f41b49b623907dd",
+  "prompts": {},
+  "sessions": {
+    "s_7453737e55b5e8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fae4d-1a56-7962-8dee-09754dbbf2df",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}
