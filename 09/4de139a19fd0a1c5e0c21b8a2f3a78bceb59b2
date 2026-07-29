@@ -1,0 +1,19 @@
+packages/agents/src/observability/ai/index.ts
+  s_aafd844c7d936e::t_f43de7c6cf7d1e 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "094de139a19fd0a1c5e0c21b8a2f3a78bceb59b2",
+  "prompts": {},
+  "sessions": {
+    "s_aafd844c7d936e": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019fad06-1fa4-76e5-9bd2-6fca00020385",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
