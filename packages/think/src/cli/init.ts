@@ -350,13 +350,13 @@ export const THIRD_PARTY_DEPENDENCIES: Record<string, string> = {
 };
 
 export const THIRD_PARTY_DEV_DEPENDENCIES: Record<string, string> = {
-  "@cloudflare/vite-plugin": "^1.42.3",
-  "@cloudflare/workers-types": "^4.20260629.1",
+  "@cloudflare/vite-plugin": "^1.48.0",
+  "@cloudflare/workers-types": "^5.20260729.1",
   oxfmt: "^0.56.0",
   oxlint: "^1.71.0",
   typescript: "^6.0.3",
   vite: "^8.1.0",
-  wrangler: "^4.105.0"
+  wrangler: "^4.115.0"
 };
 
 function packageJsonSource(projectName: string): string {
