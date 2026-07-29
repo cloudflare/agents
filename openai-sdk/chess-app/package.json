@@ -9,7 +9,7 @@
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.42.3",
+    "@cloudflare/vite-plugin": "^1.48.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@vitejs/plugin-react": "^6.0.3",

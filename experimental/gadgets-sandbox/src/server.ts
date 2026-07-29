@@ -153,7 +153,6 @@ export class DatabaseLoopback extends WorkerEntrypoint<Env, LoopbackProps> {
   private _agentId: string = this.ctx.props.agentId;
 
   private _getAgent(): DurableObjectStub<SandboxAgent> {
-    // @ts-expect-error — experimental: ctx.exports
     const ns = this.ctx.exports
       .SandboxAgent as DurableObjectNamespace<SandboxAgent>;
     return ns.get(ns.idFromString(this._agentId));
@@ -205,9 +204,6 @@ export class TailLoopback extends WorkerEntrypoint<Env, TailLoopbackProps> {
     // Round-trip through JSON to make traces serializable
     const serializable = JSON.parse(JSON.stringify(event));
 
-    // ctx.exports is available on WorkerEntrypoints in the experimental runtime,
-    // but the types only declare it on DurableObjectState.
-    // @ts-expect-error — experimental: ctx.exports on WorkerEntrypoint
     const ns = this.ctx.exports
       .SandboxAgent as DurableObjectNamespace<SandboxAgent>;
     const stub = ns.get(ns.idFromString(this.ctx.props.agentId));
@@ -343,11 +339,9 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
       agentId: this.ctx.id.toString()
     };
 
-    // @ts-expect-error — experimental: ctx.exports
     const dbBinding = this.ctx.exports.DatabaseLoopback({
       props: loopbackProps
     });
-    // @ts-expect-error — experimental: ctx.exports
     const tailBinding = this.ctx.exports.TailLoopback({ props: tailProps });
 
     // Create the dynamic isolate via the Worker Loader.

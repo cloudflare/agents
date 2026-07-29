@@ -178,7 +178,7 @@ function createMockEmail(
       }
     }),
     rawSize: rawEmail.length,
-    reply: async (_message: EmailMessage) => ({
+    reply: async (_message: EmailMessage | EmailReplyMessageBuilder) => ({
       messageId: `mock-reply-${crypto.randomUUID()}`
     }),
     forward: async (_rcptTo: string, _headers?: Headers) => ({
