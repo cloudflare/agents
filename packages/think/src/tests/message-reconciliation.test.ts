@@ -221,6 +221,41 @@ describe("Think — message reconciliation on incoming submits", () => {
     ws.close(1000);
   });
 
+  it("keeps a later assistant when a toolCallId is reused across turns", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    const firstAssistant = makeServerToolAssistant("server-first-assistant");
+    await agent.persistToolCallMessage([userA, firstAssistant]);
+
+    const userB = makeUserMessage("user-b", "create another cat");
+    const secondAssistant = makeServerToolAssistant("client-second-assistant");
+    const userC = makeUserMessage("user-c", "continue");
+
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [userA, firstAssistant, userB, secondAssistant, userC]);
+    await done;
+    await delay(200);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const assistantsWithTool = messages.filter(
+      (message) =>
+        message.role === "assistant" &&
+        assistantToolPart(message)?.toolCallId === TOOL_CALL_ID
+    );
+
+    expect(assistantsWithTool.map((message) => message.id)).toEqual([
+      "server-first-assistant",
+      "client-second-assistant"
+    ]);
+
+    ws.close(1000);
+  });
+
   it("merges server tool outputs into a stale client snapshot when IDs match", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

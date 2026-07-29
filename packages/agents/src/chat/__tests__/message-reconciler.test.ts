@@ -253,7 +253,7 @@ describe("reconcileMessages — ID reconciliation", () => {
     expect(result[3].id).toBe("srv-a2");
   });
 
-  it("skips content matching for tool-bearing assistant messages", () => {
+  it("adopts server ID for a toolCallId match", () => {
     const server = [
       toolAssistantMsg("srv-a1", "tc1", "output-available", { output: 1 })
     ];
@@ -261,7 +261,37 @@ describe("reconcileMessages — ID reconciliation", () => {
       toolAssistantMsg("cli-a1", "tc1", "output-available", { output: 1 })
     ];
     const result = reconcileMessages(client, server);
-    expect(result[0].id).toBe("cli-a1");
+    expect(result[0].id).toBe("srv-a1");
+  });
+
+  it("claims reused toolCallIds one-to-one across turns", () => {
+    const server = [
+      userMsg("u1", "first"),
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        output: "old result"
+      })
+    ];
+    const client = [
+      userMsg("u1", "first"),
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        output: "old result"
+      }),
+      userMsg("u2", "second"),
+      toolAssistantMsg("cli-a2", "tc1", "input-available", {
+        input: { turn: 2 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result[1].id).toBe("srv-a1");
+    expect(result[3].id).toBe("cli-a2");
+    expect((result[3].parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+    expect(
+      (result[3].parts[0] as Record<string, unknown>).output
+    ).toBeUndefined();
   });
 
   it("passes through when server state is empty", () => {
@@ -327,6 +357,7 @@ describe("reconcileMessages — composed stages", () => {
     expect((result[0].parts[0] as Record<string, unknown>).state).toBe(
       "output-available"
     );
+    expect(result[0].id).toBe("srv-a1");
     expect(result[1].id).toBe("srv-a2");
   });
 
@@ -355,7 +386,7 @@ describe("reconcileMessages — composed stages", () => {
       }
     ];
     const result = reconcileMessages([msg], server);
-    expect(result[0].id).toBe("cli-a1");
+    expect(result[0].id).toBe("srv-a1");
   });
 });
 
