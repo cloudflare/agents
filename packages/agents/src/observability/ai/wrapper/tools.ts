@@ -86,7 +86,6 @@ function wrapTool(
 
   wrappedTool.execute = (...args) => {
     const span = toolCallSpan({
-      integration: "ai-sdk",
       operation: "tool.execute",
       toolCallId: extractToolCallId(args[1]),
       toolName
@@ -277,7 +276,6 @@ function recordApprovalSegment(
   boundToInvocation = false
 ): void {
   const tool = toolCallSpan({
-    integration: "ai-sdk",
     operation: "tool.approval",
     toolCallId,
     toolName

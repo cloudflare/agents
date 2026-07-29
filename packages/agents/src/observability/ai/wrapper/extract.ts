@@ -12,7 +12,7 @@ import {
   readTokenCount
 } from "../read";
 
-/** Identity fields extracted from an AI SDK v6 language model object. */
+/** Identity fields extracted from an AI SDK language model object. */
 export type ModelInfo = {
   readonly modelId: string | undefined;
   readonly provider: string | undefined;
@@ -30,7 +30,7 @@ export function finishAttributesFromResult(
     finishReason: extractFinishReason(result),
     response: options.includeResponse ? extractResponseInfo(result) : undefined,
     toolCallCount: extractToolCallCount(result),
-    usage: extractAISDKv6TokenUsage(result)
+    usage: extractAISDKTokenUsage(result)
   });
 }
 
@@ -54,7 +54,7 @@ export function extractRequestSummary(
   };
 }
 
-/** Extracts model identity from an AI SDK v6 model object. */
+/** Extracts model identity from an AI SDK model object. */
 export function extractModelInfo(value: unknown): ModelInfo | undefined {
   // Gateway-style string model ids still identify the model.
   if (typeof value === "string") {
@@ -82,13 +82,11 @@ export function extractModelInfo(value: unknown): ModelInfo | undefined {
 }
 
 /**
- * Extracts token usage from an AI SDK v6 result or stream chunk.
- *
- * AI SDK v6 exposes usage as `{ inputTokens, outputTokens, totalTokens }`
- * where `inputTokens`/`outputTokens` may be plain numbers or nested objects
- * like `{ total, cacheRead, cacheWrite }` / `{ total, reasoning }`.
+ * Extracts token usage from an AI SDK result or stream chunk across supported
+ * majors. Token counts may be plain numbers or nested objects such as
+ * `{ total, cacheRead, cacheWrite }` / `{ total, reasoning }`.
  */
-export function extractAISDKv6TokenUsage(
+export function extractAISDKTokenUsage(
   value: unknown
 ): TokenUsageSummary | undefined {
   if (typeof value !== "object" || value === null) {
@@ -98,13 +96,13 @@ export function extractAISDKv6TokenUsage(
   // SAFETY: AI SDK result/chunk objects are records with known optional fields.
   const record = value as Record<string, unknown>;
 
-  // AI SDK v6 results expose totalUsage (multi-step aggregate) or usage.
+  // Results expose totalUsage (multi-step aggregate) or usage.
   const raw = record.totalUsage ?? record.usage;
   if (typeof raw !== "object" || raw === null) {
     return undefined;
   }
 
-  // SAFETY: AI SDK v6 usage is a record with inputTokens, outputTokens, totalTokens.
+  // SAFETY: AI SDK usage is a record with inputTokens, outputTokens, totalTokens.
   const usage = raw as Record<string, unknown>;
 
   const inputTokens = readTokenCount(usage.inputTokens);
@@ -159,7 +157,7 @@ function extractToolCallCount(value: unknown): number | undefined {
 }
 
 /**
- * Reads a finish reason from an AI SDK v6 result or `finish`-type stream chunk.
+ * Reads a finish reason from an AI SDK result or `finish`-type stream chunk.
  */
 export function extractFinishReason(value: unknown): string | undefined {
   if (typeof value !== "object" || value === null) {
@@ -174,7 +172,7 @@ export function extractFinishReason(value: unknown): string | undefined {
     return finishReason;
   }
 
-  // AI SDK v6 may expose finishReason as { unified: string }.
+  // The SDK may expose finishReason as { unified: string }.
   if (typeof finishReason === "object" && finishReason !== null) {
     // SAFETY: finishReason object has an optional unified string field.
     const unified = (finishReason as Record<string, unknown>).unified;
