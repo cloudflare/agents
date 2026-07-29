@@ -262,15 +262,14 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 
 ## Agent initialization span
 
-When Worker traces are enabled, every `Agent` constructor runs its setup —
-method wrapping, schema creation, and MCP client manager initialization —
-inside an `agent_initialization` span. Constructor-time child spans group under
-this one stable parent instead of appearing as top-level clutter. The span
-carries `cloudflare.agents.agent.name` (the agent class),
-`cloudflare.agents.agent.id` (the named instance, omitted when the name is not
-yet readable during construction), and `cloudflare.agents.operation.name`
-(`agent_initialization`). Like the rest of the tracing in this package, it is a
-no-op when the runtime has no native tracing capability.
+When Worker traces are enabled, the base Agent startup runs inside one
+`agent_initialization` span. Internal state restoration, recovery, and user
+startup hooks do not emit additional setup spans. The span carries
+`cloudflare.agents.agent.name` (the agent class),
+`cloudflare.agents.agent.id` (the named instance), and
+`cloudflare.agents.operation.name` (`agent_initialization`). Like the rest of
+the tracing in this package, it is a no-op when the runtime has no native
+tracing capability.
 
 ## AI SDK tracing
 
