@@ -117,7 +117,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 | **Browser Agents**      | Run agents in the browser tab with `agents/browser`                             |
 | **Code Mode**           | LLMs generate executable TypeScript instead of individual tool calls            |
 | **Sandboxed Execution** | Run generated code inside an isolated Worker with a virtual filesystem          |
-| **x402 Payments**       | Pay-per-call APIs and tools via the x402 protocol                               |
+| **x402 Payments**       | Integrate OSS x402 payment libraries into an Agent                              |
 | **Observability**       | Built-in tracing, metrics, and structured logs                                  |
 | **SQL**                 | Direct SQLite queries via Durable Objects                                       |
 | **React Hooks**         | `useAgent`, `useAgentChat`, `useVoiceAgent` for frontend integration            |
@@ -125,16 +125,16 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 
 ## Packages
 
-| Package                                                 | Description                                                                                       |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [`agents`](packages/agents)                             | Core SDK — `Agent` class, routing, state, scheduling, MCP, email, workflows, x402, browser agents |
-| [`@cloudflare/ai-chat`](packages/ai-chat)               | Higher-level AI chat — persistent messages, resumable streaming, tool execution                   |
-| [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base — agentic loop, stream resumption, client tools, workspace tools      |
-| [`@cloudflare/codemode`](packages/codemode)             | LLMs write executable code that calls your tools, instead of one tool call at a time              |
-| [`@cloudflare/shell`](packages/shell)                   | Sandboxed JS execution + virtual filesystem (`Workspace`) for agents                              |
-| [`@cloudflare/voice`](packages/voice)                   | Voice pipeline — STT, TTS, VAD, streaming, SFU utilities                                          |
-| [`@cloudflare/worker-bundler`](packages/worker-bundler) | Build and bundle Workers at runtime, for use with the Worker Loader binding                       |
-| [`hono-agents`](packages/hono-agents)                   | Hono middleware for adding agents to Hono apps                                                    |
+| Package                                                 | Description                                                                                  |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| [`agents`](packages/agents)                             | Core SDK — `Agent` class, routing, state, scheduling, MCP, email, workflows, browser agents  |
+| [`@cloudflare/ai-chat`](packages/ai-chat)               | Higher-level AI chat — persistent messages, resumable streaming, tool execution              |
+| [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base — agentic loop, stream resumption, client tools, workspace tools |
+| [`@cloudflare/codemode`](packages/codemode)             | LLMs write executable code that calls your tools, instead of one tool call at a time         |
+| [`@cloudflare/shell`](packages/shell)                   | Sandboxed JS execution + virtual filesystem (`Workspace`) for agents                         |
+| [`@cloudflare/voice`](packages/voice)                   | Voice pipeline — STT, TTS, VAD, streaming, SFU utilities                                     |
+| [`@cloudflare/worker-bundler`](packages/worker-bundler) | Build and bundle Workers at runtime, for use with the Worker Loader binding                  |
+| [`hono-agents`](packages/hono-agents)                   | Hono middleware for adding agents to Hono apps                                               |
 
 > AI-chat modules used to live in `agents/ai-chat-agent`, `agents/chat`, `agents/ai-react`, and `agents/ai-types`. Those entry points still re-export, but they're deprecated — import from `@cloudflare/ai-chat` directly. New chat-from-scratch projects should look at `@cloudflare/think`.
 
@@ -148,7 +148,7 @@ The [`examples/`](examples) directory has 30+ self-contained demos. A non-exhaus
 - **Code Mode & sandboxes** — [`codemode/`](examples/codemode), [`codemode-mcp/`](examples/codemode-mcp), [`codemode-mcp-openapi/`](examples/codemode-mcp-openapi), [`dynamic-workers/`](examples/dynamic-workers), [`dynamic-workers-playground/`](examples/dynamic-workers-playground), [`worker-bundler-playground/`](examples/worker-bundler-playground)
 - **Voice** — [`voice-agent/`](examples/voice-agent) is the unified voice pipeline example with Workers AI, AssemblyAI, Telnyx, and ElevenLabs STT; [`voice-input/`](examples/voice-input) covers dictation; [`telnyx-voice-agent/`](examples/telnyx-voice-agent) covers phone transport; [`elevenlabs-starter/`](examples/elevenlabs-starter) covers broader ElevenLabs media APIs
 - **Workflows & approvals** — [`workflows/`](examples/workflows), [`a2a/`](examples/a2a)
-- **Auth, payments, comms** — [`auth-agent/`](examples/auth-agent), [`cross-domain/`](examples/cross-domain), [`x402/`](examples/x402), [`x402-mcp/`](examples/x402-mcp), [`email-agent/`](examples/email-agent), [`github-webhook/`](examples/github-webhook), [`push-notifications/`](examples/push-notifications)
+- **Auth, payments, comms** — [`auth-agent/`](examples/auth-agent), [`cross-domain/`](examples/cross-domain), [`x402/`](examples/x402), [`email-agent/`](examples/email-agent), [`github-webhook/`](examples/github-webhook), [`push-notifications/`](examples/push-notifications)
 - **Game & misc** — [`tictactoe/`](examples/tictactoe), [`ai-chat/`](examples/ai-chat)
 
 Examples using the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) live in [`openai-sdk/`](openai-sdk). Work-in-progress experiments live in [`experimental/`](experimental) (no stability guarantees).

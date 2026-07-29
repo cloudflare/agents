@@ -109,7 +109,7 @@ const features = [
       {
         name: "Advanced MCP",
         path: "/mcp/advanced",
-        description: "Transports, elicitation, codemode, and x402"
+        description: "Transports, elicitation, and codemode"
       }
     ]
   },

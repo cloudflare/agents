@@ -64,7 +64,7 @@ The playground is organized into feature categories, each with interactive demos
 | **Server**       | Creating MCP servers with tools, resources, and prompts |
 | **Client**       | Connecting to external MCP servers                      |
 | **OAuth**        | OAuth authentication for MCP connections                |
-| **Advanced MCP** | Transports, elicitation, codemode, and x402 patterns    |
+| **Advanced MCP** | Transports, elicitation, and codemode patterns          |
 
 ### Workflows
 

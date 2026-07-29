@@ -1,5 +1,8 @@
 # x402 MCP — Paid Tools
 
+> [!WARNING]
+> The Agents SDK's `agents/x402` integration is deprecated and feature-frozen. Existing applications can continue using it, but it is not recommended for new projects. Cloudflare is developing integrated monetization capabilities through [Monetization Gateway](https://blog.cloudflare.com/monetization-gateway/).
+
 Paid MCP tools using the [x402 payment protocol](https://x402.org). Includes both a server (`PayMCP`) with free and paid tools, and a client agent (`PayAgent`) that handles the payment confirmation flow — all in one Worker.
 
 ## What it demonstrates
