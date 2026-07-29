@@ -1,5 +1,5 @@
 import type { AISDKInstrumentationOptions } from "./options";
-import { createAISDKV6Wrapper } from "./v6/wrap";
+import { createAISDKWrapper } from "./wrapper/wrap";
 import { tracer } from "../tracing/cloudflare";
 
 /**
@@ -9,7 +9,7 @@ export function wrapAISDK<T extends Record<string, unknown>>(
   ai: T,
   options: AISDKInstrumentationOptions = {}
 ): T {
-  return createAISDKV6Wrapper(ai, {
+  return createAISDKWrapper(ai, {
     options,
     tracer
   });

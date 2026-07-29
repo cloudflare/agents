@@ -28,37 +28,37 @@ import {
   wrapTools
 } from "./tools";
 import type {
-  AISDKV6CallParams,
-  AISDKV6Operation,
-  AISDKV6WrapLanguageModel
+  AISDKCallParams,
+  AISDKOperation,
+  AISDKWrapLanguageModel
 } from "./types";
 
-type AISDKV6OperationName =
+type AISDKOperationName =
   | "generateObject"
   | "generateText"
   | "streamObject"
   | "streamText";
 
-export type { AISDKV6Namespace } from "./types";
+export type { AISDKNamespace } from "./types";
 
-/** Tracing configuration for the AI SDK v6 wrapper. */
-export type AISDKV6Instrumentation = {
+/** Tracing configuration for the AI SDK compatibility wrapper. */
+export type AISDKWrapperInstrumentation = {
   readonly options?: AISDKInstrumentationOptions;
   readonly tracer: AgentTracer;
 };
 
 /**
- * Wraps an AI SDK namespace object with v6 tracing while preserving its public
- * shape and overloaded call signatures.
+ * Wraps an AI SDK namespace object with tracing while preserving its public
+ * shape and overloaded call signatures across supported majors.
  */
-export function createAISDKV6Wrapper<T extends Record<string, unknown>>(
+export function createAISDKWrapper<T extends Record<string, unknown>>(
   ai: T,
-  instrumentation: AISDKV6Instrumentation
+  instrumentation: AISDKWrapperInstrumentation
 ): T {
   const target = isModuleNamespace(ai) ? Object.setPrototypeOf({}, ai) : ai;
   // Cache wrappers so repeated property reads return the same function
   // (memoization patterns like `wrapped.streamText === wrapped.streamText`).
-  const wrapperCache = new Map<PropertyKey, AISDKV6Operation>();
+  const wrapperCache = new Map<PropertyKey, AISDKOperation>();
 
   return new Proxy(target, {
     get(proxyTarget, property, receiver) {
@@ -69,7 +69,7 @@ export function createAISDKV6Wrapper<T extends Record<string, unknown>>(
         if (!wrapper) {
           wrapper = createOperationWrapper(
             property,
-            toAISDKV6Operation(original),
+            toAISDKOperation(original),
             readWrapLanguageModel(ai),
             instrumentation
           );
@@ -85,21 +85,21 @@ export function createAISDKV6Wrapper<T extends Record<string, unknown>>(
 
 function readWrapLanguageModel(
   ai: Record<string, unknown>
-): AISDKV6WrapLanguageModel | undefined {
+): AISDKWrapLanguageModel | undefined {
   const value = ai.wrapLanguageModel;
   if (typeof value !== "function") {
     return undefined;
   }
 
-  // SAFETY: This is a vendored structural contract for the AI SDK v6 adapter;
-  // the public wrapper preserves the caller's AI SDK type instead of importing ai.
-  return value as AISDKV6WrapLanguageModel;
+  // SAFETY: This is a vendored structural contract shared by the supported AI
+  // SDK majors; the public wrapper preserves the caller's installed SDK type.
+  return value as AISDKWrapLanguageModel;
 }
 
-function toAISDKV6Operation(value: unknown): AISDKV6Operation {
+function toAISDKOperation(value: unknown): AISDKOperation {
   // SAFETY: The proxy only calls this after selecting known AI SDK operation
-  // export names. The adapter uses the narrow params fields it reads/replaces.
-  return value as AISDKV6Operation;
+  // export names. The wrapper uses the narrow params fields it reads/replaces.
+  return value as AISDKOperation;
 }
 
 function isModuleNamespace(value: unknown): boolean {
@@ -128,11 +128,11 @@ function isModuleNamespace(value: unknown): boolean {
 }
 
 function createOperationWrapper(
-  operationName: AISDKV6OperationName,
-  operation: AISDKV6Operation,
-  wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
-  instrumentation: AISDKV6Instrumentation
-): AISDKV6Operation {
+  operationName: AISDKOperationName,
+  operation: AISDKOperation,
+  wrapLanguageModel: AISDKWrapLanguageModel | undefined,
+  instrumentation: AISDKWrapperInstrumentation
+): AISDKOperation {
   const storage: ResolvedAISDKStorageOptions = {
     storeMessages: instrumentation.options?.storeMessages === true,
     storeTools: instrumentation.options?.storeTools === true
@@ -242,7 +242,7 @@ function createOperationWrapper(
  * `gen_ai.agent.name` never disagree. `functionId` is the AI SDK's canonical
  * projection; an explicit name from v6 metadata or v7 runtime context wins.
  */
-function agentNameForCall(params: AISDKV6CallParams): string | undefined {
+function agentNameForCall(params: AISDKCallParams): string | undefined {
   const telemetry = telemetryOptions(params);
   const metadata = telemetryMetadata(params);
   const runtimeContext = runtimeContextRecord(params);
@@ -255,13 +255,13 @@ function agentNameForCall(params: AISDKV6CallParams): string | undefined {
 }
 
 function operationParamsForCall(
-  params: AISDKV6CallParams,
-  operationName: AISDKV6OperationName,
-  wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
+  params: AISDKCallParams,
+  operationName: AISDKOperationName,
+  wrapLanguageModel: AISDKWrapLanguageModel | undefined,
   tracer: AgentTracer,
   storage: ResolvedAISDKStorageOptions,
   boundToInvocation = false
-): AISDKV6CallParams {
+): AISDKCallParams {
   const approvedToolCalls = new Map<string, string>();
   return {
     ...params,
@@ -302,7 +302,7 @@ function operationParamsForCall(
 }
 
 function canWrapModel(
-  wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
+  wrapLanguageModel: AISDKWrapLanguageModel | undefined,
   model: unknown
 ): boolean {
   return (
@@ -312,17 +312,17 @@ function canWrapModel(
   );
 }
 
-function isStreamOperation(operationName: AISDKV6OperationName): boolean {
+function isStreamOperation(operationName: AISDKOperationName): boolean {
   return operationName === "streamObject" || operationName === "streamText";
 }
 
-function shouldWrapTools(operationName: AISDKV6OperationName): boolean {
+function shouldWrapTools(operationName: AISDKOperationName): boolean {
   return operationName === "generateText" || operationName === "streamText";
 }
 
 function isWrappedOperationName(
   value: PropertyKey
-): value is AISDKV6OperationName {
+): value is AISDKOperationName {
   return (
     value === "generateObject" ||
     value === "generateText" ||
@@ -334,7 +334,7 @@ function isWrappedOperationName(
 function operationSpanForCall(
   operation: string,
   model: ModelInfo | undefined,
-  params: AISDKV6CallParams,
+  params: AISDKCallParams,
   options: AISDKInstrumentationOptions | undefined
 ): ReturnType<typeof operationSpan> {
   return operationSpan({
@@ -356,7 +356,7 @@ function operationSpanForCall(
 
 /** Reads the per-call `experimental_telemetry.metadata` record, if present. */
 function telemetryMetadata(
-  params: AISDKV6CallParams
+  params: AISDKCallParams
 ): Record<string, unknown> | undefined {
   const telemetry = telemetryOptions(params);
 
@@ -371,7 +371,7 @@ function telemetryMetadata(
  * two majors cannot drift on which one identity and metadata come from.
  */
 function runtimeContextRecord(
-  params: AISDKV6CallParams
+  params: AISDKCallParams
 ): Record<string, unknown> | undefined {
   const value = params.runtimeContext ?? params.experimental_context;
 
@@ -381,7 +381,7 @@ function runtimeContextRecord(
 }
 
 function telemetryOptions(
-  params: AISDKV6CallParams
+  params: AISDKCallParams
 ): Record<string, unknown> | undefined {
   const telemetryValue = params.telemetry ?? params.experimental_telemetry;
 
@@ -409,7 +409,7 @@ function telemetryOptions(
  * callers nowhere else to put it.
  */
 function includedRuntimeContext(
-  params: AISDKV6CallParams
+  params: AISDKCallParams
 ): Record<string, unknown> | undefined {
   const runtimeContext = runtimeContextRecord(params);
   if (runtimeContext === undefined) {
@@ -463,10 +463,7 @@ function includedContextKeys(
  * requiring one would silently cost every caller `gen_ai.agent.id` — but an
  * explicit `false` is a stated intention and is honoured.
  */
-function isExcludedFromContext(
-  params: AISDKV6CallParams,
-  key: string
-): boolean {
+function isExcludedFromContext(params: AISDKCallParams, key: string): boolean {
   const included = telemetryOptions(params)?.includeRuntimeContext;
 
   return (
@@ -483,7 +480,7 @@ function isExcludedFromContext(
  * name takes priority. Each field comes from v6 `telemetry.metadata` or, on
  * v7 where that option no longer exists, from `runtimeContext`.
  */
-function semanticContext(params: AISDKV6CallParams): SemanticContext {
+function semanticContext(params: AISDKCallParams): SemanticContext {
   const telemetry = telemetryOptions(params);
   const metadata = telemetryMetadata(params);
   const runtimeContext = runtimeContextRecord(params);
@@ -525,7 +522,7 @@ function metadataValue(
  * one attribute, not a canonical one and a `runtime_context.*` near-duplicate.
  */
 function contextAttributes(
-  params: AISDKV6CallParams,
+  params: AISDKCallParams,
   options: AISDKInstrumentationOptions | undefined
 ): TraceAttributes | undefined {
   const included = options?.includeRuntimeContext;
@@ -555,7 +552,7 @@ const invocationBounded = Symbol.for(
   "cloudflare.agents.ai-sdk.invocation-bounded"
 );
 
-function isAISDKInvocationBounded(params: AISDKV6CallParams): boolean {
+function isAISDKInvocationBounded(params: AISDKCallParams): boolean {
   return (
     (params as Record<PropertyKey, unknown>)[invocationBounded] === true ||
     agentContext.getStore()?.connection !== undefined

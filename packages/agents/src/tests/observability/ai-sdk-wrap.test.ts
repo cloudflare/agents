@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { RecordingTracer } from "./recording-tracer";
 import {
-  createAISDKV6Wrapper,
-  type AISDKV6Namespace
-} from "../../observability/ai/v6/wrap";
+  createAISDKWrapper,
+  type AISDKNamespace
+} from "../../observability/ai/wrapper/wrap";
 
 type TestModel = {
   readonly doGenerate: (params?: unknown) => Promise<unknown>;
@@ -11,7 +11,7 @@ type TestModel = {
   readonly provider: string;
 };
 
-describe("createAISDKV6Wrapper", () => {
+describe("createAISDKWrapper", () => {
   it("traces generateText and the child doGenerate model call", async () => {
     const tracing = new RecordingTracer();
     const model = {
@@ -28,7 +28,7 @@ describe("createAISDKV6Wrapper", () => {
         }
       })
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const wrappedModel = params.model as TestModel;
         return wrappedModel.doGenerate({ prompt: params.prompt });
@@ -48,7 +48,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = await wrapped.generateText({
       experimental_telemetry: {
         functionId: "fixture-agent",
@@ -115,7 +115,7 @@ describe("createAISDKV6Wrapper", () => {
         }
       })
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => (params.model as TestModel).doGenerate(),
       wrapLanguageModel({ model: rawModel, middleware }) {
         const original = rawModel as TestModel;
@@ -132,7 +132,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       model,
       prompt: "hello"
     });
@@ -168,7 +168,7 @@ describe("createAISDKV6Wrapper", () => {
         return { finishReason: "stop" };
       }
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => (params.model as TestModel).doGenerate(),
       wrapLanguageModel({ model: rawModel, middleware }) {
         const original = rawModel as TestModel;
@@ -184,7 +184,7 @@ describe("createAISDKV6Wrapper", () => {
         };
       }
     };
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
 
     await wrapped.generateText({ model, prompt: "first" });
     await wrapped.generateText({ model, prompt: "second" });
@@ -206,11 +206,11 @@ describe("createAISDKV6Wrapper", () => {
     ["custom-provider", "custom-provider"]
   ])("maps provider %s to %s", async (provider, expected) => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "ok" })
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       model: { modelId: "model", provider },
       prompt: "hello"
     });
@@ -232,7 +232,7 @@ describe("createAISDKV6Wrapper", () => {
         throw cause;
       }
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const wrappedModel = params.model as TestModel;
         return wrappedModel.doGenerate({ prompt: params.prompt });
@@ -252,7 +252,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
 
     await expect(
       wrapped.generateText({ model, prompt: "Say hello" })
@@ -296,7 +296,7 @@ describe("createAISDKV6Wrapper", () => {
         ])
       })
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const wrappedModel = params.model as TestModel & {
@@ -333,7 +333,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = (await wrapped.streamText?.({
       model,
       prompt: "Say hello"
@@ -396,7 +396,7 @@ describe("createAISDKV6Wrapper", () => {
         ])
       })
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const wrappedModel = params.model as TestModel & {
@@ -433,7 +433,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = (await wrapped.streamText?.({
       model,
       prompt: "Say hello"
@@ -476,7 +476,7 @@ describe("createAISDKV6Wrapper", () => {
         ])
       })
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const wrappedModel = params.model as TestModel & {
@@ -513,7 +513,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = (await wrapped.streamText?.({
       model,
       prompt: "Say hello"
@@ -546,7 +546,7 @@ describe("createAISDKV6Wrapper", () => {
 
   it("preserves stream result methods such as toUIMessageStreamResponse", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: () => {
         const result = Object.create({
@@ -564,7 +564,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = wrapped.streamText?.({ prompt: "hello" }) as {
       readonly fullStream: AsyncIterable<unknown>;
       toUIMessageStreamResponse(): Response;
@@ -582,7 +582,7 @@ describe("createAISDKV6Wrapper", () => {
   it("cancels readable streams through the active reader and closes the span", async () => {
     const tracing = new RecordingTracer();
     let cancelledReason: unknown;
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: () => ({
         fullStream: readableStreamWaitingForCancel(
@@ -594,7 +594,7 @@ describe("createAISDKV6Wrapper", () => {
       })
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = wrapped.streamText?.({ prompt: "hello" }) as {
       readonly fullStream: ReadableStream<unknown>;
     };
@@ -615,7 +615,7 @@ describe("createAISDKV6Wrapper", () => {
 
   it("preserves fullStream as a ReadableStream for AI SDK response helpers", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: () => {
         const result = {
@@ -638,7 +638,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = wrapped.streamText?.({ prompt: "hello" }) as {
       readonly fullStream: ReadableStream<unknown>;
       toUIMessageStreamResponse(): ReadableStream<unknown>;
@@ -663,7 +663,7 @@ describe("createAISDKV6Wrapper", () => {
         a * b
     };
     const originalExecute = multiplyTool.execute;
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const tools = params.tools as {
           readonly multiply: typeof multiplyTool;
@@ -677,7 +677,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     await wrapped.generateText({
       prompt: "multiply",
       tools: { multiply: multiplyTool }
@@ -704,7 +704,7 @@ describe("createAISDKV6Wrapper", () => {
         a * b
     };
     const originalExecute = multiplyTool.execute;
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const tools = params.tools as {
@@ -720,7 +720,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = wrapped.streamText?.({
       prompt: "multiply",
       tools: { multiply: multiplyTool }
@@ -752,7 +752,7 @@ describe("createAISDKV6Wrapper", () => {
       modelId: "object-model",
       provider: "test-provider"
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateObject: async (params) => {
         const wrappedModel = params.model as TestModel;
         return wrappedModel.doGenerate();
@@ -773,7 +773,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = await wrapped.generateObject?.({ model });
 
     expect(result).toMatchObject({ object: { answer: "Paris" } });
@@ -795,14 +795,14 @@ describe("createAISDKV6Wrapper", () => {
 
   it("wraps optional streamObject calls", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamObject: () => ({
         partialObjectStream: streamFrom([{ answer: "Paris" }])
       })
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = wrapped.streamObject?.({ prompt: "object please" }) as {
       readonly partialObjectStream: AsyncIterable<unknown>;
     };
@@ -825,11 +825,11 @@ describe("createAISDKV6Wrapper", () => {
 
   it("omits context by default and emits only allowlisted scalar context attributes", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "ok" })
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       experimental_context: {
         requestId: "req-1"
       }
@@ -840,7 +840,7 @@ describe("createAISDKV6Wrapper", () => {
     ]);
 
     const configuredTracing = new RecordingTracer();
-    await createAISDKV6Wrapper(ai, {
+    await createAISDKWrapper(ai, {
       options: {
         includeRuntimeContext: ["requestId", "privateObject"]
       },
@@ -873,7 +873,7 @@ describe("createAISDKV6Wrapper", () => {
         ])
       })
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: (params) => {
         const wrappedModel = params.model as TestModel & {
@@ -910,7 +910,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = (await wrapped.streamText?.({
       model,
       prompt: "Say hello"
@@ -940,14 +940,14 @@ describe("createAISDKV6Wrapper", () => {
         yield "chunk-2";
       }
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const tools = params.tools as { readonly count: typeof countTool };
         return { output: tools.count.execute({}), text: "ok" };
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = (await wrapped.generateText({
       prompt: "count",
       tools: { count: countTool }
@@ -983,14 +983,14 @@ describe("createAISDKV6Wrapper", () => {
         }
       }
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const wrappedToolset = params.tools as typeof tools;
         return { output: wrappedToolset.count.execute({}), text: "ok" };
       }
     };
 
-    const result = (await createAISDKV6Wrapper(ai, {
+    const result = (await createAISDKWrapper(ai, {
       tracer: tracing
     }).generateText({
       prompt: "count",
@@ -1031,14 +1031,14 @@ describe("createAISDKV6Wrapper", () => {
         }
       }
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const wrappedToolset = params.tools as typeof tools;
         return { output: wrappedToolset.count.execute({}), text: "ok" };
       }
     };
 
-    const result = (await createAISDKV6Wrapper(ai, {
+    const result = (await createAISDKWrapper(ai, {
       tracer: tracing
     }).generateText({
       prompt: "count",
@@ -1075,7 +1075,7 @@ describe("createAISDKV6Wrapper", () => {
         _options?: { readonly toolCallId?: string }
       ) => a * b
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const tools = params.tools as {
           readonly multiply: typeof multiplyTool;
@@ -1088,7 +1088,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     await wrapped.generateText({
       prompt: "multiply",
       tools: { multiply: multiplyTool }
@@ -1105,7 +1105,7 @@ describe("createAISDKV6Wrapper", () => {
 
   it("records a numeric time to first chunk on streamed operations", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "unused" }),
       streamText: () => ({
         textStream: streamFrom([
@@ -1115,7 +1115,7 @@ describe("createAISDKV6Wrapper", () => {
       })
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const result = wrapped.streamText?.({ prompt: "hello" }) as {
       readonly textStream: AsyncIterable<unknown>;
     };
@@ -1134,11 +1134,11 @@ describe("createAISDKV6Wrapper", () => {
   it("falls back to the bare operation when the span name exceeds 64 bytes", async () => {
     const tracing = new RecordingTracer();
     const agentName = "a".repeat(65);
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "ok" })
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       experimental_telemetry: { metadata: { agentName } },
       prompt: "hello"
     });
@@ -1152,11 +1152,11 @@ describe("createAISDKV6Wrapper", () => {
 
   it("lets explicit metadata agentName override functionId", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "ok" })
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       experimental_telemetry: {
         functionId: "function-agent",
         metadata: { agentName: "explicit-agent" }
@@ -1173,11 +1173,11 @@ describe("createAISDKV6Wrapper", () => {
   describe("telemetry metadata passthrough", () => {
     it("maps reserved turn keys to dedicated turn attributes", async () => {
       const tracing = new RecordingTracer();
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async () => ({ text: "ok" })
       };
 
-      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      await createAISDKWrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
           metadata: {
             "cloudflare.agents.turn.admission": "queue",
@@ -1207,11 +1207,11 @@ describe("createAISDKV6Wrapper", () => {
 
     it("preserves an explicit user.id semantic attribute", async () => {
       const tracing = new RecordingTracer();
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async () => ({ text: "ok" })
       };
 
-      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      await createAISDKWrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
           metadata: { "user.id": "user-7" }
         },
@@ -1228,11 +1228,11 @@ describe("createAISDKV6Wrapper", () => {
 
     it("passes arbitrary scalar keys through under cloudflare.agents.metadata", async () => {
       const tracing = new RecordingTracer();
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async () => ({ text: "ok" })
       };
 
-      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      await createAISDKWrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
           metadata: {
             beta: true,
@@ -1256,11 +1256,11 @@ describe("createAISDKV6Wrapper", () => {
 
     it("drops object and array metadata values", async () => {
       const tracing = new RecordingTracer();
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async () => ({ text: "ok" })
       };
 
-      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      await createAISDKWrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
           metadata: { list: [1, 2], nested: { a: 1 } }
         },
@@ -1277,11 +1277,11 @@ describe("createAISDKV6Wrapper", () => {
 
     it("consumes identity keys into semantic context without passthrough", async () => {
       const tracing = new RecordingTracer();
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async () => ({ text: "ok" })
       };
 
-      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      await createAISDKWrapper(ai, { tracer: tracing }).generateText({
         experimental_telemetry: {
           metadata: { agentId: "a", agentName: "n", conversationId: "c" }
         },
@@ -1307,12 +1307,12 @@ describe("createAISDKV6Wrapper", () => {
 
   it("returns identical wrapper functions on repeated property reads", () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({ text: "ok" }),
       streamText: () => ({ textStream: streamFrom([]) })
     };
 
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
 
     expect(wrapped.generateText).toBe(wrapped.generateText);
     expect(wrapped.streamText).toBe(wrapped.streamText);
@@ -1320,7 +1320,7 @@ describe("createAISDKV6Wrapper", () => {
 
   it("reads public-result usage details and response.modelId", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({
         finishReason: "stop",
         response: { id: "resp-9", modelId: "served-9" },
@@ -1335,7 +1335,7 @@ describe("createAISDKV6Wrapper", () => {
       })
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       prompt: "hello"
     });
 
@@ -1353,7 +1353,7 @@ describe("createAISDKV6Wrapper", () => {
 
   it("reads deprecated flat cachedInputTokens and reasoningTokens usage fields", async () => {
     const tracing = new RecordingTracer();
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async () => ({
         text: "Hi",
         usage: {
@@ -1366,7 +1366,7 @@ describe("createAISDKV6Wrapper", () => {
       })
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       prompt: "hello"
     });
 
@@ -1381,7 +1381,7 @@ describe("createAISDKV6Wrapper", () => {
   it("records string model ids on the root span", async () => {
     const tracing = new RecordingTracer();
     let receivedModel: unknown;
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         receivedModel = params.model;
         return { text: "ok" };
@@ -1391,7 +1391,7 @@ describe("createAISDKV6Wrapper", () => {
       }
     };
 
-    await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+    await createAISDKWrapper(ai, { tracer: tracing }).generateText({
       model: "gateway/model-9",
       prompt: "hello"
     });
@@ -1411,7 +1411,7 @@ describe("createAISDKV6Wrapper", () => {
         provider: "test-provider",
         doGenerate: async () => ({ text: "ok" })
       };
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async (params) => {
           const currentModel = params.model as TestModel;
           return currentModel.doGenerate();
@@ -1422,7 +1422,7 @@ describe("createAISDKV6Wrapper", () => {
         }
       };
 
-      const result = await createAISDKV6Wrapper(ai, {
+      const result = await createAISDKWrapper(ai, {
         tracer: tracing
       }).generateText({ model, prompt: "hello" });
 
@@ -1438,7 +1438,7 @@ describe("createAISDKV6Wrapper", () => {
       };
       const originalExecute = multiplyTool.execute;
       let receivedTools: unknown;
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async (params) => {
           receivedTools = params.tools;
           return { text: "ok" };
@@ -1446,7 +1446,7 @@ describe("createAISDKV6Wrapper", () => {
       };
 
       const tools = { multiply: multiplyTool };
-      await createAISDKV6Wrapper(ai, { tracer: tracing }).generateText({
+      await createAISDKWrapper(ai, { tracer: tracing }).generateText({
         prompt: "multiply",
         tools
       });
@@ -1463,14 +1463,14 @@ describe("createAISDKV6Wrapper", () => {
       const tracing = new RecordingTracer({ isTraced: false });
       const originalStream = streamFrom([{ type: "text-delta", delta: "Hi" }]);
       const originalResult = { textStream: originalStream };
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async () => ({ text: "unused" }),
         streamText: () => originalResult
       };
 
-      const result = createAISDKV6Wrapper(ai, { tracer: tracing }).streamText?.(
-        { prompt: "hello" }
-      );
+      const result = createAISDKWrapper(ai, { tracer: tracing }).streamText?.({
+        prompt: "hello"
+      });
 
       expect(result).toBe(originalResult);
       // The stream field is left untouched — no patching on the fast path.
@@ -1482,7 +1482,7 @@ describe("createAISDKV6Wrapper", () => {
     it("never enumerates telemetry metadata when not tracing", async () => {
       const tracing = new RecordingTracer({ isTraced: false });
       const originalResult = { text: "ok" };
-      const ai: AISDKV6Namespace = {
+      const ai: AISDKNamespace = {
         generateText: async () => originalResult
       };
       // Direct reads (agentName for the span name) are allowed; enumeration
@@ -1499,7 +1499,7 @@ describe("createAISDKV6Wrapper", () => {
         }
       );
 
-      const result = await createAISDKV6Wrapper(ai, {
+      const result = await createAISDKWrapper(ai, {
         tracer: tracing
       }).generateText({
         experimental_telemetry: { metadata: hostileMetadata },
@@ -1514,7 +1514,7 @@ describe("createAISDKV6Wrapper", () => {
   });
 });
 
-describe("createAISDKV6Wrapper payload storage", () => {
+describe("createAISDKWrapper payload storage", () => {
   function fixture() {
     const tool = { execute: async (_input: unknown) => ({ saved: true }) };
     const model: TestModel = {
@@ -1533,7 +1533,7 @@ describe("createAISDKV6Wrapper payload storage", () => {
         finishReason: "stop"
       })
     };
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         await (params.model as TestModel).doGenerate({
           prompt: params.messages ?? params.prompt
@@ -1579,7 +1579,7 @@ describe("createAISDKV6Wrapper payload storage", () => {
       }
     ];
 
-    await createAISDKV6Wrapper(ai, {
+    await createAISDKWrapper(ai, {
       options: { storeMessages: true },
       tracer: tracing
     }).generateText({ messages, model, tools: { save: tool } });
@@ -1648,7 +1648,7 @@ describe("createAISDKV6Wrapper payload storage", () => {
       { role: "user", content: "newest" }
     ];
 
-    await createAISDKV6Wrapper(ai, {
+    await createAISDKWrapper(ai, {
       options: { storeMessages: true },
       tracer: tracing
     }).generateText({ messages, model, tools: { save: tool } });
@@ -1673,7 +1673,7 @@ describe("createAISDKV6Wrapper payload storage", () => {
     const tracing = new RecordingTracer();
     const { ai, model, tool } = fixture();
 
-    await createAISDKV6Wrapper(ai, {
+    await createAISDKWrapper(ai, {
       options: { storeTools: true },
       tracer: tracing
     }).generateText({
@@ -1699,7 +1699,7 @@ describe("createAISDKV6Wrapper payload storage", () => {
   });
 });
 
-describe("createAISDKV6Wrapper tool approval spans", () => {
+describe("createAISDKWrapper tool approval spans", () => {
   function approvalMessages(approved: boolean): Array<Record<string, unknown>> {
     return [
       {
@@ -1741,7 +1741,7 @@ describe("createAISDKV6Wrapper tool approval spans", () => {
     };
     const messages =
       mode === "requested" ? [] : approvalMessages(mode === "approved");
-    const ai: AISDKV6Namespace = {
+    const ai: AISDKNamespace = {
       generateText: async (params) => {
         const wrapped = (params.tools as { deploy: typeof tool }).deploy;
         const options = {
@@ -1768,7 +1768,7 @@ describe("createAISDKV6Wrapper tool approval spans", () => {
       const tracing = new RecordingTracer();
       const fixture = approvalAI(mode);
 
-      await createAISDKV6Wrapper(fixture.ai, { tracer: tracing }).generateText({
+      await createAISDKWrapper(fixture.ai, { tracer: tracing }).generateText({
         messages: fixture.messages,
         tools: { deploy: fixture.tool }
       });

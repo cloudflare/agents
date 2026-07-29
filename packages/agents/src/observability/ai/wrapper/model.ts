@@ -13,11 +13,11 @@ import {
 } from "./extract";
 import type { ModelInfo } from "./extract";
 import { finishWhenStreamCompletes } from "./streams";
-import type { AISDKV6WrapLanguageModel } from "./types";
+import type { AISDKWrapLanguageModel } from "./types";
 
 export function wrapModel(
   tracer: AgentTracer,
-  wrapLanguageModel: AISDKV6WrapLanguageModel | undefined,
+  wrapLanguageModel: AISDKWrapLanguageModel | undefined,
   model: unknown,
   parentOperation: string,
   storeMessages: boolean,

@@ -3,7 +3,7 @@ import * as ai from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createAISDKV6Wrapper } from "../../observability/ai/v6/wrap";
+import { createAISDKWrapper } from "../../observability/ai/wrapper/wrap";
 import { withInvocationScope } from "../../observability/tracing/tracer";
 import { deferred, RecordingTracer } from "./recording-tracer";
 
@@ -29,7 +29,7 @@ function spanFor(tracing: RecordingTracer, operation: string) {
 }
 
 const wrap = (tracing: RecordingTracer) =>
-  createAISDKV6Wrapper(ai, { tracer: tracing });
+  createAISDKWrapper(ai, { tracer: tracing });
 
 describe("wrapAISDK with the real AI SDK v7", () => {
   it("keeps model and tool spans under invoke_agent without restoring auth state", async () => {
@@ -369,7 +369,7 @@ describe("wrapAISDK with the real AI SDK v7", () => {
     });
 
     await withInvocationScope(async () => {
-      const result = createAISDKV6Wrapper(ai, {
+      const result = createAISDKWrapper(ai, {
         options: { storeTools: true },
         tracer: tracing
       }).streamText({

@@ -3,7 +3,7 @@ import * as ai from "ai";
 import { convertArrayToReadableStream, MockLanguageModelV3 } from "ai/test";
 import { createWorkersAI } from "workers-ai-provider";
 import { deferred, RecordingTracer } from "./recording-tracer";
-import { createAISDKV6Wrapper } from "../../observability/ai/v6/wrap";
+import { createAISDKWrapper } from "../../observability/ai/wrapper/wrap";
 import { withInvocationScope } from "../../observability/tracing/tracer";
 
 type ProviderStreamResult = Awaited<
@@ -64,10 +64,10 @@ function textStreamModel(): MockLanguageModelV3 {
   });
 }
 
-describe("createAISDKV6Wrapper with the real AI SDK", () => {
+describe("createAISDKWrapper with the real AI SDK", () => {
   it("traces a streamText call end to end", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, {
+    const wrapped = createAISDKWrapper(ai, {
       options: { storeMessages: true },
       tracer: tracing
     });
@@ -183,7 +183,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     });
 
     await withInvocationScope(async () => {
-      const result = createAISDKV6Wrapper(ai, {
+      const result = createAISDKWrapper(ai, {
         options: { storeTools: true },
         tracer: tracing
       }).streamText({
@@ -285,7 +285,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
     // work that is supposed to escape it.
     let escaped: Promise<void> | undefined;
     await withInvocationScope(async () => {
-      const result = createAISDKV6Wrapper(ai, { tracer: tracing }).streamText({
+      const result = createAISDKWrapper(ai, { tracer: tracing }).streamText({
         [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
         model,
         prompt: "Double 21",
@@ -340,7 +340,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("records an AI Gateway log id exposed in provider response headers", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const model = new MockLanguageModelV3({
       doGenerate: {
         content: [{ type: "text", text: "Hello" }],
@@ -379,7 +379,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("records the log id exposed on a real Workers AI provider binding", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const binding = {
       aiGatewayLogId: null as string | null,
       async run() {
@@ -411,7 +411,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("keeps a Workers AI binding log id through stream completion", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const binding = {
       aiGatewayLogId: null as string | null,
       async run() {
@@ -448,7 +448,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("stays lazy: nothing consumes the stream before the caller does", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const model = textStreamModel();
 
     const result = wrapped.streamText({ model, prompt: "lazy" });
@@ -473,7 +473,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("traces tool execution with the SDK-provided tool call id", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, {
+    const wrapped = createAISDKWrapper(ai, {
       options: { storeMessages: true },
       tracer: tracing
     });
@@ -567,7 +567,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("keeps the usage a failed turn already reported", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     // The step reports its usage, then the stream fails. Those tokens were
     // really spent, so reporting nothing for the turn is worse than reporting
     // the partial truth.
@@ -617,7 +617,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("marks the root span errored when the provider emits an in-band error part", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const parts: ProviderStreamPart[] = [
       { type: "stream-start", warnings: [] },
       { type: "text-start", id: "text-1" },
@@ -656,7 +656,7 @@ describe("createAISDKV6Wrapper with the real AI SDK", () => {
 
   it("finishes the root span as canceled when the caller aborts mid-stream", async () => {
     const tracing = new RecordingTracer();
-    const wrapped = createAISDKV6Wrapper(ai, { tracer: tracing });
+    const wrapped = createAISDKWrapper(ai, { tracer: tracing });
     const abortController = new AbortController();
     const model = new MockLanguageModelV3({
       modelId: "mock-model",
