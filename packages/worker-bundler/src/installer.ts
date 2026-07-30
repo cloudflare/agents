@@ -510,10 +510,10 @@ async function installPythonPackage(
   }
 }
 
-async function retrieveFromPyPI (
+async function retrieveFromPyPI(
   name: string,
   registry: string
-): Promise<[Response, PypiSimpleFile, string, string[]] | null> {
+): Promise<[Response, PypiSimpleFile, string] | null> {
   const metadata = await fetchPythonPackageMetadata(name, registry);
   const version = metadata.version;
   const wheel = metadata.wheel;
@@ -531,9 +531,9 @@ async function retrieveFromPyPI (
   return [response, wheel, version];
 }
 
-async function retrieveFromPyodide (
+async function retrieveFromPyodide(
   name: string
-): Promise<[Response, PypiSimpleFile, string, string[]] | null> {
+): Promise<[Response, PypiSimpleFile, string] | null> {
   const pyodideWheel = getPyodideWheel(name);
   if (!pyodideWheel) {
     return null;
@@ -551,7 +551,7 @@ async function retrieveFromPyodide (
   const version = pyodideWheel.package.version;
   const wheel = pyodideWheel.file;
   return [response, wheel, version];
-};
+}
 
 /**
  * Strip a Python wheel down to just the package contents.

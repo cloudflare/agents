@@ -1170,4 +1170,4 @@ describe("comparePythonVersions", () => {
     expect(comparePythonVersions("2.0.0dev", "2.0.0")).toBeLessThan(0);
     expect(comparePythonVersions("2.0.0pre", "2.0.0")).toBeLessThan(0);
   });
-})
+});
