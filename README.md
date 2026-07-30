@@ -117,7 +117,6 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 | **Browser Agents**      | Run agents in the browser tab with `agents/browser`                             |
 | **Code Mode**           | LLMs generate executable TypeScript instead of individual tool calls            |
 | **Sandboxed Execution** | Run generated code inside an isolated Worker with a virtual filesystem          |
-| **x402 Payments**       | Integrate OSS x402 payment libraries into an Agent                              |
 | **Observability**       | Built-in tracing, metrics, and structured logs                                  |
 | **SQL**                 | Direct SQLite queries via Durable Objects                                       |
 | **React Hooks**         | `useAgent`, `useAgentChat`, `useVoiceAgent` for frontend integration            |
@@ -148,7 +147,7 @@ The [`examples/`](examples) directory has 30+ self-contained demos. A non-exhaus
 - **Code Mode & sandboxes** — [`codemode/`](examples/codemode), [`codemode-mcp/`](examples/codemode-mcp), [`codemode-mcp-openapi/`](examples/codemode-mcp-openapi), [`dynamic-workers/`](examples/dynamic-workers), [`dynamic-workers-playground/`](examples/dynamic-workers-playground), [`worker-bundler-playground/`](examples/worker-bundler-playground)
 - **Voice** — [`voice-agent/`](examples/voice-agent) is the unified voice pipeline example with Workers AI, AssemblyAI, Telnyx, and ElevenLabs STT; [`voice-input/`](examples/voice-input) covers dictation; [`telnyx-voice-agent/`](examples/telnyx-voice-agent) covers phone transport; [`elevenlabs-starter/`](examples/elevenlabs-starter) covers broader ElevenLabs media APIs
 - **Workflows & approvals** — [`workflows/`](examples/workflows), [`a2a/`](examples/a2a)
-- **Auth, payments, comms** — [`auth-agent/`](examples/auth-agent), [`cross-domain/`](examples/cross-domain), [`x402/`](examples/x402), [`email-agent/`](examples/email-agent), [`github-webhook/`](examples/github-webhook), [`push-notifications/`](examples/push-notifications)
+- **Auth & comms** — [`auth-agent/`](examples/auth-agent), [`cross-domain/`](examples/cross-domain), [`email-agent/`](examples/email-agent), [`github-webhook/`](examples/github-webhook), [`push-notifications/`](examples/push-notifications)
 - **Game & misc** — [`tictactoe/`](examples/tictactoe), [`ai-chat/`](examples/ai-chat)
 
 Examples using the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) live in [`openai-sdk/`](openai-sdk). Work-in-progress experiments live in [`experimental/`](experimental) (no stability guarantees).

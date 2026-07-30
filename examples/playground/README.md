@@ -84,9 +84,9 @@ The playground is organized into feature categories, each with interactive demos
 
 ### Product Integrations
 
-| Demo                    | Description                                                |
-| ----------------------- | ---------------------------------------------------------- |
-| **Integration Stories** | Email, webhooks, push, A2A, x402, and browser-tool stories |
+| Demo                    | Description                                          |
+| ----------------------- | ---------------------------------------------------- |
+| **Integration Stories** | Email, webhooks, push, A2A, and browser-tool stories |
 
 ## Project Structure
 

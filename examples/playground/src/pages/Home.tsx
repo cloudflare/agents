@@ -184,7 +184,7 @@ const features = [
       {
         name: "Integration Stories",
         path: "/integrations/products",
-        description: "Email, webhooks, push, A2A, x402, and browser tools"
+        description: "Email, webhooks, push, A2A, and browser tools"
       }
     ]
   }

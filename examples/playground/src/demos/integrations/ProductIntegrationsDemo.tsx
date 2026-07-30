@@ -4,7 +4,7 @@ import { DemoWrapper } from "../../layout";
 import { CodeExplanation, LogPanel, type CodeSection } from "../../components";
 import { useLogs } from "../../hooks";
 
-type StoryId = "email" | "webhook" | "push" | "a2a" | "x402" | "browser";
+type StoryId = "email" | "webhook" | "push" | "a2a" | "browser";
 
 const stories: Array<{
   id: StoryId;
@@ -72,20 +72,6 @@ const stories: Array<{
       ["artifact_returned", { type: "summary" }]
     ],
     examplePath: "examples/a2a"
-  },
-  {
-    id: "x402",
-    title: "Paid HTTP Request",
-    product: "OSS x402 payment libraries",
-    description:
-      "A protected HTTP endpoint returns payment requirements. The client confirms, pays with the OSS x402 libraries, and retries the request.",
-    events: [
-      ["payment_required", { price: "0.01 USDC" }],
-      ["user_confirmed", { maxPaymentValue: "0.10 USDC" }],
-      ["payment_attached", { network: "base-sepolia" }],
-      ["request_completed", { result: "premium result" }]
-    ],
-    examplePath: "examples/x402"
   },
   {
     id: "browser",
