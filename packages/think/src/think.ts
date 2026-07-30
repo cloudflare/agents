@@ -3024,7 +3024,14 @@ export class Think<
         this._scheduleMediaEvictionPass({ force: true });
       }
     };
-    this.onStart = (props?: Props) => startThink(props);
+    this.onStart = (props?: Props) =>
+      withAgentSpan(
+        this,
+        "think_start",
+        "startup",
+        { "cloudflare.agents.component": "think" },
+        () => startThink(props)
+      );
   }
 
   /**

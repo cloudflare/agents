@@ -801,7 +801,7 @@ export class AIChatAgent<
     super(ctx, env);
     withAgentSpan(
       this,
-      "agent_initialization",
+      "chat_initialization",
       "initialization",
       { "cloudflare.agents.component": "ai_chat" },
       () => {

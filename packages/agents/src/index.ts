@@ -2802,7 +2802,7 @@ export class Agent<
       );
     };
     this.onStart = (props?: Props) =>
-      this._withAgentSpan("agent_initialization", "startup", {}, (update) =>
+      this._withAgentSpan("agent_start", "startup", {}, (update) =>
         startAgent(props, update)
       );
   }
