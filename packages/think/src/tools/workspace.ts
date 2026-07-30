@@ -4,6 +4,11 @@ import type { InitialFiles } from "just-bash";
 import { Bash } from "just-bash";
 import { tool } from "ai";
 import { z } from "zod";
+import {
+  workspaceShellCapability,
+  type WorkspaceShellExecutor,
+  type WorkspaceWithShellCapability
+} from "./workspace-capabilities";
 
 // ── WorkspaceLike ─────────────────────────────────────────────────
 //
@@ -213,13 +218,36 @@ export function createWorkspaceTools(
   };
 
   if (options.bash !== false) {
-    tools.bash = createBashTool({
-      ...(typeof options.bash === "object" ? options.bash : {}),
-      ops: workspaceBashOps(workspace)
-    });
+    const bashOptions =
+      typeof options.bash === "object" ? options.bash : undefined;
+    const shell = getWorkspaceShell(workspace);
+    tools.bash = shell
+      ? createWorkspaceShellTool({
+          shell,
+          timeout: bashOptions?.timeout,
+          maxOutputBytes: bashOptions?.maxOutputBytes
+        })
+      : createBashTool({
+          ...bashOptions,
+          ops: workspaceBashOps(workspace)
+        });
   }
 
   return tools;
+}
+
+function getWorkspaceShell(
+  workspace: WorkspaceLike
+): WorkspaceShellExecutor | undefined {
+  try {
+    const candidate = workspace as WorkspaceLike &
+      WorkspaceWithShellCapability & {
+        shell?: WorkspaceShellExecutor;
+      };
+    return candidate[workspaceShellCapability] ?? candidate.shell;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Read ────────────────────────────────────────────────────────────
@@ -1157,6 +1185,43 @@ export interface BashToolOptions {
   maxWorkspaceFiles?: number;
   maxWorkspaceFileBytes?: number;
   maxOutputBytes?: number;
+}
+
+interface WorkspaceShellToolOptions {
+  shell: WorkspaceShellExecutor;
+  timeout?: number;
+  maxOutputBytes?: number;
+}
+
+function createWorkspaceShellTool(options: WorkspaceShellToolOptions): Tool {
+  return tool({
+    description:
+      "Run a shell command against the workspace. Use for shell-style " +
+      "workflows that combine multiple file operations. The workspace is " +
+      "mounted at `/workspace`, which is also the default working directory.",
+    inputSchema: z.object({
+      script: z.string().describe("Shell script to run"),
+      cwd: z
+        .string()
+        .optional()
+        .describe("Working directory for the script. Defaults to /workspace")
+    }),
+    execute: async ({ script, cwd }: BashToolInput) => {
+      const handle = await options.shell.exec(script, {
+        cwd: cwd ?? "/workspace",
+        encoding: "utf8",
+        timeoutMs: options.timeout ?? DEFAULT_BASH_TIMEOUT_MS
+      });
+      const result = await handle.result();
+      const maxOutputBytes =
+        options.maxOutputBytes ?? DEFAULT_BASH_MAX_OUTPUT_BYTES;
+      return {
+        stdout: truncateToolOutput(result.stdout, maxOutputBytes),
+        stderr: truncateToolOutput(result.stderr, maxOutputBytes),
+        exitCode: result.exitCode
+      };
+    }
+  });
 }
 
 export function createBashTool(options: BashToolOptions): Tool {

@@ -87,6 +87,92 @@ This requires an R2 bucket binding in `wrangler.jsonc`:
 }
 ```
 
+### Experimental Computer workspace
+
+You can opt an individual Think class into the new
+[`@cloudflare/computer`](https://github.com/cloudflare/computer)
+implementation
+without changing Think's default workspace:
+
+```sh
+npm install @cloudflare/computer
+```
+
+```typescript
+import { Think } from "@cloudflare/think";
+import {
+  createComputerWorkspace,
+  WorkerBackend,
+  WorkspaceServiceProxy
+} from "@cloudflare/think/experimental/computer";
+
+export { WorkspaceServiceProxy };
+
+export class MyAgent extends Think<Env> {
+  override workspace = createComputerWorkspace({
+    storage: this.ctx.storage,
+    backends: [
+      new WorkerBackend({
+        loader: this.env.LOADER,
+        workspace: {
+          binding: "MyAgent",
+          id: this.ctx.id.toString()
+        },
+        ctx: this.ctx
+      })
+    ]
+  });
+
+  getModel() {
+    /* ... */
+  }
+}
+```
+
+Use `this.workspace.readFile(...)` and `this.workspace.writeFile(...)` as you
+would with Think's default workspace. Computer-specific APIs are also available
+through `this.workspace.shell`, `this.workspace.git`, and
+`this.workspace.assets`. When a `WorkerBackend` is configured, Think's built-in
+`bash` tool uses Computer shell exec instead of the legacy `just-bash` snapshot.
+
+Add a Worker Loader binding for shell execution:
+
+```jsonc
+{
+  "worker_loaders": [{ "binding": "LOADER" }]
+}
+```
+
+> **No data migration:** The experimental Computer stores files in separate
+> `vfs_*` SQLite tables. It does not read or migrate the existing Think
+> workspace stored by `@cloudflare/shell`, so an existing agent starts with an
+> empty Computer workspace after opting in. The legacy files remain untouched
+> and become visible again if you remove the override, but files written to the
+> Computer are not visible to the legacy workspace.
+
+`WorkspaceServiceProxy` is the Worker entrypoint used by the shell backend to
+call back into the Computer owned by the Think instance. It does not own a
+separate workspace.
+
+#### API reference
+
+| Export                                                 | Signature or behavior                                                                        |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `createComputerWorkspace(options)`                     | Creates a locally owned Computer with `useThink: true`; returns the Computer itself          |
+| `LocalComputerWorkspace`                               | The local Computer type intersected with Think's `WorkspaceLike`                             |
+| `adaptComputer(computer)`                              | Adapts the client returned by `getWorkspace()` when another Durable Object owns the Computer |
+| `ComputerWorkspace`                                    | Compatibility adapter used for remote Computer clients                                       |
+| `Computer`                                             | Alias for the current `Workspace` class from `@cloudflare/computer`                          |
+| `getWorkspace()` and `withWorkspace()`                 | Re-exports for unified local and remote Computer clients                                     |
+| `WorkerBackend`                                        | Worker Loader shell backend from `@cloudflare/computer/backends/worker`                      |
+| `WorkspaceServiceProxy`                                | Worker entrypoint connecting the shell backend to the Think-owned Computer                   |
+| `ComputerOptions`, `WorkspaceClient`, and Worker types | Type-only exports for constructing or adapting a Computer                                    |
+
+Use `createComputerWorkspace()` for a Computer owned directly by the Think
+instance. Use `adaptComputer(await getWorkspace(stub))` when another Durable
+Object owns the Computer; compatibility methods are installed on local Computer
+instances, not on remote `getWorkspace()` clients.
+
 ## Custom Tools
 
 Override `getTools()` to add your own tools. These are standard AI SDK `tool()` definitions with Zod schemas:

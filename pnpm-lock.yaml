@@ -4092,6 +4092,9 @@ importers:
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../ai-chat
+      '@cloudflare/computer':
+        specifier: 0.1.0-alpha.1
+        version: 0.1.0-alpha.1(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(isomorphic-git@1.38.5)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -5588,6 +5591,23 @@ packages:
   '@clack/prompts@1.6.0':
     resolution: {integrity: sha512-EYlRokl8szrP9Z25qT5aepMdBjzBvHF9ZEhzIiUBc9guz/T31EqRgvD0QSgZcpE93xiwrr+OkB4nz0BZyF6fSA==}
     engines: {node: '>= 20.12.0'}
+
+  '@cloudflare/computer@0.1.0-alpha.1':
+    resolution: {integrity: sha512-oZ0SvnYeNqs5nt2Qe8CkakuPHjpEQUtY165iIQhaaBig4OR8Fvk7jKjLFZt7pf9D2evuu9stnIQdSTUvC/yB4w==}
+    peerDependencies:
+      '@platformatic/vfs': '*'
+      ai: ^6.0.196 || ^7.0.0
+      isomorphic-git: ^1.27.0
+      zod: ^4.4.3
+    peerDependenciesMeta:
+      '@platformatic/vfs':
+        optional: true
+      ai:
+        optional: true
+      isomorphic-git:
+        optional: true
+      zod:
+        optional: true
 
   '@cloudflare/containers@0.3.7':
     resolution: {integrity: sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==}
@@ -13353,6 +13373,18 @@ snapshots:
       fast-string-width: 3.0.2
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
+
+  '@cloudflare/computer@0.1.0-alpha.1(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(isomorphic-git@1.38.5)(zod@4.4.3)':
+    dependencies:
+      capnweb: 0.8.0
+      just-bash: 3.0.2
+    optionalDependencies:
+      '@platformatic/vfs': 0.4.0
+      ai: 7.0.18(zod@4.4.3)
+      isomorphic-git: 1.38.5
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - supports-color
 
   '@cloudflare/containers@0.3.7': {}
 

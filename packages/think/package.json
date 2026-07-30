@@ -40,6 +40,7 @@
     "@ai-sdk/react": "^4.0.0",
     "@chat-adapter/telegram": "^4.31.0",
     "@cloudflare/ai-chat": "workspace:*",
+    "@cloudflare/computer": "0.1.0-alpha.1",
     "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
@@ -62,6 +63,7 @@
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@chat-adapter/telegram": "^4.29.0",
+    "@cloudflare/computer": ">=0.1.0-alpha.1 <0.2.0",
     "agents": ">=0.18.0 <1.0.0",
     "ai": "^6.0.0 || ^7.0.0",
     "react": "^19.0.0",
@@ -73,6 +75,9 @@
       "optional": true
     },
     "@chat-adapter/telegram": {
+      "optional": true
+    },
+    "@cloudflare/computer": {
       "optional": true
     },
     "react": {
@@ -110,6 +115,10 @@
     "./messengers/telegram": {
       "types": "./dist/messengers/telegram.d.ts",
       "import": "./dist/messengers/telegram.js"
+    },
+    "./experimental/computer": {
+      "types": "./dist/experimental/computer.d.ts",
+      "import": "./dist/experimental/computer.js"
     },
     "./react": {
       "types": "./dist/react.d.ts",

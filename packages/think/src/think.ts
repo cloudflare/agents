@@ -7037,6 +7037,26 @@ export class Think<
 
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
 
+  /** @internal Used by the experimental Computer shell service proxy. */
+  async __getWorkspaceStub(): Promise<object> {
+    const workspace = this.workspace as WorkspaceLike & {
+      __getWorkspaceStub?: () => Promise<object>;
+      ready?: () => Promise<void>;
+      stub?: () => object;
+    };
+    if (workspace.__getWorkspaceStub) {
+      return workspace.__getWorkspaceStub();
+    }
+    if (workspace.ready && workspace.stub) {
+      await workspace.ready();
+      return workspace.stub();
+    }
+    throw new Error(
+      "The Computer shell backend requires a locally owned Computer " +
+        "or an adapter from @cloudflare/think/experimental/computer."
+    );
+  }
+
   async _hostReadFile(path: string): Promise<string | null> {
     return (await this.workspace.readFile(path)) ?? null;
   }

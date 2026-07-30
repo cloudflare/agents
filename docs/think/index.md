@@ -1283,20 +1283,21 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 
 ## Package Exports
 
-| Export                                  | Description                                                   |
-| --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session`, `Workspace`, `skills` namespace           |
-| `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
-| `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
-| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
-| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
-| `@cloudflare/think/workflows`           | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
-| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
-| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
-| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
-| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
-| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
-| `@cloudflare/think/vite`                | Think Vite plugin and generated Worker config helpers         |
+| Export                                    | Description                                                   |
+| ----------------------------------------- | ------------------------------------------------------------- |
+| `@cloudflare/think`                       | `Think`, `Session`, `Workspace`, `skills` namespace           |
+| `@cloudflare/think/framework`             | Framework manifest discovery and Worker config helpers        |
+| `@cloudflare/think/server-entry`          | Framework Worker entry helpers for custom server handlers     |
+| `@cloudflare/think/messengers`            | Messenger contracts, Chat SDK bridge, state agent, delivery   |
+| `@cloudflare/think/messengers/telegram`   | Telegram messenger provider and delivery helpers              |
+| `@cloudflare/think/experimental/computer` | Opt-in `@cloudflare/computer` workspace integration           |
+| `@cloudflare/think/workflows`             | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
+| `@cloudflare/think/tools/workspace`       | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/fetch`           | `createFetchTools()` — opt-in allowlisted HTTP reads          |
+| `@cloudflare/think/tools/execute`         | `createExecuteTool()` — sandboxed code execution via codemode |
+| `@cloudflare/think/tools/extensions`      | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/extensions`            | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| `@cloudflare/think/vite`                  | Think Vite plugin and generated Worker config helpers         |
 
 ## Dependencies
 
@@ -1308,6 +1309,7 @@ Peer dependencies you provide:
 | `ai`                     | yes      | Vercel AI SDK v6                             |
 | `zod`                    | yes      | Schema validation (v4)                       |
 | `@chat-adapter/telegram` | optional | Required for Telegram messengers             |
+| `@cloudflare/computer`   | optional | Experimental Computer workspace integration  |
 | `vite`                   | optional | Required for the Think Vite plugin (`/vite`) |
 
 Bundled with `@cloudflare/think`:

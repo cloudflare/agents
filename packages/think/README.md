@@ -206,6 +206,52 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
+### Experimental Computer workspace
+
+To try the new `@cloudflare/computer` implementation without changing the
+default for other Think agents, install the experimental peer:
+
+```sh
+npm install @cloudflare/computer
+```
+
+```ts
+import {
+  createComputerWorkspace,
+  WorkerBackend,
+  WorkspaceServiceProxy
+} from "@cloudflare/think/experimental/computer";
+
+export { WorkspaceServiceProxy };
+
+export class MyAgent extends Think<Env> {
+  override workspace = createComputerWorkspace({
+    storage: this.ctx.storage,
+    backends: [
+      new WorkerBackend({
+        loader: this.env.LOADER,
+        workspace: {
+          binding: "MyAgent",
+          id: this.ctx.id.toString()
+        },
+        ctx: this.ctx
+      })
+    ]
+  });
+}
+```
+
+Computer's `useThink` compatibility keeps the existing direct interface
+(`this.workspace.readFile(...)`). `createComputerWorkspace()` returns the
+Computer itself, so native surfaces such as `this.workspace.fs`,
+`this.workspace.shell`, and `this.workspace.git` remain available. Think uses
+Computer shell exec for the built-in `bash` tool.
+
+> **No data migration:** opting in starts a separate, empty Computer workspace.
+> Existing legacy workspace files remain untouched but are not visible through
+> the experimental Computer. Files written through the Computer are likewise not
+> visible if you switch back.
+
 ## Agent Skills
 
 Think supports the [Agent Skills](https://agentskills.io/) directory format as
@@ -315,19 +361,20 @@ Script execution requires a Worker Loader binding:
 
 ## Exports
 
-| Export                                  | Description                                                   |
-| --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
-| `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
-| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
-| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
-| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
-| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
-| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
-| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
-| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
-| `@cloudflare/think/vite`                | Think Vite plugin and generated Worker config helpers         |
+| Export                                    | Description                                                   |
+| ----------------------------------------- | ------------------------------------------------------------- |
+| `@cloudflare/think`                       | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think/framework`             | Framework manifest discovery and Worker config helpers        |
+| `@cloudflare/think/server-entry`          | Framework Worker entry helpers for custom server handlers     |
+| `@cloudflare/think/messengers`            | Messenger contracts, Chat SDK bridge, state agent, delivery   |
+| `@cloudflare/think/messengers/telegram`   | Telegram messenger provider and delivery helpers              |
+| `@cloudflare/think/experimental/computer` | Opt-in `@cloudflare/computer` compatibility adapter           |
+| `@cloudflare/think/tools/workspace`       | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/fetch`           | `createFetchTools()` — opt-in allowlisted HTTP reads          |
+| `@cloudflare/think/tools/execute`         | `createExecuteTool()` — sandboxed code execution via codemode |
+| `@cloudflare/think/tools/extensions`      | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/extensions`            | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| `@cloudflare/think/vite`                  | Think Vite plugin and generated Worker config helpers         |
 
 ## Think
 
@@ -1009,6 +1056,7 @@ getTools() {
 | `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
 | `just-bash`                  | Bash skill script execution                               |
 | `@chat-adapter/telegram`     | Required for Telegram messengers                          |
+| `@cloudflare/computer`       | Optional experimental Computer workspace                  |
 
 ## Acknowledgments
 
