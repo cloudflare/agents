@@ -2321,20 +2321,27 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    if (!wrappedClasses.has(this.constructor)) {
-      // Auto-wrap custom methods with agent context
-      this._autoWrapCustomMethods();
-      wrappedClasses.add(this.constructor);
-    }
+    this.mcp = this._withAgentSpan(
+      "agent_initialization",
+      "initialization",
+      {},
+      () => {
+        if (!wrappedClasses.has(this.constructor)) {
+          // Auto-wrap custom methods with agent context
+          this._autoWrapCustomMethods();
+          wrappedClasses.add(this.constructor);
+        }
 
-    this._ensureSchema();
+        this._ensureSchema();
 
-    // Initialize MCPClientManager AFTER tables are created
-    this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
-      storage: this.ctx.storage,
-      createAuthProvider: (callbackUrl) =>
-        this.createMcpOAuthProvider(callbackUrl)
-    });
+        // Initialize MCPClientManager AFTER tables are created
+        return new MCPClientManager(this._ParentClass.name, "0.0.1", {
+          storage: this.ctx.storage,
+          createAuthProvider: (callbackUrl) =>
+            this.createMcpOAuthProvider(callbackUrl)
+        });
+      }
+    );
 
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(

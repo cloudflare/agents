@@ -799,26 +799,34 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
-    this.sql`create table if not exists cf_ai_chat_agent_messages (
-      id text primary key,
-      message text not null,
-      created_at datetime default current_timestamp
-    )`;
+    withAgentSpan(
+      this,
+      "agent_initialization",
+      "initialization",
+      { "cloudflare.agents.component": "ai_chat" },
+      () => {
+        this.sql`create table if not exists cf_ai_chat_agent_messages (
+          id text primary key,
+          message text not null,
+          created_at datetime default current_timestamp
+        )`;
 
-    // Key-value table for request context that must survive hibernation
-    // (e.g., custom body fields, client tools from the last chat request).
-    this.sql`create table if not exists cf_ai_chat_request_context (
-      key text primary key,
-      value text not null
-    )`;
+        // Key-value table for request context that must survive hibernation
+        // (e.g., custom body fields, client tools from the last chat request).
+        this.sql`create table if not exists cf_ai_chat_request_context (
+          key text primary key,
+          value text not null
+        )`;
 
-    this._ensureAgentToolTables();
-    this._restoreRequestContext();
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
+        this._ensureAgentToolTables();
+        this._restoreRequestContext();
+        this._resumableStream = new ResumableStream(this.sql.bind(this));
 
-    const rawMessages = this._loadMessagesFromDb();
-    // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-    this.messages = autoTransformMessages(rawMessages);
+        const rawMessages = this._loadMessagesFromDb();
+        // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
+        this.messages = autoTransformMessages(rawMessages);
+      }
+    );
 
     this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
