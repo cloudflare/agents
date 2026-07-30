@@ -412,7 +412,7 @@ async function installPythonPackage(
   installedPackages: Map<string, string>,
   inProgress: Map<string, Promise<void>>,
   registry: string,
-  preferPyodideIndex: boolean
+  preferPyodideIndex: boolean // TODO: Remove this / remove references to this from other files; we will always prefer the pyodide index
 ): Promise<void> {
   // Skip if already installed in this run
   if (installedPackages.has(name)) {
@@ -531,6 +531,7 @@ async function retrieveFromPyPI(
   return [response, wheel, version];
 }
 
+// TODO: Alter the flow to use the PyPA simple api (index.pyodide.org)
 async function retrieveFromPyodide(
   name: string
 ): Promise<[Response, PypiSimpleFile, string] | null> {
