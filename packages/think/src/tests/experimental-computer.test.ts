@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { adaptComputer, type WorkspaceClient } from "../experimental/computer";
-import { Think, type WorkspaceLike } from "../think";
+import { Think } from "../think";
 import { createWorkspaceTools } from "../tools/workspace";
 
 const toolContext = {
@@ -152,8 +152,26 @@ function createFakeComputer(options?: {
           }
         }
       }
-    },
+    } as unknown as WorkspaceClient["fs"],
     shell,
+    async readFile() {
+      return null;
+    },
+    async readFileBytes() {
+      return null;
+    },
+    async writeFile() {},
+    async readDir() {
+      return [];
+    },
+    async rm() {},
+    async glob() {
+      return [];
+    },
+    async mkdir() {},
+    async stat() {
+      return null;
+    },
     git: {},
     assets: undefined,
     artifacts: {},
@@ -167,47 +185,25 @@ function createFakeComputer(options?: {
   };
 }
 
-function addThinkCompatibility(
-  computer: FakeComputer
-): FakeComputer & WorkspaceLike {
-  const compatibility = adaptComputer(computer);
-  return Object.assign(computer, {
-    readFile: compatibility.readFile.bind(compatibility),
-    readFileBytes: compatibility.readFileBytes.bind(compatibility),
-    writeFile: compatibility.writeFile.bind(compatibility),
-    readDir: compatibility.readDir.bind(compatibility),
-    rm: compatibility.rm.bind(compatibility),
-    glob: compatibility.glob.bind(compatibility),
-    mkdir: compatibility.mkdir.bind(compatibility),
-    stat: compatibility.stat.bind(compatibility)
-  });
-}
-
 describe("experimental Computer workspace", () => {
-  it("preserves Think's direct filesystem interface", async () => {
-    const workspace = adaptComputer(createFakeComputer());
+  it("preserves the upstream Computer client", () => {
+    const computer = createFakeComputer();
 
-    await workspace.mkdir("/notes", { recursive: true });
-    await workspace.writeFile("/notes/today.md", "hello");
+    expect(adaptComputer(computer)).toBe(computer);
+  });
 
-    await expect(workspace.readFile("/notes/today.md")).resolves.toBe("hello");
-    await expect(workspace.readFile("/missing.md")).resolves.toBeNull();
-    await expect(workspace.readDir("/notes")).resolves.toMatchObject([
-      {
-        path: "/notes/today.md",
-        name: "today.md",
-        type: "file",
-        size: 0
-      }
-    ]);
-    await expect(workspace.glob("**/*.md")).resolves.toMatchObject([
-      { path: "/notes/today.md", type: "file" }
-    ]);
+  it("rejects clients whose owner did not enable useThink", () => {
+    const computer = createFakeComputer();
+    delete computer.readFile;
+
+    expect(() => adaptComputer(computer)).toThrow(
+      "Construct its Workspace with useThink: true"
+    );
   });
 
   it("uses Computer shell exec for the built-in bash tool", async () => {
     const calls: Array<{ command: string; cwd: string | undefined }> = [];
-    const workspace = addThinkCompatibility(
+    const workspace = adaptComputer(
       createFakeComputer({
         onExec(command, cwd) {
           calls.push({ command, cwd });
@@ -229,7 +225,7 @@ describe("experimental Computer workspace", () => {
   it("provides the local stub used by WorkspaceServiceProxy", async () => {
     const stub = { kind: "workspace-stub" };
     let ready = false;
-    const workspace = addThinkCompatibility(
+    const workspace = adaptComputer(
       createFakeComputer({
         onReady() {
           ready = true;

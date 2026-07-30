@@ -156,22 +156,22 @@ separate workspace.
 
 #### API reference
 
-| Export                                                 | Signature or behavior                                                                        |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `createComputerWorkspace(options)`                     | Creates a locally owned Computer with `useThink: true`; returns the Computer itself          |
-| `LocalComputerWorkspace`                               | The local Computer type intersected with Think's `WorkspaceLike`                             |
-| `adaptComputer(computer)`                              | Adapts the client returned by `getWorkspace()` when another Durable Object owns the Computer |
-| `ComputerWorkspace`                                    | Compatibility adapter used for remote Computer clients                                       |
-| `Computer`                                             | Alias for the current `Workspace` class from `@cloudflare/computer`                          |
-| `getWorkspace()` and `withWorkspace()`                 | Re-exports for unified local and remote Computer clients                                     |
-| `WorkerBackend`                                        | Worker Loader shell backend from `@cloudflare/computer/backends/worker`                      |
-| `WorkspaceServiceProxy`                                | Worker entrypoint connecting the shell backend to the Think-owned Computer                   |
-| `ComputerOptions`, `WorkspaceClient`, and Worker types | Type-only exports for constructing or adapting a Computer                                    |
+| Export                                                 | Signature or behavior                                                                      |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `createComputerWorkspace(options)`                     | Creates a locally owned Computer with `useThink: true`; returns the Computer itself        |
+| `LocalComputerWorkspace`                               | The local Computer type intersected with Think's `WorkspaceLike`                           |
+| `adaptComputer(computer)`                              | Narrows a `getWorkspace()` client whose owner enabled `useThink` to Think's workspace type |
+| `ComputerWorkspace`                                    | Computer client type intersected with Think's `WorkspaceLike`                              |
+| `Computer`                                             | Alias for the current `Workspace` class from `@cloudflare/computer`                        |
+| `getWorkspace()` and `withWorkspace()`                 | Re-exports for unified local and remote Computer clients                                   |
+| `WorkerBackend`                                        | Worker Loader shell backend from `@cloudflare/computer/backends/worker`                    |
+| `WorkspaceServiceProxy`                                | Worker entrypoint connecting the shell backend to the Think-owned Computer                 |
+| `ComputerOptions`, `WorkspaceClient`, and Worker types | Type-only exports for constructing or adapting a Computer                                  |
 
 Use `createComputerWorkspace()` for a Computer owned directly by the Think
 instance. Use `adaptComputer(await getWorkspace(stub))` when another Durable
-Object owns the Computer; compatibility methods are installed on local Computer
-instances, not on remote `getWorkspace()` clients.
+Object owns the Computer. The owning Computer must set `useThink: true`;
+`getWorkspace()` then installs the same compatibility methods on its client.
 
 ## Custom Tools
 

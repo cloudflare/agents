@@ -4093,8 +4093,8 @@ importers:
         specifier: workspace:*
         version: link:../ai-chat
       '@cloudflare/computer':
-        specifier: 0.1.0-alpha.1
-        version: 0.1.0-alpha.1(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(isomorphic-git@1.38.5)(zod@4.4.3)
+        specifier: https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@6208b43
+        version: https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@6208b43(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(isomorphic-git@1.38.5)(zod@4.4.3)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
@@ -5592,8 +5592,9 @@ packages:
     resolution: {integrity: sha512-EYlRokl8szrP9Z25qT5aepMdBjzBvHF9ZEhzIiUBc9guz/T31EqRgvD0QSgZcpE93xiwrr+OkB4nz0BZyF6fSA==}
     engines: {node: '>= 20.12.0'}
 
-  '@cloudflare/computer@0.1.0-alpha.1':
-    resolution: {integrity: sha512-oZ0SvnYeNqs5nt2Qe8CkakuPHjpEQUtY165iIQhaaBig4OR8Fvk7jKjLFZt7pf9D2evuu9stnIQdSTUvC/yB4w==}
+  '@cloudflare/computer@https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@6208b43':
+    resolution: {integrity: sha512-dN64J8skTBdjdKS4AuXOyOJYhsGIjR7Fd28RpWt3rtR4nQlPwr00hY6scJ8WCR2DKgh0I0lZASearaQhuTDHvA==, tarball: https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@6208b43}
+    version: 0.1.0-alpha.1
     peerDependencies:
       '@platformatic/vfs': '*'
       ai: ^6.0.196 || ^7.0.0
@@ -13374,7 +13375,7 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
-  '@cloudflare/computer@0.1.0-alpha.1(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(isomorphic-git@1.38.5)(zod@4.4.3)':
+  '@cloudflare/computer@https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@6208b43(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(isomorphic-git@1.38.5)(zod@4.4.3)':
     dependencies:
       capnweb: 0.8.0
       just-bash: 3.0.2
