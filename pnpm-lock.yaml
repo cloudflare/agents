@@ -166,8 +166,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/think
       '@cloudflare/workspace':
-        specifier: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18
-        version: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)
+        specifier: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb
+        version: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)
       '@platformatic/vfs':
         specifier: ^0.4.0
         version: 0.4.0
@@ -5586,8 +5586,8 @@ packages:
   '@cloudflare/workers-types@5.20260729.1':
     resolution: {integrity: sha512-X5r/4y0gKMq/B72qkz/tEwNK4c3v2regT3to6Ia8qqC66E0+YIN/fU7x0JG6ej2rLxtU3TV3aVhfK9y8+jMMAw==}
 
-  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18':
-    resolution: {integrity: sha512-xd19y3M6pYO7l9TZIFEMSTy/its4EaikA5UmnEezzcSDvtq3c9+h9/AlsbALNEhHF1SP6mk48Qns9ZtK367W0g==, tarball: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18}
+  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb':
+    resolution: {integrity: sha512-xd19y3M6pYO7l9TZIFEMSTy/its4EaikA5UmnEezzcSDvtq3c9+h9/AlsbALNEhHF1SP6mk48Qns9ZtK367W0g==, tarball: https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb}
     version: 0.0.0-alpha.11
     peerDependencies:
       '@platformatic/vfs': '*'
@@ -13463,7 +13463,7 @@ snapshots:
 
   '@cloudflare/workers-types@5.20260729.1': {}
 
-  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@18(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
+  '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
     dependencies:
       capnweb: 0.8.0
       just-bash: 3.0.2
