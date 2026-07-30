@@ -111,25 +111,6 @@ return createLegacyMcpHandler(server, { route: "/codemode" })(
   env,
   ctx
 );`
-  },
-  {
-    title: "Paid Tools with x402",
-    description:
-      "Add payment requirements to expensive MCP tools. The client can confirm or reject the payment before the call proceeds.",
-    snippet: `import { withX402 } from "agents/x402";
-
-const server = withX402(new McpServer({ name: "PayMCP" }), config);
-
-server.paidTool(
-  "search_pro",
-  "Deep search",
-  0.01,
-  schema,
-  {},
-  async (args) => {
-    return search(args);
-  });
-);`
   }
 ];
 
@@ -171,7 +152,7 @@ if (result.state === "authenticating") {
   {
     title: "Expose advanced cases as links when setup is heavy",
     description:
-      "Some MCP stories need real OAuth providers, wallets, or browser support. The Playground should explain them clearly and link to focused examples for full setup.",
+      "Some MCP stories need real OAuth providers or browser support. The Playground should explain them clearly and link to focused examples for full setup.",
     code: `// Good Playground shape
 // 1. Show the decision and code path
 // 2. Simulate the state transitions
@@ -190,8 +171,8 @@ export function AdvancedMcpDemo() {
         <>
           MCP in the Agents SDK is more than connecting to one server. Agents
           can host MCP, consume external servers, use OAuth, run in-process RPC,
-          prompt users mid-tool-call with elicitation, wrap APIs with codemode,
-          and protect expensive tools with x402 payments.
+          prompt users mid-tool-call with elicitation, and wrap APIs with
+          codemode.
         </>
       }
     >
@@ -306,7 +287,6 @@ export function AdvancedMcpDemo() {
                 ["OAuth server", "examples/mcp-worker-authenticated"],
                 ["Codemode MCP", "examples/codemode-mcp"],
                 ["OpenAPI MCP", "examples/codemode-mcp-openapi"],
-                ["x402 MCP", "examples/x402-mcp"],
                 ["WebMCP", "examples/webmcp"]
               ].map(([label, path]) => (
                 <div

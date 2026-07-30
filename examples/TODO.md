@@ -5,7 +5,6 @@ Tracked issues from the examples audit. See `AGENTS.md` in this folder for the c
 ## Missing README.md
 
 - [x] `resumable-stream-chat/` — add README
-- [x] `x402/` — add README
 
 ## Add frontend + Vite plugin
 
@@ -17,17 +16,10 @@ Most examples should be full-stack (frontend + backend). Focused server-only MCP
 - [x] `mcp-server/` — restored raw transport server-only example
 - [x] `mcp-worker/` — added MCP tool tester frontend
 - [x] `mcp-worker-authenticated/` — added info page with endpoint docs
-- [x] `x402/` — added React+Kumo frontend with "Fetch & Pay" UI
-- [x] `x402-mcp/` — added React+Kumo frontend with tool forms and payment modal
 
 ## Vite plugin fix
 
 - [ ] `cross-domain/` — add `@cloudflare/vite-plugin` to existing `vite.config.ts` (currently uses `@vitejs/plugin-react` only)
-
-## Type declarations
-
-- [x] `x402/` — renamed `worker-configuration.d.ts` to `env.d.ts`, regenerated
-- [x] `x402-mcp/` — renamed `worker-configuration.d.ts` to `env.d.ts`, regenerated
 
 ## Missing env.d.ts
 
@@ -63,5 +55,3 @@ Migrate examples to use Kumo components and Tailwind.
 - [x] `mcp-worker/` — added Kumo frontend
 - [x] `mcp-worker-authenticated/` — added Kumo frontend
 - [x] `mcp-elicitation/` and `mcp-elicitation-mrtr/` — intentionally server-only; elicitation requires an MCP client
-- [x] `x402/` — migrated from worker-only to Kumo frontend
-- [x] `x402-mcp/` — migrated from inline HTML to React+Kumo, replaced raw WebSocket with useAgent
