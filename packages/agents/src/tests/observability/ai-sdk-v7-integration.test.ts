@@ -3,7 +3,7 @@ import * as ai from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createAISDKV6Wrapper } from "../../observability/ai/v6/wrap";
+import { createAISDKWrapper } from "../../observability/ai/wrapper/wrap";
 import { withInvocationScope } from "../../observability/tracing/tracer";
 import { deferred, RecordingTracer } from "./recording-tracer";
 
@@ -29,7 +29,7 @@ function spanFor(tracing: RecordingTracer, operation: string) {
 }
 
 const wrap = (tracing: RecordingTracer) =>
-  createAISDKV6Wrapper(ai, { tracer: tracing });
+  createAISDKWrapper(ai, { tracer: tracing });
 
 describe("wrapAISDK with the real AI SDK v7", () => {
   it("keeps model and tool spans under invoke_agent without restoring auth state", async () => {
@@ -369,7 +369,7 @@ describe("wrapAISDK with the real AI SDK v7", () => {
     });
 
     await withInvocationScope(async () => {
-      const result = createAISDKV6Wrapper(ai, {
+      const result = createAISDKWrapper(ai, {
         options: { storeTools: true },
         tracer: tracing
       }).streamText({
@@ -523,6 +523,41 @@ describe("wrapAISDK with the real AI SDK v7", () => {
       "requested"
     );
     // ...but not passed off as part of an invocation that had already ended.
+    expect(approval?.attributes["cloudflare.agents.span.truncated"]).toBe(true);
+    expect(
+      approval?.parent?.attributes["cloudflare.agents.span.truncated"]
+    ).toBe(true);
+  });
+
+  it("marks top-level approval spans decided after the invocation ended", async () => {
+    const tracing = new RecordingTracer();
+    const decided = deferred<"user-approval">();
+    let escaped: Promise<unknown> | undefined;
+
+    await withInvocationScope(async () => {
+      escaped = wrap(tracing).generateText({
+        [Symbol.for("cloudflare.agents.ai-sdk.invocation-bounded")]: true,
+        model: approvalRequestModel(),
+        prompt: "Deploy",
+        toolApproval: async () => decided.promise,
+        tools: {
+          deploy: ai.tool({
+            execute: async () => "deployed",
+            inputSchema: z.object({ target: z.string() })
+          })
+        }
+      } as Parameters<typeof ai.generateText>[0]);
+    });
+
+    decided.resolve("user-approval");
+    await escaped;
+
+    const approval = tracing.spans.find(
+      (span) => span.name === "tool_approval deploy"
+    );
+    expect(approval?.attributes["cloudflare.agents.tool.approval.state"]).toBe(
+      "requested"
+    );
     expect(approval?.attributes["cloudflare.agents.span.truncated"]).toBe(true);
     expect(
       approval?.parent?.attributes["cloudflare.agents.span.truncated"]

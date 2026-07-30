@@ -1,9 +1,6 @@
 import { TraceAttribute } from "./attributes";
 import type { TraceAttributes } from "../tracing/tracer";
 
-/** Integrations that project into the shared telemetry schema. */
-export type IntegrationName = "ai-sdk" | "pi-ai";
-
 /** Canonical token usage shape used by model adapters. */
 export type TokenUsageSummary = {
   readonly cacheCreationInputTokens?: number | undefined;
@@ -199,7 +196,6 @@ export function operationSpanName(agentName: string | undefined): string {
 export function operationSpan(input: {
   readonly attributes: TraceAttributes | undefined;
   readonly context?: SemanticContext | undefined;
-  readonly integration: IntegrationName;
   readonly model: string | undefined;
   readonly operation: string;
   readonly provider: string | undefined;
@@ -208,7 +204,7 @@ export function operationSpan(input: {
   return {
     attributes: {
       ...input.attributes,
-      [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
+      [TraceAttribute.Cloudflare.IntegrationName]: "ai-sdk",
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.AgentID]: input.context?.agentId,
       [TraceAttribute.GenAI.AgentName]: input.context?.agentName,
@@ -231,7 +227,6 @@ export function operationSpan(input: {
 /** Builds the child span for an underlying model call. */
 export function modelCallSpan(input: {
   readonly attributes?: TraceAttributes | undefined;
-  readonly integration: IntegrationName;
   readonly model: string | undefined;
   readonly operation: string;
   readonly provider: string | undefined;
@@ -240,7 +235,7 @@ export function modelCallSpan(input: {
   return {
     attributes: {
       ...input.attributes,
-      [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
+      [TraceAttribute.Cloudflare.IntegrationName]: "ai-sdk",
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueChat,
@@ -275,14 +270,13 @@ function requestAttributes(
 
 /** Builds the child span for a tool execution. */
 export function toolCallSpan(input: {
-  readonly integration: IntegrationName;
   readonly operation: string;
   readonly toolCallId?: string | undefined;
   readonly toolName: string;
 }): SpanSpec {
   return {
     attributes: {
-      [TraceAttribute.Cloudflare.IntegrationName]: input.integration,
+      [TraceAttribute.Cloudflare.IntegrationName]: "ai-sdk",
       [TraceAttribute.Cloudflare.OperationName]: input.operation,
       [TraceAttribute.GenAI.OperationName]:
         TraceAttribute.GenAI.OperationNameValueExecuteTool,

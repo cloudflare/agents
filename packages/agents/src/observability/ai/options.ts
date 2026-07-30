@@ -9,7 +9,7 @@ export type ResolvedAISDKStorageOptions = {
   readonly storeTools: boolean;
 };
 
-/** Instrumentation options for the AI SDK v6 adapter. */
+/** Instrumentation options for the AI SDK v6 and v7 wrapper. */
 export type AISDKInstrumentationOptions = AISDKStorageOptions & {
   /**
    * Context keys to emit as `cloudflare.agents.runtime_context.{key}`, set

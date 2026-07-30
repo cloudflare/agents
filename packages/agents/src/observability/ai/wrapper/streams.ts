@@ -8,7 +8,7 @@ import type { TraceAttributes, AgentSpan } from "../../tracing/tracer";
 import { extractAIGatewayLogId } from "../ai-gateway";
 import { createStreamMessages, outputMessageAttributesFrom } from "../content";
 import {
-  extractAISDKv6TokenUsage,
+  extractAISDKTokenUsage,
   extractFinishReason,
   extractResponseInfo
 } from "./extract";
@@ -510,7 +510,7 @@ function createStreamState(
         toolCallCount += 1;
       }
       finishReason = extractFinishReason(chunk) ?? finishReason;
-      usage = extractAISDKv6TokenUsage(chunk) ?? usage;
+      usage = extractAISDKTokenUsage(chunk) ?? usage;
       response = extractResponseInfo(chunk) ?? response;
     }
   };
