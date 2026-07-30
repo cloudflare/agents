@@ -112,6 +112,12 @@ interface PyodideLockfilePackage {
   depends: string[];
 }
 
+interface PyodideWheelInfo {
+  package: PyodideLockfilePackage;
+  url: string;
+  file: PypiSimpleFile;
+}
+
 // Making this global so it will only need to be fetched once per invocation
 // TODO: Consider distributing this with Pyodide itself since it's not likely to change very much between runs
 let pyodideLockfile: PyodideLockfile | null = null;
@@ -640,11 +646,7 @@ function normalizePythonName(name: string): string {
  *
  * Returns `null` if the lockfile is not loaded or the package is not present.
  */
-function getPyodideWheel(name: string): {
-  package: PyodideLockfilePackage;
-  url: string;
-  file: PypiSimpleFile;
-} | null {
+function getPyodideWheel(name: string): PyodideWheelInfo | null {
   if (!pyodideLockfile) return null;
 
   const normalizedName = normalizePythonName(name);
