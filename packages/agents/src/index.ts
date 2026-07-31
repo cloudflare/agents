@@ -1554,6 +1554,42 @@ export function getCurrentAgent<
  * @returns A wrapped method that runs within the agent context
  */
 
+// Native RPC initialization applies to the public application RPC surface.
+// PartyServer lifecycle/control-plane methods below initialize themselves or
+// must retain their original dispatch semantics; underscore-prefixed methods
+// are likewise reserved for framework internals. Keep this list in sync when
+// PartyServer adds lifecycle or control-plane entry points.
+const RPC_INITIALIZATION_CONTROL_METHODS = new Set([
+  "constructor",
+  "fetch",
+  "alarm",
+  "webSocketMessage",
+  "webSocketClose",
+  "webSocketError",
+  "setName",
+  "__unsafe_ensureInitialized",
+  "_initAndFetch",
+  "onStart",
+  "onAlarm",
+  "onRequest",
+  "onConnect",
+  "onMessage",
+  "onClose",
+  "onError",
+  "onException",
+  // PartyServer's synchronous connection/storage control plane must retain its
+  // original dispatch semantics and is safe to use during construction/startup.
+  "sql",
+  "broadcast",
+  "getConnection",
+  "getConnections",
+  "getConnectionTags",
+  // Agent state hooks are local lifecycle callbacks, not application RPC.
+  "onStateChanged",
+  "onStateUpdate",
+  "validateStateChange"
+]);
+
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
 function withAgentContext<T extends (...args: any[]) => any>(
   method: T
@@ -1578,9 +1614,20 @@ function withAgentContext<T extends (...args: any[]) => any>(
         email: undefined
       },
       () => {
-        return method.apply(this, args);
+        if (this._rpcInitializationState !== "pending") {
+          return method.apply(this, args);
+        }
+
+        // A native Durable Object RPC invokes the method directly, bypassing
+        // PartyServer.fetch() and the other entry points that normally run
+        // onStart(). Initialize inside the invocation context so methods called
+        // by onStart take the synchronous branch above rather than recursively
+        // trying to initialize the same Agent.
+        return this.__unsafe_ensureInitialized().then(() =>
+          method.apply(this, args)
+        );
       }
-    );
+    ) as ReturnType<T>;
   };
 }
 
@@ -1609,6 +1656,13 @@ export class Agent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Server<Env, Props> {
+  /** @internal Native RPC lifecycle state; armed after derived construction. */
+  protected _rpcInitializationState:
+    | "constructing"
+    | "pending"
+    | "starting"
+    | "started" = "constructing";
+
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
@@ -2335,6 +2389,19 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    // Base constructors run before derived class fields and constructor bodies.
+    // Keep local calls synchronous during that phase, then arm native-RPC
+    // initialization in a microtask protected by blockConcurrencyWhile(). The
+    // runtime cannot dispatch an external event/RPC until this callback settles,
+    // while JavaScript guarantees the derived constructor finishes before the
+    // current stack reaches the awaited continuation.
+    this.ctx.blockConcurrencyWhile(async () => {
+      await Promise.resolve();
+      if (this._rpcInitializationState === "constructing") {
+        this._rpcInitializationState = "pending";
+      }
+    });
+
     this.mcp = this._withAgentSpan(
       "agent_initialization",
       "initialization",
@@ -2342,7 +2409,7 @@ export class Agent<
       (update) => {
         if (!wrappedClasses.has(this.constructor)) {
           // Auto-wrap custom methods with agent context
-          this._autoWrapCustomMethods();
+          this._autoWrapRpcMethods();
           wrappedClasses.add(this.constructor);
         }
 
@@ -2858,10 +2925,23 @@ export class Agent<
         }
       );
     };
-    this.onStart = (props?: Props) =>
-      this._withAgentSpan("agent_start", "startup", {}, (update) =>
-        startAgent(props, update)
-      );
+    this.onStart = async (props?: Props) => {
+      const previousInitialization = this._rpcInitializationState;
+      this._rpcInitializationState = "starting";
+      try {
+        const result = await this._withAgentSpan(
+          "agent_start",
+          "startup",
+          {},
+          (update) => startAgent(props, update)
+        );
+        this._rpcInitializationState = "started";
+        return result;
+      } catch (error) {
+        this._rpcInitializationState = previousInitialization;
+        throw error;
+      }
+    };
   }
 
   /**
@@ -3565,64 +3645,53 @@ export class Agent<
   }
 
   /**
-   * Automatically wrap custom methods with agent context
-   * This ensures getCurrentAgent() works in all custom methods without decorators
+   * Wraps the public application RPC methods exposed by an Agent subclass with
+   * invocation context and cold-start initialization. Explicit PartyServer
+   * lifecycle/control-plane methods retain their dispatch semantics, while
+   * underscore-prefixed methods are reserved for framework internals.
    */
-  private _autoWrapCustomMethods() {
-    // Collect all methods from base prototypes (Agent and Server)
-    const basePrototypes = [Agent.prototype, Server.prototype];
-    const baseMethods = new Set<string>();
-    for (const baseProto of basePrototypes) {
-      let proto = baseProto;
-      while (proto && proto !== Object.prototype) {
-        const methodNames = Object.getOwnPropertyNames(proto);
-        for (const methodName of methodNames) {
-          baseMethods.add(methodName);
-        }
-        proto = Object.getPrototypeOf(proto);
-      }
-    }
-    // Get all methods from the current instance's prototype chain
+  private _autoWrapRpcMethods() {
+    // The nearest descriptor is authoritative. Record every name before
+    // classifying its descriptor so an inherited method can never replace a
+    // subclass getter or non-function property with the same name.
+    const discoveredNames = new Set<string>();
     let proto = Object.getPrototypeOf(this);
-    let depth = 0;
-    while (proto && proto !== Object.prototype && depth < 10) {
-      const methodNames = Object.getOwnPropertyNames(proto);
-      for (const methodName of methodNames) {
-        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
+    while (proto && proto !== Object.prototype) {
+      for (const methodName of Object.getOwnPropertyNames(proto)) {
+        if (discoveredNames.has(methodName)) continue;
+        discoveredNames.add(methodName);
 
-        // Skip if it's a private method, a base method, a getter, or not a function,
+        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
         if (
-          baseMethods.has(methodName) ||
+          RPC_INITIALIZATION_CONTROL_METHODS.has(methodName) ||
           methodName.startsWith("_") ||
           !descriptor ||
           !!descriptor.get ||
+          !!descriptor.set ||
           typeof descriptor.value !== "function"
         ) {
           continue;
         }
 
-        // Now, methodName is confirmed to be a custom method/function
-        // Wrap the custom method with context
+        const originalMethod = descriptor.value;
         /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
         const wrappedFunction = withAgentContext(
-          this[methodName as keyof this] as (...args: any[]) => any
+          originalMethod as (...args: any[]) => any
         ) as any;
         /* oxlint-enable @typescript-eslint/no-explicit-any */
 
-        // if the method is callable, copy the metadata from the original method
-        if (this._isCallable(methodName)) {
-          callableMetadata.set(
-            wrappedFunction,
-            callableMetadata.get(this[methodName as keyof this] as Function)!
-          );
+        const metadata = callableMetadata.get(originalMethod);
+        if (metadata) {
+          callableMetadata.set(wrappedFunction, metadata);
         }
 
-        // set the wrapped function on the prototype
-        this.constructor.prototype[methodName as keyof this] = wrappedFunction;
+        Object.defineProperty(this.constructor.prototype, methodName, {
+          ...descriptor,
+          value: wrappedFunction
+        });
       }
 
       proto = Object.getPrototypeOf(proto);
-      depth++;
     }
   }
 

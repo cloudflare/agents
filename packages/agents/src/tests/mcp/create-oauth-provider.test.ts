@@ -40,7 +40,9 @@ describe("createMcpOAuthProvider", () => {
   });
 
   it("should resolve PKCE verifiers by OAuth callback state", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(
+      `pkce-state-correlation-${crypto.randomUUID()}`
+    );
     const agentStub = env.TestOAuthAgent.get(agentId);
 
     const result = await agentStub.testPkceVerifierStateCorrelation();

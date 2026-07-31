@@ -3082,14 +3082,27 @@ export class Think<
         "cloudflare.agents.start.degradations": this._onStartDegradations.length
       });
     };
-    this.onStart = (props?: Props) =>
-      withAgentSpan(
-        this,
-        "think_start",
-        "startup",
-        { "cloudflare.agents.component": "think" },
-        (update) => startThink(props, update)
-      );
+    this.onStart = async (props?: Props) => {
+      // PartyServer's normal fetch/setName/alarm initialization enters onStart
+      // without going through an application-RPC wrapper. Suppress its native
+      // RPC guard while startup itself calls public Think extension points.
+      const previousInitialization = this._rpcInitializationState;
+      this._rpcInitializationState = "starting";
+      try {
+        const result = await withAgentSpan(
+          this,
+          "think_start",
+          "startup",
+          { "cloudflare.agents.component": "think" },
+          (update) => startThink(props, update)
+        );
+        this._rpcInitializationState = "started";
+        return result;
+      } catch (error) {
+        this._rpcInitializationState = previousInitialization;
+        throw error;
+      }
+    };
   }
 
   /**
