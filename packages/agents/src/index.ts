@@ -385,6 +385,8 @@ type SubAgentConnectionBridgeLike = {
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void;
+  dup?(): SubAgentConnectionBridgeLike;
+  [Symbol.dispose]?(): void;
 };
 
 type StoredSubAgentConnection = {
@@ -7106,8 +7108,11 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
+    const bridge =
+      this._cf_currentSubAgentBridge ??
+      this._cf_virtualSubAgentConnections.values().next().value?.bridge;
+    if (bridge) {
+      bridge.broadcast(this.selfPath, message, without);
       return;
     }
     const root = await this._rootAlarmOwner();
@@ -7497,6 +7502,9 @@ export class Agent<
     await this._cf_runWithSubAgentBridge(bridge, () =>
       this.onClose(connection, code, reason, wasClean)
     );
+    this._cf_virtualSubAgentConnections
+      .get(meta.id)
+      ?.bridge[Symbol.dispose]?.();
     this._cf_virtualSubAgentConnections.delete(meta.id);
   }
 
@@ -7519,7 +7527,7 @@ export class Agent<
   ): Connection {
     let stored = this._cf_virtualSubAgentConnections.get(meta.id);
     if (stored) {
-      stored.bridge = bridge;
+      this._cf_replaceSubAgentBridge(stored, bridge);
       stored.meta = meta;
       if (stored.connection) {
         (
@@ -7537,7 +7545,7 @@ export class Agent<
         return stored.connection;
       }
     } else {
-      stored = { bridge, meta };
+      stored = { bridge: this._cf_retainSubAgentBridge(bridge), meta };
       this._cf_virtualSubAgentConnections.set(meta.id, stored);
     }
 
@@ -7588,16 +7596,47 @@ export class Agent<
       ...connection.tags
     ]);
     const stored = this._cf_virtualSubAgentConnections.get(connection.id);
+    if (stored) {
+      this._cf_replaceSubAgentBridge(stored, bridge);
+      stored.meta = {
+        id: connection.id,
+        uri: connection.uri,
+        tags: [...connection.tags],
+        state: this._cf_getRawConnectionState(connection)
+      };
+      stored.connection ??= connection;
+      return;
+    }
+
     this._cf_virtualSubAgentConnections.set(connection.id, {
-      bridge,
+      bridge: this._cf_retainSubAgentBridge(bridge),
       meta: {
         id: connection.id,
         uri: connection.uri,
         tags: [...connection.tags],
         state: this._cf_getRawConnectionState(connection)
       },
-      connection: stored?.connection ?? connection
+      connection
     });
+  }
+
+  private _cf_retainSubAgentBridge(
+    bridge: SubAgentConnectionBridgeLike
+  ): SubAgentConnectionBridgeLike {
+    // RPC argument stubs are disposed when their handler returns. Retain the
+    // bridge so turns that continue afterwards can broadcast through the
+    // existing capability instead of resolving the root DO for every chunk.
+    return bridge.dup?.() ?? bridge;
+  }
+
+  private _cf_replaceSubAgentBridge(
+    stored: StoredSubAgentConnection,
+    bridge: SubAgentConnectionBridgeLike
+  ): void {
+    if (stored.bridge === bridge) return;
+    const retained = this._cf_retainSubAgentBridge(bridge);
+    stored.bridge[Symbol.dispose]?.();
+    stored.bridge = retained;
   }
 
   protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
