@@ -26,7 +26,7 @@ export function createVoiceTranscriber(
     return createElevenLabsTranscriber(env, url);
   }
 
-  return createWorkersAITranscriber(env, provider);
+  return createWorkersAITranscriber(env, provider, url);
 }
 
 export function getMissingSttProviderKey(

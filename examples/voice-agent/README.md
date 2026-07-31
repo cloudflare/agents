@@ -57,7 +57,7 @@ Browser                          Durable Object (VoiceAgent)
 - **Interruption handling** — speak over the agent to cut it off mid-sentence. Flux speech-start events abort the server pipeline and stop queued browser playback; client audio-level detection remains as a fallback.
 - **Provider selector** — choose Workers AI, AssemblyAI, Telnyx, or ElevenLabs STT without changing the agent code.
 - **Server-side turn detection** — the selected STT provider handles speech boundaries, so the example does not need client-side end-of-speech signaling to run the voice pipeline.
-- **Provider tuning** — AssemblyAI exposes latency/accuracy mode, Voice Focus, context prompt, and keyterms; Telnyx exposes model/language; ElevenLabs exposes Scribe cleanup, background filtering, and keyterms.
+- **Provider tuning** — Workers AI Flux and Nova-3 expose keyterms; AssemblyAI exposes latency/accuracy mode, Voice Focus, context prompt, and keyterms; Telnyx exposes model/language; ElevenLabs exposes Scribe cleanup, background filtering, and keyterms.
 - **Speaker selection** — choose an audio output device for assistant playback. Unsupported browsers keep using the system default output.
 - **Conversation persistence** — all messages are stored in SQLite and survive restarts. The agent remembers previous conversations.
 - **Agent tools** — the LLM can call `get_current_time`, `set_reminder`, and `get_weather` during conversation.
