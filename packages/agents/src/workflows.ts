@@ -111,6 +111,12 @@ export class AgentWorkflow<
    */
   private _errorReported = false;
 
+  /**
+   * Guard to prevent automatic completion reporting from duplicating an
+   * explicit reportComplete() call.
+   */
+  private _completionReported = false;
+
   constructor(ctx: ExecutionContext, env: Env) {
     super(ctx, env);
 
@@ -167,7 +173,7 @@ export class AgentWorkflow<
               cleanedEvent
             );
 
-            return await this._runWithErrorReporting(
+            return await this._runWithLifecycleReporting(
               originalRun,
               cleanedEvent,
               wrappedStep
@@ -179,7 +185,7 @@ export class AgentWorkflow<
 
         // If already initialized (e.g., called via super.run()),
         // just call the original with the event as-is.
-        return await this._runWithErrorReporting(
+        return await this._runWithLifecycleReporting(
           originalRun,
           event as WorkflowEvent<Params>,
           step as AgentWorkflowStep
@@ -302,9 +308,9 @@ export class AgentWorkflow<
   }
 
   /**
-   * Call user workflow code and report unhandled errors to the Agent.
+   * Call user workflow code and report its terminal lifecycle to the Agent.
    */
-  private async _runWithErrorReporting(
+  private async _runWithLifecycleReporting(
     originalRun: (
       event: WorkflowEvent<Params>,
       step: AgentWorkflowStep
@@ -313,7 +319,11 @@ export class AgentWorkflow<
     step: AgentWorkflowStep
   ): Promise<unknown> {
     try {
-      return await originalRun.call(this, event, step);
+      const result = await originalRun.call(this, event, step);
+      if (!this._completionReported) {
+        await step.reportComplete(result);
+      }
+      return result;
     } catch (err) {
       await this._autoReportError(err);
       throw err;
@@ -346,6 +356,7 @@ export class AgentWorkflow<
 
     // Add durable Agent methods directly to the step object
     wrappedStep.reportComplete = async <T>(result?: T): Promise<void> => {
+      this._completionReported = true;
       await step.do(`__agent_reportComplete_${stepCounter++}`, async () => {
         await this.notifyAgent({
           workflowName: this._workflowName,
