@@ -25,6 +25,36 @@ describe("native Durable Object RPC initialization", () => {
     });
   });
 
+  it("keeps synchronous connection policy hooks synchronous before startup", async () => {
+    const namespace = env.TestNativeRpcAgent;
+    const stub = namespace.get(namespace.idFromName(uniqueName()));
+
+    const result = await runInDurableObject(stub, (instance) => {
+      const readonly = instance.shouldConnectionBeReadonly(
+        undefined as never,
+        undefined as never
+      );
+      const sendsProtocol = instance.shouldSendProtocolMessages(
+        undefined as never,
+        undefined as never
+      );
+
+      return {
+        readonly,
+        readonlyIsBoolean: typeof readonly === "boolean",
+        sendsProtocol,
+        sendsProtocolIsBoolean: typeof sendsProtocol === "boolean"
+      };
+    });
+
+    expect(result).toEqual({
+      readonly: false,
+      readonlyIsBoolean: true,
+      sendsProtocol: true,
+      sendsProtocolIsBoolean: true
+    });
+  });
+
   it("initializes exactly once before inherited and application RPC methods", async () => {
     const namespace = env.TestNativeRpcAgent;
     const stub = namespace.get(namespace.idFromName(uniqueName()));

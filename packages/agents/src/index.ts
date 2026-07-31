@@ -1557,18 +1557,35 @@ export function getCurrentAgent<
 // Native RPC initialization applies to the public application RPC surface.
 // PartyServer methods initialize themselves or belong to its synchronous
 // lifecycle/control plane, so derive that boundary from the installed Server
-// prototype instead of duplicating upstream method names here.
-const RPC_INITIALIZATION_CONTROL_METHODS = new Set([
-  ...Object.getOwnPropertyNames(Server.prototype),
+// prototype chain instead of duplicating upstream method names here.
+const RPC_INITIALIZATION_CONTROL_METHODS = new Set<string>();
+let serverPrototype: object | null = Server.prototype;
+while (serverPrototype && serverPrototype !== Object.prototype) {
+  for (const methodName of Object.getOwnPropertyNames(serverPrototype)) {
+    RPC_INITIALIZATION_CONTROL_METHODS.add(methodName);
+  }
+  serverPrototype = Object.getPrototypeOf(serverPrototype);
+}
+
+for (const methodName of [
   // Destruction deliberately bypasses startup when alarm() resumes teardown of
   // a condemned Agent. Initializing here would recreate state immediately
   // before destroy() erases it.
   "destroy",
+  // Connection policy hooks make synchronous decisions inside framework entry
+  // points and must never return an initialization Promise.
+  "shouldConnectionBeReadonly",
+  "shouldSendProtocolMessages",
+  "isConnectionProtocolEnabled",
   // Agent state hooks are local lifecycle callbacks, not application RPC.
   "onStateChanged",
   "onStateUpdate",
   "validateStateChange"
-]);
+]) {
+  RPC_INITIALIZATION_CONTROL_METHODS.add(methodName);
+}
+
+const RPC_INITIALIZATION_WRAPPERS = new WeakSet<object>();
 
 type AgentContextMethodReturn<T extends (...args: never[]) => unknown> =
   | ReturnType<T>
@@ -1581,7 +1598,10 @@ function withAgentContext<T extends (...args: any[]) => any>(
   this: Agent<Cloudflare.Env, unknown>,
   ...args: Parameters<T>
 ) => AgentContextMethodReturn<T> {
-  return function (...args: Parameters<T>): AgentContextMethodReturn<T> {
+  const wrappedMethod = function (
+    this: Agent<Cloudflare.Env, unknown>,
+    ...args: Parameters<T>
+  ): AgentContextMethodReturn<T> {
     const { agent } = getCurrentAgent();
 
     if (agent === this) {
@@ -1613,6 +1633,8 @@ function withAgentContext<T extends (...args: any[]) => any>(
       }
     );
   };
+  RPC_INITIALIZATION_WRAPPERS.add(wrappedMethod);
+  return wrappedMethod;
 }
 
 /**
@@ -3658,6 +3680,10 @@ export class Agent<
         }
 
         const originalMethod = descriptor.value;
+        if (RPC_INITIALIZATION_WRAPPERS.has(originalMethod)) {
+          continue;
+        }
+
         /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
         const wrappedFunction = withAgentContext(
           originalMethod as (...args: any[]) => any
