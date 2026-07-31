@@ -56,10 +56,9 @@ export class TestProcessingWorkflow extends AgentWorkflow<
       }>("wait-for-approval", { type: "approval", timeout: "1 minute" });
 
       if (!approval.payload.approved) {
-        await step.reportError(
+        throw new Error(
           `Rejected: ${approval.payload.reason || "No reason given"}`
         );
-        throw new Error("Workflow rejected");
       }
     }
 
@@ -107,8 +106,6 @@ export class TestProcessingWorkflow extends AgentWorkflow<
       percent: 0.9,
       message: "Almost done"
     });
-    await step.reportComplete(result);
-
     return result;
   }
 }
