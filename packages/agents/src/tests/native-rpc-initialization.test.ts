@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 function uniqueName(): string {
@@ -42,6 +46,26 @@ describe("native Durable Object RPC initialization", () => {
     expect(await stub.applicationRpc()).toMatchObject({
       shadowedValue: "nearest getter"
     });
+  });
+
+  it("destroys a condemned cold Agent without running startup", async () => {
+    const namespace = env.TestNativeRpcAgent;
+    const id = namespace.idFromName(uniqueName());
+    const stub = namespace.get(id);
+
+    await runInDurableObject(stub, async (_instance, ctx) => {
+      await ctx.storage.put("fail_if_started", true);
+      await ctx.storage.put("cf_agents_destroy_pending", true);
+      await ctx.storage.setAlarm(Date.now() + 86_400_000);
+    });
+    await evictDurableObject(stub);
+
+    await runDurableObjectAlarm(stub).catch((error) => {
+      if (!String(error).includes("destroyed")) throw error;
+    });
+
+    // Reaching destroy() proves startup did not intercept the alarm preamble;
+    // deferred-destroy.test.ts separately verifies that teardown erases storage.
   });
 
   it("recovers a setName fallback before application RPC after eviction", async () => {

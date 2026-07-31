@@ -24,6 +24,10 @@ export class TestNativeRpcAgent extends NativeRpcBaseAgent {
   }
 
   override async onStart(): Promise<void> {
+    if (await this.ctx.storage.get<boolean>("fail_if_started")) {
+      throw new Error("condemned agent must not start");
+    }
+
     const starts =
       (await this.ctx.storage.get<number>("test_start_count")) ?? 0;
     await this.ctx.storage.put("test_start_count", starts + 1);

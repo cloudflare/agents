@@ -1555,40 +1555,24 @@ export function getCurrentAgent<
  */
 
 // Native RPC initialization applies to the public application RPC surface.
-// PartyServer lifecycle/control-plane methods below initialize themselves or
-// must retain their original dispatch semantics; underscore-prefixed methods
-// are likewise reserved for framework internals. Keep this list in sync when
-// PartyServer adds lifecycle or control-plane entry points.
+// PartyServer methods initialize themselves or belong to its synchronous
+// lifecycle/control plane, so derive that boundary from the installed Server
+// prototype instead of duplicating upstream method names here.
 const RPC_INITIALIZATION_CONTROL_METHODS = new Set([
-  "constructor",
-  "fetch",
-  "alarm",
-  "webSocketMessage",
-  "webSocketClose",
-  "webSocketError",
-  "setName",
-  "__unsafe_ensureInitialized",
-  "_initAndFetch",
-  "onStart",
-  "onAlarm",
-  "onRequest",
-  "onConnect",
-  "onMessage",
-  "onClose",
-  "onError",
-  "onException",
-  // PartyServer's synchronous connection/storage control plane must retain its
-  // original dispatch semantics and is safe to use during construction/startup.
-  "sql",
-  "broadcast",
-  "getConnection",
-  "getConnections",
-  "getConnectionTags",
+  ...Object.getOwnPropertyNames(Server.prototype),
+  // Destruction deliberately bypasses startup when alarm() resumes teardown of
+  // a condemned Agent. Initializing here would recreate state immediately
+  // before destroy() erases it.
+  "destroy",
   // Agent state hooks are local lifecycle callbacks, not application RPC.
   "onStateChanged",
   "onStateUpdate",
   "validateStateChange"
 ]);
+
+type AgentContextMethodReturn<T extends (...args: never[]) => unknown> =
+  | ReturnType<T>
+  | Promise<Awaited<ReturnType<T>>>;
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
 function withAgentContext<T extends (...args: any[]) => any>(
@@ -1596,8 +1580,8 @@ function withAgentContext<T extends (...args: any[]) => any>(
 ): (
   this: Agent<Cloudflare.Env, unknown>,
   ...args: Parameters<T>
-) => ReturnType<T> {
-  return function (...args: Parameters<T>): ReturnType<T> {
+) => AgentContextMethodReturn<T> {
+  return function (...args: Parameters<T>): AgentContextMethodReturn<T> {
     const { agent } = getCurrentAgent();
 
     if (agent === this) {
@@ -1627,7 +1611,7 @@ function withAgentContext<T extends (...args: any[]) => any>(
           method.apply(this, args)
         );
       }
-    ) as ReturnType<T>;
+    );
   };
 }
 
