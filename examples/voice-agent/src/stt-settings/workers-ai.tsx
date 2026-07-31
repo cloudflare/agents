@@ -1,4 +1,4 @@
-import type { SettingsUpdate, SttProvider, SttSettings } from "./types";
+import type { SettingsUpdate, SttSettings } from "./types";
 
 export function getWorkersAIQuery(
   settings: SttSettings
@@ -6,14 +6,6 @@ export function getWorkersAIQuery(
   const query: Record<string, string> = { stt: settings.provider };
   if (settings.keyterms.trim()) query.keyterms = settings.keyterms.trim();
   return query;
-}
-
-export function getWorkersAIDescription(provider: SttProvider): string {
-  if (provider === "workers-ai-nova-3") {
-    return "Workers AI Nova 3 supports keyterm hints through the Workers AI binding.";
-  }
-
-  return "Workers AI Flux supports keyterm hints, server-side turn detection, and interruption handling.";
 }
 
 export function WorkersAISettings({

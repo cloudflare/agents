@@ -1,24 +1,17 @@
 import { Surface } from "@cloudflare/kumo";
 import {
-  ASSEMBLYAI_DESCRIPTION,
   AssemblyAISettings,
   DEFAULT_ASSEMBLYAI_KEYTERMS,
   DEFAULT_ASSEMBLYAI_PROMPT,
   getAssemblyAIQuery
 } from "./stt-settings/assemblyai";
 import {
-  ELEVENLABS_DESCRIPTION,
   ElevenLabsSettings,
   getElevenLabsQuery
 } from "./stt-settings/elevenlabs";
-import {
-  TELNYX_DESCRIPTION,
-  TelnyxSettings,
-  getTelnyxQuery
-} from "./stt-settings/telnyx";
+import { TelnyxSettings, getTelnyxQuery } from "./stt-settings/telnyx";
 import type { SttProvider, SttSettings } from "./stt-settings/types";
 import {
-  getWorkersAIDescription,
   getWorkersAIQuery,
   WorkersAISettings
 } from "./stt-settings/workers-ai";
@@ -50,20 +43,6 @@ export function getSttQuery(settings: SttSettings): Record<string, string> {
     case "workers-ai-flux":
     case "workers-ai-nova-3":
       return getWorkersAIQuery(settings);
-  }
-}
-
-function getProviderDescription(provider: SttProvider): string {
-  switch (provider) {
-    case "assemblyai":
-      return ASSEMBLYAI_DESCRIPTION;
-    case "telnyx":
-      return TELNYX_DESCRIPTION;
-    case "elevenlabs":
-      return ELEVENLABS_DESCRIPTION;
-    case "workers-ai-flux":
-    case "workers-ai-nova-3":
-      return getWorkersAIDescription(provider);
   }
 }
 
@@ -136,10 +115,6 @@ export function ProviderSettings({
           )}
         </div>
       </details>
-
-      <p className="mt-3 text-xs text-kumo-secondary">
-        {getProviderDescription(settings.provider)}
-      </p>
     </Surface>
   );
 }

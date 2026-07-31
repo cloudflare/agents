@@ -11,9 +11,6 @@ export const DEFAULT_ASSEMBLYAI_PROMPT =
 export const DEFAULT_ASSEMBLYAI_KEYTERMS =
   "Cloudflare, Workers AI, Durable Objects, VoiceAgent, Kimi, GLM, GPT OSS";
 
-export const ASSEMBLYAI_DESCRIPTION =
-  "AssemblyAI Universal 3.5 Pro Realtime uses prompt and keyterm hints, as well as carrying full agent context to inform transcription.";
-
 export function getAssemblyAIQuery(
   settings: SttSettings
 ): Record<string, string> {

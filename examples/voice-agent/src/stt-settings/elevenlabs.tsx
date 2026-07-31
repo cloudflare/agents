@@ -1,8 +1,5 @@
 import type { SettingsUpdate, SttSettings } from "./types";
 
-export const ELEVENLABS_DESCRIPTION =
-  "ElevenLabs Scribe v2 Realtime uses VAD commits, keyterms, and optional cleanup/background filtering. Requires ELEVENLABS_API_KEY.";
-
 export function getElevenLabsQuery(
   settings: SttSettings
 ): Record<string, string> {

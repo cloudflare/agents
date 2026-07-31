@@ -1,8 +1,5 @@
 import type { SettingsUpdate, SttSettings, TelnyxEngine } from "./types";
 
-export const TELNYX_DESCRIPTION =
-  "Telnyx STT streams the same browser microphone audio to Telnyx's transcription WebSocket. Requires TELNYX_API_KEY.";
-
 export function getTelnyxQuery(settings: SttSettings): Record<string, string> {
   const query: Record<string, string> = {
     stt: "telnyx",
