@@ -3,14 +3,18 @@ import {
   WorkersAINova3STT,
   type Transcriber
 } from "@cloudflare/voice";
+import { getOptionalProviderKeyterms } from "./utils";
 
 export function createWorkersAITranscriber(
   env: Env,
-  model: string
+  model: string,
+  url: URL
 ): Transcriber {
+  const keyterms = getOptionalProviderKeyterms(url);
+
   if (model === "workers-ai-nova-3") {
-    return new WorkersAINova3STT(env.AI);
+    return new WorkersAINova3STT(env.AI, { keyterms });
   }
 
-  return new WorkersAIFluxSTT(env.AI);
+  return new WorkersAIFluxSTT(env.AI, { keyterms });
 }

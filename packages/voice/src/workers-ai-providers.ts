@@ -228,7 +228,7 @@ class FluxSession implements TranscriberSession {
         input.eager_eot_threshold = String(config.eagerEotThreshold);
       if (config.eotTimeoutMs != null)
         input.eot_timeout_ms = String(config.eotTimeoutMs);
-      if (config.keyterms?.length) input.keyterm = config.keyterms[0];
+      if (config.keyterms?.length) input.keyterm = config.keyterms;
 
       const resp = await ai.run("@cf/deepgram/flux", input, {
         websocket: true
@@ -524,7 +524,7 @@ class Nova3Session implements TranscriberSession {
         smart_format: String(config.smartFormat),
         punctuate: String(config.punctuate)
       };
-      if (config.keyterms?.length) input.keyterm = config.keyterms[0];
+      if (config.keyterms?.length) input.keyterm = config.keyterms;
 
       const resp = await ai.run("@cf/deepgram/nova-3", input, {
         websocket: true

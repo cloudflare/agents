@@ -8,15 +8,17 @@ export const DEFAULT_PROVIDER_KEYTERMS = [
   "GPT OSS"
 ];
 
-export function getProviderKeyterms(url: URL): string[] {
+export function getOptionalProviderKeyterms(url: URL): string[] | undefined {
   const configured = url.searchParams
     .get("keyterms")
     ?.split(",")
     .map((term) => term.trim())
     .filter((term) => term.length > 0);
-  return configured && configured.length > 0
-    ? configured
-    : DEFAULT_PROVIDER_KEYTERMS;
+  return configured && configured.length > 0 ? configured : undefined;
+}
+
+export function getProviderKeyterms(url: URL): string[] {
+  return getOptionalProviderKeyterms(url) ?? DEFAULT_PROVIDER_KEYTERMS;
 }
 
 export function getEnvString(env: Env, key: string): string | undefined {
