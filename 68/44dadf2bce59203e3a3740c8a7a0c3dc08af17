@@ -1,0 +1,25 @@
+.changeset/automatic-agent-workflow-lifecycle.md
+  s_62ae7dace9878b::t_c1424524144725 1-5
+docs/agents/workflows.md
+  s_62ae7dace9878b::t_15460a13508d39 94,211-218,797-798,838
+packages/agents/src/workflow-types.ts
+  s_62ae7dace9878b::t_98bfdb943179f5 52,58,60
+packages/agents/src/workflows.ts
+  s_62ae7dace9878b::t_9ccc76f3ac3422 114-119,176,188,311,313,322-326,359
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6844dadf2bce59203e3a3740c8a7a0c3dc08af17",
+  "prompts": {},
+  "sessions": {
+    "s_62ae7dace9878b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb4d1-818f-7e70-a367-31be3df8008f",
+        "model": "unknown"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}
