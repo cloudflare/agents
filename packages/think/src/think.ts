@@ -3027,7 +3027,7 @@ export class Think<
     this.onStart = (props?: Props) =>
       withAgentSpan(
         this,
-        "think_start",
+        "start_agent_runtime",
         "startup",
         { "cloudflare.agents.component": "think" },
         () => startThink(props)
@@ -7055,7 +7055,9 @@ export class Think<
       // channel context must be set here too.
       return withAgentSpan(
         this,
-        "chat_submission",
+        spec.admission === "submit"
+          ? "submit_agent_turn"
+          : "run_submitted_agent_turn",
         "submission",
         {
           "cloudflare.agents.component": "think",
@@ -7063,21 +7065,7 @@ export class Think<
           "cloudflare.agents.turn.admission": spec.admission,
           "cloudflare.agents.turn.channel": spec.channel
         },
-        () =>
-          withAgentSpan(
-            this,
-            spec.admission === "submit"
-              ? "accept_chat_submission"
-              : "execute_chat_submission",
-            "submission",
-            {
-              "cloudflare.agents.component": "think",
-              "cloudflare.agents.turn.trigger": spec.trigger,
-              "cloudflare.agents.turn.admission": spec.admission,
-              "cloudflare.agents.turn.channel": spec.channel
-            },
-            () => this._withChannelContext(spec.channel, () => spec.execute())
-          )
+        () => this._withChannelContext(spec.channel, () => spec.execute())
       );
     }
 
@@ -7117,7 +7105,7 @@ export class Think<
       () =>
         withAgentSpan(
           this,
-          "chat_turn",
+          "run_agent_turn",
           "turn",
           {
             "cloudflare.agents.component": "think",
@@ -11125,7 +11113,7 @@ export class Think<
           if (event.type === "chat-request") {
             await withAgentSpan(
               this,
-              "chat_interaction",
+              "handle_chat_request",
               "interaction",
               {
                 "cloudflare.agents.component": "think",
@@ -11315,17 +11303,7 @@ export class Think<
     // gap would surface the previous failed turn's error even though the user
     // has already moved on. Completion clears it too, but only once the turn
     // resolves — which leaves the gap open.
-    await withAgentSpan(
-      this,
-      "chat_interaction_setup",
-      "interaction",
-      {
-        "cloudflare.agents.component": "think",
-        "cloudflare.agents.turn.request_id": requestId,
-        "cloudflare.agents.turn.trigger": "ws-chat"
-      },
-      () => this._clearChatTerminal()
-    );
+    await this._clearChatTerminal();
 
     // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client that
     // reconnects/re-mounts before the stream starts is parked and told to keep
@@ -11499,7 +11477,7 @@ export class Think<
 
                 await withAgentSpan(
                   this,
-                  "persist_chat_result",
+                  "stream_agent_response",
                   "turn",
                   {
                     "cloudflare.agents.component": "think",
@@ -11523,7 +11501,7 @@ export class Think<
                   ) {
                     const shortened = await withAgentSpan(
                       this,
-                      "compact_chat_history",
+                      "compact_conversation_history",
                       "turn",
                       {
                         "cloudflare.agents.component": "think",

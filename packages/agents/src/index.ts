@@ -2322,7 +2322,7 @@ export class Agent<
     super(ctx, env);
 
     this.mcp = this._withAgentSpan(
-      "agent_initialization",
+      "initialize_agent",
       "initialization",
       {},
       () => {
@@ -2802,7 +2802,7 @@ export class Agent<
       );
     };
     this.onStart = (props?: Props) =>
-      this._withAgentSpan("agent_start", "startup", {}, (update) =>
+      this._withAgentSpan("start_agent", "startup", {}, (update) =>
         startAgent(props, update)
       );
   }
@@ -5599,20 +5599,10 @@ export class Agent<
     options?: InternalFiberOptions
   ): Promise<T> {
     const signal = options?.signal ?? new AbortController().signal;
-    this._withAgentSpan(
-      "initialize_fiber",
-      "fiber",
-      {
-        "cloudflare.agents.fiber.id": id,
-        "cloudflare.agents.fiber.name": name
-      },
-      () => {
-        this.sql`
-          INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-          VALUES (${id}, ${name}, NULL, ${Date.now()})
-        `;
-      }
-    );
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, NULL, ${Date.now()})
+    `;
     const startedAt = Date.now();
     this._emit("fiber:run:started", {
       fiberId: id,

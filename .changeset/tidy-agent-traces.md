@@ -4,4 +4,4 @@
 "@cloudflare/think": patch
 ---
 
-Reduce SDK trace noise by consolidating initialization, chat setup, and fiber lifecycle spans around semantic agent operations.
+Reduce SDK trace noise and use consistent verb-object names for agent lifecycle, request handling, turns, submissions, and response streaming.

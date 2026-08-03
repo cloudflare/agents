@@ -801,7 +801,7 @@ export class AIChatAgent<
     super(ctx, env);
     withAgentSpan(
       this,
-      "chat_initialization",
+      "initialize_chat_agent",
       "initialization",
       { "cloudflare.agents.component": "ai_chat" },
       () => {
@@ -954,17 +954,7 @@ export class AIChatAgent<
           // A genuinely-new turn supersedes any pending terminal record (#1645)
           // so a stale exhaustion can't replay on a later reconnect once the
           // user has moved on.
-          await withAgentSpan(
-            this,
-            "chat_interaction_setup",
-            "interaction",
-            {
-              "cloudflare.agents.component": "ai_chat",
-              "cloudflare.agents.turn.request_id": chatMessageId,
-              "cloudflare.agents.turn.trigger": requestTrigger
-            },
-            () => this._clearChatTerminal()
-          );
+          await this._clearChatTerminal();
 
           // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client
           // that reconnects/re-mounts before the stream starts is parked and
@@ -1113,7 +1103,7 @@ export class AIChatAgent<
                           if (response) {
                             await withAgentSpan(
                               this,
-                              "persist_chat_result",
+                              "stream_agent_response",
                               "turn",
                               {
                                 "cloudflare.agents.component": "ai_chat",
@@ -1326,7 +1316,7 @@ export class AIChatAgent<
       if (event?.type === "chat-request") {
         return withAgentSpan(
           this,
-          "chat_interaction",
+          "handle_chat_request",
           "interaction",
           {
             "cloudflare.agents.component": "ai_chat",
@@ -2568,7 +2558,7 @@ export class AIChatAgent<
             () =>
               withAgentSpan(
                 this,
-                "chat_turn",
+                "run_agent_turn",
                 "turn",
                 {
                   "cloudflare.agents.component": "ai_chat",
