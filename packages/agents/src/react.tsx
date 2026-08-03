@@ -1030,6 +1030,15 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   const stub = useMemo(() => createStubProxy(call), [call]);
   agent.stub = stub;
   agent.getHttpUrl = () => {
+    // `usePartySocket` replaces its socket in an effect when the addressed
+    // room changes. During the render that requests that replacement,
+    // `agent` is still the previous room's socket. Never expose that stale URL
+    // to consumers such as `useAgentChat` — it may contain both the previous
+    // room path and credentials. A basePath connection has no client-selected
+    // room, so its server-routed URL is intentionally exempt.
+    if (!options.basePath && agent.room !== (options.name || "default")) {
+      return "";
+    }
     // TODO: upstream to partysocket — expose an HTTP URL property
     // @ts-expect-error accessing protected PartySocket internals
     const wsUrl: string = (agent._url as string | null) || agent._pkurl || "";

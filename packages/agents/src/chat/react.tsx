@@ -770,6 +770,20 @@ export function useAgentChat<
     ? `${agentUrl.origin}${agentUrl.pathname}|${agentAddressKey}`
     : null;
   const initialMessagesCacheKey = agentAddressKey;
+  const previousInitialMessagesAddressKeyRef = useRef(agentAddressKey);
+  const isWaitingForAddressedSocket =
+    previousInitialMessagesAddressKeyRef.current !== agentAddressKey &&
+    !agentUrlString;
+  previousInitialMessagesAddressKeyRef.current = agentAddressKey;
+
+  // For ordinary room/sub-agent routing, `.path` is updated from the current
+  // hook options synchronously while the PartySocket replacement happens
+  // after commit. Use that desired leaf identity for the loader so the
+  // request metadata and cache key cannot describe different conversations.
+  // `basePath` sockets have no room and remain server-identity-driven.
+  const socketRoom = (agent as typeof agent & { room?: string }).room;
+  const addressedLeaf =
+    socketRoom && Array.isArray(agent.path) ? agent.path.at(-1) : undefined;
 
   // Stable chat ID for `useChat({ id })`.
   //
@@ -883,7 +897,7 @@ export function useAgentChat<
   }
 
   const shouldFetchInitialMessages =
-    getInitialMessages === null
+    isWaitingForAddressedSocket || getInitialMessages === null
       ? false
       : getInitialMessages
         ? true
@@ -892,8 +906,8 @@ export function useAgentChat<
     ? null
     : doGetInitialMessages(
         {
-          agent: agent.agent,
-          name: agent.name,
+          agent: addressedLeaf?.agent ?? agent.agent,
+          name: addressedLeaf?.name ?? agent.name,
           url: agentUrlString ?? undefined
         },
         initialMessagesCacheKey
