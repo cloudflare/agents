@@ -791,7 +791,9 @@ export class WebSocketChatTransport<
 
         const onClose = () =>
           finish(() =>
-            controller.error(new Error("WebSocket closed mid-stream"))
+            requestId === null
+              ? controller.close()
+              : controller.error(new Error("WebSocket closed mid-stream"))
           );
 
         agent.addEventListener("message", onMessage, {
