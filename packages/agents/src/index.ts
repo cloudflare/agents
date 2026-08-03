@@ -2333,6 +2333,18 @@ export class Agent<
   }
 
   constructor(ctx: AgentContext, env: Env) {
+    // PartyServer selects its connection manager while `super()` initializes
+    // the base-class fields, before this Agent instance exists. Ensure the raw
+    // subclass option it reads has the same hibernation default as our resolved
+    // options. Replacing (rather than mutating) the object also supports frozen
+    // user-provided option objects.
+    const ctor = new.target as typeof Agent;
+    if (ctor.options?.hibernate === undefined) {
+      ctor.options = {
+        ...ctor.options,
+        hibernate: DEFAULT_AGENT_STATIC_OPTIONS.hibernate
+      };
+    }
     super(ctx, env);
 
     this.mcp = this._withAgentSpan(
