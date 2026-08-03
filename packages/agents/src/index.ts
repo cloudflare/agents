@@ -6287,6 +6287,28 @@ export class Agent<
             "Update to the latest `compatibility_date` in your wrangler.jsonc."
         );
       }
+
+      // Close any client WebSocket connected directly to the target
+      // (or a descendant) before deleting it — mirrors `deleteSubAgent`.
+      // `this` may itself be the root (target is its direct child) or
+      // an intermediate facet reached by recursing below; only the
+      // root holds real hibernatable connections, so an intermediate
+      // facet delegates through its own root stub.
+      if (this._isFacet) {
+        const root = await this._rootAlarmOwner();
+        await root._cf_closeSubAgentConnectionsForPrefix(
+          targetPath,
+          1001,
+          "Sub-agent deleted"
+        );
+      } else {
+        await this._cf_closeSubAgentConnectionsForPrefix(
+          targetPath,
+          1001,
+          "Sub-agent deleted"
+        );
+      }
+
       try {
         ctx.facets.delete(`${target.className}\0${target.name}`);
       } catch {

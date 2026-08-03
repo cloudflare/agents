@@ -1826,6 +1826,22 @@ describe("SubAgent", () => {
       expect(reason).toBe("Sub-agent deleted");
     });
 
+    it("a sub-agent's self-destruct() closes a still-open socket connected to it", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const ws = await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}/sub/counter-sub-agent/${childName}`
+      );
+      const closePromise = waitForClose(ws);
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await parent.subAgentSelfDestruct(childName);
+
+      const { code, reason } = await closePromise;
+      expect(code).toBe(1001);
+      expect(reason).toBe("Sub-agent deleted");
+    });
+
     it("deleteSubAgent stays deleted after the client closes a still-open sub-agent socket", async () => {
       const parentName = uniqueName();
       const childName = uniqueName();
