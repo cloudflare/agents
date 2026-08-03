@@ -10,6 +10,9 @@ type ColdRpcStub = {
     messages: UIMessage[];
     onStartCount: number;
   }>;
+  _hostGetMessages(): Promise<
+    Array<{ id: string; role: string; content: string }>
+  >;
 };
 
 function uniqueName(): string {
@@ -48,6 +51,33 @@ describe("native RPC initialization", () => {
       messages: [],
       onStartCount: 1
     });
+  });
+
+  it("hydrates persisted Think history before a cold host-bridge RPC", async () => {
+    const namespace = env.ThinkProgrammaticTestAgent;
+    const durableStub = namespace.get(namespace.idFromName(uniqueName()));
+    const stub = durableStub as unknown as ColdRpcStub;
+    const message: UIMessage = {
+      id: "host-bridge-cold-rpc-message",
+      role: "user",
+      parts: [{ type: "text", text: "hydrate for host bridge" }]
+    };
+
+    await stub.addMessages([message]);
+    await evictDurableObject(durableStub);
+
+    // HostBridgeLoopback reconstructs the already-named Agent stub from its
+    // string id, so startup must recover the persisted PartyServer name.
+    const hostStub = namespace.get(
+      namespace.idFromString(durableStub.id.toString())
+    ) as unknown as ColdRpcStub;
+    expect(await hostStub._hostGetMessages()).toEqual([
+      {
+        id: message.id,
+        role: message.role,
+        content: "hydrate for host bridge"
+      }
+    ]);
   });
 
   it("hydrates persisted Think history when native RPC is first after eviction", async () => {

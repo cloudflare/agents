@@ -1669,6 +1669,12 @@ export class Agent<
     | "starting"
     | "started" = "constructing";
 
+  /** @internal Initialize cold RPC entrypoints without re-entering startup. */
+  override async __unsafe_ensureInitialized(): Promise<void> {
+    if (this._rpcInitializationState !== "pending") return;
+    await super.__unsafe_ensureInitialized();
+  }
+
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
@@ -4403,6 +4409,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<{ ok: boolean; callback?: string }> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     const result = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
@@ -4432,6 +4439,7 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const rows = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
       WHERE owner_path IS NOT NULL
@@ -4556,6 +4564,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<Schedule<unknown> | undefined> {
+    await this.__unsafe_ensureInitialized();
     return this._getScheduleForOwner(ownerPath, id);
   }
 
@@ -4568,6 +4577,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     criteria: ScheduleCriteria = {}
   ): Promise<Schedule<unknown>[]> {
+    await this.__unsafe_ensureInitialized();
     return this._listSchedulesForOwner(ownerPath, criteria);
   }
 
@@ -4580,6 +4590,7 @@ export class Agent<
   async _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
     this._facetKeepAliveTokens.add(token);
@@ -4596,6 +4607,7 @@ export class Agent<
    * @internal
    */
   async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     if (!this._facetKeepAliveTokens.delete(token)) return;
     this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
     await this._scheduleNextAlarm();
@@ -4611,6 +4623,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathJson = JSON.stringify(ownerPath);
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     if (!ownerPathKey) {
@@ -4633,6 +4646,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     this.sql`
       DELETE FROM cf_agents_facet_runs
@@ -6160,6 +6174,7 @@ export class Agent<
   async _cf_checkRunFibersForFacet(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<number> {
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
     if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -6207,6 +6222,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     row: ScheduleStorageRow
   ): Promise<boolean> {
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
     if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -6324,6 +6340,7 @@ export class Agent<
   async _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
 
     if (targetPath.length === 0) {
@@ -7198,6 +7215,7 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     if (this._isFacet && this._cf_currentSubAgentBridge) {
       this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
       return;
@@ -7215,6 +7233,7 @@ export class Agent<
   async _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
+    await this.__unsafe_ensureInitialized();
     const metas: SubAgentConnectionMeta[] = [];
     for (const connection of super.getConnections()) {
       const meta = this._cf_subAgentConnectionMetaForPath(
@@ -7230,6 +7249,7 @@ export class Agent<
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
@@ -7242,6 +7262,7 @@ export class Agent<
     code?: number,
     reason?: string
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
@@ -7253,6 +7274,7 @@ export class Agent<
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return null;
@@ -7521,6 +7543,7 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this._cf_runWithSubAgentBridge(bridge, async () => {
       const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
       const request = new Request(meta.uri ?? "http://placeholder/", {
@@ -7557,6 +7580,7 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
@@ -7571,6 +7595,7 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
@@ -7830,6 +7855,7 @@ export class Agent<
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     const stub = await this._cf_resolveSubAgent(className, name);
     return await this._cf_invokeStubMethod(stub, className, method, args);
   }
@@ -7847,6 +7873,7 @@ export class Agent<
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     const [self, next, ...rest] = path;
     if (!self) {
       throw new Error(`Sub-agent path invocation requires a non-empty path.`);

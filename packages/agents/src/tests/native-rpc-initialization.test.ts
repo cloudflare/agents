@@ -78,6 +78,25 @@ describe("native Durable Object RPC initialization", () => {
     });
   });
 
+  it("initializes before a cold framework-internal RPC executes", async () => {
+    const namespace = env.TestNativeRpcAgent;
+    const name = uniqueName();
+    const stub = namespace.get(namespace.idFromName(name));
+
+    await (
+      stub as unknown as {
+        _cf_checkRunFibersForFacet(
+          ownerPath: ReadonlyArray<{ className: string; name: string }>
+        ): Promise<number>;
+      }
+    )._cf_checkRunFibersForFacet([{ className: "TestNativeRpcAgent", name }]);
+
+    const startCount = await runInDurableObject(stub, (_instance, ctx) =>
+      ctx.storage.get<number>("test_start_count")
+    );
+    expect(startCount).toBe(1);
+  });
+
   it("destroys a condemned cold Agent without running startup", async () => {
     const namespace = env.TestNativeRpcAgent;
     const id = namespace.idFromName(uniqueName());
