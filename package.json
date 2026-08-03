@@ -1,0 +1,28 @@
+{
+  "name": "repro-issue-2009",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy --temporary"
+  },
+  "dependencies": {
+    "@cloudflare/codemode": "0.5.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "agents": "0.20.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.40.2",
+    "@cloudflare/workers-types": "^5.20260801.1",
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "wrangler": "^4.102.0"
+  }
+}
