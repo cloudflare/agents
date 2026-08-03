@@ -19,7 +19,10 @@ export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
  */
 export { withInvocationScope as __DO_NOT_USE_WILL_BREAK__withInvocationScope } from "./observability/tracing/tracer";
 import {
+  SUB_AGENT_OUTER_URL_HEADER,
   SUB_PREFIX,
+  buildSubAgentPath,
+  encodeAgentNameSegment,
   parseSubAgentPath as _parseSubAgentPath
 } from "./sub-routing";
 export {
@@ -28,7 +31,7 @@ export {
   parseSubAgentPath,
   SUB_PREFIX
 } from "./sub-routing";
-export type { SubAgentPathMatch } from "./sub-routing";
+export type { SubAgentPathMatch, SubAgentPathStep } from "./sub-routing";
 import { signAgentHeaders } from "./email";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
@@ -1207,8 +1210,6 @@ const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
  */
 const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
-
-const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
 
 /**
  * The set of all internal keys stored in connection state that must be
@@ -7015,6 +7016,11 @@ export class Agent<
       return super.fetch(request);
     }
 
+    // Capture the public URL before user hooks can replace the Request or its
+    // internal routing header. Nested facets inherit the root-captured value.
+    const outerUrl =
+      request.headers.get(SUB_AGENT_OUTER_URL_HEADER) ?? request.url;
+
     // Hook runs in the parent's isolate before any facet work.
     const decision = await this.onBeforeSubAgent(request, {
       className: match.childClass,
@@ -7031,7 +7037,7 @@ export class Agent<
       return super.fetch(new Request(forwardReq, { headers: acceptHeaders }));
     }
 
-    return this._cf_forwardToFacet(forwardReq, match);
+    return this._cf_forwardToFacet(forwardReq, match, outerUrl);
   }
 
   override broadcast(
@@ -7698,7 +7704,8 @@ export class Agent<
       childClass: string;
       childName: string;
       remainingPath: string;
-    }
+    },
+    outerUrl: string
   ): Promise<Response> {
     let fetcher: { fetch(r: Request): Promise<Response> };
     try {
@@ -7724,13 +7731,11 @@ export class Agent<
     const rewritten = new URL(req.url);
     rewritten.pathname = match.remainingPath;
     const forwardedHeaders = new Headers(req.headers);
+    forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, outerUrl);
     const forwardedInit: RequestInit = {
       method: req.method,
       headers: forwardedHeaders
     };
-    if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-      forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
-    }
     if (req.body && req.method !== "GET" && req.method !== "HEAD") {
       forwardedInit.body = await req.arrayBuffer();
     }
@@ -12626,9 +12631,18 @@ export class Agent<
     let callbackUrl: string | undefined;
     if (resolvedCallbackHost) {
       const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
-      callbackUrl = resolvedCallbackPath
-        ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
-        : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+      if (resolvedCallbackPath) {
+        callbackUrl = `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`;
+      } else if (this._isFacet) {
+        const [root, ...facets] = this.selfPath;
+        if (!root) {
+          throw new Error("A sub-agent OAuth callback requires a root path");
+        }
+        const rootPath = `/${resolvedAgentsPrefix}/${camelCaseToKebabCase(root.className)}/${encodeAgentNameSegment(root.name)}`;
+        callbackUrl = `${normalizedHost}${rootPath}${buildSubAgentPath(facets, "/callback")}`;
+      } else {
+        callbackUrl = `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+      }
     }
 
     const id = requestedId ?? existingServer?.id ?? nanoid(8);
@@ -12836,15 +12850,34 @@ export class Agent<
   private async handleMcpOAuthCallback(
     request: Request
   ): Promise<Response | null> {
-    // Check if this is an OAuth callback request
-    const isCallback = this.mcp.isCallbackRequest(request);
+    const outerUrl = this._isFacet
+      ? request.headers.get(SUB_AGENT_OUTER_URL_HEADER)
+      : null;
+    let callbackRequest = request;
+    if (outerUrl) {
+      const callbackUrl = new URL(outerUrl);
+      // The internal header contributes only the public origin/path used for
+      // callback registration matching. OAuth parameters always come from the
+      // actual request URL so a caller cannot substitute code/state via a
+      // forged routing header.
+      callbackUrl.search = new URL(request.url).search;
+      callbackRequest = new Request(callbackUrl, {
+        method: request.method,
+        headers: request.headers
+      });
+    }
+
+    // Check if this is an MCP callback at its public URL. Facet routing strips
+    // `/sub/{class}/{name}` segments before the request reaches the child, so
+    // use the root-recorded outer URL when matching the registered redirect URI.
+    const isCallback = this.mcp.isCallbackRequest(callbackRequest);
     if (!isCallback) {
       return null;
     }
 
     // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
     // This fires onServerStateChanged event which triggers broadcast
-    const result = await this.mcp.handleCallbackRequest(request);
+    const result = await this.mcp.handleCallbackRequest(callbackRequest);
 
     // If auth was successful, establish the connection in the background
     // (establishConnection handles retries internally using per-server retry config)
@@ -12956,8 +12989,12 @@ export async function routeAgentRequest<Env>(
   env: Env,
   options?: AgentOptions<Env>
 ) {
+  const headers = new Headers(request.headers);
+  headers.delete(SUB_AGENT_OUTER_URL_HEADER);
+  const routedRequest = new Request(request, { headers });
+
   // oxlint-disable-next-line typescript/no-explicit-any
-  return routePartykitRequest(request, env as any, {
+  return routePartykitRequest(routedRequest, env as any, {
     prefix: "agents",
     ...(options as PartyServerOptions<Record<string, unknown>>)
   });

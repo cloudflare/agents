@@ -10,6 +10,7 @@
  *     external HTTP/WS routing goes through `routeSubAgentRequest`.
  *
  * Internal:
+ *   - `buildSubAgentPath(path, leaf?)` — structured path → nested URL tail.
  *   - `parseSubAgentPath(url)` — URL → `{ childClass, childName, remainingPath }`.
  *   - `forwardToFacet(req, parent, match)` — resolves `ctx.facets.get(...)`
  *     on the parent and returns `facetStub.fetch(rewrittenReq)`.
@@ -29,6 +30,16 @@ import type { Agent, SubAgentClass, SubAgentStub } from "./index";
  */
 export const SUB_PREFIX = "sub";
 
+/** @internal Carries the public URL while nested routing rewrites pathname. */
+export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
+
+export interface SubAgentPathStep {
+  /** CamelCase class name as exported by the Worker. */
+  className: string;
+  /** Logical sub-agent instance name. */
+  name: string;
+}
+
 export interface SubAgentPathMatch {
   /** CamelCase class name of the child, as it appears in `ctx.exports`. */
   childClass: string;
@@ -41,6 +52,56 @@ export interface SubAgentPathMatch {
    * recursively nested sub-agent is being routed.
    */
   remainingPath: string;
+}
+
+/**
+ * Encode a logical agent name as one externally routable URL segment.
+ *
+ * @internal Shared by structured sub-agent routing and root-agent URL construction.
+ */
+export function encodeAgentNameSegment(name: string): string {
+  if (name === "" || name === "." || name === "..") {
+    throw new Error(
+      `Cannot build a sub-agent path for name ${JSON.stringify(name)}. Empty and dot-segment names are not externally routable.`
+    );
+  }
+  return encodeURIComponent(name);
+}
+
+/**
+ * Build a nested pathname for routing through one or more sub-agents.
+ *
+ * @example
+ * ```ts
+ * buildSubAgentPath(
+ *   [
+ *     { className: "Chat", name: "chat-a" },
+ *     { className: "Thread", name: "thread-b" }
+ *   ],
+ *   "/callback"
+ * );
+ * // "/sub/chat/chat-a/sub/thread/thread-b/callback"
+ * ```
+ */
+export function buildSubAgentPath(
+  path: ReadonlyArray<SubAgentPathStep>,
+  remainingPath = ""
+): string {
+  const segments = path.flatMap((step) => {
+    const classSegment = camelCaseToKebabCase(step.className);
+    if (!classSegment || classSegment === SUB_PREFIX) {
+      throw new Error(
+        `Cannot build a sub-agent path for class ${JSON.stringify(step.className)} because its URL segment is reserved or empty.`
+      );
+    }
+    return [SUB_PREFIX, classSegment, encodeAgentNameSegment(step.name)];
+  });
+  const suffix = remainingPath
+    ? remainingPath.startsWith("/")
+      ? remainingPath
+      : `/${remainingPath}`
+    : "";
+  return `${segments.length > 0 ? `/${segments.join("/")}` : ""}${suffix}`;
 }
 
 /**
@@ -167,19 +228,29 @@ export async function routeSubAgentRequest(
   parent: unknown,
   options?: {
     /**
-     * Path to route on. Defaults to `req.url`'s pathname. Useful
-     * when your outer URL is custom (e.g. `/api/v1/...`) and you
-     * want to route the sub-agent tail without rewriting the
-     * Request first.
+     * Path to route on. Pass either an existing `/sub/...` path or a
+     * structured descendant path plus the path the leaf should receive.
+     * Defaults to `req.url`'s pathname.
      */
-    fromPath?: string;
+    fromPath?:
+      | string
+      | {
+          path: ReadonlyArray<SubAgentPathStep>;
+          leaf?: string;
+        };
   }
 ): Promise<Response> {
   // We don't know the parent's ctx.exports from here, so parse with
   // a permissive resolver. If the class doesn't exist, the parent's
   // bridge will 404. This lets us keep the helper self-contained.
-  const pathForParsing = options?.fromPath
-    ? `http://placeholder${options.fromPath.startsWith("/") ? "" : "/"}${options.fromPath}`
+  const fromPath =
+    typeof options?.fromPath === "string"
+      ? options.fromPath
+      : options?.fromPath
+        ? buildSubAgentPath(options.fromPath.path, options.fromPath.leaf)
+        : undefined;
+  const pathForParsing = fromPath
+    ? `http://placeholder${fromPath.startsWith("/") ? "" : "/"}${fromPath}`
     : req.url;
 
   const match = parseSubAgentPath(pathForParsing);
@@ -204,12 +275,12 @@ export async function routeSubAgentRequest(
   // handing off to the child facet. If `fromPath` itself contains a
   // `?query` segment, that overrides the original.
   const forwardUrl =
-    options?.fromPath !== undefined
-      ? rewritePathname(req.url, options.fromPath)
-      : req.url;
+    fromPath !== undefined ? rewritePathname(req.url, fromPath) : req.url;
+  const forwardHeaders = new Headers(req.headers);
+  forwardHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
   const forwardInit: RequestInit = {
     method: req.method,
-    headers: new Headers(req.headers)
+    headers: forwardHeaders
   };
   if (req.body && req.method !== "GET" && req.method !== "HEAD") {
     forwardInit.body = await req.arrayBuffer();

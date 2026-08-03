@@ -17,6 +17,7 @@ import { exports, env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../index";
 import { getAgentByName, getSubAgentByName, parseSubAgentPath } from "../index";
+import { buildSubAgentPath } from "../sub-routing";
 
 function uniqueName() {
   return `sub-routing-${Math.random().toString(36).slice(2)}`;
@@ -51,6 +52,98 @@ describe("sub-agent routing — routeAgentRequest + /sub/... URLs", () => {
 
     const after = await childStub.get("anything");
     expect(after).toBe(1);
+  });
+
+  it("builds a routable OAuth callback URL for a sub-agent", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+
+    const authUrl = new URL(await parentStub.startSubAgentOAuth(child));
+
+    expect(authUrl.origin + authUrl.pathname).toBe(
+      "https://auth.example.com/authorize"
+    );
+    expect(authUrl.searchParams.get("redirect_uri")).toBe(
+      `https://app.example.com/agents/test-sub-agent-parent/${parent}/sub/o-auth-callback-sub-agent/${child}/callback`
+    );
+  });
+
+  it("routes an OAuth callback to the sub-agent that started the flow", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+    const authUrl = new URL(await parentStub.startSubAgentOAuth(child));
+    const callbackUrl = new URL(authUrl.searchParams.get("redirect_uri")!);
+    callbackUrl.searchParams.set("error", "access_denied");
+    callbackUrl.searchParams.set("state", authUrl.searchParams.get("state")!);
+
+    const response = await exports.default.fetch(
+      new Request(callbackUrl, { redirect: "manual" })
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      serverId: authUrl.searchParams.get("state")!.split(".")[1],
+      success: false
+    });
+  });
+
+  it("routes a custom OAuth callback through a structured path", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+    const authUrl = new URL(
+      await parentStub.startSubAgentOAuth(child, "/oauth/callback")
+    );
+    const callbackUrl = new URL(authUrl.searchParams.get("redirect_uri")!);
+    callbackUrl.searchParams.set("error", "access_denied");
+    callbackUrl.searchParams.set("state", authUrl.searchParams.get("state")!);
+    const { routeSubAgentRequest } = await import("../index");
+
+    const response = await routeSubAgentRequest(
+      new Request(callbackUrl),
+      parentStub,
+      {
+        fromPath: {
+          path: [{ className: "OAuthCallbackSubAgent", name: child }],
+          leaf: "/callback"
+        }
+      }
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({ success: false });
+  });
+
+  it("does not take OAuth parameters from the internal outer-URL header", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+    const authUrl = new URL(
+      await parentStub.startSubAgentOAuth(child, "/oauth/callback")
+    );
+    const state = authUrl.searchParams.get("state")!;
+    const internalUrl = new URL(
+      `https://app.example.com/sub/o-auth-callback-sub-agent/${child}/callback`
+    );
+    internalUrl.searchParams.set("error", "access_denied");
+    internalUrl.searchParams.set("state", state);
+
+    const response = await parentStub.fetch(
+      new Request(internalUrl, {
+        headers: {
+          "x-cf-agents-subagent-url":
+            "https://app.example.com/oauth/callback?state=forged.invalid"
+        }
+      })
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      serverId: state.split(".")[1],
+      success: false
+    });
   });
 
   it("hasSubAgent reflects spawns driven by the real bridge", async () => {
@@ -253,6 +346,38 @@ describe("onBeforeSubAgent hook — allow / reject / mutate", () => {
   });
 });
 
+describe("buildSubAgentPath", () => {
+  it("builds a nested route and leaf path", () => {
+    expect(
+      buildSubAgentPath(
+        [
+          { className: "Chat", name: "chat/a" },
+          { className: "ThreadAgent", name: "thread one" }
+        ],
+        "/callback"
+      )
+    ).toBe("/sub/chat/chat%2Fa/sub/thread-agent/thread%20one/callback");
+  });
+
+  it("defaults the leaf path to the routed sub-agent root", () => {
+    expect(buildSubAgentPath([{ className: "Chat", name: "chat-a" }])).toBe(
+      "/sub/chat/chat-a"
+    );
+  });
+
+  it.each(["", ".", ".."])("rejects the non-routable name %j", (name) => {
+    expect(() => buildSubAgentPath([{ className: "Chat", name }])).toThrow(
+      /not externally routable/
+    );
+  });
+
+  it("rejects a sub-agent class that collides with the route separator", () => {
+    expect(() =>
+      buildSubAgentPath([{ className: "Sub", name: "child" }])
+    ).toThrow(/reserved/);
+  });
+});
+
 describe("parseSubAgentPath", () => {
   it("matches the default /sub/{class}/{name}", () => {
     const m = parseSubAgentPath("http://x/agents/inbox/alice/sub/chat/abc", {
@@ -352,6 +477,31 @@ describe("parseSubAgentPath", () => {
 });
 
 describe("routeSubAgentRequest — query-param preservation", () => {
+  it("accepts a structured sub-agent path", async () => {
+    const parent = uniqueName();
+    const child = "chat/with space";
+    const parentStub = await getAgentByName(env.HookingSubAgentParent, parent);
+    await parentStub.setHookMode("allow");
+    const { routeSubAgentRequest } = await import("../index");
+
+    await routeSubAgentRequest(
+      new Request("https://app.example.com/oauth/callback?code=test"),
+      parentStub,
+      {
+        fromPath: {
+          path: [{ className: "CounterSubAgent", name: child }],
+          leaf: "/callback"
+        }
+      }
+    );
+
+    const observed = new URL((await parentStub.lastObservedUrl())!);
+    expect(observed.pathname).toBe(
+      "/sub/counter-sub-agent/chat%2Fwith%20space/callback"
+    );
+    expect(observed.search).toBe("?code=test");
+  });
+
   it("preserves original request query params when `fromPath` is used", async () => {
     // Custom-routing worker handler at worker.ts:/custom-sub/...
     // extracts `rest` from the pathname (no query). Without a fix,

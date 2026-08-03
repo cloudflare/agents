@@ -1,9 +1,11 @@
 import { Agent, getCurrentAgent } from "../../index.ts";
 import type {
+  AgentContext,
   FiberInspection,
   FiberRecoveryContext,
   FiberRecoveryResult
 } from "../../index.ts";
+import { MCPConnectionState } from "../../mcp/client-connection.ts";
 import { RpcTarget } from "cloudflare:workers";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
@@ -552,6 +554,67 @@ export class CounterSubAgent extends Agent {
       agentName: row.agent_name,
       payload: JSON.parse(row.payload) as { callback?: string; id?: string }
     }));
+  }
+}
+
+// ── SubAgent: MCP OAuth callback routing ───────────────────────────
+
+export class OAuthCallbackSubAgent extends Agent {
+  constructor(ctx: AgentContext, env: Cloudflare.Env) {
+    super(ctx, env);
+
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) =>
+        Response.json(
+          { serverId: result.serverId, success: result.authSuccess },
+          { status: result.authSuccess ? 200 : 401 }
+        )
+    });
+
+    this.mcp.connectToServer = async (id: string) => {
+      const provider =
+        this.mcp.mcpConnections[id]?.options.transport.authProvider;
+      if (!provider) {
+        throw new Error("Test OAuth provider was not registered");
+      }
+
+      const redirectUrl = provider.redirectUrl;
+      if (!redirectUrl) {
+        throw new Error("Test OAuth provider has no redirect URL");
+      }
+
+      if (!provider.state) {
+        throw new Error("Test OAuth provider cannot create state");
+      }
+      const authUrl = new URL("https://auth.example.com/authorize");
+      authUrl.searchParams.set("redirect_uri", redirectUrl.toString());
+      authUrl.searchParams.set("state", await provider.state());
+      authUrl.searchParams.set("code_challenge", "test-code-challenge");
+      authUrl.searchParams.set("code_challenge_method", "S256");
+      await provider.redirectToAuthorization(authUrl);
+      this.mcp.mcpConnections[id].connectionState =
+        MCPConnectionState.AUTHENTICATING;
+
+      if (!provider.authUrl) {
+        throw new Error("Test OAuth provider did not record an auth URL");
+      }
+      return {
+        state: MCPConnectionState.AUTHENTICATING,
+        authUrl: provider.authUrl
+      };
+    };
+  }
+
+  async startOAuth(callbackPath?: string): Promise<string> {
+    const result = await this.addMcpServer(
+      "test-oauth-server",
+      "https://mcp.example.com/mcp",
+      { callbackHost: "https://app.example.com", callbackPath }
+    );
+    if (result.state !== "authenticating") {
+      throw new Error(`Expected authenticating state, got ${result.state}`);
+    }
+    return result.authUrl;
   }
 }
 
@@ -1143,6 +1206,14 @@ export class TestSubAgentParent extends Agent {
   async subAgentPing(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.ping();
+  }
+
+  async startSubAgentOAuth(
+    subAgentName: string,
+    callbackPath?: string
+  ): Promise<string> {
+    const child = await this.subAgent(OAuthCallbackSubAgent, subAgentName);
+    return child.startOAuth(callbackPath);
   }
 
   async seedLegacyCounterSubAgentRegistry(subAgentName: string): Promise<void> {

@@ -256,6 +256,39 @@ https://{host}/{agentsPrefix}/{agent-name}/{instance-name}/callback
 
 For example: `https://my-worker.workers.dev/agents/my-agent/default/callback`
 
+When a sub-agent starts the OAuth flow, the callback URL includes its complete
+root-first path:
+
+```
+https://{host}/{agentsPrefix}/{root-agent}/{root-name}/sub/{child-agent}/{child-name}/callback
+```
+
+For example:
+`https://my-worker.workers.dev/agents/inbox/user-123/sub/chat/chat-abc/callback`.
+Additional nested sub-agents add another `/sub/{agent}/{name}` pair before
+`/callback`. The nested route returns the callback to the sub-agent that stored
+the OAuth state and PKCE verifier.
+
+A custom `callbackPath` bypasses this automatic path construction. Your Worker
+must route a custom callback to the root agent and through the complete
+sub-agent path. Pass the structured descendant path to
+`routeSubAgentRequest()`:
+
+```typescript
+import { getAgentByName, routeSubAgentRequest } from "agents";
+
+const parent = await getAgentByName(env.Inbox, userId);
+return routeSubAgentRequest(request, parent, {
+  fromPath: {
+    path: [{ className: "Chat", name: chatId }],
+    leaf: "/callback"
+  }
+});
+```
+
+This also applies when `sendIdentityOnConnect` is `false`, where an explicit
+`callbackPath` is required to avoid exposing instance names.
+
 OAuth tokens are securely stored in SQLite and persist across agent restarts.
 
 ### Custom Callback Handling

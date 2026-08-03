@@ -60,6 +60,7 @@ export {
   TestSubAgentParent,
   CustomBoundSubAgentParent,
   CounterSubAgent,
+  OAuthCallbackSubAgent,
   OuterSubAgent,
   InnerSubAgent,
   LeafSubAgent,

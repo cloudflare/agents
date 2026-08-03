@@ -201,6 +201,10 @@
         "name": "CounterSubAgent"
       },
       {
+        "class_name": "OAuthCallbackSubAgent",
+        "name": "OAuthCallbackSubAgent"
+      },
+      {
         "class_name": "OuterSubAgent",
         "name": "OuterSubAgent"
       },
