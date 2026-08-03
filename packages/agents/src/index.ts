@@ -22,8 +22,8 @@ import {
   SUB_AGENT_OUTER_URL_HEADER,
   SUB_PREFIX,
   buildSubAgentPath,
-  encodeAgentNameSegment,
-  parseSubAgentPath as _parseSubAgentPath
+  parseSubAgentPath as _parseSubAgentPath,
+  validateRootAgentNameSegment
 } from "./sub-routing";
 export {
   routeSubAgentRequest,
@@ -7031,6 +7031,7 @@ export class Agent<
       // marker names a child class this parent cannot resolve. Fail explicitly
       // instead of letting a WebSocket connect to the parent with facet flags.
       if (
+        request.headers.get("Upgrade")?.toLowerCase() === "websocket" &&
         request.headers.has(SUB_AGENT_OUTER_URL_HEADER) &&
         _parseSubAgentPath(request.url)
       ) {
@@ -12666,7 +12667,7 @@ export class Agent<
         if (!root) {
           throw new Error("A sub-agent OAuth callback requires a root path");
         }
-        const rootPath = `/${resolvedAgentsPrefix}/${camelCaseToKebabCase(root.className)}/${encodeAgentNameSegment(root.name)}`;
+        const rootPath = `/${resolvedAgentsPrefix}/${camelCaseToKebabCase(root.className)}/${validateRootAgentNameSegment(root.name)}`;
         callbackUrl = `${normalizedHost}${rootPath}${buildSubAgentPath(facets, "/callback")}`;
       } else {
         callbackUrl = `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
@@ -13018,10 +13019,18 @@ export async function routeAgentRequest<Env>(
   options?: AgentOptions<Env>
 ) {
   let routedRequest = request;
-  if (request.headers.has(SUB_AGENT_OUTER_URL_HEADER)) {
+  const pathParts = new URL(request.url).pathname.split("/").filter(Boolean);
+  const prefixParts = (options?.prefix ?? "agents").split("/").filter(Boolean);
+  const couldMatchAgentRoute =
+    prefixParts.length > 0 &&
+    prefixParts.every((part, index) => pathParts[index] === part) &&
+    pathParts.length >= prefixParts.length + 2;
+  if (couldMatchAgentRoute && request.headers.has(SUB_AGENT_OUTER_URL_HEADER)) {
     const headers = new Headers(request.headers);
     headers.delete(SUB_AGENT_OUTER_URL_HEADER);
-    routedRequest = new Request(request, { headers });
+    routedRequest = new Request(request.clone() as unknown as RequestInfo, {
+      headers
+    });
   }
 
   // oxlint-disable-next-line typescript/no-explicit-any

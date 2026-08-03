@@ -17,7 +17,10 @@ import { exports, env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../index";
 import { getAgentByName, getSubAgentByName, parseSubAgentPath } from "../index";
-import { buildSubAgentPath } from "../sub-routing";
+import {
+  buildSubAgentPath,
+  validateRootAgentNameSegment
+} from "../sub-routing";
 
 function uniqueName() {
   return `sub-routing-${Math.random().toString(36).slice(2)}`;
@@ -67,6 +70,20 @@ describe("sub-agent routing — routeAgentRequest + /sub/... URLs", () => {
     expect(authUrl.searchParams.get("redirect_uri")).toBe(
       `https://app.example.com/agents/test-sub-agent-parent/${parent}/sub/o-auth-callback-sub-agent/${child}/callback`
     );
+  });
+
+  it("routes an OAuth callback when the root name contains percent escapes", async () => {
+    const parent = `root%2F${uniqueName()}`;
+    const child = uniqueName();
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+    const authUrl = new URL(await parentStub.startSubAgentOAuth(child));
+    const callbackUrl = new URL(authUrl.searchParams.get("redirect_uri")!);
+    callbackUrl.searchParams.set("error", "access_denied");
+    callbackUrl.searchParams.set("state", authUrl.searchParams.get("state")!);
+
+    const response = await exports.default.fetch(new Request(callbackUrl));
+
+    expect(response.status).toBe(401);
   });
 
   it("routes an OAuth callback to the sub-agent that started the flow", async () => {
@@ -130,6 +147,23 @@ describe("sub-agent routing — routeAgentRequest + /sub/... URLs", () => {
     );
 
     expect(response.status).toBe(404);
+  });
+
+  it("allows ordinary facet HTTP paths containing a sub segment", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const response = await exports.default.fetch(
+      new Request(
+        `https://app.example.com/agents/test-sub-agent-parent/${parent}/sub/outer-sub-agent/${child}/api/sub/items/42`
+      )
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      agentName: child,
+      path: "/api/sub/items/42"
+    });
   });
 
   it("does not take OAuth parameters from the internal outer-URL header", async () => {
@@ -504,26 +538,68 @@ describe("routeSubAgentRequest — query-param preservation", () => {
     expect(response.status).toBe(400);
   });
 
-  it("rejects an empty string path", async () => {
+  it("returns 400 for an invalid structured path step", async () => {
     const { routeSubAgentRequest } = await import("../index");
     const response = await routeSubAgentRequest(
-      new Request("https://app.example.com/sub/chat/child"),
+      new Request("https://app.example.com/callback"),
       { fetch: () => Promise.reject(new Error("should not forward")) },
-      { fromPath: "" }
+      { fromPath: { path: [{ className: "Sub", name: "child" }] } }
     );
 
     expect(response.status).toBe(400);
   });
 
+  it("treats an empty string path as omitted", async () => {
+    const { routeSubAgentRequest } = await import("../index");
+    let forwardedUrl: string | undefined;
+    const response = await routeSubAgentRequest(
+      new Request("https://app.example.com/sub/chat/child?code=test"),
+      {
+        fetch: (request: Request) => {
+          forwardedUrl = request.url;
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+      },
+      { fromPath: "" }
+    );
+
+    expect(response.status).toBe(204);
+    expect(forwardedUrl).toBe(
+      "https://app.example.com/sub/chat/child?code=test"
+    );
+  });
+
+  it.each(["%2e", "%2e%2e", "has/slash", "has?query", "has#fragment"])(
+    "rejects the non-routable root name %j",
+    (name) => {
+      expect(() => validateRootAgentNameSegment(name)).toThrow(
+        /not externally routable/
+      );
+    }
+  );
+
   it("does not disturb unmatched request bodies", async () => {
     const { routeAgentRequest } = await import("../index");
     const request = new Request("https://app.example.com/not-an-agent", {
       method: "POST",
+      headers: { "x-cf-agents-subagent-url": "https://forged.example.com" },
       body: "fallback body"
     });
 
     expect(await routeAgentRequest(request, env)).toBeNull();
     await expect(request.text()).resolves.toBe("fallback body");
+  });
+
+  it("does not clone an unmatched request with an already-used body", async () => {
+    const { routeAgentRequest } = await import("../index");
+    const request = new Request("https://app.example.com/not-an-agent", {
+      method: "POST",
+      headers: { "x-cf-agents-subagent-url": "https://forged.example.com" },
+      body: "already read"
+    });
+    await request.text();
+
+    expect(await routeAgentRequest(request, env)).toBeNull();
   });
 
   it("accepts a structured sub-agent path", async () => {

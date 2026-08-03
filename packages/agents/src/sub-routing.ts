@@ -40,6 +40,25 @@ export interface SubAgentPathStep {
   name: string;
 }
 
+/** @internal Validate a raw PartyServer room-name URL segment. */
+export function validateRootAgentNameSegment(name: string): string {
+  const path = `/root/${name}/callback`;
+  const url = new URL(path, "https://placeholder.invalid");
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (
+    url.pathname !== path ||
+    segments.length !== 3 ||
+    segments[1] !== name ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      `Cannot build a callback URL for root agent name ${JSON.stringify(name)} because it is not externally routable.`
+    );
+  }
+  return name;
+}
+
 export interface SubAgentPathMatch {
   /** CamelCase class name of the child, as it appears in `ctx.exports`. */
   childClass: string;
@@ -251,12 +270,20 @@ export async function routeSubAgentRequest(
       status: 400
     });
   }
-  const fromPath =
-    typeof options?.fromPath === "string"
-      ? options.fromPath
-      : options?.fromPath
-        ? buildSubAgentPath(options.fromPath.path, options.fromPath.leaf)
-        : undefined;
+  let fromPath: string | undefined;
+  try {
+    fromPath =
+      typeof options?.fromPath === "string"
+        ? options.fromPath || undefined
+        : options?.fromPath
+          ? buildSubAgentPath(options.fromPath.path, options.fromPath.leaf)
+          : undefined;
+  } catch (error) {
+    return new Response(
+      error instanceof Error ? error.message : "Invalid sub-agent path",
+      { status: 400 }
+    );
+  }
   const pathForParsing =
     fromPath !== undefined
       ? `http://placeholder${fromPath.startsWith("/") ? "" : "/"}${fromPath}`
