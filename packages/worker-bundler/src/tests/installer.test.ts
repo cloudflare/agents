@@ -9,6 +9,8 @@ type TestTarEntry = {
   path: string;
   content?: string;
   type?: "file" | "directory" | "pax-global-header";
+  /** Directory portion stored separately in the USTAR prefix field. */
+  ustarPrefix?: string;
 };
 
 function writeTarHeaderField(
@@ -41,6 +43,10 @@ function createTarHeader(entry: TestTarEntry, contentSize: number): Uint8Array {
   writeTarHeaderField(header, 148, "        ");
   writeTarHeaderField(header, 156, typeFlag);
   writeTarHeaderField(header, 257, "ustar\0");
+  writeTarHeaderField(header, 263, "00");
+  if (entry.ustarPrefix) {
+    writeTarHeaderField(header, 345, entry.ustarPrefix);
+  }
 
   const checksum = header.reduce((sum, byte) => sum + byte, 0);
   writeTarHeaderField(
@@ -167,6 +173,32 @@ describe("installDependencies tarball root handling", () => {
     expect(fileSystem.read("node_modules/conventional/index.js")).toBe(
       "export default true;"
     );
+  });
+
+  it("reconstructs USTAR-prefixed paths before detecting the archive root", async () => {
+    const longEntryPath =
+      "dist/compiled/next-server/dist_client_dev_noop-turbopack-hmr_js-turbo-experimental.runtime.dev.js";
+    const fileSystem = await installTarballFixture("ustar-layout", [
+      {
+        path: "package/package.json",
+        content: '{"name":"ustar-layout"}'
+      },
+      {
+        path: longEntryPath,
+        ustarPrefix: "package",
+        content: "export const runtime = true;"
+      }
+    ]);
+
+    expect(fileSystem.read("node_modules/ustar-layout/package.json")).toBe(
+      '{"name":"ustar-layout"}'
+    );
+    expect(fileSystem.read(`node_modules/ustar-layout/${longEntryPath}`)).toBe(
+      "export const runtime = true;"
+    );
+    expect(
+      fileSystem.read("node_modules/ustar-layout/package/package.json")
+    ).toBeNull();
   });
 
   it("normalizes leading dot segments and ignores tar metadata", async () => {

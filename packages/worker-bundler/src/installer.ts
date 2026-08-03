@@ -424,7 +424,7 @@ function parseTar(data: Uint8Array): Record<string, string> {
     }
 
     // Parse header fields
-    const filePath = normalizeTarEntryPath(readString(header, 0, 100));
+    const filePath = normalizeTarEntryPath(readTarEntryPath(header));
     const sizeStr = readString(header, 124, 12);
     const typeFlag = header[156];
 
@@ -467,6 +467,23 @@ function parseTar(data: Uint8Array): Record<string, string> {
   }
 
   return files;
+}
+
+/**
+ * Read a TAR entry path, including the directory prefix from POSIX USTAR.
+ */
+function readTarEntryPath(header: Uint8Array): string {
+  const name = readString(header, 0, 100);
+  const isPosixUstar =
+    readString(header, 257, 6) === "ustar" &&
+    readString(header, 263, 2) === "00";
+
+  if (!isPosixUstar) {
+    return name;
+  }
+
+  const prefix = readString(header, 345, 155);
+  return prefix === "" ? name : `${prefix}/${name}`;
 }
 
 /**
