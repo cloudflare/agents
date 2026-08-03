@@ -242,9 +242,9 @@ function getWorkspaceShell(
   try {
     const candidate = workspace as WorkspaceLike &
       WorkspaceWithShellCapability & {
-        shell?: WorkspaceShellExecutor;
+        runtime?: WorkspaceShellExecutor;
       };
-    return candidate[workspaceShellCapability] ?? candidate.shell;
+    return candidate[workspaceShellCapability] ?? candidate.runtime;
   } catch {
     return undefined;
   }

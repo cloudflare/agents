@@ -10,11 +10,11 @@ export {
   WorkspaceServiceProxy,
   withWorkspace
 } from "@cloudflare/computer";
-export { WorkerBackend } from "@cloudflare/computer/backends/worker";
+export { WorkerShellBackend } from "@cloudflare/computer/backends/worker-shell";
 export type {
-  WorkerBackendOptions,
+  WorkerShellBackendOptions,
   WorkerShellFetcher
-} from "@cloudflare/computer/backends/worker";
+} from "@cloudflare/computer/backends/worker-shell";
 export type { ComputerOptions, WorkspaceClient };
 export { Computer };
 

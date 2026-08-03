@@ -102,7 +102,7 @@ npm install @cloudflare/computer
 import { Think } from "@cloudflare/think";
 import {
   createComputerWorkspace,
-  WorkerBackend,
+  WorkerShellBackend,
   WorkspaceServiceProxy
 } from "@cloudflare/think/experimental/computer";
 
@@ -112,7 +112,7 @@ export class MyAgent extends Think<Env> {
   override workspace = createComputerWorkspace({
     storage: this.ctx.storage,
     backends: [
-      new WorkerBackend({
+      new WorkerShellBackend({
         loader: this.env.LOADER,
         workspace: {
           binding: "MyAgent",
@@ -131,8 +131,8 @@ export class MyAgent extends Think<Env> {
 
 Use `this.workspace.readFile(...)` and `this.workspace.writeFile(...)` as you
 would with Think's default workspace. Computer-specific APIs are also available
-through `this.workspace.shell`, `this.workspace.git`, and
-`this.workspace.assets`. When a `WorkerBackend` is configured, Think's built-in
+through `this.workspace.runtime`, `this.workspace.git`, and
+`this.workspace.assets`. When a `WorkerShellBackend` is configured, Think's built-in
 `bash` tool uses Computer shell exec instead of the legacy `just-bash` snapshot.
 
 Add a Worker Loader binding for shell execution:
@@ -164,7 +164,7 @@ separate workspace.
 | `ComputerWorkspace`                                    | Computer client type intersected with Think's `WorkspaceLike`                              |
 | `Computer`                                             | Alias for the current `Workspace` class from `@cloudflare/computer`                        |
 | `getWorkspace()` and `withWorkspace()`                 | Re-exports for unified local and remote Computer clients                                   |
-| `WorkerBackend`                                        | Worker Loader shell backend from `@cloudflare/computer/backends/worker`                    |
+| `WorkerShellBackend`                                   | Worker Loader shell backend from `@cloudflare/computer/backends/worker-shell`              |
 | `WorkspaceServiceProxy`                                | Worker entrypoint connecting the shell backend to the Think-owned Computer                 |
 | `ComputerOptions`, `WorkspaceClient`, and Worker types | Type-only exports for constructing or adapting a Computer                                  |
 

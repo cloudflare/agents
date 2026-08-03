@@ -70,7 +70,7 @@ function createFakeComputer(options?: {
     });
   }
 
-  const shell = {
+  const runtime = {
     async exec(command: string, execOptions?: { cwd?: string }) {
       options?.onExec?.(command, execOptions?.cwd);
       return {
@@ -83,7 +83,7 @@ function createFakeComputer(options?: {
         }
       };
     }
-  } as WorkspaceClient["shell"];
+  } as WorkspaceClient["runtime"];
 
   return {
     fs: {
@@ -153,7 +153,7 @@ function createFakeComputer(options?: {
         }
       }
     } as unknown as WorkspaceClient["fs"],
-    shell,
+    runtime,
     async readFile() {
       return null;
     },

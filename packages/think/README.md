@@ -218,7 +218,7 @@ npm install @cloudflare/computer
 ```ts
 import {
   createComputerWorkspace,
-  WorkerBackend,
+  WorkerShellBackend,
   WorkspaceServiceProxy
 } from "@cloudflare/think/experimental/computer";
 
@@ -228,7 +228,7 @@ export class MyAgent extends Think<Env> {
   override workspace = createComputerWorkspace({
     storage: this.ctx.storage,
     backends: [
-      new WorkerBackend({
+      new WorkerShellBackend({
         loader: this.env.LOADER,
         workspace: {
           binding: "MyAgent",
@@ -244,7 +244,7 @@ export class MyAgent extends Think<Env> {
 Computer's `useThink` compatibility keeps the existing direct interface
 (`this.workspace.readFile(...)`). `createComputerWorkspace()` returns the
 Computer itself, so native surfaces such as `this.workspace.fs`,
-`this.workspace.shell`, and `this.workspace.git` remain available. Think uses
+`this.workspace.runtime`, and `this.workspace.git` remain available. Think uses
 Computer shell exec for the built-in `bash` tool.
 
 > **No data migration:** opting in starts a separate, empty Computer workspace.
