@@ -352,7 +352,8 @@ export async function fetchPackageFiles(
  * Extract files from a gzipped tarball.
  *
  * npm packages are distributed as .tgz files (gzipped tar).
- * The contents are in a "package/" directory.
+ * Package contents are usually enclosed by one archive directory, which is
+ * removed by `parseTar` so returned paths are relative to the package root.
  */
 async function extractTarball(
   data: Uint8Array
@@ -408,8 +409,9 @@ async function decompress(data: Uint8Array): Promise<Uint8Array> {
  * - Two empty blocks at the end
  */
 function parseTar(data: Uint8Array): Record<string, string> {
-  const files: Record<string, string> = {};
   const textDecoder = new TextDecoder();
+  const regularFilePaths: string[] = [];
+  const textFiles = new Map<string, string>();
   let offset = 0;
 
   while (offset < data.length - 512) {
@@ -422,7 +424,7 @@ function parseTar(data: Uint8Array): Record<string, string> {
     }
 
     // Parse header fields
-    const name = readString(header, 0, 100);
+    const filePath = normalizeTarEntryPath(readTarEntryPath(header));
     const sizeStr = readString(header, 124, 12);
     const typeFlag = header[156];
 
@@ -432,24 +434,22 @@ function parseTar(data: Uint8Array): Record<string, string> {
     // Move past header
     offset += 512;
 
-    // Only process regular files (type '0' or '\0')
-    if ((typeFlag === 48 || typeFlag === 0) && size > 0) {
+    // Only regular files describe the paths this text-only extractor returns.
+    // Tar metadata entries such as PAX headers and GNU long-name records must
+    // not affect package root detection.
+    const isRegularFile = typeFlag === 48 || typeFlag === 0;
+    if (isRegularFile && filePath !== "") {
+      regularFilePaths.push(filePath);
+    }
+
+    if (isRegularFile && size > 0 && isTextFile(filePath)) {
       // Read file content
       const content = data.slice(offset, offset + size);
 
-      // Remove "package/" prefix from npm tarballs
-      let filePath = name;
-      if (filePath.startsWith("package/")) {
-        filePath = filePath.slice(8);
-      }
-
-      // Only include text files (skip binary files)
-      if (isTextFile(filePath)) {
-        try {
-          files[filePath] = textDecoder.decode(content);
-        } catch {
-          // Skip files that can't be decoded as text
-        }
+      try {
+        textFiles.set(filePath, textDecoder.decode(content));
+      } catch {
+        // Skip files that can't be decoded as text
       }
     }
 
@@ -457,7 +457,73 @@ function parseTar(data: Uint8Array): Record<string, string> {
     offset += Math.ceil(size / 512) * 512;
   }
 
+  const archiveRoot = findSharedTarRootDirectory(regularFilePaths);
+  const files: Record<string, string> = {};
+  for (const [filePath, content] of textFiles) {
+    const packagePath = archiveRoot
+      ? filePath.slice(archiveRoot.length)
+      : filePath;
+    files[packagePath] = content;
+  }
+
   return files;
+}
+
+/**
+ * Read a TAR entry path, including the directory prefix from POSIX USTAR.
+ */
+function readTarEntryPath(header: Uint8Array): string {
+  const name = readString(header, 0, 100);
+  const isPosixUstar =
+    readString(header, 257, 6) === "ustar" &&
+    readString(header, 263, 2) === "00";
+
+  if (!isPosixUstar) {
+    return name;
+  }
+
+  const prefix = readString(header, 345, 155);
+  return prefix === "" ? name : `${prefix}/${name}`;
+}
+
+/**
+ * Normalize the current-directory prefix that tar writers may add to entries.
+ */
+function normalizeTarEntryPath(filePath: string): string {
+  let normalizedPath = filePath;
+  while (normalizedPath.startsWith("./")) {
+    normalizedPath = normalizedPath.slice(2);
+  }
+  return normalizedPath;
+}
+
+/**
+ * Return the enclosing tar directory shared by every regular file.
+ *
+ * npm clients remove one enclosing directory during extraction without
+ * requiring it to be named `package`. If any file is already at the archive
+ * root, or files have different roots, the archive is left unchanged.
+ */
+function findSharedTarRootDirectory(
+  filePaths: readonly string[]
+): string | undefined {
+  let sharedRoot: string | undefined;
+
+  for (const filePath of filePaths) {
+    const separatorIndex = filePath.indexOf("/");
+    if (separatorIndex <= 0) {
+      return undefined;
+    }
+
+    const fileRoot = filePath.slice(0, separatorIndex + 1);
+    if (sharedRoot === undefined) {
+      sharedRoot = fileRoot;
+    } else if (sharedRoot !== fileRoot) {
+      return undefined;
+    }
+  }
+
+  return sharedRoot;
 }
 
 /**
