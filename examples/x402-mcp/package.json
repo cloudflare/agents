@@ -1,0 +1,36 @@
+{
+  "name": "@cloudflare/agents-x402-mcp-example",
+  "description": "Paid MCP tools using the x402 payment protocol",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/kumo": "^2.6.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "@x402/evm": "^2.17.0",
+    "agents": "*",
+    "nanoid": "^5.1.16",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "viem": "^2.53.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.48.0",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^26.0.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "wrangler": "^4.115.0"
+  }
+}
