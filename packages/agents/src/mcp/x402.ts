@@ -1,11 +1,6 @@
 /**
  * X402 MCP Integration (v2)
  *
- * @deprecated The Agents SDK x402 integration is feature-frozen and not
- * recommended for new projects. Cloudflare is developing integrated
- * monetization capabilities through Monetization Gateway. See
- * https://blog.cloudflare.com/monetization-gateway/
- *
  * Based on:
  * - Coinbase's x402 (Apache 2.0): https://github.com/coinbase/x402
  * - @ethanniser and his work at https://github.com/ethanniser/x402-mcp
@@ -35,31 +30,28 @@ import type { ZodRawShape } from "zod";
 
 // v2 imports from @x402/core
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
-import type { ResourceConfig } from "@x402/core/server";
+import type { FacilitatorConfig, ResourceConfig } from "@x402/core/server";
 import { x402Client } from "@x402/core/client";
-import type { PaymentPayload } from "@x402/core/types";
+import type {
+  PaymentPayload,
+  PaymentRequirements,
+  PaymentRequired,
+  Network
+} from "@x402/core/types";
 
 // v2 imports from @x402/evm
 import { registerExactEvmScheme as registerServerEvmScheme } from "@x402/evm/exact/server";
 import { registerExactEvmScheme as registerClientEvmScheme } from "@x402/evm/exact/client";
+import type { ClientEvmSigner } from "@x402/evm";
 
 // Re-export commonly used types for consumer convenience
-/** @deprecated The agents/x402 integration is deprecated and feature-frozen. */
-export type PaymentRequirements =
-  import("@x402/core/types").PaymentRequirements;
-/** @deprecated The agents/x402 integration is deprecated and feature-frozen. */
-export type PaymentRequired = import("@x402/core/types").PaymentRequired;
-/** @deprecated The agents/x402 integration is deprecated and feature-frozen. */
-export type Network = import("@x402/core/types").Network;
-/** @deprecated The agents/x402 integration is deprecated and feature-frozen. */
-export type FacilitatorConfig = import("@x402/core/server").FacilitatorConfig;
-/** @deprecated The agents/x402 integration is deprecated and feature-frozen. */
-export type ClientEvmSigner = import("@x402/evm").ClientEvmSigner;
-
-const X402_DEPRECATION_URL =
-  "https://blog.cloudflare.com/monetization-gateway/";
-let didWarnAboutWithX402 = false;
-let didWarnAboutWithX402Client = false;
+export type {
+  PaymentRequirements,
+  PaymentRequired,
+  Network
+} from "@x402/core/types";
+export type { FacilitatorConfig } from "@x402/core/server";
+export type { ClientEvmSigner } from "@x402/evm";
 
 /**
  * Map of legacy v1 network names to CAIP-2 identifiers.
@@ -75,8 +67,6 @@ const LEGACY_NETWORK_MAP: Record<string, string> = {
 /**
  * Normalize a network identifier to CAIP-2 format.
  * Accepts both legacy v1 names ("base-sepolia") and CAIP-2 ("eip155:84532").
- *
- * @deprecated The agents/x402 integration is deprecated and feature-frozen.
  */
 export function normalizeNetwork(network: string): Network {
   return (LEGACY_NETWORK_MAP[network] ?? network) as Network;
@@ -86,12 +76,6 @@ export function normalizeNetwork(network: string): Network {
   ======= SERVER SIDE =======
 */
 
-/**
- * @deprecated The Agents SDK x402 integration is feature-frozen and not
- * recommended for new projects. Cloudflare is developing integrated
- * monetization capabilities through Monetization Gateway. See
- * https://blog.cloudflare.com/monetization-gateway/
- */
 export type X402Config = {
   /**
    * Network identifier.
@@ -106,14 +90,7 @@ export type X402Config = {
   version?: number;
 };
 
-/**
- * @deprecated The Agents SDK x402 integration is feature-frozen and not
- * recommended for new projects. Cloudflare is developing integrated
- * monetization capabilities through Monetization Gateway. See
- * https://blog.cloudflare.com/monetization-gateway/
- */
 export interface X402AugmentedServer {
-  /** @deprecated The agents/x402 integration is deprecated and feature-frozen. */
   paidTool<Args extends ZodRawShape>(
     name: string,
     description: string,
@@ -124,23 +101,10 @@ export interface X402AugmentedServer {
   ): RegisteredTool;
 }
 
-/**
- * @deprecated The Agents SDK x402 integration is feature-frozen and not
- * recommended for new projects. Cloudflare is developing integrated
- * monetization capabilities through Monetization Gateway. See
- * https://blog.cloudflare.com/monetization-gateway/
- */
 export function withX402<T extends McpServer>(
   server: T,
   cfg: X402Config
 ): T & X402AugmentedServer {
-  if (!didWarnAboutWithX402) {
-    didWarnAboutWithX402 = true;
-    console.warn(
-      `[agents/x402] withX402() is deprecated and feature-frozen. It is not recommended for new projects. Cloudflare is developing integrated monetization capabilities through Monetization Gateway. See ${X402_DEPRECATION_URL}`
-    );
-  }
-
   const network = normalizeNetwork(cfg.network);
   const facilitatorConfig: FacilitatorConfig = cfg.facilitator ?? {
     url: "https://x402.org/facilitator"
@@ -339,14 +303,7 @@ export function withX402<T extends McpServer>(
   ======= CLIENT SIDE =======
 */
 
-/**
- * @deprecated The Agents SDK x402 integration is feature-frozen and not
- * recommended for new projects. Cloudflare is developing integrated
- * monetization capabilities through Monetization Gateway. See
- * https://blog.cloudflare.com/monetization-gateway/
- */
 export interface X402AugmentedClient {
-  /** @deprecated The agents/x402 integration is deprecated and feature-frozen. */
   callTool(
     x402ConfirmationCallback:
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
@@ -368,12 +325,6 @@ export interface X402AugmentedClient {
   ): Promise<CallToolResult>;
 }
 
-/**
- * @deprecated The Agents SDK x402 integration is feature-frozen and not
- * recommended for new projects. Cloudflare is developing integrated
- * monetization capabilities through Monetization Gateway. See
- * https://blog.cloudflare.com/monetization-gateway/
- */
 export type X402ClientConfig = {
   /**
    * EVM account/signer for signing payment authorizations.
@@ -395,23 +346,10 @@ export type X402ClientConfig = {
   confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
 };
 
-/**
- * @deprecated The Agents SDK x402 integration is feature-frozen and not
- * recommended for new projects. Cloudflare is developing integrated
- * monetization capabilities through Monetization Gateway. See
- * https://blog.cloudflare.com/monetization-gateway/
- */
 export function withX402Client<T extends CompatibleMcpClient>(
   client: T,
   x402Config: X402ClientConfig
 ): X402AugmentedClient & T {
-  if (!didWarnAboutWithX402Client) {
-    didWarnAboutWithX402Client = true;
-    console.warn(
-      `[agents/x402] withX402Client() is deprecated and feature-frozen. It is not recommended for new projects. Cloudflare is developing integrated monetization capabilities through Monetization Gateway. See ${X402_DEPRECATION_URL}`
-    );
-  }
-
   const invoker = bindMcpClient(client);
   const { account } = x402Config;
 

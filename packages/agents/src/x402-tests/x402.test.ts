@@ -109,35 +109,6 @@ const mockSigner = {
   signTypedData: vi.fn()
 };
 
-describe("deprecation warnings", () => {
-  it("warns once for each x402 wrapper", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    try {
-      withX402(createMockMcpServer(), defaultServerConfig);
-      withX402(createMockMcpServer(), defaultServerConfig);
-      withX402Client(createMockMcpClient(), {
-        account: mockSigner as unknown as X402ClientConfig["account"]
-      });
-      withX402Client(createMockMcpClient(), {
-        account: mockSigner as unknown as X402ClientConfig["account"]
-      });
-
-      expect(warn).toHaveBeenCalledTimes(2);
-      expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
-        expect.stringMatching(
-          /withX402\(\) is deprecated and feature-frozen.*Monetization Gateway.*blog\.cloudflare\.com\/monetization-gateway/
-        ),
-        expect.stringMatching(
-          /withX402Client\(\) is deprecated and feature-frozen.*Monetization Gateway.*blog\.cloudflare\.com\/monetization-gateway/
-        )
-      ]);
-    } finally {
-      warn.mockRestore();
-    }
-  });
-});
-
 // =============================================================
 // normalizeNetwork
 // =============================================================

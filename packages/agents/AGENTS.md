@@ -15,7 +15,6 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
 | `agents/mcp/server`          | `src/mcp/server.ts`          | Isolated Agents wrapper for SDK v2 stateless servers                         |
 | `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
-| `agents/x402`                | `src/mcp/x402.ts`            | Deprecated and feature-frozen x402 integration for MCP                       |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
 | `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                             |
