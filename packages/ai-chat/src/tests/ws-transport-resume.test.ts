@@ -355,7 +355,7 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(result.done).toBe(true);
   });
 
-  it("tool continuation errors and clears resolvers when socket closes before handshake", async () => {
+  it("tool continuation closes and clears resolvers when socket closes before handshake", async () => {
     transport.expectToolContinuation();
 
     const stream = (await transport.reconnectToStream({
@@ -365,9 +365,12 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
-    // A socket close before the resume handshake completes must error the
-    // continuation stream, not close it cleanly (see issue #2013).
-    await expect(reader.read()).rejects.toThrow("WebSocket closed mid-stream");
+    // A socket close before the resume handshake completes closes the
+    // continuation stream cleanly; only mid-chunk closes error (see #2013).
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined
+    });
     expect(transport.handleStreamResuming({ id: "late-tool" })).toBe(false);
     expect(transport.handleStreamResumeNone()).toBe(false);
     expect(transport.abortActiveToolContinuation()).toBe(false);
