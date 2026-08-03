@@ -243,15 +243,24 @@ export async function routeSubAgentRequest(
   // We don't know the parent's ctx.exports from here, so parse with
   // a permissive resolver. If the class doesn't exist, the parent's
   // bridge will 404. This lets us keep the helper self-contained.
+  if (
+    typeof options?.fromPath === "object" &&
+    options.fromPath.path.length === 0
+  ) {
+    return new Response("Sub-agent path must contain at least one step", {
+      status: 400
+    });
+  }
   const fromPath =
     typeof options?.fromPath === "string"
       ? options.fromPath
       : options?.fromPath
         ? buildSubAgentPath(options.fromPath.path, options.fromPath.leaf)
         : undefined;
-  const pathForParsing = fromPath
-    ? `http://placeholder${fromPath.startsWith("/") ? "" : "/"}${fromPath}`
-    : req.url;
+  const pathForParsing =
+    fromPath !== undefined
+      ? `http://placeholder${fromPath.startsWith("/") ? "" : "/"}${fromPath}`
+      : req.url;
 
   const match = parseSubAgentPath(pathForParsing);
   if (!match) {

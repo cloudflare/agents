@@ -1211,6 +1211,20 @@ const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
 
+function validSubAgentOuterUrl(value: string | null, fallback: string): string {
+  if (value) {
+    try {
+      const url = new URL(value);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        return url.toString();
+      }
+    } catch {
+      // Ignore malformed caller-supplied internal routing headers.
+    }
+  }
+  return fallback;
+}
+
 /**
  * The set of all internal keys stored in connection state that must be
  * hidden from user code and preserved across setState calls.
@@ -7013,13 +7027,24 @@ export class Agent<
     });
 
     if (!match) {
+      // A request tagged by routeSubAgentRequest that still has a `/sub/...`
+      // marker names a child class this parent cannot resolve. Fail explicitly
+      // instead of letting a WebSocket connect to the parent with facet flags.
+      if (
+        request.headers.has(SUB_AGENT_OUTER_URL_HEADER) &&
+        _parseSubAgentPath(request.url)
+      ) {
+        return new Response("Sub-agent class not found", { status: 404 });
+      }
       return super.fetch(request);
     }
 
     // Capture the public URL before user hooks can replace the Request or its
     // internal routing header. Nested facets inherit the root-captured value.
-    const outerUrl =
-      request.headers.get(SUB_AGENT_OUTER_URL_HEADER) ?? request.url;
+    const outerUrl = validSubAgentOuterUrl(
+      request.headers.get(SUB_AGENT_OUTER_URL_HEADER),
+      request.url
+    );
 
     // Hook runs in the parent's isolate before any facet work.
     const decision = await this.onBeforeSubAgent(request, {
@@ -7031,6 +7056,9 @@ export class Agent<
 
     if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       const acceptHeaders = new Headers(forwardReq.headers);
+      // WebSocket connection bookkeeping needs the locally routed URL so it
+      // can resolve `/sub/...` markers relative to this agent's selfPath. HTTP
+      // forwarding instead carries the original public URL for callback matching.
       const routedUrl = new URL(forwardReq.url);
       routedUrl.pathname = new URL(request.url).pathname;
       acceptHeaders.set(SUB_AGENT_OUTER_URL_HEADER, routedUrl.toString());
@@ -12855,7 +12883,7 @@ export class Agent<
       : null;
     let callbackRequest = request;
     if (outerUrl) {
-      const callbackUrl = new URL(outerUrl);
+      const callbackUrl = new URL(validSubAgentOuterUrl(outerUrl, request.url));
       // The internal header contributes only the public origin/path used for
       // callback registration matching. OAuth parameters always come from the
       // actual request URL so a caller cannot substitute code/state via a
@@ -12989,9 +13017,12 @@ export async function routeAgentRequest<Env>(
   env: Env,
   options?: AgentOptions<Env>
 ) {
-  const headers = new Headers(request.headers);
-  headers.delete(SUB_AGENT_OUTER_URL_HEADER);
-  const routedRequest = new Request(request, { headers });
+  let routedRequest = request;
+  if (request.headers.has(SUB_AGENT_OUTER_URL_HEADER)) {
+    const headers = new Headers(request.headers);
+    headers.delete(SUB_AGENT_OUTER_URL_HEADER);
+    routedRequest = new Request(request, { headers });
+  }
 
   // oxlint-disable-next-line typescript/no-explicit-any
   return routePartykitRequest(routedRequest, env as any, {

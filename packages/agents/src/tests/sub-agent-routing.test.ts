@@ -116,6 +116,22 @@ describe("sub-agent routing — routeAgentRequest + /sub/... URLs", () => {
     await expect(response.json()).resolves.toMatchObject({ success: false });
   });
 
+  it("ignores a malformed internal outer-URL header", async () => {
+    const parentStub = await getAgentByName(
+      env.TestSubAgentParent,
+      uniqueName()
+    );
+
+    const response = await parentStub.fetch(
+      new Request(
+        `https://app.example.com/sub/counter-sub-agent/${uniqueName()}/request`,
+        { headers: { "x-cf-agents-subagent-url": "not a URL" } }
+      )
+    );
+
+    expect(response.status).toBe(404);
+  });
+
   it("does not take OAuth parameters from the internal outer-URL header", async () => {
     const parent = uniqueName();
     const child = uniqueName();
@@ -477,6 +493,39 @@ describe("parseSubAgentPath", () => {
 });
 
 describe("routeSubAgentRequest — query-param preservation", () => {
+  it("rejects an empty structured path", async () => {
+    const { routeSubAgentRequest } = await import("../index");
+    const response = await routeSubAgentRequest(
+      new Request("https://app.example.com/callback"),
+      { fetch: () => Promise.reject(new Error("should not forward")) },
+      { fromPath: { path: [] } }
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects an empty string path", async () => {
+    const { routeSubAgentRequest } = await import("../index");
+    const response = await routeSubAgentRequest(
+      new Request("https://app.example.com/sub/chat/child"),
+      { fetch: () => Promise.reject(new Error("should not forward")) },
+      { fromPath: "" }
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("does not disturb unmatched request bodies", async () => {
+    const { routeAgentRequest } = await import("../index");
+    const request = new Request("https://app.example.com/not-an-agent", {
+      method: "POST",
+      body: "fallback body"
+    });
+
+    expect(await routeAgentRequest(request, env)).toBeNull();
+    await expect(request.text()).resolves.toBe("fallback body");
+  });
+
   it("accepts a structured sub-agent path", async () => {
     const parent = uniqueName();
     const child = "chat/with space";
