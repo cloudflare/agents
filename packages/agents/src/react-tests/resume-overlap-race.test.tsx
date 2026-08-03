@@ -137,59 +137,65 @@ describe("reconnect-driven stream resume", () => {
     cleanup();
   });
 
-  it("treats observed error frames as terminal without parsing or appending (#1898)", async () => {
-    const { agent, target, sentMessages } = createFakeAgent({
-      name: "observer-error",
-      url: "ws://localhost:3000/agents/chat/observer-error?_pk=abc"
-    });
-
-    function TestComponent() {
-      const chat = useAgentChat({
-        agent,
-        getInitialMessages: null,
-        messages: [] as UIMessage[]
+  it.each([
+    { label: "with done", done: true },
+    { label: "without done", done: undefined }
+  ])(
+    "treats observed error frames as terminal $label (#1898)",
+    async ({ done }) => {
+      const { agent, target, sentMessages } = createFakeAgent({
+        name: "observer-error",
+        url: "ws://localhost:3000/agents/chat/observer-error?_pk=abc"
       });
-      return (
-        <div>
-          <div data-testid="message-count">{chat.messages.length}</div>
-          <div data-testid="streaming">{String(chat.isServerStreaming)}</div>
-        </div>
-      );
+
+      function TestComponent() {
+        const chat = useAgentChat({
+          agent,
+          getInitialMessages: null,
+          messages: [] as UIMessage[]
+        });
+        return (
+          <div>
+            <div data-testid="message-count">{chat.messages.length}</div>
+            <div data-testid="streaming">{String(chat.isServerStreaming)}</div>
+          </div>
+        );
+      }
+
+      const { container } = await render(<TestComponent />);
+      await vi.waitFor(() => {
+        expect(countType(sentMessages, RESUME_REQUEST)).toBe(1);
+      });
+      dispatch(target, { type: RESUME_NONE, reason: "idle" });
+
+      // With no transport waiting, this stream is handled by the observer path.
+      dispatch(target, { type: RESUMING, id: "errored-stream" });
+      await vi.waitFor(() => {
+        expect(
+          container.querySelector('[data-testid="streaming"]')?.textContent
+        ).toBe("true");
+      });
+
+      dispatch(target, {
+        type: CHAT_RESPONSE,
+        id: "errored-stream",
+        body: "Network connection lost.",
+        done,
+        error: true,
+        replay: true
+      });
+
+      await vi.waitFor(() => {
+        expect(
+          container.querySelector('[data-testid="streaming"]')?.textContent
+        ).toBe("false");
+        expect(
+          container.querySelector('[data-testid="message-count"]')?.textContent
+        ).toBe("0");
+      });
+      expect(warnSpy).not.toHaveBeenCalled();
     }
-
-    const { container } = await render(<TestComponent />);
-    await vi.waitFor(() => {
-      expect(countType(sentMessages, RESUME_REQUEST)).toBe(1);
-    });
-    dispatch(target, { type: RESUME_NONE, reason: "idle" });
-
-    // With no transport waiting, this stream is handled by the observer path.
-    dispatch(target, { type: RESUMING, id: "errored-stream" });
-    await vi.waitFor(() => {
-      expect(
-        container.querySelector('[data-testid="streaming"]')?.textContent
-      ).toBe("true");
-    });
-
-    dispatch(target, {
-      type: CHAT_RESPONSE,
-      id: "errored-stream",
-      body: "Network connection lost.",
-      done: true,
-      error: true,
-      replay: true
-    });
-
-    await vi.waitFor(() => {
-      expect(
-        container.querySelector('[data-testid="streaming"]')?.textContent
-      ).toBe("false");
-      expect(
-        container.querySelector('[data-testid="message-count"]')?.textContent
-      ).toBe("0");
-    });
-    expect(warnSpy).not.toHaveBeenCalled();
-  });
+  );
 
   it("serializes overlapping resumes and never reads a cleared activeResponse (#1837)", async () => {
     const { agent, target, sentMessages } = createFakeAgent({
