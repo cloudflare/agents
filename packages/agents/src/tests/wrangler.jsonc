@@ -221,6 +221,10 @@
         "name": "BroadcastSubAgent"
       },
       {
+        "class_name": "SlowReplySubAgent",
+        "name": "SlowReplySubAgent"
+      },
+      {
         "class_name": "TestMigrationAgent",
         "name": "TestMigrationAgent"
       },

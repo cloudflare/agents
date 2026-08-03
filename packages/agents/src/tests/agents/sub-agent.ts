@@ -1,8 +1,9 @@
-import { Agent, getCurrentAgent } from "../../index.ts";
+import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
   FiberInspection,
   FiberRecoveryContext,
-  FiberRecoveryResult
+  FiberRecoveryResult,
+  StreamingResponse
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
@@ -2210,6 +2211,43 @@ class _UnboundParent extends Agent {
   }
 }
 export { _UnboundParent as TestUnboundParentAgent };
+
+// ── SubAgent: slow/fast RPC replies (issue #1991) ───────────────────
+// Repro fixture for the facet connection-bridge clobber: a browser
+// `useAgent().call()` frame whose @callable AWAITS before returning
+// loses its reply when another frame lands on the same socket while it
+// is suspended. Each frame's `_cf_handleSubAgentWebSocketMessage` RPC
+// carries a fresh per-frame `SubAgentConnectionBridge` (an RpcTarget),
+// and `_cf_createSubAgentBridgeConnection` overwrites the shared
+// virtual connection's `stored.bridge` with it. The suspended handler
+// resumes and replies via `getStored().bridge` — the LATEST frame's
+// bridge, whose RPC already completed and whose stub is disposed — so
+// the reply is dropped and the client times out.
+
+export class SlowReplySubAgent extends Agent {
+  /** Yields the event loop before replying — suspended long enough for a
+   * concurrent frame's bridge to replace ours and be disposed. */
+  @callable()
+  async slowEcho(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `slow:${value}`;
+  }
+
+  /** Replies without awaiting — its frame's RPC completes immediately. */
+  @callable()
+  fastEcho(value: string): string {
+    return `fast:${value}`;
+  }
+
+  @callable({ streaming: true })
+  async slowStreamingEcho(
+    stream: StreamingResponse,
+    value: string
+  ): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    stream.end(`slow-stream:${value}`);
+  }
+}
 
 /** Class identifier `_a`, exported as `TestMinifiedNameParentAgent`. */
 class _a extends Agent {
