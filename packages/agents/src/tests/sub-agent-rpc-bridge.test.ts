@@ -42,6 +42,28 @@ async function connectWS(path: string): Promise<WebSocket> {
  * Matching is by request id, so interleaved protocol frames (identity,
  * state, mcp_servers) and other calls' responses are ignored.
  */
+function waitForTextFrame(
+  ws: WebSocket,
+  expected: string,
+  timeoutMs = 1000
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", handler);
+      reject(new Error(`Text frame ${JSON.stringify(expected)} never arrived`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      if (event.data !== expected) return;
+      clearTimeout(timer);
+      ws.removeEventListener("message", handler);
+      resolve(event.data as string);
+    };
+
+    ws.addEventListener("message", handler);
+  });
+}
+
 function callRPC(
   ws: WebSocket,
   method: string,
@@ -132,6 +154,44 @@ describe("facet @callable RPC replies under concurrent frames (issue #1991)", ()
       const slowRes = await slowPromise;
       expect(slowRes.success).toBe(true);
       if (slowRes.success) expect(slowRes.result).toBe("slow-stream:burst");
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("delivers an out-of-band broadcast after concurrent frames finish out of order", async () => {
+    const ws = await connectWS(wsPath(uniqueName(), uniqueName()));
+    try {
+      const first = callRPC(ws, "delayedEcho", ["first", 50]);
+      const second = callRPC(ws, "delayedEcho", ["second", 150]);
+
+      const [firstRes, secondRes] = await Promise.all([first, second]);
+      expect(firstRes.success).toBe(true);
+      expect(secondRes.success).toBe(true);
+
+      const broadcast = waitForTextFrame(ws, "after-concurrent-frames");
+      const scheduled = await callRPC(ws, "broadcastAfterDelay", [
+        "after-concurrent-frames",
+        25
+      ]);
+      expect(scheduled.success).toBe(true);
+      if (scheduled.success) expect(scheduled.result).toBe("scheduled");
+
+      await expect(broadcast).resolves.toBe("after-concurrent-frames");
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("honors the explicit connection passed to StreamingResponse", async () => {
+    const ws = await connectWS(wsPath(uniqueName(), uniqueName()));
+    try {
+      const response = await callRPC(
+        ws,
+        "streamingResponseUsesExplicitConnection"
+      );
+      expect(response.success).toBe(true);
+      if (response.success) expect(response.result).toBe(true);
     } finally {
       ws.close();
     }

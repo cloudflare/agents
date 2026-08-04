@@ -1,9 +1,13 @@
-import { Agent, callable, getCurrentAgent } from "../../index.ts";
+import {
+  Agent,
+  StreamingResponse,
+  callable,
+  getCurrentAgent
+} from "../../index.ts";
 import type {
   FiberInspection,
   FiberRecoveryContext,
-  FiberRecoveryResult,
-  StreamingResponse
+  FiberRecoveryResult
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
@@ -2237,6 +2241,47 @@ export class SlowReplySubAgent extends Agent {
   @callable()
   fastEcho(value: string): string {
     return `fast:${value}`;
+  }
+
+  @callable()
+  async delayedEcho(value: string, delayMs: number): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return `delayed:${value}`;
+  }
+
+  @callable()
+  broadcastAfterDelay(message: string, delayMs: number): string {
+    this.ctx.waitUntil(
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        this.broadcast(message);
+        // Keep the event alive while the facet routes the broadcast to its
+        // root Durable Object.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      })()
+    );
+    return "scheduled";
+  }
+
+  @callable()
+  streamingResponseUsesExplicitConnection(): boolean {
+    const { connection } = getCurrentAgent();
+    if (!connection) throw new Error("Expected an active connection");
+
+    let explicitConnectionUsed = false;
+    const explicitConnection = new Proxy(connection, {
+      get(target, property, receiver) {
+        if (property === "send") {
+          return () => {
+            explicitConnectionUsed = true;
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      }
+    });
+
+    new StreamingResponse(explicitConnection, "manual-stream").end("target");
+    return explicitConnectionUsed;
   }
 
   @callable({ streaming: true })

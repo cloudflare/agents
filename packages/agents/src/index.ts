@@ -275,8 +275,11 @@ type RPCResponseDelivery = {
 // A forwarded facet message can pass through arbitrary onMessage wrappers
 // before the Agent protocol dispatcher sees it. Keep its reply capability
 // invocation-local so concurrent frames cannot overwrite one another.
+type SubAgentRpcReplyInvocationContext = {
+  bridge?: SubAgentConnectionBridge;
+};
 const subAgentRpcReplyContext =
-  new AsyncLocalStorage<SubAgentConnectionBridge>();
+  new AsyncLocalStorage<SubAgentRpcReplyInvocationContext>();
 
 function sendRpcResponseIfOpen(
   target: RPCReplyTarget,
@@ -296,6 +299,21 @@ function sendRpcResponseIfOpen(
     }
     throw error;
   }
+}
+
+const streamingResponseReplyTargets = new WeakMap<
+  StreamingResponse,
+  RPCReplyTarget
+>();
+
+function createStreamingResponse(
+  connection: Connection,
+  id: string,
+  replyTarget: RPCReplyTarget
+): StreamingResponse {
+  const stream = new StreamingResponse(connection, id);
+  streamingResponseReplyTargets.set(stream, replyTarget);
+  return stream;
 }
 
 const streamingResponseDeliveries = new WeakMap<
@@ -318,8 +336,12 @@ function trackStreamingResponseDelivery(
 async function waitForStreamingResponseDeliveries(
   stream: StreamingResponse
 ): Promise<void> {
-  await Promise.all(streamingResponseDeliveries.get(stream) ?? []);
-  streamingResponseDeliveries.delete(stream);
+  try {
+    await Promise.all(streamingResponseDeliveries.get(stream) ?? []);
+  } finally {
+    streamingResponseDeliveries.delete(stream);
+    streamingResponseReplyTargets.delete(stream);
+  }
 }
 
 /**
@@ -437,6 +459,10 @@ type StoredSubAgentConnection = {
   bridge: SubAgentConnectionBridgeLike;
   meta: SubAgentConnectionMeta;
   connection?: Connection;
+};
+
+type SubAgentBridgeInvocationContext = {
+  bridge?: SubAgentConnectionBridgeLike;
 };
 
 type SubAgentWebSocketEndpoint = {
@@ -1685,7 +1711,8 @@ export class Agent<
   private _isFacet = false;
 
   private _protocolBroadcastExcludeIds = new Set<string>();
-  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
+  private _cf_subAgentBridgeContext =
+    new AsyncLocalStorage<SubAgentBridgeInvocationContext>();
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
@@ -2495,7 +2522,7 @@ export class Agent<
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
-      const replyBridge = subAgentRpcReplyContext.getStore();
+      const replyBridge = subAgentRpcReplyContext.getStore()?.bridge;
       if (
         await this._cf_forwardSubAgentWebSocketMessage(
           connection,
@@ -2568,7 +2595,11 @@ export class Agent<
 
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
-                const stream = new StreamingResponse(connection, id);
+                const stream = createStreamingResponse(
+                  connection,
+                  id,
+                  replyTarget
+                );
 
                 this._emit("rpc", { method, streaming: true });
 
@@ -7158,12 +7189,17 @@ export class Agent<
     }
   }
 
+  private _cf_activeSubAgentBridge(): SubAgentConnectionBridgeLike | undefined {
+    return this._cf_subAgentBridgeContext.getStore()?.bridge;
+  }
+
   private async _cf_broadcastToParentSubAgent(
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
+    const bridge = this._cf_activeSubAgentBridge();
+    if (bridge) {
+      bridge.broadcast(this.selfPath, message, without);
       return;
     }
     const root = await this._rootAlarmOwner();
@@ -7175,8 +7211,9 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._isFacet && this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
+    const bridge = this._cf_activeSubAgentBridge();
+    if (this._isFacet && bridge) {
+      bridge.broadcast(ownerPath, message, without);
       return;
     }
 
@@ -7540,11 +7577,20 @@ export class Agent<
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    await subAgentRpcReplyContext.run(replyBridge, () =>
-      this._cf_runWithSubAgentBridge(bridge, () =>
-        this.onMessage(connection, message)
-      )
-    );
+    const replyContext: SubAgentRpcReplyInvocationContext = {
+      bridge: replyBridge
+    };
+    try {
+      await subAgentRpcReplyContext.run(replyContext, () =>
+        this._cf_runWithSubAgentBridge(bridge, () =>
+          this.onMessage(connection, message)
+        )
+      );
+    } finally {
+      // Detached work may inherit this context, but the RPC capability expires
+      // when message forwarding completes.
+      replyContext.bridge = undefined;
+    }
   }
 
   async _cf_handleSubAgentWebSocketClose(
@@ -7566,12 +7612,14 @@ export class Agent<
     bridge: SubAgentConnectionBridgeLike,
     fn: () => Promise<T> | T
   ): Promise<T> {
-    const previous = this._cf_currentSubAgentBridge;
-    this._cf_currentSubAgentBridge = bridge;
+    const context: SubAgentBridgeInvocationContext = { bridge };
     try {
-      return await fn();
+      return await this._cf_subAgentBridgeContext.run(context, fn);
     } finally {
-      this._cf_currentSubAgentBridge = previous;
+      // Detached work inherits the async context, but the per-frame bridge is
+      // only valid until the forwarding RPC finishes. Clear the capability so
+      // inherited contexts neither retain it nor use it after that boundary.
+      context.bridge = undefined;
     }
   }
 
@@ -13217,8 +13265,12 @@ export class StreamingResponse {
   private _closed = false;
 
   constructor(connection: Connection, id: string) {
-    this._replyTarget = subAgentRpcReplyContext.getStore() ?? connection;
+    this._replyTarget = connection;
     this._id = id;
+  }
+
+  private get _activeReplyTarget(): RPCReplyTarget {
+    return streamingResponseReplyTargets.get(this) ?? this._replyTarget;
   }
 
   /**
@@ -13247,7 +13299,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    const delivery = sendRpcResponseIfOpen(this._replyTarget, response);
+    const delivery = sendRpcResponseIfOpen(this._activeReplyTarget, response);
     trackStreamingResponseDelivery(this, delivery.completion);
     return delivery.sent;
   }
@@ -13269,7 +13321,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    const delivery = sendRpcResponseIfOpen(this._replyTarget, response);
+    const delivery = sendRpcResponseIfOpen(this._activeReplyTarget, response);
     trackStreamingResponseDelivery(this, delivery.completion);
     return delivery.sent;
   }
@@ -13290,7 +13342,7 @@ export class StreamingResponse {
       success: false,
       type: MessageType.RPC
     };
-    const delivery = sendRpcResponseIfOpen(this._replyTarget, response);
+    const delivery = sendRpcResponseIfOpen(this._activeReplyTarget, response);
     trackStreamingResponseDelivery(this, delivery.completion);
     return delivery.sent;
   }
