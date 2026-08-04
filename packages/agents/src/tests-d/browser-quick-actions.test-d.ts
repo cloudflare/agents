@@ -9,7 +9,16 @@ declare const browser: QuickActionBinding;
 runQuickAction(browser, "json", {
   url: "https://example.com",
   prompt: "extract titles",
-  response_format: { type: "json_schema", schema: {} }
+  response_format: { type: "json_schema", json_schema: {} }
+});
+
+runQuickAction(browser, "json", {
+  url: "https://example.com",
+  response_format: {
+    type: "json_schema",
+    // @ts-expect-error Browser Run requires the schema under `json_schema`
+    schema: {}
+  }
 });
 
 // `scrape` accepts `elements`.

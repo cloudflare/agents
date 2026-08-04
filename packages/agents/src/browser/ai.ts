@@ -507,7 +507,7 @@ export function createQuickActionTools(
             ...toPage(input, requestOptions),
             prompt: input.prompt,
             response_format: input.schema
-              ? { type: "json_schema", schema: input.schema }
+              ? { type: "json_schema", json_schema: input.schema }
               : undefined
           }),
           maxChars

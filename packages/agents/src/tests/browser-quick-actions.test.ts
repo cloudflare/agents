@@ -72,7 +72,7 @@ describe("quick action helpers", () => {
         prompt: "list products",
         response_format: {
           type: "json_schema",
-          schema: { type: "object" }
+          json_schema: { type: "object" }
         }
       }
     );
@@ -237,7 +237,7 @@ describe("createQuickActionTools", () => {
     );
   });
 
-  it("maps the extract tool's schema onto response_format", async () => {
+  it("maps the extract tool's schema onto response_format.json_schema", async () => {
     const { browser, calls } = fakeBrowser(() => jsonResult({ ok: true }));
     const tools = createQuickActionTools({ browser });
     await runTool(tools.browser_extract, {
@@ -248,7 +248,7 @@ describe("createQuickActionTools", () => {
     expect(calls[0].action).toBe("json");
     expect(calls[0].params.response_format).toEqual({
       type: "json_schema",
-      schema: { type: "object" }
+      json_schema: { type: "object" }
     });
   });
 
