@@ -7220,7 +7220,15 @@ export class Agent<
       const targetPath = this._cf_subAgentTargetPath(connection);
       if (!targetPath) continue;
       if (!this._isSameAgentPathPrefix(prefix, targetPath)) continue;
-      connection.close(code, reason);
+      try {
+        connection.close(code, reason);
+      } catch {
+        // `close()` on a socket that's already closing/closed can
+        // throw. This runs on `deleteSubAgent`'s critical path, ahead
+        // of `ctx.facets.delete()` and `_forgetSubAgent()` — one
+        // uncooperative socket must not block those state mutations
+        // or block closing the rest of the matched connections.
+      }
     }
   }
 
