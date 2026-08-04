@@ -588,6 +588,37 @@ function prependMissingHydratedMessages<ChatMessage extends UIMessage>(
   return [...missingHydratedMessages, ...currentMessages];
 }
 
+const SOCKET_OPEN = 1; // WebSocket.OPEN
+
+// Re-append trailing local user messages the snapshot omits, stopping at the
+// first already-present or non-user message (never resurrects assistants or
+// reorders history).
+function preserveTrailingLocalUserSends<ChatMessage extends UIMessage>(
+  snapshot: ChatMessage[],
+  local: readonly ChatMessage[]
+): ChatMessage[] {
+  if (local.length === 0) {
+    return snapshot;
+  }
+
+  const snapshotIds = new Set(snapshot.map((message) => message.id));
+  const trailing: ChatMessage[] = [];
+  for (let index = local.length - 1; index >= 0; index--) {
+    const message = local[index];
+    if (snapshotIds.has(message.id) || message.role !== "user") {
+      break;
+    }
+    trailing.push(message);
+  }
+
+  if (trailing.length === 0) {
+    return snapshot;
+  }
+
+  trailing.reverse();
+  return [...snapshot, ...trailing];
+}
+
 /**
  * React hook for building AI chat interfaces using an Agent
  * @param options Chat options including the agent connection
@@ -1292,6 +1323,12 @@ export function useAgentChat<
     anchorMessageId: string | null;
   } | null>(null);
 
+  // Set when a send is buffered (socket not OPEN); consumed by the next
+  // transcript snapshot to rescue the optimistic message from the reconnect
+  // replay. Known limitation: a non-`queue` concurrency mode that rolls back a
+  // buffered-then-delivered send can still be resurrected by this.
+  const pendingBufferedSendRef = useRef(false);
+
   const preserveProtectedStreamingAssistant = useCallback(
     (messages: readonly ChatMessage[]): ChatMessage[] => {
       const protection = protectedStreamingAssistantRef.current;
@@ -1512,10 +1549,25 @@ export function useAgentChat<
     fallbackAckedResumeRequestIdsRef.current.clear();
     replayHydratedAssistantMessageIdsRef.current.clear();
     protectedStreamingAssistantRef.current = null;
+    pendingBufferedSendRef.current = false;
   }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
 
   const sendMessageWithStreamingProtection: typeof sendMessage = useCallback(
     async (message, options) => {
+      // Non-OPEN socket => PartySocket buffers this send; flag it for the
+      // reconnect replay. A socket without a numeric readyState (test doubles)
+      // is treated as connected.
+      const socket = agentRef.current;
+      if (
+        socket !== null &&
+        typeof socket === "object" &&
+        "readyState" in socket &&
+        typeof socket.readyState === "number" &&
+        socket.readyState !== SOCKET_OPEN
+      ) {
+        pendingBufferedSendRef.current = true;
+      }
+
       const request = sendMessage(message, options);
 
       if (
@@ -1916,6 +1968,12 @@ export function useAgentChat<
             if (observed.accumulator.parts.length >= snapshotParts) {
               next = observed.accumulator.mergeInto(next) as ChatMessage[];
             }
+          }
+          // One-shot: rescue a send buffered while the socket was down that the
+          // reconnect replay would otherwise drop.
+          if (pendingBufferedSendRef.current) {
+            pendingBufferedSendRef.current = false;
+            next = preserveTrailingLocalUserSends(next, messagesRef.current);
           }
           setMessages(next);
           break;
