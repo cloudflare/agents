@@ -1,13 +1,9 @@
-import {
-  Agent,
-  StreamingResponse,
-  callable,
-  getCurrentAgent
-} from "../../index.ts";
+import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
   FiberInspection,
   FiberRecoveryContext,
-  FiberRecoveryResult
+  FiberRecoveryResult,
+  StreamingResponse
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
