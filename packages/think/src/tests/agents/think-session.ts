@@ -109,6 +109,7 @@ type CapturedModelCallSettings = {
 
 type MockModelOptions = {
   onCall?: (settings: CapturedModelCallSettings) => void;
+  onPromptRoles?: (roles: string[]) => void;
 };
 
 function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
@@ -130,6 +131,28 @@ function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
   };
 }
 
+function captureModelPromptRoles(options: unknown): string[] {
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    !("prompt" in options)
+  ) {
+    return [];
+  }
+  const prompt = Array.isArray(options.prompt) ? options.prompt : [];
+  return prompt.flatMap((message) => {
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("role" in message) ||
+      typeof message.role !== "string"
+    ) {
+      return [];
+    }
+    return [message.role];
+  });
+}
+
 function createMockModel(
   response: string,
   options: MockModelOptions = {}
@@ -144,6 +167,7 @@ function createMockModel(
     },
     doStream(callOptions: unknown) {
       options.onCall?.(captureModelCallSettings(callOptions));
+      options.onPromptRoles?.(captureModelPromptRoles(callOptions));
       _mockCallCount++;
       const callId = _mockCallCount;
       const stream = new ReadableStream({
@@ -6451,6 +6475,7 @@ export class ThinkRecoveryTestAgent extends Think {
   private _stashResult: { success: boolean; error?: string } | null = null;
   private _rejectPrefill = false;
   private _lastPromptRole: string | undefined;
+  private _promptRoles: string[][] = [];
   private _throwBeforeTurnMessage: string | null = null;
   // recovery × channels: capture the channel context + assembled system prompt
   // that each turn (including recovered ones) actually ran with, so a test can
@@ -6493,7 +6518,9 @@ export class ThinkRecoveryTestAgent extends Think {
         }
       });
     }
-    return createMockModel("Continued response.");
+    return createMockModel("Continued response.", {
+      onPromptRoles: (roles) => this._promptRoles.push(roles)
+    });
   }
 
   override beforeTurn(ctx: TurnContext): void {
@@ -6567,6 +6594,28 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getTurnCallCount(): Promise<number> {
     return this._turnCallCount;
+  }
+
+  /** Stored child branches for recovery integration assertions. */
+  async getBranchesForTest(messageId: string): Promise<UIMessage[]> {
+    // SAFETY: Think's Session stores sanitized UIMessage values; the provider's
+    // narrower SessionMessage type intentionally avoids depending on the AI SDK.
+    return (await this.session.getBranches(messageId)) as UIMessage[];
+  }
+
+  /** Model prompt roles recorded after a recovered turn starts. */
+  async getPromptRolesForTest(): Promise<string[][]> {
+    return this._promptRoles;
+  }
+
+  /** Re-deliver a branch-scoped retry callback to verify recovery idempotency. */
+  async retryBranchForTest(input: {
+    targetUserId: string;
+    historyLeafId: string;
+    activeLeafIdAtStart: string;
+    originalRequestId: string;
+  }): Promise<void> {
+    await this._chatRecoveryRetry(input);
   }
 
   /** The active channel id captured at each turn's `beforeTurn` (""=none). */

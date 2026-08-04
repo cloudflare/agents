@@ -2998,7 +2998,7 @@ describe("Think — custom body via WebSocket", () => {
 // ── Regeneration (branching) ─────────────────────────────────────
 
 describe("Think — regeneration", () => {
-  it("regenerate-message creates a sibling branch, not a replacement", async () => {
+  it("regenerates from the user branch point while preserving the previous answer", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
@@ -3038,6 +3038,12 @@ describe("Think — regeneration", () => {
     expect(branches).toHaveLength(2);
     expect(branches.map((b: UIMessage) => b.id)).toContain(firstAssistant.id);
     expect(branches.map((b: UIMessage) => b.id)).toContain(secondAssistant.id);
+
+    const promptRoles = await agent.getTextOnlyPromptRoles();
+    expect(promptRoles).toEqual([
+      ["system", "user"],
+      ["system", "user"]
+    ]);
 
     await closeWS(ws);
   });
@@ -3124,6 +3130,49 @@ describe("Think — regeneration", () => {
     // user2 should have 2 branches (old + new assistant)
     const branches = (await agent.getBranches(user2.id)) as UIMessage[];
     expect(branches).toHaveLength(2);
+
+    expect(await agent.getTextOnlyPromptRoles()).toEqual([
+      ["system", "user"],
+      ["system", "user", "assistant", "user"],
+      ["system", "user", "assistant", "user"]
+    ]);
+
+    await closeWS(ws);
+  });
+
+  it("compacts the selected regeneration branch after context overflow", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const user1 = makeUserMessage("hello");
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1]);
+    await donePromise;
+    await delay(200);
+
+    const assistant1 = ((await agent.getMessages()) as UIMessage[])[1];
+    const user2 = makeUserMessage("tell me more");
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1, assistant1, user2]);
+    await donePromise;
+    await delay(200);
+
+    await agent.overflowNextTextOnlyAttempt();
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1, assistant1, user2], {
+      trigger: "regenerate-message"
+    });
+    await donePromise;
+    await delay(200);
+
+    expect(await agent.getCompactionHistoryMessageIds()).toEqual([
+      [user1.id, assistant1.id, user2.id]
+    ]);
+    expect(await agent.getBranches(user2.id)).toHaveLength(2);
 
     await closeWS(ws);
   });
