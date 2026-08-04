@@ -31,6 +31,14 @@ The URL shape is nested under the parent:
 /agents/{parent-class}/{parent-name}/sub/{child-class}/{child-name}
 ```
 
+`buildAgentPath(path, options?)` is the canonical serializer for this wire
+format. It accepts the same root-first `{ className, name }[]` shape exposed by
+`Agent#selfPath`, owns class conversion and name encoding, and can append a
+pathname suffix. When the root Durable Object binding and class names differ,
+`rootBinding` supplies the routing namespace. `buildAgentUrl(origin, path, options?)` adds
+an HTTP(S) or WS(S) origin. The resulting address is transport-neutral: HTTP
+requests and WebSocket upgrades use the same pathname.
+
 The parent DO is always woken first. Its `onBeforeSubAgent(req, { className, name })`
 hook can:
 
