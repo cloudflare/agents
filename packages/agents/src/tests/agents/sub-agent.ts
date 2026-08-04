@@ -1087,101 +1087,9 @@ export class CustomBoundSubAgentParent extends Agent {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
-  onStart(): void {
-    const handleMessage = this.onMessage.bind(this);
-    this.onMessage = async (connection, message) => {
-      let method: unknown;
-      if (typeof message === "string") {
-        try {
-          method = (JSON.parse(message) as { method?: unknown }).method;
-        } catch {
-          // Non-JSON application messages are unrelated to this test fixture.
-        }
-      }
-
-      if (method === "replyAfterInjectedFacetDeliveryFailure") {
-        const originalSend = connection.send.bind(connection) as (
-          message: string
-        ) => void;
-        connection.send = ((_reply: string) => {
-          connection.send = originalSend as typeof connection.send;
-          throw new Error("Intentional facet reply delivery failure");
-        }) as typeof connection.send;
-      }
-
-      await handleMessage(connection, message);
-      if (method === "streamWithLateDelivery") {
-        connection.send("late-stream-handler-complete");
-      }
-    };
-  }
-
-  @callable()
-  healthyEcho(value: string): string {
-    return `healthy:${value}`;
-  }
-
-  @callable()
-  nonSerializableResult(): unknown {
-    return BigInt(1);
-  }
-
-  @callable({ streaming: true })
-  streamWithLateDelivery(stream: StreamingResponse): void {
-    const { connection } = getCurrentAgent();
-    if (!connection) throw new Error("Expected an active connection");
-
-    const originalSend = connection.send.bind(connection) as (
-      message: string
-    ) => void;
-    let sendIndex = 0;
-    connection.send = ((message: string) => {
-      const currentSend = sendIndex++;
-      if (currentSend > 1) return originalSend(message);
-
-      const delayMs = currentSend === 0 ? 25 : 75;
-      return new Promise<void>((resolve) => {
-        setTimeout(() => {
-          originalSend(message);
-          resolve();
-        }, delayMs);
-      }) as unknown as void;
-    }) as typeof connection.send;
-
-    stream.send("first");
-    this.ctx.waitUntil(
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          stream.end("late");
-          resolve();
-        }, 0);
-      })
-    );
-  }
-
-  @callable()
-  forceReplyDeliveryFailure(throwCallableError: boolean): string {
-    const { connection } = getCurrentAgent();
-    if (!connection) throw new Error("Expected an active connection");
-
-    const originalSend = connection.send.bind(connection) as (
-      message: string
-    ) => void;
-    let failuresRemaining = 1;
-    connection.send = ((message: string) => {
-      if (failuresRemaining > 0) {
-        failuresRemaining--;
-        return Promise.reject(
-          new Error("Intentional asynchronous reply delivery failure")
-        ) as unknown as void;
-      }
-      return originalSend(message);
-    }) as typeof connection.send;
-
-    if (throwCallableError) {
-      throw new Error("Intentional callable failure");
-    }
-    return "completed";
+  async delayedEchoFromParent(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `parent:${value}`;
   }
 
   async onMessage(
@@ -2313,112 +2221,33 @@ class _UnboundParent extends Agent {
 }
 export { _UnboundParent as TestUnboundParentAgent };
 
-// ── SubAgent: slow/fast RPC replies (issue #1991) ───────────────────
-// Repro fixture for the facet connection-bridge clobber: a browser
-// `useAgent().call()` frame whose @callable AWAITS before returning
-// loses its reply when another frame lands on the same socket while it
-// is suspended. Each frame's `_cf_handleSubAgentWebSocketMessage` RPC
-// carries a fresh per-frame `SubAgentConnectionBridge` (an RpcTarget),
-// and `_cf_createSubAgentBridgeConnection` overwrites the shared
-// virtual connection's `stored.bridge` with it. The suspended handler
-// resumes and replies via `getStored().bridge` — the LATEST frame's
-// bridge, whose RPC already completed and whose stub is disposed — so
-// the reply is dropped and the client times out.
-
+// Regression fixture for issue #1991. The onMessage wrapper is intentional:
+// facet RPC replies must retain their originating bridge through application
+// and framework middleware before the Agent protocol dispatcher handles them.
 export class SlowReplySubAgent extends Agent {
-  /** Yields the event loop before replying — suspended long enough for a
-   * concurrent frame's bridge to replace ours and be disposed. */
+  onStart(): void {
+    const handleMessage = this.onMessage.bind(this);
+    this.onMessage = async (connection, message) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await handleMessage(connection, message);
+    };
+  }
+
   @callable()
   async slowEcho(value: string): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, 150));
     return `slow:${value}`;
   }
 
-  /** Replies without awaiting — its frame's RPC completes immediately. */
   @callable()
   fastEcho(value: string): string {
     return `fast:${value}`;
   }
 
   @callable()
-  async delayedEcho(value: string, delayMs: number): Promise<string> {
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-    return `delayed:${value}`;
-  }
-
-  @callable()
-  replyAfterInjectedFacetDeliveryFailure(): string {
-    return "completed";
-  }
-
-  @callable()
-  broadcastAfterDelay(message: string, delayMs: number): string {
-    this.ctx.waitUntil(
-      (async () => {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        this.broadcast(message);
-        // Keep the event alive while the facet routes the broadcast to its
-        // root Durable Object.
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      })()
-    );
-    return "scheduled";
-  }
-
-  @callable()
-  streamingResponseUsesExplicitConnection(): boolean {
-    const { connection } = getCurrentAgent();
-    if (!connection) throw new Error("Expected an active connection");
-
-    let explicitConnectionUsed = false;
-    const explicitConnection = new Proxy(connection, {
-      get(target, property, receiver) {
-        if (property === "send") {
-          return () => {
-            explicitConnectionUsed = true;
-          };
-        }
-        return Reflect.get(target, property, receiver);
-      }
-    });
-
-    new StreamingResponse(explicitConnection, "manual-stream").end("target");
-    return explicitConnectionUsed;
-  }
-
-  @callable()
-  createStreamWithRejectedDelivery(): string {
-    const { connection } = getCurrentAgent();
-    if (!connection) throw new Error("Expected an active connection");
-
-    const rejectingConnection = new Proxy(connection, {
-      get(target, property, receiver) {
-        if (property === "send") {
-          return () =>
-            Promise.reject(
-              new Error("Intentional public stream delivery failure")
-            );
-        }
-        return Reflect.get(target, property, receiver);
-      }
-    });
-    new StreamingResponse(rejectingConnection, "manual-rejection").send(
-      "target"
-    );
-    return "created";
-  }
-
-  @callable({ streaming: true })
-  nonSerializableStreamingResponse(stream: StreamingResponse): void {
-    stream.send(BigInt(1));
-  }
-
-  @callable({ streaming: true })
-  burstStreamingEcho(stream: StreamingResponse, count: number): void {
-    for (let index = 0; index < count; index++) {
-      stream.send(index);
-    }
-    stream.end(count);
+  async parentEcho(value: string): Promise<string> {
+    const parent = await this.parentAgent(TestSubAgentParent);
+    return await parent.delayedEchoFromParent(value);
   }
 
   @callable({ streaming: true })
@@ -2427,7 +2256,8 @@ export class SlowReplySubAgent extends Agent {
     value: string
   ): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 150));
-    stream.end(`slow-stream:${value}`);
+    stream.send(`slow-stream:${value}:chunk`);
+    stream.end(`slow-stream:${value}:done`);
   }
 }
 

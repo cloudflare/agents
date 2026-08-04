@@ -263,103 +263,102 @@ function isClosedWebSocketSendError(error: unknown): boolean {
   );
 }
 
+function sendRpcResponseIfOpen(
+  connection: Connection,
+  response: RPCResponse
+): boolean {
+  try {
+    connection.send(JSON.stringify(response));
+    return true;
+  } catch (error) {
+    if (isClosedWebSocketSendError(error)) return false;
+    throw error;
+  }
+}
+
 type RPCReplyTarget = {
   send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
 };
 
-type RPCResponseDelivery = {
+type FacetRPCResponseDelivery = {
   sent: boolean;
-  completion?: Promise<boolean>;
+  completion: Promise<void>;
 };
 
-// A forwarded facet message can pass through arbitrary onMessage wrappers
-// before the Agent protocol dispatcher sees it. Keep its reply capability
-// invocation-local so concurrent frames cannot overwrite one another.
 type SubAgentRpcReplyInvocationContext = {
   bridge?: SubAgentConnectionBridge;
 };
+
 const subAgentRpcReplyContext =
   new AsyncLocalStorage<SubAgentRpcReplyInvocationContext>();
 
-function reportRpcResponseDeliveryError(error: unknown): void {
-  if (isClosedWebSocketSendError(error)) return;
-  console.error("[Agent] RPC response delivery failed:", error);
-}
-
-function sendRpcResponseIfOpen(
+function sendFacetRpcResponseIfOpen(
   target: RPCReplyTarget,
   response: RPCResponse
-): RPCResponseDelivery {
-  // Serialization is part of producing the callable result, not transport
-  // delivery. Let serialization failures reach the callable error handler.
-  const message = JSON.stringify(response);
-
+): FacetRPCResponseDelivery {
   try {
-    const result = target.send(message);
-    if (result === undefined) return { sent: true };
-
-    const completion = Promise.resolve(result).then(
-      () => true,
-      (error) => {
-        reportRpcResponseDeliveryError(error);
-        return false;
+    const completion = Promise.resolve(
+      target.send(JSON.stringify(response))
+    ).catch((error: unknown) => {
+      if (!isClosedWebSocketSendError(error)) {
+        console.error("[Agent] Facet RPC response delivery failed:", error);
       }
-    );
+    });
     return { sent: true, completion };
   } catch (error) {
-    reportRpcResponseDeliveryError(error);
-    return { sent: false };
+    if (isClosedWebSocketSendError(error)) {
+      return { sent: false, completion: Promise.resolve() };
+    }
+    throw error;
   }
 }
 
-type StreamingResponseDeliveryState = {
+type FacetStreamingResponseDeliveryState = {
   replyTarget: RPCReplyTarget;
-  pending: Set<Promise<boolean>>;
+  pending: Set<Promise<void>>;
 };
 
-const streamingResponseDeliveryStates = new WeakMap<
+const facetStreamingResponseDeliveryStates = new WeakMap<
   StreamingResponse,
-  StreamingResponseDeliveryState
+  FacetStreamingResponseDeliveryState
 >();
 
 function createStreamingResponse(
   connection: Connection,
   id: string,
-  replyTarget: RPCReplyTarget
+  facetReplyTarget?: RPCReplyTarget
 ): StreamingResponse {
   const stream = new StreamingResponse(connection, id);
-  streamingResponseDeliveryStates.set(stream, {
-    replyTarget,
-    pending: new Set()
-  });
+  if (facetReplyTarget) {
+    facetStreamingResponseDeliveryStates.set(stream, {
+      replyTarget: facetReplyTarget,
+      pending: new Set()
+    });
+  }
   return stream;
 }
 
-function trackStreamingResponseDelivery(
+function trackFacetStreamingResponseDelivery(
   stream: StreamingResponse,
-  completion: Promise<boolean> | undefined
+  completion: Promise<void>
 ): void {
-  const state = streamingResponseDeliveryStates.get(stream);
-  if (!state || !completion) return;
+  const state = facetStreamingResponseDeliveryStates.get(stream);
+  if (!state) return;
 
   state.pending.add(completion);
-  void completion.then(() => {
-    state.pending.delete(completion);
-  });
+  void completion.finally(() => state.pending.delete(completion));
 }
 
-async function waitForStreamingResponseDeliveries(
+async function waitForFacetStreamingResponseDeliveries(
   stream: StreamingResponse
 ): Promise<void> {
-  const state = streamingResponseDeliveryStates.get(stream);
+  const state = facetStreamingResponseDeliveryStates.get(stream);
   if (!state) return;
 
   try {
-    while (state.pending.size > 0) {
-      await Promise.all(state.pending);
-    }
+    await Promise.all(state.pending);
   } finally {
-    streamingResponseDeliveryStates.delete(stream);
+    facetStreamingResponseDeliveryStates.delete(stream);
   }
 }
 
@@ -478,10 +477,6 @@ type StoredSubAgentConnection = {
   bridge: SubAgentConnectionBridgeLike;
   meta: SubAgentConnectionMeta;
   connection?: Connection;
-};
-
-type SubAgentBridgeInvocationContext = {
-  bridge?: SubAgentConnectionBridgeLike;
 };
 
 type SubAgentWebSocketEndpoint = {
@@ -1730,8 +1725,7 @@ export class Agent<
   private _isFacet = false;
 
   private _protocolBroadcastExcludeIds = new Set<string>();
-  private _cf_subAgentBridgeContext =
-    new AsyncLocalStorage<SubAgentBridgeInvocationContext>();
+  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
@@ -2551,7 +2545,6 @@ export class Agent<
       ) {
         return;
       }
-      const replyTarget: RPCReplyTarget = replyBridge ?? connection;
       this._ensureConnectionWrapped(connection);
       return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
@@ -2617,7 +2610,7 @@ export class Agent<
                 const stream = createStreamingResponse(
                   connection,
                   id,
-                  replyTarget
+                  replyBridge
                 );
 
                 this._emit("rpc", { method, streaming: true });
@@ -2637,7 +2630,7 @@ export class Agent<
                     );
                   }
                 }
-                await waitForStreamingResponseDeliveries(stream);
+                await waitForFacetStreamingResponseDeliveries(stream);
                 return;
               }
 
@@ -2653,28 +2646,13 @@ export class Agent<
                 success: true,
                 type: MessageType.RPC
               };
-              const delivery = sendRpcResponseIfOpen(replyTarget, response);
-              const delivered = delivery.completion
-                ? await delivery.completion
-                : delivery.sent;
-              if (!delivered) {
-                const fallback: RPCResponse = {
-                  error: "RPC response could not be delivered",
-                  id,
-                  success: false,
-                  type: MessageType.RPC
-                };
-                await sendRpcResponseIfOpen(replyTarget, fallback).completion;
+              if (replyBridge) {
+                await sendFacetRpcResponseIfOpen(replyBridge, response)
+                  .completion;
+              } else {
+                sendRpcResponseIfOpen(connection, response);
               }
             } catch (e) {
-              console.error("RPC error:", e);
-              this._emit("rpc:error", {
-                method: parsed.method,
-                error: e instanceof Error ? e.message : String(e)
-              });
-
-              // Report the callable error before attempting its best-effort
-              // response so a delivery failure cannot hide the original error.
               const response: RPCResponse = {
                 error:
                   e instanceof Error ? e.message : "Unknown error occurred",
@@ -2682,7 +2660,18 @@ export class Agent<
                 success: false,
                 type: MessageType.RPC
               };
-              await sendRpcResponseIfOpen(replyTarget, response).completion;
+              if (replyBridge) {
+                await sendFacetRpcResponseIfOpen(replyBridge, response)
+                  .completion;
+              } else {
+                sendRpcResponseIfOpen(connection, response);
+              }
+
+              console.error("RPC error:", e);
+              this._emit("rpc:error", {
+                method: parsed.method,
+                error: e instanceof Error ? e.message : String(e)
+              });
             }
             return;
           }
@@ -7222,17 +7211,12 @@ export class Agent<
     }
   }
 
-  private _cf_activeSubAgentBridge(): SubAgentConnectionBridgeLike | undefined {
-    return this._cf_subAgentBridgeContext.getStore()?.bridge;
-  }
-
   private async _cf_broadcastToParentSubAgent(
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    const bridge = this._cf_activeSubAgentBridge();
-    if (bridge) {
-      bridge.broadcast(this.selfPath, message, without);
+    if (this._cf_currentSubAgentBridge) {
+      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
       return;
     }
     const root = await this._rootAlarmOwner();
@@ -7244,9 +7228,8 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    const bridge = this._cf_activeSubAgentBridge();
-    if (this._isFacet && bridge) {
-      bridge.broadcast(ownerPath, message, without);
+    if (this._isFacet && this._cf_currentSubAgentBridge) {
+      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
       return;
     }
 
@@ -7620,8 +7603,6 @@ export class Agent<
         )
       );
     } finally {
-      // Detached work may inherit this context, but the RPC capability expires
-      // when message forwarding completes.
       replyContext.bridge = undefined;
     }
   }
@@ -7645,14 +7626,12 @@ export class Agent<
     bridge: SubAgentConnectionBridgeLike,
     fn: () => Promise<T> | T
   ): Promise<T> {
-    const context: SubAgentBridgeInvocationContext = { bridge };
+    const previous = this._cf_currentSubAgentBridge;
+    this._cf_currentSubAgentBridge = bridge;
     try {
-      return await this._cf_subAgentBridgeContext.run(context, fn);
+      return await fn();
     } finally {
-      // Detached work inherits the async context, but the per-frame bridge is
-      // only valid until the forwarding RPC finishes. Clear the capability so
-      // inherited contexts neither retain it nor use it after that boundary.
-      context.bridge = undefined;
+      this._cf_currentSubAgentBridge = previous;
     }
   }
 
@@ -13293,20 +13272,24 @@ export async function getAgentByName<
  * A wrapper for streaming responses in callable methods
  */
 export class StreamingResponse {
-  private _replyTarget: RPCReplyTarget;
+  private _connection: Connection;
   private _id: string;
   private _closed = false;
 
   constructor(connection: Connection, id: string) {
-    this._replyTarget = connection;
+    this._connection = connection;
     this._id = id;
   }
 
-  private get _activeReplyTarget(): RPCReplyTarget {
-    return (
-      streamingResponseDeliveryStates.get(this)?.replyTarget ??
-      this._replyTarget
-    );
+  private _send(response: RPCResponse): boolean {
+    const state = facetStreamingResponseDeliveryStates.get(this);
+    if (!state) {
+      return sendRpcResponseIfOpen(this._connection, response);
+    }
+
+    const delivery = sendFacetRpcResponseIfOpen(state.replyTarget, response);
+    trackFacetStreamingResponseDelivery(this, delivery.completion);
+    return delivery.sent;
   }
 
   /**
@@ -13335,9 +13318,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    const delivery = sendRpcResponseIfOpen(this._activeReplyTarget, response);
-    trackStreamingResponseDelivery(this, delivery.completion);
-    return delivery.sent;
+    return this._send(response);
   }
 
   /**
@@ -13357,9 +13338,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    const delivery = sendRpcResponseIfOpen(this._activeReplyTarget, response);
-    trackStreamingResponseDelivery(this, delivery.completion);
-    return delivery.sent;
+    return this._send(response);
   }
 
   /**
@@ -13378,8 +13357,6 @@ export class StreamingResponse {
       success: false,
       type: MessageType.RPC
     };
-    const delivery = sendRpcResponseIfOpen(this._activeReplyTarget, response);
-    trackStreamingResponseDelivery(this, delivery.completion);
-    return delivery.sent;
+    return this._send(response);
   }
 }
