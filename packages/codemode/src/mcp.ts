@@ -119,6 +119,18 @@ Do NOT define named functions then call them — just write the arrow function b
 
 {{example}}`;
 
+/** MCP context for the outer `code` tool call. */
+export type CodeMcpRequestContext = RequestHandlerExtra<
+  ServerRequest,
+  ServerNotification
+>;
+
+/** Shape the final sandbox result before it is formatted for MCP content. */
+export type CodeMcpTransformResult = (
+  result: unknown,
+  context: CodeMcpRequestContext
+) => unknown | Promise<unknown>;
+
 /**
  * Wrap an existing MCP server with a single codemode `code` tool.
  *
@@ -135,12 +147,18 @@ export interface CodeMcpServerOptions {
    * Falls back to a generic default when omitted.
    */
   description?: string;
+  /**
+   * Reshape the final successful sandbox result before it is serialized and
+   * truncated for MCP text content. Use this to replace oversized structured
+   * results with a complete, bounded envelope.
+   */
+  transformResult?: CodeMcpTransformResult;
 }
 
 export async function codeMcpServer(
   options: CodeMcpServerOptions
 ): Promise<McpServer> {
-  const { server, executor, description } = options;
+  const { server, executor, description, transformResult } = options;
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
 
@@ -216,7 +234,7 @@ export async function codeMcpServer(
         code: z.string().describe("JavaScript async arrow function to execute")
       }
     },
-    async ({ code }) => {
+    async ({ code }, context) => {
       try {
         const result = await executor.execute(code, [
           { name: "codemode", fns }
@@ -229,9 +247,12 @@ export async function codeMcpServer(
             isError: true
           };
         }
+        const transformedResult = transformResult
+          ? await transformResult(result.result, context)
+          : result.result;
         return {
           content: [
-            { type: "text" as const, text: truncateResponse(result.result) }
+            { type: "text" as const, text: truncateResponse(transformedResult) }
           ]
         };
       } catch (error) {
