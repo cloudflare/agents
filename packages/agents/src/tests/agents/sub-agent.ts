@@ -1090,16 +1090,28 @@ export class TestSubAgentParent extends Agent {
   onStart(): void {
     const handleMessage = this.onMessage.bind(this);
     this.onMessage = async (connection, message) => {
-      await handleMessage(connection, message);
-      if (typeof message !== "string") return;
-
-      try {
-        const parsed = JSON.parse(message) as { method?: unknown };
-        if (parsed.method === "streamWithLateDelivery") {
-          connection.send("late-stream-handler-complete");
+      let method: unknown;
+      if (typeof message === "string") {
+        try {
+          method = (JSON.parse(message) as { method?: unknown }).method;
+        } catch {
+          // Non-JSON application messages are unrelated to this test fixture.
         }
-      } catch {
-        // Non-JSON application messages are unrelated to this test fixture.
+      }
+
+      if (method === "replyAfterInjectedFacetDeliveryFailure") {
+        const originalSend = connection.send.bind(connection) as (
+          message: string
+        ) => void;
+        connection.send = ((_reply: string) => {
+          connection.send = originalSend as typeof connection.send;
+          throw new Error("Intentional facet reply delivery failure");
+        }) as typeof connection.send;
+      }
+
+      await handleMessage(connection, message);
+      if (method === "streamWithLateDelivery") {
+        connection.send("late-stream-handler-complete");
       }
     };
   }
@@ -2332,6 +2344,11 @@ export class SlowReplySubAgent extends Agent {
   async delayedEcho(value: string, delayMs: number): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     return `delayed:${value}`;
+  }
+
+  @callable()
+  replyAfterInjectedFacetDeliveryFailure(): string {
+    return "completed";
   }
 
   @callable()

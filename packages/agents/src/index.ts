@@ -269,7 +269,7 @@ type RPCReplyTarget = {
 
 type RPCResponseDelivery = {
   sent: boolean;
-  completion?: Promise<void>;
+  completion?: Promise<boolean>;
 };
 
 // A forwarded facet message can pass through arbitrary onMessage wrappers
@@ -298,8 +298,12 @@ function sendRpcResponseIfOpen(
     const result = target.send(message);
     if (result === undefined) return { sent: true };
 
-    const completion = Promise.resolve(result).catch(
-      reportRpcResponseDeliveryError
+    const completion = Promise.resolve(result).then(
+      () => true,
+      (error) => {
+        reportRpcResponseDeliveryError(error);
+        return false;
+      }
     );
     return { sent: true, completion };
   } catch (error) {
@@ -310,7 +314,7 @@ function sendRpcResponseIfOpen(
 
 type StreamingResponseDeliveryState = {
   replyTarget: RPCReplyTarget;
-  pending: Set<Promise<void>>;
+  pending: Set<Promise<boolean>>;
 };
 
 const streamingResponseDeliveryStates = new WeakMap<
@@ -333,7 +337,7 @@ function createStreamingResponse(
 
 function trackStreamingResponseDelivery(
   stream: StreamingResponse,
-  completion: Promise<void> | undefined
+  completion: Promise<boolean> | undefined
 ): void {
   const state = streamingResponseDeliveryStates.get(stream);
   if (!state || !completion) return;
@@ -2649,7 +2653,19 @@ export class Agent<
                 success: true,
                 type: MessageType.RPC
               };
-              await sendRpcResponseIfOpen(replyTarget, response).completion;
+              const delivery = sendRpcResponseIfOpen(replyTarget, response);
+              const delivered = delivery.completion
+                ? await delivery.completion
+                : delivery.sent;
+              if (!delivered) {
+                const fallback: RPCResponse = {
+                  error: "RPC response could not be delivered",
+                  id,
+                  success: false,
+                  type: MessageType.RPC
+                };
+                await sendRpcResponseIfOpen(replyTarget, fallback).completion;
+              }
             } catch (e) {
               console.error("RPC error:", e);
               this._emit("rpc:error", {

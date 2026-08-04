@@ -269,18 +269,54 @@ describe("facet @callable RPC replies under concurrent frames (issue #1991)", ()
     }
   });
 
-  it("contains an asynchronous success-reply delivery failure", async () => {
+  it("returns an error when a successful result cannot be delivered", async () => {
+    const ws = await connectWS(wsPath(uniqueName(), uniqueName()));
+    const events: ObservabilityEvent[] = [];
+    const unsubscribe = subscribe("rpc", (event) => events.push(event));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      const response = await callRPC(
+        ws,
+        "replyAfterInjectedFacetDeliveryFailure"
+      );
+      expect(response.success).toBe(false);
+      if (!response.success) {
+        expect(response.error).toBe("RPC response could not be delivered");
+      }
+
+      expect(
+        events.filter(
+          (event) =>
+            event.type === "rpc:error" &&
+            event.payload.method === "replyAfterInjectedFacetDeliveryFailure"
+        )
+      ).toHaveLength(0);
+
+      const healthyResponse = await callRPC(ws, "fastEcho", ["after-fallback"]);
+      expect(healthyResponse.success).toBe(true);
+      if (healthyResponse.success) {
+        expect(healthyResponse.result).toBe("fast:after-fallback");
+      }
+    } finally {
+      consoleError.mockRestore();
+      unsubscribe();
+      ws.close();
+    }
+  });
+
+  it("returns an error after an asynchronous result delivery failure", async () => {
     const ws = await connectWS(rootWsPath(uniqueName()));
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
     try {
-      sendRPCWithoutWaiting(ws, "forceReplyDeliveryFailure", [false]);
-      await waitForCondition(() =>
-        consoleError.mock.calls.some(
-          ([message]) => message === "[Agent] RPC response delivery failed:"
-        )
-      );
+      const response = await callRPC(ws, "forceReplyDeliveryFailure", [false]);
+      expect(response.success).toBe(false);
+      if (!response.success) {
+        expect(response.error).toBe("RPC response could not be delivered");
+      }
 
       const healthyResponse = await callRPC(ws, "healthyEcho", ["connection"]);
       expect(healthyResponse.success).toBe(true);
