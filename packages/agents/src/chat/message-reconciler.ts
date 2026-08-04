@@ -15,7 +15,10 @@ import type { UIMessage } from "ai";
  *
  * 1. Reconciles assistant IDs: exact match → toolCallId match → content-key match
  * 2. Merges server-known tool outputs into incoming messages that still
- *    show stale states (input-available, approval-requested, approval-responded)
+ *    show stale states (input-available, approval-requested, approval-responded).
+ *    Outputs come from the server row the message resolved to; a message that
+ *    resolved to no row may still merge from an unambiguous toolCallId whose
+ *    input is identical.
  *
  * @param incoming - Messages from the client
  * @param serverMessages - Current server-side messages (source of truth)
@@ -40,8 +43,12 @@ export function reconcileMessages(
  * For a single message, resolve its ID by matching toolCallId against server state.
  * Prevents duplicate DB rows when client IDs differ from server IDs.
  *
- * Prefer {@link reconcileMessages} for transcript reconciliation because tool call
- * IDs can repeat across turns and must claim server messages one-to-one.
+ * @deprecated Unsafe when a provider reuses a toolCallId across turns. This
+ * scans the whole conversation and claims nothing, so a later assistant can
+ * adopt an earlier row's ID and overwrite it on upsert (#1992). Use
+ * {@link reconcileMessages}, which claims server rows one-to-one over the
+ * whole transcript. Retained only for backwards compatibility; no longer used
+ * by `@cloudflare/ai-chat` or `@cloudflare/think`.
  */
 export function resolveToolMergeId(
   message: UIMessage,
@@ -144,19 +151,28 @@ function mergeServerToolOutputs(
     string,
     Map<string, Record<string, unknown>>
   >();
+  // Conversation-wide index used ONLY as a fallback for incoming messages that
+  // never matched a server row. `null` marks a toolCallId that resolved on more
+  // than one server row — too ambiguous to merge from.
+  const resolvedByToolCallId = new Map<
+    string,
+    Record<string, unknown> | null
+  >();
+  const serverMessageIds = new Set<string>();
+
   for (const msg of serverMessages) {
+    serverMessageIds.add(msg.id);
     if (msg.role !== "assistant") continue;
     const resolvedParts = new Map<string, Record<string, unknown>>();
     for (const part of msg.parts) {
       const record = part as Record<string, unknown>;
-      if (
-        "toolCallId" in record &&
-        "state" in record &&
-        (record.state === "output-available" ||
-          record.state === "output-error" ||
-          record.state === "output-denied")
-      ) {
-        resolvedParts.set(record.toolCallId as string, record);
+      if (isResolvedToolPart(record)) {
+        const toolCallId = record.toolCallId as string;
+        resolvedParts.set(toolCallId, record);
+        resolvedByToolCallId.set(
+          toolCallId,
+          resolvedByToolCallId.has(toolCallId) ? null : record
+        );
       }
     }
     if (resolvedParts.size > 0) {
@@ -169,21 +185,30 @@ function mergeServerToolOutputs(
   return incoming.map((msg) => {
     if (msg.role !== "assistant") return msg;
     const serverResolvedParts = serverResolvedPartsByMessage.get(msg.id);
-    if (!serverResolvedParts) return msg;
+    // A message that kept its own ID never claimed a server row, so the
+    // per-message index cannot reach it. Fall back to the conversation-wide
+    // index, but only for a tool call carrying an identical input: same
+    // toolCallId AND same input means the same call, whereas a provider
+    // reusing an ID for a NEW call carries different input. Without this a
+    // stale duplicate persists stuck in a pre-terminal state, reintroducing
+    // the dangling orphan of #1381 and losing the server's output-error /
+    // output-denied that #1623 hardened.
+    const useFallback =
+      serverResolvedParts === undefined && !serverMessageIds.has(msg.id);
+    if (!serverResolvedParts && !useFallback) return msg;
 
     let hasChanges = false;
     const updatedParts = msg.parts.map((part) => {
       const record = part as Record<string, unknown>;
-      if (
-        "toolCallId" in record &&
-        "state" in record &&
-        (record.state === "input-available" ||
-          record.state === "approval-requested" ||
-          record.state === "approval-responded") &&
-        serverResolvedParts.has(record.toolCallId as string)
-      ) {
+      if (!isPendingToolPart(record)) return part;
+
+      const toolCallId = record.toolCallId as string;
+      const server = serverResolvedParts
+        ? serverResolvedParts.get(toolCallId)
+        : fallbackResolvedPart(resolvedByToolCallId, record);
+
+      if (server) {
         hasChanges = true;
-        const server = serverResolvedParts.get(record.toolCallId as string)!;
         // Overlay the server's resolved state, keeping the client part's
         // identity/input. Carry ONLY the result field that belongs to the
         // server's terminal state — so a stray `output` left on an
@@ -287,6 +312,53 @@ function reconcileAssistantIds(
 
 function hasToolCallPart(message: UIMessage): boolean {
   return message.parts.some((part) => "toolCallId" in part);
+}
+
+/** A server-side tool part that has reached a terminal state. */
+function isResolvedToolPart(record: Record<string, unknown>): boolean {
+  return (
+    "toolCallId" in record &&
+    "state" in record &&
+    (record.state === "output-available" ||
+      record.state === "output-error" ||
+      record.state === "output-denied")
+  );
+}
+
+/** A client-side tool part still waiting on a result. */
+function isPendingToolPart(record: Record<string, unknown>): boolean {
+  return (
+    "toolCallId" in record &&
+    "state" in record &&
+    (record.state === "input-available" ||
+      record.state === "approval-requested" ||
+      record.state === "approval-responded")
+  );
+}
+
+/**
+ * Resolve a server part for an incoming tool part that never claimed a server
+ * row. Requires an unambiguous toolCallId AND an identical input, so a
+ * provider that reuses a toolCallId for a genuinely new call (different
+ * input) cannot inherit the previous turn's result.
+ */
+function fallbackResolvedPart(
+  resolvedByToolCallId: Map<string, Record<string, unknown> | null>,
+  record: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  const server = resolvedByToolCallId.get(record.toolCallId as string);
+  if (!server) return undefined;
+  return sameToolInput(record.input, server.input) ? server : undefined;
+}
+
+/**
+ * Structural comparison of two tool inputs. Both absent counts as equal, which
+ * keeps the pre-existing permissive behaviour for tools that take no input.
+ */
+function sameToolInput(a: unknown, b: unknown): boolean {
+  if (a === undefined && b === undefined) return true;
+  if (a === undefined || b === undefined) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function getToolCallIds(message: UIMessage): Set<string> {

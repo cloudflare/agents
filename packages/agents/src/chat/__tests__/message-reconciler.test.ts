@@ -294,6 +294,66 @@ describe("reconcileMessages — ID reconciliation", () => {
     ).toBeUndefined();
   });
 
+  it("still merges a terminal result into an unclaimed same-input duplicate", () => {
+    // The server row is claimed by an exact-ID match, so the stale duplicate
+    // can claim nothing. It carries the SAME input, so it is the same call and
+    // must still pick up the server's terminal state — otherwise it persists
+    // as a dangling `input-available` orphan (#1381) and the server's
+    // output-error is lost from that row (#1623).
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-error", {
+        input: { q: "same" },
+        output: undefined
+      })
+    ];
+    const client = [
+      toolAssistantMsg("srv-a1", "tc1", "output-error", {
+        input: { q: "same" }
+      }),
+      toolAssistantMsg("cli-a9", "tc1", "input-available", {
+        input: { q: "same" }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result).toHaveLength(2);
+    expect((result[1].parts[0] as Record<string, unknown>).state).toBe(
+      "output-error"
+    );
+  });
+
+  it("does not merge a terminal result into a reused-ID call with different input", () => {
+    // Same toolCallId but a DIFFERENT input means the provider reused the ID
+    // for a genuinely new call, which must not inherit the old result.
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "first" },
+        output: "old result"
+      })
+    ];
+    const client = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "first" },
+        output: "old result"
+      }),
+      toolAssistantMsg("cli-a9", "tc1", "input-available", {
+        input: { q: "second" }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result).toHaveLength(2);
+    expect(result[1].id).toBe("cli-a9");
+    expect((result[1].parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+    expect(
+      (result[1].parts[0] as Record<string, unknown>).output
+    ).toBeUndefined();
+  });
+
   it("passes through when server state is empty", () => {
     const client = [userMsg("u1", "hi"), assistantMsg("cli-a1", "Hello")];
     const result = reconcileMessages(client, []);
