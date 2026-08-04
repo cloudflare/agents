@@ -112,6 +112,13 @@ export interface CreateWorkerOptions {
   registry?: string;
 
   /**
+   * When installing Python packages declared in pyproject.toml, prefer the
+   * Pyodide package index over PyPI.
+   * @default true
+   */
+  preferPyodideIndex?: boolean;
+
+  /**
    * JSX transform mode passed to esbuild.
    * `"automatic"` enables the new JSX runtime (no need to import React).
    *
