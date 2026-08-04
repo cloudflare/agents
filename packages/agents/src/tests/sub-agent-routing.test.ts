@@ -590,6 +590,24 @@ describe("routeSubAgentRequest — query-param preservation", () => {
     await expect(request.text()).resolves.toBe("fallback body");
   });
 
+  it("rejects a matched request with an already-used body before cloning", async () => {
+    const { routeAgentRequest } = await import("../index");
+    const request = new Request(
+      `https://app.example.com/agents/test-sub-agent-parent/${uniqueName()}`,
+      {
+        method: "POST",
+        headers: {
+          "x-cf-agents-subagent-url": "https://forged.example.com"
+        },
+        body: "already read"
+      }
+    );
+    await request.text();
+
+    const response = await routeAgentRequest(request, env);
+    expect(response?.status).toBe(400);
+  });
+
   it("does not clone an unmatched request with an already-used body", async () => {
     const { routeAgentRequest } = await import("../index");
     const request = new Request("https://app.example.com/not-an-agent", {

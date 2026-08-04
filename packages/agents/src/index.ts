@@ -13037,6 +13037,14 @@ export async function routeAgentRequest<Env>(
     prefixParts.every((part, index) => pathParts[index] === part) &&
     pathParts.length >= prefixParts.length + 2;
   if (couldMatchAgentRoute && request.headers.has(SUB_AGENT_OUTER_URL_HEADER)) {
+    if (request.bodyUsed) {
+      return new Response(
+        "Cannot route a request whose body was already read",
+        {
+          status: 400
+        }
+      );
+    }
     const headers = new Headers(request.headers);
     headers.delete(SUB_AGENT_OUTER_URL_HEADER);
     routedRequest = new Request(request.clone() as unknown as RequestInfo, {
