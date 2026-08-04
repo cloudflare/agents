@@ -7200,14 +7200,15 @@ export class Agent<
   /**
    * Close every root-owned WebSocket connection whose `/sub/...`
    * target path equals or descends from `prefix`. Called by
-   * {@link deleteSubAgent} so a client connected directly to a
-   * deleted sub-agent (or one of its descendants) gets an explicit
-   * close instead of being left pointed at nothing — see issue #2003.
+   * {@link deleteSubAgent} and delegated self-destroy teardown so a
+   * client connected directly to a deleted sub-agent (or one of its
+   * descendants) gets an explicit close instead of being left
+   * pointed at nothing — see issue #2003.
    *
    * Runs synchronously with respect to the caller's turn (no `await`
    * before iterating `super.getConnections()`), so it observes every
    * connection recorded up to this point in the same tick that
-   * `deleteSubAgent` starts tearing down the target.
+   * teardown starts deleting the target.
    *
    * @internal
    */
@@ -7224,10 +7225,11 @@ export class Agent<
         connection.close(code, reason);
       } catch {
         // `close()` on a socket that's already closing/closed can
-        // throw. This runs on `deleteSubAgent`'s critical path, ahead
-        // of `ctx.facets.delete()` and `_forgetSubAgent()` — one
-        // uncooperative socket must not block those state mutations
-        // or block closing the rest of the matched connections.
+        // throw. This runs on the shared deletion/self-destroy
+        // critical path, ahead of `ctx.facets.delete()` and
+        // `_forgetSubAgent()` — one uncooperative socket must not
+        // block those state mutations or closing the rest of the
+        // matched connections.
       }
     }
   }
@@ -10848,18 +10850,16 @@ export class Agent<
    * caller treats as "drop this event" rather than recreating the
    * target (issue #2003).
    *
-   * The one call site (`_cf_resolveSubAgentConnection`) is only
-   * reached via a real hibernatable WebSocket, which — per the
-   * facets-never-own-real-sockets invariant (issue #1677) — means
-   * `this` is always the root, so `_parentPath` is empty and
-   * `rootClassName` is always this DO's own class identifier. If that
-   * identifier didn't resolve via `ctx.exports`, the very first
-   * `subAgent()`/`connect` for this root would already have thrown
-   * before any registry row (or client socket) could exist. So unlike
-   * {@link _cf_resolveSubAgent}, this intentionally skips
-   * re-validating `ctx.exports`/the child class/the root namespace —
-   * a missing registry row is the only reachable "the sub-agent is
-   * gone" signal on this path.
+   * The one call site (`_cf_resolveSubAgentConnection`) can run on
+   * the root for the first hop or on an intermediate facet while
+   * recursively forwarding a nested `/sub/...` route. In either
+   * case, this connection's initial `connect` event already traversed
+   * the same hop through {@link _cf_resolveSubAgent}, validating
+   * `ctx.facets`, the child export, and the root namespace before a
+   * registry row (or virtual connection) could exist. This therefore
+   * intentionally skips repeating those checks — a missing registry
+   * row is the only reachable "the sub-agent is gone" signal on the
+   * later `message`/`close` path.
    *
    * @internal
    */
@@ -10882,9 +10882,9 @@ export class Agent<
     const rootClassName =
       this._parentPath[0]?.className ??
       (this.constructor as { name: string }).name;
-    // See the reachability note above: this DO is always the root on
-    // this path, so `rootClassName` always resolved via `ctx.exports`
-    // by the time any registry row (or client socket) could exist.
+    // See the reachability note above: the initial `connect` already
+    // resolved this namespace, whether this hop is the root or an
+    // intermediate facet deriving it from `_parentPath[0]`.
     const rootNs = ctx.exports[rootClassName] as DurableObjectClass &
       Pick<DurableObjectNamespace, "idFromName">;
 
