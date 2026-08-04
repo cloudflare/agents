@@ -23,6 +23,7 @@ import type {
   StoredCompaction
 } from "../provider";
 import type { SessionMessage } from "../types";
+import { isCompactionMessage } from "../../utils/compaction-helpers";
 import {
   toPostgresConnection,
   type PostgresClient,
@@ -265,6 +266,10 @@ export class PostgresSessionProvider implements SessionProvider {
     messages: SessionMessage[],
     compactions: StoredCompaction[]
   ): SessionMessage[] {
+    // Drop any synthetic overlay that a pre-#1984 session filed as a real row
+    // so the summary can't render twice; the overlay is re-synthesized below.
+    // No-op for healthy sessions.
+    messages = messages.filter((m) => !isCompactionMessage(m));
     const ids = messages.map((m) => m.id);
     const result: SessionMessage[] = [];
     let i = 0;
