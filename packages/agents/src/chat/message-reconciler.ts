@@ -151,17 +151,15 @@ function mergeServerToolOutputs(
     string,
     Map<string, Record<string, unknown>>
   >();
-  // Conversation-wide index used ONLY as a fallback for incoming messages that
-  // never matched a server row. `null` marks a toolCallId that resolved on more
-  // than one server row — too ambiguous to merge from.
+  // Conversation-wide index used as a per-part fallback. `null` marks a
+  // toolCallId that resolved on more than one server row — too ambiguous to
+  // merge from.
   const resolvedByToolCallId = new Map<
     string,
     Record<string, unknown> | null
   >();
-  const serverMessageIds = new Set<string>();
 
   for (const msg of serverMessages) {
-    serverMessageIds.add(msg.id);
     if (msg.role !== "assistant") continue;
     const resolvedParts = new Map<string, Record<string, unknown>>();
     for (const part of msg.parts) {
@@ -184,28 +182,26 @@ function mergeServerToolOutputs(
 
   return incoming.map((msg) => {
     if (msg.role !== "assistant") return msg;
-    const serverResolvedParts = serverResolvedPartsByMessage.get(msg.id);
-    // A message that kept its own ID never claimed a server row, so the
-    // per-message index cannot reach it. Fall back to the conversation-wide
-    // index, but only for a tool call carrying an identical input: same
-    // toolCallId AND same input means the same call, whereas a provider
-    // reusing an ID for a NEW call carries different input. Without this a
-    // stale duplicate persists stuck in a pre-terminal state, reintroducing
-    // the dangling orphan of #1381 and losing the server's output-error /
-    // output-denied that #1623 hardened.
-    const useFallback =
-      serverResolvedParts === undefined && !serverMessageIds.has(msg.id);
-    if (!serverResolvedParts && !useFallback) return msg;
+    const ownResolvedParts = serverResolvedPartsByMessage.get(msg.id);
 
     let hasChanges = false;
     const updatedParts = msg.parts.map((part) => {
       const record = part as Record<string, unknown>;
       if (!isPendingToolPart(record)) return part;
 
+      // Prefer the row this message resolved to. If that row does not carry
+      // this call — the message resolved to no row at all, or the result was
+      // persisted on a different row — fall back to the conversation-wide
+      // index, but only for a call carrying an identical input. Same
+      // toolCallId AND same input means the same call, whereas a provider
+      // reusing an ID for a NEW call carries different input. Without the
+      // fallback a pending part persists stuck in a pre-terminal state,
+      // reintroducing the dangling orphan of #1381 and losing the server's
+      // output-error / output-denied that #1623 hardened.
       const toolCallId = record.toolCallId as string;
-      const server = serverResolvedParts
-        ? serverResolvedParts.get(toolCallId)
-        : fallbackResolvedPart(resolvedByToolCallId, record);
+      const server =
+        ownResolvedParts?.get(toolCallId) ??
+        fallbackResolvedPart(resolvedByToolCallId, record);
 
       if (server) {
         hasChanges = true;

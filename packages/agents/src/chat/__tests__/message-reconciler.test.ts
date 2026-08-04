@@ -323,6 +323,50 @@ describe("reconcileMessages — ID reconciliation", () => {
     );
   });
 
+  it("merges a result stored on a different server row than the one matched", () => {
+    // The incoming message resolves to srv-a1, which carries tc1 but not tc2.
+    // tc2's result was persisted on a separate row, so a per-message-only
+    // lookup would write tc2 back as still pending.
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "one" },
+        output: "one done"
+      }),
+      toolAssistantMsg("srv-a2", "tc2", "output-available", {
+        input: { q: "two" },
+        output: "two done"
+      })
+    ];
+    const client = [
+      {
+        id: "srv-a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            state: "input-available",
+            input: { q: "one" }
+          },
+          {
+            type: "tool-calc",
+            toolCallId: "tc2",
+            state: "input-available",
+            input: { q: "two" }
+          }
+        ]
+      } as unknown as ChatMessage
+    ];
+
+    const result = reconcileMessages(client, server);
+    const parts = result[0].parts as unknown as Record<string, unknown>[];
+
+    expect(parts[0].state).toBe("output-available");
+    expect(parts[0].output).toBe("one done");
+    expect(parts[1].state).toBe("output-available");
+    expect(parts[1].output).toBe("two done");
+  });
+
   it("does not merge a terminal result into a reused-ID call with different input", () => {
     // Same toolCallId but a DIFFERENT input means the provider reused the ID
     // for a genuinely new call, which must not inherit the old result.
