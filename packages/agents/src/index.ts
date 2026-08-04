@@ -12658,17 +12658,23 @@ export class Agent<
 
     // Build the callback URL if we have a host (needed for OAuth, optional for non-OAuth servers)
     let callbackUrl: string | undefined;
+    let callbackUrlError: Error | undefined;
     if (resolvedCallbackHost) {
       const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
       if (resolvedCallbackPath) {
         callbackUrl = `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`;
       } else if (this._isFacet) {
-        const [root, ...facets] = this.selfPath;
-        if (!root) {
-          throw new Error("A sub-agent OAuth callback requires a root path");
+        try {
+          const [root, ...facets] = this.selfPath;
+          if (!root) {
+            throw new Error("A sub-agent OAuth callback requires a root path");
+          }
+          const rootPath = `/${resolvedAgentsPrefix}/${camelCaseToKebabCase(root.className)}/${validateRootAgentNameSegment(root.name)}`;
+          callbackUrl = `${normalizedHost}${rootPath}${buildSubAgentPath(facets, "/callback")}`;
+        } catch (error) {
+          callbackUrlError =
+            error instanceof Error ? error : new Error(String(error));
         }
-        const rootPath = `/${resolvedAgentsPrefix}/${camelCaseToKebabCase(root.className)}/${validateRootAgentNameSegment(root.name)}`;
-        callbackUrl = `${normalizedHost}${rootPath}${buildSubAgentPath(facets, "/callback")}`;
       } else {
         callbackUrl = `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
       }
@@ -12726,6 +12732,10 @@ export class Agent<
     const result = await this.mcp.connectToServer(id);
 
     if (result.state === MCPConnectionState.FAILED) {
+      // If callback construction failed, surface that actionable error when
+      // the connection cannot proceed without the omitted OAuth provider.
+      if (callbackUrlError) throw callbackUrlError;
+
       // Server stays in storage so user can retry via connectToServer(id)
       throw new Error(
         `Failed to connect to MCP server at ${normalizedUrl}: ${result.error}`
@@ -12733,6 +12743,7 @@ export class Agent<
     }
 
     if (result.state === MCPConnectionState.AUTHENTICATING) {
+      if (callbackUrlError) throw callbackUrlError;
       if (!callbackUrl) {
         throw new Error(
           "This MCP server requires OAuth authentication. " +
