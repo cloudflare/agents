@@ -1128,6 +1128,35 @@ describe("useAgent hook", () => {
       );
     });
 
+    it("preserves URL-normalizable characters in a nested user path", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      await render(
+        <TestAgentComponent
+          options={{
+            agent: "TestSubAgentParent",
+            name: "sub-url-parent-unicode",
+            host,
+            protocol,
+            sub: [{ agent: "CounterSubAgent", name: "sub-url-child-unicode" }],
+            path: "rooms/日本語"
+          }}
+          onAgent={(agent) => {
+            capturedAgent = agent;
+          }}
+        />
+      );
+
+      await vi.waitFor(() => expect(capturedAgent).not.toBeNull(), {
+        timeout: 10000
+      });
+
+      expect(capturedAgent!.getHttpUrl()).toContain(
+        "/sub/counter-sub-agent/sub-url-child-unicode/rooms/日本語"
+      );
+    });
+
     it("combines sub-chain alone when no user path is given", async () => {
       const { host, protocol } = getTestWorkerHost();
       let capturedAgent: TestAgent | null = null;

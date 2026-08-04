@@ -371,7 +371,7 @@ By default, agents are routed at `/agents/{agent-name}/{instance-name}`. You can
 import { routeAgentRequest } from "agents";
 
 const agentResponse = await routeAgentRequest(request, env, {
-  prefix: "/api/agents" // Now routes at /api/agents/{agent-name}/{instance-name}
+  prefix: "api/agents" // Now routes at /api/agents/{agent-name}/{instance-name}
 });
 ```
 
