@@ -269,7 +269,7 @@ type RPCReplyTarget = {
 
 type RPCResponseDelivery = {
   sent: boolean;
-  completion: Promise<void>;
+  completion?: Promise<void>;
 };
 
 // A forwarded facet message can pass through arbitrary onMessage wrappers
@@ -281,29 +281,41 @@ type SubAgentRpcReplyInvocationContext = {
 const subAgentRpcReplyContext =
   new AsyncLocalStorage<SubAgentRpcReplyInvocationContext>();
 
+function reportRpcResponseDeliveryError(error: unknown): void {
+  if (isClosedWebSocketSendError(error)) return;
+  console.error("[Agent] RPC response delivery failed:", error);
+}
+
 function sendRpcResponseIfOpen(
   target: RPCReplyTarget,
   response: RPCResponse
 ): RPCResponseDelivery {
+  // Serialization is part of producing the callable result, not transport
+  // delivery. Let serialization failures reach the callable error handler.
+  const message = JSON.stringify(response);
+
   try {
-    const completion = Promise.resolve(
-      target.send(JSON.stringify(response))
-    ).catch((error: unknown) => {
-      if (isClosedWebSocketSendError(error)) return;
-      throw error;
-    });
+    const result = target.send(message);
+    if (result === undefined) return { sent: true };
+
+    const completion = Promise.resolve(result).catch(
+      reportRpcResponseDeliveryError
+    );
     return { sent: true, completion };
   } catch (error) {
-    if (isClosedWebSocketSendError(error)) {
-      return { sent: false, completion: Promise.resolve() };
-    }
-    throw error;
+    reportRpcResponseDeliveryError(error);
+    return { sent: false };
   }
 }
 
-const streamingResponseReplyTargets = new WeakMap<
+type StreamingResponseDeliveryState = {
+  replyTarget: RPCReplyTarget;
+  pending: Set<Promise<void>>;
+};
+
+const streamingResponseDeliveryStates = new WeakMap<
   StreamingResponse,
-  RPCReplyTarget
+  StreamingResponseDeliveryState
 >();
 
 function createStreamingResponse(
@@ -312,35 +324,38 @@ function createStreamingResponse(
   replyTarget: RPCReplyTarget
 ): StreamingResponse {
   const stream = new StreamingResponse(connection, id);
-  streamingResponseReplyTargets.set(stream, replyTarget);
+  streamingResponseDeliveryStates.set(stream, {
+    replyTarget,
+    pending: new Set()
+  });
   return stream;
 }
 
-const streamingResponseDeliveries = new WeakMap<
-  StreamingResponse,
-  Promise<void>[]
->();
-
 function trackStreamingResponseDelivery(
   stream: StreamingResponse,
-  completion: Promise<void>
+  completion: Promise<void> | undefined
 ): void {
-  const deliveries = streamingResponseDeliveries.get(stream);
-  if (deliveries) {
-    deliveries.push(completion);
-  } else {
-    streamingResponseDeliveries.set(stream, [completion]);
-  }
+  const state = streamingResponseDeliveryStates.get(stream);
+  if (!state || !completion) return;
+
+  state.pending.add(completion);
+  void completion.then(() => {
+    state.pending.delete(completion);
+  });
 }
 
 async function waitForStreamingResponseDeliveries(
   stream: StreamingResponse
 ): Promise<void> {
+  const state = streamingResponseDeliveryStates.get(stream);
+  if (!state) return;
+
   try {
-    await Promise.all(streamingResponseDeliveries.get(stream) ?? []);
+    while (state.pending.size > 0) {
+      await Promise.all(state.pending);
+    }
   } finally {
-    streamingResponseDeliveries.delete(stream);
-    streamingResponseReplyTargets.delete(stream);
+    streamingResponseDeliveryStates.delete(stream);
   }
 }
 
@@ -2636,7 +2651,14 @@ export class Agent<
               };
               await sendRpcResponseIfOpen(replyTarget, response).completion;
             } catch (e) {
-              // Send error response
+              console.error("RPC error:", e);
+              this._emit("rpc:error", {
+                method: parsed.method,
+                error: e instanceof Error ? e.message : String(e)
+              });
+
+              // Report the callable error before attempting its best-effort
+              // response so a delivery failure cannot hide the original error.
               const response: RPCResponse = {
                 error:
                   e instanceof Error ? e.message : "Unknown error occurred",
@@ -2645,11 +2667,6 @@ export class Agent<
                 type: MessageType.RPC
               };
               await sendRpcResponseIfOpen(replyTarget, response).completion;
-              console.error("RPC error:", e);
-              this._emit("rpc:error", {
-                method: parsed.method,
-                error: e instanceof Error ? e.message : String(e)
-              });
             }
             return;
           }
@@ -13270,7 +13287,10 @@ export class StreamingResponse {
   }
 
   private get _activeReplyTarget(): RPCReplyTarget {
-    return streamingResponseReplyTargets.get(this) ?? this._replyTarget;
+    return (
+      streamingResponseDeliveryStates.get(this)?.replyTarget ??
+      this._replyTarget
+    );
   }
 
   /**

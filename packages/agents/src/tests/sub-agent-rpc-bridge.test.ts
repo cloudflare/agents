@@ -18,8 +18,9 @@
  * live); only awaiting + a concurrent frame loses the reply.
  */
 import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RPCRequest, RPCResponse } from "../index";
+import { subscribe, type ObservabilityEvent } from "../observability";
 import { MessageType } from "../types";
 
 function uniqueName() {
@@ -35,6 +36,19 @@ async function connectWS(path: string): Promise<WebSocket> {
   expect(ws).toBeDefined();
   ws.accept();
   return ws;
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 1000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Condition was not met before timeout");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 /**
@@ -61,6 +75,63 @@ function waitForTextFrame(
     };
 
     ws.addEventListener("message", handler);
+  });
+}
+
+function sendRPCWithoutWaiting(
+  ws: WebSocket,
+  method: string,
+  args: unknown[] = []
+): void {
+  const request: RPCRequest = {
+    type: MessageType.RPC,
+    id: `${method}-${Math.random().toString(36).slice(2)}`,
+    method,
+    args
+  };
+  ws.send(JSON.stringify(request));
+}
+
+function callStreamingRPC(
+  ws: WebSocket,
+  method: string,
+  args: unknown[] = [],
+  timeoutMs = 3000
+): Promise<{ chunks: unknown[]; terminal: RPCResponse }> {
+  const id = `${method}-${Math.random().toString(36).slice(2)}`;
+  const request: RPCRequest = { type: MessageType.RPC, id, method, args };
+
+  return new Promise((resolve, reject) => {
+    const chunks: unknown[] = [];
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", handler);
+      reject(
+        new Error(
+          `Streaming RPC reply for ${method} timed out (${timeoutMs}ms)`
+        )
+      );
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      let response: RPCResponse;
+      try {
+        response = JSON.parse(event.data as string) as RPCResponse;
+      } catch {
+        return;
+      }
+      if (response.type !== MessageType.RPC || response.id !== id) return;
+      if (response.success && response.done === false) {
+        chunks.push(response.result);
+        return;
+      }
+
+      clearTimeout(timer);
+      ws.removeEventListener("message", handler);
+      resolve({ chunks, terminal: response });
+    };
+
+    ws.addEventListener("message", handler);
+    ws.send(JSON.stringify(request));
   });
 }
 
@@ -101,6 +172,7 @@ function callRPC(
 }
 
 describe("facet @callable RPC replies under concurrent frames (issue #1991)", () => {
+  const rootWsPath = (name: string) => `/agents/test-sub-agent-parent/${name}`;
   const wsPath = (parent: string, child: string) =>
     `/agents/test-sub-agent-parent/${parent}/sub/slow-reply-sub-agent/${child}`;
   const nestedWsPath = (parent: string, middle: string, child: string) =>
@@ -192,6 +264,199 @@ describe("facet @callable RPC replies under concurrent frames (issue #1991)", ()
       );
       expect(response.success).toBe(true);
       if (response.success) expect(response.result).toBe(true);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("contains an asynchronous success-reply delivery failure", async () => {
+    const ws = await connectWS(rootWsPath(uniqueName()));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      sendRPCWithoutWaiting(ws, "forceReplyDeliveryFailure", [false]);
+      await waitForCondition(() =>
+        consoleError.mock.calls.some(
+          ([message]) => message === "[Agent] RPC response delivery failed:"
+        )
+      );
+
+      const healthyResponse = await callRPC(ws, "healthyEcho", ["connection"]);
+      expect(healthyResponse.success).toBe(true);
+      if (healthyResponse.success) {
+        expect(healthyResponse.result).toBe("healthy:connection");
+      }
+
+      const deliveryFailures = consoleError.mock.calls.filter(
+        ([message]) => message === "[Agent] RPC response delivery failed:"
+      );
+      expect(deliveryFailures).toHaveLength(1);
+      expect(
+        consoleError.mock.calls.some(([message]) => message === "RPC error:")
+      ).toBe(false);
+    } finally {
+      consoleError.mockRestore();
+      ws.close();
+    }
+  });
+
+  it("records the callable error before a failed error-reply delivery", async () => {
+    const ws = await connectWS(rootWsPath(uniqueName()));
+    const events: ObservabilityEvent[] = [];
+    const unsubscribe = subscribe("rpc", (event) => events.push(event));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      sendRPCWithoutWaiting(ws, "forceReplyDeliveryFailure", [true]);
+      await waitForCondition(
+        () =>
+          events.some(
+            (event) =>
+              event.type === "rpc:error" &&
+              event.payload.method === "forceReplyDeliveryFailure"
+          ) &&
+          consoleError.mock.calls.some(
+            ([message]) => message === "[Agent] RPC response delivery failed:"
+          )
+      );
+
+      const healthyResponse = await callRPC(ws, "healthyEcho", ["after-error"]);
+      expect(healthyResponse.success).toBe(true);
+      if (healthyResponse.success) {
+        expect(healthyResponse.result).toBe("healthy:after-error");
+      }
+
+      const rpcErrors = consoleError.mock.calls.filter(
+        ([message]) => message === "RPC error:"
+      );
+      expect(rpcErrors).toHaveLength(1);
+      expect(rpcErrors[0]?.[1]).toEqual(
+        expect.objectContaining({ message: "Intentional callable failure" })
+      );
+      expect(
+        events.filter(
+          (event) =>
+            event.type === "rpc:error" &&
+            event.payload.method === "forceReplyDeliveryFailure"
+        )
+      ).toHaveLength(1);
+    } finally {
+      consoleError.mockRestore();
+      unsubscribe();
+      ws.close();
+    }
+  });
+
+  it("observes rejected deliveries from publicly constructed streams", async () => {
+    const ws = await connectWS(wsPath(uniqueName(), uniqueName()));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      const response = await callRPC(ws, "createStreamWithRejectedDelivery");
+      expect(response.success).toBe(true);
+      if (response.success) expect(response.result).toBe("created");
+      await waitForCondition(() =>
+        consoleError.mock.calls.some(
+          ([message]) => message === "[Agent] RPC response delivery failed:"
+        )
+      );
+
+      expect(
+        consoleError.mock.calls.filter(
+          ([message]) => message === "[Agent] RPC response delivery failed:"
+        )
+      ).toHaveLength(1);
+    } finally {
+      consoleError.mockRestore();
+      ws.close();
+    }
+  });
+
+  it("waits for a streaming delivery appended during the flush", async () => {
+    const ws = await connectWS(rootWsPath(uniqueName()));
+    const order: string[] = [];
+    const observer = (event: MessageEvent) => {
+      if (event.data === "late-stream-handler-complete") {
+        order.push("handler-complete");
+        return;
+      }
+      try {
+        const response = JSON.parse(event.data as string) as RPCResponse;
+        if (
+          response.type === MessageType.RPC &&
+          response.success &&
+          response.done === true &&
+          response.result === "late"
+        ) {
+          order.push("terminal-delivery");
+        }
+      } catch {
+        // Ignore protocol and application frames unrelated to this stream.
+      }
+    };
+    ws.addEventListener("message", observer);
+
+    try {
+      const marker = waitForTextFrame(ws, "late-stream-handler-complete");
+      const stream = callStreamingRPC(ws, "streamWithLateDelivery");
+      const [{ terminal }] = await Promise.all([stream, marker]);
+
+      expect(terminal.success).toBe(true);
+      if (terminal.success) expect(terminal.result).toBe("late");
+      expect(order).toEqual(["terminal-delivery", "handler-complete"]);
+    } finally {
+      ws.removeEventListener("message", observer);
+      ws.close();
+    }
+  });
+
+  it("reports a non-serializable callable result as an RPC error", async () => {
+    const ws = await connectWS(rootWsPath(uniqueName()));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      const response = await callRPC(ws, "nonSerializableResult");
+      expect(response.success).toBe(false);
+      if (!response.success) expect(response.error).toContain("BigInt");
+    } finally {
+      consoleError.mockRestore();
+      ws.close();
+    }
+  });
+
+  it("reports a non-serializable streaming chunk as an RPC error", async () => {
+    const ws = await connectWS(wsPath(uniqueName(), uniqueName()));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      const { terminal } = await callStreamingRPC(
+        ws,
+        "nonSerializableStreamingResponse"
+      );
+      expect(terminal.success).toBe(false);
+      if (!terminal.success) expect(terminal.error).toContain("BigInt");
+    } finally {
+      consoleError.mockRestore();
+      ws.close();
+    }
+  });
+
+  it("delivers every chunk from a burst stream while another RPC is in flight", async () => {
+    const ws = await connectWS(wsPath(uniqueName(), uniqueName()));
+    try {
+      const stream = callStreamingRPC(ws, "burstStreamingEcho", [250]);
+      const concurrent = await callRPC(ws, "fastEcho", ["alongside-burst"]);
+      expect(concurrent.success).toBe(true);
+
+      const { chunks, terminal } = await stream;
+      expect(chunks).toEqual(Array.from({ length: 250 }, (_, index) => index));
+      expect(terminal.success).toBe(true);
+      if (terminal.success) expect(terminal.result).toBe(250);
     } finally {
       ws.close();
     }

@@ -1087,6 +1087,91 @@ export class CustomBoundSubAgentParent extends Agent {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  onStart(): void {
+    const handleMessage = this.onMessage.bind(this);
+    this.onMessage = async (connection, message) => {
+      await handleMessage(connection, message);
+      if (typeof message !== "string") return;
+
+      try {
+        const parsed = JSON.parse(message) as { method?: unknown };
+        if (parsed.method === "streamWithLateDelivery") {
+          connection.send("late-stream-handler-complete");
+        }
+      } catch {
+        // Non-JSON application messages are unrelated to this test fixture.
+      }
+    };
+  }
+
+  @callable()
+  healthyEcho(value: string): string {
+    return `healthy:${value}`;
+  }
+
+  @callable()
+  nonSerializableResult(): unknown {
+    return BigInt(1);
+  }
+
+  @callable({ streaming: true })
+  streamWithLateDelivery(stream: StreamingResponse): void {
+    const { connection } = getCurrentAgent();
+    if (!connection) throw new Error("Expected an active connection");
+
+    const originalSend = connection.send.bind(connection) as (
+      message: string
+    ) => void;
+    let sendIndex = 0;
+    connection.send = ((message: string) => {
+      const currentSend = sendIndex++;
+      if (currentSend > 1) return originalSend(message);
+
+      const delayMs = currentSend === 0 ? 25 : 75;
+      return new Promise<void>((resolve) => {
+        setTimeout(() => {
+          originalSend(message);
+          resolve();
+        }, delayMs);
+      }) as unknown as void;
+    }) as typeof connection.send;
+
+    stream.send("first");
+    this.ctx.waitUntil(
+      new Promise<void>((resolve) => {
+        setTimeout(() => {
+          stream.end("late");
+          resolve();
+        }, 0);
+      })
+    );
+  }
+
+  @callable()
+  forceReplyDeliveryFailure(throwCallableError: boolean): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) throw new Error("Expected an active connection");
+
+    const originalSend = connection.send.bind(connection) as (
+      message: string
+    ) => void;
+    let failuresRemaining = 1;
+    connection.send = ((message: string) => {
+      if (failuresRemaining > 0) {
+        failuresRemaining--;
+        return Promise.reject(
+          new Error("Intentional asynchronous reply delivery failure")
+        ) as unknown as void;
+      }
+      return originalSend(message);
+    }) as typeof connection.send;
+
+    if (throwCallableError) {
+      throw new Error("Intentional callable failure");
+    }
+    return "completed";
+  }
+
   async onMessage(
     connection: { send(message: string): void },
     message: string | ArrayBuffer
@@ -2282,6 +2367,41 @@ export class SlowReplySubAgent extends Agent {
 
     new StreamingResponse(explicitConnection, "manual-stream").end("target");
     return explicitConnectionUsed;
+  }
+
+  @callable()
+  createStreamWithRejectedDelivery(): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) throw new Error("Expected an active connection");
+
+    const rejectingConnection = new Proxy(connection, {
+      get(target, property, receiver) {
+        if (property === "send") {
+          return () =>
+            Promise.reject(
+              new Error("Intentional public stream delivery failure")
+            );
+        }
+        return Reflect.get(target, property, receiver);
+      }
+    });
+    new StreamingResponse(rejectingConnection, "manual-rejection").send(
+      "target"
+    );
+    return "created";
+  }
+
+  @callable({ streaming: true })
+  nonSerializableStreamingResponse(stream: StreamingResponse): void {
+    stream.send(BigInt(1));
+  }
+
+  @callable({ streaming: true })
+  burstStreamingEcho(stream: StreamingResponse, count: number): void {
+    for (let index = 0; index < count; index++) {
+      stream.send(index);
+    }
+    stream.end(count);
   }
 
   @callable({ streaming: true })
