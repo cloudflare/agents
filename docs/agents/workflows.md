@@ -246,7 +246,8 @@ const instanceId = await this.runWorkflow(
   {
     id: "custom-id", // optional - auto-generated if not provided
     metadata: { userId: "user-456", priority: "high" }, // optional - for querying
-    agentBinding: "MyAgent" // optional - auto-detected from class name if not provided
+    agentBinding: "MyAgent", // optional - auto-detected from class name if not provided
+    idempotencyKey: "process-user-456" // optional - deduplicates active instances
   }
 );
 ```
@@ -258,6 +259,7 @@ const instanceId = await this.runWorkflow(
 - `options.id` - Custom workflow ID (auto-generated if not provided)
 - `options.metadata` - Optional metadata stored for querying (not passed to workflow)
 - `options.agentBinding` - Agent binding name (auto-detected from class name if not provided). When called from a sub-agent, this is the root Agent binding name.
+- `options.idempotencyKey` - Logical key that allows at most one active workflow for the same workflow binding in this Agent or sub-agent facet. Concurrent calls return the existing workflow ID. The key becomes available again after the tracked workflow completes, errors, or is terminated.
 
 **Returns:** Workflow instance ID
 
@@ -525,20 +527,23 @@ Workflows started with `runWorkflow()` are automatically tracked in the originat
 
 ### `cf_agents_workflows` Table
 
-| Column          | Type    | Description                     |
-| --------------- | ------- | ------------------------------- |
-| `id`            | TEXT    | Internal row ID                 |
-| `workflow_id`   | TEXT    | Cloudflare workflow instance ID |
-| `workflow_name` | TEXT    | Workflow binding name           |
-| `status`        | TEXT    | Current status                  |
-| `metadata`      | TEXT    | JSON metadata (for querying)    |
-| `error_name`    | TEXT    | Error name (if failed)          |
-| `error_message` | TEXT    | Error message (if failed)       |
-| `created_at`    | INTEGER | Unix timestamp                  |
-| `updated_at`    | INTEGER | Unix timestamp                  |
-| `completed_at`  | INTEGER | Unix timestamp (when done)      |
+| Column            | Type    | Description                     |
+| ----------------- | ------- | ------------------------------- |
+| `id`              | TEXT    | Internal row ID                 |
+| `workflow_id`     | TEXT    | Cloudflare workflow instance ID |
+| `idempotency_key` | TEXT    | Optional active-instance key    |
+| `workflow_name`   | TEXT    | Workflow binding name           |
+| `status`          | TEXT    | Current status                  |
+| `metadata`        | TEXT    | JSON metadata (for querying)    |
+| `error_name`      | TEXT    | Error name (if failed)          |
+| `error_message`   | TEXT    | Error message (if failed)       |
+| `created_at`      | INTEGER | Unix timestamp                  |
+| `updated_at`      | INTEGER | Unix timestamp                  |
+| `completed_at`    | INTEGER | Unix timestamp (when done)      |
 
 Note: Workflow params and output are not stored by default. Use `metadata` to store queryable information, and store large payloads in your own tables if needed.
+
+An idempotency key is scoped to the workflow binding and the originating Agent storage. It does not replace the Workflow instance ID and does not shorten Workflow or tracking retention. Terminal history rows retain their key, but only non-terminal rows reserve it.
 
 ### Workflow Status Values
 
