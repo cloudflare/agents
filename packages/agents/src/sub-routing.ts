@@ -148,22 +148,40 @@ function validateRootAgentName(name: string): string {
   return name;
 }
 
-/** @internal Build the path tail handled recursively by sub-agent routing. */
-export function buildSubAgentPath(
+function serializeSubAgentPath(
   path: ReadonlyArray<AgentPathStep>,
-  leafPath?: string
+  leafPath: string | undefined,
+  validate: boolean
 ): string {
   if (path.length === 0) return leafPath ?? "";
 
   const segments = path.flatMap((child) => [
     SUB_PREFIX,
-    encodeAgentClassName(child.className),
-    encodeChildAgentName(child.name)
+    validate
+      ? encodeAgentClassName(child.className)
+      : camelCaseToKebabCase(child.className),
+    validate ? encodeChildAgentName(child.name) : encodeURIComponent(child.name)
   ]);
   const subPath = segments.join("/");
   if (!leafPath) return subPath;
   const normalizedLeaf = leafPath.startsWith("/") ? leafPath : `/${leafPath}`;
   return `${subPath}${normalizedLeaf}`;
+}
+
+/** @internal Build the strictly validated path tail for sub-agent routing. */
+export function buildSubAgentPath(
+  path: ReadonlyArray<AgentPathStep>,
+  leafPath?: string
+): string {
+  return serializeSubAgentPath(path, leafPath, true);
+}
+
+/** @internal Preserve React's tolerant path composition for disabled placeholders. */
+export function buildSubAgentPathUnchecked(
+  path: ReadonlyArray<AgentPathStep>,
+  leafPath?: string
+): string {
+  return serializeSubAgentPath(path, leafPath, false);
 }
 
 /**

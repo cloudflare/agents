@@ -19,7 +19,7 @@ import {
   AgentConnectionError as AgentConnectionErrorCtor,
   isTerminalCloseEvent
 } from "./client";
-import { buildSubAgentPath } from "./sub-routing";
+import { buildSubAgentPathUnchecked } from "./sub-routing";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
 import {
@@ -85,7 +85,7 @@ function buildSubPath(
   subChain: ReadonlyArray<{ agent: string; name: string }>,
   extraPath?: string
 ): string {
-  return buildSubAgentPath(
+  return buildSubAgentPathUnchecked(
     subChain.map((step) => ({ className: step.agent, name: step.name })),
     extraPath
   );
