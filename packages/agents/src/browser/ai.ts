@@ -491,7 +491,9 @@ export function createQuickActionTools(
             .optional()
             .describe("What to extract, in natural language"),
           schema: z
-            .unknown()
+            .record(z.string(), z.unknown(), {
+              error: "Schema must be a JSON object"
+            })
             .optional()
             .describe("Optional JSON Schema describing the desired output")
         })
