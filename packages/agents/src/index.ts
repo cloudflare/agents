@@ -10848,21 +10848,31 @@ export class Agent<
    * caller treats as "drop this event" rather than recreating the
    * target (issue #2003).
    *
+   * The one call site (`_cf_resolveSubAgentConnection`) is only
+   * reached via a real hibernatable WebSocket, which — per the
+   * facets-never-own-real-sockets invariant (issue #1677) — means
+   * `this` is always the root, so `_parentPath` is empty and
+   * `rootClassName` is always this DO's own class identifier. If that
+   * identifier didn't resolve via `ctx.exports`, the very first
+   * `subAgent()`/`connect` for this root would already have thrown
+   * before any registry row (or client socket) could exist. So unlike
+   * {@link _cf_resolveSubAgent}, this intentionally skips
+   * re-validating `ctx.exports`/the child class/the root namespace —
+   * a missing registry row is the only reachable "the sub-agent is
+   * gone" signal on this path.
+   *
    * @internal
    */
   private async _cf_resolveExistingSubAgent(
     className: string,
     name: string
   ): Promise<unknown> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    if (!ctx.facets || !ctx.exports) return null;
+    const ctx = this.ctx as unknown as FacetCapableCtx;
 
     const row = this._subAgentRegistryRow(className, name);
     if (!row) return null;
 
     const Cls = ctx.exports[className];
-    if (!Cls) return null;
-
     const identityName =
       row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
       typeof row.identity_name === "string"
@@ -10872,8 +10882,11 @@ export class Agent<
     const rootClassName =
       this._parentPath[0]?.className ??
       (this.constructor as { name: string }).name;
-    const rootNs = ctx.exports[rootClassName];
-    if (!rootNs?.idFromName) return null;
+    // See the reachability note above: this DO is always the root on
+    // this path, so `rootClassName` always resolved via `ctx.exports`
+    // by the time any registry row (or client socket) could exist.
+    const rootNs = ctx.exports[rootClassName] as DurableObjectClass &
+      Pick<DurableObjectNamespace, "idFromName">;
 
     const facetKey = `${className}\0${name}`;
     const facetId = rootNs.idFromName(identityName);
