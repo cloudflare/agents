@@ -192,6 +192,33 @@ describe("#1913 — resume replay burst", () => {
     }
   );
 
+  it("shows a replayed burst that is not followed by a terminator", async () => {
+    // A burst is coalesced only for the turn of the event loop that delivers
+    // it. Nothing may wait on `replayComplete` or `done` to become visible,
+    // and no content may be held across the frames that drive the hook's own
+    // replay bookkeeping.
+    const h = await mount("replay-no-terminator");
+    await vi.waitFor(() =>
+      expect(countType(h.sentMessages, RESUME_REQUEST)).toBe(1)
+    );
+
+    dispatch(h.target, { id: "req-open", type: RESUMING });
+    await sleep(10);
+
+    for (const frame of replayFrames("req-open", 120)) {
+      dispatch(h.target, frame);
+    }
+    await sleep(60);
+
+    expect({
+      chars: h.read("chars"),
+      error: h.read("error")
+    }).toEqual({
+      chars: String(expectedChars(120)),
+      error: ""
+    });
+  });
+
   it("keeps replayed content when the resumed turn ends in an error", async () => {
     const h = await mount("replay-error");
     await vi.waitFor(() =>

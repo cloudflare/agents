@@ -25,6 +25,28 @@ function createRecorder() {
   return { controller, enqueued, events };
 }
 
+/**
+ * A batch whose end-of-turn window is closed manually, so tests decide when
+ * the turn ends instead of racing a timer.
+ */
+function createBatch(
+  controller: ReadableStreamDefaultController<UIMessageChunk>
+) {
+  let pending: (() => void) | undefined;
+  const batch = new ReplayChunkBatch(controller, (flush) => {
+    pending = flush;
+    return () => {
+      pending = undefined;
+    };
+  });
+  return {
+    batch,
+    /** Runs the end-of-turn flush, as the event loop would. */
+    endTurn: () => pending?.(),
+    windowIsOpen: () => pending !== undefined
+  };
+}
+
 const textDelta = (id: string, delta: string): UIMessageChunk => ({
   delta,
   id,
@@ -40,25 +62,25 @@ const replayFrame = (chunk: UIMessageChunk) => ({
 describe("ReplayChunkBatch", () => {
   it("merges consecutive deltas of the same part", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
     batch.push(textDelta("t1", "Hello"));
     batch.push(textDelta("t1", " "));
     batch.push(textDelta("t1", "world"));
-    batch.flush(controller);
+    batch.flush();
 
     expect(enqueued).toEqual([textDelta("t1", "Hello world")]);
   });
 
   it("does not merge across different parts, preserving order", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
     batch.push(textDelta("t1", "a"));
     batch.push({ id: "r1", type: "reasoning-delta", delta: "why" });
     batch.push(textDelta("t1", "b"));
     batch.push(textDelta("t2", "c"));
-    batch.flush(controller);
+    batch.flush();
 
     expect(enqueued).toEqual([
       textDelta("t1", "a"),
@@ -70,7 +92,7 @@ describe("ReplayChunkBatch", () => {
 
   it("merges tool input deltas by tool call id", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
     batch.push({
       inputTextDelta: '{"a"',
@@ -87,7 +109,7 @@ describe("ReplayChunkBatch", () => {
       toolCallId: "c2",
       type: "tool-input-delta"
     });
-    batch.flush(controller);
+    batch.flush();
 
     expect(enqueued).toEqual([
       { inputTextDelta: '{"a":1}', toolCallId: "c1", type: "tool-input-delta" },
@@ -97,7 +119,7 @@ describe("ReplayChunkBatch", () => {
 
   it("keeps deltas carrying provider metadata whole", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
     const withMetadata: UIMessageChunk = {
       delta: "b",
       id: "t1",
@@ -108,7 +130,7 @@ describe("ReplayChunkBatch", () => {
     batch.push(textDelta("t1", "a"));
     batch.push(withMetadata);
     batch.push(textDelta("t1", "c"));
-    batch.flush(controller);
+    batch.flush();
 
     expect(enqueued).toEqual([
       textDelta("t1", "a"),
@@ -119,14 +141,14 @@ describe("ReplayChunkBatch", () => {
 
   it("empties itself on flush", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
     batch.push(textDelta("t1", "a"));
     expect(batch.isEmpty).toBe(false);
-    batch.flush(controller);
+    batch.flush();
     expect(batch.isEmpty).toBe(true);
 
-    batch.flush(controller);
+    batch.flush();
     expect(enqueued).toHaveLength(1);
   });
 });
@@ -134,18 +156,10 @@ describe("ReplayChunkBatch", () => {
 describe("applyChatResponseFrame", () => {
   it("buffers mid-burst replay chunks instead of enqueuing them", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "a"))
-    );
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "b"))
-    );
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "b")));
 
     expect(enqueued).toEqual([]);
     expect(batch.isEmpty).toBe(false);
@@ -153,19 +167,11 @@ describe("applyChatResponseFrame", () => {
 
   it("flushes at replayComplete, which carries an empty body", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "a"))
-    );
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "b"))
-    );
-    applyChatResponseFrame(batch, controller, {
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "b")));
+    applyChatResponseFrame(batch, {
       body: "",
       done: false,
       replay: true,
@@ -177,14 +183,10 @@ describe("applyChatResponseFrame", () => {
 
   it("flushes at done for streams that never send replayComplete", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "a"))
-    );
-    applyChatResponseFrame(batch, controller, {
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    applyChatResponseFrame(batch, {
       body: "",
       done: true,
       replay: true
@@ -195,14 +197,10 @@ describe("applyChatResponseFrame", () => {
 
   it("flushes the batch before the first live chunk", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "a"))
-    );
-    applyChatResponseFrame(batch, controller, {
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    applyChatResponseFrame(batch, {
       body: JSON.stringify(textDelta("t1", "live")),
       done: false
     });
@@ -212,9 +210,9 @@ describe("applyChatResponseFrame", () => {
 
   it("passes live chunks straight through", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
-    applyChatResponseFrame(batch, controller, {
+    applyChatResponseFrame(batch, {
       body: JSON.stringify(textDelta("t1", "a")),
       done: false
     });
@@ -225,20 +223,68 @@ describe("applyChatResponseFrame", () => {
 
   it("skips malformed bodies without stranding the batch", () => {
     const { controller, enqueued } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "a"))
-    );
-    applyChatResponseFrame(batch, controller, {
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    applyChatResponseFrame(batch, {
       body: "not json",
       done: false,
       replay: true
     });
-    applyChatResponseFrame(batch, controller, { body: "not json", done: true });
+    applyChatResponseFrame(batch, { body: "not json", done: true });
 
+    expect(enqueued).toEqual([textDelta("t1", "a")]);
+  });
+});
+
+describe("the end-of-turn window", () => {
+  it("flushes a burst that never sends a terminator", () => {
+    const { controller, enqueued } = createRecorder();
+    const { batch, endTurn } = createBatch(controller);
+
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "b")));
+    expect(enqueued).toEqual([]);
+
+    endTurn();
+
+    expect(enqueued).toEqual([textDelta("t1", "ab")]);
+  });
+
+  it("never holds chunks across turns, so replay passes stay separate", () => {
+    const { controller, enqueued } = createRecorder();
+    const { batch, endTurn } = createBatch(controller);
+
+    // A second announcement of the same stream replays the turn again (#1733).
+    // The hook repairs that duplicate by inspecting messages the first pass
+    // already applied, so two passes must never merge into one batch.
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "Hello")));
+    endTurn();
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "Hello")));
+    endTurn();
+
+    expect(enqueued).toEqual([
+      textDelta("t1", "Hello"),
+      textDelta("t1", "Hello")
+    ]);
+  });
+
+  it("closes the window when a terminator arrives first", () => {
+    const { controller, enqueued } = createRecorder();
+    const { batch, endTurn, windowIsOpen } = createBatch(controller);
+
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    expect(windowIsOpen()).toBe(true);
+
+    applyChatResponseFrame(batch, {
+      body: "",
+      done: false,
+      replay: true,
+      replayComplete: true
+    });
+    expect(windowIsOpen()).toBe(false);
+
+    endTurn();
     expect(enqueued).toEqual([textDelta("t1", "a")]);
   });
 });
@@ -247,21 +293,17 @@ describe("failChatStream", () => {
   it("errors the stream directly when nothing is buffered", () => {
     const { controller, events } = createRecorder();
 
-    failChatStream(new ReplayChunkBatch(), controller, "boom");
+    failChatStream(new ReplayChunkBatch(controller), "boom");
 
     expect(events).toEqual(["error:boom"]);
   });
 
   it("delivers buffered content before the error (#1575)", () => {
     const { controller, enqueued, events } = createRecorder();
-    const batch = new ReplayChunkBatch();
+    const { batch } = createBatch(controller);
 
-    applyChatResponseFrame(
-      batch,
-      controller,
-      replayFrame(textDelta("t1", "a"))
-    );
-    failChatStream(batch, controller, "model exploded");
+    applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
+    failChatStream(batch, "model exploded");
 
     expect(enqueued).toEqual([
       textDelta("t1", "a"),
