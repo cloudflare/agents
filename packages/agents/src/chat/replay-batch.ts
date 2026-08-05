@@ -19,14 +19,23 @@ import type { UIMessageChunk } from "ai";
  * The window collects replayed chunks and merges consecutive deltas of the same
  * part, so the burst applies as roughly one chunk per message part.
  *
- * The window is deliberately short: it closes at the end of the event-loop turn
- * that opened it, or earlier at a burst boundary. That bound is what makes the
- * burst safe to coalesce — a burst spread over several turns cannot trip
- * React's guard in the first place, and holding chunks longer would change the
- * order in which the hook's own replay bookkeeping in `chat/react.tsx` sees
- * state. That bookkeeping repairs a second replay of the same turn (#1733) by
- * inspecting messages already applied, so replayed content must never be held
- * across the frames that trigger it.
+ * The window is deliberately short. It is opened by the first buffered chunk
+ * and closed by a `setTimeout(0)`, which runs once the task that delivered the
+ * burst finishes. Coalescing is therefore opportunistic: a burst delivered in
+ * one task is merged, and a burst spread over several tasks is delivered as it
+ * arrives — which is harmless, because only a burst inside a single task can
+ * outrun React's commit loop.
+ *
+ * Correctness does not depend on that timer winning any race, because the
+ * timer is not the only thing that closes the window:
+ *
+ * - A burst boundary flushes synchronously (`applyChatResponseFrame`).
+ * - The transport flushes before it closes or detaches a stream, so a
+ *   disconnect mid-burst cannot lose received content.
+ * - A replayed `start` for a message already buffered supersedes the buffered
+ *   pass (`supersedesBufferedPass`), so two replays of one turn can never be
+ *   concatenated — the case the hook's own bookkeeping repairs when the passes
+ *   are applied separately (#1733).
  */
 export class ReplayChunkBatch {
   /** Buffered chunks, in wire order. Owned by the batch — merged in place. */
@@ -36,9 +45,15 @@ export class ReplayChunkBatch {
   /** Cancels the pending end-of-turn flush. Set while the window is open. */
   private cancelWindow: (() => void) | undefined;
 
+  /** `messageId` of the buffered replay pass, if it began with a `start`. */
+  private startMessageId: string | undefined;
+
   constructor(
     private readonly controller: ReadableStreamDefaultController<UIMessageChunk>,
-    /** Schedules the end-of-turn flush. Overridable for deterministic tests. */
+    /**
+     * Schedules the window's flush and returns a canceller. Runs after the
+     * current task by default; overridable for deterministic tests.
+     */
     private readonly closeWindow: (flush: () => void) => () => void = (
       flush
     ) => {
@@ -46,6 +61,11 @@ export class ReplayChunkBatch {
       return () => clearTimeout(timer);
     }
   ) {}
+
+  /** `messageId` of the buffered pass, or undefined if none is buffered. */
+  get bufferedStartMessageId(): string | undefined {
+    return this.startMessageId;
+  }
 
   get isEmpty(): boolean {
     return this.chunks.length === 0;
@@ -68,16 +88,27 @@ export class ReplayChunkBatch {
     if (this.chunks.length === 0) {
       this.cancelWindow = this.closeWindow(() => {
         this.cancelWindow = undefined;
-        try {
-          this.flush();
-        } catch {
-          // The stream can close before the window elapses.
-        }
+        this.flush();
       });
     }
 
+    if (chunk.type === "start") {
+      this.startMessageId = chunk.messageId;
+    }
     this.chunks.push(chunk);
     this.tailMergeKey = key;
+  }
+
+  /**
+   * Drops the buffered pass. Only for a pass that a newer replay of the same
+   * message supersedes — nothing buffered has reached the consumer yet.
+   */
+  discard(): void {
+    this.cancelWindow?.();
+    this.cancelWindow = undefined;
+    this.chunks = [];
+    this.tailMergeKey = null;
+    this.startMessageId = undefined;
   }
 
   /** Enqueues the buffered batch in wire order and closes the window. */
@@ -89,8 +120,15 @@ export class ReplayChunkBatch {
     const batch = this.chunks;
     this.chunks = [];
     this.tailMergeKey = null;
-    for (const chunk of batch) {
-      this.controller.enqueue(chunk);
+    this.startMessageId = undefined;
+    try {
+      for (const chunk of batch) {
+        this.controller.enqueue(chunk);
+      }
+    } catch {
+      // The stream is already closed or errored, which discards its queue
+      // anyway. Never let a flush throw: callers flush on their way to
+      // closing a stream, and must still close it.
     }
   }
 
@@ -116,6 +154,7 @@ export class ReplayChunkBatch {
 /** The subset of `cf_agent_use_chat_response` a chunk stream needs to route a frame. */
 type ChatResponseFrame = {
   body?: string;
+  continuation?: boolean;
   done?: boolean;
   replay?: boolean;
   replayComplete?: boolean;
@@ -160,7 +199,33 @@ export function applyChatResponseFrame(
     return;
   }
 
+  if (supersedesBufferedPass(batch, chunk, frame)) {
+    batch.discard();
+  }
+
   batch.push(chunk);
+}
+
+/**
+ * True when `chunk` starts a replay pass that makes the buffered one redundant.
+ *
+ * A stream can announce itself twice, so the same turn can replay twice before
+ * either pass is delivered (#1733). Every replay rebuilds the message from its
+ * first chunk, so the newer pass is a superset of the buffered one; delivering
+ * both would duplicate the message's parts. Continuation replays are excluded:
+ * they append to an existing message rather than rebuild it.
+ */
+function supersedesBufferedPass(
+  batch: ReplayChunkBatch,
+  chunk: UIMessageChunk,
+  frame: ChatResponseFrame
+): boolean {
+  return (
+    chunk.type === "start" &&
+    frame.continuation !== true &&
+    chunk.messageId !== undefined &&
+    chunk.messageId === batch.bufferedStartMessageId
+  );
 }
 
 /**
