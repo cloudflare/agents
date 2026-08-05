@@ -2149,6 +2149,40 @@ importers:
         specifier: ^4.115.0
         version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
 
+  examples/plivo-voice-agent:
+    dependencies:
+      '@cloudflare/voice':
+        specifier: '*'
+        version: link:../../packages/voice
+      '@cloudflare/voice-plivo':
+        specifier: '*'
+        version: link:../../voice-providers/plivo
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
+      workers-ai-provider:
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260729.1
+        version: 5.20260729.1
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.115.0
+        version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
+
   examples/push-notifications:
     dependencies:
       '@cloudflare/kumo':
@@ -4728,6 +4762,12 @@ importers:
         version: link:../../packages/voice
 
   voice-providers/elevenlabs:
+    dependencies:
+      '@cloudflare/voice':
+        specifier: '>=0.3.3 <1.0.0'
+        version: link:../../packages/voice
+
+  voice-providers/plivo:
     dependencies:
       '@cloudflare/voice':
         specifier: '>=0.3.3 <1.0.0'
