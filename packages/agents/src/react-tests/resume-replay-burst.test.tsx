@@ -219,6 +219,34 @@ describe("#1913 — resume replay burst", () => {
     });
   });
 
+  it("keeps replayed content when the socket closes during the burst", async () => {
+    // A second disconnect can arrive before the coalescing window closes.
+    // Content already received must not be lost — it was visible before the
+    // batch existed, because each chunk was enqueued on arrival and a closed
+    // stream still yields whatever it has queued.
+    const h = await mount("replay-close");
+    await vi.waitFor(() =>
+      expect(countType(h.sentMessages, RESUME_REQUEST)).toBe(1)
+    );
+
+    dispatch(h.target, { id: "req-close", type: RESUMING });
+    await sleep(10);
+
+    for (const frame of replayFrames("req-close", 120)) {
+      dispatch(h.target, frame);
+    }
+    h.target.dispatchEvent(new Event("close"));
+    await sleep(60);
+
+    expect({
+      chars: h.read("chars"),
+      error: h.read("error")
+    }).toEqual({
+      chars: String(expectedChars(120)),
+      error: ""
+    });
+  });
+
   it("keeps replayed content when the resumed turn ends in an error", async () => {
     const h = await mount("replay-error");
     await vi.waitFor(() =>

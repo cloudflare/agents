@@ -53,6 +53,13 @@ const textDelta = (id: string, delta: string): UIMessageChunk => ({
   type: "text-delta"
 });
 
+/** One replay pass of message `m1`: `start`, `text-start`, then deltas. */
+const replayPass = (...deltas: string[]): UIMessageChunk[] => [
+  { messageId: "m1", type: "start" },
+  { id: "t1", type: "text-start" },
+  ...deltas.map((delta) => textDelta("t1", delta))
+];
+
 const replayFrame = (chunk: UIMessageChunk) => ({
   body: JSON.stringify(chunk),
   done: false,
@@ -267,6 +274,50 @@ describe("the end-of-turn window", () => {
       textDelta("t1", "Hello"),
       textDelta("t1", "Hello")
     ]);
+  });
+
+  it("supersedes a buffered pass when the same turn replays again", () => {
+    const { controller, enqueued } = createRecorder();
+    const { batch, endTurn } = createBatch(controller);
+
+    // Two announcements of one stream can replay the turn twice before either
+    // pass is delivered (#1733). Every replay rebuilds from its first chunk, so
+    // delivering both would duplicate the message's parts. This must not
+    // depend on which pass the flush timer happens to land between.
+    for (const chunk of replayPass("Hello ", "world")) {
+      applyChatResponseFrame(batch, replayFrame(chunk));
+    }
+    for (const chunk of replayPass("Hello ", "world")) {
+      applyChatResponseFrame(batch, replayFrame(chunk));
+    }
+    endTurn();
+
+    expect(enqueued).toEqual([
+      { messageId: "m1", type: "start" },
+      { id: "t1", type: "text-start" },
+      textDelta("t1", "Hello world")
+    ]);
+  });
+
+  it("keeps a continuation replay, which appends instead of rebuilding", () => {
+    const { controller, enqueued } = createRecorder();
+    const { batch, endTurn } = createBatch(controller);
+
+    for (const chunk of replayPass("first")) {
+      applyChatResponseFrame(batch, {
+        ...replayFrame(chunk),
+        continuation: true
+      });
+    }
+    for (const chunk of replayPass("second")) {
+      applyChatResponseFrame(batch, {
+        ...replayFrame(chunk),
+        continuation: true
+      });
+    }
+    endTurn();
+
+    expect(enqueued).toHaveLength(6);
   });
 
   it("closes the window when a terminator arrives first", () => {

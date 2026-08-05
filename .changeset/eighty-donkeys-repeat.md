@@ -18,10 +18,12 @@ boundary (`replayComplete`, `done`, or the first live chunk). Applying a
 replayed prefix is now proportional to the number of message parts rather than
 the number of chunks.
 
-The window is bounded to a single turn on purpose: a burst spread over several
-turns cannot trip React's guard, and holding replayed chunks any longer would
-reorder them against the hook's own replay bookkeeping, which repairs a second
-replay of the same turn (#1733) by inspecting already-applied messages.
+The window is short on purpose: only a burst delivered inside one task can
+outrun React's commit loop, so coalescing anything wider buys nothing and
+delays content. Correctness does not depend on the flush timer: a burst
+boundary flushes synchronously, the transport flushes before it closes or
+detaches a stream, and a second replay of the same turn supersedes the buffered
+pass rather than being appended to it (#1733).
 
 Cross-part ordering is unchanged, deltas carrying `providerMetadata` are kept
 whole, and an errored resumed turn still delivers its replayed content before
