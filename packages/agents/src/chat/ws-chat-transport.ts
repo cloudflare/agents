@@ -10,6 +10,11 @@
 
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { nanoid } from "nanoid";
+import {
+  applyChatResponseFrame,
+  failChatStream,
+  ReplayChunkBatch
+} from "./replay-batch";
 import { MessageType, type OutgoingMessage } from "./wire-types";
 
 /**
@@ -689,6 +694,7 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         readerController = controller;
+        const replayBatch = new ReplayChunkBatch();
         let timeout: ReturnType<typeof setTimeout> | undefined;
 
         const armTimeout = (delay: number) => {
@@ -763,19 +769,16 @@ export class WebSocketChatTransport<
 
             if (data.error) {
               finish(() =>
-                controller.error(new Error(data.body || "Stream error"))
+                failChatStream(
+                  replayBatch,
+                  controller,
+                  data.body || "Stream error"
+                )
               );
               return;
             }
 
-            if (data.body?.trim()) {
-              try {
-                const chunk = JSON.parse(data.body) as UIMessageChunk;
-                controller.enqueue(chunk);
-              } catch {
-                // Skip malformed chunk bodies
-              }
-            }
+            applyChatResponseFrame(replayBatch, controller, data);
 
             if (data.done) {
               finish(() => controller.close());
@@ -868,6 +871,7 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         streamController = controller;
+        const replayBatch = new ReplayChunkBatch();
 
         const onMessage = (event: MessageEvent) => {
           try {
@@ -880,20 +884,16 @@ export class WebSocketChatTransport<
 
             if (data.error) {
               finish(() =>
-                controller.error(new Error(data.body || "Stream error"))
+                failChatStream(
+                  replayBatch,
+                  controller,
+                  data.body || "Stream error"
+                )
               );
               return;
             }
 
-            // Parse and enqueue the chunk
-            if (data.body?.trim()) {
-              try {
-                const chunk = JSON.parse(data.body) as UIMessageChunk;
-                controller.enqueue(chunk);
-              } catch {
-                // Skip malformed chunk bodies
-              }
-            }
+            applyChatResponseFrame(replayBatch, controller, data);
 
             if (data.done) {
               finish(() => controller.close());
