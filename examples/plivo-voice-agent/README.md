@@ -33,8 +33,8 @@ Audio back to caller via Plivo
 From the repository root:
 
 ```bash
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 The build compiles the workspace packages the example imports.
@@ -51,7 +51,7 @@ Fill in `.env` with the values from [cx.plivo.com](https://cx.plivo.com) → Acc
 ### 3. Deploy
 
 ```bash
-npm run deploy
+pnpm run deploy
 ```
 
 This runs `wrangler deploy`, reads the deployed Worker URL, and points your Plivo application and phone number at it automatically.
@@ -63,7 +63,7 @@ Dial the Plivo number. The agent greets the caller and responds in real time. Sp
 ## Local development
 
 ```bash
-npm run dev
+pnpm run dev
 ```
 
-Plivo's cloud can't reach localhost, so `npm run dev` starts the Worker, opens a [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) tunnel, and points your Plivo application at the tunnel URL — the same one-command flow as deploy. Install `cloudflared` first; the script prints a link if it's missing. Run `npm run deploy` afterward to point Plivo back at your deployed Worker.
+Plivo's cloud can't reach localhost, so `pnpm run dev` starts the Worker, opens a [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) tunnel, and points your Plivo application at the tunnel URL — the same one-command flow as deploy. Install `cloudflared` first; the script prints a link if it's missing. Run `pnpm run deploy` afterward to point Plivo back at your deployed Worker.

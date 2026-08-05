@@ -141,9 +141,7 @@ tts = new PlivoPCMTTS(this.env.AI);
 
 ## Interrupt handling
 
-When the caller speaks while the agent is talking, the adapter sends `clearAudio` to Plivo to cut off playback immediately. Speech is detected via energy threshold on the inbound audio — no separate VAD model required. Flux STT (`WorkersAIFluxSTT`) also fires `onSpeechStart` which triggers a pipeline abort on the agent side.
-
-The adapter uses Plivo's `clearAudio` event for this interrupt behavior.
+When the caller speaks while the agent is talking, the adapter sends `clearAudio` to Plivo to cut off playback immediately. An inbound energy threshold provides a low-latency local signal without a separate VAD model. The adapter also translates the agent's `playback_interrupt` message into `clearAudio`, so speech detected by Flux STT (`WorkersAIFluxSTT`) interrupts Plivo playback even when it falls below the local threshold.
 
 ## Limitations
 

@@ -78,6 +78,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -437,17 +438,42 @@ describe("barge-in", () => {
     expect(harness.agentSocket.binarySent).toHaveLength(2);
   });
 
-  it("discards the first agent chunk after barge-in, then resumes", async () => {
+  it("holds stale audio until the agent confirms interruption", async () => {
     const harness = createHarness();
     await startCall(harness);
     speak(harness); // playAudio #1
     expect(playAudios(harness)).toHaveLength(1);
     for (let i = 0; i < 3; i++) sendMedia(harness, loud); // gate + clearAudio
-    speak(harness); // discarded (stale TTS), clears gate
+
+    speak(harness);
+    speak(harness);
     expect(playAudios(harness)).toHaveLength(1);
-    speak(harness); // resumes
+
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "playback_interrupt" })
+    });
+    expect(clearAudios(harness)).toHaveLength(1);
+
+    speak(harness); // first audio from the new reply must be preserved
     expect(playAudios(harness)).toHaveLength(2);
   });
+
+  it.each(["listening", "thinking"])(
+    "releases the audio gate at the %s status boundary",
+    async (status) => {
+      const harness = createHarness();
+      await startCall(harness);
+      speak(harness);
+      for (let i = 0; i < 3; i++) sendMedia(harness, loud);
+
+      harness.agentSocket.emit("message", {
+        data: JSON.stringify({ type: "status", status })
+      });
+      speak(harness);
+
+      expect(playAudios(harness)).toHaveLength(2);
+    }
+  );
 
   it("requires a fresh burst to barge in again after un-gating", async () => {
     const harness = createHarness();
@@ -455,23 +481,39 @@ describe("barge-in", () => {
     speak(harness);
     for (let i = 0; i < 3; i++) sendMedia(harness, loud); // fires once
     expect(clearAudios(harness)).toHaveLength(1);
-    speak(harness); // discarded → clears the gate
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "playback_interrupt" })
+    });
+    speak(harness);
     // The debounce counter reset on the first fire, so a single loud frame
     // must NOT immediately re-fire while the agent resumes.
     sendMedia(harness, loud);
     expect(clearAudios(harness)).toHaveLength(1);
   });
 
-  it("ignores playback_interrupt from agent (adapter is agent-agnostic)", async () => {
+  it("clears Plivo when the agent detects an interrupt", async () => {
     const harness = createHarness();
     await startCall(harness);
+    speak(harness);
     harness.agentSocket.emit("message", {
       data: JSON.stringify({ type: "playback_interrupt" })
     });
-    // no clearAudio — only inbound speech energy triggers it
-    expect(clearAudios(harness)).toHaveLength(0);
-    // audio still flows
-    speak(harness);
-    expect(playAudios(harness)).toHaveLength(1);
+    expect(clearAudios(harness)).toHaveLength(1);
+  });
+
+  it("keeps barge-in armed for the duration of queued audio", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    // Two seconds of 16kHz, 16-bit mono PCM, sent as one TTS sentence.
+    harness.agentSocket.emit("message", {
+      data: new Int16Array(32_000).fill(5000).buffer
+    });
+    vi.setSystemTime(1500);
+    for (let i = 0; i < 3; i++) sendMedia(harness, loud);
+
+    expect(clearAudios(harness)).toHaveLength(1);
   });
 });

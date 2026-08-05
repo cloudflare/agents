@@ -67,13 +67,18 @@ describe("setupPlivoApplication", () => {
     });
   });
 
-  it("pages past the first page to find an existing application", async () => {
+  it("pages past the first page using Plivo pagination metadata", async () => {
     // App lives on page 2 — must be found and updated, not duplicated.
+    const firstPage = Array.from({ length: 20 }, (_, index) => ({
+      app_id: `other-${index}`,
+      app_name: `other-${index}`,
+      answer_url: ""
+    }));
     const calls = mockFetchSequence([
       {
         body: {
-          objects: [{ app_id: "a-1", app_name: "other", answer_url: "" }],
-          meta: { next: "/v1/Account/MA123/Application/?limit=20&offset=20" }
+          objects: firstPage,
+          meta: { limit: 20, offset: 0, total_count: 21 }
         }
       },
       {
@@ -85,7 +90,7 @@ describe("setupPlivoApplication", () => {
               answer_url: ""
             }
           ],
-          meta: { next: null }
+          meta: { limit: 20, offset: 20, total_count: 21 }
         }
       },
       { body: {} },
@@ -105,6 +110,39 @@ describe("setupPlivoApplication", () => {
       "https://api.plivo.com/v1/Account/MA123/Application/a-2/"
     );
     expect(calls[2].init?.method).toBe("POST");
+  });
+
+  it("falls back to page length when pagination metadata is absent", async () => {
+    const firstPage = Array.from({ length: 20 }, (_, index) => ({
+      app_id: `other-${index}`,
+      app_name: `other-${index}`,
+      answer_url: ""
+    }));
+    const calls = mockFetchSequence([
+      { body: { objects: firstPage } },
+      {
+        body: {
+          objects: [
+            {
+              app_id: "a-2",
+              app_name: "cloudflare-agents-12025551234",
+              answer_url: ""
+            }
+          ]
+        }
+      },
+      { body: {} },
+      { body: {} }
+    ]);
+
+    await setupPlivoApplication(config);
+
+    expect(calls[1].url).toBe(
+      "https://api.plivo.com/v1/Account/MA123/Application/?limit=20&offset=20"
+    );
+    expect(calls[2].url).toBe(
+      "https://api.plivo.com/v1/Account/MA123/Application/a-2/"
+    );
   });
 
   it("creates an application named for the full phone number", async () => {

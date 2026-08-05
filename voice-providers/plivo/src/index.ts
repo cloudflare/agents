@@ -61,9 +61,10 @@ const SPEECH_ENERGY_THRESHOLD = 250_000;
 // caller speech (≈60ms at 8kHz/20ms frames) — debounces transient noise.
 const SPEECH_DEBOUNCE_FRAMES = 3;
 
-// Only treat inbound speech as a barge-in if the agent sent audio within this
-// window, i.e. it is actually speaking and there is something to interrupt.
-const AGENT_SPEAKING_WINDOW_MS = 1000;
+// Keep a small allowance after estimated playback ends for network and Plivo
+// queue latency before considering the agent silent.
+const PLAYBACK_GRACE_MS = 1000;
+const AGENT_PCM_BYTES_PER_SECOND = 16_000 * 2;
 
 /**
  * Bridges Plivo audio streaming to a VoiceAgent Durable Object.
@@ -91,19 +92,19 @@ export class PlivoAdapter {
     let streamId: string | null = null;
     let agentSocket: WebSocket | null = null;
 
-    // audioGated suppresses agent audio forwarded to Plivo during an active
-    // barge-in. Raised by inbound speech energy detection; cleared
-    // automatically when the agent sends its next audio chunk.
+    // audioGated suppresses stale agent audio after local speech detection.
+    // The gate remains raised until the agent confirms that it interrupted the
+    // old pipeline or starts the next turn.
     let audioGated = false;
 
-    // Barge-in is only armed while the agent is actually speaking (we sent it
-    // audio recently) and only fires after a few consecutive loud frames, so
-    // line noise, caller backchannels, and echo of the agent's own audio
-    // don't spuriously cut playback mid-response.
-    let lastAgentAudioAt = 0;
+    // Barge-in is only armed while Plivo is estimated to still be playing
+    // queued audio and only fires after a few consecutive loud frames, so line
+    // noise, caller backchannels, and echo do not spuriously cut playback.
+    let estimatedPlaybackEndAt = 0;
     let loudFrames = 0;
 
     const sendClearAudio = () => {
+      estimatedPlaybackEndAt = 0;
       if (serverSocket.readyState === WebSocket.OPEN) {
         serverSocket.send(JSON.stringify({ event: "clearAudio", streamId }));
       }
@@ -149,6 +150,27 @@ export class PlivoAdapter {
           try {
             const msg = JSON.parse(event.data) as Record<string, unknown>;
 
+            if (msg.type === "playback_interrupt") {
+              // The agent's transcriber can detect speech that the local
+              // energy heuristic misses. Clear Plivo unless the local path
+              // already did, then release the gate at this ordered boundary.
+              if (!audioGated) sendClearAudio();
+              audioGated = false;
+              loudFrames = 0;
+              return;
+            }
+
+            if (
+              msg.type === "status" &&
+              (msg.status === "listening" ||
+                msg.status === "thinking" ||
+                msg.status === "speaking")
+            ) {
+              // Status transitions are ordered after the previous pipeline's
+              // audio, so no stale chunk can follow this boundary.
+              audioGated = false;
+            }
+
             if (
               serverSocket.readyState === WebSocket.OPEN &&
               (msg.type === "transcript" ||
@@ -168,14 +190,17 @@ export class PlivoAdapter {
           }
         } else if (event.data instanceof ArrayBuffer) {
           if (audioGated) {
-            // Discard first chunk after barge-in (may be stale TTS in flight)
-            // and clear the gate so subsequent chunks flow through.
-            audioGated = false;
+            // Audio arriving before the agent's interruption boundary belongs
+            // to the aborted response and must not refill Plivo's queue.
             return;
           }
 
           if (serverSocket.readyState === WebSocket.OPEN) {
-            lastAgentAudioAt = Date.now();
+            const now = Date.now();
+            const durationMs =
+              (event.data.byteLength / AGENT_PCM_BYTES_PER_SECOND) * 1000;
+            estimatedPlaybackEndAt =
+              Math.max(now, estimatedPlaybackEndAt) + durationMs;
             serverSocket.send(
               JSON.stringify({
                 event: "playAudio",
@@ -234,7 +259,7 @@ export class PlivoAdapter {
               ? loudFrames + 1
               : 0;
           const agentSpeaking =
-            Date.now() - lastAgentAudioAt < AGENT_SPEAKING_WINDOW_MS;
+            Date.now() < estimatedPlaybackEndAt + PLAYBACK_GRACE_MS;
           if (
             !audioGated &&
             agentSpeaking &&
@@ -260,6 +285,7 @@ export class PlivoAdapter {
         }
 
         case "clearedAudio": {
+          estimatedPlaybackEndAt = 0;
           break;
         }
 

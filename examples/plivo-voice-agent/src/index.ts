@@ -109,7 +109,7 @@ export default {
 
     if (url.pathname === "/answer") {
       // The Plivo application and number are provisioned at deploy time
-      // (npm run deploy / npm run dev), so this just hands Plivo the audio
+      // (pnpm run deploy / pnpm run dev), so this just hands Plivo the audio
       // stream URL to open.
       const wsUrl = `wss://${url.host}/plivo`;
       const xml = `<Response><Stream keepCallAlive="true" bidirectional="true" contentType="audio/x-mulaw;rate=8000">${wsUrl}</Stream></Response>`;

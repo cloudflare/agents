@@ -26,7 +26,11 @@ interface PlivoApplication {
 
 interface PlivoListApplicationsResponse {
   objects: PlivoApplication[];
-  meta?: { next?: string | null };
+  meta?: {
+    limit: number;
+    offset: number;
+    total_count: number;
+  };
 }
 
 /**
@@ -69,8 +73,18 @@ export async function setupPlivoApplication(
     }
     const page = (await listResp.json()) as PlivoListApplicationsResponse;
     existing = page.objects.find((a) => a.app_name === appName);
-    if (existing || !page.meta?.next || page.objects.length === 0) break;
-    offset += limit;
+    if (existing || page.objects.length === 0) break;
+
+    if (page.meta) {
+      const consumed = page.meta.offset + page.objects.length;
+      if (consumed >= page.meta.total_count) break;
+      offset = page.meta.offset + page.meta.limit;
+    } else {
+      // Older or malformed responses may omit metadata. A full page can still
+      // have a successor, while a short page is necessarily the last one.
+      if (page.objects.length < limit) break;
+      offset += limit;
+    }
   }
 
   let appId: string;
