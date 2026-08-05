@@ -694,7 +694,7 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         readerController = controller;
-        const replayBatch = new ReplayChunkBatch();
+        const replayBatch = new ReplayChunkBatch(controller);
         let timeout: ReturnType<typeof setTimeout> | undefined;
 
         const armTimeout = (delay: number) => {
@@ -769,16 +769,12 @@ export class WebSocketChatTransport<
 
             if (data.error) {
               finish(() =>
-                failChatStream(
-                  replayBatch,
-                  controller,
-                  data.body || "Stream error"
-                )
+                failChatStream(replayBatch, data.body || "Stream error")
               );
               return;
             }
 
-            applyChatResponseFrame(replayBatch, controller, data);
+            applyChatResponseFrame(replayBatch, data);
 
             if (data.done) {
               finish(() => controller.close());
@@ -871,7 +867,7 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         streamController = controller;
-        const replayBatch = new ReplayChunkBatch();
+        const replayBatch = new ReplayChunkBatch(controller);
 
         const onMessage = (event: MessageEvent) => {
           try {
@@ -884,16 +880,12 @@ export class WebSocketChatTransport<
 
             if (data.error) {
               finish(() =>
-                failChatStream(
-                  replayBatch,
-                  controller,
-                  data.body || "Stream error"
-                )
+                failChatStream(replayBatch, data.body || "Stream error")
               );
               return;
             }
 
-            applyChatResponseFrame(replayBatch, controller, data);
+            applyChatResponseFrame(replayBatch, data);
 
             if (data.done) {
               finish(() => controller.close());
