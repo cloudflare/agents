@@ -71,5 +71,7 @@ export {
   Sub_,
   ReservedClassParent,
   TestUnboundParentAgent,
-  TestMinifiedNameParentAgent
+  TestMinifiedNameParentAgent,
+  BodyProbeSubAgent,
+  BodyProbeRootAgent
 } from "./sub-agent";
