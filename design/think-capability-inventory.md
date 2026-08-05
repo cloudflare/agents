@@ -1,8 +1,10 @@
-# Think — capability inventory
+# Think + Agent — capability inventory
 
-An inventory of what `@cloudflare/think` does, broken into capabilities, sized, with the public surface and shared state each one touches. Input for boundary/interface design; deliberately contains no proposal.
+An inventory of what `@cloudflare/think` and its parent `Agent` do, broken into capabilities, sized, with the public surface and shared state each one touches. Input for boundary/interface design; deliberately contains no proposal.
 
-Counts from `packages/think/src/think.ts` at `3172a23`. Line counts are member spans (declaration to next declaration) and include doc comments. Every one of the 390 class members is assigned to exactly one capability; the assignment is a judgement call at the margins, but the mass distribution is not sensitive to those calls.
+Inheritance chain: `Think` → `Agent` → `Server` (partyserver, external). Part one below covers `Think`; part two covers `Agent` and the layers around it.
+
+Counts from `packages/think/src/think.ts` and `packages/agents/src/index.ts` at `3172a23`. Line counts are member spans (declaration to next declaration) and include doc comments. Every one of the 390 class members is assigned to exactly one capability; the assignment is a judgement call at the margins, but the mass distribution is not sensitive to those calls.
 
 Related: [think.md](./think.md) · [think-vs-aichat.md](./think-vs-aichat.md) · [rfc-composable-rebuild.md](./rfc-composable-rebuild.md)
 
@@ -288,3 +290,201 @@ Offered as input to the boundary conversation, not as conclusions.
 **The per-turn state is the real interface problem.** Of the 96 instance fields on `Think`, a large group are ambient per-turn values: `_activeTurnTools`, `_activeTurnActionMetadata`, `_activeTurnAuthorization`, `_activeTurnApprovedActionInputs`, `_activeTurnReplyAttachments`, `_activeChannelContext`, `_activeDeliverySurface`, `_activeMessengerContext`, `_streamingAssistant`, `_turnModelMessageBaseline`, `_activeStallTimeoutMs`, `_activeChatRecoveryRootRequestId`. Each is written by one capability and read by two or three others, with correctness resting on turns being serialized by the turn queue. Any decomposition has to decide whether these become an explicit turn-context value passed between modules or stay ambient — that single decision determines how independently the modules can be tested and swapped.
 
 **Five entry paths, one loop.** WebSocket request, RPC `chat()`, `runTurn()`, durable submissions, declared scheduled tasks, workflow notices and auto-continuation all converge on the same inference loop, but each brought its own admission logic, durability story and recovery path with it. That fan-in — rather than the loop itself — is where most of the 13,000 lines went.
+
+---
+
+# Agent — capability inventory
+
+`Think → Agent → Server` (partyserver, external). The parent class is `packages/agents/src/index.ts`: 13,235 lines total, of which **11,309** are the `Agent` class body containing **301 members**. All 301 classified into 16 capabilities.
+
+## Distribution
+
+| Capability          | Lines |    % | Members | AI concept? |
+| ------------------- | ----: | ---: | ------: | ----------- |
+| agent tools         | 2,445 | 21.9 |      59 | no          |
+| sub-agents + facets | 1,481 | 13.3 |      56 | no          |
+| fibers              | 1,293 | 11.6 |      46 | **none**    |
+| workflows           | 1,127 | 10.1 |      33 | no          |
+| scheduling          | 1,012 |  9.1 |      22 | **none**    |
+| boot + lifecycle    |   826 |  7.4 |      14 | no          |
+| alarm + OOM breaker |   661 |  5.9 |      16 | **none**    |
+| MCP servers         |   632 |  5.7 |      12 | yes         |
+| connections         |   407 |  3.6 |      13 | no          |
+| sql + schema        |   404 |  3.6 |       3 | **none**    |
+| email               |   213 |  1.9 |       3 | no          |
+| state sync          |   210 |  1.9 |       8 | **none**    |
+| queues              |   188 |  1.7 |       7 | **none**    |
+| rpc + callable      |   183 |  1.6 |       4 | **none**    |
+| observability       |    67 |  0.6 |       4 | **none**    |
+| retries             |    26 |  0.2 |       1 | **none**    |
+
+Methods over 150 lines: `constructor` (535), `_ensureSchema` (357), `addMcpServer` (343), `runAgentTool` (336), `_reconcileAgentToolRuns` (246), `_forwardAgentToolStream` (193), `_insertScheduleForOwner` (193), `_checkRunFibers` (180), `_cf_runAlarmBody` (173), `_reattachAgentToolRunToTerminal` (168), `_executeScheduleCallback` (161).
+
+## Infrastructure — no AI concept present
+
+4,451 lines (39% of the class). Nothing here knows what a model, a message or a tool is.
+
+### `sql + schema` — 404 lines, 3 members
+
+The `sql` tagged template with typed results and error wrapping, plus one centralized initializer creating all ten internal tables and seven indexes.
+
+- **Surface** — `sql`
+- **Tables** — `cf_agents_state`, `cf_agents_schedules`, `cf_agents_queues`, `cf_agents_fibers`, `cf_agents_facet_runs`, `cf_agents_runs`, `cf_agent_tool_runs`, `cf_agents_sub_agents`, `cf_agents_workflows`, `cf_agents_mcp_servers`
+- **State** — `_schemaInitialization`
+- **Note** — already a good boundary: one function owns every table. Think, by contrast, creates its five tables lazily from five separate `_ensure*Table` methods guarded by five booleans.
+
+### `scheduling` — 1,012 lines, 22 members
+
+One-shot, delayed, cron and interval schedules as persisted rows, with callback validation, interval overlap prevention, hung-execution detection, and per-facet ownership so a child's schedules are dispatched by the root.
+
+- **Surface** — `schedule()`, `scheduleEvery()`, `getSchedule()`, `getScheduleById()`, `getSchedules()`, `listSchedules()`, `cancelSchedule()`
+- **Tables** — `cf_agents_schedules`
+- **State** — `_warnedScheduleInOnStart`, `_insideOnStart`
+- **Note** — roughly half is the facet-ownership dimension: six `_cf_*ForFacet` RPC variants so a facet's rows live on the root but dispatch back down.
+
+### `alarm + OOM breaker` — 661 lines, 16 members
+
+Sole ownership of the DO alarm: computes the next wake across every subsystem needing one, dispatches due rows, and carries a circuit breaker that detects a memory-limit reset loop and backs off the offending schedule row.
+
+- **Surface** — `onAlarm()`, `keepAlive()`, `keepAliveWhile()`, `_cf_recoveryAlarmCallbacks()`, `_cf_sealMemoryLimitedRecovery()`
+- **State** — `_keepAliveRefs`, `_facetKeepAliveTokens`, `_cf_executingScheduleRowId`, `_CF_OOM_ALARM_STRIKES_KEY`
+- **Note** — the breaker asks the subclass which callbacks are recovery-related so it can purge those without disturbing user schedules: a genuine upward dependency from parent to child.
+
+### `queues` — 188 lines, 7 members
+
+A persisted FIFO of callback invocations with a flush loop. Distinct from both schedules and fibers.
+
+- **Surface** — `queue()`, `dequeue()`, `dequeueAll()`, `dequeueAllByCallback()`, `getQueue()`, `getQueues()`
+- **Tables** — `cf_agents_queues`
+- **State** — `_flushingQueue`
+
+### `fibers` — 1,293 lines, 46 members
+
+Durable execution. Run a function under a ledger row so that if the object is evicted mid-flight the row survives, a recovery hook fires on the next wake, and the caller can inspect, cancel or resolve it. Supports idempotency keys, snapshots via `stash()`, timeouts, status filtering.
+
+- **Surface** — `runFiber()`, `startFiber()`, `stash()`, `onFiberRecovered()`, `inspectFiber()`, `inspectFiberByKey()`, `listFibers()`, `cancelFiber()`, `cancelFiberByKey()`, `resolveFiber()`, `deleteFibers()`
+- **Tables** — `cf_agents_fibers`, `cf_agents_facet_runs`
+- **State** — `_runFiberActiveFibers`, `_managedFiberAbortControllers`, `_managedFiberExecutions`, `_managedFiberTerminalWaiters`, `_runFiberRecoveryInProgress`, `_recoveryNoProgressScans`
+- **Note** — the primitive Think's entire chat-recovery capability is built on; Think wraps each turn in a fiber named `__cf_internal_chat_turn`. The single most reusable thing in the parent, and the closest existing thing to a general durable-work ledger.
+
+## Runtime and transport
+
+### `boot + lifecycle` — 826 lines, 14 members
+
+A 535-line constructor wiring schema, facet detection, connection wrapping, state hydration, method auto-wrapping, MCP restore and orphan-workflow checks; plus destroy/teardown and the top-level error path.
+
+- **Surface** — `onError()`, `render()`, `destroy()`, `initialState`, `static options`, `sessionAffinity`, `name`
+- **State** — `_destroyed`, `_disposables`, `_isFacet`, `_facetName`, `_parentPath`, `_insideOnStart`, `_cachedOptions`, `_ParentClass`
+- **Note** — same implicit-ordering problem as Think's boot, one level down, and the two interleave: Think's constructor wraps `onStart`, which the parent constructor already governs.
+
+### `connections` — 407 lines, 13 members
+
+Wraps every partyserver connection to add readonly enforcement, protocol gating and per-connection flags; overrides `fetch`, `broadcast` and `getConnection` to route sub-agent traffic.
+
+- **Surface** — `setConnectionReadonly()`, `isConnectionReadonly()`, `shouldConnectionBeReadonly()`, `shouldSendProtocolMessages()`, `isConnectionProtocolEnabled()`, `broadcast()`, `getConnection()`
+- **State** — `_protocolBroadcastExcludeIds`, `_rawStateAccessors`
+
+### `state sync` — 210 lines, 8 members
+
+The replicated `state` object: persist, broadcast to connections, validate incoming changes, fire change hooks.
+
+- **Surface** — `state`, `setState()`, `initialState`, `validateStateChange()`, `onStateChanged()`, `onStateUpdate()`
+- **Tables** — `cf_agents_state`
+- **State** — `_state`, `_persistenceHookMode`
+- **Note** — small, well-bounded, independent of everything else in the class. `Think` barely uses it.
+
+### `rpc + callable` — 183 lines, 4 members
+
+Auto-wraps subclass methods for RPC invocation across facet boundaries; enumerates which are client-callable.
+
+- **Surface** — `getCallableMethods()`, the `@callable` decorator
+
+### `observability` — 67 lines, 4 members
+
+Event emission and span wrapping. The taxonomy lives in `src/observability/` (4,376 lines).
+
+### `retries` — 26 lines, 1 member
+
+Bounded retry with backoff. Delegates to `src/retries.ts` (331 lines).
+
+## Multi-agent
+
+3,926 lines — 35% of the class.
+
+### `sub-agents + facets` — 1,481 lines, 56 members
+
+Child agents as Durable Object facets: resolve or create by class and name, address via nested `/sub/...` paths, bridge WebSocket connections down and state back up, walk to a parent, cascade destroy.
+
+- **Surface** — `subAgent()`, `parentAgent()`, `hasSubAgent()`, `listSubAgents()`, `deleteSubAgent()`, `abortSubAgent()`, `onBeforeSubAgent()`, `parentPath`, `selfPath`
+- **Tables** — `cf_agents_sub_agents`
+- **State** — `_cf_currentSubAgentBridge`, `_cf_virtualSubAgentConnections`, `_isFacet`, `_facetName`, `_parentPath`, `_subAgentRegistryReady`
+- **Note** — ~28 of the 56 members are connection bridging alone (forwarding connect/message/close down a path, synthesizing a virtual `Connection` on the child side). That sub-cluster is separable from spawn/registry/addressing.
+
+### `agent tools` — 2,445 lines, 59 members
+
+The largest capability in either class. Parent half of sub-agent orchestration: start a child run as a tool call, forward its stream back, track progress milestones, support detached runs that outlive the caller, deliver terminal results via a durable named-method hook, replay runs to a reconnecting client, reconcile everything mid-flight after a restart.
+
+- **Surface** — `runAgentTool()`, `cancelAgentTool()`, `hasAgentToolRun()`, `clearAgentToolRuns()`, `onAgentToolStart()`, `onAgentToolFinish()`, `onProgress()`, `reportProgress()`, `maxConcurrentAgentTools`
+- **Tables** — `cf_agent_tool_runs` (+ index)
+- **State** — `_agentToolRunRecoveryPromise`, `_detachedBackboneArming`, `_detachedLiveCountWarned`
+- **Note** — at least four separable concerns: run lifecycle (~500), stream forwarding and progress (~500), detached delivery (~600), recovery/replay/reattach (~700). Has a child-side mirror in `Think` (998 lines) and a third copy in `AIChatAgent`.
+
+## Integrations
+
+### `workflows` — 1,127 lines, 33 members
+
+Start and control Cloudflare Workflows — send events, approve, reject, pause, resume, restart, terminate — with a local tracking table, cursor-paginated queries, binding migration, and callback hooks back into the agent.
+
+- **Surface** — `runWorkflow()`, `sendWorkflowEvent()`, `approveWorkflow()`, `rejectWorkflow()`, `pauseWorkflow()`, `resumeWorkflow()`, `restartWorkflow()`, `terminateWorkflow()`, `getWorkflow()`, `getWorkflows()`, `getWorkflowStatus()`, `deleteWorkflow()`, `deleteWorkflows()`, `migrateWorkflowBinding()`, `onWorkflowCallback()`, `onWorkflowProgress()`, `onWorkflowComplete()`, `onWorkflowError()`, `onWorkflowEvent()`
+- **Tables** — `cf_agents_workflows` (+ 2 indexes)
+- **Note** — self-contained adapter over a Workflows binding; touches no other capability. The most obviously extractable capability in the parent.
+
+### `MCP servers` — 632 lines, 12 members
+
+Connect the agent as an MCP *client* to remote servers: register, persist, restore on wake, run the OAuth callback dance, broadcast the server list.
+
+- **Surface** — `mcp` (`MCPClientManager`), `addMcpServer()`, `removeMcpServer()`, `getMcpServers()`, `createMcpOAuthProvider()`, `broadcastMcpServers()`, `handleMcpOAuthCallback()`
+- **Tables** — `cf_agents_mcp_servers`
+- **Note** — `addMcpServer` alone is 343 lines with three overloads. Heavy lifting is in `src/mcp/` (9,122 lines); what sits on the class is registration, persistence and OAuth plumbing.
+
+### `email` — 213 lines, 3 members
+
+Receive inbound email as an agent event, reply in-thread with correct headers, send new mail via a `send_email` binding.
+
+- **Surface** — `replyToEmail()`, `sendEmail()`, `onEmail`
+- **Note** — fully self-contained; touches no other capability.
+
+## Already outside the parent class
+
+| Module                          | What it is                                                                                | Lines  |
+| ------------------------------- | ----------------------------------------------------------------------------------------- | -----: |
+| `chat/`                         | Shared chat primitives — turn queue, resumable stream, recovery engine, ~30 modules        | 12,516 |
+| `mcp/`                          | MCP client and server, transports, OAuth, x402                                              |  9,122 |
+| `experimental/memory/session/`  | Session — transcript tree, compaction, context blocks, FTS search, pluggable providers      |  5,517 |
+| `observability/`                | Event taxonomy and emitters                                                                 |  4,376 |
+| `browser/`                      | Browser Run — CDP sessions, connector, quick actions                                        |  3,194 |
+| `skills/`                       | Agent Skills engine — sources, registry, runner                                             |  2,170 |
+| `react.tsx`                     | `useAgent` hook, state sync, RPC from components                                            |  1,115 |
+| `chat-sdk/`                     | chat-SDK adapter                                                                            |    798 |
+| `client.ts`                     | `AgentClient` — browser/Node WebSocket client                                               |    663 |
+| `workflows.ts`                  | `AgentWorkflow` base class                                                                  |    619 |
+| `sub-routing.ts`                | Nested `/sub/...` routing helpers                                                            |    548 |
+| `vite.ts`                       | Vite plugin — decorator transform, skills virtual module                                     |    478 |
+| `email.ts`                      | Email routing, resolvers, header signing                                                     |    399 |
+| `retries.ts`                    | Retry primitives and backoff                                                                 |    331 |
+
+## The grandparent
+
+`Server` comes from `partyserver`, an external dependency. `Agent` touches it narrowly — `super.getConnections` (5 call sites), `super.getConnection` (5), `super.alarm` (5), `super.name` (3), `super.fetch` (2) — and overrides `fetch`, `broadcast`, `getConnection`, `onError`, `alarm`.
+
+It provides WebSocket hibernation, connection identity and lifecycle, request routing and DO naming: roughly 15 call sites of real surface. The one boundary in the stack that is already narrow, and the only layer not ours to redesign.
+
+## Observations on the parent
+
+**39% of the parent has no AI concept in it at all.** `sql + schema`, `scheduling`, `alarm`, `queues`, `fibers`, `connections`, `state sync`, `rpc`, `retries` and `observability` are 4,451 of 11,309 lines, and nothing in them knows what a model, a message or a tool is. That is a stateful-durable-object toolkit that happens to live inside an AI SDK.
+
+**One capability, three classes.** Agent-tool orchestration is 2,445 lines in `Agent` (parent side), 998 in `Think` (child-side mirror), and a third copy in `AIChatAgent` — ~4,400 lines for one mechanism. The split follows the inheritance chain rather than the mechanism, which is why it triplicated.
+
+**Two integrations ride along on every agent.** `workflows` (1,127) and `email` (213) sit on the base class and are inherited by everything, but touch no other capability and hold no shared state.
+
+**Boot was invented twice and the two interleave.** Agent's 535-line constructor and Think's 205-line constructor plus eleven-phase `onStart` closure both govern startup ordering, with Think's wrapping a hook the parent already manages.
