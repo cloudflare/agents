@@ -25,7 +25,6 @@ import {
   parseMessengerReplySnapshot,
   serializableMessengerEvent,
   TextStreamCallback,
-  textDeltaFromStreamChunk,
   ThinkMessengerRuntime,
   toMessengerAttachment,
   toMessengerUserMessage,
@@ -744,15 +743,6 @@ describe("think messengers core", () => {
     expect(handled).toBe(true);
     expect(posted).toEqual(["interrupted"]);
     expect(resolved).toEqual([{ status: "completed" }]);
-  });
-
-  it("extracts streamed text deltas", () => {
-    expect(
-      textDeltaFromStreamChunk(
-        JSON.stringify({ type: "text-delta", delta: "hello" })
-      )
-    ).toBe("hello");
-    expect(textDeltaFromStreamChunk("{")).toBeNull();
   });
 
   it("separates text segments across tool-call boundaries (#1841)", async () => {

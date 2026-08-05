@@ -1,62 +1,80 @@
 import { describe, expect, it } from "vitest";
-import {
-  isTextSegmentBoundary,
-  TextSegmentJoiner
-} from "../text-segment-joiner";
+import { TextSegmentJoiner } from "../text-segment-joiner";
 
-describe("isTextSegmentBoundary", () => {
-  it("treats every structured event other than text deltas as a boundary", () => {
-    expect(isTextSegmentBoundary("tool-call")).toBe(true);
-    expect(isTextSegmentBoundary("tool-result")).toBe(true);
-    expect(isTextSegmentBoundary("text-start")).toBe(true);
-    expect(isTextSegmentBoundary("text-end")).toBe(true);
-    expect(isTextSegmentBoundary("start-step")).toBe(true);
-    expect(isTextSegmentBoundary("finish-step")).toBe(true);
-    expect(isTextSegmentBoundary("start")).toBe(true);
-    expect(isTextSegmentBoundary("finish")).toBe(true);
-    expect(isTextSegmentBoundary("text-delta")).toBe(false);
-    expect(isTextSegmentBoundary(undefined)).toBe(false);
-  });
-});
+const text = (value: string) => ({ type: "text", text: value }) as const;
+const boundary = { type: "boundary" } as const;
 
 describe("TextSegmentJoiner", () => {
-  it("separates text segments across a stream boundary", () => {
+  it("classifies structured chunks and separates non-adjacent text", () => {
     const joiner = new TextSegmentJoiner();
 
-    expect(joiner.pushText("Before.")).toEqual(["Before."]);
-    joiner.markBoundary();
-    expect(joiner.pushText("After.")).toEqual([" ", "After."]);
+    expect(joiner.pushChunk({ type: "text-delta", text: "Before." })).toEqual([
+      text("Before.")
+    ]);
+    expect(joiner.pushChunk({ type: "tool-call" })).toEqual([boundary]);
+    expect(joiner.pushChunk({ type: "tool-result" })).toEqual([]);
+    expect(joiner.pushChunk({ type: "text-delta", delta: "After." })).toEqual([
+      text(" "),
+      text("After.")
+    ]);
+  });
+
+  it("treats text and stream lifecycle chunks as boundaries", () => {
+    for (const type of [
+      "text-start",
+      "text-end",
+      "start-step",
+      "finish-step",
+      "start",
+      "finish"
+    ]) {
+      const joiner = new TextSegmentJoiner();
+      joiner.pushChunk({ type: "text-delta", text: "Before." });
+      expect(joiner.pushChunk({ type }), type).toEqual([boundary]);
+    }
   });
 
   it("does not duplicate whitespace already provided by either segment", () => {
     const trailingWhitespace = new TextSegmentJoiner();
-    trailingWhitespace.pushText("Before. ");
-    trailingWhitespace.markBoundary();
-    expect(trailingWhitespace.pushText("After.")).toEqual(["After."]);
+    trailingWhitespace.pushChunk({ type: "text-delta", text: "Before. " });
+    trailingWhitespace.pushChunk({ type: "tool-call" });
+    expect(
+      trailingWhitespace.pushChunk({ type: "text-delta", text: "After." })
+    ).toEqual([text("After.")]);
 
     const leadingWhitespace = new TextSegmentJoiner();
-    leadingWhitespace.pushText("Before.");
-    leadingWhitespace.markBoundary();
-    expect(leadingWhitespace.pushText("\nAfter.")).toEqual(["\nAfter."]);
+    leadingWhitespace.pushChunk({ type: "text-delta", text: "Before." });
+    leadingWhitespace.pushChunk({ type: "tool-call" });
+    expect(
+      leadingWhitespace.pushChunk({ type: "text-delta", text: "\nAfter." })
+    ).toEqual([text("\nAfter.")]);
   });
 
   it("reports only the first repeated boundary", () => {
     const joiner = new TextSegmentJoiner();
-    expect(joiner.markBoundary()).toBe(false);
-    joiner.pushText("Before.");
+    expect(joiner.pushChunk({ type: "tool-call" })).toEqual([]);
+    joiner.pushChunk({ type: "text-delta", text: "Before." });
 
-    expect(joiner.markBoundary()).toBe(true);
-    expect(joiner.markBoundary()).toBe(false);
-    expect(joiner.pushText("After.")).toEqual([" ", "After."]);
+    expect(joiner.pushChunk({ type: "tool-call" })).toEqual([boundary]);
+    expect(joiner.pushChunk({ type: "tool-result" })).toEqual([]);
+    expect(joiner.pushChunk({ type: "text-delta", text: "After." })).toEqual([
+      text(" "),
+      text("After.")
+    ]);
   });
 
   it("does not add whitespace without text on both sides", () => {
     const joiner = new TextSegmentJoiner();
-    joiner.markBoundary();
-    expect(joiner.pushText("First.")).toEqual(["First."]);
+    expect(joiner.pushChunk({ type: "tool-call" })).toEqual([]);
+    expect(joiner.pushChunk({ type: "text-delta", text: "First." })).toEqual([
+      text("First.")
+    ]);
 
-    joiner.markBoundary();
-    expect(joiner.pushText("")).toEqual([]);
-    expect(joiner.pushText("Second.")).toEqual([" ", "Second."]);
+    expect(joiner.pushChunk({ type: "tool-call" })).toEqual([boundary]);
+    expect(joiner.pushChunk({ type: "text-delta", text: "" })).toEqual([]);
+    expect(joiner.pushChunk({ type: "text-delta", text: "Second." })).toEqual([
+      text(" "),
+      text("Second.")
+    ]);
   });
 });

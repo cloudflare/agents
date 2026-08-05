@@ -1,6 +1,6 @@
 import { RpcTarget } from "cloudflare:workers";
 import type { FiberContext } from "agents";
-import { isTextSegmentBoundary, TextSegmentJoiner } from "agents/chat";
+import { TextSegmentJoiner } from "agents/chat";
 import type { UIMessage } from "ai";
 import type { ChatStartEvent, StreamCallback } from "../think";
 import type { MessengerEvent } from "./events";
@@ -52,21 +52,14 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
     const chunk = streamChunkFromJson(json);
     if (!chunk) return;
 
-    if (chunk.type === "text-delta") {
-      if (typeof chunk.delta === "string") {
-        const textChunks = this.textSegmentJoiner.pushText(chunk.delta);
-        for (const text of textChunks) {
-          this.text += text;
-          this.pushVisibleText(text);
-        }
-        if (textChunks.length > 0) this.wake();
-      }
-      return;
+    let pushedText = false;
+    for (const event of this.textSegmentJoiner.pushChunk(chunk)) {
+      if (event.type !== "text") continue;
+      this.text += event.text;
+      this.pushVisibleText(event.text);
+      pushedText = true;
     }
-
-    if (isTextSegmentBoundary(chunk.type)) {
-      this.textSegmentJoiner.markBoundary();
-    }
+    if (pushedText) this.wake();
   }
 
   onDone(): void {
@@ -197,13 +190,6 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
     this.visibleStarted = true;
     await this.onVisibleStart?.();
   }
-}
-
-export function textDeltaFromStreamChunk(json: string): string | null {
-  const chunk = streamChunkFromJson(json);
-  return chunk?.type === "text-delta" && typeof chunk.delta === "string"
-    ? chunk.delta
-    : null;
 }
 
 function streamChunkFromJson(

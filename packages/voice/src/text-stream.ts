@@ -1,4 +1,4 @@
-import { isTextSegmentBoundary, TextSegmentJoiner } from "agents/chat";
+import { TextSegmentJoiner } from "agents/chat";
 
 /**
  * Utilities for normalising various text-producing sources into a uniform
@@ -181,17 +181,6 @@ async function* iterateAsyncTextEvents(
 
     if (!isRecord(chunk)) continue;
 
-    if (chunk.type === "text-delta") {
-      const text = getTextDelta(chunk);
-      if (!text) continue;
-
-      for (const joinedText of textSegmentJoiner.pushText(text)) {
-        yield textEvent(joinedText);
-      }
-      hasYieldedText = true;
-      continue;
-    }
-
     if (chunk.type === "error") {
       if (hasYieldedText) {
         yield { type: "boundary" };
@@ -200,8 +189,9 @@ async function* iterateAsyncTextEvents(
       return;
     }
 
-    if (isTextSegmentBoundary(chunk.type) && textSegmentJoiner.markBoundary()) {
-      yield { type: "boundary" };
+    for (const event of textSegmentJoiner.pushChunk(chunk)) {
+      yield event;
+      if (event.type === "text") hasYieldedText = true;
     }
   }
 }
@@ -218,12 +208,6 @@ function warnDeprecatedTextStream(source?: object): void {
   console.warn(
     "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.stream from onTurn() instead."
   );
-}
-
-function getTextDelta(chunk: Record<string, unknown>): string | null {
-  if (typeof chunk.text === "string") return chunk.text;
-  if (typeof chunk.delta === "string") return chunk.delta;
-  return null;
 }
 
 function toError(error: unknown): Error {
