@@ -14532,9 +14532,10 @@ export class Think<
     snapshot: ChatFiberSnapshot | null
   ): Promise<boolean> {
     const lastLeaf = await this.session.getLatestLeaf();
+    const activeLeafIdAtStart =
+      snapshot?.activeLeafIdAtStart ?? snapshot?.latestMessageId;
     return (
-      lastLeaf?.role === "assistant" &&
-      lastLeaf.id !== snapshot?.latestMessageId
+      lastLeaf?.role === "assistant" && lastLeaf.id !== activeLeafIdAtStart
     );
   }
 

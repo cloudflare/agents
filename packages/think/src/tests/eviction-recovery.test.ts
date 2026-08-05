@@ -85,7 +85,8 @@ async function seedInterruptedContinueTurn(
 }
 
 async function seedInterruptedRegeneration(
-  agent: Awaited<ReturnType<typeof recoveryAgent>>
+  agent: Awaited<ReturnType<typeof recoveryAgent>>,
+  streamStatus: "streaming" | "completed" | "error" = "streaming"
 ): Promise<{
   userId: string;
   oldAssistantId: string;
@@ -106,24 +107,29 @@ async function seedInterruptedRegeneration(
     role: "assistant",
     parts: [{ type: "text", text: "Old answer" }]
   });
-  await agent.insertInterruptedStream(`stream-${requestId}`, requestId, [
-    {
-      body: JSON.stringify({ type: "start", messageId: partialAssistantId }),
-      index: 0
-    },
-    {
-      body: JSON.stringify({ type: "text-start", id: "regenerated-text" }),
-      index: 1
-    },
-    {
-      body: JSON.stringify({
-        type: "text-delta",
-        id: "regenerated-text",
-        delta: "Partial replacement"
-      }),
-      index: 2
-    }
-  ]);
+  await agent.insertInterruptedStream(
+    `stream-${requestId}`,
+    requestId,
+    [
+      {
+        body: JSON.stringify({ type: "start", messageId: partialAssistantId }),
+        index: 0
+      },
+      {
+        body: JSON.stringify({ type: "text-start", id: "regenerated-text" }),
+        index: 1
+      },
+      {
+        body: JSON.stringify({
+          type: "text-delta",
+          id: "regenerated-text",
+          delta: "Partial replacement"
+        }),
+        index: 2
+      }
+    ],
+    streamStatus
+  );
   await agent.insertInterruptedFiber(`__cf_internal_chat_turn:${requestId}`, {
     __cfThinkChatFiberSnapshot: {
       kind: "think-chat-turn",
@@ -258,6 +264,25 @@ describe("Think chat recovery after forced Durable Object eviction", () => {
     ]);
     expect(await agent.getPromptRolesForTest()).toEqual([
       ["system", "user", "assistant", "user"]
+    ]);
+  });
+
+  it("persists terminal regeneration on the selected sibling branch", async () => {
+    const name = `evict-terminal-regeneration-${crypto.randomUUID()}`;
+    let agent = await recoveryAgent(name);
+    const { userId, oldAssistantId, partialAssistantId } =
+      await seedInterruptedRegeneration(agent, "completed");
+
+    await evictDurableObject(agent as unknown as DurableObjectStub);
+    agent = await recoveryAgent(name);
+
+    await waitFor(async () => (await agent.getActiveFibers()).length === 0);
+
+    expect(await agent.getTurnCallCount()).toBe(0);
+    const branches = await getStoredBranches(agent, userId);
+    expect(branches.map((message) => message.id)).toEqual([
+      oldAssistantId,
+      partialAssistantId
     ]);
   });
 });
