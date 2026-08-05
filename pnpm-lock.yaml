@@ -4150,7 +4150,7 @@ importers:
   packages/voice:
     dependencies:
       agents:
-        specifier: '>=0.17.1 <1.0.0'
+        specifier: '>=0.20.2 <1.0.0'
         version: link:../agents
       partysocket:
         specifier: ^1.0.0

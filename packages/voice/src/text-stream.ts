@@ -1,3 +1,5 @@
+import { isTextSegmentBoundary, TextSegmentJoiner } from "agents/chat";
+
 /**
  * Utilities for normalising various text-producing sources into a uniform
  * `AsyncGenerator<string>`.  This lets `onTurn()` return any of:
@@ -167,9 +169,8 @@ function hasCustomAsyncIterator(source: Exclude<TextSource, string>): boolean {
 async function* iterateAsyncTextEvents(
   source: AsyncIterable<unknown>
 ): AsyncGenerator<TextStreamEvent> {
-  let needsBoundarySpace = false;
+  const textSegmentJoiner = new TextSegmentJoiner();
   let hasYieldedText = false;
-  let lastTextEndedWithWhitespace = false;
 
   for await (const chunk of source) {
     if (typeof chunk === "string") {
@@ -184,19 +185,10 @@ async function* iterateAsyncTextEvents(
       const text = getTextDelta(chunk);
       if (!text) continue;
 
-      if (
-        needsBoundarySpace &&
-        hasYieldedText &&
-        !lastTextEndedWithWhitespace &&
-        !startsWithWhitespace(text)
-      ) {
-        yield textEvent(" ");
+      for (const joinedText of textSegmentJoiner.pushText(text)) {
+        yield textEvent(joinedText);
       }
-
-      yield textEvent(text);
       hasYieldedText = true;
-      lastTextEndedWithWhitespace = endsWithWhitespace(text);
-      needsBoundarySpace = false;
       continue;
     }
 
@@ -208,9 +200,8 @@ async function* iterateAsyncTextEvents(
       return;
     }
 
-    if (hasYieldedText && isTextBoundary(chunk.type)) {
-      if (!needsBoundarySpace) yield { type: "boundary" };
-      needsBoundarySpace = true;
+    if (isTextSegmentBoundary(chunk.type) && textSegmentJoiner.markBoundary()) {
+      yield { type: "boundary" };
     }
   }
 }
@@ -233,26 +224,6 @@ function getTextDelta(chunk: Record<string, unknown>): string | null {
   if (typeof chunk.text === "string") return chunk.text;
   if (typeof chunk.delta === "string") return chunk.delta;
   return null;
-}
-
-function isTextBoundary(type: unknown): boolean {
-  return (
-    typeof type === "string" &&
-    type !== "text-start" &&
-    type !== "text-end" &&
-    type !== "start" &&
-    type !== "finish" &&
-    type !== "start-step" &&
-    type !== "finish-step"
-  );
-}
-
-function startsWithWhitespace(text: string): boolean {
-  return /^\s/.test(text);
-}
-
-function endsWithWhitespace(text: string): boolean {
-  return /\s$/.test(text);
 }
 
 function toError(error: unknown): Error {

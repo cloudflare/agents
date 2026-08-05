@@ -1,5 +1,6 @@
 import { RpcTarget } from "cloudflare:workers";
 import type { FiberContext } from "agents";
+import { isTextSegmentBoundary, TextSegmentJoiner } from "agents/chat";
 import type { UIMessage } from "ai";
 import type { ChatStartEvent, StreamCallback } from "../think";
 import type { MessengerEvent } from "./events";
@@ -23,6 +24,7 @@ export interface TextStreamCallbackOptions {
 
 export class TextStreamCallback extends RpcTarget implements StreamCallback {
   private readonly onVisibleStart?: () => Promise<void> | void;
+  private readonly textSegmentJoiner = new TextSegmentJoiner();
   private readonly visibleChunks: string[] = [];
   private readonly wakeups: Wake[] = [];
   private readonly visibleSoftLimit?: number;
@@ -47,14 +49,24 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
   }
 
   onEvent(json: string): void {
-    const text = textDeltaFromStreamChunk(json);
-    if (!text) {
+    const chunk = streamChunkFromJson(json);
+    if (!chunk) return;
+
+    if (chunk.type === "text-delta") {
+      if (typeof chunk.delta === "string") {
+        const textChunks = this.textSegmentJoiner.pushText(chunk.delta);
+        for (const text of textChunks) {
+          this.text += text;
+          this.pushVisibleText(text);
+        }
+        if (textChunks.length > 0) this.wake();
+      }
       return;
     }
 
-    this.text += text;
-    this.pushVisibleText(text);
-    this.wake();
+    if (isTextSegmentBoundary(chunk.type)) {
+      this.textSegmentJoiner.markBoundary();
+    }
   }
 
   onDone(): void {
@@ -188,10 +200,19 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
 }
 
 export function textDeltaFromStreamChunk(json: string): string | null {
+  const chunk = streamChunkFromJson(json);
+  return chunk?.type === "text-delta" && typeof chunk.delta === "string"
+    ? chunk.delta
+    : null;
+}
+
+function streamChunkFromJson(
+  json: string
+): { delta?: unknown; type?: unknown } | null {
   try {
-    const chunk = JSON.parse(json) as { delta?: unknown; type?: string };
-    return chunk.type === "text-delta" && typeof chunk.delta === "string"
-      ? chunk.delta
+    const chunk: unknown = JSON.parse(json);
+    return typeof chunk === "object" && chunk !== null
+      ? (chunk as { delta?: unknown; type?: unknown })
       : null;
   } catch {
     return null;

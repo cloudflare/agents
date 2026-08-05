@@ -24,6 +24,14 @@ export {
 
 export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
 
+/**
+ * @internal Shared text-segment separator for sibling streaming packages.
+ */
+export {
+  isTextSegmentBoundary,
+  TextSegmentJoiner
+} from "./text-segment-joiner";
+
 export {
   SubmitConcurrencyController,
   type NormalizedMessageConcurrency,
