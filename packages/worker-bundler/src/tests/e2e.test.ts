@@ -1047,8 +1047,7 @@ describe("createWorker with pyproject.toml", () => {
           // `attrs` has zero dependencies
           'dependencies = ["typing_extensions==4.16.0", "typing_inspection==0.4.2", "attrs==26.1.0"]'
         ].join("\n")
-      },
-      preferPyodideIndex: false
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1089,8 +1088,7 @@ describe("createWorker with pyproject.toml", () => {
           // typing_inspection depends on typing_extensions
           'dependencies = ["typing_inspection==0.4.2"]'
         ].join("\n")
-      },
-      preferPyodideIndex: false
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1130,8 +1128,7 @@ describe("createWorker with pyproject.toml", () => {
           // typing_inspection depends on typing_extensions
           'dependencies = ["typing_inspection==0.4.2"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1168,8 +1165,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           'dependencies = ["certifi"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1209,8 +1205,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           'dependencies = ["pyyaml"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1259,8 +1254,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           'dependencies = ["pygments", "fastapi", "beautifulsoup4", "flask", "jinja2", "numpy", "libcst"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1307,8 +1301,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           'dependencies = ["numpy"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1359,8 +1352,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           'dependencies = ["fastapi"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1409,8 +1401,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           'dependencies = ["fastapi"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,
@@ -1456,8 +1447,7 @@ describe("createWorker with pyproject.toml", () => {
           'version = "0.0.0"',
           'dependencies = ["libcst"]'
         ].join("\n")
-      },
-      preferPyodideIndex: true
+      }
     });
     const worker = env.LOADER.get(id, () => ({
       mainModule: createWorkerResult.mainModule,

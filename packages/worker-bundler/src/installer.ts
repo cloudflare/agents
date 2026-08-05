@@ -133,11 +133,6 @@ interface InstallOptions {
    * Registry URL (default: https://registry.npmjs.org)
    */
   registry?: string;
-
-  /**
-   * If installing Python packages, set whether to prefer the Pyodide index (default: true)
-   */
-  preferPyodideIndex?: boolean;
 }
 
 export interface InstallResult {
@@ -167,11 +162,7 @@ export async function installDependencies(
   fileSystem: FileSystem,
   options: InstallOptions = {}
 ): Promise<InstallResult> {
-  const {
-    dev = false,
-    registry = NPM_REGISTRY,
-    preferPyodideIndex = true
-  } = options;
+  const { dev = false, registry = NPM_REGISTRY } = options;
 
   const result: InstallResult = {
     installed: [],
@@ -226,11 +217,7 @@ export async function installDependencies(
       )
     );
   } else if (pyprojectTomlContent) {
-    return await installDependenciesPython(
-      fileSystem,
-      pyprojectTomlContent,
-      preferPyodideIndex
-    );
+    return await installDependenciesPython(fileSystem, pyprojectTomlContent);
   }
   return result;
 }
@@ -240,8 +227,7 @@ export async function installDependencies(
  */
 async function installDependenciesPython(
   fileSystem: FileSystem,
-  pyprojectTomlContent: string,
-  preferPyodideIndex: boolean
+  pyprojectTomlContent: string
 ): Promise<InstallResult> {
   const result: InstallResult = {
     installed: [],
@@ -291,8 +277,7 @@ async function installDependenciesPython(
         fileSystem,
         installedPackages,
         inProgress,
-        PYPI_SIMPLE_API,
-        preferPyodideIndex
+        PYPI_SIMPLE_API
       )
     )
   );
@@ -412,8 +397,7 @@ async function installPythonPackage(
   fileSystem: FileSystem,
   installedPackages: Map<string, string>,
   inProgress: Map<string, Promise<void>>,
-  registry: string,
-  preferPyodideIndex: boolean // TODO: Remove this / remove references to this from other files; we will always prefer the pyodide index
+  backupRegistry: string
 ): Promise<void> {
   const name = parsePythonVersionString(dependencySpecifier)["name"];
   // Skip if already installed in this run
@@ -445,36 +429,18 @@ async function installPythonPackage(
       let wheel: PypiSimpleFile = {} as PypiSimpleFile;
       let version: string = "";
 
-      // Putting the logic for retrieving a wheel from PyPI and the Pyodide index into their own functions here
-      // This is so either one can be used as a fallback for the other in a (relatively) tidy way
-      // Try either PyPI or the Pyodide index, then fall back to the other one if that one fails
-      if (preferPyodideIndex) {
-        let registryResult = await retrieveFromPyodide(name);
-        if (registryResult) {
-          [response, wheel, version] = registryResult;
-        } else {
-          registryResult = await retrieveFromPyPI(name, registry);
-          if (registryResult) {
-            [response, wheel, version] = registryResult;
-          } else {
-            throw new Error(
-              `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheel.url})`
-            );
-          }
-        }
+      // Try the Pyodide index first, then fall back to PyPI if that fails
+      let registryResult = await retrieveFromPyodide(name);
+      if (registryResult) {
+        [response, wheel, version] = registryResult;
       } else {
-        let registryResult = await retrieveFromPyPI(name, registry);
+        registryResult = await retrieveFromPyPI(name, backupRegistry);
         if (registryResult) {
           [response, wheel, version] = registryResult;
         } else {
-          registryResult = await retrieveFromPyodide(name);
-          if (registryResult) {
-            [response, wheel, version] = registryResult;
-          } else {
-            throw new Error(
-              `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheel.url})`
-            );
-          }
+          throw new Error(
+            `Failed to download ${name}@${version}: ${response.status} ${response.statusText} (${wheel.url})`
+          );
         }
       }
       const buffer = await response.arrayBuffer();
@@ -498,8 +464,7 @@ async function installPythonPackage(
             fileSystem,
             installedPackages,
             inProgress,
-            PYPI_SIMPLE_API,
-            preferPyodideIndex
+            PYPI_SIMPLE_API
           )
         )
       );

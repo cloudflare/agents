@@ -101,14 +101,6 @@ export interface CreateAppOptions {
   registry?: string;
 
   /**
-   * When installing Python packages declared in pyproject.toml, prefer the
-   * Pyodide package index over PyPI. Useful when the target runtime uses
-   * Pyodide's wasm32 wheel builds.
-   * @default true
-   */
-  preferPyodideIndex?: boolean;
-
-  /**
    * JSX transform mode passed to esbuild. Applied to both server and client
    * bundles.
    */
@@ -212,7 +204,6 @@ export async function createApp(
     minify = false,
     sourcemap = false,
     registry,
-    preferPyodideIndex,
     jsx,
     jsxImportSource,
     define,
@@ -236,8 +227,7 @@ export async function createApp(
   const installWarnings: string[] = [];
   if (hasDependencies(fileSystem)) {
     const installResult = await installDependencies(fileSystem, {
-      ...(registry ? { registry } : {}),
-      ...(preferPyodideIndex !== undefined ? { preferPyodideIndex } : {})
+      ...(registry ? { registry } : {})
     });
     installWarnings.push(...installResult.warnings);
   }
