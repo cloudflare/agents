@@ -16,6 +16,7 @@ import {
 } from "../connectors";
 import { DynamicWorkerExecutor } from "../executor";
 import { createCodemodeRuntime } from "../runtime-handle";
+import type { CodemodeValidator } from "../validation";
 import {
   getCodemodeRuntime,
   type ProxyToolInput,
@@ -153,6 +154,12 @@ type RunOptions = { maxExecutions?: number };
 
 export class CodemodeTestHost extends DurableObject<Env> {
   #connector?: ItemsConnector;
+  #validationCalls: string[] = [];
+  #lastCodeContext?: {
+    code: string;
+    normalizedCode: string;
+    connectors: string[];
+  };
   // When set, the runtime wraps every completed result so tests can assert the
   // transformResult hook fires on both the initial run and a resume.
   #shape = false;
@@ -162,15 +169,66 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return this.#connector;
   }
 
-  #runtime(options?: RunOptions & { name?: string; noConnectors?: boolean }) {
+  #runtime(
+    options?: RunOptions & {
+      name?: string;
+      noConnectors?: boolean;
+      noValidators?: boolean;
+    }
+  ) {
     const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
+    const validator: CodemodeValidator = {
+      name: "test-policy",
+      validateCode: ({ code, normalizedCode, connectors }) => {
+        this.#lastCodeContext = {
+          code,
+          normalizedCode,
+          connectors: connectors.map((connector) => connector.name)
+        };
+        if (code.includes("INVALID_CODE")) {
+          return {
+            valid: false,
+            issues: [
+              {
+                code: "invalid-code",
+                message: "The generated program violates the test policy.",
+                suggestion: "Remove INVALID_CODE."
+              }
+            ]
+          };
+        }
+        return { valid: true };
+      },
+      validateToolCall: (call) => {
+        this.#validationCalls.push(`${call.connector}.${call.method}`);
+        if (call.connector === "items" && call.method === "add_note") {
+          const text = (call.args as { text?: string } | undefined)?.text;
+          if (text === "throw-validator") {
+            throw new Error("secret validator implementation detail");
+          }
+          if (text === "invalid") {
+            return {
+              valid: false,
+              issues: [
+                {
+                  path: "text",
+                  message: "This note is not allowed."
+                }
+              ]
+            };
+          }
+        }
+        return { valid: true };
+      }
+    };
     return createCodemodeRuntime({
       ctx: this.ctx,
       executor,
       connectors: options?.noConnectors ? [] : [this.#items()],
       name: options?.name,
       maxExecutions: options?.maxExecutions,
-      transformResult: this.#shape ? (r) => ({ shaped: r }) : undefined
+      transformResult: this.#shape ? (r) => ({ shaped: r }) : undefined,
+      validators: options?.noValidators ? [] : [validator]
     });
   }
 
@@ -192,6 +250,10 @@ export class CodemodeTestHost extends DurableObject<Env> {
 
   approve(executionId: string): Promise<ProxyToolOutput> {
     return this.#runtime().approve({ executionId });
+  }
+
+  approveWithoutValidators(executionId: string): Promise<ProxyToolOutput> {
+    return this.#runtime({ noValidators: true }).approve({ executionId });
   }
 
   /**
@@ -263,6 +325,13 @@ export class CodemodeTestHost extends DurableObject<Env> {
   sideEffects() {
     const c = this.#items();
     return { created: c.created, deleted: c.deleted, notes: c.notes };
+  }
+
+  validationState() {
+    return {
+      calls: this.#validationCalls,
+      codeContext: this.#lastCodeContext
+    };
   }
 
   lifecycle() {
