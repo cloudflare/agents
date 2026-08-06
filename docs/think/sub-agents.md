@@ -211,7 +211,11 @@ await this.saveMessages((current) => [
 
 ### Scheduled responses
 
-Trigger a recurring prompt turn with `getScheduledTasks()`:
+Declared scheduled tasks are armed on the **root agent only**.
+`getScheduledTasks()` is usually a static declaration, so it returns the same
+tasks on every instance of the class — arming it on sub-agents too would fire
+each occurrence once per live sub-agent on top of the root. Declare the task on
+the root and let it fan out to sub-agents itself:
 
 ```typescript
 export class MyAgent extends Think<Env> {
@@ -224,12 +228,43 @@ export class MyAgent extends Think<Env> {
       dailyReport: {
         schedule: "every day at 09:00",
         timezone: "UTC",
-        prompt: "Generate the daily report."
+        handler: async () => {
+          for (const { name } of this.listSubAgents(ChatAgent)) {
+            const chat = await this.subAgent(ChatAgent, name);
+            await chat.submitMessages([
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: "Generate the daily report." }]
+              }
+            ]);
+          }
+        }
       }
     };
   }
 }
 ```
+
+If a class genuinely declares _different_ tasks per sub-agent — for example when
+`getScheduledTasks()` reads per-sub-agent state — opt in with
+`getScheduledTasksScope()` and each sub-agent owns an independent schedule:
+
+```typescript
+export class PerUserAgent extends Think<Env> {
+  getScheduledTasksScope() {
+    return "all" as const;
+  }
+
+  async getScheduledTasks() {
+    const reminder = await this.getReminderForThisUser();
+    return reminder ? { reminder } : {};
+  }
+}
+```
+
+A sub-agent that declares tasks without opting in logs a warning naming this
+hook, so an inert schedule is never silent.
 
 ### Chaining from onChatResponse
 

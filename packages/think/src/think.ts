@@ -3725,6 +3725,7 @@ export class Think<
   private _submissionTableEnsured = false;
   private _workflowNotificationTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
+  private _warnedFacetScheduledTasksDisarmed = false;
   private _actionLedgerTableEnsured = false;
   private _actionPendingTableEnsured = false;
   private _drainingSubmissions = false;
@@ -4408,6 +4409,29 @@ export class Think<
   /** Return code-declared scheduled tasks for this agent. */
   getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
     return {};
+  }
+
+  /**
+   * Return which instances of this class arm the declared scheduled tasks.
+   *
+   * `"root"` (the default) arms them only on the top-level agent. Because
+   * `getScheduledTasks()` is usually a static code declaration, it returns the
+   * same tasks on every instance — so without this scope an agent that also
+   * has sub-agents would arm one private copy per live facet and dispatch each
+   * occurrence once per facet on top of the root (#1877).
+   *
+   * Return `"all"` to arm on facets as well. That is only correct when
+   * `getScheduledTasks()` genuinely varies per facet (for example when it
+   * reads per-facet state), since each facet then owns an independent
+   * schedule.
+   *
+   * The value must be stable across wakes. Reporting `"root"` on a facet that
+   * previously armed cancels its occurrences, so a scope that flickers with
+   * request-scoped or not-yet-loaded state will repeatedly tear down and
+   * re-create that facet's schedule.
+   */
+  getScheduledTasksScope(): "root" | "all" | Promise<"root" | "all"> {
+    return "root";
   }
 
   /**
@@ -9192,6 +9216,20 @@ export class Think<
     return stableHash(this.selfPath);
   }
 
+  /**
+   * Whether this instance arms the declared scheduled tasks.
+   *
+   * The root always arms. Facets only arm when the class opts in via
+   * `getScheduledTasksScope()`; see that hook for why root-only is the
+   * default (#1877). `parentPath` is hydrated before the reconcile step of
+   * `onStart` — persisted by `_cf_initAsFacet` on a facet's first boot, and
+   * restored from storage by the base agent on every later wake.
+   */
+  private async _declaredScheduledTasksArmedHere(): Promise<boolean> {
+    if (this.parentPath.length === 0) return true;
+    return (await this.getScheduledTasksScope()) === "all";
+  }
+
   private _declaredScheduleValidationError(
     rawSchedule: string,
     taskTimezone?: string,
@@ -9234,11 +9272,19 @@ export class Think<
   }
 
   private async _reconcileDeclaredScheduledTasks(): Promise<void> {
-    const tasks = await this._declaredScheduledTasksForNow();
+    // A facet that does not arm reconciles against an empty task set rather
+    // than skipping outright: the prune pass below then cancels and deletes
+    // any rows an earlier version armed here, so pre-existing duplicates heal
+    // on the next wake instead of firing forever (#1877).
+    const armed = await this._declaredScheduledTasksArmedHere();
+    const tasks = armed
+      ? await this._declaredScheduledTasksForNow()
+      : new Map<string, NormalizedDeclaredTask>();
     this._ensureDeclaredScheduledTasksTable();
     const ownerKey = this._declaredScheduleOwnerKey();
     const now = Date.now();
     const existing = this._listDeclaredScheduledTaskRows();
+    if (!armed) await this._warnFacetScheduledTasksDisarmed(existing.length);
     const seen = new Set<string>();
 
     for (const [taskId, task] of tasks) {
@@ -9351,6 +9397,46 @@ export class Think<
     }
   }
 
+  /**
+   * Warn once when a sub-agent declares tasks it will not arm.
+   *
+   * Two populations need this, and only one of them leaves a trace. A facet
+   * upgrading from the pre-#1877 default has rows to prune, so `armedCount`
+   * is non-zero. A facet declaring tasks for the first time under the root
+   * default never armed anything, so the only way to tell it apart from a
+   * class that declares nothing is to ask — otherwise its schedule is
+   * silently inert, which is the failure mode #1877 was filed about.
+   */
+  private async _warnFacetScheduledTasksDisarmed(
+    armedCount: number
+  ): Promise<void> {
+    if (this._warnedFacetScheduledTasksDisarmed) return;
+    let declaredCount = armedCount;
+    if (declaredCount === 0) {
+      try {
+        declaredCount = Object.keys(await this.getScheduledTasks()).length;
+      } catch {
+        // Only the warning depends on this; a declaration that throws still
+        // surfaces from whichever instance actually arms it.
+        return;
+      }
+    }
+    if (declaredCount === 0) return;
+    this._warnedFacetScheduledTasksDisarmed = true;
+    console.warn(
+      `[Think] Sub-agent "${this.name}" declares ${declaredCount} scheduled ` +
+        `task(s) that are not armed here. Declared tasks run on the root ` +
+        `agent only, so each occurrence fires once rather than once per live ` +
+        `sub-agent (#1877)` +
+        (armedCount > 0
+          ? `; the occurrences this sub-agent had already armed have been ` +
+            `cancelled`
+          : ``) +
+        `. Override getScheduledTasksScope() to return "all" if this class ` +
+        `intentionally declares per-sub-agent tasks.`
+    );
+  }
+
   private async _scheduleDeclaredTaskOccurrence(
     task: NormalizedDeclaredTask,
     now: Date,
@@ -9426,6 +9512,12 @@ export class Think<
     ) {
       throw new Error("Invalid declared scheduled task payload");
     }
+
+    // A dispatch can reach a facet that no longer arms — either racing the
+    // reconcile that prunes its rows, or arriving before this wake got that
+    // far. Returning here keeps the `finally` below from re-arming the very
+    // occurrence the prune is trying to retire (#1877).
+    if (!(await this._declaredScheduledTasksArmedHere())) return;
 
     const row = this._readDeclaredScheduledTaskRow(payload.taskId);
     if (!row || row.schedule_hash !== payload.scheduleHash) return;
