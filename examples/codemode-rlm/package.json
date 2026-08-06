@@ -1,0 +1,27 @@
+{
+  "name": "@cloudflare/agents-codemode-rlm-example",
+  "description": "Think-hosted recursive language model with Code Mode as its only model-facing tool",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/codemode": "*",
+    "@cloudflare/think": "*",
+    "agents": "*",
+    "ai": "^7.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.19.0",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.9",
+    "wrangler": "^4.115.0"
+  }
+}

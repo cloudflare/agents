@@ -714,6 +714,7 @@ const types = generateTypes(myAiSdkTools);
 
 - [`examples/codemode-connectors/`](../../examples/codemode-connectors/) — Runtime and connector example with MCP and OpenAPI connectors
 - [`examples/codemode/`](../../examples/codemode/) — Full working example with task management tools
+- [`examples/codemode-rlm/`](../../examples/codemode-rlm/) — Think-hosted recursive language model with Code Mode as its only model-facing tool
 - [`examples/codemode-browser/`](../../examples/codemode-browser/) — Browser iframe executor example with dynamic client tools
 
 ## License
