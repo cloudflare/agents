@@ -166,9 +166,22 @@ describe("AgentWorkflow integration", () => {
 
       const callbacks =
         (await agentStub.getCallbacksReceived()) as CallbackRecord[];
-      expect(callbacks.some((c: CallbackRecord) => c.type === "complete")).toBe(
-        true
+      const completeCallbacks = callbacks.filter(
+        (c: CallbackRecord) => c.type === "complete"
       );
+      expect(completeCallbacks).toHaveLength(1);
+      expect(completeCallbacks[0].data).toEqual({
+        result: expect.objectContaining({
+          processed: true,
+          taskId: "task-789"
+        })
+      });
+
+      const trackedWorkflow = (await agentStub.getWorkflowById(
+        "approval-test-wf-1"
+      )) as WorkflowInfo | null;
+      expect(trackedWorkflow?.status).toBe("complete");
+      expect(trackedWorkflow?.completedAt).toBeInstanceOf(Date);
     });
 
     it("should handle rejection and report error", async () => {
