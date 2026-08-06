@@ -6,15 +6,29 @@
  * does not assert natural idle hibernation or hibernation eligibility.
  */
 import type { UIMessage } from "ai";
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
-import type { ThinkRecoveryTestAgent } from "./agents/think-session";
+import type {
+  ThinkNonRecoveryTestAgent,
+  ThinkRecoveryTestAgent
+} from "./agents/think-session";
+
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+const MSG_STREAM_RESUME_ACK = "cf_agent_stream_resume_ack";
+const MSG_STREAM_RESUMING = "cf_agent_stream_resuming";
 
 async function recoveryAgent(name: string) {
   return getServerByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
+    name
+  );
+}
+
+async function nonRecoveryAgent(name: string) {
+  return getServerByName(
+    env.ThinkNonRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkNonRecoveryTestAgent>,
     name
   );
 }
@@ -25,6 +39,13 @@ async function getStoredBranches(
 ): Promise<UIMessage[]> {
   // SAFETY: The test agent returns sanitized UIMessage values. PartyServer's
   // RPC serializer cannot infer the AI SDK's open metadata shape.
+  return (await agent.getBranchesForTest(messageId)) as UIMessage[];
+}
+
+async function getNonRecoveryStoredBranches(
+  agent: Awaited<ReturnType<typeof nonRecoveryAgent>>,
+  messageId: string
+): Promise<UIMessage[]> {
   return (await agent.getBranchesForTest(messageId)) as UIMessage[];
 }
 
@@ -39,6 +60,55 @@ async function waitFor(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+async function connectNonRecoveryAgent(name: string): Promise<WebSocket> {
+  const response = await exports.default.fetch(
+    `http://example.com/agents/think-non-recovery-test-agent/${name}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  expect(response.status).toBe(101);
+  const webSocket = response.webSocket;
+  expect(webSocket).toBeDefined();
+  webSocket!.accept();
+  return webSocket!;
+}
+
+function waitForWebSocketFrame(
+  webSocket: WebSocket,
+  predicate: (frame: Record<string, unknown>) => boolean,
+  timeoutMs = 3000
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      webSocket.removeEventListener("message", onMessage);
+      reject(new Error(`WebSocket frame not received within ${timeoutMs}ms`));
+    }, timeoutMs);
+    const onMessage = (event: MessageEvent) => {
+      const frame = JSON.parse(event.data as string) as Record<string, unknown>;
+      if (!predicate(frame)) return;
+      clearTimeout(timeout);
+      webSocket.removeEventListener("message", onMessage);
+      resolve(frame);
+    };
+    webSocket.addEventListener("message", onMessage);
+  });
+}
+
+async function closeWebSocket(webSocket: WebSocket): Promise<void> {
+  const closed = new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, 200);
+    webSocket.addEventListener(
+      "close",
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      { once: true }
+    );
+  });
+  webSocket.close();
+  await closed;
 }
 
 async function seedInterruptedContinueTurn(
@@ -284,5 +354,57 @@ describe("Think chat recovery after forced Durable Object eviction", () => {
       oldAssistantId,
       partialAssistantId
     ]);
+  });
+});
+
+describe("Think resume handshake after forced Durable Object eviction", () => {
+  it("persists an orphaned regeneration as a sibling without chat recovery", async () => {
+    const name = `evict-resume-regeneration-${crypto.randomUUID()}`;
+    let agent = await nonRecoveryAgent(name);
+    const { requestId, userId, oldAssistantId, partialAssistantId } =
+      await agent.seedInterruptedRegenerationForResumeTest();
+
+    await evictDurableObject(agent as unknown as DurableObjectStub);
+
+    const webSocket = await connectNonRecoveryAgent(name);
+    try {
+      const resuming = await waitForWebSocketFrame(
+        webSocket,
+        (frame) => frame.type === MSG_STREAM_RESUMING
+      );
+      expect(resuming.id).toBe(requestId);
+
+      const replayDone = waitForWebSocketFrame(
+        webSocket,
+        (frame) =>
+          frame.type === MSG_CHAT_RESPONSE &&
+          frame.id === requestId &&
+          frame.done === true
+      );
+      webSocket.send(
+        JSON.stringify({ type: MSG_STREAM_RESUME_ACK, id: requestId })
+      );
+      await replayDone;
+
+      agent = await nonRecoveryAgent(name);
+      await waitFor(async () => {
+        const userBranches = await getNonRecoveryStoredBranches(agent, userId);
+        const oldAnswerBranches = await getNonRecoveryStoredBranches(
+          agent,
+          oldAssistantId
+        );
+        return [...userBranches, ...oldAnswerBranches].some(
+          (message) => message.id === partialAssistantId
+        );
+      });
+
+      const branches = await getNonRecoveryStoredBranches(agent, userId);
+      expect(branches.map((message) => message.id)).toEqual([
+        oldAssistantId,
+        partialAssistantId
+      ]);
+    } finally {
+      await closeWebSocket(webSocket);
+    }
   });
 });
