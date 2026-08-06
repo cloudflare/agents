@@ -1,0 +1,25 @@
+design/codemode-rlm.md
+  s_0b3003d5997402::t_f54990be6a5705 1-215
+examples/codemode-rlm/env.d.ts
+  s_0b3003d5997402::t_f515106f3399a3 2,13,17
+examples/codemode-rlm/src/api.ts
+  s_0b3003d5997402::t_09282477d1314f 1-150
+examples/codemode-rlm/src/client.tsx
+  s_0b3003d5997402::t_76def66a3660a5 1-1002
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2aacf1c23706e5de0b54fd98f37b5dd80988833c",
+  "prompts": {},
+  "sessions": {
+    "s_0b3003d5997402": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd6b0-e1c0-7b61-ba71-7591b8469662",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
