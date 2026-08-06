@@ -1,0 +1,22 @@
+/* Tailwind ignores node_modules by default, so source Kumo and Streamdown. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@source "../node_modules/streamdown/dist/*.js";
+@import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+.chat-scrollbar {
+  scrollbar-color: color-mix(in srgb, currentColor 18%, transparent) transparent;
+  scrollbar-width: thin;
+}

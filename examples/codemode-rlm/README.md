@@ -1,8 +1,10 @@
 # Code Mode RLM
 
-A server-only, think-only Recursive Language Model built with [`@cloudflare/think`](../../packages/think), the [Agents SDK](../../packages/agents), and [`@cloudflare/codemode`](../../packages/codemode).
+A Vite chat app for a think-only Recursive Language Model built with [`@cloudflare/think`](../../packages/think), the [Agents SDK](../../packages/agents), and [`@cloudflare/codemode`](../../packages/codemode).
 
 The model can call exactly one tool: `codemode`. Generated JavaScript reaches external context, durable notebook state, recursive children, and a guarded continual harness through four connector namespaces. This is inspired by Prime Agent; it is not Prime Agent and does not claim benchmark parity or autonomous self-improvement.
+
+The React frontend is a chat experience over the RLM request protocol. It uses authenticated HTTP admission and polling instead of Think's generic WebSocket chat route, preserving external-input storage, request idempotency, and verified completion. The bearer token stays in browser session storage and is never exposed through a `VITE_*` variable.
 
 ## Key pattern
 
@@ -58,10 +60,12 @@ Requires Node.js 24+, pnpm, a Cloudflare account with Workers AI, and Dynamic Wo
 ```bash
 pnpm install
 cp .env.example .env
-# Set API_TOKEN in .env, then use the same value below.
+# Set API_TOKEN in .env, then enter the same value in the app.
 export RLM_API_TOKEN='replace-with-your-local-token'
 pnpm dev
 ```
+
+Open the URL printed by Vite, choose a durable session name, and enter the local `API_TOKEN`. The composer accepts a normal chat task plus optional large context. Only one turn is admitted at a time so the UI can preserve conversational ordering; it displays `admitted` and `running` honestly rather than simulating token streaming before the verified answer exists.
 
 Root turns are durable asynchronous submissions. Supply a stable `requestId`; retrying the same request is safe, while changed arguments are rejected.
 
@@ -117,10 +121,11 @@ Defaults live in [`wrangler.jsonc`](./wrangler.jsonc): 12 model steps, depth one
 ```bash
 pnpm run types
 pnpm test
-pnpm exec tsc --noEmit
+pnpm run typecheck
+pnpm run build
 pnpm exec wrangler deploy --dry-run
 ```
 
 From the repository root, run `pnpm run check`.
 
-For the design research and fidelity limits, read [RESEARCH.md](./RESEARCH.md). Related examples: [`codemode`](../codemode), [`agents-as-tools`](../agents-as-tools), and [`think-workflows`](../think-workflows).
+For the contributor-facing architecture, read [`design/codemode-rlm.md`](../../design/codemode-rlm.md). For the source research and fidelity limits, read [RESEARCH.md](./RESEARCH.md). Related examples: [`codemode`](../codemode), [`agents-as-tools`](../agents-as-tools), and [`think-workflows`](../think-workflows).

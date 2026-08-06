@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
-import { boundedInteger, requireString } from "./core";
 import { RlmChildAgent, RlmThinkAgent } from "./agent";
+import { boundedInteger, requireString } from "./core";
 
 export { RlmChildAgent, RlmThinkAgent };
 export { CodemodeRuntime } from "@cloudflare/codemode";
@@ -71,28 +71,6 @@ function authorized(request: Request, env: Env): Response | undefined {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/") {
-      return json({
-        name: "codemode-rlm",
-        architecture:
-          "Think owns durable turns and retained sub-agents; the model sees only Code Mode.",
-        usage:
-          "POST /sessions/:session/think, then poll GET /sessions/:session/requests?requestId=...",
-        endpoints: [
-          "GET /sessions/:session",
-          "POST /sessions/:session/think",
-          "POST /sessions/:session/refine",
-          "GET /sessions/:session/requests?requestId=...",
-          "POST /sessions/:session/rollback",
-          "GET /sessions/:session/history",
-          "GET /sessions/:session/children",
-          "GET /sessions/:session/harness",
-          "GET /sessions/:session/executions",
-          "GET|POST /sessions/:session/snippets"
-        ]
-      });
-    }
-
     const authResponse = authorized(request, env);
     if (authResponse) return authResponse;
 

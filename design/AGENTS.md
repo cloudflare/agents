@@ -71,6 +71,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 | File                                    | Type       | Scope                                                                                                                                                                           |
 | --------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `codemode-rlm.md`                       | design doc | Code Mode RLM example — one-tool boundary, durable context and kernel, recursive Think children, guarded harness                                                                |
 | `chat-shared-layer.md`                  | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat                                                                                             |
 | `durable-streams-comparison.md`         | analysis   | Durable Streams (ElectricSQL) vs the Agents SDK — layer mapping, what each has, strategic takeaways                                                                             |
 | `think.md`                              | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions                                                                                           |
