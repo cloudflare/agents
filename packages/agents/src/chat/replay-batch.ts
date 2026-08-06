@@ -4,56 +4,48 @@ import type { UIMessageChunk } from "ai";
  * Coalescing window for the chunk burst a resumed stream replays.
  *
  * On reconnect the server re-sends every stored chunk of the active turn
- * back-to-back — one `cf_agent_use_chat_response` frame per chunk, each marked
- * `replay: true`. Forwarding each replayed chunk into the UI-message stream on
- * arrival rebuilds chat state once per chunk, which has two costs:
+ * back-to-back — one `cf_agent_use_chat_response` frame per chunk, marked
+ * `replay: true`. Rebuilding chat state once per chunk is quadratic in the
+ * turn's length, because each rebuild deep-clones the assistant message, and it
+ * schedules one synchronous React render per chunk. A burst delivered inside a
+ * single task therefore exceeds React's nested-update limit: "Maximum update
+ * depth exceeded" (#1913), which reaches the user as a false terminal
+ * `status: "error"` while the server-side turn is healthy.
  *
- * 1. Every rebuild deep-clones the whole assistant message, so replaying a long
- *    turn is quadratic in its length.
- * 2. Every rebuild schedules a synchronous React render. A burst delivered in a
- *    single event-loop turn outpaces React's commit loop and trips its
- *    nested-update guard — "Maximum update depth exceeded" (#1913) — which
- *    surfaces as a false terminal `status: "error"` even though the server-side
- *    turn is healthy.
+ * The window buffers replayed chunks and merges consecutive deltas of the same
+ * part, so a burst applies as roughly one chunk per message part.
  *
- * The window collects replayed chunks and merges consecutive deltas of the same
- * part, so the burst applies as roughly one chunk per message part.
+ * Coalescing is best-effort. The first buffered chunk opens the window and a
+ * `setTimeout(0)` closes it. That timer is a fresh macrotask: it runs no
+ * earlier than the end of the current task, but other queued tasks — a socket
+ * message, a close — can run before it. A burst split that way is delivered in
+ * pieces, which is harmless, since only a burst inside one task can exceed the
+ * limit.
  *
- * The window is deliberately short. It is opened by the first buffered chunk
- * and closed by a `setTimeout(0)`, which runs once the task that delivered the
- * burst finishes. Coalescing is therefore opportunistic: a burst delivered in
- * one task is merged, and a burst spread over several tasks is delivered as it
- * arrives — which is harmless, because only a burst inside a single task can
- * outrun React's commit loop.
- *
- * Correctness does not depend on that timer winning any race, because the
- * timer is not the only thing that closes the window:
+ * Correctness never depends on when the timer fires. Three things close the
+ * window in a defined order:
  *
  * - A burst boundary flushes synchronously (`applyChatResponseFrame`).
  * - The transport flushes before it closes or detaches a stream, so a
  *   disconnect mid-burst cannot lose received content.
- * - A replayed `start` for a message already buffered supersedes the buffered
- *   pass (`supersedesBufferedPass`), so two replays of one turn can never be
- *   concatenated — the case the hook's own bookkeeping repairs when the passes
- *   are applied separately (#1733).
+ * - A newer replay of a buffered message supersedes it
+ *   (`supersedesBufferedPass`), so two replays of one turn are never
+ *   concatenated — what the hook repairs when the passes apply separately
+ *   (#1733).
  */
 export class ReplayChunkBatch {
   /** Buffered chunks, in wire order. Owned by the batch — merged in place. */
   private chunks: UIMessageChunk[] = [];
   /** Merge key of the last buffered chunk, or null if it cannot be merged into. */
   private tailMergeKey: string | null = null;
-  /** Cancels the pending end-of-turn flush. Set while the window is open. */
+  /** Cancels the scheduled flush. Set while the window is open. */
   private cancelWindow: (() => void) | undefined;
-
-  /** `messageId` of the buffered replay pass, if it began with a `start`. */
+  /** `messageId` of the buffered pass, if it began with a `start` chunk. */
   private startMessageId: string | undefined;
 
   constructor(
     private readonly controller: ReadableStreamDefaultController<UIMessageChunk>,
-    /**
-     * Schedules the window's flush and returns a canceller. Runs after the
-     * current task by default; overridable for deterministic tests.
-     */
+    /** Schedules the flush, returning a canceller. Injected by tests. */
     private readonly closeWindow: (flush: () => void) => () => void = (
       flush
     ) => {
@@ -62,7 +54,6 @@ export class ReplayChunkBatch {
     }
   ) {}
 
-  /** `messageId` of the buffered pass, or undefined if none is buffered. */
   get bufferedStartMessageId(): string | undefined {
     return this.startMessageId;
   }
@@ -73,8 +64,8 @@ export class ReplayChunkBatch {
 
   /**
    * Buffers a replayed chunk, merging it into the previous one when both are
-   * deltas of the same part. Takes ownership of the chunk. Opens the window on
-   * the first chunk so the batch cannot outlive the turn that produced it.
+   * deltas of the same part. Takes ownership of the chunk, and opens the window
+   * on the first one.
    */
   push(chunk: UIMessageChunk): void {
     const key = mergeKeyOf(chunk);
@@ -126,9 +117,9 @@ export class ReplayChunkBatch {
         this.controller.enqueue(chunk);
       }
     } catch {
-      // The stream is already closed or errored, which discards its queue
-      // anyway. Never let a flush throw: callers flush on their way to
-      // closing a stream, and must still close it.
+      // Already closed or errored, which discards the stream's queue anyway. A
+      // flush must never throw: callers flush on their way to closing a stream,
+      // and still have to close it.
     }
   }
 
@@ -140,12 +131,10 @@ export class ReplayChunkBatch {
     this.controller.enqueue(chunk);
   }
 
-  /** Closes the stream. */
   closeNow(): void {
     this.controller.close();
   }
 
-  /** Errors the stream, discarding anything still queued in it. */
   errorNow(error: Error): void {
     this.controller.error(error);
   }
@@ -161,13 +150,13 @@ type ChatResponseFrame = {
 };
 
 /**
- * Routes one non-error `cf_agent_use_chat_response` frame into a chunk stream:
- * a replayed chunk joins the current window, anything else flushes the window
- * first so replayed content always reaches the consumer ahead of live content.
+ * Routes one non-error `cf_agent_use_chat_response` frame into a chunk stream.
+ * A replayed chunk joins the window; anything else flushes it first, so
+ * replayed content always reaches the consumer ahead of live content.
  *
- * A burst also ends at `replayComplete` (live stream) or at `done` (finalized
- * or orphaned stream, which never sends `replayComplete`). Both flush, and both
- * can carry an empty body — hence the flush on bodyless frames too.
+ * A burst also ends at `replayComplete` (live stream) or `done` (finalized or
+ * orphaned stream, which sends no `replayComplete`). Either can carry an empty
+ * body, so bodyless frames flush too.
  */
 export function applyChatResponseFrame(
   batch: ReplayChunkBatch,
@@ -209,11 +198,11 @@ export function applyChatResponseFrame(
 /**
  * True when `chunk` starts a replay pass that makes the buffered one redundant.
  *
- * A stream can announce itself twice, so the same turn can replay twice before
+ * A stream can announce itself twice, so one turn can replay twice before
  * either pass is delivered (#1733). Every replay rebuilds the message from its
- * first chunk, so the newer pass is a superset of the buffered one; delivering
- * both would duplicate the message's parts. Continuation replays are excluded:
- * they append to an existing message rather than rebuild it.
+ * first chunk, so the newer pass contains the buffered one, which has reached
+ * nobody; delivering both would duplicate the message's parts. Continuation
+ * replays append instead of rebuilding, so they never supersede.
  */
 function supersedesBufferedPass(
   batch: ReplayChunkBatch,
@@ -233,9 +222,9 @@ function supersedesBufferedPass(
  *
  * Resuming an errored turn replays its partial content and only then sends the
  * terminal error frame (#1575). `controller.error()` resets the stream's queue,
- * so with content still buffered the error is delivered as an `error` chunk
- * behind the flushed batch instead — `processUIMessageStream` turns that into
- * the same thrown error, so `useChat` still lands in `status: "error"`.
+ * so with content buffered the error is delivered as an `error` chunk behind
+ * the flushed batch instead. `processUIMessageStream` turns that into the same
+ * thrown error, so `useChat` still lands in `status: "error"`.
  */
 export function failChatStream(batch: ReplayChunkBatch, message: string): void {
   if (batch.isEmpty) {
@@ -249,8 +238,8 @@ export function failChatStream(batch: ReplayChunkBatch, message: string): void {
 }
 
 /**
- * Identity of the part a chunk contributes text to, or null when the chunk
- * must not be merged into (non-delta chunks, and deltas carrying metadata).
+ * Identity of the part a chunk adds text to, or null when the chunk must not be
+ * merged into: non-deltas, and deltas carrying metadata.
  */
 function mergeKeyOf(chunk: UIMessageChunk): string | null {
   switch (chunk.type) {
@@ -266,10 +255,7 @@ function mergeKeyOf(chunk: UIMessageChunk): string | null {
   }
 }
 
-/**
- * Appends `source`'s delta text onto `target`. Only called for chunks with
- * equal, non-null merge keys, so both are the same kind of delta.
- */
+/** Appends `source`'s delta text onto `target`. Both have equal merge keys. */
 function appendDeltaText(target: UIMessageChunk, source: UIMessageChunk): void {
   if (
     target.type === "tool-input-delta" &&
