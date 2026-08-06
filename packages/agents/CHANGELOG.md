@@ -1,5 +1,29 @@
 # @cloudflare/agents
 
+## 0.21.0
+
+### Minor Changes
+
+- [#2052](https://github.com/cloudflare/agents/pull/2052) [`f9d71d6`](https://github.com/cloudflare/agents/commit/f9d71d65ffb31cb45c8594b5f3bd4eeb4a8560d1) Thanks [@cjol](https://github.com/cjol)! - Expose `WebSocketChatTransport` and its connection types from the framework-neutral `agents/chat/transport` entry point. React peers are now optional for framework-neutral clients and servers.
+
+### Patch Changes
+
+- [#2037](https://github.com/cloudflare/agents/pull/2037) [`1bca2a6`](https://github.com/cloudflare/agents/commit/1bca2a62435dee1a75914c8840d028b832913d0f) Thanks [@cjol](https://github.com/cjol)! - Add `buildAgentPath()` and `buildAgentUrl()` for constructing canonical root-first Agent and sub-agent addresses for external HTTP requests, WebSocket connections, callbacks, and webhooks. React sub-agent connections now share the same descendant path encoder.
+
+- [#2034](https://github.com/cloudflare/agents/pull/2034) [`efcb316`](https://github.com/cloudflare/agents/commit/efcb3167b72bcab2bab6e49036f6cee74d35b187) Thanks [@cjol](https://github.com/cjol)! - Send Browser Run extraction schemas under `response_format.json_schema`, matching the Quick Actions `/json` contract.
+
+- [#2023](https://github.com/cloudflare/agents/pull/2023) [`2b2b598`](https://github.com/cloudflare/agents/commit/2b2b5980e1945cf55f5a11626bc395e7c460516f) Thanks [@threepointone](https://github.com/threepointone)! - Treat `useAgentChat` observer error frames as terminal responses.
+
+  Plain-text error bodies are no longer parsed as stream chunks or merged into an empty assistant message. Error frames now clear observer streaming, replay, recovery, and tool-continuation state even when they omit `done`, matching the transport-owned stream behavior.
+
+- [#1996](https://github.com/cloudflare/agents/pull/1996) [`753a674`](https://github.com/cloudflare/agents/commit/753a6748c1d20e56a300bedab6174e43acb33a79) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Update PartyServer and the Cloudflare Workers development toolchain for `@cloudflare/workers-types` v5 compatibility. New Think projects now use Workers Types v5 with matching Wrangler and Vite plugin versions.
+
+- [#1994](https://github.com/cloudflare/agents/pull/1994) [`6e77f62`](https://github.com/cloudflare/agents/commit/6e77f62e368279a5bbd11ee2c4b2f489693d0401) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Use `wrapAISDK()` as the single AI SDK v6 and v7 tracing integration, removing the separate `createAISDKTelemetry()` callback adapter that could not preserve the `invoke_agent` parent hierarchy. Mark asynchronously decided AI SDK v7 top-level approval spans when they outlive their invocation.
+
+- [#2035](https://github.com/cloudflare/agents/pull/2035) [`5d66723`](https://github.com/cloudflare/agents/commit/5d66723c8c0cacb4d8808d6399074b80020786ef) Thanks [@cjol](https://github.com/cjol)! - Validate BrowserConnector tool arguments before execution and reject JSON-stringified Browser Run extraction schemas with an actionable error.
+
+- [#2049](https://github.com/cloudflare/agents/pull/2049) [`ce0e608`](https://github.com/cloudflare/agents/commit/ce0e608675e41794b02178dce0fb13bb62530aa8) Thanks [@cjol](https://github.com/cjol)! - Preserve spacing between streamed text segments separated by tool calls. Think messenger delivery and Voice now share the same boundary-aware text joining logic from `agents/chat`. Remove the unsafe `textDeltaFromStreamChunk()` messenger export; consume streams through `TextStreamCallback` so structured boundaries are retained.
+
 ## 0.20.1
 
 ### Patch Changes

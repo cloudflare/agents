@@ -1,5 +1,19 @@
 # @cloudflare/think
 
+## 0.16.0
+
+### Minor Changes
+
+- [#2049](https://github.com/cloudflare/agents/pull/2049) [`ce0e608`](https://github.com/cloudflare/agents/commit/ce0e608675e41794b02178dce0fb13bb62530aa8) Thanks [@cjol](https://github.com/cjol)! - Preserve spacing between streamed text segments separated by tool calls. Think messenger delivery and Voice now share the same boundary-aware text joining logic from `agents/chat`. Remove the unsafe `textDeltaFromStreamChunk()` messenger export; consume streams through `TextStreamCallback` so structured boundaries are retained.
+
+### Patch Changes
+
+- [#2023](https://github.com/cloudflare/agents/pull/2023) [`2b2b598`](https://github.com/cloudflare/agents/commit/2b2b5980e1945cf55f5a11626bc395e7c460516f) Thanks [@threepointone](https://github.com/threepointone)! - Treat `useAgentChat` observer error frames as terminal responses.
+
+  Plain-text error bodies are no longer parsed as stream chunks or merged into an empty assistant message. Error frames now clear observer streaming, replay, recovery, and tool-continuation state even when they omit `done`, matching the transport-owned stream behavior.
+
+- [#1996](https://github.com/cloudflare/agents/pull/1996) [`753a674`](https://github.com/cloudflare/agents/commit/753a6748c1d20e56a300bedab6174e43acb33a79) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Update PartyServer and the Cloudflare Workers development toolchain for `@cloudflare/workers-types` v5 compatibility. New Think projects now use Workers Types v5 with matching Wrangler and Vite plugin versions.
+
 ## 0.15.1
 
 ### Patch Changes

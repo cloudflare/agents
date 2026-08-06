@@ -1,5 +1,13 @@
 # @cloudflare/voice
 
+## 0.3.6
+
+### Patch Changes
+
+- [#2004](https://github.com/cloudflare/agents/pull/2004) [`0efd545`](https://github.com/cloudflare/agents/commit/0efd545a58c9075885977627e5d853b6e98f6d54) Thanks [@cjol](https://github.com/cjol)! - Pass the full `keyterms` array to Workers AI Flux and Nova-3 STT instead of only the first term.
+
+- [#2049](https://github.com/cloudflare/agents/pull/2049) [`ce0e608`](https://github.com/cloudflare/agents/commit/ce0e608675e41794b02178dce0fb13bb62530aa8) Thanks [@cjol](https://github.com/cjol)! - Preserve spacing between streamed text segments separated by tool calls. Think messenger delivery and Voice now share the same boundary-aware text joining logic from `agents/chat`. Remove the unsafe `textDeltaFromStreamChunk()` messenger export; consume streams through `TextStreamCallback` so structured boundaries are retained.
+
 ## 0.3.5
 
 ### Patch Changes
