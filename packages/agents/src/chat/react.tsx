@@ -9,6 +9,7 @@ import type {
 } from "ai";
 import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { chatThrottleOptions } from "./chat-throttle";
 import type { OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
@@ -383,7 +384,12 @@ export type UseAgentChatOptions<
   // oxlint-disable-next-line no-unused-vars -- kept for backward compat
   State = unknown,
   ChatMessage extends UIMessage = UIMessage
-> = Omit<UseChatParams<ChatMessage>, "fetch" | "onToolCall"> & {
+> = Omit<
+  UseChatParams<ChatMessage>,
+  // Both throttle names are redeclared below: ours accepts `false`, and
+  // intersecting with the SDK's `throttle?: number` would drop that.
+  "fetch" | "onToolCall" | "throttle" | "experimental_throttle"
+> & {
   /** Agent connection from useAgent (accepts both typed and untyped agents) */
   agent: AgentConnection & {
     agent: string;
@@ -400,6 +406,17 @@ export type UseAgentChatOptions<
   credentials?: RequestCredentials;
   /** Request headers */
   headers?: HeadersInit;
+  /**
+   * Milliseconds to coalesce chat state updates before re-rendering,
+   * defaulting to 50.
+   *
+   * Streaming writes chat state once per chunk, so without a throttle a fast
+   * burst of chunks renders once per chunk. The first chunk is never delayed.
+   * Pass `false` to render every chunk as it arrives.
+   */
+  throttle?: number | false;
+  /** @deprecated Use `throttle`. */
+  experimental_throttle?: number;
   /**
    * Callback for handling client-side tool execution.
    * Called when a tool without server-side `execute` is invoked by the LLM.
@@ -690,6 +707,8 @@ export function useAgentChat<
     syncMessagesToServer = true,
     body: bodyOption,
     prepareSendMessagesRequest,
+    throttle,
+    experimental_throttle,
     ...rest
   } = options;
 
@@ -1017,6 +1036,7 @@ export function useAgentChat<
   // the Chat stable across socket recreations.
   const useChatHelpers = useChat<ChatMessage>({
     ...rest,
+    ...chatThrottleOptions({ experimental_throttle, throttle }),
     onData,
     messages: initialMessages,
     transport: customTransport,
