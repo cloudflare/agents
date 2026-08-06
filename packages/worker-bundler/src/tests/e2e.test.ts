@@ -8,6 +8,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
 import { createTypescriptLanguageService } from "../typescript";
+import { comparePythonVersions } from "../installer";
 
 let testId = 0;
 
@@ -982,5 +983,507 @@ describe("hasNodejsCompat", () => {
 
   it("returns false for undefined config", () => {
     expect(hasNodejsCompat(undefined)).toBe(false);
+  });
+});
+
+// Longer timeout duration given since Python workers can take longer to start in the test suite
+describe("createWorker with python main", () => {
+  it("executes a Python script as the main module", async () => {
+    const dynamic_worker = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    return Response("hi")'
+        ].join("\n")
+      }
+    });
+    const id = "test-worker-" + testId++;
+
+    // These should both have defaults from createWorker
+    expect(dynamic_worker.wranglerConfig?.compatibilityDate).not.toBeNull();
+    expect(dynamic_worker.wranglerConfig?.compatibilityFlags).not.toBeNull();
+
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: dynamic_worker.mainModule,
+      modules: dynamic_worker.modules,
+      compatibilityDate: dynamic_worker.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: dynamic_worker.wranglerConfig!.compatibilityFlags!
+    }));
+
+    let response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("hi");
+  });
+}, 20000);
+
+describe("createWorker with pyproject.toml", () => {
+  it("works with a pure python package", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import typing_extensions",
+          "import typing_inspection",
+          "import attrs, attr", // `attrs` supplies two importables, attr and attrs. If it's installed properly, both will be available
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    return Response.json({",
+          '      "typing_extensions": typing_extensions.__name__,',
+          '      "typing_inspection": typing_inspection.__name__,',
+          '      "attrs": attrs.__name__,',
+          '      "attr": attr.__name__,',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          // typing_extensions has zero dependencies. typing_inspection depends on typing_extensions
+          // `attrs` has zero dependencies
+          'dependencies = ["typing_extensions==4.16.0", "typing_inspection==0.4.2", "attrs==26.1.0"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, string>;
+    expect(body.typing_extensions).toBe("typing_extensions");
+    expect(body.typing_inspection).toBe("typing_inspection");
+    expect(body.attrs).toBe("attrs");
+    expect(body.attr).toBe("attr");
+  });
+
+  it("automatically installs a nested dependency", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import typing_inspection",
+          "import typing_extensions",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    return Response.json({",
+          '      "typing_extensions": typing_extensions.__name__,',
+          '      "typing_inspection": typing_inspection.__name__,',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          // typing_inspection depends on typing_extensions
+          'dependencies = ["typing_inspection==0.4.2"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, string>;
+    expect(body.typing_extensions).toBe("typing_extensions");
+    expect(body.typing_inspection).toBe("typing_inspection");
+  });
+
+  // Checks that the Pyodide index works the same way we expect PyPI to work
+  it("works with the pyodide index", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import typing_inspection",
+          "import typing_extensions", // If nothing has gone wrong with nested deps when using the Pyodide index, this will work fine
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    return Response.json({",
+          '      "typing_extensions": typing_extensions.__name__,',
+          '      "typing_inspection": typing_inspection.__name__,',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          // typing_inspection depends on typing_extensions
+          'dependencies = ["typing_inspection==0.4.2"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, string>;
+    expect(body.typing_extensions).toBe("typing_extensions");
+    expect(body.typing_inspection).toBe("typing_inspection");
+  });
+
+  it("works with packages that include arbitrary binary files", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import certifi",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    return Response.json({",
+          '      "certifi": certifi.__name__,',
+          '      "contents": certifi.contents()',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["certifi"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.certifi).toBe("certifi");
+    expect(body.contents).toBeTruthy();
+  });
+
+  it("works with packages that have extensions", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import yaml",
+          "from yaml import _yaml",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    parsed = yaml.load("hello: world", yaml.CLoader)',
+          "    return Response.json({",
+          '      "yaml": yaml.__name__,',
+          '      "hasCLoader": yaml.CLoader is not None,',
+          '      "parsed": parsed',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["pyyaml"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.yaml).toBe("yaml");
+    expect(body.hasCLoader).toBe(true);
+    expect(body.parsed).toEqual({ hello: "world" });
+  });
+
+  it("imports larger packages", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import pygments",
+          "import fastapi",
+          "import bs4", // beautifulsoup4
+          "import flask",
+          "import jinja2",
+          "import numpy",
+          "import libcst",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    return Response.json({",
+          '      "pygments": pygments.__name__,',
+          '      "fastapi": fastapi.__name__,',
+          '      "bs4": bs4.__name__,',
+          '      "flask": flask.__name__,',
+          '      "jinja2": jinja2.__name__,',
+          '      "numpy": numpy.__name__,',
+          '      "libcst": libcst.__name__,',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["pygments", "fastapi", "beautifulsoup4", "flask", "jinja2", "numpy", "libcst"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.pygments).toBe("pygments");
+    expect(body.fastapi).toBe("fastapi");
+    expect(body.bs4).toBe("bs4");
+    expect(body.flask).toBe("flask");
+    expect(body.jinja2).toBe("jinja2");
+    expect(body.numpy).toBe("numpy");
+    expect(body.libcst).toBe("libcst");
+  });
+
+  it("doesn't trip on numpy and its extensions", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import numpy as np",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    a = np.array([1, 2, 3], dtype=np.int32)",
+          "    b = np.array([4, 5, 6], dtype=np.int32)",
+          "    dot = int(np.dot(a, b))",
+          "    total = int(np.sum(a))",
+          "    return Response.json({",
+          '      "dot": dot,',
+          '      "sum": total,',
+          '      "dtype": str(a.dtype)',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["numpy"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.dot).toBe(32);
+    expect(body.sum).toBe(6);
+    expect(body.dtype).toBe("int32");
+  });
+
+  it("uses fastapi to build routes and generate an openapi schema", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "from fastapi import FastAPI",
+          "from pydantic import BaseModel",
+          "",
+          "app = FastAPI()",
+          "",
+          "class Item(BaseModel):",
+          "  name: str",
+          "  price: float",
+          "",
+          "@app.post('/items')",
+          "async def create_item(item: Item):",
+          "  return item",
+          "",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    schema = app.openapi()",
+          "    return Response.json({",
+          '      "title": schema.get("info", {}).get("title"),',
+          '      "has_paths": "/items" in schema.get("paths", {})',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["fastapi"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.title).toBe("FastAPI");
+    expect(body.has_paths).toBe(true);
+  });
+
+  it("uses pydantic native validation required by fastapi", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "from pydantic import BaseModel, ValidationError",
+          "",
+          "class User(BaseModel):",
+          "  name: str",
+          "  age: int",
+          "",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    user = User(name="alice", age=30)',
+          "    try:",
+          '      User(name="bob", age="not an int")',
+          "      validation_failed = False",
+          "    except ValidationError:",
+          "      validation_failed = True",
+          "    return Response.json({",
+          '      "name": user.name,',
+          '      "age": user.age,',
+          '      "validation_failed": validation_failed',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["fastapi"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.name).toBe("alice");
+    expect(body.age).toBe(30);
+    expect(body.validation_failed).toBe(true);
+  });
+
+  it("uses libcst to parse and inspect python source", async () => {
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import libcst as cst",
+          "",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          "    source = \"def greet(name):\\n    return f'Hello, {name}!'\\n\"",
+          "    module = cst.parse_module(source)",
+          "    functions = [",
+          "      stmt for stmt in module.body",
+          "      if isinstance(stmt, cst.FunctionDef)",
+          "    ]",
+          "    name = functions[0].name.value if functions else None",
+          "    return Response.json({",
+          '      "function_name": name,',
+          '      "has_code": len(module.code) > 0',
+          "    })"
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["libcst"]'
+        ].join("\n")
+      }
+    });
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.function_name).toBe("greet");
+    expect(body.has_code).toBe(true);
+  });
+}, 20000);
+
+describe("comparePythonVersions", () => {
+  it("accurately compares versions", () => {
+    expect(comparePythonVersions("1.0.0", "1.0.0")).toBe(0);
+    expect(comparePythonVersions("2.0.0", "1.0.0")).toBeGreaterThan(0);
+    expect(comparePythonVersions("1.0.0", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("1.2.3", "1.2.4")).toBeLessThan(0);
+    expect(comparePythonVersions("1.2.4", "1.2.3")).toBeGreaterThan(0);
+    expect(comparePythonVersions("1.10.0", "1.2.0")).toBeGreaterThan(0);
+    expect(comparePythonVersions("1.0.1", "1.0")).toBeGreaterThan(0);
+  });
+
+  it("considers non-release versions (a/b/rc/alpha/beta/dev/pre) to be lower versions than numeric ones", () => {
+    expect(comparePythonVersions("2.0.0a1", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0", "2.0.0a1")).toBeGreaterThan(0);
+    expect(comparePythonVersions("2.0.0b1", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0rc1", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0-alpha", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0beta", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0dev", "2.0.0")).toBeLessThan(0);
+    expect(comparePythonVersions("2.0.0pre", "2.0.0")).toBeLessThan(0);
   });
 });
