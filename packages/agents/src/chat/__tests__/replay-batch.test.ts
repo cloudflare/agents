@@ -26,7 +26,7 @@ function createRecorder() {
 }
 
 /**
- * A batch whose end-of-turn window is closed manually, so tests decide when
+ * A batch whose coalescing window is closed manually, so tests decide when
  * the turn ends instead of racing a timer.
  */
 function createBatch(
@@ -41,8 +41,8 @@ function createBatch(
   });
   return {
     batch,
-    /** Runs the end-of-turn flush, as the event loop would. */
-    endTurn: () => pending?.(),
+    /** Fires the scheduled flush, as the event loop eventually would. */
+    fireWindow: () => pending?.(),
     windowIsOpen: () => pending !== undefined
   };
 }
@@ -244,31 +244,31 @@ describe("applyChatResponseFrame", () => {
   });
 });
 
-describe("the end-of-turn window", () => {
+describe("the coalescing window", () => {
   it("flushes a burst that never sends a terminator", () => {
     const { controller, enqueued } = createRecorder();
-    const { batch, endTurn } = createBatch(controller);
+    const { batch, fireWindow } = createBatch(controller);
 
     applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
     applyChatResponseFrame(batch, replayFrame(textDelta("t1", "b")));
     expect(enqueued).toEqual([]);
 
-    endTurn();
+    fireWindow();
 
     expect(enqueued).toEqual([textDelta("t1", "ab")]);
   });
 
   it("never holds chunks across turns, so replay passes stay separate", () => {
     const { controller, enqueued } = createRecorder();
-    const { batch, endTurn } = createBatch(controller);
+    const { batch, fireWindow } = createBatch(controller);
 
     // A second announcement of the same stream replays the turn again (#1733).
     // The hook repairs that duplicate by inspecting messages the first pass
     // already applied, so two passes must never merge into one batch.
     applyChatResponseFrame(batch, replayFrame(textDelta("t1", "Hello")));
-    endTurn();
+    fireWindow();
     applyChatResponseFrame(batch, replayFrame(textDelta("t1", "Hello")));
-    endTurn();
+    fireWindow();
 
     expect(enqueued).toEqual([
       textDelta("t1", "Hello"),
@@ -278,7 +278,7 @@ describe("the end-of-turn window", () => {
 
   it("supersedes a buffered pass when the same turn replays again", () => {
     const { controller, enqueued } = createRecorder();
-    const { batch, endTurn } = createBatch(controller);
+    const { batch, fireWindow } = createBatch(controller);
 
     // Two announcements of one stream can replay the turn twice before either
     // pass is delivered (#1733). Every replay rebuilds from its first chunk, so
@@ -290,7 +290,7 @@ describe("the end-of-turn window", () => {
     for (const chunk of replayPass("Hello ", "world")) {
       applyChatResponseFrame(batch, replayFrame(chunk));
     }
-    endTurn();
+    fireWindow();
 
     expect(enqueued).toEqual([
       { messageId: "m1", type: "start" },
@@ -301,7 +301,7 @@ describe("the end-of-turn window", () => {
 
   it("keeps a continuation replay, which appends instead of rebuilding", () => {
     const { controller, enqueued } = createRecorder();
-    const { batch, endTurn } = createBatch(controller);
+    const { batch, fireWindow } = createBatch(controller);
 
     for (const chunk of replayPass("first")) {
       applyChatResponseFrame(batch, {
@@ -315,14 +315,14 @@ describe("the end-of-turn window", () => {
         continuation: true
       });
     }
-    endTurn();
+    fireWindow();
 
     expect(enqueued).toHaveLength(6);
   });
 
   it("closes the window when a terminator arrives first", () => {
     const { controller, enqueued } = createRecorder();
-    const { batch, endTurn, windowIsOpen } = createBatch(controller);
+    const { batch, fireWindow, windowIsOpen } = createBatch(controller);
 
     applyChatResponseFrame(batch, replayFrame(textDelta("t1", "a")));
     expect(windowIsOpen()).toBe(true);
@@ -335,7 +335,7 @@ describe("the end-of-turn window", () => {
     });
     expect(windowIsOpen()).toBe(false);
 
-    endTurn();
+    fireWindow();
     expect(enqueued).toEqual([textDelta("t1", "a")]);
   });
 });
