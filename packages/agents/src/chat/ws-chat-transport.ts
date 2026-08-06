@@ -34,7 +34,9 @@ const RESUME_PENDING_TIMEOUT_MS = 60000;
  * Matches the shape returned by useAgent from agents/react.
  */
 export interface AgentConnection {
-  send: (data: string) => void;
+  // PartySocket returns `false` when the frame was buffered (socket not OPEN)
+  // rather than sent immediately; `void` keeps non-PartySocket providers valid.
+  send: (data: string) => boolean | void;
   addEventListener: (
     type: string,
     listener: (event: MessageEvent) => void,
@@ -73,6 +75,13 @@ export type WebSocketChatTransportOptions<
    * @default false
    */
   cancelOnClientAbort?: boolean;
+  /**
+   * Called when a `submit-message` request frame was buffered rather than sent
+   * immediately (the socket was not OPEN, so PartySocket queued it for the next
+   * reconnect). The hook uses this to preserve the optimistic message across the
+   * reconnect transcript replay. `messageId` is the submitted user message's id.
+   */
+  onRequestBuffered?: (messageId: string | undefined) => void;
 };
 
 /**
@@ -87,6 +96,7 @@ export class WebSocketChatTransport<
   private prepareBody?: WebSocketChatTransportOptions<ChatMessage>["prepareBody"];
   private activeRequestIds?: Set<string>;
   private cancelOnClientAbort: boolean;
+  private onRequestBuffered?: WebSocketChatTransportOptions<ChatMessage>["onRequestBuffered"];
 
   // Pending resume resolver — set by reconnectToStream, called by
   // handleStreamResuming when onAgentMessage sees CF_AGENT_STREAM_RESUMING.
@@ -121,6 +131,7 @@ export class WebSocketChatTransport<
     this.prepareBody = options.prepareBody;
     this.activeRequestIds = options.activeRequestIds;
     this.cancelOnClientAbort = options.cancelOnClientAbort ?? false;
+    this.onRequestBuffered = options.onRequestBuffered;
   }
 
   /**
@@ -458,9 +469,13 @@ export class WebSocketChatTransport<
       return stream;
     }
 
-    // Send the request over WebSocket
+    // Send the request over WebSocket. `send()` returns false when the frame
+    // was buffered (socket not OPEN) rather than sent immediately; a buffered
+    // submit means the server hasn't seen the message yet, so tell the hook to
+    // preserve it across the reconnect transcript replay. Only an explicit
+    // false counts — non-PartySocket doubles return undefined (treated as sent).
     requestSent = true;
-    agent.send(
+    const sent = agent.send(
       JSON.stringify({
         id: requestId,
         init: {
@@ -470,6 +485,12 @@ export class WebSocketChatTransport<
         type: MessageType.CF_AGENT_USE_CHAT_REQUEST
       })
     );
+    if (sent === false && options.trigger === "submit-message") {
+      const lastUserMessage = [...options.messages]
+        .reverse()
+        .find((message) => message.role === "user");
+      this.onRequestBuffered?.(lastUserMessage?.id);
+    }
 
     return stream;
   }
