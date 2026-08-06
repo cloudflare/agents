@@ -1429,24 +1429,29 @@ export function useAgentChat<
     [setMessages]
   );
 
-  const collapseHydratedReplayTextParts = useCallback(
+  const collapseHydratedReplayParts = useCallback(
     (message: ChatMessage): ChatMessage => {
       const parts = message.parts;
+
+      // Text and reasoning are both rebuilt from their first chunk, and both
+      // carry the accumulated string, so both can collide with a hydrated
+      // copy. Anything else (tool calls, files, step markers) is left alone.
+      const isRebuiltPart = (
+        part: ChatMessage["parts"][number]
+      ): part is ChatMessage["parts"][number] & { text: string } =>
+        (part.type === "text" || part.type === "reasoning") &&
+        "text" in part &&
+        !!part.text;
+
       const nextParts = parts.filter((part, index) => {
-        if (part.type !== "text" || !("text" in part) || !part.text) {
-          return true;
-        }
+        if (!isRebuiltPart(part)) return true;
 
         // Replayed streams rebuild from the first chunk. If the
         // hydrated assistant already had the same prefix, replay can
-        // temporarily produce a second text part with the rebuilt text.
+        // temporarily produce a second part with the rebuilt text.
         return !parts.some((candidate, candidateIndex) => {
           if (candidateIndex <= index) return false;
-          if (
-            candidate.type !== "text" ||
-            !("text" in candidate) ||
-            !candidate.text
-          ) {
+          if (candidate.type !== part.type || !isRebuiltPart(candidate)) {
             return false;
           }
           return candidate.text.startsWith(part.text);
@@ -1469,7 +1474,7 @@ export function useAgentChat<
           (message) =>
             replayHydratedAssistantMessageIdsRef.current.has(message.id) &&
             message.role === "assistant" &&
-            collapseHydratedReplayTextParts(message) !== message
+            collapseHydratedReplayParts(message) !== message
         )
         .map((message) => message.id)
     );
@@ -1482,7 +1487,7 @@ export function useAgentChat<
           return message;
         }
 
-        const nextMessage = collapseHydratedReplayTextParts(message);
+        const nextMessage = collapseHydratedReplayParts(message);
         if (nextMessage !== message) {
           changed = true;
         }
@@ -1491,7 +1496,7 @@ export function useAgentChat<
 
       return changed ? nextMessages : prevMessages;
     });
-  }, [chatMessages, collapseHydratedReplayTextParts, setMessages]);
+  }, [chatMessages, collapseHydratedReplayParts, setMessages]);
 
   // Shared reset for every path that wipes chat history — keep this
   // list in sync between `clearHistory()` (local user action) and the
