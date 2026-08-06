@@ -1122,6 +1122,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -1137,9 +1140,6 @@ importers:
       streamdown:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.48.0

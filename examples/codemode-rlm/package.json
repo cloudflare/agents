@@ -6,7 +6,6 @@
   "version": "0.0.0",
   "scripts": {
     "start": "vite dev",
-    "dev": "vite dev",
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
     "typecheck": "tsc --noEmit",
@@ -18,12 +17,12 @@
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
     "agents": "*",
     "ai": "^7.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "streamdown": "^2.5.0",
-    "zod": "^4.4.3"
+    "streamdown": "^2.5.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.48.0",

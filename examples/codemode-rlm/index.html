@@ -7,10 +7,14 @@
       name="description"
       content="Chat with a durable Recursive Language Model powered by Think and Code Mode."
     />
+    <link rel="icon" href="/favicon.ico" />
     <title>Code Mode RLM</title>
     <script>
       (() => {
-        const mode = localStorage.getItem("theme") || "light";
+        let mode = "light";
+        try {
+          mode = localStorage.getItem("theme") || mode;
+        } catch {}
         document.documentElement.setAttribute("data-mode", mode);
         document.documentElement.style.colorScheme = mode;
       })();

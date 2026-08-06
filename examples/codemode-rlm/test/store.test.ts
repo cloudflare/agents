@@ -2,6 +2,7 @@
 
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { INPUT_CHUNK_CHARS } from "../src/core";
 
 async function post(path: string, value: unknown): Promise<Response> {
   return SELF.fetch(`https://example.test${path}`, {
@@ -11,108 +12,41 @@ async function post(path: string, value: unknown): Promise<Response> {
   });
 }
 
-describe("durable recovery ledgers", () => {
-  it("accepts exact input replay and rejects same-length replacement data", async () => {
-    const first = await post("/input", {
+describe("minimal RLM durable state", () => {
+  it("binds a request and input id to exact external data", async () => {
+    const input = {
       id: "input-replay",
+      requestId: "request-replay",
       task: "alpha",
       material: "beta"
-    });
-    expect(first.status).toBe(200);
+    };
+    expect((await post("/input?instance=input", input)).status).toBe(200);
+    expect((await post("/input?instance=input", input)).status).toBe(200);
 
-    const replay = await post("/input", {
-      id: "input-replay",
-      task: "alpha",
-      material: "beta"
+    const changed = await post("/input?instance=input", {
+      ...input,
+      task: "omega"
     });
-    expect(replay.status).toBe(200);
-
-    const mismatch = await post("/input", {
-      id: "input-replay",
-      task: "omega",
-      material: "beta"
-    });
-    expect(mismatch.status).toBe(409);
-    await expect(mismatch.json()).resolves.toMatchObject({
+    expect(changed.status).toBe(409);
+    await expect(changed.json()).resolves.toMatchObject({
       error: expect.stringMatching(/different data/)
     });
-  });
 
-  it("charges one recursive call across different Code Mode executions", async () => {
-    const base = {
-      id: "operation-replay",
-      rootInputId: "root-turn",
-      argsHash: "args-a",
-      childId: "child-a",
-      turnInputId: "child-turn-a"
-    };
-    const first = await post("/operation", {
-      ...base,
-      executionId: "exec-a"
+    const reusedRequest = await post("/input?instance=input", {
+      ...input,
+      id: "another-input"
     });
-    expect(await first.json()).toMatchObject({ created: true, used: 1 });
-
-    const replay = await post("/operation", {
-      ...base,
-      executionId: "exec-b"
-    });
-    expect(await replay.json()).toMatchObject({ created: false, used: 1 });
-
-    const mismatch = await post("/operation", {
-      ...base,
-      argsHash: "args-b",
-      executionId: "exec-c"
-    });
-    expect(mismatch.status).toBe(409);
-    await expect(mismatch.json()).resolves.toMatchObject({
-      error: expect.stringMatching(/different arguments/)
-    });
-  });
-
-  it("binds a caller request id to one canonical root input", async () => {
-    const request = {
-      requestId: "http-request-replay",
-      argsHash: "request-args-a",
-      inputId: "request-input-a"
-    };
-    expect((await post("/request", request)).status).toBe(200);
-    expect((await post("/request", request)).status).toBe(200);
-
-    const mismatch = await post("/request", {
-      ...request,
-      argsHash: "request-args-b"
-    });
-    expect(mismatch.status).toBe(409);
-    await expect(mismatch.json()).resolves.toMatchObject({
-      error: expect.stringMatching(/different arguments/)
-    });
-  });
-
-  it("records child transcript turns once and finalizes finish ownership", async () => {
-    const transcript = await post("/transcript", {
-      inputId: "child-turn-transcript"
-    });
-    expect(await transcript.json()).toEqual({
-      writes: [true, false, true, false],
-      messages: 2
-    });
-
-    const execution = await post("/execution", {
-      executionId: "exec-finish",
-      inputId: "input-finish"
-    });
-    expect(await execution.json()).toEqual({
-      status: "completed",
-      belongs: true,
-      answer: "done"
+    expect(reusedRequest.status).toBe(409);
+    await expect(reusedRequest.json()).resolves.toMatchObject({
+      error: expect.stringMatching(/request id.*reused/)
     });
   });
 
   it("exposes only inputs activated by the current causal turn", async () => {
-    const result = await post("/visibility?instance=visibility", {
+    const response = await post("/visibility?instance=visibility", {
       prefix: "causal"
     });
-    expect(await result.json()).toEqual({
+    await expect(response.json()).resolves.toEqual({
       before: ["causal:first"],
       fromFirst: ["causal:first"],
       fromSecond: ["causal:second", "causal:first"],
@@ -120,96 +54,145 @@ describe("durable recovery ledgers", () => {
     });
   });
 
-  it("prevents a stale child refresh from rolling its head backward", async () => {
-    const result = await post("/child-cas?instance=child-cas", {
-      prefix: "cas"
+  it("finds literal text across storage chunk boundaries", async () => {
+    const material = `${"x".repeat(INPUT_CHUNK_CHARS - 2)}needle`;
+    const response = await post("/search?instance=search", {
+      id: "boundary",
+      material
     });
-    expect(await result.json()).toMatchObject({
-      advanced: true,
-      stale: false,
-      child: {
-        inputId: "cas:input-2",
-        status: "admitted"
+    await expect(response.json()).resolves.toMatchObject([
+      {
+        offset: INPUT_CHUNK_CHARS - 2,
+        preview: expect.stringContaining("needle")
       }
-    });
-  });
-
-  it("does not let a same-turn stale refresh erase a terminal child", async () => {
-    const result = await post("/child-terminal-cas?instance=child-terminal", {
-      prefix: "terminal"
-    });
-    expect(await result.json()).toMatchObject({
-      running: true,
-      completed: true,
-      stale: false,
-      duplicate: false,
-      child: {
-        inputId: "terminal:input",
-        status: "completed",
-        answer: "terminal answer"
-      }
-    });
-  });
-
-  it("atomically reserves immutable snippet names and enforces the cap", async () => {
-    const instance = "snippet-ledger";
-    expect(
-      (
-        await post(`/promotion?instance=${instance}`, {
-          name: "skill_v1",
-          maximum: 2
-        })
-      ).status
-    ).toBe(200);
-    const duplicate = await post(`/promotion?instance=${instance}`, {
-      name: "skill_v1",
-      maximum: 2
-    });
-    expect(duplicate.status).toBe(409);
-    await expect(duplicate.json()).resolves.toMatchObject({
-      error: expect.stringMatching(/already exists or is reserved/)
-    });
-    expect(
-      (
-        await post(`/promotion?instance=${instance}`, {
-          name: "skill_v2",
-          maximum: 2
-        })
-      ).status
-    ).toBe(200);
-    const overLimit = await post(`/promotion?instance=${instance}`, {
-      name: "skill_v3",
-      maximum: 2
-    });
-    expect(overLimit.status).toBe(409);
-    await expect(overLimit.json()).resolves.toMatchObject({
-      error: expect.stringMatching(/at most 2/)
-    });
-  });
-
-  it("admits only one of two concurrent claims for the final snippet slot", async () => {
-    const instance = "snippet-race";
-    const responses = await Promise.all([
-      post(`/promotion?instance=${instance}`, { name: "left_v1", maximum: 1 }),
-      post(`/promotion?instance=${instance}`, {
-        name: "right_v1",
-        maximum: 1
-      })
-    ]);
-    expect(responses.map((response) => response.status).sort()).toEqual([
-      200, 409
     ]);
   });
 
-  it("prunes rollback-created full snapshots to the retention window", async () => {
-    const result = await post(
-      "/rollback-retention?instance=rollback-retention",
-      {}
+  it("charges recursive budget once across replay", async () => {
+    const operation = {
+      id: "operation-replay",
+      rootInputId: "root-turn",
+      argsHash: "args-a",
+      childId: "child-a",
+      turnInputId: "child-turn-a"
+    };
+    await expect(
+      (await post("/operation?instance=operation", operation)).json()
+    ).resolves.toEqual({
+      created: true,
+      used: 1
+    });
+    await expect(
+      (await post("/operation?instance=operation", operation)).json()
+    ).resolves.toEqual({
+      created: false,
+      used: 1
+    });
+
+    const changed = await post("/operation?instance=operation", {
+      ...operation,
+      argsHash: "args-b"
+    });
+    expect(changed.status).toBe(409);
+    await expect(changed.json()).resolves.toMatchObject({
+      error: expect.stringMatching(/different arguments/)
+    });
+  });
+
+  it("serves kernel.finish only after its Code Mode execution verifies", async () => {
+    await expect(
+      (
+        await post("/answer?instance=answers", {
+          inputId: "input",
+          executionId: "exec"
+        })
+      ).json()
+    ).resolves.toEqual({ before: null, after: "done" });
+    await expect(
+      (
+        await post("/failed-answer?instance=answers", {
+          inputId: "failed",
+          executionId: "exec-failed"
+        })
+      ).json()
+    ).resolves.toEqual({ answer: null });
+
+    await expect(
+      (
+        await post("/answer-execution?instance=answers", {
+          inputId: "execution-bound"
+        })
+      ).json()
+    ).resolves.toEqual({ verified: true, wrongExecution: false });
+
+    await expect(
+      (await post("/answer-race?instance=answer-race", {})).json()
+    ).resolves.toEqual({
+      recovered: true,
+      recoveredAnswer: "first",
+      winner: true,
+      loser: false,
+      winnerAnswer: "second",
+      rolledBack: null
+    });
+  });
+
+  it("bounds durable kernel keys without blocking updates", async () => {
+    await expect(
+      (await post("/kernel-cap?instance=kernel", {})).json()
+    ).resolves.toMatchObject({
+      rejected: true,
+      existing: "updated",
+      error: expect.stringMatching(/256 keys/)
+    });
+  });
+
+  it("versions and rolls back the compact continual harness", async () => {
+    const first = await post("/harness?instance=harness", {
+      id: "depth",
+      content: "Prefer depth one.",
+      reason: "user preference"
+    });
+    await expect(first.json()).resolves.toMatchObject({
+      revision: 1,
+      entries: [{ id: "depth", kind: "memory", content: "Prefer depth one." }]
+    });
+
+    const second = await post("/harness?instance=harness", {
+      id: "citations",
+      content: "Cite evidence.",
+      reason: "observed omission"
+    });
+    await expect(second.json()).resolves.toMatchObject({ revision: 2 });
+
+    const rollback = await post("/rollback?instance=harness", {
+      targetRevision: 1
+    });
+    await expect(rollback.json()).resolves.toEqual({
+      revision: 3,
+      entries: [
+        expect.objectContaining({ id: "depth", content: "Prefer depth one." })
+      ]
+    });
+  });
+
+  it("allows one idempotent harness mutation per refinement input", async () => {
+    await expect(
+      (await post("/harness-once?instance=harness-once", {})).json()
+    ).resolves.toMatchObject({
+      firstRevision: 1,
+      replayRevision: 1,
+      rejected: true,
+      error: expect.stringMatching(/already made a different/)
+    });
+  });
+
+  it("returns the requested number of pending history messages", async () => {
+    const history = await post("/history-limit?instance=history", {});
+    const messages = (await history.json()) as Array<{ content: string }>;
+    expect(messages).toHaveLength(6);
+    expect(Math.max(...messages.map((message) => message.content.length))).toBe(
+      8_192
     );
-    expect(await result.json()).toEqual({
-      revision: 105,
-      retained: 100,
-      oldRevisionPresent: false
-    });
   });
 });

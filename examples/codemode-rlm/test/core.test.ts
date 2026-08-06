@@ -1,18 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   INPUT_CHUNK_CHARS,
-  MAX_HARNESS_BYTES,
-  applyHarnessEdits,
+  applyHarnessUpdate,
   buildHarnessOverview,
   emptyHarnessState,
   inputSource,
-  normalizeHarnessApply,
-  rollbackHarness,
+  normalizeHarnessUpdate,
   splitInput,
   stableId,
   truncateText,
   truncateUnknown
 } from "../src/core";
+import { buildSystemPrompt } from "../src/prompts";
 
 describe("external input helpers", () => {
   it("builds deterministic, tuple-safe identifiers", async () => {
@@ -28,22 +27,20 @@ describe("external input helpers", () => {
     const value = "x".repeat(INPUT_CHUNK_CHARS + 17);
     const chunks = splitInput(value);
     expect(chunks).toHaveLength(2);
-    expect(chunks[0]).toHaveLength(INPUT_CHUNK_CHARS);
     expect(chunks.join("")).toBe(value);
   });
 
-  it("accepts only named external sources", () => {
+  it("accepts only external input sources", () => {
     expect(inputSource("task")).toBe("task");
     expect(inputSource("material")).toBe("material");
     expect(() => inputSource("history")).toThrow(/source must be/);
   });
 
-  it("keeps text and structured observations inside their hard limit", () => {
+  it("bounds text and structured output", () => {
     expect(truncateText("x".repeat(100), 40)).toHaveLength(40);
-    const structured = truncateUnknown({ value: "x".repeat(100) }, 50);
-    expect(typeof structured).toBe("string");
-    expect((structured as string).length).toBeLessThanOrEqual(50);
-
+    expect(
+      String(truncateUnknown({ value: "x".repeat(100) }, 50))
+    ).toHaveLength(50);
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(truncateUnknown(cyclic, 50)).toBe("[unserializable result]");
@@ -51,215 +48,94 @@ describe("external input helpers", () => {
 });
 
 describe("continual harness", () => {
-  it("creates and updates entries with optimistic revisions", () => {
-    const initial = emptyHarnessState();
-    const create = normalizeHarnessApply({
+  it("applies small typed updates with optimistic revisions", () => {
+    const update = normalizeHarnessUpdate({
       expectedRevision: 0,
-      trigger: "the agent repeatedly misses citations",
-      evidence: "messages 4 and 9 made unsupported claims",
-      expectedOutcome: "answers distinguish sourced facts from inference",
-      edits: [
+      reason: "answers repeatedly omit citations",
+      evidence: "turns 2 and 4 made unsupported claims",
+      upsert: [
         {
-          action: "create",
-          kind: "prompt",
-          id: "evidence_policy",
-          title: "Evidence policy",
-          content: "Label inference and retain evidence handles.",
-          path: "research",
-          reason: "two observed citation failures"
+          id: "evidence",
+          kind: "instruction",
+          content: "Separate sourced facts from inference."
+        },
+        {
+          id: "researcher",
+          kind: "delegate",
+          content:
+            "Use a child when two source sets can be checked independently."
         }
       ]
     });
-    const first = applyHarnessEdits(initial, create, 100, "refine_1");
-    expect(first.state.revision).toBe(1);
-    expect(first.state.entries.prompt.evidence_policy.version).toBe(1);
-
-    const update = normalizeHarnessApply({
-      expectedRevision: 1,
-      trigger: "tighten the evidence policy",
-      evidence: "message 12 labels sources but not inference",
-      expectedOutcome: "inferences are explicitly marked",
-      edits: [
-        {
-          action: "update",
-          kind: "prompt",
-          id: "evidence_policy",
-          title: "Evidence and inference policy",
-          content: "Retain evidence handles and explicitly label inference.",
-          path: "research",
-          reason: "the first policy did not cover inference labels"
-        }
-      ]
-    });
-    const second = applyHarnessEdits(first.state, update, 200, "refine_2");
-    expect(second.state.revision).toBe(2);
-    expect(second.state.entries.prompt.evidence_policy.version).toBe(2);
-    expect(buildHarnessOverview(second.state)).toContain(
-      "Evidence and inference"
-    );
-    expect(() => applyHarnessEdits(second.state, update, 300, "stale")).toThrow(
+    const state = applyHarnessUpdate(emptyHarnessState(), update, 100);
+    expect(state.revision).toBe(1);
+    expect(state.entries).toHaveLength(2);
+    expect(buildHarnessOverview(state)).toContain("Separate sourced facts");
+    expect(() => applyHarnessUpdate(state, update, 200)).toThrow(
       /revision conflict/
     );
   });
 
-  it("requires skills to point at developer-promoted Code Mode snippets", () => {
-    expect(() =>
-      normalizeHarnessApply({
+  it("updates and removes entries without prototype-key behavior", () => {
+    const first = applyHarnessUpdate(
+      emptyHarnessState(),
+      normalizeHarnessUpdate({
         expectedRevision: 0,
-        trigger: "reuse a successful program",
-        evidence: "execution exec_1 completed",
-        expectedOutcome: "the program is discoverable",
-        edits: [
-          {
-            action: "create",
-            kind: "skill",
-            title: "Map reduce",
-            content: "Run a map-reduce program.",
-            reason: "it worked once",
-            reference: { type: "source-code", path: "map.ts" }
-          }
+        reason: "remember a decision",
+        evidence: "the user chose depth one",
+        upsert: [
+          { id: "constructor", kind: "memory", content: "Use depth one." }
         ]
+      }),
+      100
+    );
+    const second = applyHarnessUpdate(
+      first,
+      normalizeHarnessUpdate({
+        expectedRevision: 1,
+        reason: "the decision was temporary",
+        evidence: "the user withdrew it",
+        remove: ["constructor"]
+      }),
+      200
+    );
+    expect(second.entries).toEqual([]);
+  });
+
+  it("rejects empty or ambiguous updates", () => {
+    expect(() =>
+      normalizeHarnessUpdate({
+        expectedRevision: 0,
+        reason: "no-op",
+        evidence: "none"
       })
-    ).toThrow(/developer-promoted Code Mode snippet/);
-
-    expect(
-      normalizeHarnessApply({
-        expectedRevision: 0,
-        trigger: "reuse a successful program",
-        evidence: "execution exec_1 completed",
-        expectedOutcome: "the program is discoverable",
-        edits: [
-          {
-            action: "create",
-            kind: "skill",
-            title: "Map reduce",
-            content: "Run a map-reduce program.",
-            reason: "it worked once",
-            reference: { type: "codemode-snippet", name: "map_reduce" }
-          }
-        ]
-      }).edits[0].reference
-    ).toEqual({ type: "codemode-snippet", name: "map_reduce" });
-  });
-
-  it("treats harness ids as own keys rather than object prototypes", () => {
-    const initial = emptyHarnessState();
+    ).toThrow(/upsert or remove/);
     expect(() =>
-      applyHarnessEdits(
-        initial,
-        normalizeHarnessApply({
-          expectedRevision: 0,
-          trigger: "malformed inherited id",
-          evidence: "the id came from untrusted model output",
-          expectedOutcome: "prototype properties are never harness entries",
-          edits: [
-            {
-              action: "update",
-              kind: "memory",
-              id: "__proto__",
-              title: "Unsafe",
-              content: "Must not resolve through Object.prototype.",
-              reason: "exercise inherited-key handling"
-            }
-          ]
-        }),
-        100,
-        "refine_proto"
-      )
-    ).toThrow(/missing harness entry/);
-
-    const created = applyHarnessEdits(
-      initial,
-      normalizeHarnessApply({
+      normalizeHarnessUpdate({
         expectedRevision: 0,
-        trigger: "valid prototype-named entry",
-        evidence: "constructor is a valid user-facing label",
-        expectedOutcome: "the entry is stored as an own property",
-        edits: [
-          {
-            action: "create",
-            kind: "memory",
-            id: "constructor",
-            title: "Constructor",
-            content: "Stored safely as an own entry.",
-            reason: "exercise own-key creation"
-          }
-        ]
-      }),
-      100,
-      "refine_constructor"
-    ).state;
-    expect(Object.hasOwn(created.entries.memory, "constructor")).toBe(true);
-    expect(created.entries.memory["constructor"].content).toContain("safely");
+        reason: "ambiguous",
+        evidence: "same id twice",
+        upsert: [{ id: "same", kind: "memory", content: "one" }],
+        remove: ["same"]
+      })
+    ).toThrow(/each id only once/);
   });
+});
 
-  it("rolls back entries while keeping a monotonic audit revision", () => {
-    const initial = emptyHarnessState();
-    const changed = applyHarnessEdits(
-      initial,
-      normalizeHarnessApply({
-        expectedRevision: 0,
-        trigger: "remember a decision",
-        evidence: "user selected depth one",
-        expectedOutcome: "future turns default to depth one",
-        edits: [
-          {
-            action: "create",
-            kind: "memory",
-            id: "depth",
-            title: "Depth default",
-            content: "Use depth one.",
-            reason: "explicit user choice"
-          }
-        ]
-      }),
-      100,
-      "refine_1"
-    ).state;
-
-    const rolledBack = rollbackHarness(
-      changed,
-      initial,
-      0,
-      "the preference was temporary",
-      200,
-      "rollback_1"
-    );
-    expect(rolledBack.revision).toBe(2);
-    expect(rolledBack.entries.memory.depth).toBeUndefined();
-    expect(rolledBack.refinements.at(-1)?.trigger).toBe(
-      "rollback to revision 0"
-    );
-  });
-
-  it("rejects a rollback whose merged snapshot exceeds the harness cap", () => {
-    const current = emptyHarnessState();
-    current.refinements.push({
-      id: "large-history",
-      revision: 1,
-      trigger: "history",
-      evidence: "y".repeat(Math.floor(MAX_HARNESS_BYTES * 0.5)),
-      expectedOutcome: "bounded",
-      changes: [],
-      createdAt: 1
+describe("runtime prompt", () => {
+  it("advertises only connectors available to a child", () => {
+    const prompt = buildSystemPrompt({
+      mode: "think",
+      depth: 1,
+      maxDepth: 1,
+      maxRlmCalls: 8,
+      canDelegate: false,
+      canUseHarness: false,
+      harnessOverview: ""
     });
-    const target = emptyHarnessState();
-    target.entries.memory.large = {
-      id: "large",
-      kind: "memory",
-      title: "Large snapshot",
-      content: "x".repeat(Math.floor(MAX_HARNESS_BYTES * 0.6)),
-      path: "test",
-      reference: {},
-      arguments: {},
-      metadata: {},
-      source: "user",
-      createdAt: 1,
-      updatedAt: 1,
-      version: 1
-    };
-    expect(() =>
-      rollbackHarness(current, target, 0, "restore", 2, "rollback_large")
-    ).toThrow(/harness limit/);
+    expect(prompt).toContain("- context:");
+    expect(prompt).toContain("- kernel:");
+    expect(prompt).not.toContain("rlm.");
+    expect(prompt).not.toContain("- harness:");
   });
 });

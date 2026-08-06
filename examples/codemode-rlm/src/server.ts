@@ -93,17 +93,11 @@ export default {
     const action = match[2] ?? "";
     const agent = await getAgentByName(env.RlmThinkAgent, session);
     try {
-      if (request.method === "GET" && action === "") {
-        return json(await agent.sessionSummary());
-      }
       if (request.method === "POST" && action === "think") {
         return requestResponse(await agent.runThink(await body(request)));
       }
       if (request.method === "POST" && action === "refine") {
         return requestResponse(await agent.refineHarness(await body(request)));
-      }
-      if (request.method === "POST" && action === "rollback") {
-        return json(await agent.rollbackHarness(await body(request)));
       }
       if (request.method === "GET" && action === "history") {
         return json(
@@ -116,29 +110,6 @@ export default {
         return requestResponse(
           await agent.requestStatus(url.searchParams.get("requestId"))
         );
-      }
-      if (request.method === "GET" && action === "children") {
-        return json(
-          await agent.children(
-            boundedInteger(url.searchParams.get("limit"), 20, 1, 100)
-          )
-        );
-      }
-      if (request.method === "GET" && action === "harness") {
-        return json(await agent.harness());
-      }
-      if (request.method === "GET" && action === "executions") {
-        return json(
-          await agent.executions(
-            boundedInteger(url.searchParams.get("limit"), 20, 1, 50)
-          )
-        );
-      }
-      if (request.method === "GET" && action === "snippets") {
-        return json(await agent.snippets());
-      }
-      if (request.method === "POST" && action === "snippets") {
-        return json(await agent.promoteSnippet(await body(request)), 201);
       }
       return json({ error: "route not found" }, 404);
     } catch (error) {

@@ -1,15 +1,9 @@
-export type ActiveRequestStatus = "admitted" | "running";
-export type RequestStatus = ActiveRequestStatus | "completed" | "error";
-
 export type RlmRequest = {
   requestId: string;
-  kind: "think" | "refine";
-  status: RequestStatus;
+  status: "admitted" | "running" | "completed" | "error";
   inputId: string;
   answer?: string;
   error?: string;
-  executionIds?: string[];
-  recursiveCalls?: number;
 };
 
 export type HistoryMessage = {
@@ -21,130 +15,64 @@ export type HistoryMessage = {
   createdAt: number;
 };
 
-export type SessionSummary = {
-  kind: string;
-  model: string;
-  orchestration: string;
-  modelFacingTools: string[];
-  limits: {
-    maxSteps: number;
-    maxDepth: number;
-    maxRlmCalls: number;
-    maxParallel: number;
-    timeoutMs: number;
-  };
-  messages: number;
-  children: number;
-  harness: { revision?: number; entries?: number } & Record<string, unknown>;
-};
-
-export type ChildRecord = {
-  id: string;
-  name: string;
-  mode: string;
-  status: string;
-  answer?: string;
-  error?: string;
-  updatedAt: number;
-};
-
-export type ExecutionRecord = {
-  id: string;
-  status: string;
-  createdAt: number;
-  updatedAt: number;
-};
-
 export class RlmApiError extends Error {
   constructor(
     message: string,
     readonly status: number
   ) {
     super(message);
-    this.name = "RlmApiError";
   }
 }
 
 async function decode<T>(response: Response): Promise<T> {
-  const value = (await response.json().catch(() => null)) as {
+  const body = (await response.json().catch(() => null)) as {
     error?: unknown;
   } | null;
   if (!response.ok) {
-    const message =
-      typeof value?.error === "string"
-        ? value.error
-        : `request failed with HTTP ${response.status}`;
-    throw new RlmApiError(message, response.status);
+    throw new RlmApiError(
+      typeof body?.error === "string"
+        ? body.error
+        : `request failed with HTTP ${response.status}`,
+      response.status
+    );
   }
-  return value as T;
+  return body as T;
 }
 
-export class RlmApi {
-  readonly #base: string;
-
-  constructor(
-    session: string,
-    readonly token: string
-  ) {
-    this.#base = `/sessions/${encodeURIComponent(session)}`;
-  }
-
-  async #request<T>(path: string, init?: RequestInit): Promise<T> {
+export function createRlmApi(session: string, token: string) {
+  const base = `/sessions/${encodeURIComponent(session)}`;
+  async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const headers = new Headers(init?.headers);
-    headers.set("authorization", `Bearer ${this.token}`);
+    headers.set("authorization", `Bearer ${token}`);
     if (init?.body) headers.set("content-type", "application/json");
     return decode<T>(
-      await fetch(`${this.#base}${path}`, {
-        ...init,
-        headers,
-        cache: "no-store"
-      })
+      await fetch(`${base}${path}`, { ...init, headers, cache: "no-store" })
     );
   }
-
-  summary(): Promise<SessionSummary> {
-    return this.#request("");
-  }
-
-  async history(limit = 50): Promise<HistoryMessage[]> {
-    const result = await this.#request<{ messages: HistoryMessage[] }>(
-      `/history?limit=${limit}`
-    );
-    return result.messages;
-  }
-
-  submit(
-    requestId: string,
-    task: string,
-    context: string
-  ): Promise<RlmRequest> {
-    return this.#request("/think", {
-      method: "POST",
-      body: JSON.stringify({
-        requestId,
-        task,
-        ...(context ? { context } : {})
-      })
-    });
-  }
-
-  request(requestId: string): Promise<RlmRequest> {
-    return this.#request(
-      `/requests?requestId=${encodeURIComponent(requestId)}`
-    );
-  }
-
-  async children(): Promise<ChildRecord[]> {
-    const result = await this.#request<{ children: ChildRecord[] }>(
-      "/children?limit=20"
-    );
-    return result.children;
-  }
-
-  async executions(): Promise<ExecutionRecord[]> {
-    const result = await this.#request<{ executions: ExecutionRecord[] }>(
-      "/executions?limit=20"
-    );
-    return result.executions;
-  }
+  return {
+    async history(signal?: AbortSignal): Promise<HistoryMessage[]> {
+      return (
+        await request<{ messages: HistoryMessage[] }>("/history?limit=50", {
+          signal
+        })
+      ).messages;
+    },
+    submit(
+      requestId: string,
+      task: string,
+      context: string,
+      signal?: AbortSignal
+    ): Promise<RlmRequest> {
+      return request("/think", {
+        method: "POST",
+        body: JSON.stringify({ requestId, task, ...(context && { context }) }),
+        signal
+      });
+    },
+    status(requestId: string, signal?: AbortSignal): Promise<RlmRequest> {
+      return request(`/requests?requestId=${encodeURIComponent(requestId)}`, {
+        signal
+      });
+    }
+  };
 }

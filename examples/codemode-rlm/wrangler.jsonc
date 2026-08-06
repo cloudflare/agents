@@ -42,7 +42,6 @@
     "MAX_STEPS": "12",
     "MAX_RLM_DEPTH": "1",
     "MAX_RLM_CALLS": "8",
-    "MAX_RLM_PARALLEL": "4",
     "TURN_TIMEOUT_MS": "180000"
   }
 }
