@@ -12,6 +12,13 @@ Focused protocol examples can be server-only when a frontend would obscure the c
 
 Full-stack examples use the [Cloudflare Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/) for development and builds. Server-only examples use Wrangler directly.
 
+Framework-specific examples that intentionally demonstrate a non-React client
+may replace the React Vite plugin with that framework's plugin. They must not
+install React-only UI dependencies such as Kumo or Streamdown merely to match
+the default example shell; accessible framework-native markup and focused CSS
+are appropriate for these examples. All other structural conventions still
+apply.
+
 ## Required structure
 
 Full-stack examples must have:
