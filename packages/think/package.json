@@ -20,42 +20,28 @@
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
-  "bin": {
-    "think": "dist/cli/index.js"
-  },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
     "@cloudflare/codemode": ">=0.5.0",
     "@cloudflare/shell": ">=0.4.0",
-    "aywson": "^0.0.16",
     "chat": "^4.31.0",
-    "create-think": "workspace:*",
     "just-bash": "^3.0.2",
-    "smol-toml": "^1.7.0",
-    "workers-ai-provider": "^4.0.0",
-    "yargs": "^18.0.0"
+    "workers-ai-provider": "^4.0.0"
   },
   "devDependencies": {
     "@ai-sdk/react": "^4.0.0",
     "@chat-adapter/telegram": "^4.31.0",
     "@cloudflare/ai-chat": "workspace:*",
-    "@cloudflare/kumo": "^2.6.0",
-    "@phosphor-icons/react": "^2.1.10",
-    "@streamdown/code": "^1.1.1",
-    "@tailwindcss/vite": "^4",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@types/yargs": "^17.0.35",
     "@vitejs/plugin-react": "^6.0.3",
     "agents": "workspace:*",
     "ai": "^7.0.0",
     "jsdom": "^29.1.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "streamdown": "^2.5.0",
-    "tailwindcss": "^4.3.2",
     "vite": "^8.1.0",
     "zod": "^4.4.3"
   },
@@ -65,7 +51,6 @@
     "agents": ">=0.20.2 <1.0.0",
     "ai": "^6.0.0 || ^7.0.0",
     "react": "^19.0.0",
-    "vite": ">=6 <9",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
@@ -76,9 +61,6 @@
       "optional": true
     },
     "react": {
-      "optional": true
-    },
-    "vite": {
       "optional": true
     }
   },
@@ -94,14 +76,6 @@
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js"
-    },
-    "./framework": {
-      "types": "./dist/framework/index.d.ts",
-      "import": "./dist/framework/index.js"
-    },
-    "./server-entry": {
-      "types": "./dist/server-entry.d.ts",
-      "import": "./dist/server-entry.js"
     },
     "./messengers": {
       "types": "./dist/messengers/index.d.ts",
@@ -138,10 +112,6 @@
     "./tools/sandbox": {
       "types": "./dist/tools/sandbox.d.ts",
       "import": "./dist/tools/sandbox.js"
-    },
-    "./vite": {
-      "types": "./dist/vite.d.ts",
-      "import": "./dist/vite.js"
     }
   },
   "files": [
@@ -151,12 +121,9 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "test": "npm run test:workers && npm run test:generated-entry && npm run test:vite && npm run test:cli && npm run test:react",
-    "test:cli": "vitest --run -c src/cli-tests/vitest.config.ts",
+    "test": "npm run test:workers && npm run test:react",
     "test:react": "vitest --run -c src/react-tests/vitest.config.ts",
     "test:workers": "vitest --run -c src/tests/vitest.config.ts",
-    "test:generated-entry": "vitest --run -c src/tests/generated-entry/vitest.config.ts",
-    "test:vite": "vitest --run src/vite-tests",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
   },
   "nx": {
