@@ -1,5 +1,15 @@
 # @cloudflare/ai-chat
 
+## 0.10.2
+
+### Patch Changes
+
+- [#2023](https://github.com/cloudflare/agents/pull/2023) [`2b2b598`](https://github.com/cloudflare/agents/commit/2b2b5980e1945cf55f5a11626bc395e7c460516f) Thanks [@threepointone](https://github.com/threepointone)! - Treat `useAgentChat` observer error frames as terminal responses.
+
+  Plain-text error bodies are no longer parsed as stream chunks or merged into an empty assistant message. Error frames now clear observer streaming, replay, recovery, and tool-continuation state even when they omit `done`, matching the transport-owned stream behavior.
+
+- [#2052](https://github.com/cloudflare/agents/pull/2052) [`f9d71d6`](https://github.com/cloudflare/agents/commit/f9d71d65ffb31cb45c8594b5f3bd4eeb4a8560d1) Thanks [@cjol](https://github.com/cjol)! - Expose `WebSocketChatTransport` and its connection types from the framework-neutral `agents/chat/transport` entry point. React peers are now optional for framework-neutral clients and servers.
+
 ## 0.10.1
 
 ### Patch Changes

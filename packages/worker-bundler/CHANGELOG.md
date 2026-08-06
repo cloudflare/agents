@@ -1,5 +1,13 @@
 # @cloudflare/worker-bundler
 
+## 0.2.3
+
+### Patch Changes
+
+- [#2043](https://github.com/cloudflare/agents/pull/2043) [`38bbf5a`](https://github.com/cloudflare/agents/commit/38bbf5a67efa0bc2a632698289a5086277da2c07) Thanks [@abstractedfox](https://github.com/abstractedfox)! - Python package support
+
+- [#2016](https://github.com/cloudflare/agents/pull/2016) [`2ee8424`](https://github.com/cloudflare/agents/commit/2ee842419e022a441a757bc074e38fc127757026) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Fix dependency extraction for npm tarballs whose enclosing directory is not named `package`, including DefinitelyTyped packages.
+
 ## 0.2.2
 
 ### Patch Changes
