@@ -1,0 +1,19 @@
+packages/agents/src/tests/workflow-integration.test.ts
+  s_62ae7dace9878b::t_09d6dd4584aafe 169-170,172-184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b0f833d0605e3fb1cfb629bd3180fcf1bac7bb2d",
+  "prompts": {},
+  "sessions": {
+    "s_62ae7dace9878b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb4d1-818f-7e70-a367-31be3df8008f",
+        "model": "unknown"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}

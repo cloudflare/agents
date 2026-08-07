@@ -1,0 +1,25 @@
+.changeset/quiet-chats-change-address.md
+  s_834863978a96b8::t_0ccacf10918fd0 1-5
+packages/agents/src/chat/react.tsx
+  s_834863978a96b8::t_e7aa3a125517a6 773-786,900,909-910
+packages/agents/src/react-tests/initial-messages-address-race.test.tsx
+  s_834863978a96b8::t_bd45320a1bed40 1-71
+packages/agents/src/react.tsx
+  s_834863978a96b8::t_9d767aac10baae 1033-1041
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "46dfa5b70d6aa6fccaf62fea7089748dc949a001",
+  "prompts": {},
+  "sessions": {
+    "s_834863978a96b8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc797-96aa-7aa0-b854-cafb89e7a43c",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

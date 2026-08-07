@@ -1,0 +1,23 @@
+packages/agents/src/tests/static-options.test.ts
+  s_834863978a96b8::t_4cf3a3f30b79d3 1-33
+.changeset/tidy-agents-hibernate.md
+  s_834863978a96b8::t_455678a316b290 1-5
+packages/agents/src/index.ts
+  s_834863978a96b8::t_90fff911bf99a6 2336-2347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "63a905461da0492b1ee1387f19f3096d1b222773",
+  "prompts": {},
+  "sessions": {
+    "s_834863978a96b8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc797-96aa-7aa0-b854-cafb89e7a43c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+packages/agents/src/react-tests/resume-overlap-race.test.tsx
+  s_834863978a96b8::t_c475ba1e3713e4 140-148,151-163,165-177,179-198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3dedcc71d9f5ac03a859306f8a9ddd6330dc01ae",
+  "prompts": {},
+  "sessions": {
+    "s_834863978a96b8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc797-96aa-7aa0-b854-cafb89e7a43c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

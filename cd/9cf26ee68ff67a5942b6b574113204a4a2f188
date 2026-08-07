@@ -1,0 +1,25 @@
+docs/agents/workflows.md
+  s_86b2bf9a9ceb9b::t_61d29bd203fb54 268-271,544-558
+packages/agents/src/index.ts
+  s_86b2bf9a9ceb9b::t_b36c307ca34212 40,11428-11429,11432-11439
+packages/agents/src/tests/workflow.test.ts
+  s_86b2bf9a9ceb9b::t_704e386ab4ddcd 95-137
+packages/agents/src/workflow-retention.ts
+  s_86b2bf9a9ceb9b::t_a50474b00a05e9 1-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cd9cf26ee68ff67a5942b6b574113204a4a2f188",
+  "prompts": {},
+  "sessions": {
+    "s_86b2bf9a9ceb9b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa5b7-9ee1-7922-a136-b5943be227a2",
+        "model": "unknown"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}
