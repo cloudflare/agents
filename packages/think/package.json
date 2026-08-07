@@ -115,6 +115,10 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
     },
+    "./workspace-legacy": {
+      "types": "./dist/workspace-legacy.d.ts",
+      "import": "./dist/workspace-legacy.js"
+    },
     "./tools/workspace": {
       "types": "./dist/tools/workspace.d.ts",
       "import": "./dist/tools/workspace.js"

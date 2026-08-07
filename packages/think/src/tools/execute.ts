@@ -8,8 +8,7 @@ import {
   type Executor
 } from "@cloudflare/codemode";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
-import type { StateBackend, WorkspaceFsLike } from "@cloudflare/shell";
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import type { StateBackend } from "@cloudflare/shell";
 import { StateConnector } from "@cloudflare/shell/workers";
 import {
   BrowserConnector,
@@ -17,7 +16,10 @@ import {
   type BrowserBinding,
   type BrowserConnectorSessionOptions
 } from "agents/browser";
-import type { WorkspaceLike } from "./workspace";
+import type { WorkspaceLike } from "../workspace-contract";
+import { createWorkspaceStateConnectors } from "../workspace-state";
+import { truncatePausedExecutionOutput } from "./execute-output";
+export { truncatePausedExecutionOutput } from "./execute-output";
 
 /**
  * The minimum agent surface for the `createExecuteTool(this)` one-liner.
@@ -42,6 +44,12 @@ export interface CreateExecuteToolOptions {
   ctx: DurableObjectState;
 
   /**
+   * Workspace exposed through the existing codemode `state.*` interface.
+   * Inferred automatically by `createExecuteTool(this)`.
+   */
+  workspace?: WorkspaceLike;
+
+  /**
    * AI SDK tools exposed inside the sandbox as `tools.*`. Tools with
    * `needsApproval` get the runtime's durable pause/approve/resume flow:
    * calling one pauses the execution until `approveExecution` /
@@ -52,17 +60,7 @@ export interface CreateExecuteToolOptions {
    */
   tools?: ToolSet;
 
-  /**
-   * StateBackend exposed as `state.*` inside the sandbox — the full
-   * filesystem API (readFile, writeFile, glob, searchFiles, replaceInFiles,
-   * planEdits, …). Every method takes a single object argument.
-   *
-   * @example
-   * ```ts
-   * import { createWorkspaceStateBackend } from "@cloudflare/shell";
-   * state: createWorkspaceStateBackend(this.workspace)
-   * ```
-   */
+  /** Legacy Shell state exposed inside the sandbox as `state.*`. */
   state?: StateBackend;
 
   /**
@@ -81,8 +79,8 @@ export interface CreateExecuteToolOptions {
   session?: BrowserConnectorSessionOptions;
 
   /**
-   * Additional connectors for the sandbox beyond `tools`, `state`, and `cdp`.
-   * Each adds its own named namespace.
+   * Additional connectors for the sandbox beyond `workspace`, `tools`,
+   * `state`, and `cdp`. Each adds its own named namespace.
    */
   connectors?: CodemodeConnector[];
 
@@ -153,42 +151,9 @@ function isAgent(
   // An options bag has no `env`, but guard against a hand-built object that
   // happens to carry one (e.g. spread from a worker handler): an explicit
   // `executor`/`loader` key marks it as options — agents never have those.
-  // (Other option keys like `state`/`browser` can legitimately exist on agent
+  // (Other option keys like `browser` can legitimately exist on agent
   // subclasses, so they can't discriminate.)
   return "env" in source && !("executor" in source) && !("loader" in source);
-}
-
-// The agent one-liner derives state from the workspace, which requires the
-// full filesystem surface (`WorkspaceFsLike`) — a concrete `Workspace` has
-// it; a minimal custom `WorkspaceLike` may not.
-const WORKSPACE_FS_METHODS = [
-  "readFile",
-  "readFileBytes",
-  "writeFile",
-  "writeFileBytes",
-  "appendFile",
-  "exists",
-  "stat",
-  "lstat",
-  "mkdir",
-  "readDir",
-  "rm",
-  "cp",
-  "mv",
-  "symlink",
-  "readlink",
-  "glob"
-] as const;
-
-function workspaceFs(
-  workspace: WorkspaceLike | undefined
-): WorkspaceFsLike | undefined {
-  if (!workspace) return undefined;
-  const candidate = workspace as unknown as Record<string, unknown>;
-  for (const method of WORKSPACE_FS_METHODS) {
-    if (typeof candidate[method] !== "function") return undefined;
-  }
-  return workspace as unknown as WorkspaceFsLike;
 }
 
 function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
@@ -203,11 +168,10 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
         "call createExecuteTool({ ctx, loader, ... }) with explicit options."
     );
   }
-  const fs = workspaceFs(agent.workspace);
   return {
     ctx,
     loader: env.LOADER,
-    state: fs ? createWorkspaceStateBackend(fs) : undefined,
+    workspace: agent.workspace,
     browser: env.BROWSER
   };
 }
@@ -227,9 +191,17 @@ export function createExecuteRuntime(
   overrides?: Partial<Omit<CreateExecuteToolOptions, "ctx">>
 ): ExecuteRuntime {
   const agent = isAgent(source) ? source : undefined;
-  const options: CreateExecuteToolOptions = isAgent(source)
-    ? { ...optionsFromAgent(source), ...overrides }
-    : { ...source, ...overrides };
+  const inferred = agent ? optionsFromAgent(agent) : undefined;
+  const options: CreateExecuteToolOptions = inferred
+    ? {
+        ...inferred,
+        ...overrides,
+        connectors: [
+          ...(inferred.connectors ?? []),
+          ...(overrides?.connectors ?? [])
+        ]
+      }
+    : { ...(source as CreateExecuteToolOptions), ...overrides };
 
   if (agent && !options.executor && !options.loader) {
     throw new Error(
@@ -257,13 +229,17 @@ export function createExecuteRuntime(
   }
 
   const connectors: CodemodeConnector[] = [];
+  if (options.state) {
+    connectors.push(new StateConnector(options.ctx, options.state));
+  } else if (options.workspace) {
+    connectors.push(
+      ...createWorkspaceStateConnectors(options.workspace, options.ctx)
+    );
+  }
   if (options.tools && Object.keys(options.tools).length > 0) {
     connectors.push(
       new ToolSetConnector(options.ctx, { tools: options.tools })
     );
-  }
-  if (options.state) {
-    connectors.push(new StateConnector(options.ctx, options.state));
   }
   if (options.browser) {
     connectors.push(
@@ -280,7 +256,7 @@ export function createExecuteRuntime(
   if (connectors.length === 0) {
     throw new Error(
       "createExecuteTool has nothing to expose — provide at least one of " +
-        "`tools`, `state`, `browser`, or `connectors`."
+        "`workspace`, `tools`, `state`, `browser`, or `connectors`."
     );
   }
 
@@ -298,7 +274,7 @@ export function createExecuteRuntime(
 
   const baseTool = runtime.tool({
     description: options.description,
-    connectorHints: connectorHints(options)
+    connectorHints: connectorHints(options, connectors)
   });
   const baseExecute = baseTool.execute;
   const tool: Tool = baseExecute
@@ -333,7 +309,8 @@ export function createExecuteRuntime(
  * `tools.*` via `codemode.search`.
  */
 function connectorHints(
-  options: CreateExecuteToolOptions
+  options: CreateExecuteToolOptions,
+  connectors: CodemodeConnector[]
 ): Record<string, string> {
   const hints: Record<string, string> = {};
   if (options.tools) {
@@ -346,9 +323,9 @@ function connectorHints(
         `Available: ${names.join(", ")}`;
     }
   }
-  if (options.state) {
+  if (connectors.some((connector) => connector.name() === "state")) {
     hints.state =
-      "the workspace filesystem. Every method takes ONE object argument: " +
+      "the legacy workspace filesystem. Every method takes ONE object argument: " +
       "`state.readFile({ path })`, `state.writeFile({ path, content })`, " +
       "`state.readdir({ path })`, `state.glob({ pattern })`, …";
   }
@@ -363,42 +340,15 @@ function connectorHints(
   return hints;
 }
 
-/** Character budget for a pending action's args in the transcript. */
-const PENDING_ARGS_MAX_CHARS = 2_000;
-
-/**
- * Truncate the `pending[].args` of a paused execution output for transcript /
- * model consumption. The full args stay on the runtime facet (used by the
- * actual resume); only the model-facing copy is bounded. Non-paused outputs
- * pass through unchanged.
- */
-export function truncatePausedExecutionOutput(output: unknown): unknown {
-  if (typeof output !== "object" || output === null) return output;
-  const o = output as { status?: unknown; pending?: unknown };
-  if (o.status !== "paused" || !Array.isArray(o.pending)) return output;
-  return {
-    ...o,
-    pending: o.pending.map((action) => {
-      if (typeof action !== "object" || action === null) return action;
-      const a = action as { args?: unknown };
-      if (!("args" in a)) return action;
-      return {
-        ...a,
-        args: truncateResult(a.args, { maxChars: PENDING_ARGS_MAX_CHARS })
-      };
-    })
-  };
-}
-
 /**
  * Create a code execution tool that lets the LLM write and run TypeScript
- * against your tools, the workspace filesystem, and (optionally) a live
- * browser — all inside a sandboxed Worker, recorded on a durable codemode
+ * against your tools, legacy workspace state, and (optionally) a live browser
+ * inside a sandboxed Worker, recorded on a durable codemode
  * runtime (abort-and-replay, approvals, snippets).
  *
- * The model sees typed namespaces: `tools.*` for your AI SDK tools,
- * `state.*` for the filesystem (object args: `state.readFile({ path })`),
- * and `cdp.*` for the browser.
+ * The model sees typed namespaces for the configured capabilities: `tools.*`
+ * for AI SDK tools, `state.*` for the legacy workspace, and `cdp.*` for the
+ * browser.
  *
  * Setup checklist:
  *
@@ -408,14 +358,10 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  *   `export { CodemodeRuntime } from "@cloudflare/codemode"`
  *   (the `@cloudflare/codemode/vite` plugin does this automatically)
  *
- * @example One-liner — defaults from the agent
+ * @example Agent defaults, including legacy workspace state
  * ```ts
  * getTools() {
- *   return {
- *     // state.* from this.workspace, cdp.* if env.BROWSER is bound,
- *     // executor from env.LOADER
- *     execute: createExecuteTool(this)
- *   };
+ *   return { execute: createExecuteTool(this) };
  * }
  * ```
  *
@@ -428,9 +374,9 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  * ```ts
  * execute: createExecuteTool({
  *   ctx: this.ctx,
- *   tools: myDomainTools,                                  // tools.*
- *   state: createWorkspaceStateBackend(this.workspace),    // state.*
- *   browser: this.env.BROWSER,                             // cdp.*
+ *   tools: myDomainTools,                 // tools.*
+ *   connectors: myConnectors,             // e.g. state.*
+ *   browser: this.env.BROWSER,            // cdp.*
  *   loader: this.env.LOADER
  * })
  * ```
