@@ -24,12 +24,8 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { z } from "zod";
 import { Session } from "agents/experimental/memory/session";
 import type { ObservabilityEvent } from "agents/observability";
-import {
-  action,
-  Think,
-  Workspace,
-  defaultContextOverflowClassifier
-} from "../think";
+import { action, Think, defaultContextOverflowClassifier } from "../think";
+import { Workspace } from "../workspace-shell-legacy";
 import type { Action } from "../think";
 import { ThinkWorkflow, type ThinkWorkflowStep } from "../workflows";
 import type {

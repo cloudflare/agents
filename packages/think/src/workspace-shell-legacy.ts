@@ -1,3 +1,4 @@
+import type { WorkspaceRuntimeValue } from "@cloudflare/computer";
 import {
   createWorkspaceStateBackend,
   Workspace as ShellWorkspace,
@@ -185,7 +186,7 @@ export class LegacyShellRuntime implements ThinkWorkspaceRuntime {
       backend?: string;
       timeoutMs?: number;
       env?: Record<string, string>;
-      input?: unknown;
+      input?: WorkspaceRuntimeValue;
       stdin?: Uint8Array | string;
     }
   ) {
