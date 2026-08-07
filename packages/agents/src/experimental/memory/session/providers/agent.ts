@@ -13,7 +13,10 @@ import type {
   HistoryRowStat,
   RecentHistoryResult
 } from "../provider";
-import { COMPACTION_PREFIX } from "../../utils/compaction-helpers";
+import {
+  COMPACTION_PREFIX,
+  isCompactionMessage
+} from "../../utils/compaction-helpers";
 
 export interface SqlProvider {
   sql<T = Record<string, string | number | boolean | null>>(
@@ -529,6 +532,13 @@ export class AgentSessionProvider implements SessionProvider {
     messages: SessionMessage[],
     compactions: StoredCompaction[]
   ): SessionMessage[] {
+    // A pre-#1984 session may carry a synthetic overlay that was filed as a
+    // real row on an earlier turn. Drop those raw rows before overlaying — the
+    // overlay for the range is re-synthesized below — so the summary can't
+    // render twice. This is a no-op for healthy sessions (no such rows) and
+    // only touches the returned projection; the SQL parent-chain walk has
+    // already resolved children of the stray row.
+    messages = messages.filter((m) => !isCompactionMessage(m));
     const ids = messages.map((m) => m.id);
     const result: SessionMessage[] = [];
     let i = 0;

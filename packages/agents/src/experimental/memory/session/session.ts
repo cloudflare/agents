@@ -25,7 +25,10 @@ import {
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
-import type { CompactResult } from "../utils/compaction-helpers";
+import {
+  isCompactionMessage,
+  type CompactResult
+} from "../utils/compaction-helpers";
 import { estimateMessageTokens, estimateStringTokens } from "../utils/tokens";
 import { MessageType } from "../../../types";
 
@@ -617,6 +620,19 @@ export class Session {
     parentId?: string | null
   ): Promise<void> {
     await this._ensureRestored();
+
+    // The `compaction_` prefix is reserved for synthetic overlays that
+    // `getHistory()` computes on read — they must never become real rows.
+    // A client transport round-trips the full transcript back on the next
+    // turn, so an overlay arrives here as an incoming message; persisting it
+    // would duplicate the summary in every later read (#1984). Reject it from
+    // any write path so the invariant can't be violated caller-side.
+    if (isCompactionMessage(message)) {
+      console.warn(
+        `[Session] Refusing to persist a message with the reserved compaction id "${message.id}" — synthetic compaction overlays are computed on read and are never stored (#1984).`
+      );
+      return;
+    }
 
     const existing = await this.storage.getMessage(message.id);
     if (existing) {

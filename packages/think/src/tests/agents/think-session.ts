@@ -1892,6 +1892,15 @@ export class ThinkTestAgent extends Think {
     return (await this.session.getHistory()) as UIMessage[];
   }
 
+  /**
+   * Probe a raw stored row by id (reads `assistant_messages` directly, without
+   * the read-time compaction overlay), so a test can prove a synthetic
+   * compaction message was never filed as a real row (#1984).
+   */
+  async getSessionMessageForTest(id: string): Promise<UIMessage | null> {
+    return (await this.session.getMessage(id)) as UIMessage | null;
+  }
+
   async deliverNoticeErrorForTest(
     text: string,
     channel?: string
