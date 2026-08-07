@@ -56,7 +56,7 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
   // ── sendMessages lifecycle ───────────────────────────────────────────
 
-  it("closes the original sendMessages stream when the socket closes before done", async () => {
+  it("errors the original sendMessages stream when the socket closes before done", async () => {
     const stream = await transport.sendMessages({
       chatId: "chat-1",
       messages: [
@@ -75,10 +75,10 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
-    await expect(reader.read()).resolves.toEqual({
-      done: true,
-      value: undefined
-    });
+    // The socket dying mid-stream must surface as a stream error, not a clean
+    // close, so useChat can distinguish a dropped connection from a completed
+    // turn (see issue #2013).
+    await expect(reader.read()).rejects.toThrow("WebSocket closed mid-stream");
     expect(activeRequestIds.size).toBe(0);
   });
 
@@ -365,6 +365,8 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
+    // A socket close before the resume handshake completes closes the
+    // continuation stream cleanly; only mid-chunk closes error (see #2013).
     await expect(reader.read()).resolves.toEqual({
       done: true,
       value: undefined
@@ -449,7 +451,7 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(activeRequestIds.has("req-keep-id")).toBe(true);
   });
 
-  it("tool continuation closes and removes requestId when socket closes mid-stream", async () => {
+  it("tool continuation errors and removes requestId when socket closes mid-stream", async () => {
     transport.expectToolContinuation();
 
     const stream = (await transport.reconnectToStream({
@@ -474,10 +476,9 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
-    await expect(reader.read()).resolves.toEqual({
-      done: true,
-      value: undefined
-    });
+    // A socket close mid-continuation must error the stream, not close it
+    // cleanly, so useChat can surface the interruption (see issue #2013).
+    await expect(reader.read()).rejects.toThrow("WebSocket closed mid-stream");
     expect(activeRequestIds.has("req-tool-close")).toBe(false);
     expect(transport.abortActiveToolContinuation()).toBe(false);
   });
@@ -770,7 +771,7 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(activeRequestIds.has("req-cleanup")).toBe(false);
   });
 
-  it("removes requestId from activeRequestIds when resumed stream socket closes", async () => {
+  it("errors and removes requestId from activeRequestIds when resumed stream socket closes", async () => {
     const promise = transport.reconnectToStream({ chatId: "chat-1" });
 
     transport.handleStreamResuming({ id: "req-close-cleanup" });
@@ -793,10 +794,9 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
-    await expect(reader.read()).resolves.toEqual({
-      done: true,
-      value: undefined
-    });
+    // A socket close during chunk replay must error the resumed stream, not
+    // close it cleanly (see issue #2013).
+    await expect(reader.read()).rejects.toThrow("WebSocket closed mid-stream");
     expect(activeRequestIds.has("req-close-cleanup")).toBe(false);
   });
 
