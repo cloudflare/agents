@@ -845,6 +845,7 @@ path.
 | `getSystemPrompt()`        | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `getTools()`               | `{}`                             | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `getScheduledTasks()`      | `{}`                             | Code-declared recurring prompts or handlers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `getScheduledTasksScope()` | `"root"`                         | Which instances arm the declared tasks — `"root"` (top-level agent only) or `"all"` (sub-agents too)                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `getDefaultTimezone()`     | `undefined`                      | Default timezone for wall-clock scheduled tasks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `getMessengers()`          | `{}`                             | Messenger ingress and delivery declarations — see [Messengers](./messengers.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `getActions()`             | `{}`                             | Server actions (idempotency, approvals, authorization) compiled into tools — see [Actions](./actions.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -1192,6 +1193,27 @@ schedule, scheduleKind, timezone, metadata }` and are intended for app-owned
 work such as creating a Workflow run or writing a run ledger. Delivery is
 at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
 idempotency.
+
+Declared tasks are armed on the **root agent only**. Because
+`getScheduledTasks()` is normally a static declaration, it returns the same
+tasks on every instance of the class, so arming it on sub-agents as well would
+dispatch each occurrence once per live sub-agent on top of the root. Override
+`getScheduledTasksScope()` to return `"all"` when a class genuinely declares
+different tasks per sub-agent — each sub-agent then owns an independent
+schedule.
+
+```typescript
+export class PerUserAgent extends Think<Env> {
+  getScheduledTasksScope() {
+    return "all" as const;
+  }
+
+  async getScheduledTasks(): Promise<ThinkScheduledTasks> {
+    const reminder = await this.getReminderForThisUser();
+    return reminder ? { reminder } : {};
+  }
+}
+```
 
 Static declarations reconcile on startup. If `getScheduledTasks()` reads
 product-owned data that can change while the Durable Object is live, call

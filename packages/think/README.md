@@ -340,6 +340,7 @@ Script execution requires a Worker Loader binding:
 | `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
 | `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
 | `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |
+| `getScheduledTasksScope()` | `"root"`                           | Which instances arm declared tasks — `"root"` or `"all"` (sub-agents too)                                                                                                                                                    |
 | `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                                                                                                    |
 | `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                                                                                                     |
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
@@ -516,6 +517,14 @@ schedule, scheduleKind, timezone, metadata }` and are intended for app-owned
 work such as creating a Workflow run or writing a run ledger. Delivery is
 at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
 idempotency.
+
+Declared tasks are armed on the **root agent only**. Because
+`getScheduledTasks()` is normally a static declaration, it returns the same
+tasks on every instance of the class, so arming it on sub-agents as well would
+dispatch each occurrence once per live sub-agent on top of the root. Override
+`getScheduledTasksScope()` to return `"all"` when a class genuinely declares
+different tasks per sub-agent — each sub-agent then owns an independent
+schedule.
 
 Static declarations reconcile on startup. If `getScheduledTasks()` reads
 product-owned data that can change while the Durable Object is live, call
