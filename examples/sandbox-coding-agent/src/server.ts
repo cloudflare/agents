@@ -87,8 +87,6 @@ Sandbox.outboundByHost = { "api.anthropic.com": anthropicViaGateway };
  * isolated in its own container.
  */
 export class ClaudeCodeAgent extends AIChatAgent<Env> {
-  chatRecovery = true;
-
   // Claude owns its native session; persist its id so each turn can --resume it.
   private sessionId: string | undefined;
   // The diff produced by the most recent turn, returned as the agent-tool output.
@@ -176,7 +174,6 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
  * loop and delegates the actual coding to `ClaudeCodeAgent` sub-agents.
  */
 export class CodingOrchestrator extends Think<Env> {
-  override chatRecovery = true;
   // Cap how many containers run at once (also bounded by container max_instances).
   override maxConcurrentAgentTools = 3;
 

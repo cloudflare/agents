@@ -115,7 +115,6 @@ const RECOVERY_SUFFIX =
 // ── Agent ─────────────────────────────────────────────────────────────
 
 export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
-  override chatRecovery = true;
   maxPersistedMessages = 200;
 
   // Tracks stash data for the current buffered turn so both the custom

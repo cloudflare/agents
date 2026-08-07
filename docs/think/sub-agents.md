@@ -300,14 +300,14 @@ controller.
 
 Think chat recovery works in sub-agents. The underlying fiber is stored in the sub-agent's own SQLite database, and the top-level parent keeps a small index of active child fibers. When the parent alarm fires, it routes recovery checks into the owning sub-agent, so recovery runs with the sub-agent as `this` even if the child is otherwise idle. Recovered continuations can call `schedule()` inside the sub-agent — the top-level parent owns the physical alarm and routes the continuation back into the child.
 
-The external signal lives in memory only. If the Durable Object hibernates mid-turn and `chatRecovery` is enabled, the recovered turn runs via `continueLastTurn()` **without** the original `options.signal` — the listener was lost on eviction, and the recovery path has no way to reach back to the original caller.
+The external signal lives in memory only. If the Durable Object hibernates mid-turn, the recovered turn runs via `continueLastTurn()` **without** the original `options.signal` — the listener was lost on eviction, and the recovery path has no way to reach back to the original caller.
 
 In practice this means:
 
 - A signal that aborts **after** the DO restarts has no effect on the recovered turn.
 - Subclasses that need the recovered turn to honor a fresh signal should override `onChatRecovery` and reject continuation (`return { continue: false }`) when the original caller is gone.
 - Recovery is best for long-lived chat sub-agents that have their own client reconnect path. Agent tools define a parent-side replay and terminal-state policy for cases where the original parent forwarding loop is gone.
-- If the parent restarts mid-agent-tool run, stored child chunks can replay, but the parent marks the run `interrupted` unless a future live-tail policy reattaches to recovered work.
+- If the parent restarts mid-agent-tool run, Agent Tools reattaches to the child's durable run, replays stored chunks, and waits for its real terminal result within the configured reattach budget.
 
 See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original motivation, and [Agent Tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md) for the shipped orchestration API.
 
@@ -352,21 +352,9 @@ Both methods produce the same end state as `chat-request-cancel`: inference loop
 
 ## Chat Recovery
 
-Think can wrap chat turns in Durable Object fibers for durable execution. When a DO is evicted mid-turn, the turn can be recovered on restart. This works for top-level agents and sub-agents; for sub-agents, the top-level parent alarm drives recovery checks back into the child facet.
+Think wraps chat turns in Durable Object fibers for durable execution. When a DO is evicted mid-turn, the turn can be recovered on restart. This works for top-level agents and sub-agents; for sub-agents, the top-level parent alarm drives recovery checks back into the child facet.
 
-### Setup
-
-```typescript
-export class MyAgent extends Think<Env> {
-  chatRecovery = true;
-
-  getModel() {
-    /* ... */
-  }
-}
-```
-
-When `chatRecovery` is `true`, every turn entry path is wrapped in `runFiber`: WebSocket chat, sub-agent `chat()` RPC, auto-continuation, `saveMessages()`, `submitMessages()` execution, and `continueLastTurn()`.
+Every turn entry path is wrapped in `runFiber`: WebSocket chat, sub-agent `chat()` RPC, auto-continuation, `saveMessages()`, `submitMessages()` execution, and `continueLastTurn()`. Durable recovery is always enabled; use `chatRecovery` only to tune recovery budgets and terminal behavior.
 
 ### onChatRecovery
 
@@ -405,8 +393,6 @@ onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions | void
 
 ```typescript
 export class MyAgent extends Think<Env> {
-  chatRecovery = true;
-
   getModel() {
     /* ... */
   }
@@ -449,7 +435,9 @@ onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions {
 
 ### Recovery budgets and limits
 
-Instead of `chatRecovery = true`, assign an object to tune how long recovery is allowed to run and when it is given up on. A turn that keeps making forward progress survives unbounded interruption — duration is not a bound — as long as it stays under the `maxRecoveryWork` backstop. Recovery is only sealed by one of the limits below.
+Assign a `chatRecovery` object to tune how long recovery is allowed to run and when it is given up on. A turn that keeps making forward progress survives unbounded interruption — duration is not a bound — as long as it stays under the `maxRecoveryWork` backstop. Recovery is only sealed by one of the limits below.
+
+`chatRecovery = false` is no longer supported. If automatic continuation is unsafe, return `{ continue: false }` from `onChatRecovery()`. For cancellation that must survive hibernation, store cancellation intent durably and check it in that hook. See [Migrating from `chatRecovery = false`](../agents/chat-agents.md#migrating-from-chatrecovery--false) for side-effect and cost guidance.
 
 ```typescript
 export class MyAgent extends Think<Env> {
