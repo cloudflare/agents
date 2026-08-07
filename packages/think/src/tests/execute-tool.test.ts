@@ -11,6 +11,56 @@ async function freshAgent(name?: string) {
   return getAgentByName(env.ThinkExecuteToolAgent, name ?? crypto.randomUUID());
 }
 
+describe("Computer workspace state connector", () => {
+  it("preserves state.* for the backend-free Computer provider", async () => {
+    const agent = await getAgentByName(
+      env.ThinkComputerWorkspaceExecuteAgent,
+      crypto.randomUUID()
+    );
+
+    const stateResult = await agent.runWorkspaceExecute(`async () => {
+        await state.writeFile({ path: "/notes.txt", content: "hello" });
+        await state.replaceInFile({
+          path: "/notes.txt",
+          search: "hello",
+          replacement: "updated"
+        });
+        const file = await state.readFile({ path: "/notes.txt" });
+        const listing = await state.glob({ pattern: "**/*.txt" });
+        return file === "updated" && listing.includes("/notes.txt");
+      }`);
+    expect(stateResult).toMatchObject({ status: "completed", result: true });
+
+    await expect(
+      agent.runExplicitWorkspaceExecute(`async () => {
+        return await state.readFile({ path: "/notes.txt" });
+      }`)
+    ).resolves.toMatchObject({ status: "completed", result: "updated" });
+  });
+
+  it("re-executes state reads without repeating writes after approval", async () => {
+    const agent = await getAgentByName(
+      env.ThinkComputerWorkspaceExecuteAgent,
+      crypto.randomUUID()
+    );
+
+    const paused = await agent.runWorkspaceReplay(`async () => {
+      await state.writeFile({ path: "/replay.txt", content: "initial" });
+      const before = await state.readFile({ path: "/replay.txt" });
+      await tools.checkpoint({});
+      const after = await state.readFile({ path: "/replay.txt" });
+      return before === "external" && after === "external";
+    }`);
+    expect(paused).toMatchObject({ status: "paused" });
+    if (!paused.executionId) throw new Error("Missing paused execution id");
+
+    await agent.writeWorkspaceFile("/replay.txt", "external");
+    await expect(
+      agent.approveWorkspaceReplay(paused.executionId)
+    ).resolves.toMatchObject({ status: "completed", result: true });
+  });
+});
+
 describe("execute tool on the codemode runtime", () => {
   it("runs sandbox code against tools.* (ToolSetConnector)", async () => {
     const agent = await freshAgent();
