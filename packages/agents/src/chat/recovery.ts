@@ -23,6 +23,10 @@ export type ChatFiberSnapshot<Kind extends string = string> = {
   latestMessageId?: string;
   latestMessageRole?: string;
   latestUserMessageId?: string;
+  /** Explicit history endpoint for a branch-scoped turn such as regeneration. */
+  historyLeafId?: string;
+  /** Physical active leaf observed when a branch-scoped turn was accepted. */
+  activeLeafIdAtStart?: string;
   startedAt: number;
   lastBody?: Record<string, unknown>;
   lastClientTools?: ClientToolSchema[];
@@ -34,6 +38,8 @@ export function createChatFiberSnapshot<Kind extends string>({
   recoveryRootRequestId,
   continuation,
   messages,
+  historyLeafId,
+  activeLeafIdAtStart,
   lastBody,
   lastClientTools
 }: {
@@ -42,6 +48,8 @@ export function createChatFiberSnapshot<Kind extends string>({
   recoveryRootRequestId?: string;
   continuation: boolean;
   messages: ReadonlyArray<SnapshotMessage>;
+  historyLeafId?: string;
+  activeLeafIdAtStart?: string;
   lastBody?: Record<string, unknown>;
   lastClientTools?: ClientToolSchema[];
 }): ChatFiberSnapshot<Kind> {
@@ -65,6 +73,8 @@ export function createChatFiberSnapshot<Kind extends string>({
     latestMessageId: latestMessage?.id,
     latestMessageRole: latestMessage?.role,
     latestUserMessageId: latestUser?.id,
+    historyLeafId,
+    activeLeafIdAtStart,
     startedAt: Date.now(),
     lastBody,
     lastClientTools

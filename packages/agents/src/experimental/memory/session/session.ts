@@ -25,7 +25,10 @@ import {
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
-import type { CompactResult } from "../utils/compaction-helpers";
+import {
+  COMPACTION_PREFIX,
+  type CompactResult
+} from "../utils/compaction-helpers";
 import { estimateMessageTokens, estimateStringTokens } from "../utils/tokens";
 import { MessageType } from "../../../types";
 
@@ -732,9 +735,10 @@ export class Session {
 
   /**
    * Run the registered compaction function and store the result as an overlay.
-   * Requires `onCompaction()` to be called first.
+   * When `leafId` is provided, compact that root-to-leaf branch instead of the
+   * active branch. Requires `onCompaction()` to be called first.
    */
-  async compact(): Promise<CompactResult | null> {
+  async compact(leafId?: string | null): Promise<CompactResult | null> {
     await this._ensureRestored();
     if (!this._compactionFn) {
       throw new Error(
@@ -743,6 +747,7 @@ export class Session {
     }
 
     const tokensBefore = await this._emitStatus("compacting");
+    const history = await this.getHistory(leafId);
 
     let result: CompactResult | null;
     try {
@@ -750,7 +755,7 @@ export class Session {
       // function's boundary logic can use the same accounting as the
       // fire/no-fire decision (see CompactContext). The function still wins if
       // it was given its own explicit counter.
-      result = await this._compactionFn(await this.getHistory(), {
+      result = await this._compactionFn(history, {
         tokenCounter: this._tokenCounter
       });
     } catch (err) {
@@ -763,15 +768,21 @@ export class Session {
       return null;
     }
 
-    // Validate toMessageId exists in the history
-    const historyIds = new Set((await this.getHistory()).map((m) => m.id));
+    // Validate toMessageId exists in the selected history.
+    const historyIds = new Set(history.map((message) => message.id));
     if (!historyIds.has(result.toMessageId)) {
       await this._emitStatus("idle");
       return null;
     }
 
-    // Iterative compaction — extend from earliest existing compaction's start
-    const existing = await this.getCompactions();
+    // Iterative compaction extends only an overlay visible on this branch.
+    // Other sibling branches may have unrelated overlays in the same session.
+    const existing = (await this.getCompactions()).filter(
+      (compaction) =>
+        historyIds.has(`${COMPACTION_PREFIX}${compaction.id}`) ||
+        (historyIds.has(compaction.fromMessageId) &&
+          historyIds.has(compaction.toMessageId))
+    );
     const fromId =
       existing.length > 0 ? existing[0].fromMessageId : result.fromMessageId;
 

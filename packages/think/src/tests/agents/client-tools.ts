@@ -8,7 +8,8 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
-import { Think } from "../../think";
+import { Session } from "agents/experimental/memory/session";
+import { defaultContextOverflowClassifier, Think } from "../../think";
 import type {
   ChatResponseResult,
   MessageConcurrency,
@@ -630,7 +631,10 @@ function createMultiStepExecutableClientToolMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
-function createTextOnlyMockModel(): LanguageModel {
+function createTextOnlyMockModel(
+  recordPromptRoles: (roles: string[]) => void,
+  shouldOverflow: () => boolean
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -639,10 +643,33 @@ function createTextOnlyMockModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented");
     },
-    doStream() {
+    doStream(options: Record<string, unknown>) {
+      const prompt = Array.isArray(options.prompt) ? options.prompt : [];
+      recordPromptRoles(
+        prompt.flatMap((message) => {
+          if (
+            typeof message !== "object" ||
+            message === null ||
+            !("role" in message) ||
+            typeof message.role !== "string"
+          ) {
+            return [];
+          }
+          return [message.role];
+        })
+      );
+
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          if (shouldOverflow()) {
+            controller.enqueue({
+              type: "error",
+              error: new Error("context_length_exceeded")
+            });
+            controller.close();
+            return;
+          }
           controller.enqueue({ type: "text-start", id: "t1" });
           controller.enqueue({
             type: "text-delta",
@@ -683,6 +710,26 @@ export class ThinkClientToolsAgent extends Think {
   private _slowChunkCount = 4;
   private _responseLog: ChatResponseResult[] = [];
   private _lastTurnToolNames: string[] = [];
+  private _textOnlyPromptRoles: string[][] = [];
+  private _textOnlyOverflowAttemptsRemaining = 0;
+  private _compactionHistoryMessageIds: string[][] = [];
+
+  override classifyChatError = defaultContextOverflowClassifier;
+
+  override configureSession(session: Session): Session {
+    return session.onCompaction(async (messages) => {
+      this._compactionHistoryMessageIds.push(
+        messages.map((message) => message.id)
+      );
+      const first = messages[0];
+      if (!first) return null;
+      return {
+        summary: "Compacted selected regeneration branch",
+        fromMessageId: first.id,
+        toMessageId: first.id
+      };
+    });
+  }
 
   override beforeTurn(ctx: { tools: ToolSet }): void {
     this._lastTurnToolNames = Object.keys(ctx.tools);
@@ -726,7 +773,15 @@ export class ThinkClientToolsAgent extends Think {
         this._midStreamParallelGapsBeforeSlow,
         this._midStreamParallelGapsAfterSlow
       );
-    if (this._useTextOnly) return createTextOnlyMockModel();
+    if (this._useTextOnly)
+      return createTextOnlyMockModel(
+        (roles) => this._textOnlyPromptRoles.push(roles),
+        () => {
+          if (this._textOnlyOverflowAttemptsRemaining === 0) return false;
+          this._textOnlyOverflowAttemptsRemaining--;
+          return true;
+        }
+      );
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
     return createClientToolMockModel();
   }
@@ -755,6 +810,23 @@ export class ThinkClientToolsAgent extends Think {
 
   async setTextOnlyMode(value: boolean): Promise<void> {
     this._useTextOnly = value;
+  }
+
+  /** Model prompt roles recorded by the text-only boundary implementation. */
+  async getTextOnlyPromptRoles(): Promise<string[][]> {
+    return this._textOnlyPromptRoles;
+  }
+
+  /** Make the next text-only attempt overflow and enable compact-and-retry. */
+  async overflowNextTextOnlyAttempt(): Promise<void> {
+    this.contextOverflow = { reactive: true };
+    this._textOnlyOverflowAttemptsRemaining = 1;
+    this._compactionHistoryMessageIds = [];
+  }
+
+  /** Message IDs supplied to each compaction function invocation. */
+  async getCompactionHistoryMessageIds(): Promise<string[][]> {
+    return this._compactionHistoryMessageIds;
   }
 
   async setServerApprovalToolMode(value: boolean): Promise<void> {

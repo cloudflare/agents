@@ -352,7 +352,10 @@ export interface ChatFiberWakeHooks<TClassify> {
     input: PersistOrphanedPartialInput
   ): boolean | Promise<boolean>;
   /** Materialize the orphaned stream's partial into a persisted assistant message. */
-  persistOrphanedStream(streamId: string): Promise<void>;
+  persistOrphanedStream(
+    streamId: string,
+    snapshot: ChatFiberSnapshot | null
+  ): Promise<void>;
   /** Mark the (still-active) recovered stream complete and schedule cleanup. */
   completeRecoveredStream(streamId: string): void | Promise<void>;
   /**
@@ -469,7 +472,7 @@ export class ChatRecoveryEngine {
           partial
         })
       ) {
-        await wake.persistOrphanedStream(streamId);
+        await wake.persistOrphanedStream(streamId, snapshot);
       }
       await adapter.exhaustChatRecovery(
         incident,
@@ -508,7 +511,7 @@ export class ChatRecoveryEngine {
           partial
         })
       ) {
-        await wake.persistOrphanedStream(streamId);
+        await wake.persistOrphanedStream(streamId, snapshot);
       }
 
       if (streamStillActive) {
