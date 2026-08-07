@@ -394,7 +394,7 @@ function Chat({
           >
             {contextOpen && (
               <InputArea
-                className="mb-2"
+                className="mb-2 w-full"
                 value={context}
                 onValueChange={setContext}
                 rows={5}
@@ -420,7 +420,7 @@ function Chat({
                 }
                 disabled={!configured || Boolean(active)}
                 rows={2}
-                className="!bg-transparent !shadow-none !outline-none !ring-0 focus:!ring-0"
+                className="w-full !bg-transparent !shadow-none !outline-none !ring-0 focus:!ring-0"
               />
               <div className="mt-2 flex items-center justify-between gap-3">
                 <Button
