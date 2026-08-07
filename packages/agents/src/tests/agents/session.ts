@@ -196,9 +196,10 @@ export class TestSessionAgent extends Agent {
   // ── ResumableStream legacy migration helpers ────────────────────
 
   /**
-   * Recreate `cf_ai_chat_stream_metadata` with the pre-#1691/#1733 schema
-   * (no `message_id` / `is_continuation`) and seed one in-flight row, so a
-   * fresh `ResumableStream` exercises the legacy lazy-migration path on a
+   * Recreate `cf_ai_chat_stream_metadata` with the pre-branch-parent schema
+   * (no `message_id` / `parent_message_id` / `is_continuation`) and seed one
+   * in-flight row, so a fresh `ResumableStream` exercises the legacy
+   * lazy-migration path on a
    * real workerd SQLite (validates the runtime's actual error strings).
    */
   async setupLegacyStreamTableForTest(): Promise<void> {
@@ -216,10 +217,53 @@ export class TestSessionAgent extends Agent {
       values ('legacy-stream', 'legacy-req', 'streaming', ${Date.now()})`;
   }
 
+  /**
+   * Recreate the metadata table as deployed immediately before branch-parent
+   * persistence: existing stream fields are present, but `parent_message_id`
+   * is not. A normal linear stream should continue using this schema unchanged.
+   */
+  async setupPreBranchParentStreamTableForTest(): Promise<void> {
+    this.sql`drop table if exists cf_ai_chat_stream_metadata`;
+    this.sql`drop table if exists cf_ai_chat_stream_chunks`;
+    this.sql`create table cf_ai_chat_stream_metadata (
+      id text primary key,
+      request_id text not null,
+      status text not null,
+      created_at integer not null,
+      completed_at integer,
+      message_id text,
+      is_continuation integer
+    )`;
+  }
+
   private streamMetadataColumnsForTest(): string[] {
     return this.sql<{ name: string }>`
       select name from pragma_table_info('cf_ai_chat_stream_metadata')
     `.map((c) => c.name);
+  }
+
+  /** A linear start must not migrate a branch-only metadata column. */
+  async resumableLinearStartWithoutParentForTest(): Promise<{
+    startThrew: boolean;
+    columnsAfter: string[];
+  }> {
+    const stream = new ResumableStream(
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] => this.sql<T>(strings, ...values)
+    );
+
+    let startThrew = false;
+    try {
+      stream.start("linear-request", { messageId: "linear-message" });
+    } catch {
+      startThrew = true;
+    }
+    return {
+      startThrew,
+      columnsAfter: this.streamMetadataColumnsForTest()
+    };
   }
 
   /**
@@ -231,9 +275,11 @@ export class TestSessionAgent extends Agent {
   async resumableLegacyMigrationForTest(): Promise<{
     columnsBefore: string[];
     legacyMessageId: string | null;
+    legacyParentMessageId: string | null;
     startThrew: boolean;
     columnsAfter: string[];
     newStreamMessageId: string | null;
+    newStreamParentMessageId: string | null;
   }> {
     const stream = new ResumableStream(
       <T = Record<string, unknown>>(
@@ -245,6 +291,8 @@ export class TestSessionAgent extends Agent {
     const columnsBefore = this.streamMetadataColumnsForTest();
     // SELECT of the new column on a legacy row: guarded → null, no throw.
     const legacyMessageId = stream.getStreamMessageId("legacy-stream");
+    const legacyParentMessageId =
+      stream.getStreamParentMessageId("legacy-stream");
 
     // INSERT naming the new columns on a legacy table: must migrate + retry.
     let startThrew = false;
@@ -252,6 +300,7 @@ export class TestSessionAgent extends Agent {
     try {
       newStreamId = stream.start("req-x", {
         messageId: "msg-1",
+        parentMessageId: "parent-1",
         continuation: true
       });
     } catch {
@@ -262,13 +311,18 @@ export class TestSessionAgent extends Agent {
     const newStreamMessageId = newStreamId
       ? stream.getStreamMessageId(newStreamId)
       : null;
+    const newStreamParentMessageId = newStreamId
+      ? stream.getStreamParentMessageId(newStreamId)
+      : null;
 
     return {
       columnsBefore,
       legacyMessageId,
+      legacyParentMessageId,
       startThrew,
       columnsAfter,
-      newStreamMessageId
+      newStreamMessageId,
+      newStreamParentMessageId
     };
   }
 }
