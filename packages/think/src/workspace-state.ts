@@ -73,7 +73,13 @@ class WorkspaceStateFilesystem implements WorkspaceFsLike {
   }
 
   async exists(path: string): Promise<boolean> {
-    return this.fs.exists(normalizeWorkspacePath(path));
+    try {
+      await this.fs.stat(normalizeWorkspacePath(path));
+      return true;
+    } catch (error) {
+      if (isWorkspaceNotFoundError(error)) return false;
+      throw error;
+    }
   }
 
   async stat(path: string): Promise<FileInfo | null> {

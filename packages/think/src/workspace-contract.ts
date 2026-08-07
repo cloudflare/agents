@@ -36,7 +36,6 @@ export interface ThinkWorkspaceFilesystem {
     path: string,
     options: { encoding?: "utf8" }
   ): Promise<string | ReadableStream<Uint8Array>>;
-  exists(path: string): Promise<boolean>;
   stat(path: string): Promise<ThinkWorkspaceStat>;
   lstat(path: string): Promise<ThinkWorkspaceStat>;
   readlink(path: string): Promise<string>;
