@@ -1,0 +1,31 @@
+design/codemode-rlm.md
+  s_0b3003d5997402::t_62bc1a37c466e8 33,43,151-155
+examples/codemode-rlm/README.md
+  s_0b3003d5997402::t_a0fa379bafa4ee 75-77,86,98,113-116
+examples/codemode-rlm/src/api.ts
+  s_0b3003d5997402::t_53692871889a4f 46
+examples/codemode-rlm/src/client.tsx
+  s_0b3003d5997402::t_26ac34957043dc 38,90,96,106,111,113-115,132-141,255,265,473,476-478,504
+examples/codemode-rlm/src/server.ts
+  s_0b3003d5997402::t_4d0c82134f3776 48
+examples/codemode-rlm/src/use-rlm-session.ts
+  s_0b3003d5997402::t_44ab88dded9bcb 33,161,165,169,175-176
+examples/codemode-rlm/vite.config.ts
+  s_0b3003d5997402::t_c40768e3cc9850 7-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ce52f0ba62191fc829da89247477712a0ffa27ac",
+  "prompts": {},
+  "sessions": {
+    "s_0b3003d5997402": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd6b0-e1c0-7b61-ba71-7591b8469662",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
