@@ -55,7 +55,8 @@ export type RlmHost = {
   } | null>;
 };
 
-function args(value: unknown): Record<string, unknown> {
+function args(value: unknown, optional = false): Record<string, unknown> {
+  if (optional && value === undefined) return {};
   if (!isRecord(value)) throw new Error("connector input must be an object");
   return value;
 }
@@ -130,7 +131,7 @@ export class ContextConnector extends CodemodeConnector<Env> {
           this.store.inputs(
             this.scope,
             this.inputId,
-            boundedInteger(args(value).limit, 20, 1, 50)
+            boundedInteger(args(value, true).limit, 20, 1, 50)
           )
       },
       slice: {
@@ -200,7 +201,7 @@ export class ContextConnector extends CodemodeConnector<Env> {
         execute: (value) =>
           this.store.history(
             this.scope,
-            boundedInteger(args(value).limit, 12, 1, 30)
+            boundedInteger(args(value, true).limit, 12, 1, 30)
           )
       }
     };
@@ -536,7 +537,7 @@ export class RlmConnector extends CodemodeConnector<Env> {
         },
         replay: "reexecute",
         execute: (value) =>
-          this.host.list(boundedInteger(args(value).limit, 10, 1, 20))
+          this.host.list(boundedInteger(args(value, true).limit, 10, 1, 20))
       },
       read: {
         description: "Read a bounded slice of a completed child answer.",
