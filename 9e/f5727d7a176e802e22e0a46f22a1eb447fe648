@@ -1,0 +1,31 @@
+examples/codemode-rlm/eval/README.md
+  s_0b3003d5997402::t_98c27f7eb46abb 94-95
+examples/codemode-rlm/eval/RESULTS.md
+  s_50912ae13583e1::t_1ba28c8c89d79d 3-79
+examples/codemode-rlm/eval/results/balanced-micro-2026-08-07-2a69375f3b1142e391e545553e10ccaf.json
+  s_0b3003d5997402::t_facfb901e5532d 1-310
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9ef5727d7a176e802e22e0a46f22a1eb447fe648",
+  "prompts": {},
+  "sessions": {
+    "s_0b3003d5997402": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd6b0-e1c0-7b61-ba71-7591b8469662",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_50912ae13583e1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34b1ef83-88de-41df-9b95-c7a4f05fed15",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
