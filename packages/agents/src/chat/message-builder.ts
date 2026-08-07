@@ -267,7 +267,21 @@ export function applyChunkToParts(
         toolPart &&
         (toolPart as Record<string, unknown>).state === "input-streaming"
       ) {
-        (toolPart as Record<string, unknown>).input = chunk.input;
+        const p = toolPart as Record<string, unknown>;
+        if (typeof chunk.inputTextDelta === "string") {
+          // AI SDK UI streams carry raw JSON fragments in inputTextDelta.
+          // Retain the raw string until an input-available or approval chunk
+          // gives us a safe boundary at which to parse it.
+          if (typeof p.input === "string") {
+            p.input += chunk.inputTextDelta;
+          } else if (p.input == null) {
+            p.input = chunk.inputTextDelta;
+          }
+        } else if (chunk.input !== undefined) {
+          // Compatibility with older/custom emitters that supplied a parsed
+          // partial input on the delta chunk.
+          p.input = chunk.input;
+        }
       }
       return true;
     }
@@ -284,6 +298,20 @@ export function applyChunkToParts(
         // resolved input/output. See the comment on tool-input-start.
         if (p.state === "input-streaming") {
           p.state = "input-available";
+          p.input = normalizeToolInput(chunk.input).input;
+          if (chunk.providerExecuted != null) {
+            p.providerExecuted = chunk.providerExecuted;
+          }
+          if (chunk.providerMetadata != null) {
+            p.callProviderMetadata = chunk.providerMetadata;
+          }
+          if (chunk.title != null) {
+            p.title = chunk.title;
+          }
+        } else if (p.state === "approval-requested") {
+          // Some stream orderings emit the approval request before the
+          // canonical input-available chunk. Fill the server-side part without
+          // regressing its approval state or discarding the approval object.
           p.input = normalizeToolInput(chunk.input).input;
           if (chunk.providerExecuted != null) {
             p.providerExecuted = chunk.providerExecuted;
@@ -374,6 +402,9 @@ export function applyChunkToParts(
           p.state === "output-denied"
         ) {
           return true;
+        }
+        if (p.state === "input-streaming") {
+          p.input = normalizeToolInput(chunk.input ?? p.input).input;
         }
         p.state = "approval-requested";
         p.approval = {
