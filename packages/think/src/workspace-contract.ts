@@ -73,6 +73,14 @@ export interface ThinkWorkspaceRuntimeHandle {
   [Symbol.dispose]?(): void;
 }
 
+export type ThinkWorkspaceRuntimeValue =
+  | null
+  | boolean
+  | number
+  | string
+  | ThinkWorkspaceRuntimeValue[]
+  | { [key: string]: ThinkWorkspaceRuntimeValue };
+
 export interface ThinkWorkspaceRuntime {
   exec(
     source: string,
@@ -82,7 +90,7 @@ export interface ThinkWorkspaceRuntime {
       backend?: string;
       timeoutMs?: number;
       env?: Record<string, string>;
-      input?: unknown;
+      input?: ThinkWorkspaceRuntimeValue;
       stdin?: Uint8Array | string;
     }
   ): Promise<ThinkWorkspaceRuntimeHandle>;
