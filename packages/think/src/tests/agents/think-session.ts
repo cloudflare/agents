@@ -1,3 +1,4 @@
+import { workspaceFilesystem } from "../../workspace-contract";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think } from "../../think";
@@ -1311,18 +1312,18 @@ export class ThinkTestAgent extends Think {
   async seedWorkspaceBytes(
     path: string,
     bytes: number[],
-    mimeType?: string
+    _mimeType?: string
   ): Promise<void> {
     const parent = path.replace(/\/[^/]+$/, "");
-    const workspace = this.workspace;
-    const writeFileBytes = Reflect.get(workspace, "writeFileBytes");
-    if (typeof writeFileBytes !== "function") {
-      throw new Error("Test workspace does not support writeFileBytes");
-    }
     if (parent && parent !== "/") {
-      await workspace.mkdir(parent, { recursive: true });
+      await workspaceFilesystem(this.workspace).mkdir(parent, {
+        recursive: true
+      });
     }
-    await writeFileBytes.call(workspace, path, new Uint8Array(bytes), mimeType);
+    await workspaceFilesystem(this.workspace).writeFile(
+      path,
+      new Uint8Array(bytes)
+    );
   }
 
   async testChatWithError(errorMessage?: string): Promise<TestChatResult> {
@@ -8381,7 +8382,19 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 
   async readWorkspaceFileForTest(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
+    try {
+      return await workspaceFilesystem(this.workspace).readFile(path, "utf8");
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return null;
+      }
+      throw error;
+    }
   }
 }
 
