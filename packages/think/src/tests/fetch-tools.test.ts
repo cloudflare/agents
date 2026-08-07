@@ -35,14 +35,21 @@ function makeWorkspace() {
   const bytes = new Map<string, Uint8Array>();
   const dirs: string[] = [];
   const ws: FetchWorkspace = {
-    mkdir: (p) => {
-      dirs.push(p);
-    },
-    writeFile: (p, c) => {
-      files.set(p, c);
-    },
-    writeFileBytes: (p, b) => {
-      bytes.set(p, b);
+    fs: {
+      mkdir: (p) => {
+        dirs.push(p);
+        return Promise.resolve();
+      },
+      writeFile: (p, content) => {
+        if (typeof content === "string") {
+          files.set(p, content);
+        } else if (content instanceof Uint8Array) {
+          bytes.set(p, content);
+        } else {
+          throw new Error("stream writes are not expected in this test");
+        }
+        return Promise.resolve();
+      }
     }
   };
   return { files, bytes, dirs, ws };
