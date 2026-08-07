@@ -13,9 +13,9 @@ the sub-agent routing primitive from `agents`.
 - **Shared workspace across chats** — `AssistantDirectory` owns one `Workspace`
   backed by its SQLite; every `MyAssistant` child gets a `SharedWorkspace`
   proxy that forwards file I/O to the parent. A `hello.txt` written in chat A
-  is visible verbatim in chat B. The proxy swaps in via the `WorkspaceFsLike`
-  type exported by `@cloudflare/shell` — no casts; builtin workspace tools
-  AND codemode's `state.*` sandbox API both route through it
+  is visible verbatim in chat B. The owner explicitly selects
+  `workspace-shell-legacy`; the proxy provides Think's Computer-shaped
+  `fs`/`runtime` contract and the legacy codemode `state.*` capability
 - **Shared MCP across chats** — server registry, OAuth credentials, live
   connections, and tool descriptors all live on `AssistantDirectory`. Auth
   to a server once (e.g. GitHub MCP) and every chat sees its tools. Each
@@ -159,7 +159,7 @@ a DO RPC hop:
 
 ```ts
 class MyAssistant extends Think<Env> {
-  override workspace: WorkspaceFsLike = new SharedWorkspace(this);
+  override workspace = new SharedWorkspace(this);
 
   getTools() {
     return {
@@ -175,7 +175,14 @@ class MyAssistant extends Think<Env> {
   }
 }
 
-class SharedWorkspace implements WorkspaceFsLike {
+class SharedWorkspace implements WorkspaceFsLike, WorkspaceStateProvider {
+  readonly fs = new LegacyShellFilesystem(this);
+  readonly runtime = new LegacyShellRuntime(this);
+
+  [workspaceStateProvider](ctx) {
+    return createLegacyWorkspaceStateConnectors(this, ctx);
+  }
+
   readFile(p) {
     return (await this.parent()).readFile(p);
   }
@@ -187,18 +194,12 @@ class SharedWorkspace implements WorkspaceFsLike {
 }
 ```
 
-The proxy satisfies `@cloudflare/shell`'s `WorkspaceFsLike` interface,
-which is a strict superset of `@cloudflare/think`'s `WorkspaceLike`.
-That one type annotation unlocks two things at once:
-
-- **All of Think's workspace-aware machinery** (`createWorkspaceTools`,
-  lifecycle hooks, the builtin `listWorkspaceFiles` /
-  `readWorkspaceFile` RPCs) works unchanged against the proxy.
-- **Codemode's `state.*` sandbox API** works too, via
-  `createWorkspaceStateBackend(this.workspace)`. Multi-file operations
-  like `state.planEdits` and `state.applyEdits` run against the shared
-  workspace, so a plan composed in one chat can mutate files another
-  chat just created.
+The proxy's `fs` and `runtime` facades satisfy Think's native
+`ThinkWorkspace` contract. Its explicit `workspaceStateProvider` preserves the
+legacy codemode `state.*` API through `createLegacyWorkspaceStateConnectors()`.
+Multi-file operations like `state.planEdits` and `state.applyEdits` therefore
+run against the shared workspace, so a plan composed in one chat can mutate
+files another chat just created.
 
 The parent DO and the child facet live on the same machine, so each
 RPC hop is in-process and cheap (no network, no serialization across

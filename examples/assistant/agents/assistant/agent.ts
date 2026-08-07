@@ -1,6 +1,7 @@
 import { callable } from "agents";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Think, Workspace } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
+import { Workspace } from "@cloudflare/think/workspace-shell-legacy";
 import type { ThinkScheduledTasks } from "@cloudflare/think";
 import type { FileInfo, WorkspaceChangeEvent } from "@cloudflare/shell";
 import { nanoid } from "nanoid";
@@ -290,15 +291,16 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
   // another chat's files via the sidebar websocket; workspace I/O is
   // LLM-tool-only. DO-to-DO RPC doesn't need the decorator.
   //
-  // The surface covers the full `WorkspaceFsLike` interface from
-  // `@cloudflare/shell`, which is what `createWorkspaceStateBackend`
-  // needs to drive codemode's `state.*` sandbox API. That means a
-  // plan from one chat can edit files the same way as a single-chat
-  // app — the shared workspace is the single source of truth.
+  // The surface covers the full legacy `WorkspaceFsLike` interface used by
+  // `createLegacyWorkspaceStateConnectors` to drive codemode's richer
+  // `state.*` sandbox API. That means a plan from one chat can edit files the
+  // same way as a single-chat app — the shared workspace is the single source
+  // of truth.
   //
   // Each method is a one-line delegate. We use
   // `Parameters<Workspace["method"]>[n]` to stay automatically in
-  // sync with `@cloudflare/shell` rather than re-stating the types.
+  // sync with the explicitly selected legacy workspace rather than re-stating
+  // the types.
 
   async readFile(path: string): Promise<string | null> {
     return this.workspace.readFile(path);

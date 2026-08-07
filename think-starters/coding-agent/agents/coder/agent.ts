@@ -1,3 +1,4 @@
+import { createWorkspaceOperations } from "@cloudflare/think/tools/workspace";
 import { Think, skills } from "@cloudflare/think";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import bundledSkills from "agents:skills";
@@ -46,7 +47,7 @@ export class Coder extends Think<Env> {
   override getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      workspaceInstance: createWorkspaceOperations(this.workspace)
     });
   }
 }

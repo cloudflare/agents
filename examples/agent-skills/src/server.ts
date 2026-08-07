@@ -1,3 +1,4 @@
+import { createWorkspaceOperations } from "@cloudflare/think/tools/workspace";
 import { callable, routeAgentRequest } from "agents";
 import { Think, skills } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
@@ -22,7 +23,7 @@ export class SkillsAgent extends Think<Env> {
   getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      workspaceInstance: createWorkspaceOperations(this.workspace)
     });
   }
 
