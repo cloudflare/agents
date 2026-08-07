@@ -182,7 +182,7 @@ export class ThinkExtensionHookAgent extends Think {
 
   async listExtLogFiles(): Promise<string[]> {
     try {
-      const entries = await this.workspace.readDir("ext-log");
+      const entries = await this.workspace.fs.readdir("/ext-log");
       return entries.map((e: { name: string }) => e.name);
     } catch {
       return [];
@@ -191,7 +191,10 @@ export class ThinkExtensionHookAgent extends Think {
 
   async readExtLogFile(name: string): Promise<unknown | null> {
     try {
-      const content = await this.workspace.readFile(`ext-log/${name}`);
+      const content = await this.workspace.fs.readFile(
+        `/ext-log/${name}`,
+        "utf8"
+      );
       if (content == null) return null;
       return JSON.parse(content);
     } catch {
