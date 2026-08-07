@@ -45,6 +45,12 @@ describe("external input helpers", () => {
     cyclic.self = cyclic;
     expect(truncateUnknown(cyclic, 50)).toBe("[unserializable result]");
   });
+
+  it("makes compact tool output safe for the next model message", () => {
+    expect(
+      truncateUnknown({ omitted: undefined, nested: [1, undefined] }, 1_000)
+    ).toEqual({ nested: [1, null] });
+  });
 });
 
 describe("continual harness", () => {
@@ -128,6 +134,7 @@ describe("runtime prompt", () => {
       mode: "think",
       depth: 1,
       maxDepth: 1,
+      maxSteps: 12,
       maxRlmCalls: 8,
       canDelegate: false,
       canUseHarness: false,
@@ -137,5 +144,10 @@ describe("runtime prompt", () => {
     expect(prompt).toContain("- kernel:");
     expect(prompt).not.toContain("rlm.");
     expect(prompt).not.toContain("- harness:");
+    expect(prompt).toContain("at most 12 model steps");
+    expect(prompt).toContain("no more than 11 steps");
+    expect(prompt).toContain("Reserve one final model step");
+    expect(prompt).toContain("best schema-valid answer");
+    expect(prompt).toContain("not a reason to omit kernel.finish");
   });
 });

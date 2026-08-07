@@ -8,6 +8,25 @@ export const MAX_HARNESS_CHARS = 128_000;
 
 export type InputSource = "task" | "material";
 export type HarnessKind = "instruction" | "memory" | "delegate";
+export type ModelReasoningEffort = "low" | "medium" | "high" | null;
+
+export type ObservedRuntimeConfig = {
+  model: string;
+  reasoningEffort: ModelReasoningEffort;
+  maxSteps: number;
+  timeoutMs: number;
+  maxDepth: number;
+  maxRlmCalls: number;
+};
+
+type RuntimeConfigSource = {
+  MODEL?: unknown;
+  REASONING_EFFORT?: unknown;
+  MAX_STEPS?: unknown;
+  TURN_TIMEOUT_MS?: unknown;
+  MAX_RLM_DEPTH?: unknown;
+  MAX_RLM_CALLS?: unknown;
+};
 
 export type HarnessEntry = {
   id: string;
@@ -55,6 +74,33 @@ export function boundedInteger(
   return Math.max(minimum, Math.min(maximum, Math.trunc(parsed)));
 }
 
+export function modelReasoningEffort(
+  value: unknown,
+  fallback: ModelReasoningEffort = "low"
+): ModelReasoningEffort {
+  if (value === "none" || value === null) return null;
+  return value === "low" || value === "medium" || value === "high"
+    ? value
+    : fallback;
+}
+
+/** The non-secret, effective configuration shared by the evaluation controls. */
+export function observedRuntimeConfig(
+  env: RuntimeConfigSource
+): ObservedRuntimeConfig {
+  return {
+    model:
+      typeof env.MODEL === "string" && env.MODEL
+        ? env.MODEL
+        : "@cf/moonshotai/kimi-k2.7-code",
+    reasoningEffort: modelReasoningEffort(env.REASONING_EFFORT),
+    maxSteps: boundedInteger(env.MAX_STEPS, 12, 2, 40),
+    timeoutMs: boundedInteger(env.TURN_TIMEOUT_MS, 180_000, 10_000, 900_000),
+    maxDepth: boundedInteger(env.MAX_RLM_DEPTH, 1, 0, 1),
+    maxRlmCalls: boundedInteger(env.MAX_RLM_CALLS, 8, 0, 16)
+  };
+}
+
 export function requireString(
   value: unknown,
   name: string,
@@ -83,7 +129,8 @@ export function truncateUnknown(value: unknown, maximum: number): unknown {
   if (typeof value === "string") return truncateText(value, maximum);
   try {
     const encoded = JSON.stringify(value, null, 2);
-    if (encoded === undefined || encoded.length <= maximum) return value;
+    if (encoded === undefined) return "[undefined result]";
+    if (encoded.length <= maximum) return JSON.parse(encoded) as unknown;
     return truncateText(encoded, maximum);
   } catch {
     return "[unserializable result]";
@@ -238,7 +285,10 @@ export function buildHarnessOverview(state: HarnessState): string {
     lines.push("", `${kind}: ${entries.length}`);
     for (const entry of entries.slice(0, 8)) {
       lines.push(
-        `- [${entry.id}] ${truncateText(entry.content.replace(/\s+/g, " "), 240)}`
+        `- [${entry.id}] ${truncateText(
+          entry.content.replace(/\s+/g, " "),
+          240
+        )}`
       );
     }
   }

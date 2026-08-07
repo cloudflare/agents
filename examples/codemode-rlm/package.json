@@ -8,6 +8,7 @@
     "start": "vite dev",
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
+    "eval:arc": "pnpm exec tsx eval/run.ts",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types env.d.ts --include-runtime false",
     "test": "vitest run"

@@ -196,3 +196,27 @@ harness updates. Worker-pool tests cover request/input replay, causal
 visibility, operation idempotency, execution-bound answer verification, kernel
 limits, history bounds, and one-mutation harness rollback. The example is also
 typechecked, built with Vite, and verified with a Wrangler deployment dry run.
+
+## Evaluation boundary
+
+The example includes a small ARC-AGI-2 public-evaluation smoke comparison. The
+runner downloads task files at a pinned commit, verifies their hashes, and
+removes every test output before either condition receives the puzzle. Gold
+grids remain in the host-side scorer. Each task and condition uses a fresh
+Durable Object so history, kernel state, children, and harness entries cannot
+cross trials.
+
+The comparison is deliberately system-level:
+
+- the RLM gets its normal external context, Code Mode, JSON kernel, and
+  depth-one delegation budget; and
+- the direct Think control gets the same model and task material in its active
+  prompt, with only a schema-neutral terminal-answer tool active and web/MCP
+  disabled.
+
+Exact nested-grid equality is the headline metric. A non-official cell metric
+helps diagnose near misses, but gives zero credit to wrong-shaped outputs.
+Because the tasks are public and the small suite is not representative, the
+result is neither an official ARC-AGI-2 score nor evidence against training-data
+contamination. It tests the example's end-to-end reasoning path and supplies a
+repeatable baseline, not benchmark parity.

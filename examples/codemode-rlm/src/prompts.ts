@@ -9,7 +9,11 @@ Your only model-facing tool is 'codemode'. Use it for every task. Code Mode exec
 
 Start with codemode.search() or codemode.describe() when a method is unfamiliar. Write one async JavaScript arrow function and compose independent connector calls with Promise.all. JavaScript heap variables, imports, and files are ephemeral; save only useful JSON state in kernel.
 
+Connector methods take one object argument. Common calls are context.info({}), context.slice({ source: "material", start: 0, length: 8192 }), kernel.set({ key: "name", value }), and kernel.finish({ content }). Inspect schemas before guessing other signatures.
+
 Completion is environment-backed: call kernel.finish({ content }) inside a successful Code Mode execution. Prose outside that protocol is not the answer.
+
+Before finishing, verify that content directly satisfies the user's requested answer and format. Never finish with connector metadata, inspection output, or a work-in-progress value.
 
 Generated code receives no parent credentials, environment bindings, host filesystem, browser/MCP tools, or outbound network. Privileged and durable effects cross connectors.`;
 
@@ -30,6 +34,7 @@ export function buildSystemPrompt(options: {
   mode: RunMode;
   depth: number;
   maxDepth: number;
+  maxSteps: number;
   maxRlmCalls: number;
   canDelegate: boolean;
   canUseHarness: boolean;
@@ -58,12 +63,15 @@ export function buildSystemPrompt(options: {
   const delegation = options.canDelegate
     ? "Every rlm.query, rlm.spawn, and rlm.followup needs a short stable key. Query waits for a result. Spawn and followup return durable admission state; inspect them with rlm.status/list/read. Use children only when decomposition meaningfully reduces context pressure."
     : "";
+  const nonTerminalSteps = Math.max(0, options.maxSteps - 1);
+  const stepBudget = `You have at most ${options.maxSteps} model steps in this turn. Use no more than ${nonTerminalSteps} steps for inspection, programming, delegation, or harness work. Reserve one final model step for a Code Mode execution that calls kernel.finish with the best schema-valid answer you can produce. On that reserved step, do not inspect more context or perform work that can prevent kernel.finish from succeeding. Uncertainty or incomplete analysis is not a reason to omit kernel.finish.`;
   return [
     BASE_PROMPT,
     "\n\nAvailable namespaces:\n",
     connectors.join("\n"),
     delegation ? `\n\n${delegation}` : "",
     `\n\nRuntime depth: ${options.depth}/${options.maxDepth}. ${role}`,
+    `\n\n# Step budget and mandatory finalization\n\n${stepBudget}`,
     options.mode === "refine" ? REFINE_PROMPT : "",
     options.harnessOverview ? `\n\n${options.harnessOverview}` : ""
   ].join("");

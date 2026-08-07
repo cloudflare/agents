@@ -81,6 +81,28 @@ submission. A reload resumes an ambiguous or running request. The UI does not
 fake token streaming: the assistant message appears only after verified
 completion.
 
+## Compare it with basic Think
+
+The bundled [ARC-AGI-2 smoke evaluator](./eval/README.md) runs the RLM and a
+basic Think control on the same redacted public-evaluation tasks.
+It downloads a pinned, mechanically selected three-task subset, keeps test
+answers only in the scorer, gives every trial a fresh durable session, and
+reports exact-grid accuracy plus latency and recursive-call count.
+
+The baseline is direct Think reasoning over the full redacted puzzle. Its only
+active tool is a schema-neutral terminal-answer tool, so both conditions have
+an explicit completion protocol without giving the baseline an ARC-specific
+helper.
+
+With the development server running, launch the comparison in another terminal:
+
+```bash
+pnpm run eval:arc
+```
+
+This is a reproducible development comparison, not an official or
+contamination-resistant ARC-AGI-2 benchmark score.
+
 ### HTTP example
 
 The local session API is also available to curl without a token:

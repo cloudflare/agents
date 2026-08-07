@@ -6,20 +6,24 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/sessions/*"]
+    "run_worker_first": ["/sessions/*", "/eval/*"]
   },
   "durable_objects": {
     "bindings": [
       {
         "name": "RlmThinkAgent",
         "class_name": "RlmThinkAgent"
+      },
+      {
+        "name": "BasicThinkAgent",
+        "class_name": "BasicThinkAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["RlmThinkAgent"]
+      "new_sqlite_classes": ["RlmThinkAgent", "BasicThinkAgent"]
     }
   ],
   "ai": {
@@ -39,6 +43,7 @@
   },
   "vars": {
     "MODEL": "@cf/moonshotai/kimi-k2.7-code",
+    "REASONING_EFFORT": "low",
     "MAX_STEPS": "12",
     "MAX_RLM_DEPTH": "1",
     "MAX_RLM_CALLS": "8",

@@ -1,8 +1,10 @@
 import { getAgentByName } from "agents";
 import { RlmChildAgent, RlmThinkAgent } from "./agent";
-import { boundedInteger, requireString } from "./core";
+import { BasicThinkAgent } from "./baseline";
+import { boundedInteger, observedRuntimeConfig, requireString } from "./core";
+import { summarizeMessages } from "./diagnostics";
 
-export { RlmChildAgent, RlmThinkAgent };
+export { BasicThinkAgent, RlmChildAgent, RlmThinkAgent };
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
 function json(data: unknown, status = 200): Response {
@@ -72,8 +74,87 @@ function authorized(request: Request, env: Env): Response | undefined {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const isEvalRoute =
+      url.pathname === "/eval" || url.pathname.startsWith("/eval/");
+    if (isEvalRoute && !import.meta.env.DEV) {
+      return json({ error: "route not found" }, 404);
+    }
+
     const authResponse = authorized(request, env);
     if (authResponse) return authResponse;
+
+    if (url.pathname === "/eval/config") {
+      if (request.method !== "GET") {
+        return json({ error: "route not found" }, 404);
+      }
+      return json(observedRuntimeConfig(env));
+    }
+
+    const rlmEvalMatch = /^\/eval\/rlm\/([^/]+)$/.exec(url.pathname);
+    if (rlmEvalMatch) {
+      if (request.method !== "GET") {
+        return json({ error: "route not found" }, 404);
+      }
+
+      let session: string;
+      try {
+        session = requireString(
+          decodeURIComponent(rlmEvalMatch[1]),
+          "session",
+          {
+            min: 1,
+            max: 120
+          }
+        );
+      } catch (error) {
+        return json(
+          { error: error instanceof Error ? error.message : String(error) },
+          400
+        );
+      }
+
+      try {
+        const agent = await getAgentByName(env.RlmThinkAgent, session);
+        return json({
+          diagnostics: summarizeMessages(await agent.getMessages())
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ error: message }, errorStatus(message));
+      }
+    }
+
+    const baselineMatch = /^\/eval\/baselines\/([^/]+)$/.exec(url.pathname);
+    if (baselineMatch) {
+      if (request.method !== "GET" && request.method !== "POST") {
+        return json({ error: "route not found" }, 404);
+      }
+
+      let trial: string;
+      try {
+        trial = requireString(decodeURIComponent(baselineMatch[1]), "trial", {
+          min: 1,
+          max: 120
+        });
+      } catch (error) {
+        return json(
+          { error: error instanceof Error ? error.message : String(error) },
+          400
+        );
+      }
+      const baseline = await getAgentByName(env.BasicThinkAgent, trial);
+      try {
+        if (request.method === "GET") {
+          return json({
+            diagnostics: summarizeMessages(await baseline.getMessages())
+          });
+        }
+        return requestResponse(await baseline.evaluate(await body(request)));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ error: message }, errorStatus(message));
+      }
+    }
 
     const match = /^\/sessions\/([^/]+)(?:\/([^/]+))?$/.exec(url.pathname);
     if (!match) return json({ error: "route not found" }, 404);

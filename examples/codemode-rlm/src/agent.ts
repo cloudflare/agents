@@ -28,6 +28,7 @@ import {
   MAX_INPUT_CHARS,
   boundedInteger,
   isRecord,
+  modelReasoningEffort,
   requireString,
   stableId,
   truncateText,
@@ -43,6 +44,7 @@ import { RlmStore, type InputMeta, type RlmOperationKind } from "./store";
 
 type RuntimeConfig = {
   model: string;
+  reasoningEffort: "low" | "medium" | "high" | null;
   maxSteps: number;
   maxDepth: number;
   maxRlmCalls: number;
@@ -72,6 +74,7 @@ function errorMessage(error: unknown): string {
 function configFromEnv(env: Env): RuntimeConfig {
   return {
     model: env.MODEL || "@cf/moonshotai/kimi-k2.7-code",
+    reasoningEffort: modelReasoningEffort(env.REASONING_EFFORT),
     maxSteps: boundedInteger(env.MAX_STEPS, 12, 2, 40),
     maxDepth: boundedInteger(env.MAX_RLM_DEPTH, 1, 0, 1),
     maxRlmCalls: boundedInteger(env.MAX_RLM_CALLS, 8, 0, 16),
@@ -284,6 +287,7 @@ abstract class RlmBaseAgent extends Think<Env> {
         mode: turn.mode,
         depth: this.depth,
         maxDepth: this.config.maxDepth,
+        maxSteps: this.config.maxSteps,
         maxRlmCalls: this.config.maxRlmCalls,
         canDelegate: this.canDelegate,
         canUseHarness: this.isRoot,
@@ -306,6 +310,9 @@ abstract class RlmBaseAgent extends Think<Env> {
       maxSteps: this.config.maxSteps,
       stopWhen: () => Boolean(this.validatedOutput(turn.meta.id)),
       maxRetries: 2,
+      providerOptions: {
+        "workers-ai": { reasoning_effort: this.config.reasoningEffort }
+      },
       timeout: {
         totalMs: this.isRoot
           ? this.config.timeoutMs
