@@ -45,6 +45,7 @@ async function body(request: Request): Promise<unknown> {
 }
 
 function authorized(request: Request, env: Env): Response | undefined {
+  if (import.meta.env.DEV) return;
   if (!env.API_TOKEN) {
     return json(
       {

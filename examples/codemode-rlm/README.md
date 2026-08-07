@@ -69,14 +69,12 @@ Workers access.
 
 ```bash
 pnpm install
-cp .env.example .env
-# Replace API_TOKEN in .env with a long local token.
 pnpm run start
 ```
 
-Open the Vite URL, choose a durable session name, and enter the same token in
-the connection dialog. The token stays in browser session storage and is never
-compiled into the client bundle.
+Open the Vite URL and choose a durable session name. Local Vite development
+does not require authentication. The bypass is guarded by `import.meta.env.DEV`
+and is removed from production builds, where `API_TOKEN` remains required.
 
 The chat admits each turn with a stable request ID and polls its durable Think
 submission. A reload resumes an ambiguous or running request. The UI does not
@@ -85,13 +83,10 @@ completion.
 
 ### HTTP example
 
-For curl, put the same local token in a shell-only variable:
+The local session API is also available to curl without a token:
 
 ```bash
-export RLM_API_TOKEN='replace-with-your-local-token'
-
 curl -sS http://localhost:5173/sessions/demo/think \
-  -H "authorization: Bearer $RLM_API_TOKEN" \
   -H 'content-type: application/json' \
   --data '{
     "requestId": "research-001",
@@ -100,15 +95,13 @@ curl -sS http://localhost:5173/sessions/demo/think \
   }'
 
 curl -sS \
-  'http://localhost:5173/sessions/demo/requests?requestId=research-001' \
-  -H "authorization: Bearer $RLM_API_TOKEN"
+  'http://localhost:5173/sessions/demo/requests?requestId=research-001'
 ```
 
 To run an explicit, rollbackable continual-harness review:
 
 ```bash
 curl -sS http://localhost:5173/sessions/demo/refine \
-  -H "authorization: Bearer $RLM_API_TOKEN" \
   -H 'content-type: application/json' \
   --data '{
     "requestId": "refine-001",
@@ -117,10 +110,10 @@ curl -sS http://localhost:5173/sessions/demo/refine \
 ```
 
 Task plus context may contain up to 20 million characters. Only one browser
-turn is admitted at a time to preserve conversational ordering. This is a
-single-operator example: every `/sessions/*` route uses one bearer token;
-production multi-tenancy needs per-session authorization, cost limits, and
-retention policy.
+turn is admitted at a time to preserve conversational ordering. In production
+this is a single-operator example: every `/sessions/*` route uses one bearer
+token. Production multi-tenancy needs per-session authorization, cost limits,
+and retention policy.
 
 A refinement may make one idempotent, optimistic harness mutation affecting at
 most 12 entries. Rollback is available only inside that explicit refinement

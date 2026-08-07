@@ -43,7 +43,7 @@ export function createRlmApi(session: string, token: string) {
   const base = `/sessions/${encodeURIComponent(session)}`;
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const headers = new Headers(init?.headers);
-    headers.set("authorization", `Bearer ${token}`);
+    if (token) headers.set("authorization", `Bearer ${token}`);
     if (init?.body) headers.set("content-type", "application/json");
     return decode<T>(
       await fetch(`${base}${path}`, { ...init, headers, cache: "no-store" })

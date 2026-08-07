@@ -35,6 +35,7 @@ import "./styles.css";
 const SESSION_KEY = "codemode-rlm:session";
 const TOKEN_KEY = "codemode-rlm:token";
 const MAX_INPUT_CHARS = 20_000_000;
+const AUTH_REQUIRED = !import.meta.env.DEV;
 
 type Connection = {
   session: string;
@@ -86,11 +87,13 @@ function ModeToggle() {
 function ConnectionDialog({
   session,
   token,
+  authRequired,
   onClose,
   onSave
 }: {
   session: string;
   token: string;
+  authRequired: boolean;
   onClose: () => void;
   onSave: (session: string, token: string) => void;
 }) {
@@ -100,14 +103,16 @@ function ConnectionDialog({
   const valid =
     nextSession.trim().length > 0 &&
     nextSession.trim().length <= 120 &&
-    nextToken.length > 0;
+    (!authRequired || nextToken.length > 0);
 
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
       <Dialog className="p-6" size="base">
-        <Dialog.Title>Connection</Dialog.Title>
+        <Dialog.Title>{authRequired ? "Connection" : "Session"}</Dialog.Title>
         <Dialog.Description>
-          Enter the Worker&apos;s API_TOKEN. It stays in this browser tab.
+          {authRequired
+            ? "Enter the Worker's API_TOKEN. It stays in this browser tab."
+            : "Choose the durable session to use for local development."}
         </Dialog.Description>
         <form
           className="mt-5 space-y-4"
@@ -124,14 +129,16 @@ function ConnectionDialog({
             placeholder="demo"
             autoComplete="off"
           />
-          <Input
-            label="API token"
-            type="password"
-            value={nextToken}
-            onChange={(event) => setNextToken(event.currentTarget.value)}
-            placeholder="Value configured as API_TOKEN"
-            autoComplete="off"
-          />
+          {authRequired && (
+            <Input
+              label="API token"
+              type="password"
+              value={nextToken}
+              onChange={(event) => setNextToken(event.currentTarget.value)}
+              placeholder="Value configured as API_TOKEN"
+              autoComplete="off"
+            />
+          )}
           <div className="flex justify-end">
             <Button type="submit" disabled={!valid}>
               Save
@@ -245,6 +252,7 @@ function Chat({
   } = useRlmSession({
     session: connection.session,
     token: connection.token,
+    authRequired: AUTH_REQUIRED,
     connectionRevision: connection.revision,
     onAuthRequired
   });
@@ -254,7 +262,7 @@ function Chat({
     pending?.inputId &&
     history.some((message) => message.metadata.inputId === pending.inputId)
   );
-  const configured = Boolean(connection.token);
+  const configured = !AUTH_REQUIRED || Boolean(connection.token);
   const overLimit = draft.trim().length + context.length > MAX_INPUT_CHARS;
   const empty = history.length === 0 && !active && !failed;
   useEffect(() => {
@@ -462,10 +470,12 @@ function Chat({
 function App() {
   const [connection, setConnection] = useState<Connection>(() => ({
     session: stored("local", SESSION_KEY) || "demo",
-    token: stored("session", TOKEN_KEY),
+    token: AUTH_REQUIRED ? stored("session", TOKEN_KEY) : "",
     revision: 0
   }));
-  const [settingsOpen, setSettingsOpen] = useState(!connection.token);
+  const [settingsOpen, setSettingsOpen] = useState(
+    AUTH_REQUIRED && !connection.token
+  );
   const openSettings = useCallback(() => setSettingsOpen(true), []);
 
   const saveConnection = useCallback((session: string, token: string) => {
@@ -491,6 +501,7 @@ function App() {
         <ConnectionDialog
           session={connection.session}
           token={connection.token}
+          authRequired={AUTH_REQUIRED}
           onClose={() => setSettingsOpen(false)}
           onSave={saveConnection}
         />

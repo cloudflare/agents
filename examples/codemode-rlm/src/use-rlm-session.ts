@@ -30,6 +30,7 @@ type Turn = ActiveTurn | FailedTurn;
 type Options = {
   session: string;
   token: string;
+  authRequired: boolean;
   connectionRevision: number;
   onAuthRequired: () => void;
 };
@@ -157,20 +158,22 @@ function isAbort(error: unknown): boolean {
 export function useRlmSession({
   session,
   token,
+  authRequired,
   connectionRevision,
   onAuthRequired
 }: Options) {
+  const configured = !authRequired || Boolean(token);
   const [turn, setTurn] = useState<Turn | null>(() => readTurn(session));
   const [history, setHistory] = useState<HistoryMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(Boolean(token));
+  const [loading, setLoading] = useState(configured);
   const [retry, setRetry] = useState(0);
   const turnRef = useRef(turn);
   turnRef.current = turn;
   const api = useMemo(() => {
     void connectionRevision;
-    return token ? createRlmApi(session, token) : null;
-  }, [connectionRevision, session, token]);
+    return configured ? createRlmApi(session, token) : null;
+  }, [configured, connectionRevision, session, token]);
 
   const save = useCallback(
     (next: Turn | null) => {

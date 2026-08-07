@@ -4,6 +4,19 @@ import react from "@vitejs/plugin-react";
 import agents from "agents/vite";
 import { defineConfig } from "vite";
 
-export default defineConfig({
-  plugins: [agents(), react(), cloudflare(), tailwindcss()]
-});
+export default defineConfig(({ command }) => ({
+  plugins: [
+    agents(),
+    react(),
+    cloudflare(
+      command === "serve"
+        ? {
+            config(config) {
+              config.secrets = { required: [] };
+            }
+          }
+        : undefined
+    ),
+    tailwindcss()
+  ]
+}));

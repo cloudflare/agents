@@ -30,7 +30,7 @@ The example should demonstrate those ideas using framework-owned primitives:
 - use Agents for one-shot and retained child orchestration;
 - verify `kernel.finish` against its successful Code Mode execution;
 - keep harness changes explicit, versioned, and rollbackable;
-- provide a small authenticated Vite chat UI.
+- provide a small Vite chat UI with production bearer authentication.
 
 It does not reproduce Prime Agent's persistent IPython heap or daemon, claim
 benchmark parity, automatically evaluate harness changes, or provide production
@@ -40,7 +40,7 @@ multi-tenancy, cost accounting, and retention policy.
 
 ```text
 Vite + React + Kumo chat
-  | authenticated POST admission + GET polling
+  | POST admission + GET polling (bearer-authenticated in production)
   v
 RlmThinkAgent (Think)
   |-- RLM SQLite: external inputs, JSON kernel, answer candidates,
@@ -148,9 +148,11 @@ loop.
 
 ## Security boundary
 
-Every `/sessions/*` route authenticates before resolving an agent. Session
-names are routing keys, not credentials. The bearer token is entered at runtime
-and kept in browser session storage; it is never a `VITE_*` value.
+Production builds authenticate every `/sessions/*` route before resolving an
+agent. Session names are routing keys, not credentials. The bearer token is
+entered at runtime and kept in browser session storage; it is never a `VITE_*`
+value. Local Vite development bypasses bearer authentication behind the
+compile-time `import.meta.env.DEV` guard.
 
 The generic Think WebSocket route is intentionally not exposed because it
 would bypass exact external-input binding, durable POST recovery, and verified
