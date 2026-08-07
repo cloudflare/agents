@@ -33,7 +33,8 @@ export {
 export { ThinkFetchToolsTestAgent } from "./fetch-tools";
 export {
   ThinkComputerWorkspaceExecuteAgent,
-  ThinkExecuteToolAgent
+  ThinkExecuteToolAgent,
+  ThinkShellWorkspaceAgent
 } from "./execute-tool";
 export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export { ThinkFiberTestAgent } from "./fiber";

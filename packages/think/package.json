@@ -116,6 +116,10 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
     },
+    "./workspace-shell": {
+      "types": "./dist/workspace-shell.d.ts",
+      "import": "./dist/workspace-shell.js"
+    },
     "./workspace-shell-legacy": {
       "types": "./dist/workspace-shell-legacy.d.ts",
       "import": "./dist/workspace-shell-legacy.js"
