@@ -6,9 +6,10 @@
 import { tool } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import type { WorkspaceFsLike } from "@cloudflare/shell";
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import { ToolSetConnector } from "@cloudflare/codemode/ai";
 import { Think } from "../../think";
+import { Workspace as LegacyWorkspace } from "../../workspace-shell-legacy";
+import { workspaceStateProvider } from "../../workspace";
 import {
   createExecuteRuntime,
   createExecuteTool,
@@ -36,6 +37,11 @@ async function invoke(
 }
 
 export class ThinkExecuteToolAgent extends Think {
+  override workspace = new LegacyWorkspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
+
   getModel(): LanguageModel {
     throw new Error("Model is not used in execute-tool tests");
   }
@@ -56,9 +62,7 @@ export class ThinkExecuteToolAgent extends Think {
           execute: async () => "boom"
         })
       },
-      state: createWorkspaceStateBackend(
-        this.workspace as unknown as WorkspaceFsLike
-      ),
+      connectors: this.workspace[workspaceStateProvider](this.ctx),
       loader: this.env.LOADER
     });
   }
@@ -71,6 +75,26 @@ export class ThinkExecuteToolAgent extends Think {
   /** Run code through the `createExecuteTool(this)` one-liner. */
   async runOneLiner(code: string): Promise<ExecuteOutput> {
     return invoke(createExecuteTool(this), code);
+  }
+
+  /** Run with both the inferred state connector and an explicit connector. */
+  async runOneLinerWithConnector(code: string): Promise<ExecuteOutput> {
+    return invoke(
+      createExecuteTool(this, {
+        connectors: [
+          new ToolSetConnector(this.ctx, {
+            name: "extra",
+            tools: {
+              echo: tool({
+                inputSchema: z.object({ value: z.string() }),
+                execute: async ({ value }) => value
+              })
+            }
+          })
+        ]
+      }),
+      code
+    );
   }
 
   /** The sandbox type surface advertised by the `tools` connector. */
@@ -88,5 +112,51 @@ export class ThinkExecuteToolAgent extends Think {
   async codemodeExecutionStatuses(): Promise<string[]> {
     if (!this.codemode) return [];
     return (await this.codemode.executions()).map((e) => e.status);
+  }
+}
+
+export class ThinkComputerWorkspaceExecuteAgent extends Think {
+  getModel(): LanguageModel {
+    throw new Error("Model is not used in Computer workspace execute tests");
+  }
+
+  #replayRuntime(): ExecuteRuntime {
+    return createExecuteRuntime(this, {
+      name: "workspace-replay-test",
+      tools: {
+        checkpoint: tool({
+          inputSchema: z.object({}),
+          needsApproval: true,
+          execute: async () => "approved"
+        })
+      }
+    });
+  }
+
+  async runWorkspaceExecute(code: string): Promise<ExecuteOutput> {
+    return invoke(createExecuteTool(this), code);
+  }
+
+  async runExplicitWorkspaceExecute(code: string): Promise<ExecuteOutput> {
+    return invoke(
+      createExecuteTool({
+        ctx: this.ctx,
+        workspace: this.workspace,
+        loader: this.env.LOADER
+      }),
+      code
+    );
+  }
+
+  async runWorkspaceReplay(code: string): Promise<ExecuteOutput> {
+    return invoke(this.#replayRuntime().tool, code);
+  }
+
+  async approveWorkspaceReplay(executionId: string): Promise<unknown> {
+    return this.#replayRuntime().runtime.approve({ executionId });
+  }
+
+  async writeWorkspaceFile(path: string, content: string): Promise<void> {
+    await this.workspace.fs.writeFile(path, content);
   }
 }

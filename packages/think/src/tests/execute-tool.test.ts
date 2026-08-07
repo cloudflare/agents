@@ -11,6 +11,57 @@ async function freshAgent(name?: string) {
   return getAgentByName(env.ThinkExecuteToolAgent, name ?? crypto.randomUUID());
 }
 
+describe("Computer workspace codemode connector", () => {
+  it("exposes the default workspace through workspace.*", async () => {
+    const agent = await getAgentByName(
+      env.ThinkComputerWorkspaceExecuteAgent,
+      crypto.randomUUID()
+    );
+
+    await expect(
+      agent.runWorkspaceExecute(`async () => {
+        await workspace.write({ path: "/notes.txt", content: "hello" });
+        const file = await workspace.read({ path: "/notes.txt" });
+        const listing = await workspace.list({ path: "/" });
+        return file.content.includes("hello") &&
+          listing.entries.some((entry) => entry.name === "notes.txt");
+      }`)
+    ).resolves.toMatchObject({
+      status: "completed",
+      result: true
+    });
+    await expect(
+      agent.runExplicitWorkspaceExecute(`async () => {
+        const listing = await workspace.list({ path: "/" });
+        return listing.entries.some((entry) => entry.name === "notes.txt");
+      }`)
+    ).resolves.toMatchObject({ status: "completed", result: true });
+  });
+
+  it("re-executes reads without repeating writes after approval", async () => {
+    const agent = await getAgentByName(
+      env.ThinkComputerWorkspaceExecuteAgent,
+      crypto.randomUUID()
+    );
+
+    const paused = await agent.runWorkspaceReplay(`async () => {
+      await workspace.write({ path: "/replay.txt", content: "initial" });
+      const before = await workspace.read({ path: "/replay.txt" });
+      await tools.checkpoint({});
+      const after = await workspace.read({ path: "/replay.txt" });
+      return before.content.includes("external") &&
+        after.content.includes("external");
+    }`);
+    expect(paused).toMatchObject({ status: "paused" });
+    if (!paused.executionId) throw new Error("Missing paused execution id");
+
+    await agent.writeWorkspaceFile("/replay.txt", "external");
+    await expect(
+      agent.approveWorkspaceReplay(paused.executionId)
+    ).resolves.toMatchObject({ status: "completed", result: true });
+  });
+});
+
 describe("execute tool on the codemode runtime", () => {
   it("runs sandbox code against tools.* (ToolSetConnector)", async () => {
     const agent = await freshAgent();
@@ -69,7 +120,7 @@ describe("execute tool on the codemode runtime", () => {
     expect(out.executionId).toBeTruthy();
   });
 
-  it("one-liner: createExecuteTool(agent) defaults state from the workspace and records on this.codemode", async () => {
+  it("one-liner: createExecuteTool(agent) infers legacy state and records on this.codemode", async () => {
     const agent = await freshAgent();
     const out = await agent.runOneLiner(
       `async () => {
@@ -84,6 +135,19 @@ describe("execute tool on the codemode runtime", () => {
     // the audit trail is reachable from agent code (callables, hooks).
     const statuses = await agent.codemodeExecutionStatuses();
     expect(statuses).toContain("completed");
+  });
+
+  it("merges inferred workspace connectors with explicit connector overrides", async () => {
+    const agent = await freshAgent();
+    const out = await agent.runOneLinerWithConnector(
+      `async () => {
+        await state.writeFile({ path: "/merged.txt", content: "state" });
+        return await extra.echo({ value: await state.readFile({ path: "/merged.txt" }) });
+      }`
+    );
+
+    expect(out.status).toBe("completed");
+    expect(out.result).toBe("state");
   });
 
   it("shares one durable history across explicit and one-liner runtimes (same name)", async () => {

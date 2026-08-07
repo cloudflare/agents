@@ -1,15 +1,15 @@
 import type { Tool, ToolSet } from "ai";
+import { createAITools } from "@cloudflare/computer/tools";
 import {
   createCodemodeRuntime,
   DynamicWorkerExecutor,
   truncateResult,
   type CodemodeConnector,
   type CodemodeRuntimeHandle,
+  type ConnectorTool,
   type Executor
 } from "@cloudflare/codemode";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
-import type { StateBackend } from "@cloudflare/shell";
-import { StateConnector } from "@cloudflare/shell/workers";
 import {
   BrowserConnector,
   DurableBrowserSessionStore,
@@ -18,7 +18,9 @@ import {
 } from "agents/browser";
 import {
   hasWorkspaceStateProvider,
+  hasWorkspaceToolProvider,
   workspaceStateProvider,
+  workspaceToolProvider,
   type ThinkWorkspace
 } from "../workspace";
 import { truncatePausedExecutionOutput } from "./execute-output";
@@ -47,6 +49,15 @@ export interface CreateExecuteToolOptions {
   ctx: DurableObjectState;
 
   /**
+   * Computer-shaped workspace exposed inside the sandbox as `workspace.*`.
+   * The provided AI tools are adapted directly from this RPC-capable target,
+   * with `ls` renamed to `list`; a configured Shell workspace adds `bash`
+   * rather than `exec`.
+   * Inferred automatically by `createExecuteTool(this)`.
+   */
+  workspace?: ThinkWorkspace;
+
+  /**
    * AI SDK tools exposed inside the sandbox as `tools.*`. Tools with
    * `needsApproval` get the runtime's durable pause/approve/resume flow:
    * calling one pauses the execution until `approveExecution` /
@@ -56,9 +67,6 @@ export interface CreateExecuteToolOptions {
    * provider-executed) are skipped — the sandbox can't call them.
    */
   tools?: ToolSet;
-
-  /** Legacy Shell state exposed inside the sandbox as `state.*`. */
-  state?: StateBackend;
 
   /**
    * Browser Rendering binding. When provided, the sandbox gets the `cdp.*`
@@ -113,7 +121,7 @@ export interface CreateExecuteToolOptions {
   /**
    * Custom tool description. Replaces the generated default entirely — the
    * default explains the codemode workflow and lists each configured
-   * namespace (`tools.*`, `state.*`, `cdp.*`) with a usage hint.
+   * namespace (`workspace.*`, `tools.*`, `state.*`, `cdp.*`) with a usage hint.
    */
   description?: string;
 
@@ -142,6 +150,42 @@ export interface ExecuteRuntime {
   tool: Tool;
 }
 
+const REEXECUTED_WORKSPACE_TOOLS = new Set(["read", "list"]);
+
+/** Codemode connector over Think's native Computer-shaped workspace tools. */
+export class WorkspaceConnector extends ToolSetConnector {
+  protected override tool(name: string, connectorTool: ConnectorTool) {
+    if (!REEXECUTED_WORKSPACE_TOOLS.has(name)) return connectorTool;
+    return { ...connectorTool, replay: "reexecute" as const };
+  }
+}
+
+/**
+ * Expose a Think workspace to codemode as `workspace.*` without adapting it
+ * through the legacy Shell state interface.
+ */
+export function createWorkspaceConnector(
+  ctx: DurableObjectState | ExecutionContext,
+  workspace: ThinkWorkspace
+): WorkspaceConnector {
+  const providedTools = createAITools({ workspace, assets: false });
+  const { ls, ...otherProvidedTools } = providedTools;
+  const tools: ToolSet = {
+    ...otherProvidedTools,
+    list: ls,
+    ...(hasWorkspaceToolProvider(workspace)
+      ? workspace[workspaceToolProvider]()
+      : {})
+  };
+  return new WorkspaceConnector(ctx, {
+    name: "workspace",
+    instructions:
+      "The agent workspace. Use read and list to inspect files; use write and edit to change them. " +
+      "A configured shell workspace also provides bash.",
+    tools
+  });
+}
+
 function isAgent(
   source: CreateExecuteToolOptions | ExecuteToolAgent
 ): source is ExecuteToolAgent {
@@ -165,13 +209,15 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
         "call createExecuteTool({ ctx, loader, ... }) with explicit options."
     );
   }
+  const workspaceConnectors = agent.workspace
+    ? hasWorkspaceStateProvider(agent.workspace)
+      ? agent.workspace[workspaceStateProvider](ctx)
+      : [createWorkspaceConnector(ctx, agent.workspace)]
+    : [];
   return {
     ctx,
     loader: env.LOADER,
-    connectors:
-      agent.workspace && hasWorkspaceStateProvider(agent.workspace)
-        ? agent.workspace[workspaceStateProvider](ctx)
-        : [],
+    connectors: workspaceConnectors,
     browser: env.BROWSER
   };
 }
@@ -229,8 +275,8 @@ export function createExecuteRuntime(
   }
 
   const connectors: CodemodeConnector[] = [];
-  if (options.state) {
-    connectors.push(new StateConnector(options.ctx, options.state));
+  if (options.workspace) {
+    connectors.push(createWorkspaceConnector(options.ctx, options.workspace));
   }
   if (options.tools && Object.keys(options.tools).length > 0) {
     connectors.push(
@@ -252,7 +298,7 @@ export function createExecuteRuntime(
   if (connectors.length === 0) {
     throw new Error(
       "createExecuteTool has nothing to expose — provide at least one of " +
-        "`tools`, `state`, `browser`, or `connectors`."
+        "`workspace`, `tools`, `browser`, or `connectors`."
     );
   }
 
@@ -319,6 +365,13 @@ function connectorHints(
         `Available: ${names.join(", ")}`;
     }
   }
+  if (connectors.some((connector) => connector.name() === "workspace")) {
+    hints.workspace =
+      "the Computer workspace. Every method takes ONE object argument: " +
+      "`workspace.read({ path })`, `workspace.list({ path })`, " +
+      "`workspace.write({ path, content })`, and `workspace.edit({ path, edits })`. " +
+      "A configured shell workspace also provides `workspace.bash({ command })`.";
+  }
   if (connectors.some((connector) => connector.name() === "state")) {
     hints.state =
       "the legacy workspace filesystem. Every method takes ONE object argument: " +
@@ -338,13 +391,14 @@ function connectorHints(
 
 /**
  * Create a code execution tool that lets the LLM write and run TypeScript
- * against your tools, legacy workspace state, and (optionally) a live browser
- * inside a sandboxed Worker, recorded on a durable codemode
+ * against your tools, the workspace filesystem, and (optionally) a live
+ * browser — all inside a sandboxed Worker, recorded on a durable codemode
  * runtime (abort-and-replay, approvals, snippets).
  *
- * The model sees typed namespaces for the configured capabilities: `tools.*`
- * for AI SDK tools, `state.*` for the legacy workspace, and `cdp.*` for the
- * browser.
+ * The model sees typed namespaces for the configured capabilities: `workspace.*`
+ * for a native Computer workspace, `tools.*` for AI SDK tools, `state.*` when
+ * a legacy workspace state provider or connector is present, and `cdp.*` for
+ * the browser.
  *
  * Setup checklist:
  *
@@ -354,7 +408,7 @@ function connectorHints(
  *   `export { CodemodeRuntime } from "@cloudflare/codemode"`
  *   (the `@cloudflare/codemode/vite` plugin does this automatically)
  *
- * @example Agent defaults, including legacy workspace state
+ * @example Agent defaults, including workspace.*
  * ```ts
  * getTools() {
  *   return { execute: createExecuteTool(this) };
@@ -370,6 +424,7 @@ function connectorHints(
  * ```ts
  * execute: createExecuteTool({
  *   ctx: this.ctx,
+ *   workspace: this.workspace,            // workspace.*
  *   tools: myDomainTools,                 // tools.*
  *   connectors: myConnectors,             // e.g. state.*
  *   browser: this.env.BROWSER,            // cdp.*

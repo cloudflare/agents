@@ -1,58 +1,14 @@
+import type {
+  WorkspaceClient,
+  WorkspaceRuntimeValue
+} from "@cloudflare/computer";
 import type { CodemodeConnector } from "@cloudflare/codemode";
 import type { ToolSet } from "ai";
 
-export interface ThinkWorkspaceStat {
-  name: string;
-  inode: number;
-  mode: number;
-  size: number;
-  mtime: number;
-  isFile: boolean;
-  isDirectory: boolean;
-  isSymbolicLink: boolean;
-}
-
-export interface ThinkWorkspaceDirent {
-  name: string;
-  parentPath: string;
-  isFile: boolean;
-  isDirectory: boolean;
-  isSymbolicLink: boolean;
-}
-
-export interface ThinkWorkspaceFoundEntry {
-  path: string;
-  type: "file" | "dir";
-}
-
-/** The filesystem surface used by Think. */
-export interface ThinkWorkspaceFilesystem {
-  readFile(path: string): Promise<ReadableStream<Uint8Array>>;
-  readFile(path: string, encoding: "utf8"): Promise<string>;
-  readFile(
-    path: string,
-    options: { encoding?: "utf8" }
-  ): Promise<string | ReadableStream<Uint8Array>>;
-  stat(path: string): Promise<ThinkWorkspaceStat>;
-  readdir(
-    path: string,
-    options?: { limit?: number }
-  ): Promise<ThinkWorkspaceDirent[]>;
-  find(
-    directory: string,
-    pattern?: string
-  ): Promise<ThinkWorkspaceFoundEntry[]>;
-  writeFile(
-    path: string,
-    content: string | Uint8Array | ReadableStream<Uint8Array>,
-    options?: { mode?: number; exclusive?: boolean }
-  ): Promise<void>;
-  mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
-  rm(
-    path: string,
-    options?: { recursive?: boolean; force?: boolean }
-  ): Promise<void>;
-}
+export type ThinkWorkspaceFilesystem = Pick<
+  WorkspaceClient["fs"],
+  "readFile" | "stat" | "readdir" | "find" | "writeFile" | "mkdir" | "rm"
+>;
 
 export interface ThinkWorkspaceRuntimeResult {
   exitCode: number;
@@ -75,13 +31,13 @@ export interface ThinkWorkspaceRuntime {
       backend?: string;
       timeoutMs?: number;
       env?: Record<string, string>;
-      input?: unknown;
+      input?: WorkspaceRuntimeValue;
       stdin?: Uint8Array | string;
     }
   ): Promise<ThinkWorkspaceRuntimeHandle>;
 }
 
-/** The workspace surface used by Think. */
+/** The native Computer-shaped workspace surface used by Think. */
 export interface ThinkWorkspace {
   readonly fs: ThinkWorkspaceFilesystem;
   readonly runtime: ThinkWorkspaceRuntime;

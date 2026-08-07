@@ -277,7 +277,7 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
-import { LegacyShellWorkspace as Workspace } from "./workspace-shell-legacy";
+import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { createWorkspaceTools } from "./tools/workspace";
 import {
   hasWorkspaceLegacyBashProvider,
@@ -323,7 +323,7 @@ export type {
 export type { DeliveryKind, DeliveryTag } from "./messengers";
 export { Session } from "agents/experimental/memory/session";
 export type { SessionMessage } from "agents/experimental/memory/session";
-export { LegacyShellWorkspace as Workspace } from "./workspace-shell-legacy";
+export { Workspace } from "@cloudflare/computer";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export {
   hasWorkspaceLegacyBashProvider,
@@ -2873,9 +2873,20 @@ export class Think<
 
   /**
    * Workspace filesystem available in `getTools()` and lifecycle hooks.
-   * Defaults to the legacy Shell workspace backed by the Durable Object's
-   * SQLite storage. Override this field with another `ThinkWorkspace`
-   * implementation to use a different filesystem or runtime.
+   * Defaults to a backend-free Computer `Workspace` backed by the Durable
+   * Object's SQLite storage.
+   *
+   * Override this field with a Computer-shaped workspace to add an execution
+   * backend or proxy storage owned by another Durable Object:
+   *
+   * ```typescript
+   * override workspace = new ShellWorkspace({
+   *   storage: this.ctx.storage,
+   *   binding: "MyAgent",
+   *   id: this.ctx.id.toString(),
+   *   backend: { loader: this.env.LOADER, ctx: this.ctx }
+   * });
+   * ```
    */
   workspace!: ThinkWorkspace;
 
@@ -2932,8 +2943,7 @@ export class Think<
           // 1. Workspace initialization
           if (!this.workspace) {
             this.workspace = new Workspace({
-              sql: this.ctx.storage.sql,
-              name: () => this.name
+              storage: this.ctx.storage as unknown as DurableObjectStorageLike
             });
           }
 

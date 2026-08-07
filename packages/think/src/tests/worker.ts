@@ -34,6 +34,7 @@ export {
   ThinkNestedMiddleAgent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkComputerWorkspaceExecuteAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
@@ -73,6 +74,7 @@ import type {
   ThinkNestedMiddleAgent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkComputerWorkspaceExecuteAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
@@ -218,6 +220,7 @@ export type Env = {
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   ThinkMcpToolMaterializationAgent: DurableObjectNamespace<ThinkMcpToolMaterializationAgent>;
+  ThinkComputerWorkspaceExecuteAgent: DurableObjectNamespace<ThinkComputerWorkspaceExecuteAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;

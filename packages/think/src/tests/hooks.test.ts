@@ -127,6 +127,8 @@ describe("Think — beforeTurn hook", () => {
     expect(log[0].continuation).toBe(false);
     expect(log[0].toolNames).toContain("read");
     expect(log[0].toolNames).toContain("write");
+    expect(log[0].toolNames).not.toContain("bash");
+    expect(log[0].toolNames).not.toContain("exec");
   });
 
   it("fires on every turn", async () => {
