@@ -40,6 +40,7 @@ The agent has:
 
 ```ts
 import { Think, skills } from "@cloudflare/think";
+import { createWorkspaceOperations } from "@cloudflare/think/tools/workspace";
 import bundledSkills from "agents:skills"; // -> ./skills next to this file
 
 export class SkillsAgent extends Think<Env> {
@@ -50,7 +51,7 @@ export class SkillsAgent extends Think<Env> {
   getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      workspaceInstance: createWorkspaceOperations(this.workspace)
     });
   }
 }
