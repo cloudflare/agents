@@ -57,6 +57,34 @@ async () => {
 };
 ```
 
+## Shaping large final results
+
+The final result is formatted as MCP text with a fixed response budget. Use
+`transformResult` to replace an oversized structured value with a complete,
+bounded envelope before that formatter runs:
+
+```ts
+const server = await codeMcpServer({
+  server: upstream,
+  executor,
+  transformResult(result, context) {
+    const serialized = JSON.stringify(result);
+    if (serialized.length <= 20_000) return result;
+
+    return {
+      partial: true,
+      reason: "response-too-large",
+      originalChars: serialized.length,
+      refinement: { instruction: "Request fewer rows", maxRows: 10 },
+      requestId: context.requestId
+    };
+  }
+});
+```
+
+The context is from the originating outer `code` tool call and includes its
+request ID and abort signal.
+
 ## Requirements
 
 `wrangler.jsonc` needs a `worker_loaders` binding for the executor:
