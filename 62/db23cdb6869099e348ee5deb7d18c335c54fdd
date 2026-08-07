@@ -1,0 +1,71 @@
+design/codemode-rlm.md
+  s_29e3fd2a62ed7a::t_5b2d7627e53cb3 199-222
+examples/codemode-rlm/README.md
+  s_29e3fd2a62ed7a::t_5b253e05121add 84-105
+examples/codemode-rlm/env.d.ts
+  s_0b3003d5997402::t_9565eb546e6352 2,7,14-16,21,36
+examples/codemode-rlm/eval/RESULTS.md
+  s_29e3fd2a62ed7a::t_c517b65786e328 1-39
+examples/codemode-rlm/eval/arc.ts
+  s_0b3003d5997402::t_41e252f85b96fa 1-289
+examples/codemode-rlm/eval/results/.gitignore
+  s_0b3003d5997402::t_1ff8605a36f619 1-2
+examples/codemode-rlm/eval/run.ts
+  s_0b3003d5997402::t_2307312f704026 1-676
+examples/codemode-rlm/package.json
+  s_0b3003d5997402::t_9d8a930834ec48 11
+examples/codemode-rlm/src/agent.ts
+  s_0b3003d5997402::t_39761078727e20 31,47,77,290,313-315
+examples/codemode-rlm/src/baseline.ts
+  s_29e3fd2a62ed7a::t_a0e4e001ca1d65 1-137
+examples/codemode-rlm/src/core.ts
+  s_0b3003d5997402::t_5e0599cdc803d5 11-29,77-103,132-133,288-291
+examples/codemode-rlm/src/diagnostics.ts
+  s_00f89f7f682bec::t_0805233b43ae27 1-80
+examples/codemode-rlm/src/prompts.ts
+  s_0b3003d5997402::t_dcd21ce123f03c 12-13,16-17,37,66-67,74
+examples/codemode-rlm/src/server.ts
+  s_0b3003d5997402::t_31f18232cffd59 3-5,7,77-82,86-158
+examples/codemode-rlm/test/core.test.ts
+  s_0b3003d5997402::t_03eeff738d3904 48-53,137,147-151
+examples/codemode-rlm/test/diagnostics.test.ts
+  s_0b3003d5997402::t_787d620510aeb0 1-58
+examples/codemode-rlm/test/eval.test.ts
+  s_0b3003d5997402::t_ebde91b3b35160 1-97
+examples/codemode-rlm/test/server.test.ts
+  s_0b3003d5997402::t_cf69a56610a78c 1-149
+examples/codemode-rlm/wrangler.jsonc
+  s_0b3003d5997402::t_8223c99a9dbdf5 9,16-19,26,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "62db23cdb6869099e348ee5deb7d18c335c54fdd",
+  "prompts": {},
+  "sessions": {
+    "s_00f89f7f682bec": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "30790c37-106d-43ac-8d7d-355007a8d1bc",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_0b3003d5997402": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd6b0-e1c0-7b61-ba71-7591b8469662",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_29e3fd2a62ed7a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7a996d96-a221-44e7-8218-acbee4f6f3c0",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
