@@ -6,6 +6,7 @@ export { HostBridgeLoopback } from "../extensions";
 
 // Facet class behind tools built on createCodemodeRuntime (execute tool).
 export { CodemodeRuntime } from "@cloudflare/codemode";
+export { WorkspaceServiceProxy } from "../workspace-shell";
 
 export {
   TestAssistantToolsAgent,
@@ -36,6 +37,7 @@ export {
   ThinkExtensionHookAgent,
   ThinkComputerWorkspaceExecuteAgent,
   ThinkExecuteToolAgent,
+  ThinkShellWorkspaceAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
@@ -76,6 +78,7 @@ import type {
   ThinkExtensionHookAgent,
   ThinkComputerWorkspaceExecuteAgent,
   ThinkExecuteToolAgent,
+  ThinkShellWorkspaceAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
@@ -222,6 +225,7 @@ export type Env = {
   ThinkMcpToolMaterializationAgent: DurableObjectNamespace<ThinkMcpToolMaterializationAgent>;
   ThinkComputerWorkspaceExecuteAgent: DurableObjectNamespace<ThinkComputerWorkspaceExecuteAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
+  ThinkShellWorkspaceAgent: DurableObjectNamespace<ThinkShellWorkspaceAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;
   ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;

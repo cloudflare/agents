@@ -277,14 +277,20 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
-import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import {
+  Workspace,
+  type DurableObjectStorageLike,
+  type WorkspaceStub
+} from "@cloudflare/computer";
 import { createWorkspaceTools } from "./tools/workspace";
 import {
   hasWorkspaceLegacyBashProvider,
+  hasWorkspaceStubProvider,
   hasWorkspaceToolProvider,
   normalizeWorkspacePath,
   readWorkspaceText,
   writeWorkspaceFile,
+  workspaceStubProvider,
   workspaceToolProvider,
   type LegacyWorkspaceBashOptions,
   type ThinkWorkspace
@@ -328,11 +334,13 @@ export type { FiberContext, FiberRecoveryContext } from "agents";
 export {
   hasWorkspaceLegacyBashProvider,
   hasWorkspaceStateProvider,
+  hasWorkspaceStubProvider,
   hasWorkspaceToolProvider,
   normalizeWorkspacePath,
   readWorkspaceText,
   workspaceLegacyBashProvider,
   workspaceStateProvider,
+  workspaceStubProvider,
   workspaceToolProvider,
   writeWorkspaceFile
 } from "./workspace";
@@ -344,6 +352,7 @@ export type {
   ThinkWorkspaceRuntimeHandle,
   WorkspaceLegacyBashProvider,
   WorkspaceStateProvider,
+  WorkspaceStubProvider,
   WorkspaceToolProvider,
   WorkspaceToolProviderOptions,
   ThinkWorkspace as WorkspaceLike
@@ -7073,6 +7082,17 @@ export class Think<
   }
 
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
+
+  /** @internal Used by Computer backends that call into this workspace. */
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    if (!hasWorkspaceStubProvider(this.workspace)) {
+      throw new Error(
+        "This workspace does not expose a service stub. Configure " +
+          "@cloudflare/think/workspace-shell before exporting WorkspaceServiceProxy."
+      );
+    }
+    return this.workspace[workspaceStubProvider]();
+  }
 
   async _hostReadFile(path: string): Promise<string | null> {
     return readWorkspaceText(this.workspace, path);

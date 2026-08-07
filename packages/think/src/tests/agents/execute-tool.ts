@@ -7,9 +7,11 @@ import { tool } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
+import type { DurableObjectStorageLike } from "@cloudflare/computer";
 import { Think } from "../../think";
 import { Workspace as LegacyWorkspace } from "../../workspace-shell-legacy";
-import { workspaceStateProvider } from "../../workspace";
+import { Workspace as ShellWorkspace } from "../../workspace-shell";
+import { workspaceStateProvider, workspaceToolProvider } from "../../workspace";
 import {
   createExecuteRuntime,
   createExecuteTool,
@@ -158,5 +160,43 @@ export class ThinkComputerWorkspaceExecuteAgent extends Think {
 
   async writeWorkspaceFile(path: string, content: string): Promise<void> {
     await this.workspace.fs.writeFile(path, content);
+  }
+}
+
+export class ThinkShellWorkspaceAgent extends Think {
+  override workspace = new ShellWorkspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    binding: "ThinkShellWorkspaceAgent",
+    id: this.ctx.id.toString(),
+    backend: {
+      loader: this.env.LOADER,
+      ctx: this.ctx
+    }
+  });
+
+  getModel(): LanguageModel {
+    throw new Error("Model is not used in shell workspace tests");
+  }
+
+  async runBash(command: string): Promise<unknown> {
+    const bash = this.workspace[workspaceToolProvider]().bash.execute;
+    if (!bash) throw new Error("Shell bash tool is missing");
+    return bash(
+      { command },
+      {
+        toolCallId: "test",
+        messages: [],
+        abortSignal: new AbortController().signal,
+        context: {}
+      }
+    );
+  }
+
+  async runCodemodeBash(code: string): Promise<ExecuteOutput> {
+    return invoke(createExecuteTool(this), code);
+  }
+
+  async readFile(path: string): Promise<string> {
+    return this.workspace.fs.readFile(path, "utf8");
   }
 }

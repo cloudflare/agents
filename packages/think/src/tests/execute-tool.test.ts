@@ -62,6 +62,39 @@ describe("Computer workspace codemode connector", () => {
   });
 });
 
+describe("Computer shell workspace", () => {
+  it("runs commands against the durable Computer filesystem", async () => {
+    const agent = await getAgentByName(
+      env.ThinkShellWorkspaceAgent,
+      crypto.randomUUID()
+    );
+
+    const result = await agent.runBash(
+      "printf 'from shell' > /workspace/result.txt"
+    );
+
+    expect(result).toMatchObject({ exitCode: 0 });
+    await expect(agent.readFile("/workspace/result.txt")).resolves.toBe(
+      "from shell"
+    );
+  });
+
+  it("exposes bash under the codemode workspace binding", async () => {
+    const agent = await getAgentByName(
+      env.ThinkShellWorkspaceAgent,
+      crypto.randomUUID()
+    );
+
+    await expect(
+      agent.runCodemodeBash(`async () => {
+        await workspace.bash({ command: "printf codemode > /workspace/codemode.txt" });
+        const file = await workspace.read({ path: "/workspace/codemode.txt" });
+        return file.content.includes("codemode");
+      }`)
+    ).resolves.toMatchObject({ status: "completed", result: true });
+  });
+});
+
 describe("execute tool on the codemode runtime", () => {
   it("runs sandbox code against tools.* (ToolSetConnector)", async () => {
     const agent = await freshAgent();

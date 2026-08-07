@@ -1,6 +1,7 @@
 import type {
   WorkspaceClient,
-  WorkspaceRuntimeValue
+  WorkspaceRuntimeValue,
+  WorkspaceStub
 } from "@cloudflare/computer";
 import type { CodemodeConnector } from "@cloudflare/codemode";
 import type { ToolSet } from "ai";
@@ -47,6 +48,10 @@ export const workspaceToolProvider: unique symbol = Symbol.for(
   "@cloudflare/think/workspace-tool-provider"
 ) as unknown as typeof workspaceToolProvider;
 
+export const workspaceStubProvider: unique symbol = Symbol.for(
+  "@cloudflare/think/workspace-stub-provider"
+) as unknown as typeof workspaceStubProvider;
+
 export const workspaceStateProvider: unique symbol = Symbol.for(
   "@cloudflare/think/workspace-state-provider"
 ) as unknown as typeof workspaceStateProvider;
@@ -71,6 +76,10 @@ export interface WorkspaceToolProviderOptions {
 /** Opt-in tools supplied by a configured workspace implementation. */
 export interface WorkspaceToolProvider {
   [workspaceToolProvider](options?: WorkspaceToolProviderOptions): ToolSet;
+}
+
+export interface WorkspaceStubProvider {
+  [workspaceStubProvider](): Promise<WorkspaceStub>;
 }
 
 export interface WorkspaceStateProvider {
@@ -106,6 +115,14 @@ export function hasWorkspaceStateProvider(
   const candidate = workspace as ThinkWorkspace &
     Partial<WorkspaceStateProvider>;
   return typeof candidate[workspaceStateProvider] === "function";
+}
+
+export function hasWorkspaceStubProvider(
+  workspace: ThinkWorkspace
+): workspace is ThinkWorkspace & WorkspaceStubProvider {
+  const candidate = workspace as ThinkWorkspace &
+    Partial<WorkspaceStubProvider>;
+  return typeof candidate[workspaceStubProvider] === "function";
 }
 
 export function normalizeWorkspacePath(path: string): string {

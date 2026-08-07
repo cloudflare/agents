@@ -132,6 +132,10 @@
         "name": "ThinkExecuteToolAgent"
       },
       {
+        "class_name": "ThinkShellWorkspaceAgent",
+        "name": "ThinkShellWorkspaceAgent"
+      },
+      {
         "class_name": "ThinkExecuteHitlAgent",
         "name": "ThinkExecuteHitlAgent"
       },
@@ -207,6 +211,7 @@
         "ThinkMcpToolMaterializationAgent",
         "ThinkComputerWorkspaceExecuteAgent",
         "ThinkExecuteToolAgent",
+        "ThinkShellWorkspaceAgent",
         "ThinkExecuteHitlAgent",
         "ThinkFetchToolsTestAgent",
         "ThinkOnStartReconcileFailureAgent",
