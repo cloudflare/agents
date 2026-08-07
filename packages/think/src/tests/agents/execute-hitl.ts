@@ -32,7 +32,7 @@ function statusesInPrompt(options: Record<string, unknown>): string[] {
     (options as { prompt?: unknown[] }).prompt ?? []
   );
   const seen: string[] = [];
-  const re = /"status"\s*:\s*"(completed|paused|rejected|error)"/g;
+  const re = /\\?"status\\?"\s*:\s*\\?"(completed|paused|rejected|error)\\?"/g;
   for (const match of serialized.matchAll(re)) {
     if (!seen.includes(match[1])) seen.push(match[1]);
   }
@@ -244,16 +244,54 @@ export class ThinkExecuteHitlAgent extends Think {
     }
   }
 
-  /** Text of system messages (the orphaned-outcome fallback notes). */
-  async systemNoteTexts(): Promise<string[]> {
+  /** Orphaned execution outcome notes, including their transcript role. */
+  async executionOutcomeNotes(): Promise<
+    Array<{
+      id: string;
+      role: string;
+      text: string;
+      metadataOrigin?: string;
+    }>
+  > {
     return this.messages
-      .filter((m) => m.role === "system")
-      .map((m) =>
-        (m as UIMessage).parts
-          .filter((p) => p.type === "text")
-          .map((p) => (p as { text: string }).text)
-          .join("")
-      );
+      .filter((message) => message.id.startsWith("exec-outcome-"))
+      .map((message) => {
+        const metadataOrigin =
+          message.metadata &&
+          typeof message.metadata === "object" &&
+          "origin" in message.metadata &&
+          typeof message.metadata.origin === "string"
+            ? message.metadata.origin
+            : undefined;
+        return {
+          id: message.id,
+          role: message.role,
+          text: (message as UIMessage).parts
+            .filter((part) => part.type === "text")
+            .map((part) => (part as { text: string }).text)
+            .join(""),
+          ...(metadataOrigin ? { metadataOrigin } : {})
+        };
+      });
+  }
+
+  /** Seed the system-role execution outcome produced by older Think releases. */
+  async appendLegacyExecutionOutcomeForTest(
+    executionId: string
+  ): Promise<void> {
+    await this.appendMessageToHistory({
+      id: `exec-outcome-${executionId}-legacy`,
+      role: "system",
+      parts: [
+        {
+          type: "text",
+          text:
+            `[execute tool] The paused execution "${executionId}" was ` +
+            `resolved, but its tool call is no longer in the transcript ` +
+            `(it may have been compacted). Outcome: {"status":"completed"}`
+        }
+      ]
+    } as UIMessage);
   }
 
   /** Expire all paused runs immediately (stage 1 `expirePaused`). */

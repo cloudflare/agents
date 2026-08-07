@@ -1912,6 +1912,22 @@ const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
  */
 const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
 
+/** Stable id prefix for fallback notes that preserve orphaned execution outcomes. */
+const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
+
+/**
+ * Present legacy execution outcome notes to providers as user context. Older
+ * Think releases persisted these notes as arbitrarily placed system messages,
+ * which current AI SDK versions and strict providers reject. Storage remains
+ * unchanged so existing session trees and client history do not need migration.
+ */
+function toProviderSafeExecutionOutcomeMessage(message: UIMessage): UIMessage {
+  return message.role === "system" &&
+    message.id.startsWith(EXECUTION_OUTCOME_MESSAGE_PREFIX)
+    ? { ...message, role: "user" }
+    : message;
+}
+
 /**
  * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
  * deliver its structured final answer. The agent runs a full multi-step,
@@ -5303,7 +5319,10 @@ export class Think<
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
     const history = await this._repairTranscriptForProvider(this.messages);
-    const truncated = truncateOlderMessages(history) as UIMessage[];
+    const providerSafeHistory = history.map(
+      toProviderSafeExecutionOutcomeMessage
+    );
+    const truncated = truncateOlderMessages(providerSafeHistory) as UIMessage[];
     // `_repairTranscriptForProvider` above already heals orphan tool calls
     // (flipping them to errored results, preserving the record). This is the
     // last-line backstop: if any incomplete tool call still slips through
@@ -13460,8 +13479,10 @@ export class Think<
    * When no paused part carries `executionId` — the output was already
    * replaced from another tab, or compaction summarized the part away — the
    * runtime has still durably applied the approval/rejection, so the outcome
-   * must not be dropped: it is appended as a system note instead, and the
-   * continuation still fires so the model can act on it.
+   * must not be dropped: it is appended as user context instead, and the
+   * continuation still fires so the model can act on it. The note inherits the
+   * latest user metadata so tools and channel policy keep the approving turn's
+   * trusted context.
    */
   private async _applyExecutionOutcome(
     executionId: string,
@@ -13478,9 +13499,10 @@ export class Think<
       } catch {
         summary = String(output);
       }
+      const metadata = this._latestUserMessageMetadata(this.messages);
       await this._appendMessageToHistory({
-        id: `exec-outcome-${executionId}-${crypto.randomUUID()}`,
-        role: "system",
+        id: `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${crypto.randomUUID()}`,
+        role: "user",
         parts: [
           {
             type: "text",
@@ -13489,7 +13511,8 @@ export class Think<
               `resolved, but its tool call is no longer in the transcript ` +
               `(it may have been compacted). Outcome: ${summary}`
           }
-        ]
+        ],
+        ...(metadata ? { metadata } : {})
       } as UIMessage);
     } else {
       await this._enqueueInteractionApply(() =>
