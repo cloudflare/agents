@@ -15,6 +15,7 @@ import {
   workspaceToolProvider,
   type ThinkWorkspace,
   type ThinkWorkspaceRuntime,
+  type ThinkWorkspaceRuntimeValue,
   type WorkspaceLegacyBashProvider,
   type WorkspaceToolProvider,
   type WorkspaceToolProviderOptions
@@ -63,7 +64,7 @@ export class LegacyShellRuntime implements ThinkWorkspaceRuntime {
       backend?: string;
       timeoutMs?: number;
       env?: Record<string, string>;
-      input?: unknown;
+      input?: ThinkWorkspaceRuntimeValue;
       stdin?: Uint8Array | string;
     }
   ) {

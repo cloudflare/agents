@@ -342,6 +342,7 @@ export type {
   ThinkWorkspaceFilesystem,
   ThinkWorkspaceRuntime,
   ThinkWorkspaceRuntimeHandle,
+  ThinkWorkspaceRuntimeValue,
   WorkspaceLegacyBashProvider,
   WorkspaceLike,
   WorkspaceToolProvider,
