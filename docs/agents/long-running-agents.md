@@ -537,7 +537,7 @@ For chat-oriented sub-agents, [Think](https://github.com/cloudflare/agents/blob/
 
 The patterns above handle the project manager's coordination work — scheduling, delegating, polling. But the project manager also uses an LLM directly: generating plans, summarizing progress, drafting status emails. Those LLM calls stream tokens over a connection that cannot be resumed if the agent is evicted mid-response.
 
-For chat-oriented agents built on `AIChatAgent`, this is an even sharper problem — the user is watching the response stream in real time and sees it stop mid-sentence. `chatRecovery` wraps each chat turn in a `runFiber`, providing automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
+For chat-oriented agents built on `AIChatAgent` or `Think`, this is an even sharper problem — the user is watching the response stream in real time and sees it stop mid-sentence. Durable recovery wraps every chat turn in a `runFiber`, providing automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
@@ -547,8 +547,6 @@ import type {
 } from "@cloudflare/ai-chat";
 
 class ProjectChat extends AIChatAgent<Env> {
-  override chatRecovery = true;
-
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
@@ -573,7 +571,7 @@ The right recovery strategy depends on the LLM provider:
 
 For a complete multi-provider implementation with full code for each strategy, see the [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) and the [`forever.md` design doc](https://github.com/cloudflare/agents/tree/main/experimental/forever.md).
 
-[Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) enables `chatRecovery` by default. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
+`AIChatAgent` and [Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) always enable durable recovery. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
 
 If the agent is interrupted before any assistant stream chunks are written, there is no partial assistant message to continue. When the latest persisted message is still the unanswered user message from that turn, chat recovery retries the turn automatically unless `onChatRecovery` returns `{ continue: false }`.
 

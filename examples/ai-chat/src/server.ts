@@ -30,14 +30,9 @@ export class ChatAgent extends AIChatAgent {
   // Keep the last 200 messages in SQLite storage
   maxPersistedMessages = 200;
 
-  // Recover durable chat turns interrupted by a Durable Object eviction
-  // (deploy, OOM, idle hibernation mid-stream). With this on, each turn runs
-  // inside a fiber with a keepAlive alarm: after an eviction the DO self-wakes,
-  // resumes the turn from the persisted partial (`_chatRecoveryContinue`), and
-  // clients see a live "recovering…" status (also replayed on reconnect).
-  // Defaults to `false` on `AIChatAgent`; `@cloudflare/think` enables it by
-  // default. Bounded by `maxAttempts` (default 6).
-  chatRecovery = true;
+  // Every turn runs inside a durable fiber with a keepAlive alarm. After an
+  // eviction the DO self-wakes, resumes from the persisted partial, and clients
+  // see a live "recovering…" status (also replayed on reconnect).
 
   // Wait for MCP connections to restore after hibernation before processing messages
   waitForMcpConnections = true;

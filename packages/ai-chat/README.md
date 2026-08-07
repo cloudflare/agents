@@ -248,11 +248,11 @@ Streams automatically resume on disconnect/reconnect. No configuration needed.
 
 When a client disconnects mid-stream, chunks are buffered in SQLite. On reconnect, the client receives all buffered chunks and continues receiving the live stream.
 
-This handles browser disconnects, navigation, and React cleanup while the Durable Object keeps running. To recover after the Durable Object itself is evicted during a model call, opt in to `chatRecovery`.
+This handles browser disconnects, navigation, and React cleanup while the Durable Object keeps running. Durable chat recovery separately handles the Durable Object itself being evicted during a model call.
 
 ## Durable Chat Recovery
 
-`AIChatAgent` defaults `chatRecovery` to `false`. Enable it when you want chat turns to survive Worker deploys, Durable Object eviction, or process restarts:
+Every `AIChatAgent` turn runs in a durable recovery fiber, so turns can survive Worker deploys, Durable Object eviction, or process restarts. Assign a `chatRecovery` object only when you need to tune budgets or terminal behavior:
 
 ```typescript
 import type {
@@ -275,7 +275,9 @@ export class ChatAgent extends AIChatAgent<Env> {
 }
 ```
 
-See [`docs/agents/chat-agents.md`](../../docs/agents/chat-agents.md#stream-recovery) for provider-specific recovery strategies and observability events.
+`chatRecovery = false` is no longer supported. Previously compiled JavaScript that still supplies `false` receives the default durable configuration. If automatic continuation is unsafe, return `{ continue: false }` from `onChatRecovery()`; use durable state for cancellation or side-effect guards, and configure recovery budgets for cost control.
+
+See [`docs/agents/chat-agents.md`](../../docs/agents/chat-agents.md#stream-recovery) for migration guidance, provider-specific recovery strategies, and observability events.
 
 Generic client stream abort/cleanup is local-only by default: the server turn continues and can be resumed later. An explicit `stop()` still cancels the server turn:
 
@@ -460,11 +462,11 @@ Extends `Agent` from the `agents` package.
 | Property / Method                    | Type                          | Description                                                                                                            |
 | ------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `messages`                           | `ChatMessage[]`               | Current conversation messages (loaded from SQLite)                                                                     |
-| `chatRecovery`                       | `ChatRecoveryConfig`          | Opt-in Durable Object eviction recovery for chat turns. Default: `false`                                               |
+| `chatRecovery`                       | `ChatRecoveryConfig`          | Always-on durable recovery configuration. Assign an object to tune budgets and terminal behavior                       |
 | `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                                     |
 | `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                                                   |
 | `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                                            |
-| `onChatRecovery(ctx)`                | Override                      | Customize recovery after a chat turn is interrupted while `chatRecovery` is enabled                                    |
+| `onChatRecovery(ctx)`                | Override                      | Customize recovery after a chat turn is interrupted                                                                    |
 | `onChatResponse(result)`             | Override                      | Called after a chat turn completes. `result` has `message`, `requestId`, `status`, `continuation`                      |
 | `persistMessages(messages)`          | `Promise<void>`               | Manually persist messages (usually automatic)                                                                          |
 | `saveMessages(messages, options?)`   | `Promise<SaveMessagesResult>` | Persist messages and trigger `onChatMessage`. Accepts array or function. `options.signal` cancels the turn externally. |

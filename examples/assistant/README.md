@@ -368,7 +368,6 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 }
 
 export class MyAssistant extends Think<Env> {
-  chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
   getModel() {
