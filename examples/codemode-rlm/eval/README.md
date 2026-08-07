@@ -91,7 +91,8 @@ are collected from the eval diagnostics endpoints; reasoning text is not copied
 into the result artifact. The runner then prints an aggregate table and writes
 raw answers and diagnostics to the gitignored `eval/results/` directory.
 
-See [RESULTS.md](./RESULTS.md) for one dated development run and its caveats.
+See [RESULTS.md](./RESULTS.md) for one dated, predefined micro-suite run and its
+caveats.
 
 ## Scoring
 
