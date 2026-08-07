@@ -260,17 +260,22 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `email:receive` | `{ from, to, subject? }` | An email is received  |
 | `email:reply`   | `{ from, to, subject? }` | A reply email is sent |
 
-## Agent initialization span
+## Agent lifecycle spans
 
-When Worker traces are enabled, every `Agent` constructor runs its setup —
-method wrapping, schema creation, and MCP client manager initialization —
-inside an `agent_initialization` span. Constructor-time child spans group under
-this one stable parent instead of appearing as top-level clutter. The span
-carries `cloudflare.agents.agent.name` (the agent class),
-`cloudflare.agents.agent.id` (the named instance, omitted when the name is not
-yet readable during construction), and `cloudflare.agents.operation.name`
-(`agent_initialization`). Like the rest of the tracing in this package, it is a
-no-op when the runtime has no native tracing capability.
+When Worker traces are enabled, Agent lifecycle work is grouped under stable
+verb-object span names:
+
+- `initialize_agent` covers base constructor setup.
+- `initialize_chat_agent` covers AIChat constructor setup.
+- `start_agent` covers base startup and recovery.
+- `start_agent_runtime` covers Think runtime and session startup.
+
+Internal setup steps do not emit additional spans. Each lifecycle span carries
+`cloudflare.agents.agent.name` (the agent class),
+`cloudflare.agents.agent.id` (the named instance), and
+`cloudflare.agents.operation.name`. Like the rest of the tracing in this
+package, lifecycle tracing is a no-op when the runtime has no native tracing
+capability.
 
 ## AI SDK tracing
 
@@ -283,14 +288,19 @@ integration is a no-op when the runtime has no native tracing capability.
 
 **Think agents are traced out of the box.** Enable
 `observability.traces.enabled` in `wrangler.jsonc`; no Think option is required.
-A turn gets an `invoke_agent {agent class}` operation span, `chat {model}` model
-spans, and `execute_tool {tool}` spans. Think always supplies its durable
-identity: `gen_ai.agent.name` is the class name, `gen_ai.agent.id` is the named
-instance, and `gen_ai.conversation.id` is the opaque Durable Object ID. These
-are defaults; `beforeTurn` can override `functionId` or the corresponding
-metadata fields for applications with a different identity model. Payload
-storage is off by default. Set `storeMessages` and/or `storeTools` on the Think
-agent to opt in; these are wrapper settings, not span attributes.
+A chat request is handled under `handle_chat_request`, and each admitted turn
+runs under `run_agent_turn`. The turn contains `invoke_agent {agent class}`
+operation spans, `chat {model}` model spans, `execute_tool {tool}` spans, and a
+`stream_agent_response` span while the response is consumed, broadcast, and
+persisted. Durable turns use `submit_agent_turn` when accepted and
+`run_submitted_agent_turn` when later executed. Think always supplies its
+durable identity: `gen_ai.agent.name` is the class name,
+`gen_ai.agent.id` is the named instance, and `gen_ai.conversation.id` is the
+opaque Durable Object ID. These are defaults; `beforeTurn` can override
+`functionId` or the corresponding metadata fields for applications with a
+different identity model. Payload storage is off by default. Set
+`storeMessages` and/or `storeTools` on the Think agent to opt in; these are
+wrapper settings, not span attributes.
 
 ### AI SDK v6 and v7
 
