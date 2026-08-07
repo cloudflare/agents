@@ -1,17 +1,23 @@
-import type { Workspace } from "@cloudflare/think";
+import {
+  workspaceStateProvider,
+  type WorkspaceStateProvider
+} from "@cloudflare/think";
+import {
+  LegacyShellFilesystem,
+  LegacyShellRuntime,
+  createLegacyWorkspaceStateConnectors,
+  type Workspace
+} from "@cloudflare/think/workspace-shell-legacy";
 import type { WorkspaceFsLike } from "@cloudflare/shell";
 import type { AssistantDirectory } from "./agent";
 
 // ── SharedWorkspace — proxy used by children ─────────────────────────
 //
-// Satisfies `WorkspaceFsLike` (the interface shipped by
-// `@cloudflare/shell`) by forwarding every call to the parent
-// `AssistantDirectory`'s real `Workspace`. Because `WorkspaceFsLike`
-// is a strict superset of `WorkspaceLike`, this also satisfies
-// everything Think's builtin tools need — but covering the wider
-// surface is what lets us pass the same object to
-// `createWorkspaceStateBackend`, so codemode's `state.*` sandbox API
-// operates on the shared workspace too.
+// Satisfies the legacy `WorkspaceFsLike` interface by forwarding every call
+// to the parent `AssistantDirectory`'s real legacy workspace. The Computer-
+// shaped `fs` and `runtime` facades satisfy Think's contract, while
+// `createLegacyWorkspaceStateConnectors` keeps codemode's richer `state.*`
+// sandbox API operating on the same shared files.
 //
 // Per-call it's one extra RPC hop; parent and child are DO facets
 // colocated on the same machine, so the hop is in-process and cheap.
@@ -21,8 +27,17 @@ import type { AssistantDirectory } from "./agent";
 // so caching the resolved stub across the child's lifetime is safe
 // even if the parent hibernates and comes back between calls.
 
-export class SharedWorkspace implements WorkspaceFsLike {
+export class SharedWorkspace
+  implements WorkspaceFsLike, WorkspaceStateProvider
+{
   #stubPromise?: Promise<DurableObjectStub<AssistantDirectory>>;
+
+  readonly fs = new LegacyShellFilesystem(this);
+  readonly runtime = new LegacyShellRuntime(this);
+
+  [workspaceStateProvider](ctx: DurableObjectState | ExecutionContext) {
+    return createLegacyWorkspaceStateConnectors(this, ctx);
+  }
 
   constructor(
     private getParent: () => Promise<DurableObjectStub<AssistantDirectory>>

@@ -6,9 +6,11 @@ import {
   defaultContextOverflowClassifier
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
-import type { WorkspaceFsLike } from "@cloudflare/shell";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
-import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
+import {
+  createWorkspaceOperations,
+  createWorkspaceTools
+} from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import { createCompactFunction } from "agents/experimental/memory/utils";
@@ -67,19 +69,16 @@ export class MyAssistant extends Think<Env> {
    * init check, the shared proxy is already in place — Think never
    * creates a per-chat `Workspace` at all.
    *
-   * Declared as `WorkspaceFsLike` (the wider interface from
-   * `@cloudflare/shell`) rather than Think's `WorkspaceLike` so that
-   * `createWorkspaceStateBackend(this.workspace)` in `getTools()` sees
-   * the full filesystem surface it needs. `WorkspaceFsLike` is a strict
-   * superset of `WorkspaceLike`, so Think's internals keep working.
+   * `SharedWorkspace` exposes the Computer-shaped `fs` and `runtime`
+   * properties that Think uses. Its legacy state provider also keeps the
+   * codemode `state.*` API connected to the shared filesystem.
    *
    * All workspace-aware code — the builtin tools from
    * `createWorkspaceTools`, lifecycle hooks, the `listWorkspaceFiles`
    * / `readWorkspaceFile` RPCs below, and codemode's `state.*` sandbox
-   * API via `createWorkspaceStateBackend` — routes through this proxy
-   * transparently.
+   * API — routes through this proxy.
    */
-  override workspace: WorkspaceFsLike = new SharedWorkspace(() =>
+  override workspace = new SharedWorkspace(() =>
     this.parentAgent(AssistantDirectory)
   );
 
@@ -135,7 +134,7 @@ export class MyAssistant extends Think<Env> {
   getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      workspaceInstance: createWorkspaceOperations(this.workspace)
     });
   }
 
@@ -191,7 +190,7 @@ When you learn something about the user or their project, save it to memory.`
       // Agent one-liner with overrides: the executor comes from
       // `env.LOADER`, `cdp.*` from `env.BROWSER` (if bound), and `state.*`
       // inside the sandbox is backed by the SHARED workspace — the
-      // `SharedWorkspace` proxy satisfies `WorkspaceFsLike`, so
+      // `SharedWorkspace` supplies the legacy state provider, so
       // `state.planEdits`/`applyEdits` in chat B sees and mutates the same
       // files chat A just wrote. This also assigns `this.codemode`, which
       // powers the built-in `approveExecution` / `rejectExecution` /
