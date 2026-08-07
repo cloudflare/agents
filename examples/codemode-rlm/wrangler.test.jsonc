@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "codemode-rlm-tests",
+  "main": "test/store-worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "STORE", "class_name": "StoreHarness" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StoreHarness"] }]
+}

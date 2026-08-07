@@ -1,0 +1,310 @@
+{
+  "schemaVersion": 1,
+  "runId": "balanced-micro-2026-08-07",
+  "nonce": "2a69375f3b1142e391e545553e10ccaf",
+  "createdAt": "2026-08-07T15:24:12.483Z",
+  "baseUrl": "http://localhost:5173",
+  "suite": "micro",
+  "taskId": null,
+  "limit": null,
+  "conditionTimeoutMs": 240000,
+  "codeRevision": {
+    "commit": "62db23cdb6869099e348ee5deb7d18c335c54fdd",
+    "dirty": false
+  },
+  "dataset": {
+    "repository": "https://github.com/arcprize/ARC-AGI-2",
+    "commit": "f3283f727488ad98fe575ea6a5ac981e4a188e49",
+    "split": "public evaluation",
+    "taskIds": [
+      "20270e3b",
+      "e8686506",
+      "28a6681f"
+    ],
+    "selection": "The public-evaluation tasks with the fewest agent-visible cells.",
+    "caveat": "This is a smoke comparison on public tasks, not an official or contamination-resistant ARC-AGI-2 score."
+  },
+  "comparison": {
+    "runtimeConfig": {
+      "model": "@cf/moonshotai/kimi-k2.7-code",
+      "reasoningEffort": "low",
+      "maxSteps": 12,
+      "timeoutMs": 180000,
+      "maxDepth": 1,
+      "maxRlmCalls": 8
+    },
+    "attemptsPerTestInput": 2,
+    "scorer": "exact nested-grid equality; task score is mean test-pair accuracy",
+    "diagnostic": "Cell accuracy is non-official and is zero when candidate dimensions are wrong.",
+    "rlm": "Code Mode only; external context, durable JSON kernel, optional depth-one Think children, empty harness per fresh session.",
+    "basicThink": "Direct Think control; full redacted task material in the active prompt, no web/MCP/puzzle helper, and only an evaluation terminal-answer tool active."
+  },
+  "prompt": "Solve the ARC-AGI-2 task in the supplied material.\n\nInfer the transformation from every training input/output pair, then apply it independently to each test input. The material contains no test outputs.\n\nReturn only one JSON object with this exact shape:\n{\"test\":[{\"attempts\":[[[0]]]}]}\n\nRequirements:\n- Include one test entry per test input, in the same order.\n- Each attempts array must contain one or two candidate output grids.\n- A grid must be a non-empty rectangular array of integers from 0 through 9.\n- Do not include analysis, Markdown fences, labels, or any keys besides test and attempts.",
+  "summary": [
+    {
+      "condition": "rlm",
+      "tasks": 3,
+      "tasksSolved": 0,
+      "pairs": "0/4",
+      "meanTaskScore": 0,
+      "diagnosticCellAccuracy": 0,
+      "medianLatencyMs": 180835,
+      "runtimeErrors": 3,
+      "formatErrors": 0,
+      "recursiveCalls": null
+    },
+    {
+      "condition": "basic-think",
+      "tasks": 3,
+      "tasksSolved": 0,
+      "pairs": "0/4",
+      "meanTaskScore": 0,
+      "diagnosticCellAccuracy": 0,
+      "medianLatencyMs": 180029,
+      "runtimeErrors": 3,
+      "formatErrors": 0,
+      "recursiveCalls": null
+    }
+  ],
+  "runs": [
+    {
+      "taskId": "20270e3b",
+      "condition": "rlm",
+      "status": "error",
+      "elapsedMs": 180835,
+      "answer": "",
+      "error": "turn completed without a valid kernel.finish",
+      "recursiveCalls": null,
+      "diagnostics": {
+        "messageCount": 2,
+        "assistantMessageCount": 1,
+        "modelStepCount": 3,
+        "toolCallCount": 2,
+        "toolNames": [
+          "codemode"
+        ]
+      },
+      "parsed": {
+        "test": [
+          {
+            "attempts": []
+          },
+          {
+            "attempts": []
+          }
+        ],
+        "error": "answer is not valid JSON"
+      },
+      "score": {
+        "correctPairs": 0,
+        "totalPairs": 2,
+        "taskScore": 0,
+        "solved": false,
+        "diagnosticCellAccuracy": 0,
+        "pairResults": [
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          },
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "20270e3b",
+      "condition": "basic-think",
+      "status": "error",
+      "elapsedMs": 180029,
+      "answer": "",
+      "error": "basic Think completed without a text answer",
+      "diagnostics": {
+        "messageCount": 2,
+        "assistantMessageCount": 1,
+        "modelStepCount": 1,
+        "toolCallCount": 0,
+        "toolNames": []
+      },
+      "parsed": {
+        "test": [
+          {
+            "attempts": []
+          },
+          {
+            "attempts": []
+          }
+        ],
+        "error": "answer is not valid JSON"
+      },
+      "score": {
+        "correctPairs": 0,
+        "totalPairs": 2,
+        "taskScore": 0,
+        "solved": false,
+        "diagnosticCellAccuracy": 0,
+        "pairResults": [
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          },
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "e8686506",
+      "condition": "rlm",
+      "status": "error",
+      "elapsedMs": 40461,
+      "answer": "",
+      "error": "turn completed without a valid kernel.finish",
+      "recursiveCalls": null,
+      "diagnostics": {
+        "messageCount": 2,
+        "assistantMessageCount": 1,
+        "modelStepCount": 12,
+        "toolCallCount": 12,
+        "toolNames": [
+          "codemode"
+        ]
+      },
+      "parsed": {
+        "test": [
+          {
+            "attempts": []
+          }
+        ],
+        "error": "answer is not valid JSON"
+      },
+      "score": {
+        "correctPairs": 0,
+        "totalPairs": 1,
+        "taskScore": 0,
+        "solved": false,
+        "diagnosticCellAccuracy": 0,
+        "pairResults": [
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "e8686506",
+      "condition": "basic-think",
+      "status": "error",
+      "elapsedMs": 180021,
+      "answer": "",
+      "error": "basic Think completed without a text answer",
+      "diagnostics": {
+        "messageCount": 2,
+        "assistantMessageCount": 1,
+        "modelStepCount": 1,
+        "toolCallCount": 0,
+        "toolNames": []
+      },
+      "parsed": {
+        "test": [
+          {
+            "attempts": []
+          }
+        ],
+        "error": "answer is not valid JSON"
+      },
+      "score": {
+        "correctPairs": 0,
+        "totalPairs": 1,
+        "taskScore": 0,
+        "solved": false,
+        "diagnosticCellAccuracy": 0,
+        "pairResults": [
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "28a6681f",
+      "condition": "rlm",
+      "status": "error",
+      "elapsedMs": 180932,
+      "answer": "",
+      "error": "turn completed without a valid kernel.finish",
+      "recursiveCalls": null,
+      "diagnostics": {
+        "messageCount": 2,
+        "assistantMessageCount": 1,
+        "modelStepCount": 3,
+        "toolCallCount": 2,
+        "toolNames": [
+          "codemode"
+        ]
+      },
+      "parsed": {
+        "test": [
+          {
+            "attempts": []
+          }
+        ],
+        "error": "answer is not valid JSON"
+      },
+      "score": {
+        "correctPairs": 0,
+        "totalPairs": 1,
+        "taskScore": 0,
+        "solved": false,
+        "diagnosticCellAccuracy": 0,
+        "pairResults": [
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "28a6681f",
+      "condition": "basic-think",
+      "status": "error",
+      "elapsedMs": 180031,
+      "answer": "",
+      "error": "basic Think completed without a text answer",
+      "diagnostics": {
+        "messageCount": 2,
+        "assistantMessageCount": 1,
+        "modelStepCount": 1,
+        "toolCallCount": 0,
+        "toolNames": []
+      },
+      "parsed": {
+        "test": [
+          {
+            "attempts": []
+          }
+        ],
+        "error": "answer is not valid JSON"
+      },
+      "score": {
+        "correctPairs": 0,
+        "totalPairs": 1,
+        "taskScore": 0,
+        "solved": false,
+        "diagnosticCellAccuracy": 0,
+        "pairResults": [
+          {
+            "correct": false,
+            "bestCellAccuracy": 0
+          }
+        ]
+      }
+    }
+  ]
+}
