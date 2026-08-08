@@ -63,7 +63,8 @@ interface RuntimeStub {
     method: string,
     args: unknown,
     requiresApproval: boolean,
-    ephemeral?: boolean
+    ephemeral?: boolean,
+    resolution?: "approval" | "client"
   ): Promise<ToolDecision>;
   recordResult(
     executionId: string,
@@ -78,6 +79,7 @@ interface RuntimeStub {
   fail(executionId: string, error: string, logs?: string[]): Promise<void>;
   listPending(executionId?: string): Promise<PendingAction[]>;
   reject(seq: number, executionId: string): Promise<boolean>;
+  resolve(executionId: string, seq: number, result: unknown): Promise<boolean>;
   expirePaused(maxAgeMs?: number): Promise<string[]>;
   actionsToRevert(executionId: string): Promise<ToolLogEntry[]>;
   markReverted(seq: number, executionId: string): Promise<void>;
@@ -408,7 +410,11 @@ function buildConnectorBindings(
       try {
         const seq = cursor.next();
         const annotation = setup.annotations[`${desc.name}.${method}`];
-        const requiresApproval = annotation?.requiresApproval ?? false;
+        // A client-resolved call always pauses, whether or not the connector
+        // also set requiresApproval — resolution implies the pause.
+        const requiresApproval =
+          (annotation?.requiresApproval ?? false) ||
+          annotation?.resolution === "client";
         const ephemeral = annotation?.replay === "reexecute";
         const decision = await runtime.decide(
           executionId,
@@ -417,7 +423,8 @@ function buildConnectorBindings(
           method,
           args,
           requiresApproval,
-          ephemeral
+          ephemeral,
+          annotation?.resolution
         );
 
         if (decision.kind === "replay") return decision.result;
@@ -941,6 +948,71 @@ export async function resumeCodemode(
     options.executor,
     options.transformResult
   );
+}
+
+// ---------------------------------------------------------------------------
+// Resolve — supply a client-resolved action's result and continue via replay
+// ---------------------------------------------------------------------------
+
+export type ResolveCodemodeOptions = ResumeCodemodeOptions & {
+  /** Sequence number of the pending client-resolved action (from `pending()`). */
+  seq: number;
+  /** The result the client produced — recorded as the call's return value. */
+  result: unknown;
+};
+
+/**
+ * Supply the result of a pending client-resolved action (`resolution:
+ * "client"`) and continue the paused execution. The result is recorded on the
+ * durable log as if the tool had executed; the run then resumes and the replay
+ * serves the client's value to the code. Returns an error *outcome* (not a
+ * throw) when the action is no longer pending — the run may have been
+ * rejected, expired, or resolved from elsewhere.
+ */
+export async function resolveCodemode(
+  options: ResolveCodemodeOptions
+): Promise<ProxyToolOutput> {
+  const runtime = getRuntime(options.ctx, options.name);
+
+  let recorded: boolean;
+  try {
+    recorded = await runtime.resolve(
+      options.executionId,
+      options.seq,
+      options.result
+    );
+  } catch (err) {
+    // An unrecordable result (too large / unserializable) — surface the
+    // model-actionable message as an error outcome; the action stays pending.
+    return {
+      status: "error",
+      executionId: options.executionId,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+  if (!recorded) {
+    return {
+      status: "error",
+      executionId: options.executionId,
+      error:
+        `Cannot resolve step ${options.seq} of execution ` +
+        `"${options.executionId}": the call is no longer pending (it may ` +
+        `have been rejected, expired, or resolved elsewhere).`
+    };
+  }
+
+  // The entry is now "applied" with the client's result; continuing is the
+  // same replay pass an approval resume runs — the replay serves the recorded
+  // value at the resolved seq.
+  return resumeCodemode({
+    ctx: options.ctx,
+    connectors: options.connectors,
+    executor: options.executor,
+    name: options.name,
+    executionId: options.executionId,
+    maxExecutions: options.maxExecutions,
+    transformResult: options.transformResult
+  });
 }
 
 // ---------------------------------------------------------------------------
