@@ -32,6 +32,7 @@ export {
 } from "./think-session";
 export { ThinkFetchToolsTestAgent } from "./fetch-tools";
 export {
+  ThinkBashWorkspaceAgent,
   ThinkComputerWorkspaceExecuteAgent,
   ThinkExecuteToolAgent
 } from "./execute-tool";

@@ -151,6 +151,10 @@
     "./vite": {
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js"
+    },
+    "./workspace-bash": {
+      "types": "./dist/workspace-bash.d.ts",
+      "import": "./dist/workspace-bash.js"
     }
   },
   "files": [

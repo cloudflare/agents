@@ -8,6 +8,8 @@ import type { LanguageModel } from "ai";
 import { z } from "zod";
 import type { DurableObjectStorageLike } from "@cloudflare/computer";
 import { Think } from "../../think";
+import { Workspace as BashWorkspace } from "../../workspace/workspace-bash";
+import { workspaceToolProvider } from "../../workspace/types";
 import { Workspace } from "../../workspace/workspace";
 import {
   createExecuteRuntime,
@@ -139,5 +141,43 @@ export class ThinkComputerWorkspaceExecuteAgent extends Think {
 
   async writeWorkspaceFile(path: string, content: string): Promise<void> {
     await this.workspace.fs.writeFile(path, content);
+  }
+}
+
+export class ThinkBashWorkspaceAgent extends Think {
+  override workspace = new BashWorkspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    binding: "ThinkBashWorkspaceAgent",
+    id: this.ctx.id.toString(),
+    backend: {
+      loader: this.env.LOADER,
+      ctx: this.ctx
+    }
+  });
+
+  getModel(): LanguageModel {
+    throw new Error("Model is not used in bash workspace tests");
+  }
+
+  async runBash(command: string): Promise<unknown> {
+    const bash = this.workspace[workspaceToolProvider]().bash.execute;
+    if (!bash) throw new Error("Bash workspace tool is missing");
+    return bash(
+      { command },
+      {
+        toolCallId: "test",
+        messages: [],
+        abortSignal: new AbortController().signal,
+        context: {}
+      }
+    );
+  }
+
+  async runCodemodeState(code: string): Promise<ExecuteOutput> {
+    return invoke(createExecuteTool(this), code);
+  }
+
+  async readFile(path: string): Promise<string> {
+    return this.workspace.fs.readFile(path, "utf8");
   }
 }
