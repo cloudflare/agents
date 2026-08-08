@@ -12,7 +12,8 @@ Think builds on packages that are installed alongside it:
 
 - `agents/docs/index.md` — Durable Objects, state, routing, sessions, scheduling, MCP, and shared agent primitives
 - `@cloudflare/codemode/docs/index.md` — sandboxed execution, tool providers, connectors, approvals, and snippets
-- `@cloudflare/shell/docs/index.md` — Workspace, filesystem operations, and the `state.*` and `git.*` providers used by Think's tools
+- `@cloudflare/shell/docs/index.md` — the default legacy workspace and snapshot Bash behavior
+- `@cloudflare/computer` — opt-in durable filesystem and Worker Shell providers
 - `create-think/README.md` — CLI commands, templates, and generated project structure
 
 ## Why Think
@@ -63,6 +64,27 @@ export default {
 ```
 
 That is it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. The built-in `read` tool reads text with line numbers and passes images/PDFs through to multimodal-capable models.
+
+## Workspace Providers
+
+Think keeps the legacy Shell workspace as its default. Existing applications,
+SQLite/R2 data, snapshot Bash behavior, and codemode programs continue to work
+without adaptation.
+
+Three entry points make provider selection explicit:
+
+- `@cloudflare/think/workspace-legacy` — the default legacy provider.
+- `@cloudflare/think/workspace` — a backend-free Computer workspace.
+- `@cloudflare/think/workspace-bash` — a Computer workspace with a regular
+  turn-level Worker Shell `bash` tool.
+
+All three expose Think's file tools and codemode's existing `state.*` interface.
+The Bash provider does not add a codemode `workspace.*` namespace. Computer and
+legacy Shell use separate storage layouts, and Think does not migrate data
+automatically.
+
+See [Tools](./tools.md#workspace-providers) for setup examples and Worker Shell
+runtime details.
 
 ## Think Framework
 
@@ -1285,7 +1307,10 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session`, `Workspace`, `skills` namespace           |
+| `@cloudflare/think`                     | `Think`, `Session`, default legacy `Workspace`, and `skills`  |
+| `@cloudflare/think/workspace-legacy`    | Explicit legacy Shell-compatible workspace                    |
+| `@cloudflare/think/workspace`           | Backend-free Computer workspace                               |
+| `@cloudflare/think/workspace-bash`      | Computer workspace with turn-level Worker Shell `bash`        |
 | `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
 | `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
@@ -1314,7 +1339,8 @@ Bundled with `@cloudflare/think`:
 
 | Package                | Notes                                                 |
 | ---------------------- | ----------------------------------------------------- |
-| `@cloudflare/shell`    | `Workspace` filesystem                                |
+| `@cloudflare/shell`    | Default legacy workspace                              |
+| `@cloudflare/computer` | Opt-in Computer workspace providers                   |
 | `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
 | `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
 | `aywson`               | Wrangler JSON/JSONC parsing for the framework plugin  |

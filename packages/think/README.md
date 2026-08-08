@@ -176,35 +176,71 @@ drill-in, and cleanup patterns.
 
 ## Built-in workspace
 
-Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash`) are automatically available to the model.
+Every Think agent gets `this.workspace` and the `read`, `write`, `edit`, `list`,
+`find`, `grep`, and `delete` tools. The default remains the legacy
+`@cloudflare/shell` workspace and also supplies `bash`, so existing SQLite and
+R2 data and the snapshot-based Bash behavior continue to work without changes.
 
-The `read` tool returns line-numbered text for text files. For images and PDFs, it keeps the persisted tool result compact and passes file bytes to multimodal-capable models using AI SDK content parts.
-The `bash` tool runs sandboxed shell workflows through `just-bash`, with network
-access disabled by default, and syncs changed files and empty directories back
-into the workspace. It snapshots up to 1,000 files by default, skips files larger
-than 1 MB, and treats skipped paths as protected during write-back. Set
-`workspaceBash = false` on your Think subclass to opt out, or pass an options
-object to tune limits, timeout, and network access.
+The `read` tool returns line-numbered text for text files. For images and PDFs,
+it keeps the persisted tool result compact and passes file bytes to
+multimodal-capable models using AI SDK content parts.
+
+Choose a workspace provider by overriding `workspace`:
+
+| Entry point                          | Storage and execution                                                                                  |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `@cloudflare/think/workspace-legacy` | The default Shell-compatible provider. Preserves existing SQLite/R2 storage and snapshot-based `bash`. |
+| `@cloudflare/think/workspace`        | A backend-free Computer workspace. Provides durable files but no turn-level execution tool.            |
+| `@cloudflare/think/workspace-bash`   | A Computer workspace with Worker Shell exposed as the turn-level `bash` tool.                          |
+
+The backend-free Computer provider only needs Durable Object storage:
 
 ```ts
+import { Think } from "@cloudflare/think";
+import { Workspace } from "@cloudflare/think/workspace";
+
 export class MyAgent extends Think<Env> {
-  getModel() { ... }
-  // this.workspace is ready to use — no setup needed
-  // workspace tools are auto-merged into every chat turn
+  override workspace = new Workspace({ storage: this.ctx.storage });
 }
 ```
 
-Override to add R2 spillover for large files:
+Use the Bash provider when the model needs direct shell access to the Computer
+filesystem:
 
 ```ts
+import { Think } from "@cloudflare/think";
+import { Workspace } from "@cloudflare/think/workspace-bash";
+
 export class MyAgent extends Think<Env> {
   override workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    r2: this.env.R2,
-    name: () => this.name
+    storage: this.ctx.storage,
+    binding: "MyAgent",
+    id: this.ctx.id.toString(),
+    backend: {
+      loader: this.env.LOADER,
+      ctx: this.ctx
+    }
   });
 }
+
+export { WorkspaceServiceProxy } from "@cloudflare/think/workspace-bash";
 ```
+
+`workspace-bash` requires a Worker Loader binding. Its loader-created Dynamic
+Worker disables outbound network access by default, operates directly on the
+durable filesystem without snapshots, and truncates returned output to 64 KiB
+by default. A custom backend `fetcher` owns its own network policy. Unlike the
+legacy Bash tool, Worker Shell does not use snapshot file limits or expose a
+per-call timeout.
+
+All providers expose the same codemode `state.*` interface through
+`createExecuteTool()`. Selecting `workspace-bash` adds regular turn-level
+`bash`; it does not add `workspace.bash()` or change codemode's namespace.
+
+Computer and legacy Shell use different storage layouts. Think does not migrate
+or copy existing data automatically. Keep the default provider, or import
+`@cloudflare/think/workspace-legacy` explicitly, when existing Shell data must
+remain available.
 
 ## Agent Skills
 
@@ -317,7 +353,10 @@ Script execution requires a Worker Loader binding:
 
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think`                     | `Think`, `Session`, and the default legacy `Workspace`        |
+| `@cloudflare/think/workspace-legacy`    | Explicit legacy Shell-compatible workspace                    |
+| `@cloudflare/think/workspace`           | Backend-free Computer workspace                               |
+| `@cloudflare/think/workspace-bash`      | Computer workspace with turn-level Worker Shell `bash`        |
 | `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
 | `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
@@ -1004,7 +1043,8 @@ getTools() {
 | `agents`                     | Cloudflare Agents SDK peer dependency                     |
 | `ai`                         | Vercel AI SDK v6 peer dependency                          |
 | `zod`                        | Schema validation peer dependency                         |
-| `@cloudflare/shell`          | Workspace filesystem                                      |
+| `@cloudflare/shell`          | Default legacy workspace                                  |
+| `@cloudflare/computer`       | Opt-in Computer workspace providers                       |
 | `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |
 | `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
 | `just-bash`                  | Bash skill script execution                               |

@@ -6,7 +6,7 @@ Think provides built-in workspace file tools on every turn, plus integration poi
 
 On every turn, Think merges tools from multiple sources. Later sources override earlier ones if names collide:
 
-1. **Workspace tools** — `read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash` (built-in)
+1. **Workspace tools** — `read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, and provider-supplied `bash`
 2. **`getTools()`** — your custom server-side tools
 3. **Extension tools** — tools from loaded extensions (prefixed by extension name)
 4. **Session tools** — `set_context`, `load_context`, `search_context` (from `configureSession`)
@@ -31,7 +31,7 @@ Every Think agent gets `this.workspace` — a virtual filesystem backed by the D
 | `find`   | Find files matching a glob pattern                                          |
 | `grep`   | Search file contents by regex or fixed string                               |
 | `delete` | Delete a file or directory                                                  |
-| `bash`   | Run a sandboxed Bash script against workspace files                         |
+| `bash`   | Run sandboxed shell commands when the selected provider supplies it         |
 
 The `bash` tool is enabled by default. It mounts workspace files into a
 `just-bash` virtual filesystem, runs with network access disabled, and writes
@@ -57,6 +57,57 @@ export class MyAgent extends Think<Env> {
   }
 }
 ```
+
+### Workspace Providers
+
+The root `Workspace` export and the default `Think.workspace` remain backed by
+`@cloudflare/shell`. This preserves existing SQLite and R2 data and the legacy
+snapshot-based Bash behavior.
+
+Use an explicit entry point to select another provider:
+
+- `@cloudflare/think/workspace-legacy` selects the default legacy provider.
+- `@cloudflare/think/workspace` selects a backend-free Computer workspace. It
+  provides the file tools but no `bash` tool.
+- `@cloudflare/think/workspace-bash` selects a Computer workspace with Worker
+  Shell exposed as the regular turn-level `bash` tool.
+
+```typescript
+import { Think } from "@cloudflare/think";
+import { Workspace } from "@cloudflare/think/workspace";
+
+export class MyAgent extends Think<Env> {
+  override workspace = new Workspace({ storage: this.ctx.storage });
+}
+```
+
+For Worker Shell, configure a Worker Loader and export its service proxy:
+
+```typescript
+import { Think } from "@cloudflare/think";
+import { Workspace } from "@cloudflare/think/workspace-bash";
+
+export class MyAgent extends Think<Env> {
+  override workspace = new Workspace({
+    storage: this.ctx.storage,
+    binding: "MyAgent",
+    id: this.ctx.id.toString(),
+    backend: { loader: this.env.LOADER, ctx: this.ctx }
+  });
+}
+
+export { WorkspaceServiceProxy } from "@cloudflare/think/workspace-bash";
+```
+
+Worker Shell operates directly on the durable filesystem instead of taking a
+snapshot. Outbound network access is disabled for loader-created workers by
+default, returned output is capped at 64 KiB by default, and there is no
+per-call timeout option. A custom backend `fetcher` controls its own network
+policy.
+
+Computer and legacy Shell use different storage layouts. Think does not migrate
+files automatically, so keep the legacy provider when existing Shell data must
+remain available.
 
 ### R2 Spillover
 
@@ -300,16 +351,19 @@ execute: createExecuteTool(this, { tools: myDomainTools });
 Or fully explicit options (no agent inference):
 
 ```typescript
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
-
 createExecuteTool({
   ctx: this.ctx,
+  workspace: this.workspace,
   tools: myDomainTools,
-  state: createWorkspaceStateBackend(this.workspace),
   browser: this.env.BROWSER,
   loader: this.env.LOADER
 });
 ```
+
+The legacy, backend-free Computer, and Computer Bash providers all expose the
+same `state.*` names, schemas, rich edit operations, generated types, and replay
+behavior. The Bash provider adds `bash` to normal Think turns only; codemode
+does not expose a `workspace.*` namespace.
 
 ### Approvals (human-in-the-loop)
 
