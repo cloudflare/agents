@@ -57,7 +57,7 @@
     "concurrently": "^10.0.3",
     "evalite": "^0.19.0",
     "fast-glob": "^3.3.3",
-    "nx": "^23.0.1",
+    "nx": "^23.0.2",
     "oxfmt": "^0.56.0",
     "oxlint": "^1.71.0",
     "partyserver": "^0.5.9",
