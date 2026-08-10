@@ -1722,10 +1722,9 @@ describe("Think — model message conversion", () => {
       ?.content?.find((part) => part.output?.type === "content")?.output;
 
     expect(toolResult?.value).toContainEqual({
-      type: "file-data",
+      type: "image-data",
       data: "iVBORw0KGgo=",
-      mediaType: "image/png",
-      filename: "screenshot"
+      mediaType: "image/png"
     });
   });
 });
