@@ -1085,6 +1085,33 @@ describe("useAgent hook", () => {
   });
 
   describe("sub-agent routing via `sub:` option", () => {
+    it("keeps a disabled placeholder child identity renderable", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <TestAgentComponent
+          options={{
+            agent: "TestSubAgentParent",
+            name: "placeholder-parent",
+            host,
+            protocol,
+            sub: [{ agent: "CounterSubAgent", name: "" }],
+            enabled: false
+          }}
+          onAgent={(agent) => {
+            capturedAgent = agent;
+          }}
+        />
+      );
+
+      await vi.waitFor(() => expect(capturedAgent).not.toBeNull());
+      expect(
+        container.querySelector('[data-testid="agent-status"]')?.textContent
+      ).toBe("connecting");
+      expect(capturedAgent!.getHttpUrl()).toContain("/sub/counter-sub-agent/");
+    });
+
     // Synchronous URL composition check. The sub-agent WebSocket path
     // is computed at render time, independent of the actual
     // connection handshake, so we can observe it via `getHttpUrl()`
@@ -1125,6 +1152,35 @@ describe("useAgent hook", () => {
       // And the full shape is root→leaf with the user path at the tail.
       expect(url).toMatch(
         /\/agents\/test-sub-agent-parent\/sub-url-parent\/sub\/counter-sub-agent\/sub-url-child\/custom-tail(\?|$)/
+      );
+    });
+
+    it("preserves URL-normalizable characters in a nested user path", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      await render(
+        <TestAgentComponent
+          options={{
+            agent: "TestSubAgentParent",
+            name: "sub-url-parent-unicode",
+            host,
+            protocol,
+            sub: [{ agent: "CounterSubAgent", name: "sub-url-child-unicode" }],
+            path: "rooms/日本語"
+          }}
+          onAgent={(agent) => {
+            capturedAgent = agent;
+          }}
+        />
+      );
+
+      await vi.waitFor(() => expect(capturedAgent).not.toBeNull(), {
+        timeout: 10000
+      });
+
+      expect(capturedAgent!.getHttpUrl()).toContain(
+        "/sub/counter-sub-agent/sub-url-child-unicode/rooms/日本語"
       );
     });
 

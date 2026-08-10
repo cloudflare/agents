@@ -98,6 +98,9 @@
     "just-bash": {
       "optional": true
     },
+    "react": {
+      "optional": true
+    },
     "vite": {
       "optional": true
     }
@@ -198,6 +201,11 @@
       "types": "./dist/chat/index.d.ts",
       "import": "./dist/chat/index.js",
       "require": "./dist/chat/index.js"
+    },
+    "./chat/transport": {
+      "types": "./dist/chat/transport.d.ts",
+      "import": "./dist/chat/transport.js",
+      "require": "./dist/chat/transport.js"
     },
     "./chat/react": {
       "types": "./dist/chat/react.d.ts",

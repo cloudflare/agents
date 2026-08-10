@@ -285,6 +285,46 @@ describe("BrowserConnector", () => {
     ).rejects.toThrow("execution context");
   });
 
+  it("validates tool arguments before starting browser work", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    await expect(
+      connector.executeTool(
+        "send",
+        {
+          method: "Runtime.enable",
+          sessionId: { sessionId: "target:target-1" }
+        },
+        { executionId: "exec-invalid" }
+      )
+    ).rejects.toThrow(
+      'Invalid arguments for cdp.send at sessionId: Instance type "object" is invalid. Expected "string".'
+    );
+    await expect(
+      connector.executeTool(
+        "attachToTarget",
+        {},
+        { executionId: "exec-invalid" }
+      )
+    ).rejects.toThrow(
+      'Invalid arguments for cdp.attachToTarget: Instance does not have required property "targetId".'
+    );
+    expect(requests).toHaveLength(0);
+  });
+
+  it("accepts omitted arguments for argumentless browser tools", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    const spec = (await connector.executeTool("spec", undefined)) as {
+      domains: Array<{ name: string }>;
+    };
+    expect(spec.domains.some((domain) => domain.name === "Page")).toBe(true);
+  });
+
   it("creates one session per execution and stores it under cdp:exec:<id>", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();

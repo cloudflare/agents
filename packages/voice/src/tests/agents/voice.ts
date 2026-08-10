@@ -648,6 +648,24 @@ export class TestEmptyResponseVoiceAgent extends VoiceBase {
   }
 }
 
+/**
+ * Reports the conversation history supplied to onTurn through its response.
+ * This lets protocol-level tests verify the VoiceTurnContext contract.
+ */
+export class TestContextVoiceAgent extends VoiceBase {
+  static options = { hibernate: false };
+
+  transcriber = new TestTranscriber();
+  tts = new TestTTS();
+
+  async onTurn(
+    _transcript: string,
+    context: VoiceTurnContext
+  ): Promise<string> {
+    return JSON.stringify(context.messages);
+  }
+}
+
 export class TestAiSdkFullStreamVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 

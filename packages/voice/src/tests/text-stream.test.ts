@@ -132,7 +132,7 @@ describe("iterateText", () => {
     expect(chunks).toEqual(["I can help.", " ", "The weather is warm"]);
   });
 
-  it("emits stream boundaries before later stream text deltas", async () => {
+  it("emits stream boundaries between and after text parts", async () => {
     async function* stream() {
       yield { type: "text-start", id: "a" };
       yield { type: "text-delta", id: "a", text: "I can help." };
@@ -148,7 +148,8 @@ describe("iterateText", () => {
       { type: "text", text: "I can help." },
       { type: "boundary" },
       { type: "text", text: " " },
-      { type: "text", text: "The weather is warm" }
+      { type: "text", text: "The weather is warm" },
+      { type: "boundary" }
     ]);
   });
 });

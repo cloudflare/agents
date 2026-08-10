@@ -1,5 +1,5 @@
-export { WebSocketChatTransport } from "agents/chat/react";
+export { WebSocketChatTransport } from "agents/chat/transport";
 export type {
   AgentConnection,
   WebSocketChatTransportOptions
-} from "agents/chat/react";
+} from "agents/chat/transport";

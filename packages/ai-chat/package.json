@@ -36,6 +36,14 @@
     "react": "^19.0.0",
     "zod": "^4.0.0"
   },
+  "peerDependenciesMeta": {
+    "@ai-sdk/react": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
