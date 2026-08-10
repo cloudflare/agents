@@ -1,0 +1,23 @@
+examples/codemode-rlm/src/baseline.ts
+  s_0b3003d5997402::t_44ab3ef6823244 1-7,105-113
+examples/codemode-rlm/test/baseline.test.ts
+  s_0b3003d5997402::t_05b51d6e4e0b97 1-37
+examples/codemode-rlm/vite.config.ts
+  s_0b3003d5997402::t_fe73001e2a749c 7-20,22-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5dd57a25f8a6c9da7d1251245a5632110e48f923",
+  "prompts": {},
+  "sessions": {
+    "s_0b3003d5997402": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd6b0-e1c0-7b61-ba71-7591b8469662",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
