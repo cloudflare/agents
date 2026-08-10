@@ -291,6 +291,24 @@ export default async function run(input: unknown, ctx: SkillRunContext) {
 }
 ```
 
+The Agents Vite plugin compiles bundled JavaScript and TypeScript scripts with
+esbuild before deployment. The runtime executes self-contained JavaScript and
+does not bundle raw TypeScript or multi-file scripts. Compile scripts from R2 or
+other dynamic sources in Node-based publish tooling, then upload the returned
+content unchanged:
+
+```ts
+import { compileSkillScript } from "agents/skills/compile";
+
+const compiled = await compileSkillScript(
+  "./skills/release-notes/scripts/format-release-notes.ts"
+);
+await skillsBucket.put(
+  "skills/release-notes/scripts/format-release-notes.ts",
+  compiled.content
+);
+```
+
 `ctx` is `{ skill, files, workspace, tools, output }`: `ctx.files` holds bundled
 text resources by relative path, `ctx.workspace` is gated by the workspace
 permission, `ctx.tools` exposes only the tools the runner was given, and
@@ -301,9 +319,9 @@ for artifacts (Python supports both `def run(input, ctx)` and CLI-style scripts)
 
 If `workspaceInstance` is provided, scripts get read-only workspace access by
 default. Workspace writes, tools, and network access are opt-in. Scripts default
-to a 30 second timeout, which can be overridden with `timeout`. TypeScript
-scripts are compiled with `@cloudflare/worker-bundler`; Python scripts run as
-Python Dynamic Workers; Bash scripts run through `just-bash`.
+to a 30 second timeout, which can be overridden with `timeout`. JavaScript and
+compiled TypeScript run as sandboxed Dynamic Workers, Python runs as a Python
+Dynamic Worker, and Bash runs through `just-bash`.
 
 Script execution requires a Worker Loader binding:
 
@@ -999,16 +1017,15 @@ getTools() {
 
 ## Runtime dependencies
 
-| Package                      | Notes                                                     |
-| ---------------------------- | --------------------------------------------------------- |
-| `agents`                     | Cloudflare Agents SDK peer dependency                     |
-| `ai`                         | Vercel AI SDK v6 peer dependency                          |
-| `zod`                        | Schema validation peer dependency                         |
-| `@cloudflare/shell`          | Workspace filesystem                                      |
-| `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |
-| `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
-| `just-bash`                  | Bash skill script execution                               |
-| `@chat-adapter/telegram`     | Required for Telegram messengers                          |
+| Package                  | Notes                                                     |
+| ------------------------ | --------------------------------------------------------- |
+| `agents`                 | Cloudflare Agents SDK peer dependency                     |
+| `ai`                     | Vercel AI SDK v6 peer dependency                          |
+| `zod`                    | Schema validation peer dependency                         |
+| `@cloudflare/shell`      | Workspace filesystem                                      |
+| `@cloudflare/codemode`   | Code execution, `createExecuteTool`, and JS skill scripts |
+| `just-bash`              | Bash skill script execution                               |
+| `@chat-adapter/telegram` | Required for Telegram messengers                          |
 
 ## Acknowledgments
 

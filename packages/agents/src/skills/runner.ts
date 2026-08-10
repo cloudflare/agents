@@ -290,6 +290,15 @@ function scriptModule(source: string, request: SkillScriptRequest): string {
   ].join("\n");
 }
 
+/** Return the local binding exported as default by an esbuild ESM bundle. */
+function findBundledDefaultExportBinding(source: string): string | null {
+  return (
+    source.match(
+      /\bexport\s*\{[^}]*\b([A-Za-z_$][\w$]*)\s+as\s+default\b[^}]*\}/m
+    )?.[1] ?? null
+  );
+}
+
 /**
  * Whether a script declares a default export, in either the raw author form
  * (`export default ...`) or the bundled form esbuild emits
@@ -298,7 +307,7 @@ function scriptModule(source: string, request: SkillScriptRequest): string {
 function hasDefaultExport(source: string): boolean {
   return (
     /^\s*export\s+default\s+/m.test(source) ||
-    /export\s*\{[^}]*\bas\s+default\b[^}]*\}/m.test(source)
+    findBundledDefaultExportBinding(source) !== null
   );
 }
 
@@ -316,12 +325,10 @@ function rewriteBundledSource(source: string): string {
   // exports, `export { helper, run as default }`. Extract the binding aliased
   // to `default` from anywhere in those blocks, then strip the (illegal-inside-
   // a-function) export statements and bind the captured name to `__skillRun`.
-  const defaultBinding = source.match(
-    /\bexport\s*\{[^}]*\b([A-Za-z_$][\w$]*)\s+as\s+default\b[^}]*\}/m
-  );
+  const defaultBinding = findBundledDefaultExportBinding(source);
   const stripped = stripStrayExports(source);
   if (defaultBinding) {
-    return `${stripped}\nconst __skillRun = ${defaultBinding[1]};`;
+    return `${stripped}\nconst __skillRun = ${defaultBinding};`;
   }
   return stripped;
 }
@@ -332,14 +339,20 @@ async function prepareJavaScriptSource(
 ): Promise<string> {
   // Skill scripts run directly in the sandbox; the runtime ships no in-Worker
   // bundler. Build-time compiled scripts (Agents Vite plugin / `compileSkillScript`
-  // from "agents/skills/compile") arrive as self-contained ESM. Normalize
-  // esbuild's `export { run as default }` (or a raw `export default`) into the
-  // `__skillRun` binding the wrapper expects.
+  // from "agents/skills/compile") arrive as self-contained ESM. Vite marks its
+  // resources as precompiled; dynamic sources can be recognized by the bundled
+  // default-export form emitted by compileSkillScript. Normalize either before
+  // extension and sibling-file checks because compiled output may retain a
+  // TypeScript path and its original sibling resources.
   const entryPrecompiled = (request.resources ?? []).some(
     (resource) =>
       resource.path === request.path && resource.precompiled === true
   );
-  if (entryPrecompiled) return rewriteBundledSource(request.source);
+  const hasBundledDefaultExport =
+    findBundledDefaultExportBinding(request.source) !== null;
+  if (entryPrecompiled || hasBundledDefaultExport) {
+    return rewriteBundledSource(request.source);
+  }
 
   // Count sibling script files to detect skills that span multiple modules.
   let scriptFileCount = 1;

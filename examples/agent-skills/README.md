@@ -57,20 +57,21 @@ export class SkillsAgent extends Think<Env> {
 ```
 
 The `agents/vite` plugin turns the local `src/skills/*/SKILL.md` directories
-into a `SkillSource` that Think can register at startup. The optional,
-experimental script runner executes the TypeScript file under `scripts/` in a
-sandboxed Worker, using `@cloudflare/worker-bundler` to compile TypeScript and
-bundle sibling script imports. JS/TS scripts are function-style
-(`export default async function run(input, ctx)`) and read bundled text files
-from `ctx.files`, call explicit `ctx.tools`, access `ctx.workspace`, and write
-scratch artifacts with `ctx.output.writeFile(name, content)`. The same runner
-also supports Python and Bash scripts via the path-based `/input.json` /
-`/skill` / `/output` contract — this example keeps it to TypeScript. Script
-execution requires the `worker_loaders` binding shown in `wrangler.jsonc`.
-Passing `workspaceInstance` gives scripts read-only workspace access by default;
-opt in to `workspace: "read-write"`, tools, or network only when a skill needs
-them. The default 30 second timeout leaves room for TypeScript compilation and
-Dynamic Worker cold starts in local development.
+into a `SkillSource` that Think can register at startup. It compiles JavaScript
+and TypeScript scripts with esbuild during the Vite build, bundling sibling
+imports before deployment. The optional, experimental script runner executes
+the resulting self-contained JavaScript in a sandboxed Worker. JS/TS scripts
+are function-style (`export default async function run(input, ctx)`) and read
+bundled text files from `ctx.files`, call explicit `ctx.tools`, access
+`ctx.workspace`, and write scratch artifacts with
+`ctx.output.writeFile(name, content)`. The same runner also supports Python and
+Bash scripts via the path-based `/input.json` / `/skill` / `/output` contract —
+this example keeps it to TypeScript. Script execution requires the
+`worker_loaders` binding shown in `wrangler.jsonc`. Passing `workspaceInstance`
+gives scripts read-only workspace access by default; opt in to
+`workspace: "read-write"`, tools, or network only when a skill needs them. The
+default 30 second timeout leaves room for script execution and Dynamic Worker
+cold starts in local development.
 
 ## Related
 

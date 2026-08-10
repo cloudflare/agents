@@ -1,3 +1,4 @@
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import * as skills from "../skills";
 
@@ -12,6 +13,16 @@ type FakeBucket = R2Bucket & {
   getCalls: string[];
   setObjects(objects: FakeObject[]): void;
 };
+
+type ExecutableTool = {
+  execute(input: Record<string, unknown>): Promise<unknown> | unknown;
+};
+
+function executableTool(tool: unknown): ExecutableTool {
+  // SAFETY: SkillRegistry only registers run_skill_script with an execute
+  // function. The AI SDK ToolSet union does not expose that shared property.
+  return tool as ExecutableTool;
+}
 
 function fakeBucket(initialObjects: FakeObject[]): FakeBucket {
   let objects = initialObjects;
@@ -165,6 +176,62 @@ describe("R2 Think skills", () => {
       ]
     });
   });
+
+  it.each([
+    {
+      scriptPath: "scripts/run.js",
+      siblingScripts: []
+    },
+    {
+      scriptPath: "scripts/run.ts",
+      siblingScripts: [
+        {
+          key: "skills/demo/scripts/helper.ts",
+          content: "export function helper(value: string) { return value; }"
+        }
+      ]
+    }
+  ])(
+    "runs compileSkillScript output loaded from R2 at $scriptPath",
+    async ({ scriptPath, siblingScripts }) => {
+      const compiledSource = `function run(input) {
+  return input.text.toUpperCase();
+}
+export {
+  run as default
+};`;
+      const source = skills.r2(
+        fakeBucket([
+          {
+            key: "skills/demo/SKILL.md",
+            content:
+              "---\nname: demo\ndescription: Run a compiled script.\n---\nRun the script.\n"
+          },
+          {
+            key: `skills/demo/${scriptPath}`,
+            content: compiledSource
+          },
+          ...siblingScripts
+        ]),
+        { prefix: "skills/" }
+      );
+      const registry = new skills.SkillRegistry(
+        [source],
+        skills.runner({ loader: env.LOADER })
+      );
+      await registry.load();
+
+      const result = await executableTool(
+        registry.tools().run_skill_script
+      ).execute({
+        name: "demo",
+        path: scriptPath,
+        input: { text: "hello" }
+      });
+
+      expect(result).toBe("HELLO");
+    }
+  );
 
   it("reads resources by skill name and relative path", async () => {
     const source = skills.r2(bucket, { prefix: "skills/" });

@@ -956,9 +956,25 @@ Script execution is opt-in and requires a Worker Loader binding:
 ```
 
 `skills.runner()` is experimental and runs JavaScript, TypeScript, Python, and
-Bash scripts under `scripts/`. TypeScript is compiled with
-`@cloudflare/worker-bundler`; Python runs as Python Dynamic Workers; Bash runs
-through `just-bash`.
+Bash scripts under `scripts/`. The Agents Vite plugin compiles bundled JavaScript
+and TypeScript with esbuild before deployment. The runtime executes
+self-contained JavaScript and does not bundle raw TypeScript or multi-file
+scripts.
+
+For skills served from R2 or another dynamic source, compile the entry point in
+Node-based publish tooling and upload the returned content unchanged:
+
+```typescript
+import { compileSkillScript } from "agents/skills/compile";
+
+const compiled = await compileSkillScript(
+  "./skills/release-notes/scripts/format-release-notes.ts"
+);
+await skillsBucket.put(
+  "skills/release-notes/scripts/format-release-notes.ts",
+  compiled.content
+);
+```
 
 JavaScript and TypeScript scripts are function-style:
 
@@ -1320,8 +1336,10 @@ Bundled with `@cloudflare/think`:
 | `aywson`               | Wrangler JSON/JSONC parsing for the framework plugin  |
 
 The Agent Skills engine and its script runner live in
-[`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so skill scripts pull
-`@cloudflare/worker-bundler` and `just-bash` through `agents`, not Think).
+[`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md).
+JavaScript skill scripts execute through `@cloudflare/codemode`, Bash scripts
+execute through `just-bash`, and build-time JavaScript and TypeScript compilation
+uses esbuild through `agents/skills/compile`.
 
 ## Docs
 

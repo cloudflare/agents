@@ -251,8 +251,12 @@ removed); `ctx.workspace` exposes async `readFile`/`listFiles`/`glob`/`stat`/
 `writeFile` gated by the workspace permission; `ctx.tools` exposes
 `tools.call(name, input)` and `tools.<name>(input)` for explicitly granted
 tools; and `ctx.output.writeFile(name, content)` records scratch artifacts
-returned by `run_skill_script` without mutating the workspace. TypeScript and
-multi-file scripts are compiled/bundled with `@cloudflare/worker-bundler`.
+returned by `run_skill_script` without mutating the workspace. The Agents Vite
+plugin compiles bundled JavaScript and TypeScript with esbuild before deployment.
+R2 and other dynamic sources use `compileSkillScript` in Node-based publish
+tooling and store its self-contained ESM output. The runner recognizes esbuild's
+`export { binding as default }` bundle form, so dynamic sources do not need to
+preserve the optional `precompiled` resource descriptor.
 
 Python (`.py`) and Bash (`.sh`/`.bash`) keep the path-based contract, matching
 CLI-oriented Agent Skills. The runner mounts:

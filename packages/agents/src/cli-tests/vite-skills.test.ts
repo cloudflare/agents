@@ -226,7 +226,9 @@ describe("compileSkillScript", () => {
     expect(result.content).not.toContain('from "./helper"');
     expect(result.content).not.toContain("type Input");
     expect(result.content).toContain("toUpperCase()");
-    expect(result.content).toMatch(/as default/);
+    expect(result.content).toMatch(
+      /export\s*\{[\s\S]*\brun\s+as\s+default\b[\s\S]*\}/
+    );
   });
 
   it("throws when the entry file does not exist", async () => {
