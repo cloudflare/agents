@@ -24,8 +24,8 @@ export interface SkillResourceDescriptor {
   /**
    * Set when a source preserves that a script was compiled to self-contained
    * JavaScript ahead of time. The Agents Vite plugin sets this for bundled
-   * skills; dynamic sources may omit it because the runner also recognizes the
-   * ESM bundle form emitted by `compileSkillScript`.
+   * skills; dynamic sources may omit it when they preserve the generated header
+   * and ESM bundle form emitted by `compileSkillScript`.
    */
   precompiled?: boolean;
 }

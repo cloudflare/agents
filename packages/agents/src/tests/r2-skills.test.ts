@@ -194,7 +194,8 @@ describe("R2 Think skills", () => {
   ])(
     "runs compileSkillScript output loaded from R2 at $scriptPath",
     async ({ scriptPath, siblingScripts }) => {
-      const compiledSource = `function run(input) {
+      const compiledSource = `// @cloudflare/agents compiled skill script v1
+function run(input) {
   return input.text.toUpperCase();
 }
 export {

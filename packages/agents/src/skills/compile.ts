@@ -1,4 +1,5 @@
 import { build } from "esbuild";
+import { COMPILED_SKILL_SCRIPT_HEADER } from "./compiled-script-format";
 
 /**
  * Build-time skill-script compiler.
@@ -19,7 +20,10 @@ import { build } from "esbuild";
 const COMPILABLE_SCRIPT_EXTENSIONS = new Set([".js", ".mjs", ".ts", ".tsx"]);
 
 export interface CompiledSkillScript {
-  /** Self-contained ESM source, ready to embed and run without a bundler. */
+  /**
+   * Self-contained ESM source with a generated format header. Upload this
+   * content unchanged so dynamic skill sources remain recognizable.
+   */
   content: string;
   /** Always `true`; mirrors the `precompiled` flag on skill resources. */
   precompiled: true;
@@ -78,5 +82,8 @@ export async function compileSkillScript(
     );
   }
 
-  return { content: output.text, precompiled: true };
+  return {
+    content: `${COMPILED_SKILL_SCRIPT_HEADER}\n${output.text}`,
+    precompiled: true
+  };
 }

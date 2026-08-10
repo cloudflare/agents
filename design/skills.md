@@ -254,9 +254,10 @@ tools; and `ctx.output.writeFile(name, content)` records scratch artifacts
 returned by `run_skill_script` without mutating the workspace. The Agents Vite
 plugin compiles bundled JavaScript and TypeScript with esbuild before deployment.
 R2 and other dynamic sources use `compileSkillScript` in Node-based publish
-tooling and store its self-contained ESM output. The runner recognizes esbuild's
-`export { binding as default }` bundle form, so dynamic sources do not need to
-preserve the optional `precompiled` resource descriptor.
+tooling and store its self-contained ESM output unchanged. The compiler prepends
+an Agents skill-script format header, and the runner requires that header plus
+esbuild's `export { binding as default }` bundle form. Dynamic sources therefore
+do not need to preserve the optional `precompiled` resource descriptor.
 
 Python (`.py`) and Bash (`.sh`/`.bash`) keep the path-based contract, matching
 CLI-oriented Agent Skills. The runner mounts:

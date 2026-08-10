@@ -146,6 +146,50 @@ export default function run(input: { text: string }) {
     ).rejects.toThrow("must be compiled to a self-contained JavaScript module");
   });
 
+  it.each([
+    {
+      matchLocation: "an export statement",
+      source: `function run(input) {
+  return input.text.toUpperCase();
+}
+export { run as default };`
+    },
+    {
+      matchLocation: "a comment",
+      source: `// export { run as default }
+export default function run(input: { text: string }) {
+  return input.text.toUpperCase();
+}`
+    },
+    {
+      matchLocation: "a string",
+      source: `const example = "export { run as default }";
+export default function run(input: { text: string }) {
+  return input.text.toUpperCase() + example.length;
+}`
+    }
+  ])(
+    "requires the compiled script header when the export shape appears in $matchLocation",
+    async ({ source }) => {
+      const runner = skills.runner({ loader: env.LOADER });
+
+      await expect(
+        runner.run({
+          skill: {
+            name: "unmarked-script",
+            description: "Script without the generated header.",
+            body: "Run the script."
+          },
+          path: "scripts/run.ts",
+          input: { text: "hello" },
+          source
+        })
+      ).rejects.toThrow(
+        "must be compiled to a self-contained JavaScript module"
+      );
+    }
+  );
+
   it("runs a precompiled bundled script (esbuild `export { run as default }` form)", async () => {
     const runner = skills.runner({
       loader: env.LOADER

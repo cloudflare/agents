@@ -295,7 +295,7 @@ The Agents Vite plugin compiles bundled JavaScript and TypeScript scripts with
 esbuild before deployment. The runtime executes self-contained JavaScript and
 does not bundle raw TypeScript or multi-file scripts. Compile scripts from R2 or
 other dynamic sources in Node-based publish tooling, then upload the returned
-content unchanged:
+content unchanged, including its generated format header:
 
 ```ts
 import { compileSkillScript } from "agents/skills/compile";

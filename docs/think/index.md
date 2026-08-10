@@ -962,7 +962,8 @@ self-contained JavaScript and does not bundle raw TypeScript or multi-file
 scripts.
 
 For skills served from R2 or another dynamic source, compile the entry point in
-Node-based publish tooling and upload the returned content unchanged:
+Node-based publish tooling and upload the returned content unchanged. The
+compiler prepends the format header used to recognize the generated bundle:
 
 ```typescript
 import { compileSkillScript } from "agents/skills/compile";

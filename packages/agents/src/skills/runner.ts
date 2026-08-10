@@ -3,6 +3,7 @@ import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import type { ToolProvider } from "@cloudflare/codemode";
 import { Bash, defineCommand } from "just-bash";
 import type { ToolSet } from "ai";
+import { COMPILED_SKILL_SCRIPT_HEADER } from "./compiled-script-format";
 import type {
   SkillScriptRequest,
   SkillScriptRunner,
@@ -340,17 +341,19 @@ async function prepareJavaScriptSource(
   // Skill scripts run directly in the sandbox; the runtime ships no in-Worker
   // bundler. Build-time compiled scripts (Agents Vite plugin / `compileSkillScript`
   // from "agents/skills/compile") arrive as self-contained ESM. Vite marks its
-  // resources as precompiled; dynamic sources can be recognized by the bundled
-  // default-export form emitted by compileSkillScript. Normalize either before
-  // extension and sibling-file checks because compiled output may retain a
-  // TypeScript path and its original sibling resources.
+  // resources as precompiled; compileSkillScript marks output from dynamic
+  // sources with a generated header. Require both that header and esbuild's
+  // bundled default-export form before trusting source without a descriptor.
+  // Normalize recognized output before extension and sibling-file checks because
+  // compiled output may retain a TypeScript path and its original resources.
   const entryPrecompiled = (request.resources ?? []).some(
     (resource) =>
       resource.path === request.path && resource.precompiled === true
   );
-  const hasBundledDefaultExport =
+  const hasCompiledSkillScriptFormat =
+    request.source.startsWith(`${COMPILED_SKILL_SCRIPT_HEADER}\n`) &&
     findBundledDefaultExportBinding(request.source) !== null;
-  if (entryPrecompiled || hasBundledDefaultExport) {
+  if (entryPrecompiled || hasCompiledSkillScriptFormat) {
     return rewriteBundledSource(request.source);
   }
 
