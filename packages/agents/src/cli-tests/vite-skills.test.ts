@@ -224,7 +224,7 @@ describe("compileSkillScript", () => {
 
     expect(result.precompiled).toBe(true);
     expect(result.content).toMatch(
-      /^\/\/ @cloudflare\/agents compiled skill script v1\n/
+      /^\/\/ cloudflare-agents:compiled-skill-script:v1\n/
     );
     expect(result.content).not.toContain('from "./helper"');
     expect(result.content).not.toContain("type Input");

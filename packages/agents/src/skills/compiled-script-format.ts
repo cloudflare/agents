@@ -3,5 +3,5 @@
  * the build-time compiled script format without relying on JavaScript syntax
  * alone.
  */
-export const COMPILED_SKILL_SCRIPT_HEADER =
-  "// @cloudflare/agents compiled skill script v1";
+export const COMPILED_SKILL_SCRIPT_FORMAT_V1 =
+  "// cloudflare-agents:compiled-skill-script:v1";

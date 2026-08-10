@@ -3,7 +3,7 @@ import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import type { ToolProvider } from "@cloudflare/codemode";
 import { Bash, defineCommand } from "just-bash";
 import type { ToolSet } from "ai";
-import { COMPILED_SKILL_SCRIPT_HEADER } from "./compiled-script-format";
+import { COMPILED_SKILL_SCRIPT_FORMAT_V1 } from "./compiled-script-format";
 import type {
   SkillScriptRequest,
   SkillScriptRunner,
@@ -351,7 +351,7 @@ async function prepareJavaScriptSource(
       resource.path === request.path && resource.precompiled === true
   );
   const hasCompiledSkillScriptFormat =
-    request.source.startsWith(`${COMPILED_SKILL_SCRIPT_HEADER}\n`) &&
+    request.source.startsWith(`${COMPILED_SKILL_SCRIPT_FORMAT_V1}\n`) &&
     findBundledDefaultExportBinding(request.source) !== null;
   if (entryPrecompiled || hasCompiledSkillScriptFormat) {
     return rewriteBundledSource(request.source);

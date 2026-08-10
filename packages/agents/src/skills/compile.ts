@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { COMPILED_SKILL_SCRIPT_HEADER } from "./compiled-script-format";
+import { COMPILED_SKILL_SCRIPT_FORMAT_V1 } from "./compiled-script-format";
 
 /**
  * Build-time skill-script compiler.
@@ -83,7 +83,7 @@ export async function compileSkillScript(
   }
 
   return {
-    content: `${COMPILED_SKILL_SCRIPT_HEADER}\n${output.text}`,
+    content: `${COMPILED_SKILL_SCRIPT_FORMAT_V1}\n${output.text}`,
     precompiled: true
   };
 }
