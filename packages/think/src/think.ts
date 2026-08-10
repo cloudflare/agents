@@ -13474,9 +13474,9 @@ export class Think<
   }
 
   /**
-   * Replace a paused execute-tool output in the transcript with the
-   * execution's new outcome and kick the auto-continuation so the model sees
-   * it.
+   * Replace a paused execute-tool or durable-action output in the transcript
+   * with the execution's new outcome and kick the auto-continuation so the
+   * model sees it.
    *
    * When no paused part carries `executionId` — the output was already
    * replaced from another tab, or compaction summarized the part away — the
@@ -13501,6 +13501,9 @@ export class Think<
       } catch {
         summary = String(output);
       }
+      const outcomeSource = executionId.startsWith(ACTION_PAUSE_ID_PREFIX)
+        ? "durable action"
+        : "execute tool";
       await this._appendMessageToHistory({
         id: `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${crypto.randomUUID()}`,
         role: "system",
@@ -13508,7 +13511,7 @@ export class Think<
           {
             type: "text",
             text:
-              `[execute tool] The paused execution "${executionId}" was ` +
+              `[${outcomeSource}] The paused execution "${executionId}" was ` +
               `resolved, but its tool call is no longer in the transcript ` +
               `(it may have been compacted). Outcome: ${summary}`
           }
