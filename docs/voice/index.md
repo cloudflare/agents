@@ -177,7 +177,7 @@ Custom transcriber sessions can implement `waitUntilReady(): Promise<void>` when
 
 ### `onTurn(transcript, context)`
 
-**Required.** Called when the user finishes speaking and the transcript is ready.
+**Required.** Called when the user finishes speaking and the transcript is ready. `context.messages` contains completed conversation history before this transcript. Append `transcript` exactly once when constructing an LLM message list.
 
 Return a `string`, `AsyncIterable<string>`, or `ReadableStream` for streaming responses:
 
@@ -217,11 +217,11 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
 
 The `context` object provides:
 
-| Field        | Type                                       | Description                        |
-| ------------ | ------------------------------------------ | ---------------------------------- |
-| `connection` | `Connection`                               | The WebSocket connection           |
-| `messages`   | `Array<{ role: string; content: string }>` | Conversation history from SQLite   |
-| `signal`     | `AbortSignal`                              | Aborted on interrupt or disconnect |
+| Field        | Type                                       | Description                             |
+| ------------ | ------------------------------------------ | --------------------------------------- |
+| `connection` | `Connection`                               | The WebSocket connection                |
+| `messages`   | `Array<{ role: string; content: string }>` | Completed history before the transcript |
+| `signal`     | `AbortSignal`                              | Aborted on interrupt or disconnect      |
 
 ### Lifecycle Hooks
 
@@ -705,10 +705,10 @@ const { metrics } = useVoiceAgent({ agent: "MyAgent" });
 
 ## Conversation History
 
-`withVoice` automatically persists conversation messages to SQLite. Access history in your `onTurn` via `context.messages`, or directly:
+`withVoice` automatically persists conversation messages to SQLite. In `onTurn()`, `context.messages` is a snapshot of the completed history before the current transcript. The pipeline persists the current transcript before invoking the hook, so a direct `getConversationHistory()` call inside `onTurn()` includes it.
 
 ```typescript
-// Get history (most recent N messages)
+// Get stored history, including the current transcript during onTurn()
 const history = this.getConversationHistory(20);
 
 // Manually save a message
