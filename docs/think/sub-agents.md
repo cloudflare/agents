@@ -437,7 +437,7 @@ onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions {
 
 Assign a `chatRecovery` object to tune how long recovery is allowed to run and when it is given up on. A turn that keeps making forward progress survives unbounded interruption — duration is not a bound — as long as it stays under the `maxRecoveryWork` backstop. Recovery is only sealed by one of the limits below.
 
-`chatRecovery = false` is no longer supported. If automatic continuation is unsafe, return `{ continue: false }` from `onChatRecovery()`. For cancellation that must survive hibernation, store cancellation intent durably and check it in that hook. See [Migrating from `chatRecovery = false`](../agents/chat-agents.md#migrating-from-chatrecovery--false) for side-effect and cost guidance.
+`chatRecovery = false` is no longer supported. If automatic continuation is unsafe, return `{ continue: false }` from `onChatRecovery()`. For cancellation that must survive hibernation, store cancellation intent durably and check it in that hook. See [Controlling automatic continuation](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#controlling-automatic-continuation) for side-effect and cost guidance.
 
 ```typescript
 export class MyAgent extends Think<Env> {
