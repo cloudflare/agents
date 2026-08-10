@@ -7,9 +7,9 @@
  * The mock model:
  *  - with no execute result in the prompt, calls the `execute` tool with the
  *    code the test configured (`setExecuteCode`);
- *  - otherwise emits text reporting every execution status it can see in the
- *    prompt (`seen:<status,...>`), so tests can assert what the model
- *    observed on each (auto-)continuation.
+ *  - otherwise emits text reporting every execution status and orphaned
+ *    execution-outcome role it can see in the prompt, so tests can assert what
+ *    the model observed on each (auto-)continuation.
  */
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
@@ -37,6 +37,25 @@ function statusesInPrompt(options: Record<string, unknown>): string[] {
     if (!seen.includes(match[1])) seen.push(match[1]);
   }
   return seen;
+}
+
+function executionOutcomeRolesInPrompt(
+  options: Record<string, unknown>
+): string[] {
+  const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+  const roles: string[] = [];
+  for (const message of messages) {
+    if (typeof message !== "object" || message === null) continue;
+    const candidate = message as Record<string, unknown>;
+    if (
+      typeof candidate.role === "string" &&
+      JSON.stringify(candidate.content ?? "").includes("[execute tool]") &&
+      !roles.includes(candidate.role)
+    ) {
+      roles.push(candidate.role);
+    }
+  }
+  return roles;
 }
 
 function enqueueExecuteCall(
@@ -92,7 +111,9 @@ function createHitlMockModel(agent: ThinkExecuteHitlAgent): LanguageModel {
             controller.enqueue({
               type: "text-delta",
               id,
-              delta: `seen:${statusesInPrompt(options).join(",")}`
+              delta:
+                `seen:${statusesInPrompt(options).join(",")};` +
+                `execution-outcome-roles:${executionOutcomeRolesInPrompt(options).join(",")}`
             });
             controller.enqueue({ type: "text-end", id });
             controller.enqueue({

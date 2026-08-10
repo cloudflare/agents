@@ -1916,10 +1916,12 @@ const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
 const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
 
 /**
- * Present legacy execution outcome notes to providers as user context. Older
- * Think releases persisted these notes as arbitrarily placed system messages,
- * which current AI SDK versions and strict providers reject. Storage remains
- * unchanged so existing session trees and client history do not need migration.
+ * Present framework-authored execution outcome notes to providers as user
+ * context. Think persists these notes as system messages so clients and
+ * recovery do not mistake them for human input, but AI SDK v7 and strict
+ * providers reject system messages in arbitrary transcript
+ * positions. The provider-only projection leaves current and legacy session
+ * history unchanged.
  */
 function toProviderSafeExecutionOutcomeMessage(message: UIMessage): UIMessage {
   return message.role === "system" &&
@@ -13479,10 +13481,10 @@ export class Think<
    * When no paused part carries `executionId` — the output was already
    * replaced from another tab, or compaction summarized the part away — the
    * runtime has still durably applied the approval/rejection, so the outcome
-   * must not be dropped: it is appended as user context instead, and the
-   * continuation still fires so the model can act on it. The note inherits the
-   * latest user metadata so tools and channel policy keep the approving turn's
-   * trusted context.
+   * must not be dropped: it is appended as a framework-authored system note,
+   * and the continuation still fires so the model can act on it. Provider
+   * assembly projects this narrowly identified note to ordinary user context
+   * without changing its durable authorship.
    */
   private async _applyExecutionOutcome(
     executionId: string,
@@ -13499,10 +13501,9 @@ export class Think<
       } catch {
         summary = String(output);
       }
-      const metadata = this._latestUserMessageMetadata(this.messages);
       await this._appendMessageToHistory({
         id: `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${crypto.randomUUID()}`,
-        role: "user",
+        role: "system",
         parts: [
           {
             type: "text",
@@ -13511,8 +13512,7 @@ export class Think<
               `resolved, but its tool call is no longer in the transcript ` +
               `(it may have been compacted). Outcome: ${summary}`
           }
-        ],
-        ...(metadata ? { metadata } : {})
+        ]
       } as UIMessage);
     } else {
       await this._enqueueInteractionApply(() =>

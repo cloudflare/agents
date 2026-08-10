@@ -361,8 +361,8 @@ describe("Think HITL — approve/reject paused executions", () => {
     // The runtime still applied the approval — the gated tool ran…
     expect(await agent.gatedCallCount()).toBe(1);
 
-    // …and the outcome was not dropped: it landed as provider-safe user
-    // context rather than a system instruction.
+    // …and the outcome was not dropped: it remained a framework-authored
+    // system note in durable history.
     await waitUntil(async () =>
       (await agent.executionOutcomeNotes()).some(
         (note) =>
@@ -373,18 +373,22 @@ describe("Think HITL — approve/reject paused executions", () => {
       candidate.id.includes(executionId)
     );
     expect(note?.id).toMatch(new RegExp(`^exec-outcome-${executionId}-`));
-    expect(note?.role).toBe("user");
+    expect(note?.role).toBe("system");
     expect(note?.text).toContain(
       `[execute tool] The paused execution "${executionId}" was resolved, ` +
         `but its tool call is no longer in the transcript (it may have been ` +
         `compacted). Outcome: `
     );
     expect(note?.text).toContain("completed");
-    expect(note?.metadataOrigin).toBe("original-user-turn");
+    expect(note?.metadataOrigin).toBeUndefined();
 
-    // The auto-continuation consumed the fallback context successfully.
+    // The auto-continuation consumed the fallback successfully after the
+    // provider boundary projected it to ordinary user context.
     await waitUntil(async () =>
       (await agent.lastAssistantText()).includes("completed")
+    );
+    expect(await agent.lastAssistantText()).toContain(
+      "execution-outcome-roles:user"
     );
 
     ws.close();
@@ -400,6 +404,9 @@ describe("Think HITL — approve/reject paused executions", () => {
 
     await waitUntil(async () =>
       (await agent.lastAssistantText()).includes("completed")
+    );
+    expect(await agent.lastAssistantText()).toContain(
+      "execution-outcome-roles:user"
     );
 
     ws.close();

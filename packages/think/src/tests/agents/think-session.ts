@@ -3668,8 +3668,8 @@ function createDurablePauseMockModel(): LanguageModel {
           (m as Record<string, unknown>).role === "tool"
       );
       // Only park when a user explicitly asked for it on this turn — so a
-      // post-resolution continuation (driven by framework user context, not a
-      // fresh user ask) responds with text instead of re-parking.
+      // post-resolution continuation (driven by provider-projected framework
+      // context, not a fresh user ask) responds with text instead of re-parking.
       const userAskedToPause = messages.some((m: unknown) => {
         if (typeof m !== "object" || m === null) return false;
         const mm = m as Record<string, unknown>;
