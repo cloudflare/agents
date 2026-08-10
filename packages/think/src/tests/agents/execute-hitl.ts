@@ -17,20 +17,18 @@ import { z } from "zod";
 import { Think } from "../../think";
 import { createExecuteTool } from "../../tools/execute";
 
-function promptHasExecuteResult(options: Record<string, unknown>): boolean {
-  const messages = (options as { prompt?: unknown[] }).prompt ?? [];
-  return messages.some(
-    (m: unknown) =>
-      typeof m === "object" &&
-      m !== null &&
-      (m as Record<string, unknown>).role === "tool"
-  );
+type HitlLanguageModelCallOptions = Parameters<
+  Extract<LanguageModel, { specificationVersion: "v3" }>["doStream"]
+>[0];
+
+function promptHasExecuteResult(
+  options: HitlLanguageModelCallOptions
+): boolean {
+  return options.prompt.some((message) => message.role === "tool");
 }
 
-function statusesInPrompt(options: Record<string, unknown>): string[] {
-  const serialized = JSON.stringify(
-    (options as { prompt?: unknown[] }).prompt ?? []
-  );
+function statusesInPrompt(options: HitlLanguageModelCallOptions): string[] {
+  const serialized = JSON.stringify(options.prompt);
   const seen: string[] = [];
   const re = /\\?"status\\?"\s*:\s*\\?"(completed|paused|rejected|error)\\?"/g;
   for (const match of serialized.matchAll(re)) {
@@ -40,19 +38,15 @@ function statusesInPrompt(options: Record<string, unknown>): string[] {
 }
 
 function executionOutcomeRolesInPrompt(
-  options: Record<string, unknown>
+  options: HitlLanguageModelCallOptions
 ): string[] {
-  const messages = (options as { prompt?: unknown[] }).prompt ?? [];
   const roles: string[] = [];
-  for (const message of messages) {
-    if (typeof message !== "object" || message === null) continue;
-    const candidate = message as Record<string, unknown>;
+  for (const message of options.prompt) {
     if (
-      typeof candidate.role === "string" &&
-      JSON.stringify(candidate.content ?? "").includes("[execute tool]") &&
-      !roles.includes(candidate.role)
+      JSON.stringify(message.content).includes("[execute tool]") &&
+      !roles.includes(message.role)
     ) {
-      roles.push(candidate.role);
+      roles.push(message.role);
     }
   }
   return roles;
@@ -89,7 +83,7 @@ function createHitlMockModel(agent: ThinkExecuteHitlAgent): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented");
     },
-    doStream(options: Record<string, unknown>) {
+    doStream(options: HitlLanguageModelCallOptions) {
       callCount++;
       const step = callCount;
       const stream = new ReadableStream({
