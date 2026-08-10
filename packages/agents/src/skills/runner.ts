@@ -3,7 +3,7 @@ import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import type { ToolProvider } from "@cloudflare/codemode";
 import { Bash, defineCommand } from "just-bash";
 import type { ToolSet } from "ai";
-import { COMPILED_SKILL_SCRIPT_FORMAT_V1 } from "./compiled-script-format";
+import { hasCompiledSkillScriptFormatV1 } from "./compiled-script-format";
 import type {
   SkillScriptRequest,
   SkillScriptRunner,
@@ -250,7 +250,7 @@ function bashFiles(
  * object from the host bridge proxy (`__host`), and invoke it.
  */
 function scriptModule(source: string, request: SkillScriptRequest): string {
-  const runnableSource = stripStrayExports(
+  const runnableSource = stripFinalExportBlock(
     source.replace(/^\s*export\s+default\s+/m, "const __skillRun = ")
   );
   const skillMeta = skillScriptContext(request).skill;
@@ -291,12 +291,32 @@ function scriptModule(source: string, request: SkillScriptRequest): string {
   ].join("\n");
 }
 
+type FinalExportBlock = {
+  readonly exports: string;
+  readonly start: number;
+  readonly end: number;
+};
+
+/** Find the final ESM export-list statement emitted by esbuild. */
+function findFinalExportBlock(source: string): FinalExportBlock | null {
+  const match = source.match(
+    /(?:^|\r?\n)[\t ]*export[\t ]*\{([^}]*)\}[\t ]*;?[\t ]*(?:\r?\n)?$/
+  );
+  if (match?.index === undefined || match[1] === undefined) return null;
+
+  return {
+    exports: match[1],
+    start: match.index,
+    end: match.index + match[0].length
+  };
+}
+
 /** Return the local binding exported as default by an esbuild ESM bundle. */
 function findBundledDefaultExportBinding(source: string): string | null {
+  const exportBlock = findFinalExportBlock(source);
   return (
-    source.match(
-      /\bexport\s*\{[^}]*\b([A-Za-z_$][\w$]*)\s+as\s+default\b[^}]*\}/m
-    )?.[1] ?? null
+    exportBlock?.exports.match(/\b([A-Za-z_$][\w$]*)\s+as\s+default\b/)?.[1] ??
+    null
   );
 }
 
@@ -312,22 +332,20 @@ function hasDefaultExport(source: string): boolean {
   );
 }
 
-/**
- * Remove `export { ... }` blocks, which are illegal inside the function wrapper
- * the runner builds around skill scripts.
- */
-function stripStrayExports(source: string): string {
-  return source.replace(/\n?export\s*\{[\s\S]*?\};?/g, "");
+/** Remove the final ESM export list, which is illegal inside the wrapper. */
+function stripFinalExportBlock(source: string): string {
+  const exportBlock = findFinalExportBlock(source);
+  if (!exportBlock) return source;
+  return source.slice(0, exportBlock.start) + source.slice(exportBlock.end);
 }
 
 function rewriteBundledSource(source: string): string {
-  // esbuild emits the default export as a binding inside an `export { ... }`
-  // block, e.g. `export { run as default }` or, when the module also has named
-  // exports, `export { helper, run as default }`. Extract the binding aliased
-  // to `default` from anywhere in those blocks, then strip the (illegal-inside-
-  // a-function) export statements and bind the captured name to `__skillRun`.
+  // esbuild emits the default binding in a final `export { ... }` block, e.g.
+  // `export { run as default }` or `export { helper, run as default }`. Extract
+  // that binding, remove the statement that is illegal inside the function
+  // wrapper, and bind the captured name to `__skillRun`.
   const defaultBinding = findBundledDefaultExportBinding(source);
-  const stripped = stripStrayExports(source);
+  const stripped = stripFinalExportBlock(source);
   if (defaultBinding) {
     return `${stripped}\nconst __skillRun = ${defaultBinding};`;
   }
@@ -351,7 +369,7 @@ async function prepareJavaScriptSource(
       resource.path === request.path && resource.precompiled === true
   );
   const hasCompiledSkillScriptFormat =
-    request.source.startsWith(`${COMPILED_SKILL_SCRIPT_FORMAT_V1}\n`) &&
+    hasCompiledSkillScriptFormatV1(request.source) &&
     findBundledDefaultExportBinding(request.source) !== null;
   if (entryPrecompiled || hasCompiledSkillScriptFormat) {
     return rewriteBundledSource(request.source);

@@ -190,6 +190,44 @@ export default function run(input: { text: string }) {
     }
   );
 
+  it.each([
+    {
+      matchLocation: "a comment",
+      sourcePrefix: "// export { fake as default }",
+      returnExpression: "input.text.toUpperCase()",
+      expected: "HELLO"
+    },
+    {
+      matchLocation: "a string",
+      sourcePrefix: 'const example = "export { fake as default }";',
+      returnExpression: "example",
+      expected: "export { fake as default }"
+    }
+  ])(
+    "preserves export-shaped text in $matchLocation inside a compiled bundle",
+    async ({ sourcePrefix, returnExpression, expected }) => {
+      const runner = skills.runner({ loader: env.LOADER });
+
+      await expect(
+        runner.run({
+          skill: {
+            name: "compiled-script-text",
+            description: "Compiled script containing export-shaped text.",
+            body: "Run the script."
+          },
+          path: "scripts/run.ts",
+          input: { text: "hello" },
+          source: `// cloudflare-agents:compiled-skill-script:v1
+${sourcePrefix}
+function run(input) {
+  return ${returnExpression};
+}
+export { run as default };`
+        })
+      ).resolves.toBe(expected);
+    }
+  );
+
   it("runs a precompiled bundled script (esbuild `export { run as default }` form)", async () => {
     const runner = skills.runner({
       loader: env.LOADER

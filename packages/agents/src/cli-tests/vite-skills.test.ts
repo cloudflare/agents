@@ -234,6 +234,18 @@ describe("compileSkillScript", () => {
     );
   });
 
+  it("removes a shebang that cannot run inside the skill wrapper", async () => {
+    const entry = join(compileDir, "run.ts");
+    await writeFile(
+      entry,
+      '#!/usr/bin/env node\nexport default function run() { return "ok"; }\n'
+    );
+
+    const result = await compileSkillScript(entry);
+
+    expect(result.content).not.toContain("#!/usr/bin/env node");
+  });
+
   it("throws when the entry file does not exist", async () => {
     await expect(
       compileSkillScript(join(compileDir, "missing.ts"))

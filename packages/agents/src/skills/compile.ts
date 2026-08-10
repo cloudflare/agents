@@ -43,6 +43,11 @@ function extensionOf(path: string): string {
   return index === -1 ? "" : file.slice(index).toLowerCase();
 }
 
+/** Remove a CLI hashbang that cannot run inside the skill function wrapper. */
+function stripLeadingHashbang(source: string): string {
+  return source.replace(/^#![^\r\n]*(?:\r?\n|$)/, "");
+}
+
 /**
  * Whether a resource path is a skill script that should be compiled ahead of
  * time (i.e. has a `.js`, `.mjs`, `.ts`, or `.tsx` extension).
@@ -58,7 +63,8 @@ export function isCompilableSkillScript(path: string): boolean {
  * TypeScript types, and emits ESM so the script can run in the Worker sandbox
  * without an in-Worker bundler.
  *
- * @param entryPath Absolute path to the skill script file on disk.
+ * @param entryPath Path to the skill script file on disk. Relative paths are
+ * resolved from the current working directory.
  */
 export async function compileSkillScript(
   entryPath: string,
@@ -83,7 +89,7 @@ export async function compileSkillScript(
   }
 
   return {
-    content: `${COMPILED_SKILL_SCRIPT_FORMAT_V1}\n${output.text}`,
+    content: `${COMPILED_SKILL_SCRIPT_FORMAT_V1}\n${stripLeadingHashbang(output.text)}`,
     precompiled: true
   };
 }

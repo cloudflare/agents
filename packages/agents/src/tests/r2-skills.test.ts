@@ -179,28 +179,50 @@ describe("R2 Think skills", () => {
 
   it.each([
     {
+      formatVariant: "unchanged",
       scriptPath: "scripts/run.js",
+      byteOrderMark: "",
+      lineEnding: "\n",
       siblingScripts: []
     },
     {
+      formatVariant: "unchanged with sibling source",
       scriptPath: "scripts/run.ts",
+      byteOrderMark: "",
+      lineEnding: "\n",
       siblingScripts: [
         {
           key: "skills/demo/scripts/helper.ts",
           content: "export function helper(value: string) { return value; }"
         }
       ]
+    },
+    {
+      formatVariant: "with a UTF-8 BOM",
+      scriptPath: "scripts/run.ts",
+      byteOrderMark: "\uFEFF",
+      lineEnding: "\n",
+      siblingScripts: []
+    },
+    {
+      formatVariant: "with CRLF line endings",
+      scriptPath: "scripts/run.ts",
+      byteOrderMark: "",
+      lineEnding: "\r\n",
+      siblingScripts: []
     }
   ])(
-    "runs compileSkillScript output loaded from R2 at $scriptPath",
-    async ({ scriptPath, siblingScripts }) => {
-      const compiledSource = `// cloudflare-agents:compiled-skill-script:v1
-function run(input) {
-  return input.text.toUpperCase();
-}
-export {
-  run as default
-};`;
+    "runs compileSkillScript output loaded from R2 at $scriptPath ($formatVariant)",
+    async ({ scriptPath, byteOrderMark, lineEnding, siblingScripts }) => {
+      const compiledSource = [
+        `${byteOrderMark}// cloudflare-agents:compiled-skill-script:v1`,
+        "function run(input) {",
+        "  return input.text.toUpperCase();",
+        "}",
+        "export {",
+        "  run as default",
+        "};"
+      ].join(lineEnding);
       const source = skills.r2(
         fakeBucket([
           {
