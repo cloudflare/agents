@@ -1,4 +1,10 @@
-import { Think, type TurnConfig, type TurnContext } from "@cloudflare/think";
+import {
+  Think,
+  type ToolCallContext,
+  type ToolCallDecision,
+  type TurnConfig,
+  type TurnContext
+} from "@cloudflare/think";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { jsonSchema, tool, type ToolSet } from "ai";
 import {
@@ -94,6 +100,15 @@ export class BasicThinkAgent extends Think<Env> {
       },
       chatStreamStallTimeoutMs: 0
     };
+  }
+
+  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | undefined {
+    return ctx.toolName === "submit_answer"
+      ? undefined
+      : {
+          action: "block",
+          reason: "The direct Think control exposes only submit_answer."
+        };
   }
 
   async evaluate(body: unknown): Promise<Record<string, unknown>> {

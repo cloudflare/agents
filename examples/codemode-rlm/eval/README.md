@@ -23,6 +23,12 @@ make wall-time comparisons meaningless.
 | `rlm`         | Material is external context; Code Mode can inspect it, persist JSON state, and use children.             |
 | `basic-think` | Material is in the active prompt; direct Think reasoning plus only a schema-neutral terminal-answer tool. |
 
+The browser chat is always the RLM. `BasicThinkAgent` exists only for this
+evaluator: it declares and forces `submit_answer` as its sole active tool,
+disables MCP and fetched tools, and blocks any unexpected tool call. Exporting
+the Code Mode runtime from the shared Worker registers the RLM runtime class; it
+does not expose Code Mode to the basic control.
+
 Every invocation generates a nonce independent of the human-readable `runId`.
 The nonce is included in every Durable Object and request identity, so reusing a
 `runId` still creates fresh history/kernel/children and cannot overwrite an
@@ -62,6 +68,31 @@ Start the example, then run the evaluator in another terminal:
 pnpm run start
 pnpm run eval:arc
 ```
+
+For a clean experiment that cannot recover Durable Object state or alarms from
+an earlier local run, give Vite a unique persistence directory:
+
+```bash
+eval_state="$(mktemp -d /tmp/codemode-rlm-eval.XXXXXX)"
+RLM_DEV_PERSIST_PATH="$eval_state" pnpm run start
+```
+
+Runtime budget overrides also belong on the Vite process, not the runner. For
+example, a generous 10-minute/40-step sensitivity run uses:
+
+```bash
+eval_state="$(mktemp -d /tmp/codemode-rlm-eval.XXXXXX)"
+RLM_DEV_PERSIST_PATH="$eval_state" \
+  TURN_TIMEOUT_MS=600000 \
+  MAX_STEPS=40 \
+  pnpm run start
+
+# In another terminal. The outer request timeout must exceed TURN_TIMEOUT_MS.
+pnpm run eval:arc -- --suite micro --timeout-ms 720000
+```
+
+Changing both limits is a budget sensitivity experiment, not a timeout-only
+replication of the checked-in default result.
 
 Useful options:
 
