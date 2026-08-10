@@ -183,6 +183,7 @@ describe("R2 Think skills", () => {
       scriptPath: "scripts/run.js",
       byteOrderMark: "",
       lineEnding: "\n",
+      trailingSuffix: "",
       siblingScripts: []
     },
     {
@@ -190,6 +191,7 @@ describe("R2 Think skills", () => {
       scriptPath: "scripts/run.ts",
       byteOrderMark: "",
       lineEnding: "\n",
+      trailingSuffix: "",
       siblingScripts: [
         {
           key: "skills/demo/scripts/helper.ts",
@@ -202,6 +204,7 @@ describe("R2 Think skills", () => {
       scriptPath: "scripts/run.ts",
       byteOrderMark: "\uFEFF",
       lineEnding: "\n",
+      trailingSuffix: "",
       siblingScripts: []
     },
     {
@@ -209,20 +212,36 @@ describe("R2 Think skills", () => {
       scriptPath: "scripts/run.ts",
       byteOrderMark: "",
       lineEnding: "\r\n",
+      trailingSuffix: "",
+      siblingScripts: []
+    },
+    {
+      formatVariant: "with trailing blank lines",
+      scriptPath: "scripts/run.ts",
+      byteOrderMark: "",
+      lineEnding: "\n",
+      trailingSuffix: "\n\n",
       siblingScripts: []
     }
   ])(
     "runs compileSkillScript output loaded from R2 at $scriptPath ($formatVariant)",
-    async ({ scriptPath, byteOrderMark, lineEnding, siblingScripts }) => {
-      const compiledSource = [
-        `${byteOrderMark}// cloudflare-agents:compiled-skill-script:v1`,
-        "function run(input) {",
-        "  return input.text.toUpperCase();",
-        "}",
-        "export {",
-        "  run as default",
-        "};"
-      ].join(lineEnding);
+    async ({
+      scriptPath,
+      byteOrderMark,
+      lineEnding,
+      trailingSuffix,
+      siblingScripts
+    }) => {
+      const compiledSource =
+        [
+          `${byteOrderMark}// cloudflare-agents:compiled-skill-script:v1`,
+          "function run(input) {",
+          "  return input.text.toUpperCase();",
+          "}",
+          "export {",
+          "  run as default",
+          "};"
+        ].join(lineEnding) + trailingSuffix;
       const source = skills.r2(
         fakeBucket([
           {

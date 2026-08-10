@@ -69,6 +69,29 @@ describe("skill script runner", () => {
     });
   });
 
+  it("runs plain JavaScript with a named export list before the default export", async () => {
+    const runner = skills.runner({ loader: env.LOADER });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "named-export",
+          description: "Run a script with a named export.",
+          body: "Run the script."
+        },
+        path: "scripts/run.js",
+        input: { text: "hello" },
+        source: `function format(text) {
+  return text.toUpperCase();
+}
+export { format };
+export default function run(input) {
+  return format(input.text);
+}`
+      })
+    ).resolves.toBe("HELLO");
+  });
+
   it("surfaces script failures with console output", async () => {
     const runner = skills.runner({
       loader: env.LOADER

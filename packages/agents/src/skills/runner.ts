@@ -250,9 +250,14 @@ function bashFiles(
  * object from the host bridge proxy (`__host`), and invoke it.
  */
 function scriptModule(source: string, request: SkillScriptRequest): string {
-  const runnableSource = stripFinalExportBlock(
-    source.replace(/^\s*export\s+default\s+/m, "const __skillRun = ")
+  const defaultExportRewritten = source.replace(
+    /^\s*export\s+default\s+/m,
+    "const __skillRun = "
   );
+  const runnableSource =
+    defaultExportRewritten === source
+      ? stripFinalExportBlock(source)
+      : stripAuthoredExportLists(defaultExportRewritten);
   const skillMeta = skillScriptContext(request).skill;
 
   return [
@@ -300,7 +305,7 @@ type FinalExportBlock = {
 /** Find the final ESM export-list statement emitted by esbuild. */
 function findFinalExportBlock(source: string): FinalExportBlock | null {
   const match = source.match(
-    /(?:^|\r?\n)[\t ]*export[\t ]*\{([^}]*)\}[\t ]*;?[\t ]*(?:\r?\n)?$/
+    /(?:^|\r?\n)[\t ]*export[\t ]*\{([^}]*)\}[\t ]*;?[\t ]*(?=\s*$)/
   );
   if (match?.index === undefined || match[1] === undefined) return null;
 
@@ -320,6 +325,11 @@ function findBundledDefaultExportBinding(source: string): string | null {
   );
 }
 
+/** Whether source contains an authored `export default` declaration. */
+function hasAuthoredDefaultExport(source: string): boolean {
+  return /^\s*export\s+default\s+/m.test(source);
+}
+
 /**
  * Whether a script declares a default export, in either the raw author form
  * (`export default ...`) or the bundled form esbuild emits
@@ -327,8 +337,22 @@ function findBundledDefaultExportBinding(source: string): string | null {
  */
 function hasDefaultExport(source: string): boolean {
   return (
-    /^\s*export\s+default\s+/m.test(source) ||
+    hasAuthoredDefaultExport(source) ||
     findBundledDefaultExportBinding(source) !== null
+  );
+}
+
+function missingSkillDefaultExportError(): Error {
+  return new Error(
+    "JS/TS skill scripts must `export default` an async run(input, ctx) function."
+  );
+}
+
+/** Remove authored ESM export lists that are illegal inside the wrapper. */
+function stripAuthoredExportLists(source: string): string {
+  return source.replace(
+    /(?:^|\r?\n)[\t ]*export[\t ]*\{[\s\S]*?\}[\t ]*;?/g,
+    ""
   );
 }
 
@@ -339,17 +363,19 @@ function stripFinalExportBlock(source: string): string {
   return source.slice(0, exportBlock.start) + source.slice(exportBlock.end);
 }
 
-function rewriteBundledSource(source: string): string {
+function rewriteBundledSource(source: string): string | null {
   // esbuild emits the default binding in a final `export { ... }` block, e.g.
   // `export { run as default }` or `export { helper, run as default }`. Extract
   // that binding, remove the statement that is illegal inside the function
   // wrapper, and bind the captured name to `__skillRun`.
   const defaultBinding = findBundledDefaultExportBinding(source);
-  const stripped = stripFinalExportBlock(source);
   if (defaultBinding) {
-    return `${stripped}\nconst __skillRun = ${defaultBinding};`;
+    return `${stripFinalExportBlock(source)}\nconst __skillRun = ${defaultBinding};`;
   }
-  return stripped;
+
+  // Descriptor-marked precompiled resources historically also accepted the
+  // authored default-export form. `scriptModule` normalizes it later.
+  return hasAuthoredDefaultExport(source) ? source : null;
 }
 
 async function prepareJavaScriptSource(
@@ -360,19 +386,26 @@ async function prepareJavaScriptSource(
   // bundler. Build-time compiled scripts (Agents Vite plugin / `compileSkillScript`
   // from "agents/skills/compile") arrive as self-contained ESM. Vite marks its
   // resources as precompiled; compileSkillScript marks output from dynamic
-  // sources with a generated header. Require both that header and esbuild's
-  // bundled default-export form before trusting source without a descriptor.
-  // Normalize recognized output before extension and sibling-file checks because
-  // compiled output may retain a TypeScript path and its original resources.
+  // sources with a generated header. Either marker selects the compiled path.
+  // Normalization still locates the default binding because the function-style
+  // wrapper must call it; that is an execution requirement, not a second format
+  // recognition signal. Normalize before extension and sibling-file checks
+  // because compiled output may retain a TypeScript path and its resources.
   const entryPrecompiled = (request.resources ?? []).some(
     (resource) =>
       resource.path === request.path && resource.precompiled === true
   );
-  const hasCompiledSkillScriptFormat =
-    hasCompiledSkillScriptFormatV1(request.source) &&
-    findBundledDefaultExportBinding(request.source) !== null;
+  const hasCompiledSkillScriptFormat = hasCompiledSkillScriptFormatV1(
+    request.source
+  );
   if (entryPrecompiled || hasCompiledSkillScriptFormat) {
-    return rewriteBundledSource(request.source);
+    const rewritten = rewriteBundledSource(request.source);
+    if (rewritten !== null) return rewritten;
+    throw missingSkillDefaultExportError();
+  }
+
+  if (!hasDefaultExport(request.source)) {
+    throw missingSkillDefaultExportError();
   }
 
   // Count sibling script files to detect skills that span multiple modules.
@@ -1048,12 +1081,6 @@ async function runJavaScriptScript(
   bridge: SkillScriptHostBridge,
   runtime: "javascript" | "typescript"
 ): Promise<unknown> {
-  if (!hasDefaultExport(request.source)) {
-    throw new Error(
-      "JS/TS skill scripts must `export default` an async run(input, ctx) function."
-    );
-  }
-
   const source = await prepareJavaScriptSource(request, runtime);
   const executor = new DynamicWorkerExecutor({
     loader: options.loader,
