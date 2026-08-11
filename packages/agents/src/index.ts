@@ -479,6 +479,11 @@ type StoredSubAgentConnection = {
   connection?: Connection;
 };
 
+type SubAgentBridgeInvocationContext = {
+  bridge?: SubAgentConnectionBridgeLike;
+  connectionId: string;
+};
+
 type SubAgentWebSocketEndpoint = {
   _cf_handleSubAgentWebSocketConnect(
     bridge: SubAgentConnectionBridge,
@@ -1725,7 +1730,8 @@ export class Agent<
   private _isFacet = false;
 
   private _protocolBroadcastExcludeIds = new Set<string>();
-  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
+  private _cf_subAgentBridgeContext =
+    new AsyncLocalStorage<SubAgentBridgeInvocationContext>();
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
@@ -7211,12 +7217,42 @@ export class Agent<
     }
   }
 
+  private _cf_activeSubAgentBridge(
+    connectionId?: string
+  ): SubAgentConnectionBridgeLike | undefined {
+    const context = this._cf_subAgentBridgeContext.getStore();
+    if (connectionId !== undefined && context?.connectionId !== connectionId) {
+      return undefined;
+    }
+    return context?.bridge;
+  }
+
+  /**
+   * Route a virtual sub-agent connection operation through its live frame
+   * bridge, or through the durable root Agent after that frame completes.
+   */
+  private _cf_routeSubAgentConnectionOperation(
+    connectionId: string,
+    operation: (bridge: SubAgentConnectionBridgeLike) => void
+  ): void {
+    const activeBridge = this._cf_activeSubAgentBridge(connectionId);
+    if (activeBridge) {
+      operation(activeBridge);
+      return;
+    }
+
+    void this._rootAlarmOwner().then((root) => {
+      operation(new RootSubAgentConnectionBridge(root, connectionId));
+    });
+  }
+
   private async _cf_broadcastToParentSubAgent(
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
+    const bridge = this._cf_activeSubAgentBridge();
+    if (bridge) {
+      bridge.broadcast(this.selfPath, message, without);
       return;
     }
     const root = await this._rootAlarmOwner();
@@ -7228,8 +7264,9 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._isFacet && this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
+    const bridge = this._cf_activeSubAgentBridge();
+    if (this._isFacet && bridge) {
+      bridge.broadcast(ownerPath, message, without);
       return;
     }
 
@@ -7554,7 +7591,7 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    await this._cf_runWithSubAgentBridge(bridge, async () => {
+    await this._cf_runWithSubAgentBridge(bridge, meta.id, async () => {
       const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
       const request = new Request(meta.uri ?? "http://placeholder/", {
         headers: meta.requestHeaders
@@ -7598,7 +7635,7 @@ export class Agent<
     };
     try {
       await subAgentRpcReplyContext.run(replyContext, () =>
-        this._cf_runWithSubAgentBridge(bridge, () =>
+        this._cf_runWithSubAgentBridge(bridge, meta.id, () =>
           this.onMessage(connection, message)
         )
       );
@@ -7616,7 +7653,7 @@ export class Agent<
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    await this._cf_runWithSubAgentBridge(bridge, () =>
+    await this._cf_runWithSubAgentBridge(bridge, meta.id, () =>
       this.onClose(connection, code, reason, wasClean)
     );
     this._cf_virtualSubAgentConnections.delete(meta.id);
@@ -7624,14 +7661,16 @@ export class Agent<
 
   private async _cf_runWithSubAgentBridge<T>(
     bridge: SubAgentConnectionBridgeLike,
+    connectionId: string,
     fn: () => Promise<T> | T
   ): Promise<T> {
-    const previous = this._cf_currentSubAgentBridge;
-    this._cf_currentSubAgentBridge = bridge;
+    const context: SubAgentBridgeInvocationContext = { bridge, connectionId };
     try {
-      return await fn();
+      return await this._cf_subAgentBridgeContext.run(context, fn);
     } finally {
-      this._cf_currentSubAgentBridge = previous;
+      // Detached work inherits this context, but a forwarded RPC bridge is only
+      // valid until its originating connect, message, or close call completes.
+      context.bridge = undefined;
     }
   }
 
@@ -7663,6 +7702,7 @@ export class Agent<
       this._cf_virtualSubAgentConnections.set(meta.id, stored);
     }
 
+    const owner = this;
     const getStored = () =>
       this._cf_virtualSubAgentConnections.get(meta.id) ?? stored;
     const updateStoredState = (nextState: unknown) => {
@@ -7684,14 +7724,20 @@ export class Agent<
         const currentState = getStored().meta.state;
         const state = typeof next === "function" ? next(currentState) : next;
         updateStoredState(state);
-        void getStored().bridge.setState(state);
+        owner._cf_routeSubAgentConnectionOperation(meta.id, (bridge) => {
+          bridge.setState(state);
+        });
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        void getStored().bridge.send(message);
+        owner._cf_routeSubAgentConnectionOperation(meta.id, (bridge) => {
+          bridge.send(message);
+        });
       },
       close(code?: number, reason?: string) {
-        void getStored().bridge.close(code, reason);
+        owner._cf_routeSubAgentConnectionOperation(meta.id, (bridge) => {
+          bridge.close(code, reason);
+        });
       },
       addEventListener() {},
       removeEventListener() {}

@@ -2217,9 +2217,9 @@ class _UnboundParent extends Agent {
 }
 export { _UnboundParent as TestUnboundParentAgent };
 
-// Regression fixture for issue #1991. The onMessage wrapper is intentional:
-// facet RPC replies must retain their originating bridge through application
-// and framework middleware before the Agent protocol dispatcher handles them.
+// Regression fixture for issues #1991 and #2055. The onMessage wrapper is
+// intentional: frame-bound RPC replies must retain their originating bridge,
+// while later connection operations must route through the durable root Agent.
 export class SlowReplySubAgent extends Agent {
   onStart(): void {
     const handleMessage = this.onMessage.bind(this);
@@ -2244,6 +2244,81 @@ export class SlowReplySubAgent extends Agent {
   async parentEcho(value: string): Promise<string> {
     const parent = await this.parentAgent(TestSubAgentParent);
     return await parent.delayedEchoFromParent(value);
+  }
+
+  /** Schedules a direct connection message after the current frame completes. */
+  @callable()
+  sendConnectionMessageAfterDelay(message: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessageAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(message);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Schedules a connection state update after the current frame completes. */
+  @callable()
+  setConnectionMarkerAfterDelay(marker: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkerAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.setState({ delayedMarker: marker });
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Returns the marker persisted in the current connection state. */
+  @callable()
+  getConnectionMarker(): string | null {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.getConnectionMarker requires an active connection"
+      );
+    }
+
+    const state = connection.state;
+    if (
+      typeof state !== "object" ||
+      state === null ||
+      !("delayedMarker" in state)
+    ) {
+      return null;
+    }
+    return typeof state.delayedMarker === "string" ? state.delayedMarker : null;
+  }
+
+  /** Schedules a connection close after the current frame completes. */
+  @callable()
+  closeConnectionAfterDelay(code: number, reason: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.closeConnectionAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.close(code, reason);
+      })
+    );
+    return "scheduled";
   }
 
   @callable({ streaming: true })

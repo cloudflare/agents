@@ -22,6 +22,49 @@ async function connectWS(parent: string, child: string): Promise<WebSocket> {
   return ws;
 }
 
+function waitForTextMessage(
+  ws: WebSocket,
+  expected: string,
+  timeoutMs = 1000
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", onMessage);
+      reject(new Error(`Message ${JSON.stringify(expected)} never arrived`));
+    }, timeoutMs);
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.data !== expected) return;
+
+      clearTimeout(timer);
+      ws.removeEventListener("message", onMessage);
+      resolve(event.data as string);
+    };
+
+    ws.addEventListener("message", onMessage);
+  });
+}
+
+function waitForClose(
+  ws: WebSocket,
+  timeoutMs = 1000
+): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.removeEventListener("close", onClose);
+      reject(new Error("WebSocket did not close"));
+    }, timeoutMs);
+
+    const onClose = (event: CloseEvent) => {
+      clearTimeout(timer);
+      ws.removeEventListener("close", onClose);
+      resolve({ code: event.code, reason: event.reason });
+    };
+
+    ws.addEventListener("close", onClose);
+  });
+}
+
 function callRPC(
   ws: WebSocket,
   method: string,
@@ -151,6 +194,59 @@ describe("facet RPC replies under concurrent frames (issue #1991)", () => {
       const { chunks, terminal } = await stream;
       expect(chunks).toEqual(["slow-stream:burst:chunk"]);
       expectSuccessfulResult(terminal, "slow-stream:burst:done");
+    } finally {
+      ws.close();
+    }
+  });
+});
+
+describe("facet connection operations after frame completion (issue #2055)", () => {
+  it("delivers a connection message", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const message = "delayed-connection-message";
+      const delivered = waitForTextMessage(ws, message);
+
+      const response = await callRPC(ws, "sendConnectionMessageAfterDelay", [
+        message
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+      await expect(delivered).resolves.toBe(message);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("persists connection state", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const marker = `delayed-state-${crypto.randomUUID()}`;
+      const scheduled = await callRPC(ws, "setConnectionMarkerAfterDelay", [
+        marker
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const read = await callRPC(ws, "getConnectionMarker");
+      expectSuccessfulResult(read, marker);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("closes the connection", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const closed = waitForClose(ws);
+      const scheduled = await callRPC(ws, "closeConnectionAfterDelay", [
+        4000,
+        "delayed-close"
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+      await expect(closed).resolves.toEqual({
+        code: 4000,
+        reason: "delayed-close"
+      });
     } finally {
       ws.close();
     }
