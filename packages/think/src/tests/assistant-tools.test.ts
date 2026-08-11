@@ -62,7 +62,7 @@ describe("assistant tools — read", () => {
     expect(result.content).not.toContain("5\tline5");
   });
 
-  it("returns compact image metadata and model image content", async () => {
+  it("returns compact image metadata and image-data model content", async () => {
     const agent = await freshAgent("read-image-mime");
     await agent.seedBytes("/screenshot", PNG_BYTES, "image/png");
 
@@ -96,11 +96,13 @@ describe("assistant tools — read", () => {
     };
     expect(modelOutput.type).toBe("content");
     expect(modelOutput.value).toContainEqual({
-      type: "file-data",
+      type: "image-data",
       data: "iVBORw0KGgo=",
-      mediaType: "image/png",
-      filename: "screenshot"
+      mediaType: "image/png"
     });
+    expect(modelOutput.value).not.toContainEqual(
+      expect.objectContaining({ type: "file-data" })
+    );
   });
 
   it.each([

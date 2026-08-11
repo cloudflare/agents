@@ -18,6 +18,7 @@ declare namespace Cloudflare {
     BROWSER: BrowserRun;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
+    DEV_USER: string;
   }
   interface GlobalProps {
     mainModule: typeof import("./worker");
