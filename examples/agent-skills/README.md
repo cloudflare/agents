@@ -7,7 +7,7 @@ skills directory imported with the `agents:skills` specifier.
 
 You need Wrangler authenticated against an account with Workers AI access. The
 example uses `ai.remote: true` and a Worker Loader binding, so local development
-will call Cloudflare services.
+calls Cloudflare services.
 
 ```bash
 npm install
@@ -23,54 +23,75 @@ Script execution uses the Worker Loader binding in `wrangler.jsonc`:
 ```
 
 Open the local Vite URL and try one of the suggested prompts. When the model
-calls `activate_skill`, that skill lights up in the sidebar, and skill tool
-activity (`activate_skill` / `run_skill_script`) is shown inline in the chat.
+calls `activate_skill`, that skill lights up in the sidebar. Skill tool activity
+from `activate_skill` and `run_skill_script` appears in the chat.
 
 The agent has:
 
-- `release-notes` available through `activate_skill`, with a function-style
-  TypeScript formatting script that reads a bundled style guide from `ctx.files`
-  and is runnable through `run_skill_script`
-- `test-plan` available through `activate_skill` — a procedure-style skill that
-  turns a change description into a prioritized test plan
-- `debug-plan` available through `activate_skill`, with an extra reference file
-- `pirate-voice` available through `activate_skill`
+- `release-notes`, with a TypeScript formatting script that reads its bundled
+  style guide through workspace-backed `node:fs`
+- `test-plan`, a procedure-style skill that turns a change description into a
+  prioritized test plan
+- `debug-plan`, with an extra reference file
+- `pirate-voice`
 
-## Key Pattern
+## Key pattern
+
+The agent configures a Computer workspace with `WorkerJavaScriptBackend`:
 
 ```ts
-import { Think, skills } from "@cloudflare/think";
-import bundledSkills from "agents:skills"; // -> ./skills next to this file
+import type { DurableObjectStorageLike } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { Workspace } from "@cloudflare/think/workspace";
 
-export class SkillsAgent extends Think<Env> {
-  getSkills() {
-    return [bundledSkills];
-  }
-
-  getSkillScriptRunner() {
-    return skills.runner({
-      loader: this.env.LOADER,
-      workspaceInstance: this.workspace
-    });
-  }
+class SkillsAgent extends Think<Env> {
+  override workspace = new Workspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    backends: [
+      new WorkerJavaScriptBackend({
+        loader: this.env.LOADER,
+        root: "/workspace",
+        access: "read-write",
+        globalOutbound: null
+      })
+    ]
+  });
 }
 ```
 
-The `agents/vite` plugin turns the local `src/skills/*/SKILL.md` directories
-into a `SkillSource` that Think can register at startup. The optional,
-experimental script runner executes the TypeScript file under `scripts/` in a
-sandboxed Worker, using `@cloudflare/worker-bundler` to compile TypeScript and
-bundle sibling script imports. JS/TS scripts are function-style
-(`export default async function run(input, ctx)`) and read bundled text files
-from `ctx.files`, call explicit `ctx.tools`, access `ctx.workspace`, and write
-scratch artifacts with `ctx.output.writeFile(name, content)`. The same runner
-also supports Python and Bash scripts via the path-based `/input.json` /
-`/skill` / `/output` contract — this example keeps it to TypeScript. Script
-execution requires the `worker_loaders` binding shown in `wrangler.jsonc`.
-Passing `workspaceInstance` gives scripts read-only workspace access by default;
-opt in to `workspace: "read-write"`, tools, or network only when a skill needs
-them. The default 30 second timeout leaves room for TypeScript compilation and
-Dynamic Worker cold starts in local development.
+`getSkillScriptRunner()` writes the selected compiled script and its resources
+to a temporary workspace directory. It then runs a small module through the
+common workspace runtime:
+
+```ts
+const handle = await this.workspace.runtime.exec(
+  `export { default } from ${JSON.stringify(`./${request.path}`)};`,
+  {
+    backend: "worker-javascript",
+    cwd: runRoot,
+    input: request.input,
+    encoding: "utf8"
+  }
+);
+const result = await handle.result();
+```
+
+The JavaScript backend calls the module's default export with `input`. Scripts
+use `node:fs` or `node:fs/promises` to read bundled resources and work with the
+agent's durable workspace. The runner uses a separate directory for each call
+and removes the materialized skill files after execution. Changes that a script
+makes elsewhere in `/workspace` remain durable.
+
+The Agents Vite plugin compiles TypeScript before it reaches the Worker. The
+example keeps filesystem imports for the runtime instead of asking the build to
+bundle them:
+
+```ts
+agents({ skillScriptExternals: ["node:fs", "node:fs/promises"] });
+```
+
+See [`src/server.ts`](src/server.ts) for input validation, binary resource
+handling, nonzero exit handling, and cleanup.
 
 ## Related
 

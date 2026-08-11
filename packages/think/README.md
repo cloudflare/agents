@@ -341,6 +341,33 @@ to a 30 second timeout, which can be overridden with `timeout`. TypeScript
 scripts are compiled with `@cloudflare/worker-bundler`; Python scripts run as
 Python Dynamic Workers; Bash scripts run through `just-bash`.
 
+A Computer workspace can run JavaScript skill modules without the capability
+object used by `skills.runner()`. Configure `WorkerJavaScriptBackend`, write the
+compiled script and its resources into the workspace, and invoke it through the
+common runtime:
+
+```ts
+const handle = await this.workspace.runtime.exec(
+  `export { default } from "./scripts/run.js";`,
+  {
+    backend: "worker-javascript",
+    cwd: skillDirectory,
+    input,
+    encoding: "utf8"
+  }
+);
+const { exitCode, stderr, value } = await handle.result();
+if (exitCode !== 0) throw new Error(stderr);
+return value;
+```
+
+The JavaScript backend provides workspace-backed `node:fs` and
+`node:fs/promises`. Configure the Agents Vite plugin with
+`skillScriptExternals: ["node:fs", "node:fs/promises"]` so those imports remain
+in compiled scripts. Use a separate materialization directory for each run and
+remove it after `handle.result()` settles. See
+[`examples/agent-skills`](../../examples/agent-skills) for a complete runner.
+
 Script execution requires a Worker Loader binding:
 
 ```jsonc

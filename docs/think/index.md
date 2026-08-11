@@ -1008,6 +1008,33 @@ Passing `workspaceInstance` gives scripts read-only workspace access by default.
 Network access, tools, and workspace writes are opt-in. The default timeout is
 30 seconds.
 
+For JavaScript-only skills, a Computer workspace can execute the skill module
+directly through `WorkerJavaScriptBackend`. Write the compiled script and its
+resources into an isolated workspace directory, then run a module that exports
+the script's default function:
+
+```typescript
+const handle = await this.workspace.runtime.exec(
+  `export { default } from "./scripts/run.js";`,
+  {
+    backend: "worker-javascript",
+    cwd: skillDirectory,
+    input,
+    encoding: "utf8"
+  }
+);
+const { exitCode, stderr, value } = await handle.result();
+if (exitCode !== 0) throw new Error(stderr);
+return value;
+```
+
+This backend provides workspace-backed `node:fs` and `node:fs/promises`.
+Configure `agents({ skillScriptExternals: ["node:fs", "node:fs/promises"] })`
+so the Vite plugin keeps these imports in the compiled module. Remove the
+materialized skill directory after the execution settles. The
+[`agent-skills` example](https://github.com/cloudflare/agents/tree/main/examples/agent-skills)
+shows the complete lifecycle.
+
 ### Chat Recovery
 
 Think wraps chat turns in recoverable fibers by default. If the Durable Object is evicted mid-stream, Think reconstructs any buffered chunks, persists partial output, and schedules either a continuation of the assistant turn or a retry of the unanswered user turn.
