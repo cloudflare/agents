@@ -8,7 +8,7 @@ import type { LanguageModel } from "ai";
 import { z } from "zod";
 import type { DurableObjectStorageLike } from "@cloudflare/computer";
 import { Think } from "../../think";
-import { Workspace } from "../../workspace";
+import { Workspace } from "../../workspace/workspace";
 import {
   createExecuteRuntime,
   createExecuteTool,

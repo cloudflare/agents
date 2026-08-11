@@ -1,7 +1,7 @@
 import type { Workspace as ComputerWorkspace } from "@cloudflare/computer";
 import { describe, expect, it } from "vitest";
-import type { ThinkWorkspace } from "../workspace-contract";
-import { Workspace } from "../workspace";
+import type { ThinkWorkspace } from "../workspace/types";
+import { Workspace } from "../workspace/workspace";
 
 function acceptsThinkWorkspace(_workspace: ThinkWorkspace): void {}
 

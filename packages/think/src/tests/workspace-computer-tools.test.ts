@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createWorkspaceTools } from "../tools/workspace";
-import type { ThinkWorkspace } from "../workspace-contract";
+import type { ThinkWorkspace } from "../workspace/types";
 
 const toolContext = {
   toolCallId: "test",
