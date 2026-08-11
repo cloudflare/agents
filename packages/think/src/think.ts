@@ -277,7 +277,7 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
-import { LegacyWorkspace as Workspace } from "./workspace-legacy";
+import { LegacyWorkspace as Workspace } from "./workspace/workspace-legacy";
 import { createWorkspaceTools } from "./tools/workspace";
 import {
   hasWorkspaceLegacyBashProvider,
@@ -289,7 +289,7 @@ import {
   workspaceToolProvider,
   type LegacyWorkspaceBashOptions,
   type WorkspaceLike
-} from "./workspace-contract";
+} from "./workspace/types";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute-output";
@@ -324,7 +324,7 @@ export type {
 export type { DeliveryKind, DeliveryTag } from "./messengers";
 export { Session } from "agents/experimental/memory/session";
 export type { SessionMessage } from "agents/experimental/memory/session";
-export { LegacyWorkspace as Workspace } from "./workspace-legacy";
+export { LegacyWorkspace as Workspace } from "./workspace/workspace-legacy";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export {
   hasWorkspaceLegacyBashProvider,
@@ -335,7 +335,7 @@ export {
   workspaceLegacyBashProvider,
   workspaceToolProvider,
   writeWorkspaceFile
-} from "./workspace-contract";
+} from "./workspace/types";
 export type {
   LegacyWorkspaceBashOptions,
   ThinkWorkspace,
@@ -347,7 +347,7 @@ export type {
   WorkspaceLike,
   WorkspaceToolProvider,
   WorkspaceToolProviderOptions
-} from "./workspace-contract";
+} from "./workspace/types";
 export type {
   CreateFetchToolsOptions,
   FetchBindingTarget,

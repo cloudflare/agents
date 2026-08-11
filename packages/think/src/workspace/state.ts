@@ -1,3 +1,7 @@
+/**
+ * @deprecated Compatibility bridge for existing codemode `state.*` programs.
+ * New workspace integrations should use Computer tools and runtime backends.
+ */
 import {
   createWorkspaceStateBackend as createLegacyStateBackend,
   type FileInfo,
@@ -11,7 +15,7 @@ import {
   workspaceFilesystem,
   type ThinkWorkspaceFilesystem,
   type WorkspaceLike
-} from "./workspace-contract";
+} from "./types";
 
 /** Build the existing codemode `state.*` backend over a Computer-style fs. */
 export function createWorkspaceStateBackend(

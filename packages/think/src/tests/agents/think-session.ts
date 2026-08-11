@@ -1,4 +1,4 @@
-import { workspaceFilesystem } from "../../workspace-contract";
+import { workspaceFilesystem } from "../../workspace/types";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think } from "../../think";

@@ -16,8 +16,8 @@ import {
   type BrowserBinding,
   type BrowserConnectorSessionOptions
 } from "agents/browser";
-import type { WorkspaceLike } from "../workspace-contract";
-import { createWorkspaceStateConnectors } from "../workspace-state";
+import type { WorkspaceLike } from "../workspace/types";
+import { createWorkspaceStateConnectors } from "../workspace/state";
 import { truncatePausedExecutionOutput } from "./execute-output";
 export { truncatePausedExecutionOutput } from "./execute-output";
 

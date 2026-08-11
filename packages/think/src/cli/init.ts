@@ -408,7 +408,6 @@ function viteConfig(routePrefix: string | undefined): string {
 function agentSource(): string {
   return [
     `import { Think, skills } from "@cloudflare/think";`,
-    `import { createWorkspaceOperations } from "@cloudflare/think/tools/workspace";`,
     `import bundledSkills from "agents:skills";`,
     "",
     "export class Assistant extends Think<Env> {",

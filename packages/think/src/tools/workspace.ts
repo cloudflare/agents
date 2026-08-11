@@ -7,9 +7,9 @@ import {
   writeWorkspaceFile,
   type ThinkWorkspaceFilesystem,
   type WorkspaceLike
-} from "../workspace-contract";
+} from "../workspace/types";
 
-export type { WorkspaceLike } from "../workspace-contract";
+export type { WorkspaceLike } from "../workspace/types";
 
 export interface FileInfo {
   path: string;
