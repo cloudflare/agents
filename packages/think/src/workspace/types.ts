@@ -67,8 +67,16 @@ export interface ThinkWorkspaceRuntimeResult {
   value?: unknown;
 }
 
-export interface ThinkWorkspaceRuntimeHandle {
+export type ThinkWorkspaceRuntimeEvent =
+  | { name: "stdout"; value: string }
+  | { name: "stderr"; value: string }
+  | { name: "exit"; code: number; result?: unknown };
+
+export interface ThinkWorkspaceRuntimeHandle extends Partial<
+  AsyncIterable<ThinkWorkspaceRuntimeEvent>
+> {
   result(): Promise<ThinkWorkspaceRuntimeResult>;
+  kill?(): Promise<void>;
   [Symbol.dispose]?(): void;
 }
 
@@ -81,6 +89,8 @@ export type ThinkWorkspaceRuntimeValue =
   | { [key: string]: ThinkWorkspaceRuntimeValue };
 
 export interface ThinkWorkspaceRuntime {
+  /** Whether a backend accepts structured input and returns a result value. */
+  isCallable?(id: string): boolean;
   exec(
     source: string,
     options?: {
