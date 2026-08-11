@@ -27,6 +27,12 @@ type ExecuteOutput = {
   pending?: Array<{ connector: string; method: string }>;
 };
 
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return (
+    typeof value === "object" && value !== null && Symbol.asyncIterator in value
+  );
+}
+
 async function invoke(
   executeTool: { execute?: unknown },
   code: string
@@ -162,7 +168,7 @@ export class ThinkBashWorkspaceAgent extends Think {
   async runBash(command: string): Promise<unknown> {
     const bash = this.workspace[workspaceToolProvider]().bash.execute;
     if (!bash) throw new Error("Bash workspace tool is missing");
-    return bash(
+    const execution = bash(
       { command },
       {
         toolCallId: "test",
@@ -171,6 +177,11 @@ export class ThinkBashWorkspaceAgent extends Think {
         context: {}
       }
     );
+    if (!isAsyncIterable(execution)) return execution;
+
+    let terminal: unknown;
+    for await (const output of execution) terminal = output;
+    return terminal;
   }
 
   async runCodemodeState(code: string): Promise<ExecuteOutput> {

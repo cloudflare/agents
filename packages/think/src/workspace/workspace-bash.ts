@@ -58,12 +58,25 @@ export function createBashWorkspaceTools(
   });
   const execute = bash.execute;
   if (execute) {
-    bash.execute = async (input, context) => {
+    bash.execute = async function* (input, context) {
       await workspace.fs.mkdir("/workspace", { recursive: true });
-      return execute(input, context);
+      const output = execute(input, context);
+      if (isAsyncIterable(output)) {
+        yield* output;
+      } else {
+        yield await output;
+      }
     };
   }
   return { bash };
+}
+
+function isAsyncIterable<T>(
+  value: T | PromiseLike<T> | AsyncIterable<T>
+): value is AsyncIterable<T> {
+  return (
+    typeof value === "object" && value !== null && Symbol.asyncIterator in value
+  );
 }
 
 /** Computer workspace configured with the Worker Shell backend. */
