@@ -142,6 +142,12 @@ describe("runtime prompt", () => {
     });
     expect(prompt).toContain("- context:");
     expect(prompt).toContain("- kernel:");
+    expect(prompt).toContain(
+      "workspace.read({ path }) returns an object whose content field contains the file text"
+    );
+    expect(prompt).toContain(
+      "kernel.get({ key }) returns the stored JSON value directly"
+    );
     expect(prompt).toContain("- workspace:");
     expect(prompt).toContain("durable Computer /workspace");
     expect(prompt).toContain("never expect a ctx parameter");

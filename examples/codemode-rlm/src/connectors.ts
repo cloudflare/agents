@@ -238,7 +238,8 @@ export class KernelConnector extends CodemodeConnector<Env> {
     };
     return {
       get: {
-        description: "Read one durable JSON value.",
+        description:
+          "Read and return one durable JSON value directly. The result is the stored value, not a { value } wrapper.",
         inputSchema: keySchema,
         replay: "reexecute",
         execute: (value) => this.store.getKernel(this.scope, args(value).key)
