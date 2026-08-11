@@ -297,6 +297,15 @@ export {
     ).resolves.toBe("template");
   });
 
+  it("directs runtime workspaces to execute JavaScript with runtime.exec", () => {
+    expect(() =>
+      skills.runner({
+        loader: env.LOADER,
+        workspaceInstance: { fs: {}, runtime: {} }
+      })
+    ).toThrow(/runtime\.exec/);
+  });
+
   it("returns output artifacts written through ctx.output", async () => {
     const workspace = testWorkspace({});
     const runner = skills.runner({

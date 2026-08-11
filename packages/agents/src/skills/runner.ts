@@ -11,9 +11,9 @@ import type {
 import { validateSkillResourcePath } from "./types";
 
 /**
- * Minimal workspace surface the skill runner needs. A concrete `Workspace`
- * from `@cloudflare/shell` (or Think's `WorkspaceLike`) satisfies this
- * structurally, so the runner does not depend on a filesystem package.
+ * Minimal direct-method workspace surface used by the compatibility runner.
+ * A concrete `Workspace` from `@cloudflare/shell` satisfies this structurally,
+ * so the runner does not depend on a filesystem package.
  */
 export interface SkillWorkspace {
   readFile(path: string): Promise<string | null>;
@@ -29,12 +29,17 @@ export interface SkillWorkspace {
  * @experimental Skill script execution is experimental and the option shape
  * may change before stabilizing.
  */
+export interface RuntimeSkillWorkspace {
+  readonly fs: object;
+  readonly runtime: object;
+}
+
 export interface WorkerSkillScriptRunnerOptions {
   loader: WorkerLoader;
   timeout?: number;
   network?: boolean;
   workspace?: "none" | "read" | "read-write";
-  workspaceInstance?: SkillWorkspace;
+  workspaceInstance?: SkillWorkspace | RuntimeSkillWorkspace;
   tools?: ToolSet | (() => ToolSet | Promise<ToolSet>);
 }
 
@@ -66,6 +71,30 @@ function extensionOf(path: string): string {
 
 function effectiveTimeout(options: WorkerSkillScriptRunnerOptions): number {
   return options.timeout ?? DEFAULT_SCRIPT_TIMEOUT_MS;
+}
+
+function resolveSkillWorkspace(
+  workspace: SkillWorkspace | RuntimeSkillWorkspace | undefined
+): SkillWorkspace | undefined {
+  if (!workspace) return undefined;
+  if (
+    "readFile" in workspace &&
+    typeof workspace.readFile === "function" &&
+    "writeFile" in workspace &&
+    typeof workspace.writeFile === "function" &&
+    "readDir" in workspace &&
+    typeof workspace.readDir === "function" &&
+    "glob" in workspace &&
+    typeof workspace.glob === "function" &&
+    "stat" in workspace &&
+    typeof workspace.stat === "function"
+  ) {
+    return workspace as SkillWorkspace;
+  }
+  throw new Error(
+    "skills.runner only supports the legacy direct-method workspace. " +
+      "Run JavaScript skill modules with workspace.runtime.exec instead."
+  );
 }
 
 function effectiveWorkspaceAccess(
@@ -1064,6 +1093,7 @@ async function runJavaScriptScript(
 export function runner(
   options: WorkerSkillScriptRunnerOptions
 ): SkillScriptRunner {
+  const workspace = resolveSkillWorkspace(options.workspaceInstance);
   return {
     async run(request: SkillScriptRequest) {
       if (!runnerExperimentalWarned) {
@@ -1085,7 +1115,7 @@ export function runner(
       // concurrent script invocations.
       const bridge = new SkillScriptHostBridge(
         tools,
-        options.workspaceInstance,
+        workspace,
         effectiveWorkspaceAccess(options)
       );
 
