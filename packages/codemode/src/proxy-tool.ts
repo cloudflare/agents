@@ -275,6 +275,8 @@ class ConnectorCallTarget extends RpcTarget {
     abortSignal: AbortSignal
   ) => Promise<unknown>;
   readonly #controllers = new Set<AbortController>();
+  #aborted = false;
+  #abortReason = "Code Mode execution was aborted";
 
   constructor(
     handle: (
@@ -287,6 +289,12 @@ class ConnectorCallTarget extends RpcTarget {
     this.#handle = handle;
   }
   async callTool(method: string, args: unknown): Promise<unknown> {
+    if (this.#aborted) {
+      return {
+        [CONTROL_KEY]: "error",
+        message: this.#abortReason
+      };
+    }
     const controller = new AbortController();
     this.#controllers.add(controller);
     try {
@@ -297,7 +305,13 @@ class ConnectorCallTarget extends RpcTarget {
   }
 
   abort(reason?: string): void {
-    for (const controller of this.#controllers) controller.abort(reason);
+    if (!this.#aborted) {
+      this.#aborted = true;
+      this.#abortReason = reason ?? this.#abortReason;
+    }
+    for (const controller of this.#controllers) {
+      controller.abort(this.#abortReason);
+    }
   }
 }
 

@@ -663,7 +663,7 @@ describe("DynamicWorkerExecutor", () => {
     expect(runtime.recordResult).not.toHaveBeenCalled();
   });
 
-  it("uses a fresh abort signal for connector calls after a nested timeout", async () => {
+  it("blocks connector calls made after an execution timeout", async () => {
     const observedSignals: AbortSignal[] = [];
     let markSlowStarted: (() => void) | undefined;
     const slowStarted = new Promise<void>((resolve) => {
@@ -697,8 +697,7 @@ describe("DynamicWorkerExecutor", () => {
           execute: async ({ command }, options) => {
             const signal = options.abortSignal!;
             observedSignals.push(signal);
-            if (command === "fast")
-              return signal.aborted ? "poisoned" : "fresh";
+            if (command === "late") return "unsafe late effect";
             markSlowStarted?.();
             return new Promise<string>((resolve) => {
               signal.addEventListener("abort", () => resolve("aborted"), {
@@ -718,7 +717,7 @@ describe("DynamicWorkerExecutor", () => {
         binding.abort?.("nested execution timed out");
         await slow;
         return {
-          result: await binding.callTool("exec", { command: "fast" })
+          result: await binding.callTool("exec", { command: "late" })
         };
       }
     };
@@ -730,10 +729,15 @@ describe("DynamicWorkerExecutor", () => {
 
     await expect(
       codemode.execute({ code: "async () => 'ignored by fake executor'" }, {})
-    ).resolves.toMatchObject({ status: "completed", result: "fresh" });
-    expect(observedSignals).toHaveLength(2);
+    ).resolves.toMatchObject({
+      status: "completed",
+      result: {
+        __codemode_control__: "error",
+        message: "nested execution timed out"
+      }
+    });
+    expect(observedSignals).toHaveLength(1);
     expect(observedSignals[0].aborted).toBe(true);
-    expect(observedSignals[1].aborted).toBe(false);
   });
 });
 
