@@ -203,7 +203,9 @@ function TurnStatus({
     <Surface className="flex max-w-[92%] items-start gap-3 rounded-xl px-4 py-3 ring ring-kumo-line">
       <CircleNotchIcon
         size={17}
-        className={`mt-0.5 shrink-0 text-kumo-accent ${active.status === "submitting" && active.notice ? "" : "animate-spin"}`}
+        className={`mt-0.5 shrink-0 text-kumo-accent ${
+          active.status === "submitting" && active.notice ? "" : "animate-spin"
+        }`}
       />
       <div>
         <p className="text-sm font-medium">{label}</p>
@@ -321,8 +323,9 @@ function Chat({
                   </Text>
                   <span className="mt-1 block">
                     <Text size="xs" variant="secondary">
-                      Large inputs stay durable and connector-addressable. An
-                      answer appears only after verified Code Mode completion.
+                      Large inputs stay connector-addressable, and reusable
+                      artifacts live in a durable Computer Workspace. An answer
+                      appears only after verified Code Mode completion.
                     </Text>
                   </span>
                 </div>
@@ -357,7 +360,7 @@ function Chat({
                   <Empty
                     icon={<BrainIcon size={32} weight="duotone" />}
                     title="Treat context as a variable"
-                    description="Give the RLM a task and optional source material. It can inspect context programmatically, keep a durable notebook, and recurse through child agents."
+                    description="Give the RLM a task and optional source material. It can inspect context programmatically, persist JSON and Workspace files, and recurse through child agents."
                   />
                 )}
               </div>

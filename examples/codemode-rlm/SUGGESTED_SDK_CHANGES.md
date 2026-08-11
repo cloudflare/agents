@@ -4,6 +4,15 @@ This example now uses Think, Agents, and Code Mode as the sources of truth for
 their own lifecycle state. The remaining application code highlights five
 small framework opportunities. None is required to run the example.
 
+The example now composes a filesystem-only Cloudflare Computer Workspace with
+Code Mode while keeping Code Mode as the model's sole tool and
+generated-program executor. The custom store remains authoritative for exact
+input admission, the compact JSON kernel, verified answers, recursive operation
+claims, and harness history. The proposed
+[Code Mode + Computer RLM RFC](../../design/rfc-codemode-computer-rlm.md) tracks
+the remaining cross-repository work for durable mutation receipts, command
+execution, backend discovery, and an optional live-session runtime.
+
 | Priority | Gap                                                                                                | Current workaround                                                                                | Useful API                                                                                                                                        |
 | -------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1        | Think has no single server-only capability policy.                                                 | Replace instructions/tools, set `activeTools`, force Code Mode, and guard `beforeToolCall`.       | An early allowlist that prevents unused tool classes and client tools from being assembled.                                                       |
@@ -128,5 +137,8 @@ proposals would:
   the one-shot query ledger.
 - `CodemodeRuntimeHandle` remains the execution audit source of truth; the
   parent does not copy code, calls, logs, results, or statuses.
+- `toolSetConnector(createAITools({ workspace }))` exposes Computer files to
+  generated code without adding another model-facing tool. The example bounds
+  read/write/edit bytes; Computer still needs bounded or paginated `ls`.
 - Visible history is derived from activated inputs and verified answers rather
   than a second transcript table.

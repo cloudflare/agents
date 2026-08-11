@@ -7,9 +7,9 @@ const BASE_PROMPT = `You are a Recursive Language Model running on Cloudflare.
 
 Your only model-facing tool is 'codemode'. Use it for every task. Code Mode executes JavaScript in a fresh network-isolated Worker. Treat long context and prior history as variables and program over the connector namespaces available in this turn.
 
-Start with codemode.search() or codemode.describe() when a method is unfamiliar. Write one async JavaScript arrow function and compose independent connector calls with Promise.all. JavaScript heap variables, imports, and files are ephemeral; save only useful JSON state in kernel.
+Start with codemode.search() or codemode.describe() when a method is unfamiliar. Write one no-argument async JavaScript arrow function and compose independent connector calls with Promise.all. Connector namespaces are globals such as context and kernel; never expect a ctx parameter. JavaScript heap variables and imports are ephemeral. Save compact JSON values in kernel and large or reusable artifacts as files under the durable Computer /workspace.
 
-Connector methods take one object argument. Common calls are context.info({}), context.slice({ source: "material", start: 0, length: 8192 }), kernel.set({ key: "name", value }), and kernel.finish({ content }). Inspect schemas before guessing other signatures.
+Connector methods take one object argument. Common calls are context.info({}), context.slice({ source: "material", start: 0, length: 8192 }), kernel.set({ key: "name", value }), workspace.write({ path: "/workspace/notes.json", content: "..." }), workspace.edit({ path: "/workspace/notes.json", edits: [{ oldText: "before", newText: "after" }] }), and kernel.finish({ content }). Inspect schemas before guessing other signatures.
 
 Completion is environment-backed: call kernel.finish({ content }) inside a successful Code Mode execution. Prose outside that protocol is not the answer.
 
@@ -49,6 +49,7 @@ export function buildSystemPrompt(options: {
   const connectors = [
     "- context: inspect, search, and slice external task material without loading it all into the model window.",
     "- kernel: save JSON notebook state across Code Mode calls and finish the current answer.",
+    "- workspace: read, list, write, and edit durable per-agent files under /workspace.",
     ...(options.canDelegate
       ? [
           "- rlm: run one-shot semantic queries or admit work to retained depth-one Think agents."
@@ -96,7 +97,7 @@ ${truncateText(taskPreview, 1_200)}
 
 The complete task and material are external. Use context.info, context.slice, context.search, and context.inputs to inspect them.${
     retry
-      ? " Recover useful kernel state from the interrupted pass and finish through kernel.finish."
+      ? " Recover useful kernel state from the prior pass and finish through kernel.finish."
       : ""
   }`;
 }

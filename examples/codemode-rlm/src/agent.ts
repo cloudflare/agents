@@ -13,6 +13,9 @@ import type {
   CodemodeRuntimeHandle,
   ProxyToolOutput
 } from "@cloudflare/codemode";
+import { toolSetConnector } from "@cloudflare/codemode/ai";
+import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { createAITools } from "@cloudflare/computer/tools";
 import {
   ContextConnector,
   HarnessConnector,
@@ -51,7 +54,7 @@ type RuntimeConfig = {
   timeoutMs: number;
 };
 
-type TurnBinding = { meta: InputMeta; mode: RunMode };
+type TurnBinding = { meta: InputMeta; mode: RunMode; repair: boolean };
 
 type RlmJob = {
   inputId: string;
@@ -94,13 +97,18 @@ function parseJob(value: unknown): RlmJob {
 function turnMessage(
   meta: InputMeta,
   preview: string,
-  mode: RunMode
+  mode: RunMode,
+  repair = false
 ): UIMessage {
   return {
-    id: `rlm-input-${meta.id}`,
+    id: `rlm-${repair ? "repair" : "input"}-${meta.id}`,
     role: "user",
-    metadata: { [TURN_METADATA_KEY]: { inputId: meta.id, mode } },
-    parts: [{ type: "text", text: buildTurnPrompt(meta, preview, mode) }]
+    metadata: {
+      [TURN_METADATA_KEY]: { inputId: meta.id, mode, repair }
+    },
+    parts: [
+      { type: "text", text: buildTurnPrompt(meta, preview, mode, repair) }
+    ]
   };
 }
 
@@ -159,6 +167,7 @@ abstract class RlmBaseAgent extends Think<Env> {
 
   protected readonly store: RlmStore;
   protected readonly config: RuntimeConfig;
+  protected readonly computerWorkspace: Workspace;
 
   protected get depth(): number {
     return 1;
@@ -176,6 +185,15 @@ abstract class RlmBaseAgent extends Think<Env> {
     super(ctx, env);
     this.store = new RlmStore(ctx.storage);
     this.config = configFromEnv(env);
+    this.computerWorkspace = new Workspace({
+      storage: ctx.storage as unknown as DurableObjectStorageLike,
+      sessionId: ctx.id.toString()
+    });
+    ctx.blockConcurrencyWhile(async () => {
+      await this.computerWorkspace.fs.mkdir("/workspace", {
+        recursive: true
+      });
+    });
     this.maxConcurrentAgentTools = Math.max(1, this.config.maxRlmCalls);
   }
 
@@ -203,7 +221,8 @@ abstract class RlmBaseAgent extends Think<Env> {
       if (isRecord(binding) && typeof binding.inputId === "string") {
         return {
           meta: this.store.inputMeta(binding.inputId),
-          mode: binding.mode === "refine" ? "refine" : "think"
+          mode: binding.mode === "refine" ? "refine" : "think",
+          repair: binding.repair === true
         };
       }
     }
@@ -225,7 +244,19 @@ abstract class RlmBaseAgent extends Think<Env> {
         "root",
         turn.meta.id
       ),
-      new KernelConnector(this.ctx, this.env, this.store, "root", turn.meta.id)
+      new KernelConnector(this.ctx, this.env, this.store, "root", turn.meta.id),
+      toolSetConnector(this.ctx, {
+        name: "workspace",
+        instructions:
+          "Durable files in this agent's isolated Computer VFS. Use absolute paths under /workspace by convention; keep large or reusable values in files and return compact references.",
+        tools: createAITools({
+          workspace: this.computerWorkspace,
+          assets: false,
+          read: { maxBytes: 64 * 1024, maxLines: 1_000 },
+          write: { maxBytes: 512 * 1024 },
+          edit: { maxBytes: 512 * 1024 }
+        })
+      })
     ];
     const host = this.createHost(turn);
     if (host) connectors.push(new RlmConnector(this.ctx, this.env, host));
@@ -240,13 +271,6 @@ abstract class RlmBaseAgent extends Think<Env> {
         )
       );
     }
-    const capabilities = [
-      "external context",
-      "durable kernel state",
-      ...(host ? ["depth-one sub-agents"] : []),
-      ...(this.isRoot ? ["the continual harness"] : [])
-    ];
-
     const built = createExecuteRuntime({
       ctx: this.ctx,
       loader: this.env.LOADER,
@@ -256,11 +280,7 @@ abstract class RlmBaseAgent extends Think<Env> {
         2_500,
         Math.floor(this.config.timeoutMs * (this.isRoot ? 0.7 : 0.4))
       ),
-      globalOutbound: null,
-      description:
-        "The only model-facing tool. Program over " +
-        capabilities.join(", ") +
-        "."
+      globalOutbound: null
     });
     this.codemode = built.runtime;
     return compactTool(
@@ -300,7 +320,7 @@ abstract class RlmBaseAgent extends Think<Env> {
             turn.meta,
             taskPreview,
             turn.mode,
-            ctx.continuation
+            turn.repair || ctx.continuation
           )
         }
       ],
@@ -665,6 +685,37 @@ export class RlmThinkAgent extends RlmBaseAgent {
     });
   }
 
+  private async submitRepair(
+    meta: InputMeta,
+    submissionId: string
+  ): Promise<void> {
+    const preview = this.store.inputSlice(meta.id, "task", 0, 1_200).content;
+    const mode: RunMode = meta.kind === "refine" ? "refine" : "think";
+    await this.submitMessages([turnMessage(meta, preview, mode, true)], {
+      submissionId,
+      idempotencyKey: submissionId,
+      metadata: {
+        inputId: meta.id,
+        requestId: meta.requestId,
+        kind: `${meta.kind}-repair`
+      },
+      channel: "web"
+    });
+  }
+
+  private async ensureRepair(meta: InputMeta, submissionId: string) {
+    const existing = await this.inspectSubmission(submissionId);
+    if (existing) return existing;
+    try {
+      await this.submitRepair(meta, submissionId);
+    } catch {
+      // As with the root admission, a durable repair write may have succeeded
+      // before scheduling surfaced an error. Re-inspect the stable id so a
+      // polling retry cannot create a second repair turn.
+    }
+    return this.inspectSubmission(submissionId);
+  }
+
   private async healSubmission(meta: InputMeta): Promise<void> {
     try {
       await this.submitRoot(meta);
@@ -783,16 +834,64 @@ export class RlmThinkAgent extends RlmBaseAgent {
         inputId: meta.id
       };
     }
+    if (submission.status === "completed") {
+      const repairSubmissionId = await stableId("repair", meta.id);
+      const repair = await this.ensureRepair(meta, repairSubmissionId);
+      if (!repair || repair.status === "pending") {
+        return {
+          requestId: meta.requestId,
+          kind: meta.kind,
+          status: "admitted",
+          inputId: meta.id
+        };
+      }
+      if (repair.status === "running") {
+        return {
+          requestId: meta.requestId,
+          kind: meta.kind,
+          status: "running",
+          inputId: meta.id
+        };
+      }
+
+      const repairedOutput = this.validatedOutput(meta.id);
+      if (repairedOutput) {
+        return {
+          requestId: meta.requestId,
+          kind: meta.kind,
+          status: "completed",
+          inputId: meta.id,
+          answer: repairedOutput.answer,
+          executionIds: [repairedOutput.executionId],
+          recursiveCalls: this.store.rlmCalls(meta.id),
+          ...(meta.kind === "refine"
+            ? { harness: harnessSummary(this.store.harness()) }
+            : {})
+        };
+      }
+      return {
+        requestId: meta.requestId,
+        kind: meta.kind,
+        status: "error",
+        inputId: meta.id,
+        recursiveCalls: this.store.rlmCalls(meta.id),
+        error: truncateText(
+          repair.error ??
+            (repair.status === "completed"
+              ? "turn and its one automatic repair completed without a valid kernel.finish"
+              : `automatic repair ended with ${repair.status}`),
+          MAX_CONTEXT_OUTPUT_CHARS
+        )
+      };
+    }
     return {
       requestId: meta.requestId,
       kind: meta.kind,
       status: "error",
       inputId: meta.id,
+      recursiveCalls: this.store.rlmCalls(meta.id),
       error: truncateText(
-        submission.error ??
-          (submission.status === "completed"
-            ? "turn completed without a valid kernel.finish"
-            : `turn ended with ${submission.status}`),
+        submission.error ?? `turn ended with ${submission.status}`,
         MAX_CONTEXT_OUTPUT_CHARS
       )
     };

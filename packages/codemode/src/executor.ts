@@ -300,8 +300,11 @@ export class DynamicWorkerExecutor implements Executor {
       // Globals the generated harness code depends on.
       "Promise",
       "setTimeout",
+      "clearTimeout",
       "Error",
-      "console"
+      "console",
+      "__runWithTimeout",
+      "__outcome"
     ]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();
@@ -420,25 +423,36 @@ export class DynamicWorkerExecutor implements Executor {
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
+      "    async function __runWithTimeout(fn, ms) {",
+      "      let timer;",
+      "      try {",
+      "        return await Promise.race([",
+      "          Promise.resolve().then(fn).then((value) => ({ timedOut: false, value })),",
+      "          new Promise((resolve) => {",
+      "            timer = setTimeout(() => resolve({ timedOut: true }), ms);",
+      "          })",
+      "        ]);",
+      "      } finally {",
+      "        if (timer !== undefined) clearTimeout(timer);",
+      "      }",
+      "    }",
       SANDBOX_CODEC,
       ...proxyInits,
       ...connectorProxyInits,
       ...preludeInits,
       "",
       "    try {",
-      "      const result = await Promise.race([",
-      "        ("
+      "      const __outcome = await __runWithTimeout(async () => ("
     ]
       .concat([normalized])
       .concat([
-        ")(),",
-        '        new Promise((_, reject) => setTimeout(() => reject(new Error("Execution timed out")), ' +
-          timeoutMs +
-          "))",
-        "      ]);",
-        "      return { result, logs: __logs };",
+        ")(), " + timeoutMs + ");",
+        "      if (__outcome.timedOut) {",
+        '        return { result: undefined, error: "Execution timed out", timedOut: true, logs: __logs };',
+        "      }",
+        "      return { result: __outcome.value, timedOut: false, logs: __logs };",
         "    } catch (err) {",
-        "      return { result: undefined, error: err.message, logs: __logs };",
+        "      return { result: undefined, error: err.message, timedOut: false, logs: __logs };",
         "    }",
         "  }",
         "}"
@@ -509,6 +523,7 @@ export class DynamicWorkerExecutor implements Executor {
         ): Promise<{
           result: unknown;
           error?: string;
+          timedOut?: boolean;
           logs?: string[];
         }>;
       };
@@ -519,6 +534,20 @@ export class DynamicWorkerExecutor implements Executor {
         );
 
         if (response.error) {
+          if (response.timedOut) {
+            // Cancellation is deliberately best-effort. A connector's abort
+            // hook must not turn the executor's bounded timeout into another
+            // unbounded wait. Promise rejections are still observed.
+            for (const { binding } of connectors) {
+              try {
+                void Promise.resolve(
+                  binding.abort?.("Code Mode execution timed out")
+                ).catch(() => undefined);
+              } catch {
+                // A synchronous abort failure cannot mask the timeout.
+              }
+            }
+          }
           return {
             result: undefined,
             error: response.error,

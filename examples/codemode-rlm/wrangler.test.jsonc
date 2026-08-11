@@ -7,5 +7,6 @@
   "durable_objects": {
     "bindings": [{ "name": "STORE", "class_name": "StoreHarness" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StoreHarness"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StoreHarness"] }],
+  "worker_loaders": [{ "binding": "LOADER" }]
 }

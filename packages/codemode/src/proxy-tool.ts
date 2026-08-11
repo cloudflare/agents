@@ -269,13 +269,35 @@ function createCursor(): Cursor {
 // ---------------------------------------------------------------------------
 
 class ConnectorCallTarget extends RpcTarget {
-  #handle: (method: string, args: unknown) => Promise<unknown>;
-  constructor(handle: (method: string, args: unknown) => Promise<unknown>) {
+  readonly #handle: (
+    method: string,
+    args: unknown,
+    abortSignal: AbortSignal
+  ) => Promise<unknown>;
+  readonly #controllers = new Set<AbortController>();
+
+  constructor(
+    handle: (
+      method: string,
+      args: unknown,
+      abortSignal: AbortSignal
+    ) => Promise<unknown>
+  ) {
     super();
     this.#handle = handle;
   }
-  callTool(method: string, args: unknown): Promise<unknown> {
-    return this.#handle(method, args);
+  async callTool(method: string, args: unknown): Promise<unknown> {
+    const controller = new AbortController();
+    this.#controllers.add(controller);
+    try {
+      return await this.#handle(method, args, controller.signal);
+    } finally {
+      this.#controllers.delete(controller);
+    }
+  }
+
+  abort(reason?: string): void {
+    for (const controller of this.#controllers) controller.abort(reason);
   }
 }
 
@@ -397,7 +419,7 @@ function buildConnectorBindings(
 ): ConnectorBinding[] {
   return setup.descriptions.map((desc) => ({
     name: desc.name,
-    binding: new ConnectorCallTarget(async (method, args) => {
+    binding: new ConnectorCallTarget(async (method, args, abortSignal) => {
       // The RpcTarget method must ALWAYS resolve — never reject. A rejection
       // across the sandbox→host RPC boundary is tracked as an unhandled
       // rejection on the host even though the sandbox awaits it. So every
@@ -422,11 +444,21 @@ function buildConnectorBindings(
 
         if (decision.kind === "replay") return decision.result;
         if (decision.kind === "pause") return { [CONTROL_KEY]: "pause" };
+        if (abortSignal.aborted) {
+          throw new Error(
+            typeof abortSignal.reason === "string"
+              ? abortSignal.reason
+              : "Code Mode execution was aborted before connector execution"
+          );
+        }
 
         const connector = setup.connectorsByName.get(desc.name);
         if (!connector) throw new Error(`Unknown connector: ${desc.name}`);
         const result = await connector.executeTool(method, args, {
-          executionId
+          executionId,
+          seq: decision.seq,
+          callId: `${executionId}:${decision.seq}`,
+          abortSignal
         });
         await runtime.recordResult(executionId, decision.seq, result);
         return result;
@@ -510,7 +542,9 @@ function createPlatformProvider(
         // run); `runCode` then normalizes the outer wrapper as usual.
         const snippetExpr = normalizeCode(snippet.code);
         const result = await runCode({
-          code: `async () => {\n  const snippet = (${snippetExpr});\n  return await snippet(${JSON.stringify(args[1])});\n}`,
+          code: `async () => {\n  const snippet = (${snippetExpr});\n  return await snippet(${JSON.stringify(
+            args[1]
+          )});\n}`,
           executor,
           providers: [provider],
           connectors: bindings
@@ -572,6 +606,7 @@ function buildDescription(
     "",
     "## Rules",
     "",
+    "- Write the entire program as one async arrow expression: `async () => { ... }`. The runtime calls it with no arguments; connector namespaces are globals, not properties of a `ctx` parameter.",
     `- The ONLY globals are ${names} and \`codemode\` (plus standard JavaScript). There is no \`host\`, \`fs\`, \`require\`, \`process\`, or Node.js API — all I/O goes through the connectors below.`,
     "- Never guess method names. If you have not used a connector in this conversation, run a discovery pass first: `codemode.search(query)` returns ranked matches across connector methods and saved snippets.",
     '- `codemode.describe("connector.method")` returns TypeScript type declarations.',
@@ -1047,7 +1082,11 @@ export async function rollbackCodemode(options: {
         action.method,
         action.args,
         action.result,
-        { executionId: options.executionId }
+        {
+          executionId: options.executionId,
+          seq: action.seq,
+          callId: `${options.executionId}:${action.seq}`
+        }
       );
       if (didRevert) {
         await runtime.markReverted(action.seq, options.executionId);

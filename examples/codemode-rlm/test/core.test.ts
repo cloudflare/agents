@@ -142,6 +142,9 @@ describe("runtime prompt", () => {
     });
     expect(prompt).toContain("- context:");
     expect(prompt).toContain("- kernel:");
+    expect(prompt).toContain("- workspace:");
+    expect(prompt).toContain("durable Computer /workspace");
+    expect(prompt).toContain("never expect a ctx parameter");
     expect(prompt).not.toContain("rlm.");
     expect(prompt).not.toContain("- harness:");
     expect(prompt).toContain("at most 12 model steps");

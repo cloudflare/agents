@@ -18,10 +18,18 @@ both conditions. Trials run serially, alternating which condition goes first,
 because parallel remote-model calls can create local head-of-line blocking and
 make wall-time comparisons meaningless.
 
-| Condition     | Context and capability budget                                                                             |
-| ------------- | --------------------------------------------------------------------------------------------------------- |
-| `rlm`         | Material is external context; Code Mode can inspect it, persist JSON state, and use children.             |
-| `basic-think` | Material is in the active prompt; direct Think reasoning plus only a schema-neutral terminal-answer tool. |
+| Condition     | Context and capability budget                                                                                                                               |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rlm`         | Material is external context; the sole model-facing tool is Code Mode, whose programs can use a compact JSON kernel, per-agent durable files, and children. |
+| `basic-think` | Material is in the active prompt; direct Think reasoning plus only a schema-neutral terminal-answer tool.                                                   |
+
+Each Dynamic Worker pass has a fresh JavaScript heap: variables and imports do
+not carry into the next pass. An approval resume replays earlier connector
+observations rather than restoring that heap. The RLM can retain small
+JSON-serializable values in its bounded kernel and larger or reusable artifacts
+in its durable Computer `/workspace`. Every child has its own isolated kernel
+and workspace; neither is shared with the root or another child. A follow-up to
+the same retained child can reuse that child's state.
 
 The browser chat is always the RLM. `BasicThinkAgent` exists only for this
 evaluator: it declares and forces `submit_answer` as its sole active tool,
@@ -31,9 +39,9 @@ does not expose Code Mode to the basic control.
 
 Every invocation generates a nonce independent of the human-readable `runId`.
 The nonce is included in every Durable Object and request identity, so reusing a
-`runId` still creates fresh history/kernel/children and cannot overwrite an
-earlier result file. Every task starts with an empty harness and receives no
-correctness feedback. The scorer retains
+`runId` still creates fresh history, kernels, workspaces, and children and
+cannot overwrite an earlier result file. Every task starts with an empty
+harness and receives no correctness feedback. The scorer retains
 `test[].output` in the local runner and sends only training pairs plus test
 inputs to either agent.
 
@@ -119,11 +127,16 @@ step/tool counts as soon as that condition finishes. A missing recursive-call
 count is recorded as `null` and printed as unknown, never inferred as zero.
 Only counts and tool names
 are collected from the eval diagnostics endpoints; reasoning text is not copied
-into the result artifact. The runner then prints an aggregate table and writes
-raw answers and diagnostics to the gitignored `eval/results/` directory.
+into the result artifact. Because `workspace` is a connector namespace inside
+Code Mode rather than a model-facing tool, a diagnostic `codemode` call does
+not by itself show whether that execution used the workspace. The runner then
+prints an aggregate table and writes raw answers and diagnostics to the
+gitignored `eval/results/` directory.
 
 See [RESULTS.md](./RESULTS.md) for one dated, predefined micro-suite run and its
-caveats.
+caveats. That run predates the Computer workspace integration, so it measures
+the earlier external-context-plus-kernel harness rather than the current hybrid
+memory condition.
 
 ## Scoring
 
@@ -139,6 +152,9 @@ the gold output. The report includes:
 
 The comparison is intentionally not compute-matched: basic Think reasons over
 the complete puzzle in one active prompt, while the RLM gets its
-external-context, Code Mode, kernel, and recursion harness. Both must use an
-explicit terminal-answer protocol. It answers the system-level question “does
-this harness help?” rather than isolating an equal-token algorithmic effect.
+external-context, Code Mode, JSON kernel, durable per-agent workspace, and
+recursion harness. These are available capabilities; the evaluator does not
+claim that a particular trial used every capability. Both conditions must use
+an explicit terminal-answer protocol. The comparison answers the system-level
+question “does this harness help?” rather than isolating an equal-token
+algorithmic effect.

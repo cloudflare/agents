@@ -13,6 +13,76 @@ async function post(path: string, value: unknown): Promise<Response> {
 }
 
 describe("minimal RLM durable state", () => {
+  it("discovers and persists a Computer workspace across connector calls", async () => {
+    const instance = "computer-workspace";
+    await expect(
+      (await post(`/workspace-describe?instance=${instance}`, {})).json()
+    ).resolves.toMatchObject({
+      methods: ["edit", "ls", "read", "write"],
+      types: expect.stringContaining("declare const workspace")
+    });
+
+    await expect(
+      (
+        await post(`/workspace-write?instance=${instance}`, {
+          path: "/workspace/memory.json",
+          content: '{"answer":41}'
+        })
+      ).json()
+    ).resolves.toEqual({
+      path: "/workspace/memory.json",
+      bytesWritten: 13
+    });
+
+    await expect(
+      (
+        await post(`/workspace-edit?instance=${instance}`, {
+          path: "/workspace/memory.json",
+          edits: [{ oldText: "41", newText: "42" }]
+        })
+      ).json()
+    ).resolves.toMatchObject({
+      path: "/workspace/memory.json",
+      editsApplied: 1
+    });
+
+    await expect(
+      (
+        await post(`/workspace-read?instance=${instance}`, {
+          path: "/workspace/memory.json"
+        })
+      ).json()
+    ).resolves.toMatchObject({
+      path: "/workspace/memory.json",
+      content: '{"answer":42}'
+    });
+  });
+
+  it("persists workspace files written by generated JavaScript", async () => {
+    const instance = "generated-computer-workspace";
+    await expect(
+      (await post(`/workspace-generated?instance=${instance}`, {})).json()
+    ).resolves.toMatchObject({
+      result: {
+        path: "/workspace/generated.txt",
+        content: "written by generated JavaScript"
+      }
+    });
+
+    await expect(
+      (
+        await post(`/workspace-generated?instance=${instance}`, {
+          action: "read"
+        })
+      ).json()
+    ).resolves.toMatchObject({
+      result: {
+        path: "/workspace/generated.txt",
+        content: "written by generated JavaScript"
+      }
+    });
+  });
+
   it("binds a request and input id to exact external data", async () => {
     const input = {
       id: "input-replay",

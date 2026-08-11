@@ -23,13 +23,16 @@ function renderConnectorTypes(
 }
 
 function renderMethodTypes(
+  connectorName: string,
   methodName: string,
   descriptors: JsonSchemaToolDescriptors
 ): string {
   const descriptor = descriptors[methodName];
   if (!descriptor) return "";
-  const generated = generateTypesFromJsonSchema({ [methodName]: descriptor });
-  return generated.slice(0, generated.indexOf("declare const codemode")).trim();
+  return generateTypesFromJsonSchema({ [methodName]: descriptor }).replace(
+    "declare const codemode",
+    `declare const ${sanitizeToolName(connectorName)}`
+  );
 }
 
 export function describeTarget(
@@ -84,7 +87,11 @@ export function describeTarget(
         ...(candidate.annotations?.[methodName]?.requiresApproval
           ? { requiresApproval: true }
           : {}),
-        types: renderMethodTypes(methodName, candidate.descriptors),
+        types: renderMethodTypes(
+          candidate.name,
+          methodName,
+          candidate.descriptors
+        ),
         kind: "method"
       };
     }

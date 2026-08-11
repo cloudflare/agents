@@ -28,8 +28,11 @@ import {
   type Grid,
   type ParsedArcAnswer
 } from "./arc";
-
-type Condition = "rlm" | "basic-think";
+import {
+  terminalRun as projectTerminalRun,
+  type Condition,
+  type ConditionRun
+} from "./result";
 
 type LoadedTask = {
   spec: ArcTaskSpec;
@@ -37,20 +40,12 @@ type LoadedTask = {
   gold: Grid[];
 };
 
-type ConditionRun = {
-  taskId: string;
-  condition: Condition;
-  status: "completed" | "error";
-  elapsedMs: number;
-  answer: string;
-  error?: string;
-  executionIds?: string[];
-  recursiveCalls?: number | null;
+type DiagnosedConditionRun = ConditionRun & {
   diagnostics?: MessageDiagnostics;
   diagnosticsError?: string;
 };
 
-type ScoredRun = ConditionRun & {
+type ScoredRun = DiagnosedConditionRun & {
   parsed: ParsedArcAnswer;
   score: ArcScore;
 };
@@ -255,10 +250,10 @@ function parseRuntimeConfig(
 }
 
 async function withMessageDiagnostics(
-  run: ConditionRun,
+  run: DiagnosedConditionRun,
   url: string,
   timeoutMs: number
-): Promise<ConditionRun> {
+): Promise<DiagnosedConditionRun> {
   try {
     const result = await responseJson(
       url,
@@ -302,50 +297,23 @@ function terminalRun(
   startedAt: number,
   result: Record<string, unknown>
 ): ConditionRun {
-  if (result.status !== "completed" || typeof result.answer !== "string") {
-    return {
-      taskId,
-      condition,
-      status: "error",
-      elapsedMs: Math.round(performance.now() - startedAt),
-      answer: "",
-      error:
-        typeof result.error === "string"
-          ? result.error
-          : `turn ended with ${String(result.status)}`,
-      ...(condition === "rlm" ? { recursiveCalls: null } : {})
-    };
-  }
-  return {
+  return projectTerminalRun(
     taskId,
     condition,
-    status: "completed",
-    elapsedMs: Math.round(performance.now() - startedAt),
-    answer: result.answer,
-    ...(Array.isArray(result.executionIds) &&
-    result.executionIds.every((id) => typeof id === "string")
-      ? { executionIds: result.executionIds as string[] }
-      : {}),
-    ...(condition === "rlm"
-      ? {
-          recursiveCalls:
-            typeof result.recursiveCalls === "number"
-              ? result.recursiveCalls
-              : null
-        }
-      : {})
-  };
+    Math.round(performance.now() - startedAt),
+    result
+  );
 }
 
 async function runPlainThink(
   task: LoadedTask,
   options: Options,
   ordinal: number
-): Promise<ConditionRun> {
+): Promise<DiagnosedConditionRun> {
   const startedAt = performance.now();
   const trial = `arc2-${options.runId}-${options.nonce}-${ordinal}-plain`;
   const url = `${options.baseUrl}/eval/baselines/${encodeURIComponent(trial)}`;
-  let run: ConditionRun;
+  let run: DiagnosedConditionRun;
   try {
     const result = await responseJson(
       url,
@@ -374,14 +342,14 @@ async function runRlm(
   task: LoadedTask,
   options: Options,
   ordinal: number
-): Promise<ConditionRun> {
+): Promise<DiagnosedConditionRun> {
   const startedAt = performance.now();
   const session = `arc2-${options.runId}-${options.nonce}-${ordinal}-rlm`;
   const requestId = `arc2-${options.runId}-${options.nonce}-${ordinal}`;
   const diagnosticsUrl = `${options.baseUrl}/eval/rlm/${encodeURIComponent(
     session
   )}`;
-  let run: ConditionRun;
+  let run: DiagnosedConditionRun;
   try {
     let result = await responseJson(
       `${options.baseUrl}/sessions/${encodeURIComponent(session)}/think`,
@@ -424,13 +392,13 @@ async function runRlm(
   return withMessageDiagnostics(run, diagnosticsUrl, options.timeoutMs);
 }
 
-function scoreRun(run: ConditionRun, task: LoadedTask): ScoredRun {
+function scoreRun(run: DiagnosedConditionRun, task: LoadedTask): ScoredRun {
   const parsed = parseArcAnswer(run.answer, task.gold.length);
   return { ...run, parsed, score: scoreArcTask(task.gold, parsed) };
 }
 
 function logConditionRun(
-  run: ConditionRun,
+  run: DiagnosedConditionRun,
   task: LoadedTask,
   ordinal: number,
   total: number
@@ -578,7 +546,7 @@ async function main() {
     `Fetching ${selectedSpecs.length} pinned ARC-AGI-2 public-evaluation tasks...`
   );
   const tasks = await Promise.all(selectedSpecs.map(loadTask));
-  const runs: ConditionRun[] = [];
+  const runs: DiagnosedConditionRun[] = [];
 
   for (let index = 0; index < tasks.length; index += 1) {
     const task = tasks[index];
@@ -646,7 +614,7 @@ async function main() {
         "exact nested-grid equality; task score is mean test-pair accuracy",
       diagnostic:
         "Cell accuracy is non-official and is zero when candidate dimensions are wrong.",
-      rlm: "Code Mode only; external context, durable JSON kernel, optional depth-one Think children, empty harness per fresh session.",
+      rlm: "Only model-facing tool is codemode; each Dynamic Worker pass has an ephemeral JavaScript heap, plus external context, a compact durable per-agent JSON kernel, a durable isolated per-agent Computer /workspace, optional depth-one Think children, and an empty harness per fresh session.",
       basicThink:
         "Direct Think control; full redacted task material in the active prompt, no web/MCP/puzzle helper, and only an evaluation terminal-answer tool active."
     },

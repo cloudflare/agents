@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-codemode-rlm-example",
-  "description": "Think-hosted recursive language model with Code Mode as its only model-facing tool",
+  "description": "Think-hosted recursive language model with Code Mode as its only model-facing tool and Computer Workspace as durable file memory",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@cloudflare/codemode": "*",
+    "@cloudflare/computer": "0.1.1",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",

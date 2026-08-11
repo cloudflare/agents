@@ -5,12 +5,17 @@
  * with a real WorkerLoader binding, no mocks needed.
  */
 import { describe, it, expect, vi } from "vitest";
-import { env } from "cloudflare:workers";
+import { env, RpcTarget } from "cloudflare:workers";
+import { tool } from "ai";
+import { z } from "zod";
 import {
   DynamicWorkerExecutor,
   ToolDispatcher,
+  type Executor,
   type ResolvedProvider
 } from "../executor";
+import { ToolSetConnector } from "../connectors/toolset";
+import { createProxyTool } from "../proxy-tool";
 
 type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
@@ -432,6 +437,303 @@ describe("DynamicWorkerExecutor", () => {
     );
 
     expect(result.error).toContain("timed out");
+  });
+
+  it("should abort in-flight connector work when execution times out", async () => {
+    class AbortableConnector extends RpcTarget {
+      aborted = false;
+      #controller = new AbortController();
+
+      async callTool(): Promise<string> {
+        return new Promise((resolve) => {
+          this.#controller.signal.addEventListener(
+            "abort",
+            () => resolve("aborted"),
+            { once: true }
+          );
+        });
+      }
+
+      abort(): void {
+        this.aborted = true;
+        this.#controller.abort();
+      }
+    }
+
+    const connector = new AbortableConnector();
+    const executor = new DynamicWorkerExecutor({
+      loader: env.LOADER,
+      timeout: 100
+    });
+    const result = await executor.execute(
+      "async () => await workspace.exec({ command: 'slow' })",
+      [],
+      { connectors: [{ name: "workspace", binding: connector }] }
+    );
+
+    expect(result.error).toBe("Execution timed out");
+    expect(connector.aborted).toBe(true);
+  });
+
+  it("should not infer a timeout from user-thrown error text", async () => {
+    class Connector extends RpcTarget {
+      aborted = false;
+
+      async callTool(): Promise<void> {}
+
+      abort(): void {
+        this.aborted = true;
+      }
+    }
+
+    const connector = new Connector();
+    const executor = new DynamicWorkerExecutor({
+      loader: env.LOADER,
+      timeout: 5_000
+    });
+    const result = await executor.execute(
+      'async () => { throw new Error("Execution timed out"); }',
+      [],
+      { connectors: [{ name: "workspace", binding: connector }] }
+    );
+
+    expect(result.error).toBe("Execution timed out");
+    expect(connector.aborted).toBe(false);
+  });
+
+  it("should not wait for a connector abort hook that never settles", async () => {
+    class HangingAbortConnector extends RpcTarget {
+      aborted = false;
+
+      async callTool(): Promise<never> {
+        return new Promise(() => {});
+      }
+
+      abort(): Promise<void> {
+        this.aborted = true;
+        return new Promise(() => {});
+      }
+    }
+
+    const connector = new HangingAbortConnector();
+    const executor = new DynamicWorkerExecutor({
+      loader: env.LOADER,
+      timeout: 100
+    });
+    const result = await Promise.race([
+      executor.execute(
+        "async () => await workspace.exec({ command: 'slow' })",
+        [],
+        { connectors: [{ name: "workspace", binding: connector }] }
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("executor waited for abort")), 2_000)
+      )
+    ]);
+
+    expect(result.error).toBe("Execution timed out");
+    expect(connector.aborted).toBe(true);
+  });
+
+  it("propagates stable call identity and timeout cancellation through a ToolSet", async () => {
+    let observedCallId: string | undefined;
+    let observedSignal: AbortSignal | undefined;
+    let aborted = false;
+    const runtime = {
+      begin: vi.fn(async () => "exec_proxy"),
+      decide: vi.fn(async (_id, seq) => ({ kind: "execute", seq })),
+      recordResult: vi.fn(async () => undefined),
+      getExecution: vi.fn(async () => ({
+        id: "exec_proxy",
+        code: "",
+        status: "running",
+        log: [],
+        createdAt: 1,
+        updatedAt: 1
+      })),
+      fail: vi.fn(async () => undefined),
+      complete: vi.fn(async () => undefined),
+      listPending: vi.fn(async () => []),
+      listSnippets: vi.fn(async () => [])
+    };
+    const ctx = {
+      facets: { get: () => runtime },
+      exports: { CodemodeRuntime: class {} }
+    } as unknown as DurableObjectState;
+    const connector = new ToolSetConnector(ctx, {
+      name: "workspace",
+      tools: {
+        exec: tool({
+          inputSchema: z.object({ command: z.string() }),
+          execute: async (_input, options) => {
+            observedCallId = options.toolCallId;
+            observedSignal = options.abortSignal;
+            return await new Promise<string>((resolve) => {
+              options.abortSignal?.addEventListener(
+                "abort",
+                () => {
+                  aborted = true;
+                  resolve("aborted");
+                },
+                { once: true }
+              );
+              setTimeout(() => resolve("late"), 500);
+            });
+          }
+        })
+      }
+    });
+    const codemode = createProxyTool({
+      ctx,
+      connectors: [connector],
+      executor: new DynamicWorkerExecutor({ loader: env.LOADER, timeout: 100 })
+    });
+
+    const output = await codemode.execute(
+      {
+        code: "async () => await workspace.exec({ command: 'slow' })"
+      },
+      {}
+    );
+
+    expect(output.status).toBe("error");
+    expect(observedCallId).toBe("exec_proxy:0");
+    expect(observedSignal).toBeInstanceOf(AbortSignal);
+    expect(aborted).toBe(true);
+  });
+
+  it("does not start a connector effect after timeout wins during admission", async () => {
+    let releaseDecision:
+      | ((decision: { kind: "execute"; seq: number }) => void)
+      | undefined;
+    const execute = vi.fn(async () => "too late");
+    const runtime = {
+      begin: vi.fn(async () => "exec_delayed_decision"),
+      decide: vi.fn(
+        async () =>
+          new Promise<{ kind: "execute"; seq: number }>((resolve) => {
+            releaseDecision = resolve;
+          })
+      ),
+      recordResult: vi.fn(async () => undefined),
+      getExecution: vi.fn(async () => ({
+        id: "exec_delayed_decision",
+        code: "",
+        status: "running",
+        log: [],
+        createdAt: 1,
+        updatedAt: 1
+      })),
+      fail: vi.fn(async () => undefined),
+      complete: vi.fn(async () => undefined),
+      listPending: vi.fn(async () => []),
+      listSnippets: vi.fn(async () => [])
+    };
+    const ctx = {
+      facets: { get: () => runtime },
+      exports: { CodemodeRuntime: class {} }
+    } as unknown as DurableObjectState;
+    const connector = new ToolSetConnector(ctx, {
+      name: "workspace",
+      tools: {
+        write: tool({
+          inputSchema: z.object({ content: z.string() }),
+          execute
+        })
+      }
+    });
+    const codemode = createProxyTool({
+      ctx,
+      connectors: [connector],
+      executor: new DynamicWorkerExecutor({ loader: env.LOADER, timeout: 100 })
+    });
+
+    const output = await codemode.execute(
+      {
+        code: `async () => workspace.write({ content: "must not happen" })`
+      },
+      {}
+    );
+    expect(output.status).toBe("error");
+    expect(runtime.decide).toHaveBeenCalledOnce();
+
+    releaseDecision?.({ kind: "execute", seq: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(execute).not.toHaveBeenCalled();
+    expect(runtime.recordResult).not.toHaveBeenCalled();
+  });
+
+  it("uses a fresh abort signal for connector calls after a nested timeout", async () => {
+    const observedSignals: AbortSignal[] = [];
+    let markSlowStarted: (() => void) | undefined;
+    const slowStarted = new Promise<void>((resolve) => {
+      markSlowStarted = resolve;
+    });
+    const runtime = {
+      begin: vi.fn(async () => "exec_nested_timeout"),
+      decide: vi.fn(async (_id, seq) => ({ kind: "execute", seq })),
+      recordResult: vi.fn(async () => undefined),
+      getExecution: vi.fn(async () => ({
+        id: "exec_nested_timeout",
+        code: "",
+        status: "running",
+        log: [],
+        createdAt: 1,
+        updatedAt: 1
+      })),
+      complete: vi.fn(async () => undefined),
+      listPending: vi.fn(async () => []),
+      listSnippets: vi.fn(async () => [])
+    };
+    const ctx = {
+      facets: { get: () => runtime },
+      exports: { CodemodeRuntime: class {} }
+    } as unknown as DurableObjectState;
+    const connector = new ToolSetConnector(ctx, {
+      name: "workspace",
+      tools: {
+        exec: tool({
+          inputSchema: z.object({ command: z.string() }),
+          execute: async ({ command }, options) => {
+            const signal = options.abortSignal!;
+            observedSignals.push(signal);
+            if (command === "fast")
+              return signal.aborted ? "poisoned" : "fresh";
+            markSlowStarted?.();
+            return new Promise<string>((resolve) => {
+              signal.addEventListener("abort", () => resolve("aborted"), {
+                once: true
+              });
+            });
+          }
+        })
+      }
+    });
+    const executor: Executor = {
+      execute: async (_code, _providers, options) => {
+        const binding = options?.connectors?.[0]?.binding;
+        if (!binding) throw new Error("missing test connector binding");
+        const slow = binding.callTool("exec", { command: "slow" });
+        await slowStarted;
+        binding.abort?.("nested execution timed out");
+        await slow;
+        return {
+          result: await binding.callTool("exec", { command: "fast" })
+        };
+      }
+    };
+    const codemode = createProxyTool({
+      ctx,
+      connectors: [connector],
+      executor
+    });
+
+    await expect(
+      codemode.execute({ code: "async () => 'ignored by fake executor'" }, {})
+    ).resolves.toMatchObject({ status: "completed", result: "fresh" });
+    expect(observedSignals).toHaveLength(2);
+    expect(observedSignals[0].aborted).toBe(true);
+    expect(observedSignals[1].aborted).toBe(false);
   });
 });
 

@@ -30,6 +30,23 @@ export type ToolAnnotations = {
 export type ToolExecuteContext = {
   /** The codemode execution this call belongs to. Stable across pause/resume. */
   executionId: string;
+  /**
+   * Durable call position within the execution. Stable when a paused or
+   * interrupted execution replays the same connector call. Present for
+   * runtime-dispatched calls; optional for backwards-compatible direct calls
+   * to `executeTool()` and `revertAction()`.
+   */
+  seq?: number;
+  /**
+   * Stable per-call identity, currently `${executionId}:${seq}`. Present for
+   * runtime-dispatched calls; optional for backwards-compatible direct calls.
+   */
+  callId?: string;
+  /**
+   * Optional host cancellation signal. Runtimes that can propagate
+   * cancellation provide it so connector tools can stop external work.
+   */
+  abortSignal?: AbortSignal;
 };
 
 /**

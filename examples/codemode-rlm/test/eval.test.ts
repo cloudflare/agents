@@ -5,6 +5,7 @@ import {
   visibleTaskMaterial,
   type ArcTask
 } from "../eval/arc";
+import { terminalRun } from "../eval/result";
 
 const task: ArcTask = {
   train: [
@@ -93,5 +94,47 @@ describe("ARC smoke scorer", () => {
       expect(parsed.error).toBeDefined();
       expect(scoreArcTask([task.test[0].output], parsed).taskScore).toBe(0);
     }
+  });
+});
+
+describe("ARC terminal result projection", () => {
+  it("preserves Code Mode and recursion diagnostics on terminal errors", () => {
+    expect(
+      terminalRun("task", "rlm", 123, {
+        status: "error",
+        error: "repair did not finish",
+        executionIds: ["exec-1", "exec-2"],
+        recursiveCalls: 3
+      })
+    ).toEqual({
+      taskId: "task",
+      condition: "rlm",
+      status: "error",
+      elapsedMs: 123,
+      answer: "",
+      error: "repair did not finish",
+      executionIds: ["exec-1", "exec-2"],
+      recursiveCalls: 3
+    });
+  });
+
+  it("rejects malformed terminal diagnostics", () => {
+    expect(
+      terminalRun("task", "rlm", 123, {
+        status: "aborted",
+        executionIds: ["exec-1", 2],
+        recursiveCalls: "three"
+      })
+    ).toMatchObject({
+      status: "error",
+      error: "turn ended with aborted",
+      recursiveCalls: null
+    });
+    expect(
+      terminalRun("task", "rlm", 123, {
+        status: "aborted",
+        executionIds: ["exec-1", 2]
+      })
+    ).not.toHaveProperty("executionIds");
   });
 });

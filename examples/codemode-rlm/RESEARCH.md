@@ -1,6 +1,6 @@
-# Research notes: Prime Agent, RLMs, Think, and Code Mode
+# Research notes: Prime Agent, RLMs, Think, Code Mode, and Computer
 
-Research date: 2026-08-06.
+Research started 2026-08-06; implementation notes updated 2026-08-11.
 
 ## Bottom line
 
@@ -13,14 +13,36 @@ Prime Agent combines four contracts:
    delegation harness.
 
 Cloudflare Code Mode is a strong match for the first two contracts and supplies
-a durable execution/replay spine. Think and the Agents SDK already supply
-persistent turns, child facets, idempotent agent-tool runs, recovery, and a
-durable programmatic-submission queue. Custom connectors bridge those existing
+a durable execution/replay spine. Cloudflare Computer supplies durable files
+without making a filesystem tool model-facing. Think and the Agents SDK already
+supply persistent turns, child facets, idempotent agent-tool runs, recovery, and
+a durable programmatic-submission queue. Custom connectors bridge those
 capabilities into one programming tool.
 
-The result is RLM-like, but it is not a Prime clone. A fresh Dynamic Worker plus
-durable JSON cannot reproduce Prime's literal IPython heap or always-on
-multi-process session daemon.
+The result is RLM-like, but it is not a Prime clone. Fresh Dynamic Workers plus
+a compact JSON kernel and durable files cannot reproduce Prime's literal
+IPython heap or always-on multi-process session daemon.
+
+## Implemented hybrid memory model
+
+The example deliberately separates live program state from retained state:
+
+| Layer              | Lifetime and purpose                                                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| JavaScript heap    | Variables, imports, closures, and objects exist only for one Dynamic Worker pass. An approval resume starts a fresh pass and replays connector observations. |
+| JSON kernel        | Small JSON-serializable notebook values persist across Worker passes and turns for one agent. The kernel is bounded and is not a general object heap.        |
+| Computer workspace | Files under `/workspace` persist across Worker passes and turns for one agent. They are intended for larger or reusable artifacts.                           |
+
+The model still receives only the `codemode` tool. `context`, `kernel`,
+`workspace`, `rlm`, and `harness` are connector namespaces available to the
+JavaScript program when that agent is allowed to use them; they are not
+additional model-facing tools.
+
+Every root or child agent owns a separate Computer workspace. A follow-up sent
+to the same retained child can reuse that child's files, but the root and other
+children cannot directly read them. Cross-agent transfer must use admitted
+task material or an explicit child answer. The example does not claim a shared
+Prime-style process filesystem.
 
 ## Original Recursive Language Models
 
@@ -74,15 +96,18 @@ This example exposes both useful shapes:
   and heavier than a plain leaf-model call.
 - `rlm.spawn` and `rlm.followup` use a named Think child and its durable FIFO
   submission queue. The child retains its Session, external inputs, Code Mode
-  facet, and JSON kernel. Root harness guidance shapes delegation; the child
-  receives only the admitted subtask and its `context`/`kernel` namespaces.
+  facet, JSON kernel, and its own Computer workspace. Root harness guidance
+  shapes delegation; the child receives only the admitted subtask and its
+  `context`, `kernel`, and `workspace` namespaces. Its workspace is not shared
+  with the root or another child.
 
 Prime describes its process/kernel boundary as lifecycle isolation, not a
 security sandbox. Code Mode's Dynamic Worker is a stronger default for this
 example: outbound network and parent bindings are disabled, and privileged or
 durable effects exist only behind connector RPC. Worker/Node-compatible
-ambient APIs and an ephemeral virtual filesystem can still exist; they do not
-expose the parent workspace or credentials.
+ambient APIs and an ephemeral execution-local filesystem can still exist; they
+do not expose the parent host filesystem or credentials. The durable Computer
+filesystem is available only through the `workspace` connector.
 
 Primary sources:
 
@@ -152,8 +177,14 @@ Findings that shaped the simplified design:
   server tools again in `beforeToolCall`.
 - The convenience `createExecuteRuntime(this)` can derive workspace/browser
   capabilities. The explicit `{ ctx, loader, connectors, globalOutbound: null }`
-  form keeps the root boundary to at most four RLM namespaces; children receive only
-  `context` and `kernel`.
+  form keeps the root boundary to at most five RLM namespaces; children receive
+  only `context`, `kernel`, and their own `workspace`.
+- Each Dynamic Worker pass gets a fresh JavaScript heap. Compact JSON belongs in
+  `kernel`; larger or reusable artifacts belong in the per-agent Computer
+  `/workspace`. Neither mechanism makes live JavaScript objects persistent.
+- Computer workspaces are backed by each agent's Durable Object storage. No
+  shell backend or additional production binding is required for the exposed
+  `read`, `ls`, `write`, and `edit` operations.
 - `runAgentTool` is idempotent by `runId` and fits one terminal child turn.
   Reusing a terminal ID returns that run; it is not a follow-up mechanism.
 - A named `subAgent` plus the child's `submitMessages` and
@@ -197,22 +228,33 @@ Official documentation:
 
 ## Mapping the systems
 
-| Prime/original concept | Think + Agents + Code Mode construction                            |
-| ---------------------- | ------------------------------------------------------------------ |
-| Context variable       | Chunked `context.inputs/search/slice` over active and prior inputs |
-| Persistent REPL values | Scope-local durable JSON through `kernel.get/set/list/delete`      |
-| Answer variable        | `kernel.finish` + terminal connector lifecycle verification        |
-| Recursive model call   | Stable, awaited `runAgentTool` child through `rlm.query`           |
-| Retained child         | `subAgent` + child `submitMessages`, inspected at the child        |
-| Follow-up              | Another durable submission in the same child Session and kernel    |
-| Execution trajectory   | Code Mode's own durable runtime facet                              |
-| Harness refinement     | One claimed mutation, optimistic revision, snapshots, rollback     |
+| Prime/original concept  | Think + Agents + Code Mode + Computer construction                          |
+| ----------------------- | --------------------------------------------------------------------------- |
+| Context variable        | Chunked `context.inputs/search/slice` over active and prior inputs          |
+| Live REPL values        | Execution-local JavaScript heap; deliberately not retained                  |
+| Compact retained state  | Per-agent durable JSON through `kernel.get/set/list/delete`                 |
+| Retained file artifacts | Per-agent durable Computer files through `workspace.read/ls/write/edit`     |
+| Answer variable         | `kernel.finish` + terminal connector lifecycle verification                 |
+| Recursive model call    | Stable, awaited `runAgentTool` child through `rlm.query`                    |
+| Retained child          | `subAgent` + child `submitMessages`, with its own kernel and workspace      |
+| Follow-up               | Another durable submission in the same child Session, kernel, and workspace |
+| Execution trajectory    | Code Mode's own durable runtime facet                                       |
+| Harness refinement      | One claimed mutation, optimistic revision, snapshots, rollback              |
 
 ## Important limitations
 
-Durable JSON cannot preserve closures, imports, class instances, generators,
-open resources, or arbitrary object graphs. Exact Prime semantics would need a
-persistent Python service with a different lifecycle and security design.
+Neither durable JSON nor durable files preserve a live JavaScript heap:
+closures, imports, class instances, generators, open resources, and arbitrary
+object graphs disappear after each Dynamic Worker pass. Exact Prime semantics
+would need a long-lived language runtime with a different lifecycle and
+security design. Prime uses IPython; a JavaScript variant could use an optional
+computerd session whose heap survives reconnects only for the lifetime of that
+process.
+
+Computer workspaces are isolated per agent, not shared across the root and its
+children. The exposed Computer tools provide file operations but no shell. A
+parent cannot directly browse a child's workspace, and the example has no
+automatic promotion of child artifacts into the root workspace.
 
 Agents/Think persistence is not Prime's continuously running multi-process
 manager or live bidirectional mailbox. A retained child does not automatically
@@ -225,12 +267,12 @@ cadence. Candidates should be compared against an unchanged harness on held-out
 work before anyone calls them improvements.
 
 Input search is literal rather than semantic. The example has no automatic
-garbage collection for its inputs, kernel values, answers, children, or Think
-submissions. Code Mode bounds terminal execution history by default, although
-running/paused execution expiry still needs an application policy. The Worker
-parses the complete JSON request before field limits, and the example has no
-aggregate token or monetary budget. Those are production requirements, not
-hidden properties of the frameworks.
+garbage collection for its inputs, kernel values, workspace files, answers,
+children, or Think submissions. Code Mode bounds terminal execution history by
+default, although running/paused execution expiry still needs an application
+policy. The Worker parses the complete JSON request before field limits, and
+the example has no aggregate token or monetary budget. Those are production
+requirements, not hidden properties of the frameworks.
 
 ## Recommended evaluation before production
 

@@ -3,13 +3,15 @@
 A Vite chat app for a durable Recursive Language Model built with
 [`@cloudflare/think`](../../packages/think), the
 [Agents SDK](../../packages/agents), and
-[`@cloudflare/codemode`](../../packages/codemode).
+[`@cloudflare/codemode`](../../packages/codemode), with
+[`@cloudflare/computer`](https://github.com/cloudflare/computer) providing a
+durable virtual workspace.
 
 The model sees one tool: `codemode`. Generated JavaScript treats long context
-as a variable, keeps JSON notebook state across calls, delegates to retained
-Think agents, and reads a small versioned continual harness. This is inspired
-by Prime Agent; it is not Prime Agent and does not claim benchmark parity or
-automatic self-improvement.
+as a variable, keeps compact JSON notebook state across calls, stores larger
+artifacts in Computer, delegates to retained Think agents, and reads a small
+versioned continual harness. This is inspired by Prime Agent; it is not Prime
+Agent and does not claim benchmark parity or automatic self-improvement.
 
 ## The pattern
 
@@ -17,10 +19,18 @@ In abridged form, `beforeTurn()` creates an explicit Code Mode runtime and
 replaces Think's tool surface:
 
 ```ts
+const workspace = toolSetConnector(this.ctx, {
+  name: "workspace",
+  tools: createAITools({
+    workspace: this.computerWorkspace,
+    assets: false
+  })
+});
+
 const built = createExecuteRuntime({
   ctx: this.ctx,
   loader: this.env.LOADER,
-  connectors: [context, kernel, rlm, harness],
+  connectors: [context, kernel, workspace, rlm, harness],
   name: "think",
   globalOutbound: null
 });
@@ -35,25 +45,55 @@ return {
 ```
 
 `beforeToolCall()` independently blocks every other tool. The generated Worker
-receives no parent credentials, bindings, MCP/browser tools, durable filesystem,
-or outbound network.
+receives no parent credentials, bindings, MCP/browser tools, host filesystem,
+or outbound network. It can reach only the durable Computer files explicitly
+exposed through the `workspace` connector.
 
-| Namespace   | Purpose                                                                           |
-| ----------- | --------------------------------------------------------------------------------- |
-| `context.*` | List, search, and slice current or prior causally visible inputs.                 |
-| `kernel.*`  | Persist JSON notebook values and call the verified `finish` protocol.             |
-| `rlm.*`     | On the root, await a one-shot child or admit/follow up with a retained child.     |
-| `harness.*` | On the root, read supplemental guidance; write only in explicit refinement turns. |
+| Namespace     | Purpose                                                                           |
+| ------------- | --------------------------------------------------------------------------------- |
+| `context.*`   | List, search, and slice current or prior causally visible inputs.                 |
+| `kernel.*`    | Persist JSON notebook values and call the verified `finish` protocol.             |
+| `workspace.*` | Read, list, write, and edit durable per-agent files under `/workspace`.           |
+| `rlm.*`       | On the root, await a one-shot child or admit/follow up with a retained child.     |
+| `harness.*`   | On the root, read supplemental guidance; write only in explicit refinement turns. |
 
-Child turns intentionally receive only `context.*` and `kernel.*`. The root
-harness guides delegation, while the admitted child prompt defines the
-subtask.
+Child turns intentionally receive only `context.*`, `kernel.*`, and their own
+`workspace.*`. Each child is a separate Durable Object, so its files are
+durable but not shared implicitly with the root. The root harness guides
+delegation, while the admitted child prompt defines the subtask.
+
+### Memory model
+
+This example does not need a continuously live JavaScript heap. Ordinary
+variables last for one Dynamic Worker pass; an approval resume starts another
+pass and reconstructs earlier connector observations through replay. Across
+passes, use the kernel for small JSON values and Computer files for larger or
+reusable artifacts:
+
+```js
+async () => {
+  const prior = (await kernel.get({ key: "progress" })) ?? { inspected: 0 };
+  const progress = { inspected: prior.inspected + 1 };
+  await Promise.all([
+    workspace.write({
+      path: "/workspace/findings.json",
+      content: JSON.stringify(progress)
+    }),
+    kernel.set({ key: "progress", value: progress })
+  ]);
+};
+```
+
+Code Mode logs the connector calls and their results, while the Workspace owns
+the file contents. A future long-lived Computer session would be useful for
+non-serializable values such as closures or open resources, but it is not part
+of this filesystem-first example.
 
 Think owns root and child submission queues. Agents owns child facets,
 registries, and one-shot agent-tool runs. Code Mode owns generated-code replay
-and execution audit. The example keeps only state unique to the RLM: chunked
-external inputs, notebook values, answer candidates, recursive operation keys,
-and harness revisions.
+and execution audit. Computer owns durable virtual files. The custom RLM store
+keeps only state unique to the example: chunked external inputs, notebook
+values, answer candidates, recursive operation keys, and harness revisions.
 
 `kernel.finish()` first stages an answer against the enclosing Code Mode
 execution ID. `KernelConnector.disposeExecution()` verifies it only when that
@@ -61,6 +101,11 @@ same execution completes, keeps it across a pause, and discards it on terminal
 failure. Recursive operation IDs derive from the active input, operation kind,
 child when relevant, and caller key, so Code Mode replay does not repeat child
 work or budget charges.
+
+If a root model turn ends cleanly without a verified `kernel.finish`, the
+request projection admits one stable, idempotent repair turn. Polling reuses
+that submission, and a second no-finish outcome is terminal, so provider-level
+tool-call omissions cannot create an unbounded loop.
 
 ## Run locally
 

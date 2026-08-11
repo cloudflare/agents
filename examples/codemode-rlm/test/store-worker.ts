@@ -1,8 +1,35 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { toolSetConnector } from "@cloudflare/codemode/ai";
+import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { createAITools } from "@cloudflare/computer/tools";
 import { normalizeHarnessUpdate } from "../src/core";
 import { RlmStore } from "../src/store";
 
-type TestEnv = { STORE: DurableObjectNamespace<StoreHarness> };
+type TestEnv = {
+  STORE: DurableObjectNamespace<StoreHarness>;
+  LOADER: WorkerLoader;
+};
+
+class WorkspaceCallTarget extends RpcTarget {
+  readonly #connector: ReturnType<typeof toolSetConnector>;
+
+  constructor(connector: ReturnType<typeof toolSetConnector>) {
+    super();
+    this.#connector = connector;
+  }
+
+  async callTool(method: string, args: unknown): Promise<unknown> {
+    try {
+      return await this.#connector.executeTool(method, args);
+    } catch (error) {
+      return {
+        __codemode_control__: "error",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+}
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -10,16 +37,73 @@ function json(value: unknown, status = 200): Response {
 
 export class StoreHarness extends DurableObject<TestEnv> {
   readonly #store: RlmStore;
+  readonly #workspace: Workspace;
+  readonly #workspaceConnector: ReturnType<typeof toolSetConnector>;
 
   constructor(ctx: DurableObjectState, env: TestEnv) {
     super(ctx, env);
     this.#store = new RlmStore(ctx.storage);
+    this.#workspace = new Workspace({
+      storage: ctx.storage as unknown as DurableObjectStorageLike,
+      sessionId: ctx.id.toString()
+    });
+    this.#workspaceConnector = toolSetConnector(ctx, {
+      name: "workspace",
+      tools: createAITools({ workspace: this.#workspace, assets: false })
+    });
+    ctx.blockConcurrencyWhile(async () => {
+      await this.#workspace.fs.mkdir("/workspace", { recursive: true });
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     try {
       const body = (await request.json()) as Record<string, unknown>;
+      if (url.pathname === "/workspace-write") {
+        return json(await this.#workspaceConnector.executeTool("write", body));
+      }
+      if (url.pathname === "/workspace-read") {
+        return json(await this.#workspaceConnector.executeTool("read", body));
+      }
+      if (url.pathname === "/workspace-edit") {
+        return json(await this.#workspaceConnector.executeTool("edit", body));
+      }
+      if (url.pathname === "/workspace-describe") {
+        const description = await this.#workspaceConnector.describe();
+        return json({
+          methods: Object.keys(description.descriptors).sort(),
+          types: await this.#workspaceConnector.getTypeScriptTypes()
+        });
+      }
+      if (url.pathname === "/workspace-generated") {
+        const executor = new DynamicWorkerExecutor({
+          loader: this.env.LOADER,
+          timeout: 5_000
+        });
+        const code =
+          body.action === "read"
+            ? `async () => workspace.read({ path: "/workspace/generated.txt" })`
+            : `async () => {
+                await workspace.write({
+                  path: "/workspace/generated.txt",
+                  content: "written by generated JavaScript"
+                });
+                return await workspace.read({
+                  path: "/workspace/generated.txt"
+                });
+              }`;
+        return json(
+          await executor.execute(code, [], {
+            connectors: [
+              {
+                name: "workspace",
+                binding: new WorkspaceCallTarget(this.#workspaceConnector)
+              }
+            ]
+          })
+        );
+      }
       if (url.pathname === "/input") {
         return json(
           this.#store.putInput({
