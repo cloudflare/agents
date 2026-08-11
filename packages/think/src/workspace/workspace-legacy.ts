@@ -8,7 +8,7 @@ import { Bash } from "just-bash";
 import type { Tool, ToolSet } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
-import type { FileInfo } from "./tools/workspace";
+import type { FileInfo } from "../tools/workspace";
 import {
   LegacyWorkspaceFilesystem,
   workspaceLegacyBashProvider,
@@ -19,7 +19,7 @@ import {
   type WorkspaceLegacyBashProvider,
   type WorkspaceToolProvider,
   type WorkspaceToolProviderOptions
-} from "./workspace-contract";
+} from "./types";
 
 export type WorkspaceOptions = ShellWorkspaceOptions;
 
