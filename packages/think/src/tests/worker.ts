@@ -1,4 +1,4 @@
-export { WorkspaceServiceProxy } from "../workspace-bash";
+export { WorkspaceServiceProxy } from "../workspace/workspace-bash";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { createBrowserRuntime, createBrowserTools } from "../tools/browser";

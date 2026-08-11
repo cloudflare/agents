@@ -16,7 +16,7 @@ import {
   type ThinkWorkspace,
   type WorkspaceStubProvider,
   type WorkspaceToolProvider
-} from "./workspace-contract";
+} from "./types";
 
 export { WorkspaceServiceProxy };
 export type { WorkerShellBackendOptions };

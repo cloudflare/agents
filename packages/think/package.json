@@ -120,6 +120,10 @@
       "types": "./dist/workspace.d.ts",
       "import": "./dist/workspace.js"
     },
+    "./workspace-bash": {
+      "types": "./dist/workspace-bash.d.ts",
+      "import": "./dist/workspace-bash.js"
+    },
     "./workspace-legacy": {
       "types": "./dist/workspace-legacy.d.ts",
       "import": "./dist/workspace-legacy.js"
@@ -151,10 +155,6 @@
     "./vite": {
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js"
-    },
-    "./workspace-bash": {
-      "types": "./dist/workspace-bash.d.ts",
-      "import": "./dist/workspace-bash.js"
     }
   },
   "files": [

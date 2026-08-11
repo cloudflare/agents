@@ -277,12 +277,8 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
-<<<<<<< HEAD
-import { LegacyWorkspace as Workspace } from "./workspace/workspace-legacy";
-=======
 import type { WorkspaceStub } from "@cloudflare/computer";
-import { LegacyWorkspace as Workspace } from "./workspace-legacy";
->>>>>>> 761be0b4 (think: Add the Computer Bash workspace provider)
+import { LegacyWorkspace as Workspace } from "./workspace/workspace-legacy";
 import { createWorkspaceTools } from "./tools/workspace";
 import {
   hasWorkspaceLegacyBashProvider,
