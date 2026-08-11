@@ -19,6 +19,7 @@ describe("minimal RLM durable state", () => {
       (await post(`/workspace-describe?instance=${instance}`, {})).json()
     ).resolves.toMatchObject({
       methods: ["edit", "ls", "read", "write"],
+      readDescription: expect.stringMatching(/result\.content/),
       types: expect.stringContaining("declare const workspace")
     });
 
@@ -64,8 +65,8 @@ describe("minimal RLM durable state", () => {
       (await post(`/workspace-generated?instance=${instance}`, {})).json()
     ).resolves.toMatchObject({
       result: {
-        path: "/workspace/generated.txt",
-        content: "written by generated JavaScript"
+        path: "/workspace/generated.json",
+        bytesWritten: 13
       }
     });
 
@@ -75,12 +76,7 @@ describe("minimal RLM durable state", () => {
           action: "read"
         })
       ).json()
-    ).resolves.toMatchObject({
-      result: {
-        path: "/workspace/generated.txt",
-        content: "written by generated JavaScript"
-      }
-    });
+    ).resolves.toMatchObject({ result: 731 });
   });
 
   it("binds a request and input id to exact external data", async () => {
@@ -214,6 +210,16 @@ describe("minimal RLM durable state", () => {
       rejected: true,
       existing: "updated",
       error: expect.stringMatching(/256 keys/)
+    });
+  });
+
+  it("returns kernel JSON values directly without a wrapper", async () => {
+    await expect(
+      (await post("/kernel-scalar?instance=kernel-scalar", {})).json()
+    ).resolves.toEqual({
+      value: 731,
+      description:
+        "Read and return one durable JSON value directly. The result is the stored value, not a { value } wrapper."
     });
   });
 

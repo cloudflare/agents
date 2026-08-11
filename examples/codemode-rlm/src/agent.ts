@@ -15,7 +15,6 @@ import type {
 } from "@cloudflare/codemode";
 import { toolSetConnector } from "@cloudflare/codemode/ai";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
-import { createAITools } from "@cloudflare/computer/tools";
 import {
   ContextConnector,
   HarnessConnector,
@@ -44,6 +43,7 @@ import {
   type RunMode
 } from "./prompts";
 import { RlmStore, type InputMeta, type RlmOperationKind } from "./store";
+import { createRlmWorkspaceTools } from "./workspace";
 
 type RuntimeConfig = {
   model: string;
@@ -249,7 +249,7 @@ abstract class RlmBaseAgent extends Think<Env> {
         name: "workspace",
         instructions:
           "Durable files in this agent's isolated Computer VFS. Use absolute paths under /workspace by convention; keep large or reusable values in files and return compact references.",
-        tools: createAITools({
+        tools: createRlmWorkspaceTools({
           workspace: this.computerWorkspace,
           assets: false,
           read: { maxBytes: 64 * 1024, maxLines: 1_000 },

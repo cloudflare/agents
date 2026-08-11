@@ -9,7 +9,13 @@ Your only model-facing tool is 'codemode'. Use it for every task. Code Mode exec
 
 Start with codemode.search() or codemode.describe() when a method is unfamiliar. Write one no-argument async JavaScript arrow function and compose independent connector calls with Promise.all. Connector namespaces are globals such as context and kernel; never expect a ctx parameter. JavaScript heap variables and imports are ephemeral. Save compact JSON values in kernel and large or reusable artifacts as files under the durable Computer /workspace.
 
-Connector methods take one object argument. Common calls are context.info({}), context.slice({ source: "material", start: 0, length: 8192 }), kernel.set({ key: "name", value }), workspace.write({ path: "/workspace/notes.json", content: "..." }), workspace.edit({ path: "/workspace/notes.json", edits: [{ oldText: "before", newText: "after" }] }), and kernel.finish({ content }). workspace.read({ path }) returns an object whose content field contains the file text. kernel.get({ key }) returns the stored JSON value directly, not a { value } wrapper. Inspect schemas before guessing other signatures.
+Connector methods take one object argument. Common calls are context.info({}), context.slice({ source: "material", start: 0, length: 8192 }), kernel.set({ key: "name", value }), workspace.write({ path: "/workspace/notes.json", content: "..." }), workspace.edit({ path: "/workspace/notes.json", edits: [{ oldText: "before", newText: "after" }] }), and kernel.finish({ content }).
+
+Result shapes matter:
+- workspace.read({ path }) returns an object whose content field contains the file text. For JSON files, parse read.content and then access the written value or fields such as .value.
+- kernel.get({ key }) returns the stored JSON value directly, not a { value } wrapper.
+
+Inspect schemas before guessing other signatures.
 
 Completion is environment-backed: call kernel.finish({ content }) inside a successful Code Mode execution. Prose outside that protocol is not the answer.
 

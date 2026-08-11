@@ -2,9 +2,10 @@ import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { toolSetConnector } from "@cloudflare/codemode/ai";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
-import { createAITools } from "@cloudflare/computer/tools";
+import { KernelConnector } from "../src/connectors";
 import { normalizeHarnessUpdate } from "../src/core";
 import { RlmStore } from "../src/store";
+import { createRlmWorkspaceTools } from "../src/workspace";
 
 type TestEnv = {
   STORE: DurableObjectNamespace<StoreHarness>;
@@ -49,7 +50,10 @@ export class StoreHarness extends DurableObject<TestEnv> {
     });
     this.#workspaceConnector = toolSetConnector(ctx, {
       name: "workspace",
-      tools: createAITools({ workspace: this.#workspace, assets: false })
+      tools: createRlmWorkspaceTools({
+        workspace: this.#workspace,
+        assets: false
+      })
     });
     ctx.blockConcurrencyWhile(async () => {
       await this.#workspace.fs.mkdir("/workspace", { recursive: true });
@@ -73,6 +77,7 @@ export class StoreHarness extends DurableObject<TestEnv> {
         const description = await this.#workspaceConnector.describe();
         return json({
           methods: Object.keys(description.descriptors).sort(),
+          readDescription: description.descriptors.read?.description,
           types: await this.#workspaceConnector.getTypeScriptTypes()
         });
       }
@@ -83,14 +88,16 @@ export class StoreHarness extends DurableObject<TestEnv> {
         });
         const code =
           body.action === "read"
-            ? `async () => workspace.read({ path: "/workspace/generated.txt" })`
-            : `async () => {
-                await workspace.write({
-                  path: "/workspace/generated.txt",
-                  content: "written by generated JavaScript"
+            ? `async () => {
+                const read = await workspace.read({
+                  path: "/workspace/generated.json"
                 });
-                return await workspace.read({
-                  path: "/workspace/generated.txt"
+                return JSON.parse(read.content).value;
+              }`
+            : `async () => {
+                return workspace.write({
+                  path: "/workspace/generated.json",
+                  content: JSON.stringify({ value: 731 })
                 });
               }`;
         return json(
@@ -270,6 +277,21 @@ export class StoreHarness extends DurableObject<TestEnv> {
             error: error instanceof Error ? error.message : String(error)
           });
         }
+      }
+      if (url.pathname === "/kernel-scalar") {
+        const connector = new KernelConnector(
+          this.ctx,
+          this.env as unknown as Env,
+          this.#store,
+          "root",
+          "kernel-scalar"
+        );
+        await connector.executeTool("set", { key: "scalar", value: 731 });
+        const description = await connector.describe();
+        return json({
+          value: await connector.executeTool("get", { key: "scalar" }),
+          description: description.descriptors.get?.description
+        });
       }
       if (url.pathname === "/harness-once") {
         const update = normalizeHarnessUpdate({
