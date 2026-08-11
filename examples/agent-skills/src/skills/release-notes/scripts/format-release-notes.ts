@@ -1,9 +1,7 @@
-import type { SkillRunContext } from "@cloudflare/think";
+import { readFile } from "node:fs/promises";
 
-export default async function run(input: unknown, ctx: SkillRunContext) {
-  // Function-style JS/TS skill scripts read bundled resources from `ctx.files`
-  // (keyed by relative path) rather than the filesystem.
-  const styleGuide = (ctx.files["references/style-guide.md"] ?? "")
+export default async function run(input: unknown) {
+  const styleGuide = (await readFile("references/style-guide.md", "utf8"))
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.startsWith("- "))
