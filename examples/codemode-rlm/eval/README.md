@@ -95,12 +95,18 @@ RLM_DEV_PERSIST_PATH="$eval_state" \
   MAX_STEPS=40 \
   pnpm run start
 
-# In another terminal. The outer request timeout must exceed TURN_TIMEOUT_MS.
-pnpm run eval:arc -- --suite micro --timeout-ms 720000
+# In another terminal. The wall budget covers the original turn plus its one
+# bounded repair, so leave polling overhead above 2 * TURN_TIMEOUT_MS.
+pnpm run eval:arc -- --suite micro --timeout-ms 1260000
 ```
 
 Changing both limits is a budget sensitivity experiment, not a timeout-only
 replication of the checked-in default result.
+
+The RLM admits at most one stable repair submission when a completed root turn
+omits `kernel.finish`. Therefore `--timeout-ms` is a per-condition wall budget,
+not a per-model-turn timeout. The checked-in 420-second default leaves one
+minute of polling overhead above two worst-case 180-second turns.
 
 Useful options:
 

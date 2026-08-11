@@ -73,7 +73,7 @@ Options:
   --limit N           Run only the first N tasks selected by --suite
   --base-url URL      Running example URL (default: http://localhost:5173)
   --run-id ID         Stable label for this run (default: timestamp + random suffix)
-  --timeout-ms N      Per-condition wall timeout (default: 360000)
+  --timeout-ms N      Per-condition wall timeout (default: 420000)
   --help              Show this message`;
 }
 
@@ -133,7 +133,7 @@ function parseOptions(args: string[]): Options {
     runId: defaultRunId(),
     nonce: invocationNonce(),
     suite: "fast",
-    timeoutMs: 360_000
+    timeoutMs: 420_000
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
