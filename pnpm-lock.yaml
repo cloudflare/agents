@@ -4139,8 +4139,8 @@ importers:
         specifier: '>=0.5.0'
         version: link:../codemode
       '@cloudflare/computer':
-        specifier: ^0.1.1
-        version: 0.1.1(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
+        specifier: file:./vendor/cloudflare-computer-5bac080.tgz
+        version: file:packages/think/vendor/cloudflare-computer-5bac080.tgz(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       '@cloudflare/shell':
         specifier: '>=0.4.0'
         version: link:../shell
@@ -5704,8 +5704,9 @@ packages:
     resolution: {integrity: sha512-EYlRokl8szrP9Z25qT5aepMdBjzBvHF9ZEhzIiUBc9guz/T31EqRgvD0QSgZcpE93xiwrr+OkB4nz0BZyF6fSA==}
     engines: {node: '>= 20.12.0'}
 
-  '@cloudflare/computer@0.1.1':
-    resolution: {integrity: sha512-4xWx5yX+y5MyNhtIK9N6LcyBsbzGdaxGbhfZdh51zRWRfdkI8OhL2ftBCReqaR6HD7we+Yg0rEihwBETrmkbmg==}
+  '@cloudflare/computer@file:packages/think/vendor/cloudflare-computer-5bac080.tgz':
+    resolution: {integrity: sha512-FOQHGwpCWP3QCLR4+JWlPWxuX7R0yDRJWtf33BpmhSrMDZ8pJk6z4Jp4hB0eTgxs2fRFSU8E32J4SPp3wwkZfQ==, tarball: file:packages/think/vendor/cloudflare-computer-5bac080.tgz}
+    version: 0.1.0-alpha.1
     peerDependencies:
       '@platformatic/vfs': '*'
       ai: ^6.0.196 || ^7.0.0
@@ -13710,7 +13711,7 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
-  '@cloudflare/computer@0.1.1(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(zod@4.4.3)':
+  '@cloudflare/computer@file:packages/think/vendor/cloudflare-computer-5bac080.tgz(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.4.3))(zod@4.4.3)':
     dependencies:
       acorn: 8.17.0
       capnweb: 0.8.0
