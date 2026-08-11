@@ -226,8 +226,9 @@ export class MyAgent extends Think<Env> {
 export { WorkspaceServiceProxy } from "@cloudflare/think/workspace-bash";
 ```
 
-`workspace-bash` requires a Worker Loader binding. Its loader-created Dynamic
-Worker disables outbound network access by default, operates directly on the
+`workspace-bash` requires a Worker Loader binding and the `experimental`
+compatibility flag. Its loader-created Dynamic Worker disables outbound network
+access by default, operates directly on the
 durable filesystem without snapshots, and truncates returned output to 64 KiB
 by default. A custom backend `fetcher` owns its own network policy. Unlike the
 legacy Bash tool, Worker Shell does not use snapshot file limits or expose a
@@ -361,7 +362,8 @@ if (exitCode !== 0) throw new Error(stderr);
 return value;
 ```
 
-The JavaScript backend provides workspace-backed `node:fs` and
+The JavaScript backend requires a Worker Loader binding and the `experimental`
+compatibility flag. It provides workspace-backed `node:fs` and
 `node:fs/promises`. Configure the Agents Vite plugin with
 `skillScriptExternals: ["node:fs", "node:fs/promises"]` so those imports remain
 in compiled scripts. Use a separate materialization directory for each run and

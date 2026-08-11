@@ -1028,7 +1028,9 @@ if (exitCode !== 0) throw new Error(stderr);
 return value;
 ```
 
-This backend provides workspace-backed `node:fs` and `node:fs/promises`.
+This backend requires a Worker Loader binding and the `experimental`
+compatibility flag. It provides workspace-backed `node:fs` and
+`node:fs/promises`.
 Configure `agents({ skillScriptExternals: ["node:fs", "node:fs/promises"] })`
 so the Vite plugin keeps these imports in the compiled module. Remove the
 materialized skill directory after the execution settles. The

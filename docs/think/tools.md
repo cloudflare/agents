@@ -81,7 +81,8 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-For Worker Shell, configure a Worker Loader and export its service proxy:
+For Worker Shell, configure a Worker Loader, add the `experimental`
+compatibility flag, and export its service proxy:
 
 ```typescript
 import { Think } from "@cloudflare/think";

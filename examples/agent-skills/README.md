@@ -14,10 +14,12 @@ npm install
 npm start
 ```
 
-Script execution uses the Worker Loader binding in `wrangler.jsonc`:
+Script execution uses the Worker Loader binding and `experimental`
+compatibility flag in `wrangler.jsonc`:
 
 ```jsonc
 {
+  "compatibility_flags": ["nodejs_compat", "experimental"],
   "worker_loaders": [{ "binding": "LOADER" }]
 }
 ```
