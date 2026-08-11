@@ -1,8 +1,11 @@
 import { Agent } from "agents";
 import type { ToolSet } from "ai";
-import { Workspace, type BashToolOptions } from "../../workspace-legacy";
+import {
+  Workspace,
+  type BashToolOptions
+} from "../../workspace/workspace-legacy";
 import { createWorkspaceTools } from "../../tools/workspace";
-import { workspaceToolProvider } from "../../workspace-contract";
+import { workspaceToolProvider } from "../../workspace/types";
 
 export class TestAssistantToolsAgent extends Agent {
   workspace = new Workspace({

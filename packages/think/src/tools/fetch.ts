@@ -1,5 +1,5 @@
 import type { JSONValue, ToolSet } from "ai";
-import type { ThinkWorkspaceFilesystem } from "../workspace-contract";
+import type { ThinkWorkspaceFilesystem } from "../workspace/types";
 import { tool } from "ai";
 import { z } from "zod";
 

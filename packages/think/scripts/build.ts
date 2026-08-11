@@ -14,7 +14,7 @@ async function main() {
       "src/react.tsx",
       "src/messengers/index.ts",
       "src/messengers/telegram.ts",
-      "src/workspace-legacy.ts",
+      "src/workspace/workspace-legacy.ts",
       "src/tools/workspace.ts",
       "src/tools/fetch.ts",
       "src/tools/execute.ts",

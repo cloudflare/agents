@@ -1,4 +1,4 @@
-import { workspaceFilesystem } from "../../workspace-contract";
+import { workspaceFilesystem } from "../../workspace/types";
 /**
  * Test agent that loads a hooks-only extension subscribing to all four
  * observation hooks (`beforeToolCall`, `afterToolCall`, `onStepFinish`,
