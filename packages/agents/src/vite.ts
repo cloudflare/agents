@@ -247,7 +247,8 @@ async function collectWatchTargets(
 
 async function readSkill(
   skillDir: string,
-  warn?: (message: string) => void
+  warn?: (message: string) => void,
+  scriptExternals?: string[]
 ): Promise<SkillFile | null> {
   const skillPath = join(skillDir, "SKILL.md");
   const rawContent = await readFile(skillPath, "utf8").catch(() => null);
@@ -276,7 +277,11 @@ async function readSkill(
         isCompilableSkillScript(file.path)
       ) {
         try {
-          content = (await compileSkillScript(file.absolutePath)).content;
+          content = (
+            await compileSkillScript(file.absolutePath, {
+              external: scriptExternals
+            })
+          ).content;
           precompiled = true;
           // The compiled bundle (which may inline sibling files and bundled
           // dependencies) is what actually ships, so report its size for the
@@ -318,7 +323,8 @@ async function readSkill(
 
 async function buildSkillsModule(
   dir: string,
-  warn?: (message: string) => void
+  warn?: (message: string) => void,
+  scriptExternals?: string[]
 ): Promise<string> {
   const entries = await readdir(dir, { withFileTypes: true });
   const skills: SkillFile[] = [];
@@ -326,7 +332,7 @@ async function buildSkillsModule(
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const skill = await readSkill(join(dir, entry.name), warn);
+    const skill = await readSkill(join(dir, entry.name), warn, scriptExternals);
     if (!skill) continue;
     if (seen.has(skill.name)) {
       warn?.(
@@ -407,7 +413,7 @@ export default TurndownService;
   };
 }
 
-function skillsImportPlugin(): Plugin {
+function skillsImportPlugin(scriptExternals?: string[]): Plugin {
   return {
     name: "agents-skills-import",
     async resolveId(source, importer) {
@@ -433,7 +439,11 @@ function skillsImportPlugin(): Plugin {
       for (const target of await collectWatchTargets(dir)) {
         this.addWatchFile(target);
       }
-      return buildSkillsModule(dir, (message) => this.warn(message));
+      return buildSkillsModule(
+        dir,
+        (message) => this.warn(message),
+        scriptExternals
+      );
     }
   };
 }
@@ -447,6 +457,11 @@ export interface AgentsPluginOptions {
    * implementation.
    */
   stubTurndown?: boolean;
+  /**
+   * Module specifiers provided by the configured skill-script runtime. These
+   * imports remain external when bundled skill scripts are compiled.
+   */
+  skillScriptExternals?: string[];
 }
 
 /**
@@ -458,10 +473,10 @@ export interface AgentsPluginOptions {
  * Agents-specific build concerns as needed.
  */
 export default function agents(options: AgentsPluginOptions = {}): Plugin[] {
-  const { stubTurndown = true } = options;
+  const { stubTurndown = true, skillScriptExternals } = options;
   return [
     ...(stubTurndown ? [turndownStubPlugin()] : []),
-    skillsImportPlugin(),
+    skillsImportPlugin(skillScriptExternals),
     babel({
       presets: [
         {

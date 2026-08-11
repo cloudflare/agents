@@ -23,8 +23,8 @@ function pluginByName(name: string, options?: Parameters<typeof agents>[0]) {
   return plugin;
 }
 
-function skillsPlugin(): Plugin {
-  return pluginByName("agents-skills-import");
+function skillsPlugin(options?: Parameters<typeof agents>[0]): Plugin {
+  return pluginByName("agents-skills-import", options);
 }
 
 function resolveId(plugin: Plugin, ctx: PluginContext): ResolveIdFn {
@@ -163,6 +163,28 @@ describe("agents:skills vite plugin", () => {
     expect(manifest).toContain("toUpperCase()");
   });
 
+  it("preserves modules supplied by a configured script runtime", async () => {
+    const skillsDir = join(dir, "skills");
+    await mkdir(skillsDir, { recursive: true });
+    await writeSkill(skillsDir, "workspace-script", async () => {
+      const scriptsDir = join(skillsDir, "workspace-script", "scripts");
+      await mkdir(scriptsDir, { recursive: true });
+      await writeFile(
+        join(scriptsDir, "run.ts"),
+        'import { readFile } from "node:fs/promises";\nexport default () => readFile("input.txt", "utf8");\n'
+      );
+    });
+
+    const plugin = skillsPlugin({
+      skillScriptExternals: ["node:fs/promises"]
+    });
+    const ctx: PluginContext = { warn: () => {}, addWatchFile: () => {} };
+    const code = await load(plugin, ctx)(`\0agents:skills:${skillsDir}`);
+
+    expect(code).toContain("node:fs/promises");
+    expect(code).toContain('"precompiled":true');
+  });
+
   it("warns when a bundled asset exceeds the size threshold", async () => {
     const skillsDir = join(dir, "skills");
     await mkdir(skillsDir, { recursive: true });
@@ -227,6 +249,20 @@ describe("compileSkillScript", () => {
     expect(result.content).not.toContain("type Input");
     expect(result.content).toContain("toUpperCase()");
     expect(result.content).toMatch(/as default/);
+  });
+
+  it("keeps configured runtime modules as external imports", async () => {
+    const entry = join(compileDir, "run.ts");
+    await writeFile(
+      entry,
+      'import { readFile } from "node:fs/promises";\nexport default () => readFile("input.txt", "utf8");\n'
+    );
+
+    const result = await compileSkillScript(entry, {
+      external: ["node:fs/promises"]
+    });
+
+    expect(result.content).toContain('from "node:fs/promises"');
   });
 
   it("throws when the entry file does not exist", async () => {

@@ -31,6 +31,11 @@ export interface CompileSkillScriptOptions {
    * Workers runtime supports.
    */
   target?: string;
+  /**
+   * Module specifiers supplied by the script runtime. External modules remain
+   * as imports in the compiled output instead of being bundled.
+   */
+  external?: string[];
 }
 
 function extensionOf(path: string): string {
@@ -67,6 +72,7 @@ export async function compileSkillScript(
     format: "esm",
     platform: "browser",
     target: options.target ?? "es2022",
+    external: options.external,
     logLevel: "silent",
     legalComments: "none"
   });
