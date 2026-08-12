@@ -4,10 +4,10 @@
 // offers to resume an in-flight turn (CF_AGENT_STREAM_RESUMING) AND pushes the
 // whole conversation transcript (CF_AGENT_CHAT_MESSAGES) — see
 // `Think._buildIdleConnectMessages`. Both are consumed by the REAL
-// `useAgentChat` hook that every Think client (Studio, starters) runs.
+// `useAgentChat` hook that Think clients run.
 //
 // These tests drive the real hook through the exact frame sequence Think emits,
-// using the same fake `EventTarget` transport `studio-chat.test.tsx` uses, and
+// using a fake `EventTarget` transport, and
 // lock three invariants:
 //   1. A resume is ACKed exactly ONCE per stream even when the server announces
 //      it twice (onConnect + the RESUME_REQUEST handler) — #1733.

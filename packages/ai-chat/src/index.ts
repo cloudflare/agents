@@ -289,7 +289,7 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
  * These tools are executed on the client, not the server.
  *
  * **For most apps**, define tools on the server with `tool()` from `"ai"` —
- * you get full Zod type safety, server-side execution, and simpler code.
+ * you get schema-derived type safety, server-side execution, and simpler code.
  * Use `onToolCall` in `useAgentChat` for tools that need client-side execution.
  *
  * **For SDKs and platforms** where the tool surface is determined dynamically
@@ -297,7 +297,8 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
  * client register tools the server does not know about at deploy time.
  *
  * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema`
- * because this is the wire format. Zod schemas cannot be serialized.
+ * because this is the wire format. Runtime validation schemas cannot be
+ * serialized.
  */
 export type { ClientToolSchema } from "agents/chat";
 

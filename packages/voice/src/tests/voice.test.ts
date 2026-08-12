@@ -56,6 +56,10 @@ function uniquePath() {
   return `/agents/test-voice-agent/voice-test-${++instanceCounter}`;
 }
 
+function uniqueContextPath() {
+  return `/agents/test-context-voice-agent/voice-test-${++instanceCounter}`;
+}
+
 function uniqueAISDKStreamPath() {
   return `/agents/test-ai-sdk-full-stream-voice-agent/voice-test-${++instanceCounter}`;
 }
@@ -1074,6 +1078,66 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     );
 
     await waitForStatus(ws, "listening");
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — turn context history", () => {
+  it("gives text turns completed history without the current transcript", async () => {
+    const { ws } = await connectWS(uniqueContextPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "text_message", text: "first text turn" });
+    const firstResponse = (await waitForType(ws, "transcript_end")) as Record<
+      string,
+      unknown
+    >;
+    expect(firstResponse.text).toBe("[]");
+
+    sendJSON(ws, { type: "text_message", text: "second text turn" });
+    const secondResponse = (await waitForType(ws, "transcript_end")) as Record<
+      string,
+      unknown
+    >;
+    expect(JSON.parse(secondResponse.text as string)).toEqual([
+      { role: "user", content: "first text turn" },
+      { role: "assistant", content: "[]" }
+    ]);
+
+    ws.close();
+  });
+
+  it("gives audio turns completed history without the current transcript", async () => {
+    const { ws } = await connectWS(uniqueContextPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const firstResponse = (await waitForType(ws, "transcript_end")) as Record<
+      string,
+      unknown
+    >;
+    expect(firstResponse.text).toBe("[]");
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const secondResponse = (await waitForType(ws, "transcript_end")) as Record<
+      string,
+      unknown
+    >;
+    expect(JSON.parse(secondResponse.text as string)).toEqual([
+      { role: "user", content: "utterance 1 (20000 bytes)" },
+      { role: "assistant", content: "[]" }
+    ]);
+
     ws.close();
   });
 });

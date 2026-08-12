@@ -37,6 +37,10 @@ Try the free **echo** tool and the paid **square** tool ($0.01) — the payment 
 
 ### Server: creating paid tools
 
+`paidTool()` requires raw Zod shapes for its input and output schemas. Define
+fields directly, as in `{ number: z.number() }` below; AI SDK flexible-schema
+adapters are not accepted by this API.
+
 ```typescript
 import { withX402, type X402Config } from "agents/x402";
 
