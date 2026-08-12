@@ -170,33 +170,91 @@ function browserScreenshotOutput(
   return result as unknown as BrowserScreenshotOutput;
 }
 
-function transformBrowserResult(value: unknown): unknown {
-  // Keep canonical screenshot output intact for UIMessage persistence and the
-  // chat renderer. `toModelOutput` below prevents the base64 from entering the
-  // model context.
-  return browserScreenshotOutput(value) ? value : truncateResult(value);
+const BASE64_REDACTION_THRESHOLD = 4096;
+const MAX_REDACTION_DEPTH = 20;
+const MAX_REDACTION_NODES = 10_000;
+
+function base64Details(
+  value: string,
+  minimumLength = BASE64_REDACTION_THRESHOLD
+): {
+  mediaType?: string;
+  chars: number;
+  bytes: number;
+} | null {
+  if (value.length < minimumLength) return null;
+
+  const dataUrl =
+    /^data:([^;,]+)(?:;[^,]*)*;base64,([A-Za-z0-9+/]*={0,2})$/i.exec(value);
+  const encoded = dataUrl?.[2] ?? value;
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+    return null;
+  }
+
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  return {
+    mediaType: dataUrl?.[1],
+    chars: encoded.length,
+    bytes: (encoded.length / 4) * 3 - padding
+  };
 }
 
-const BROWSER_EXECUTE_DESCRIPTION = `Execute JavaScript in a sandbox with the \`cdp\` connector to control a browser through the Chrome DevTools Protocol.
+function base64Redaction(
+  value: string,
+  mediaType?: string,
+  minimumLength?: number
+): string {
+  const details = base64Details(value, minimumLength);
+  if (!details) return value;
+  const type = mediaType ?? details.mediaType;
+  return `[base64${type ? ` ${type}` : ""} data omitted: ${details.chars.toLocaleString()} chars, approximately ${details.bytes.toLocaleString()} bytes]`;
+}
 
-\`codemode.search()\` discovers connector methods, not CDP commands. Do not use it to search for \`Page.*\`, \`Runtime.*\`, \`Target.*\`, or screenshot commands. The connector methods are \`cdp.send\`, \`cdp.attachToTarget\`, \`cdp.getDebugLog\`, and \`cdp.clearDebugLog\`.
+function redactBase64Payloads(value: unknown): unknown {
+  const ancestors = new WeakSet<object>();
+  let nodes = 0;
 
-\`cdp.send\` takes one object and returns the CDP method result directly:
-\`await cdp.send({ method: "Browser.getVersion" })\`
-Do not use positional arguments or invent convenience methods such as \`cdp.goto\`. CDP events are not commands and there is no \`cdp.on\`; poll with \`Runtime.evaluate\` when waiting for page state. Connector calls are already recorded, so do not wrap them in \`codemode.step\`.
+  function visit(current: unknown, depth: number): unknown {
+    if (depth > MAX_REDACTION_DEPTH) return "[nested value omitted]";
+    if (++nodes > MAX_REDACTION_NODES) return "[remaining values omitted]";
+    if (typeof current === "string") return base64Redaction(current);
+    if (typeof current !== "object" || current === null) return current;
+    if (ancestors.has(current)) return "[circular reference omitted]";
 
-For page-scoped commands, create a target and attach to it:
-\`const { targetId } = await cdp.send({ method: "Target.createTarget", params: { url: "about:blank" } });\`
-\`const { sessionId } = await cdp.attachToTarget({ targetId });\`
-Then pass \`sessionId\` to every \`Page.*\`, \`Runtime.*\`, and \`DOM.*\` command.
+    ancestors.add(current);
+    try {
+      if (Array.isArray(current)) {
+        return current.map((entry) => visit(entry, depth + 1));
+      }
 
-For navigation and screenshots: call \`Page.enable\`, call \`Page.navigate\`, then poll readiness with:
-\`const evaluation = await cdp.send({ method: "Runtime.evaluate", params: { expression: "document.readyState === 'complete' && Boolean(document.body?.innerText?.trim())", returnByValue: true }, sessionId });\`
-Read the boolean from \`evaluation.result.value\`. Poll at most 40 times, 250ms apart. If the page does not become ready, return a concise error instead of capturing. Once ready, wait another 1000ms for layout and paint, then call \`Page.captureScreenshot\`.
+      const record = current as Record<string, unknown>;
+      const screenshot =
+        record.type === "browser_screenshot" &&
+        typeof record.mediaType === "string";
+      return Object.fromEntries(
+        Object.entries(record).map(([key, entry]) => [
+          key,
+          screenshot && key === "data" && typeof entry === "string"
+            ? base64Redaction(entry, record.mediaType as string, 0)
+            : visit(entry, depth + 1)
+        ])
+      );
+    } finally {
+      ancestors.delete(current);
+    }
+  }
 
-Return screenshots exactly as:
-\`{ type: "browser_screenshot", mediaType: "image/png", data: screenshot.data }\`
-The UI keeps the image while the model receives a compact summary. Complete the browser task in one execution whenever possible.`;
+  return visit(value, 0);
+}
+
+function transformBrowserResult(value: unknown): unknown {
+  // Keep canonical screenshot output intact for UIMessage persistence and the
+  // chat renderer. Other results are redacted before truncation so a nested
+  // binary payload cannot become a large serialized preview.
+  return browserScreenshotOutput(value)
+    ? value
+    : truncateResult(redactBase64Payloads(value));
+}
 
 function browserExecuteModelOutput(
   output: unknown
@@ -210,12 +268,21 @@ function browserExecuteModelOutput(
     };
   }
 
-  const serialized = JSON.stringify(output);
-  return {
-    type: "json",
-    value:
-      serialized === undefined ? null : (JSON.parse(serialized) as JSONValue)
-  };
+  const redacted = redactBase64Payloads(output);
+  try {
+    const serialized = JSON.stringify(redacted);
+    return {
+      type: "json",
+      value:
+        serialized === undefined ? null : (JSON.parse(serialized) as JSONValue)
+    };
+  } catch {
+    return {
+      type: "text",
+      value:
+        "Browser execution completed, but its result could not be serialized for model context."
+    };
+  }
 }
 
 /**
@@ -312,13 +379,13 @@ export function createBrowserRuntime(
   });
 
   const isKitesurf = options.session?.browser === "kitesurf";
-  const browserExecute = isKitesurf
-    ? runtime.tool({ description: BROWSER_EXECUTE_DESCRIPTION })
-    : runtime.tool({
-        connectorHints: {
-          cdp: "Browser CDP. Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
-        }
-      });
+  const browserExecute = runtime.tool({
+    connectorHints: {
+      cdp: isKitesurf
+        ? 'Kitesurf one-shot Browser CDP. Call codemode.describe("cdp") for connector types and Kitesurf execution rules. codemode.search indexes connector methods and snippets, not underlying CDP commands. Complete the task in one execution and do not pause. Return screenshots as { type: "browser_screenshot", mediaType: "image/png", data: screenshot.data }.'
+        : "Browser CDP. Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
+    }
+  });
   const tools: ToolSet = {
     browser_execute: {
       ...browserExecute,

@@ -38,13 +38,11 @@ The Browser Run binding is configured with `remote: true`, so Kitesurf runs remo
 
 - "Open https://example.com and tell me the page title" -- navigates and evaluates the page through Kitesurf CDP
 - "Visit https://developers.cloudflare.com/agents/ and summarize the page" -- reads a page in one Kitesurf execution
-- "Take a screenshot of https://example.com" -- calls Kitesurf's `Page.captureScreenshot` and renders the image inline. Kitesurf navigation can finish before layout and paint, so the generated program polls for a complete, non-empty document and waits another second before capturing. It returns `{ type: "browser_screenshot", mediaType: "image/png", data }`; the full base64 is retained for the UI while `toModelOutput` gives the model only a short attachment summary.
+- "Take a screenshot of https://example.com" -- captures the page through Kitesurf and renders the image inline.
 - "Visit https://example.com, list its links, and take a screenshot" -- exercises multi-step automation over one Kitesurf connection
 - "What's the weather in London?" -- server-side tool, executes automatically
 - "What timezone am I in?" -- client-side tool, browser provides the result
 - "Calculate 150 \* 3, amount is $450" -- requires approval before executing
 - Have a long conversation -- old tool calls are pruned from LLM context automatically
 
-Kitesurf is scoped to one CDP WebSocket. The browser tool therefore does not expose session reuse, pause/resume, Live View, recording, or CDP protocol discovery. Binding-backed Quick Actions remain disabled because `BrowserRun.quickAction()` does not currently expose a Kitesurf selector.
-
-`cdp.send()` returns the CDP method result directly rather than the outer JSON-RPC envelope. For example, read `target.targetId`, `evaluation.result.value`, and `screenshot.data`—not `target.result.targetId`, `evaluation.result.result.value`, or `screenshot.result.data`. Use `cdp.attachToTarget({ targetId })` rather than sending `Target.attachToTarget` manually.
+This example uses Kitesurf as a one-shot browser and disables Quick Actions, which cannot currently select the Kitesurf engine.

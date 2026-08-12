@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createBrowserRuntime } from "../browser/ai";
 import { BrowserConnector } from "../browser/connector";
 import { connectBrowser, getBrowserRecording } from "../browser/browser-run";
 import type {
@@ -207,11 +208,97 @@ function createFakeBrowser(options?: {
 
 const fakeCtx = {} as ExecutionContext;
 
+function createKitesurfBrowserTool() {
+  const { browser } = createFakeBrowser();
+  const ctx = {
+    exports: { CodemodeRuntime: class {} },
+    facets: { get: () => ({}) }
+  } as unknown as DurableObjectState;
+  return createBrowserRuntime({
+    ctx,
+    browser,
+    store: new MemorySessionStore(),
+    loader: {} as WorkerLoader,
+    session: { browser: "kitesurf" },
+    quickActions: false
+  }).tools.browser_execute as unknown as {
+    description: string;
+    toModelOutput: (options: { output: unknown }) => unknown | Promise<unknown>;
+  };
+}
+
 function deletesFor(requests: BrowserRequest[], sessionId: string) {
   return requests.filter(
     (request) => request.method === "DELETE" && request.url.includes(sessionId)
   );
 }
+
+describe("browser_execute model output", () => {
+  it("keeps the default codemode description with Kitesurf guidance", () => {
+    const tool = createKitesurfBrowserTool();
+
+    expect(tool.description).toContain("The ONLY globals are");
+    expect(tool.description).toContain('codemode.describe("cdp")');
+    expect(tool.description).toContain("not underlying CDP commands");
+  });
+
+  it("recursively redacts base64 without mutating the UI output", async () => {
+    const tool = createKitesurfBrowserTool();
+    const image = "A".repeat(4096);
+    const output = {
+      status: "completed",
+      result: {
+        title: "Example",
+        captures: [
+          {
+            type: "browser_screenshot",
+            mediaType: "image/png",
+            data: "AAAA"
+          },
+          `data:image/jpeg;base64,${image}`
+        ]
+      },
+      calls: [{ result: { data: image } }]
+    };
+
+    const modelOutput = await tool.toModelOutput({ output });
+    const serialized = JSON.stringify(modelOutput);
+    expect(serialized).toContain("base64 image/png data omitted");
+    expect(serialized).toContain("base64 image/jpeg data omitted");
+    expect(serialized).toContain("base64 data omitted");
+    expect(serialized).not.toContain(image);
+    expect(output.result.captures[0]).toHaveProperty("data", "AAAA");
+    expect(output.calls[0].result.data).toBe(image);
+  });
+
+  it("does not redact ordinary strings or base64url values", async () => {
+    const tool = createKitesurfBrowserTool();
+    const prose = "ordinary browser text ".repeat(300);
+    const base64url = `${"A".repeat(4095)}_`;
+    const shortBase64 = "A".repeat(100);
+
+    const modelOutput = await tool.toModelOutput({
+      output: { prose, base64url, shortBase64 }
+    });
+    const serialized = JSON.stringify(modelOutput);
+    expect(serialized).toContain(prose);
+    expect(serialized).toContain(base64url);
+    expect(serialized).toContain(shortBase64);
+  });
+
+  it("returns serializable model output for circular and bigint values", async () => {
+    const tool = createKitesurfBrowserTool();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    expect(await tool.toModelOutput({ output: circular })).toMatchObject({
+      type: "json"
+    });
+    expect(await tool.toModelOutput({ output: { value: 1n } })).toMatchObject({
+      type: "text"
+    });
+  });
+});
 
 describe("Kitesurf Browser Run connections", () => {
   it("acquires Kitesurf directly over WebSocket without session endpoints", async () => {
