@@ -33,7 +33,10 @@
     "@ai-sdk/react": "^4.0.0",
     "@chat-adapter/telegram": "^4.31.0",
     "@cloudflare/ai-chat": "workspace:*",
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
     "@testing-library/react": "^16.3.2",
+    "@types/node": "catalog:",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
@@ -42,7 +45,8 @@
     "jsdom": "^29.1.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "vite": "^8.1.0",
+    "vite": "catalog:",
+    "vitest": "catalog:",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

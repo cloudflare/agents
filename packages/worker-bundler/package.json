@@ -44,10 +44,14 @@
     "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260729.1",
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
     "@types/semver": "^7.7.1",
     "esbuild": "^0.28.1",
-    "tsdown": "^0.22.3"
+    "tsdown": "^0.22.3",
+    "vite": "catalog:",
+    "vitest": "catalog:"
   },
   "engines": {
     "node": ">=22"
