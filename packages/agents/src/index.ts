@@ -7736,8 +7736,12 @@ export class Agent<
     if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
     }
+    // Hand the body through as a stream. Reading it here (e.g.
+    // `await req.arrayBuffer()`) materialises the entire body in the
+    // parent DO's isolate, ahead of any application-level intake limit,
+    // and re-materialises it once per `/sub/` hop — see #2015.
     if (req.body && req.method !== "GET" && req.method !== "HEAD") {
-      forwardedInit.body = await req.arrayBuffer();
+      forwardedInit.body = req.body;
     }
     const forwarded = new Request(rewritten, forwardedInit);
     return fetcher.fetch(forwarded);
