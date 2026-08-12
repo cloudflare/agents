@@ -1870,6 +1870,26 @@ describe("Think — beforeTurn config overrides", () => {
     expect(text).toBe("HELLO FROM THE ASSISTANT");
   });
 
+  it("repairToolCall repairs invalid tool input before execution", async () => {
+    const agent = await freshToolAgent("bt-tool-call-repair");
+    await agent.enableToolCallRepairForTest();
+
+    const result = await agent.testChat("Repair the tool call");
+
+    expect(result).toMatchObject({ done: true, error: undefined });
+    expect(await agent.getEchoExecuteCount()).toBe(1);
+    expect(await agent.getBeforeToolCallLog()).toEqual([
+      { toolName: "echo", inputJson: '{"message":"repaired"}' }
+    ]);
+    expect(await agent.getAfterToolCallLog()).toEqual([
+      {
+        toolName: "echo",
+        inputJson: '{"message":"repaired"}',
+        outputJson: '"echo: repaired"'
+      }
+    ]);
+  });
+
   it("sends reasoning chunks by default on the chat() path", async () => {
     const agent = await freshAgent("bt-reasoning-default");
     await agent.setReasoningResponse("Final answer", "Visible thinking");
