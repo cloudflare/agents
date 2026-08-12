@@ -7265,8 +7265,14 @@ export class Agent<
     without?: string[]
   ): Promise<void> {
     const bridge = this._cf_activeSubAgentBridge();
-    if (this._isFacet && bridge) {
-      bridge.broadcast(ownerPath, message, without);
+    if (this._isFacet) {
+      if (bridge) {
+        bridge.broadcast(ownerPath, message, without);
+        return;
+      }
+
+      const root = await this._rootAlarmOwner();
+      await root._cf_broadcastToSubAgent(ownerPath, message, without);
       return;
     }
 
@@ -7468,9 +7474,19 @@ export class Agent<
   private _cf_createSubAgentConnectionBridge(
     connection: Connection
   ): SubAgentConnectionBridge {
+    // A child-to-parent RPC callback starts a fresh async context. Capture the
+    // upstream bridge explicitly while this forwarding frame is still active.
+    const upstreamBroadcastBridge = this._isFacet
+      ? this._cf_activeSubAgentBridge(connection.id)
+      : undefined;
+
     return new SubAgentConnectionBridge(
       connection,
       (ownerPath, message, without) => {
+        if (upstreamBroadcastBridge) {
+          upstreamBroadcastBridge.broadcast(ownerPath, message, without);
+          return;
+        }
         void this._cf_broadcastToSubAgent(ownerPath, message, without);
       }
     );

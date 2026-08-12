@@ -1013,6 +1013,11 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
     }
   }
 
+  /** Relays a child broadcast from a fresh RPC context with no frame bridge. */
+  async relayBroadcastFromFreshContext(message: string): Promise<void> {
+    await this._cf_broadcastToSubAgent(this.selfPath, message);
+  }
+
   /**
    * Calls `this.setState(...)` from a facet RPC. `setState` drives
    * `_broadcastProtocol()` internally, so this exercises facet state
@@ -1819,6 +1824,14 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(BroadcastSubAgent, subAgentName);
     return child.tryBroadcast(msg);
+  }
+
+  async subAgentRelayBroadcastFromFreshContext(
+    subAgentName: string,
+    message: string
+  ): Promise<void> {
+    const child = await this.subAgent(BroadcastSubAgent, subAgentName);
+    await child.relayBroadcastFromFreshContext(message);
   }
 
   async subAgentTrySetState(
