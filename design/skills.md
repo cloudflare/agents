@@ -15,7 +15,6 @@ model, but it is not a first-class Think story:
   Agent Skills directories with `SKILL.md`.
 - There is no standard parser for the Agent Skills format.
 - There is no story for colocated/bundled skills or deploy-to-deploy changes.
-- Script execution and permissions are not specified.
 
 We want Think to support the Agent Skills format from
 https://agentskills.io/ while staying aligned with Workers constraints and the
@@ -77,7 +76,7 @@ specifier alongside decorator transforms. The default export is typed by
 ambient declarations shipped from `agents` (`skills-module.d.ts`), so no
 per-project shim module is needed.
 
-The skills engine (sources, registry, runner, and tools) lives in the
+The skills engine (sources, registry, and tools) lives in the
 framework-agnostic `agents/skills` module, so it is not tied to Think.
 `@cloudflare/think` re-exports it as `skills` and adds the `getSkills()` /
 Session wiring; `@cloudflare/ai-chat` (or any AI SDK caller) can build a
@@ -173,9 +172,6 @@ Session context tools:
 - `read_skill_resource({ name?, path })`: loads bundled resources on demand.
   Callers may pass `{ name, path }` or a qualified path such as
   `other-skill/references/file.md`.
-- `run_skill_script({ name, path, input? })`: optional, only registered when a
-  script runner is configured. Script paths must live under `scripts/`; omitted
-  input defaults to `{}`.
 
 Skill content should be wrapped in identifiable tags with the skill name and
 version/fingerprint. This gives compaction and diagnostics something stable to
@@ -202,74 +198,20 @@ If the fingerprint changes:
 This avoids silently rewriting old conversations while ensuring new deploys take
 effect for future skill activations.
 
-## Scripts And Permissions
+## Resource handling
 
-The Agent Skills spec defines `allowed-tools` as an optional experimental
-frontmatter field. It is a hint, not a full permission model. Think should
-define and enforce its own capability envelope.
+The Agent Skills spec defines `allowed-tools` as optional experimental
+frontmatter. It is a hint to the model, not a permission boundary or a request
+to expose ambient capabilities.
 
-Scripts should receive explicit capabilities rather than ambient access to the
-agent. The first implementation keeps this concrete: runner options are the
-permission boundary.
+Files under `references/`, `scripts/`, and `assets/` are inert resources. The
+bundled and R2 sources preserve their contents and metadata, and
+`read_skill_resource` returns a requested file to the model. The skills engine
+does not compile or execute resource files.
 
-Script execution is experimental; `skills.runner` logs a one-time warning on
-first use and its capability shape may change.
-
-```ts
-skills.runner({
-  loader: this.env.LOADER,
-  workspaceInstance: this.workspace,
-  tools: {
-    search_docs: this.getTools().search_docs
-  }
-});
-```
-
-The default is useful but not ambiently powerful: no network and no tools, with
-read-only workspace access when `workspaceInstance` is provided, and a 30 second
-script timeout. Tool access is explicit; Think does not expose the full turn
-toolset to a script by default. Workspace access is `"none"`, `"read"`, or
-`"read-write"`, with `workspace: "read-write"` required for mutating operations.
-
-A single host bridge (`SkillScriptHostBridge`) is the one source of truth for
-capabilities and permission enforcement; it is constructed fresh per `run()` so
-the per-invocation `/output` buffer never leaks between concurrent runs. Every
-runtime delegates to it: JavaScript/TypeScript through a codemode `ToolProvider`,
-Python through an RPC `RpcTarget`, and Bash through `just-bash` custom commands.
-
-JavaScript and TypeScript scripts are **function-style only**:
-
-```ts
-export default async function run(input, ctx) {
-  return input;
-}
-```
-
-`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
-text resources by relative path (replacing the earlier `node:fs` shim, which was
-removed); `ctx.workspace` exposes async `readFile`/`listFiles`/`glob`/`stat`/
-`writeFile` gated by the workspace permission; `ctx.tools` exposes
-`tools.call(name, input)` and `tools.<name>(input)` for explicitly granted
-tools; and `ctx.output.writeFile(name, content)` records scratch artifacts
-returned by `run_skill_script` without mutating the workspace. TypeScript and
-multi-file scripts are compiled/bundled with `@cloudflare/worker-bundler`.
-
-Python (`.py`) and Bash (`.sh`/`.bash`) keep the path-based contract, matching
-CLI-oriented Agent Skills. The runner mounts:
-
-- `/skill`: `SKILL.md` and bundled skill resources.
-- `/input.json`: the `run_skill_script` input, defaulting to `{}`.
-- `/context.json`: skill metadata.
-- `/output`: scratch artifacts returned by `run_skill_script`.
-
-Python runs as a Python Dynamic Worker with `python_workers`, supporting both
-`def run(input, ctx)` and CLI-style scripts; it exposes `tools.<name>(input)`,
-`tools.call(name, input)`, and `workspace.read_file()` / `list_files()` /
-`glob()` / `write_file()` per the workspace permission. Bash runs through
-`just-bash` and exposes `workspace-read` / `workspace-list` / `workspace-glob`
-(plus `workspace-write` with read-write access) and a `tool <name> <json>`
-command. Python Workers have slower cold starts than JavaScript, so JavaScript
-remains the preferred runtime for one-off generated code.
+Applications that need execution should expose it as an explicit tool with its
+own validation and permissions. Keeping execution outside `SkillRegistry`
+makes the application's tool policy the only capability boundary.
 
 ## MVP
 
@@ -284,8 +226,7 @@ The first implementation stays narrow:
 6. Add `activate_skill` and `read_skill_resource`.
 7. Add the `agents:skills` virtual specifier transform in `agents/vite`.
 8. Add a read-only R2-backed Agent Skills source.
-9. Add optional, experimental script execution for JavaScript/TypeScript,
-   Python, and Bash behind a single capability bridge.
+9. Keep all bundled and remote files as inert, readable resources.
 
 Git-backed sources should follow once the source story is proven.
 
@@ -309,11 +250,11 @@ This is attractive for sharing skills, but it introduces auth, caching, rate
 limits, and remote trust before the local runtime shape is settled. Git should
 start as build/deploy-time sync.
 
-### Execute Scripts As Shell Commands
+### Add built-in script execution
 
-This matches local coding-agent expectations, but Think runs on Workers.
-Scripts need a sandbox/runtime abstraction and explicit capabilities. Direct
-ambient Bash/Python execution is not the right default.
+A built-in execution path would mix skill discovery with application
+capabilities and permissions. Applications can expose a workspace Bash tool,
+Codemode, or a narrower custom tool when a skill needs executable behavior.
 
 ## Decision
 
