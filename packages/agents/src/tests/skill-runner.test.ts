@@ -251,6 +251,60 @@ export { run as default };`
     }
   );
 
+  it.each([
+    {
+      recognition: "the generated header",
+      header: "// cloudflare-agents:compiled-skill-script:v1",
+      precompiled: false
+    },
+    {
+      recognition: "the resource descriptor",
+      header: "",
+      precompiled: true
+    }
+  ])(
+    "preserves default-export text in a bundle recognized by $recognition",
+    async ({ header, precompiled }) => {
+      const runner = skills.runner({ loader: env.LOADER });
+      const source = [
+        header,
+        "var documentation = `",
+        "export default function run() {}",
+        "`;",
+        "function run() {",
+        "  return documentation;",
+        "}",
+        "export { run as default };"
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      await expect(
+        runner.run({
+          skill: {
+            name: "compiled-default-export-text",
+            description: "Compiled script containing default-export text.",
+            body: "Run the script."
+          },
+          path: "scripts/run.ts",
+          input: {},
+          source,
+          resources: precompiled
+            ? [
+                {
+                  path: "scripts/run.ts",
+                  kind: "script",
+                  encoding: "text",
+                  precompiled: true,
+                  content: source
+                }
+              ]
+            : undefined
+        })
+      ).resolves.toBe("\nexport default function run() {}\n");
+    }
+  );
+
   it("runs a precompiled bundled script (esbuild `export { run as default }` form)", async () => {
     const runner = skills.runner({
       loader: env.LOADER

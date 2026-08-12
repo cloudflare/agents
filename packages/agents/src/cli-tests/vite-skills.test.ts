@@ -230,7 +230,7 @@ describe("compileSkillScript", () => {
     expect(result.content).not.toContain("type Input");
     expect(result.content).toContain("toUpperCase()");
     expect(result.content).toMatch(
-      /export\s*\{[\s\S]*\brun\s+as\s+default\b[\s\S]*\}/
+      /(?:^|\r?\n)[\t ]*export[\t ]*\{[^}]*\brun\s+as\s+default\b[^}]*\}[\t ]*;?[\t ]*(?=\s*$)/
     );
   });
 

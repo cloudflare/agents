@@ -244,20 +244,17 @@ function bashFiles(
 // ── JS/TS function-style wrapper ──────────────────────────────────────
 
 /**
- * Wrap a function-style JS/TS skill module so it runs inside the codemode
- * sandbox. The module must `export default` an async `run(input, ctx)`; we
- * rewrite the default export to a local binding, build the `ctx` capability
- * object from the host bridge proxy (`__host`), and invoke it.
+ * Wrap prepared JS/TS skill source so it runs inside the codemode sandbox.
+ * Authored default exports are normalized here; compiled defaults were already
+ * normalized without scanning their bundled source as authored syntax.
  */
-function scriptModule(source: string, request: SkillScriptRequest): string {
-  const defaultExportRewritten = source.replace(
-    /^\s*export\s+default\s+/m,
-    "const __skillRun = "
-  );
-  const runnableSource =
-    defaultExportRewritten === source
-      ? stripFinalExportBlock(source)
-      : stripAuthoredExportLists(defaultExportRewritten);
+function scriptModule(
+  preparedSource: PreparedJavaScriptSource,
+  request: SkillScriptRequest
+): string {
+  const runnableSource = preparedSource.defaultExportAlreadyNormalized
+    ? preparedSource.source
+    : normalizeAuthoredScriptSource(preparedSource.source);
   const skillMeta = skillScriptContext(request).skill;
 
   return [
@@ -296,13 +293,19 @@ function scriptModule(source: string, request: SkillScriptRequest): string {
   ].join("\n");
 }
 
+/** Script source plus whether its default export is ready for the wrapper. */
+type PreparedJavaScriptSource = {
+  readonly source: string;
+  readonly defaultExportAlreadyNormalized: boolean;
+};
+
 type FinalExportBlock = {
   readonly exports: string;
   readonly start: number;
   readonly end: number;
 };
 
-/** Find the final ESM export-list statement emitted by esbuild. */
+/** Find the final export list emitted by compileSkillScript's esbuild build. */
 function findFinalExportBlock(source: string): FinalExportBlock | null {
   const match = source.match(
     /(?:^|\r?\n)[\t ]*export[\t ]*\{([^}]*)\}[\t ]*;?[\t ]*(?=\s*$)/
@@ -363,25 +366,40 @@ function stripFinalExportBlock(source: string): string {
   return source.slice(0, exportBlock.start) + source.slice(exportBlock.end);
 }
 
-function rewriteBundledSource(source: string): string | null {
+function normalizeAuthoredScriptSource(source: string): string {
+  const defaultExportRewritten = source.replace(
+    /^\s*export\s+default\s+/m,
+    "const __skillRun = "
+  );
+  return defaultExportRewritten === source
+    ? stripFinalExportBlock(source)
+    : stripAuthoredExportLists(defaultExportRewritten);
+}
+
+function rewriteBundledSource(source: string): PreparedJavaScriptSource | null {
   // esbuild emits the default binding in a final `export { ... }` block, e.g.
   // `export { run as default }` or `export { helper, run as default }`. Extract
   // that binding, remove the statement that is illegal inside the function
   // wrapper, and bind the captured name to `__skillRun`.
   const defaultBinding = findBundledDefaultExportBinding(source);
   if (defaultBinding) {
-    return `${stripFinalExportBlock(source)}\nconst __skillRun = ${defaultBinding};`;
+    return {
+      source: `${stripFinalExportBlock(source)}\nconst __skillRun = ${defaultBinding};`,
+      defaultExportAlreadyNormalized: true
+    };
   }
 
   // Descriptor-marked precompiled resources historically also accepted the
   // authored default-export form. `scriptModule` normalizes it later.
-  return hasAuthoredDefaultExport(source) ? source : null;
+  return hasAuthoredDefaultExport(source)
+    ? { source, defaultExportAlreadyNormalized: false }
+    : null;
 }
 
 async function prepareJavaScriptSource(
   request: SkillScriptRequest,
   runtime: "javascript" | "typescript"
-): Promise<string> {
+): Promise<PreparedJavaScriptSource> {
   // Skill scripts run directly in the sandbox; the runtime ships no in-Worker
   // bundler. Build-time compiled scripts (Agents Vite plugin / `compileSkillScript`
   // from "agents/skills/compile") arrive as self-contained ESM. Vite marks its
@@ -426,7 +444,10 @@ async function prepareJavaScriptSource(
   // (TypeScript, or a skill split across multiple modules) must be bundled
   // ahead of time — there is no runtime bundler to fall back to.
   if (runtime === "javascript" && scriptFileCount === 1) {
-    return request.source;
+    return {
+      source: request.source,
+      defaultExportAlreadyNormalized: false
+    };
   }
 
   throw new Error(
@@ -1081,13 +1102,13 @@ async function runJavaScriptScript(
   bridge: SkillScriptHostBridge,
   runtime: "javascript" | "typescript"
 ): Promise<unknown> {
-  const source = await prepareJavaScriptSource(request, runtime);
+  const preparedSource = await prepareJavaScriptSource(request, runtime);
   const executor = new DynamicWorkerExecutor({
     loader: options.loader,
     timeout: effectiveTimeout(options),
     globalOutbound: options.network ? undefined : null
   });
-  const result = await executor.execute(scriptModule(source, request), [
+  const result = await executor.execute(scriptModule(preparedSource, request), [
     resolveProvider(hostProvider(bridge))
   ]);
 
