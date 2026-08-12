@@ -6,9 +6,9 @@
 import { tool } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import type { WorkspaceFsLike } from "@cloudflare/shell";
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import type { DurableObjectStorageLike } from "@cloudflare/computer";
 import { Think } from "../../think";
+import { Workspace } from "../../workspace/workspace";
 import {
   createExecuteRuntime,
   createExecuteTool,
@@ -56,9 +56,7 @@ export class ThinkExecuteToolAgent extends Think {
           execute: async () => "boom"
         })
       },
-      state: createWorkspaceStateBackend(
-        this.workspace as unknown as WorkspaceFsLike
-      ),
+      workspace: this.workspace,
       loader: this.env.LOADER
     });
   }
@@ -88,5 +86,58 @@ export class ThinkExecuteToolAgent extends Think {
   async codemodeExecutionStatuses(): Promise<string[]> {
     if (!this.codemode) return [];
     return (await this.codemode.executions()).map((e) => e.status);
+  }
+}
+
+export class ThinkComputerWorkspaceExecuteAgent extends Think {
+  override workspace = new Workspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike
+  });
+
+  #replay?: ExecuteRuntime;
+
+  getModel(): LanguageModel {
+    throw new Error("Model is not used in Computer workspace tests");
+  }
+
+  #replayRuntime(): ExecuteRuntime {
+    this.#replay ??= createExecuteRuntime(this, {
+      tools: {
+        checkpoint: tool({
+          description: "Pause execution for a replay test",
+          inputSchema: z.object({}),
+          needsApproval: true,
+          execute: async () => "approved"
+        })
+      }
+    });
+    return this.#replay;
+  }
+
+  async runWorkspaceExecute(code: string): Promise<ExecuteOutput> {
+    return invoke(createExecuteTool(this), code);
+  }
+
+  async runExplicitWorkspaceExecute(code: string): Promise<ExecuteOutput> {
+    return invoke(
+      createExecuteTool({
+        ctx: this.ctx,
+        workspace: this.workspace,
+        loader: this.env.LOADER
+      }),
+      code
+    );
+  }
+
+  async runWorkspaceReplay(code: string): Promise<ExecuteOutput> {
+    return invoke(this.#replayRuntime().tool, code);
+  }
+
+  async approveWorkspaceReplay(executionId: string): Promise<unknown> {
+    return this.#replayRuntime().runtime.approve({ executionId });
+  }
+
+  async writeWorkspaceFile(path: string, content: string): Promise<void> {
+    await this.workspace.fs.writeFile(path, content);
   }
 }
