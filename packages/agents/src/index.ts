@@ -1680,10 +1680,16 @@ export class Agent<
   private _protocolBroadcastExcludeIds = new Set<string>();
   private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
   /**
-   * Facet deliveries started from a sync API (`broadcast`) that have not
-   * settled. Drained before an inbound sub-agent RPC returns (#2026).
+   * Collects facet deliveries started from a sync API (`broadcast`)
+   * while a single inbound sub-agent frame is being handled, so that
+   * frame can await them before returning (#2026).
+   *
+   * Scoped to the frame on purpose. An agent-wide set would also catch
+   * background and concurrent-frame broadcasts — a streaming agent could
+   * then hold one frame's RPC open for the length of an unrelated
+   * stream, and one connection could stall another.
    */
-  private _cf_pendingSubAgentDeliveries = new Set<Promise<unknown>>();
+  private _cf_currentDeliverySink?: Set<Promise<unknown>>;
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
@@ -7389,37 +7395,71 @@ export class Agent<
     );
   }
 
-  /** Track a delivery that has no synchronous caller to await it. */
+  /**
+   * Track a delivery that has no synchronous caller to await it.
+   *
+   * Only while a frame is in progress. A broadcast started outside one —
+   * from an alarm, a background task, or a stream that outlives the
+   * frame that began it — travels via `_rootAlarmOwner()` on a stub this
+   * agent owns, so it is not exposed to the borrowed-bridge disposal
+   * race and nothing needs to wait for it.
+   */
   private _cf_trackSubAgentDelivery(promise: Promise<unknown>): void {
-    this._cf_pendingSubAgentDeliveries.add(promise);
+    const sink = this._cf_currentDeliverySink;
+    if (!sink) {
+      void promise.catch(() => {});
+      return;
+    }
+    sink.add(promise);
     void promise
       .catch(() => {})
       .finally(() => {
-        this._cf_pendingSubAgentDeliveries.delete(promise);
+        sink.delete(promise);
       });
   }
 
   /**
-   * Wait for deliveries this agent started while handling a frame.
+   * Run `fn` as one sub-agent frame, then wait for the deliveries it
+   * started before letting the inbound RPC return.
+   *
+   * That wait is what keeps a borrowed bridge stub alive until the next
+   * hop has the message (#2026). The set is snapshotted once rather than
+   * polled: `send` and `broadcast` register synchronously, so everything
+   * the frame started is already present by the time it returns, and a
+   * completing delivery never queues another. Draining therefore cannot
+   * be extended by unrelated traffic.
+   */
+  private async _cf_runSubAgentFrame<T>(
+    id: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const sink = new Set<Promise<unknown>>();
+    const previous = this._cf_currentDeliverySink;
+    this._cf_currentDeliverySink = sink;
+    try {
+      return await fn();
+    } finally {
+      this._cf_currentDeliverySink = previous;
+      await this._cf_drainSubAgentConnection(id, sink);
+    }
+  }
+
+  /**
+   * Wait for in-flight deliveries on a virtual connection.
    *
    * A no-op for a root-owned physical socket, which sends natively and
-   * has nothing in flight. On an intermediate facet it is what keeps the
-   * bridge stub alive while the next hop completes (#2026). Loops
-   * because a delivery can itself queue another one.
+   * has nothing in flight.
    */
-  private async _cf_drainSubAgentConnection(id: string): Promise<void> {
-    const awaited = new Set<Promise<unknown>>();
-    // Terminates because each pass only awaits promises it has not seen,
-    // and a frame can only queue finitely many.
-    while (true) {
-      const inFlight = [
-        ...(this._cf_virtualSubAgentConnections.get(id)?.pending ?? []),
-        ...this._cf_pendingSubAgentDeliveries
-      ].filter((promise) => !awaited.has(promise));
-      if (inFlight.length === 0) return;
-      for (const promise of inFlight) awaited.add(promise);
-      await Promise.allSettled(inFlight);
-    }
+  private async _cf_drainSubAgentConnection(
+    id: string,
+    sink?: ReadonlySet<Promise<unknown>>
+  ): Promise<void> {
+    const inFlight = [
+      ...(this._cf_virtualSubAgentConnections.get(id)?.pending ?? []),
+      ...(sink ?? [])
+    ];
+    if (inFlight.length === 0) return;
+    await Promise.allSettled(inFlight);
   }
 
   private async _cf_forwardSubAgentWebSocketMessage(
@@ -7557,11 +7597,9 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    try {
-      await this._cf_handleSubAgentWebSocketConnectInner(bridge, meta);
-    } finally {
-      await this._cf_drainSubAgentConnection(meta.id);
-    }
+    await this._cf_runSubAgentFrame(meta.id, () =>
+      this._cf_handleSubAgentWebSocketConnectInner(bridge, meta)
+    );
   }
 
   private async _cf_handleSubAgentWebSocketConnectInner(
@@ -7606,13 +7644,11 @@ export class Agent<
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    try {
-      await this._cf_runWithSubAgentBridge(bridge, () =>
+    await this._cf_runSubAgentFrame(meta.id, () =>
+      this._cf_runWithSubAgentBridge(bridge, () =>
         this.onMessage(connection, message)
-      );
-    } finally {
-      await this._cf_drainSubAgentConnection(meta.id);
-    }
+      )
+    );
   }
 
   async _cf_handleSubAgentWebSocketClose(
@@ -7625,11 +7661,12 @@ export class Agent<
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
     try {
-      await this._cf_runWithSubAgentBridge(bridge, () =>
-        this.onClose(connection, code, reason, wasClean)
+      await this._cf_runSubAgentFrame(meta.id, () =>
+        this._cf_runWithSubAgentBridge(bridge, () =>
+          this.onClose(connection, code, reason, wasClean)
+        )
       );
     } finally {
-      await this._cf_drainSubAgentConnection(meta.id);
       this._cf_virtualSubAgentConnections.delete(meta.id);
     }
   }

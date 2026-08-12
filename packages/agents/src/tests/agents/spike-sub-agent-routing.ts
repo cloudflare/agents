@@ -134,6 +134,22 @@ export class SpikeSubChild extends Agent {
     return true;
   }
 
+  /**
+   * Register a delivery that never settles, from outside any frame —
+   * standing in for a background broadcast or a stream that outlives
+   * the frame that started it.
+   *
+   * A frame must not wait on this. When deliveries were tracked in an
+   * agent-wide set, every later frame drained it and hung forever.
+   */
+  stallBackgroundDeliveryForTest(): void {
+    (
+      this as unknown as {
+        _cf_trackSubAgentDelivery(promise: Promise<unknown>): void;
+      }
+    )._cf_trackSubAgentDelivery(new Promise<never>(() => {}));
+  }
+
   async onConnect(_connection: Connection): Promise<void> {
     this.bump("connect");
   }

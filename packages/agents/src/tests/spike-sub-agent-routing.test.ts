@@ -13,7 +13,7 @@
  */
 
 import { exports, env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildAgentPath, getAgentByName, getSubAgentByName } from "../index";
 import { SpikeSubChild } from "./agents/spike-sub-agent-routing";
 
@@ -185,6 +185,41 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     expect(ws.readyState).toBe(WebSocket.OPEN);
 
     ws.close();
+  });
+
+  it("completes a frame without waiting on a background delivery", async () => {
+    // The #2026 fix makes a frame wait for its own deliveries so the
+    // borrowed bridge stub outlives them. That wait has to stay scoped
+    // to the frame. Tracking deliveries in one agent-wide set instead
+    // would mean every frame also waited on background work and on
+    // other connections' frames — a streaming agent could hold a frame
+    // open for the length of an unrelated stream, and one client could
+    // stall another.
+    //
+    // Observed via close, because the message content is delivered
+    // before the drain and so arrives either way. It is frame
+    // *completion* that stalls: `_cf_handleSubAgentWebSocketClose` only
+    // drops the connection once its frame finishes, so an unscoped
+    // drain leaves the facet holding a closed connection forever.
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    ws.send("warmup");
+    expect(await collectMessages(ws, 1)).toEqual([`pong:${child}:warmup`]);
+
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+    await childStub.stallBackgroundDeliveryForTest();
+
+    ws.close();
+
+    await vi.waitFor(
+      async () => {
+        expect((await childStub.connectionSnapshot()).all).toHaveLength(0);
+      },
+      { timeout: 3000, interval: 50 }
+    );
   });
 
   it("this.broadcast(...) inside a facet reaches the facet's own WS clients", async () => {
