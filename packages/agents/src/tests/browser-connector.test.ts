@@ -334,6 +334,7 @@ describe("Kitesurf Browser Run connections", () => {
 
     const session = await connectBrowser(browser, {
       browser: "kitesurf",
+      keepAliveMs: 0,
       includeTargets: false,
       recording: false
     });

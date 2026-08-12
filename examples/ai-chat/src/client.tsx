@@ -102,10 +102,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function getScreenshotPreview(outer: unknown): {
-  src: string;
-  base64Length: number;
-} | null {
+function getScreenshotPreview(outer: unknown): { src: string } | null {
   // browser_execute wraps the sandbox return value: { status, result, ... }
   const output =
     isRecord(outer) && isRecord(outer.result) ? outer.result : outer;
@@ -120,27 +117,35 @@ function getScreenshotPreview(outer: unknown): {
 
   const mimeType = output.mediaType;
 
-  return {
-    src: `data:${mimeType};base64,${output.data}`,
-    base64Length: output.data.length
-  };
+  return { src: `data:${mimeType};base64,${output.data}` };
 }
 
-function formatToolOutput(
-  output: unknown,
-  screenshotPreview: {
-    base64Length: number;
-  } | null
-): string {
+// Any tool result carrying a large `data` string is treated as an inline
+// payload (screenshot or otherwise) and kept out of the transcript.
+const INLINE_DATA_REDACTION_THRESHOLD = 1024;
+
+function redactInlineData(
+  value: Record<string, unknown>
+): Record<string, unknown> {
+  const data = value.data;
+  if (
+    typeof data !== "string" ||
+    data.length <= INLINE_DATA_REDACTION_THRESHOLD
+  ) {
+    return value;
+  }
+  return { ...value, data: `[inline data omitted: ${data.length} chars]` };
+}
+
+function formatToolOutput(output: unknown): string {
   if (typeof output === "string") {
     return output;
   }
 
-  if (screenshotPreview && isRecord(output)) {
-    const omitted = `[base64 image data omitted: ${screenshotPreview.base64Length} chars]`;
+  if (isRecord(output)) {
     const redacted = isRecord(output.result)
-      ? { ...output, result: { ...output.result, data: omitted } }
-      : { ...output, data: omitted };
+      ? { ...output, result: redactInlineData(output.result) }
+      : redactInlineData(output);
     return JSON.stringify(redacted, null, 2);
   }
 
@@ -680,7 +685,7 @@ function Chat() {
                               </div>
                             )}
                             <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
-                              {formatToolOutput(toolOutput, screenshotPreview)}
+                              {formatToolOutput(toolOutput)}
                             </pre>
                           </div>
                         )}

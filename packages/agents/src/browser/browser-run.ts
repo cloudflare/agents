@@ -190,8 +190,9 @@ export async function connectBrowser(
 ): Promise<CdpSession> {
   const normalizedOptions =
     typeof options === "number" ? { timeoutMs: options } : (options ?? {});
+  const isKitesurf = normalizedOptions.browser === "kitesurf";
   if (
-    normalizedOptions.browser === "kitesurf" &&
+    isKitesurf &&
     (normalizedOptions.keepAliveMs ||
       normalizedOptions.includeTargets ||
       normalizedOptions.recording)
@@ -203,7 +204,9 @@ export async function connectBrowser(
 
   const response = await browser.fetch(
     browserSessionEndpoint(undefined, {
-      keepAliveMs: normalizedOptions.keepAliveMs,
+      // Explicitly disabled Chromium-only options are accepted but never sent:
+      // `keep_alive=0` is not a valid Kitesurf query parameter.
+      keepAliveMs: isKitesurf ? undefined : normalizedOptions.keepAliveMs,
       includeTargets: normalizedOptions.includeTargets,
       recording: normalizedOptions.recording,
       browser: normalizedOptions.browser
