@@ -2,7 +2,6 @@ import { callable } from "agents";
 import {
   Think,
   Session,
-  skills,
   defaultContextOverflowClassifier
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
@@ -127,16 +126,6 @@ export class MyAssistant extends Think<Env> {
   // than carrying every instruction in every turn.
   getSkills() {
     return [bundledSkills];
-  }
-
-  // Lets skills expose runnable scripts (`run_skill_script`). Scripts run in
-  // a bounded Worker via the Worker Loader, with read-only access to this
-  // chat's shared workspace so a script can inspect saved files.
-  getSkillScriptRunner() {
-    return skills.runner({
-      loader: this.env.LOADER,
-      workspaceInstance: this.workspace
-    });
   }
 
   configureSession(session: Session) {

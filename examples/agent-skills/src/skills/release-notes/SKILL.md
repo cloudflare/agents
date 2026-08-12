@@ -14,11 +14,9 @@ Turn implementation details into user-facing release notes.
 3. Avoid internal file names unless the user asks for engineering notes.
 4. Keep the tone factual and concise.
 
-When the user provides a rough list of changes, run
-`scripts/format-release-notes.ts` with `{ "changes": [...] }` to create a first
-draft, then polish the wording for the user's audience. The TypeScript script
-is function-style (`export default run(input, ctx)`) and demonstrates reading
-`references/style-guide.md` from `ctx.files`.
+When the user provides a rough list of changes, read
+`references/style-guide.md`, draft the release notes using those rules, then
+polish the wording for the user's audience.
 
 ## Output format
 
