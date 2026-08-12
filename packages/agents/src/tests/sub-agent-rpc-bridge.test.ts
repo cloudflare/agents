@@ -1,6 +1,6 @@
-import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
-import type { RPCRequest, RPCResponse } from "../index";
+import { env, exports } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vitest";
+import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
 
 function uniqueName(): string {
@@ -39,6 +39,32 @@ function waitForTextMessage(
       clearTimeout(timer);
       ws.removeEventListener("message", onMessage);
       resolve(event.data as string);
+    };
+
+    ws.addEventListener("message", onMessage);
+  });
+}
+
+function waitForTextMessages(
+  ws: WebSocket,
+  expected: ReadonlySet<string>,
+  timeoutMs = 1000
+): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const received: string[] = [];
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", onMessage);
+      reject(new Error("Expected text messages never arrived"));
+    }, timeoutMs);
+
+    const onMessage = (event: MessageEvent) => {
+      if (typeof event.data !== "string" || !expected.has(event.data)) return;
+      received.push(event.data);
+      if (received.length !== expected.size) return;
+
+      clearTimeout(timer);
+      ws.removeEventListener("message", onMessage);
+      resolve(received);
     };
 
     ws.addEventListener("message", onMessage);
@@ -217,6 +243,74 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("preserves consecutive message order after frame completion", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const first = `ordered-first-${crypto.randomUUID()}`;
+      const second = `ordered-second-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessages(ws, new Set([first, second]));
+
+      const response = await callRPC(ws, "sendConnectionMessagesAfterDelay", [
+        [first, second]
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+      await expect(delivered).resolves.toEqual([first, second]);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("reports a failed root-routed connection operation", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.failNextRootResolution();
+
+      const deliveredAfterFailure = `delivered-after-failure-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessage(ws, deliveredAfterFailure);
+      const response = await callRPC(ws, "sendConnectionMessagesAfterDelay", [
+        ["expected-root-resolution-failure", deliveredAfterFailure]
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+
+      await vi.waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith(
+          "[Agent] Sub-agent connection operation failed:",
+          expect.objectContaining({
+            connectionId: expect.any(String),
+            operation: expect.stringMatching(/^(send|setState|close)$/),
+            error: expect.any(Error)
+          })
+        );
+      });
+      await expect(delivered).resolves.toBe(deliveredAfterFailure);
+    } finally {
+      errorSpy.mockRestore();
+      ws.close();
+    }
+  });
+
+  it("preserves the final consecutive state update", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const first = `state-first-${crypto.randomUUID()}`;
+      const second = `state-second-${crypto.randomUUID()}`;
+      const scheduled = await callRPC(ws, "setConnectionMarkersAfterDelay", [
+        [first, second]
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const read = await callRPC(ws, "getConnectionMarker");
+      expectSuccessfulResult(read, second);
+    } finally {
+      ws.close();
+    }
+  });
+
   it("persists connection state", async () => {
     const ws = await connectWS(uniqueName(), uniqueName());
     try {
@@ -229,6 +323,29 @@ describe("facet connection operations after frame completion (issue #2055)", () 
       await new Promise((resolve) => setTimeout(resolve, 100));
       const read = await callRPC(ws, "getConnectionMarker");
       expectSuccessfulResult(read, marker);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("delivers a final message before a consecutive close", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const message = `before-close-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessage(ws, message);
+      const closed = waitForClose(ws);
+
+      const scheduled = await callRPC(ws, "sendThenCloseConnectionAfterDelay", [
+        message,
+        4000,
+        "ordered-close"
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+      await expect(delivered).resolves.toBe(message);
+      await expect(closed).resolves.toEqual({
+        code: 4000,
+        reason: "ordered-close"
+      });
     } finally {
       ws.close();
     }

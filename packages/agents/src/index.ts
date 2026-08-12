@@ -463,15 +463,17 @@ type SubAgentConnectionMeta = {
 };
 
 type SubAgentConnectionBridgeLike = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void;
-  close(code?: number, reason?: string): void;
-  setState(state: unknown): unknown;
+  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
+  close(code?: number, reason?: string): void | Promise<void>;
+  setState(state: unknown): unknown | Promise<unknown>;
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void;
+  ): void | Promise<void>;
 };
+
+type SubAgentConnectionOperationName = "send" | "setState" | "close";
 
 type StoredSubAgentConnection = {
   bridge: SubAgentConnectionBridgeLike;
@@ -558,29 +560,28 @@ class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
     this.#connectionId = connectionId;
   }
 
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    void this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
   }
 
-  close(code?: number, reason?: string): void {
-    void this.#root._cf_closeSubAgentConnection(
+  close(code?: number, reason?: string): Promise<void> {
+    return this.#root._cf_closeSubAgentConnection(
       this.#connectionId,
       code,
       reason
     );
   }
 
-  setState(state: unknown): unknown {
-    void this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
-    return state;
+  setState(state: unknown): Promise<unknown> {
+    return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
   }
 
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void {
-    void this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
+  ): Promise<void> {
+    return this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
   }
 }
 
@@ -1735,6 +1736,10 @@ export class Agent<
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
+  >();
+  private _cf_subAgentConnectionOperationTails = new Map<
+    string,
+    Promise<void>
   >();
 
   /**
@@ -7230,10 +7235,13 @@ export class Agent<
   /**
    * Route a virtual sub-agent connection operation through its live frame
    * bridge, or through the durable root Agent after that frame completes.
+   * Root-routed operations are queued per connection to preserve call order;
+   * failures are reported without blocking later operations.
    */
   private _cf_routeSubAgentConnectionOperation(
     connectionId: string,
-    operation: (bridge: SubAgentConnectionBridgeLike) => void
+    operationName: SubAgentConnectionOperationName,
+    operation: (bridge: SubAgentConnectionBridgeLike) => unknown
   ): void {
     const activeBridge = this._cf_activeSubAgentBridge(connectionId);
     if (activeBridge) {
@@ -7241,8 +7249,42 @@ export class Agent<
       return;
     }
 
-    void this._rootAlarmOwner().then((root) => {
-      operation(new RootSubAgentConnectionBridge(root, connectionId));
+    const previous =
+      this._cf_subAgentConnectionOperationTails.get(connectionId) ??
+      Promise.resolve();
+    const pending = previous.then(async () => {
+      const root = await this._rootAlarmOwner();
+      await operation(new RootSubAgentConnectionBridge(root, connectionId));
+    });
+    const completion = pending.catch((error: unknown) => {
+      this._cf_reportSubAgentConnectionOperationFailure(
+        connectionId,
+        operationName,
+        error
+      );
+    });
+
+    this._cf_subAgentConnectionOperationTails.set(connectionId, completion);
+    this.ctx.waitUntil(completion);
+    void completion.then(() => {
+      if (
+        this._cf_subAgentConnectionOperationTails.get(connectionId) ===
+        completion
+      ) {
+        this._cf_subAgentConnectionOperationTails.delete(connectionId);
+      }
+    });
+  }
+
+  private _cf_reportSubAgentConnectionOperationFailure(
+    connectionId: string,
+    operation: SubAgentConnectionOperationName,
+    error: unknown
+  ): void {
+    console.error("[Agent] Sub-agent connection operation failed:", {
+      connectionId,
+      operation,
+      error
     });
   }
 
@@ -7740,20 +7782,22 @@ export class Agent<
         const currentState = getStored().meta.state;
         const state = typeof next === "function" ? next(currentState) : next;
         updateStoredState(state);
-        owner._cf_routeSubAgentConnectionOperation(meta.id, (bridge) => {
-          bridge.setState(state);
-        });
+        owner._cf_routeSubAgentConnectionOperation(
+          meta.id,
+          "setState",
+          (bridge) => bridge.setState(state)
+        );
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        owner._cf_routeSubAgentConnectionOperation(meta.id, (bridge) => {
-          bridge.send(message);
-        });
+        owner._cf_routeSubAgentConnectionOperation(meta.id, "send", (bridge) =>
+          bridge.send(message)
+        );
       },
       close(code?: number, reason?: string) {
-        owner._cf_routeSubAgentConnectionOperation(meta.id, (bridge) => {
-          bridge.close(code, reason);
-        });
+        owner._cf_routeSubAgentConnectionOperation(meta.id, "close", (bridge) =>
+          bridge.close(code, reason)
+        );
       },
       addEventListener() {},
       removeEventListener() {}

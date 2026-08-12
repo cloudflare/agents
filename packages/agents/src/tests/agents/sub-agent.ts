@@ -1088,6 +1088,23 @@ export class CustomBoundSubAgentParent extends Agent {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  private _rootResolutionFailuresRemaining = 0;
+
+  failNextRootResolution(): void {
+    this._rootResolutionFailuresRemaining += 1;
+  }
+
+  override async setName(
+    name: string,
+    props?: Record<string, unknown>
+  ): Promise<void> {
+    if (this._rootResolutionFailuresRemaining > 0) {
+      this._rootResolutionFailuresRemaining -= 1;
+      throw new Error("TestSubAgentParent root resolution failed");
+    }
+    await super.setName(name, props);
+  }
+
   async delayedEchoFromParent(value: string): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, 150));
     return `parent:${value}`;
@@ -2277,6 +2294,24 @@ export class SlowReplySubAgent extends Agent {
     return "scheduled";
   }
 
+  /** Schedules consecutive messages after the current frame completes. */
+  @callable()
+  sendConnectionMessagesAfterDelay(messages: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessagesAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const message of messages) connection.send(message);
+      })
+    );
+    return "scheduled";
+  }
+
   /** Schedules a connection state update after the current frame completes. */
   @callable()
   setConnectionMarkerAfterDelay(marker: string): string {
@@ -2290,6 +2325,26 @@ export class SlowReplySubAgent extends Agent {
     this.ctx.waitUntil(
       new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
         connection.setState({ delayedMarker: marker });
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Schedules consecutive state updates after the current frame completes. */
+  @callable()
+  setConnectionMarkersAfterDelay(markers: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkersAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const marker of markers) {
+          connection.setState({ delayedMarker: marker });
+        }
       })
     );
     return "scheduled";
@@ -2314,6 +2369,29 @@ export class SlowReplySubAgent extends Agent {
       return null;
     }
     return typeof state.delayedMarker === "string" ? state.delayedMarker : null;
+  }
+
+  /** Schedules a message followed by close after the current frame completes. */
+  @callable()
+  sendThenCloseConnectionAfterDelay(
+    message: string,
+    code: number,
+    reason: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendThenCloseConnectionAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(message);
+        connection.close(code, reason);
+      })
+    );
+    return "scheduled";
   }
 
   /** Schedules a connection close after the current frame completes. */
