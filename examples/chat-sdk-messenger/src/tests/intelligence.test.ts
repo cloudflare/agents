@@ -16,10 +16,7 @@ import {
   shouldRouteToAi,
   toThinkUserMessage
 } from "../intelligence/messages";
-import {
-  TextStreamCallback,
-  textDeltaFromStreamChunk
-} from "@cloudflare/think/messengers";
+import { TextStreamCallback } from "@cloudflare/think/messengers";
 import {
   isExpectedTelegramFinalEditNoop as isExpectedFinalEditNoop,
   isTelegramIgnorableDeliveryError as isIgnorableDeliveryError,
@@ -207,18 +204,6 @@ describe("Telegram intelligence helpers", () => {
 
     expect(chunks.every((chunk) => chunk.length <= 18)).toBe(true);
     expect(chunks.join("")).toBe(text);
-  });
-
-  it("extracts text deltas from Think chat stream chunks", () => {
-    expect(
-      textDeltaFromStreamChunk(
-        JSON.stringify({ type: "text-delta", id: "t1", delta: "hello" })
-      )
-    ).toBe("hello");
-    expect(
-      textDeltaFromStreamChunk(JSON.stringify({ type: "text-start", id: "t1" }))
-    ).toBeNull();
-    expect(textDeltaFromStreamChunk("not json")).toBeNull();
   });
 
   it("tracks streamed text and closes cleanly", async () => {

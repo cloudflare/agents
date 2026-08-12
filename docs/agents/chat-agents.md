@@ -956,6 +956,8 @@ async onChatMessage() {
 }
 ```
 
+The `inputSchema` accepts the AI SDK's flexible schema format, so you are not limited to Zod. You can also use Valibot, a Standard JSON Schema-compatible schema, or a raw JSON Schema wrapped with `jsonSchema()` from `ai`. See [Use Valibot or another schema library](./agent-tools.md#use-valibot-or-another-schema-library) for details.
+
 ### Client-Side Tools
 
 Define a tool on the server without `execute`, then handle it on the client with `onToolCall`. Use this for tools that need browser APIs:

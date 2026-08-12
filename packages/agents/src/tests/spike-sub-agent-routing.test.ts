@@ -14,7 +14,7 @@
 
 import { exports, env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { getAgentByName, getSubAgentByName } from "../index";
+import { buildAgentPath, getAgentByName, getSubAgentByName } from "../index";
 import { SpikeSubChild } from "./agents/spike-sub-agent-routing";
 
 function uniqueName() {
@@ -88,6 +88,31 @@ function isEchoPong(data: string): boolean {
 }
 
 describe("Spike: sub-agent routing via facet Fetcher", () => {
+  it("uses a canonical Agent path for a nested WebSocket", async () => {
+    const parent = uniqueName();
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    await parentStub.getCount("on_before");
+
+    const child = "child/with space";
+    const path = buildAgentPath([
+      { className: "SpikeSubParent", name: parent },
+      { className: "SpikeSubChild", name: child }
+    ]);
+
+    const response = await exports.default.fetch(`http://example.com${path}`, {
+      headers: { Upgrade: "websocket" }
+    });
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    expect(ws).toBeDefined();
+    ws.accept();
+
+    ws.send("hello");
+    const [reply] = await collectMessages(ws, 1);
+    expect(reply).toBe(`pong:${child}:hello`);
+    ws.close();
+  });
+
   it("establishes a WebSocket through the parent → facet chain", async () => {
     const parent = uniqueName();
     const child = uniqueName();

@@ -1,11 +1,8 @@
 /**
- * WebSocket-based ChatTransport for useAgentChat.
+ * Framework-neutral WebSocket transport for AI SDK chat clients.
  *
- * Replaces the aiFetch + DefaultChatTransport indirection with a direct
- * WebSocket implementation that speaks the CF_AGENT protocol natively.
- *
- * Data flow (old): WS → aiFetch fake Response → DefaultChatTransport → useChat
- * Data flow (new): WS → WebSocketChatTransport → useChat
+ * Speaks the CF_AGENT protocol directly and returns AI SDK UI message chunks
+ * without reconstructing an HTTP response or parsing an SSE stream.
  */
 
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
@@ -31,7 +28,8 @@ const RESUME_PENDING_TIMEOUT_MS = 60000;
 
 /**
  * Agent-like interface for sending/receiving WebSocket messages.
- * Matches the shape returned by useAgent from agents/react.
+ * Matches `AgentClient` from `agents/client` and the connection returned by
+ * `useAgent` from `agents/react`.
  */
 export interface AgentConnection {
   send: (data: string) => void;
@@ -49,11 +47,10 @@ export interface AgentConnection {
 export type WebSocketChatTransportOptions<
   ChatMessage extends UIMessage = UIMessage
 > = {
-  /** The agent connection from useAgent */
+  /** The framework-neutral AgentClient or useAgent connection. */
   agent: AgentConnection;
   /**
-   * Callback to prepare the request body before sending.
-   * Can add custom headers, body fields, or credentials.
+   * Callback to add custom fields to the request body before sending.
    */
   prepareBody?: (options: {
     messages: ChatMessage[];
@@ -78,7 +75,11 @@ export type WebSocketChatTransportOptions<
 /**
  * ChatTransport that sends messages over WebSocket and returns a
  * ReadableStream<UIMessageChunk> that the AI SDK's useChat consumes directly.
- * No fake fetch, no Response reconstruction, no double SSE parsing.
+ *
+ * This low-level transport handles new and regenerated request streams plus
+ * cancellation. Higher-level protocol coordination such as automatic reconnect
+ * resume, cross-tab transcript synchronization, and client-tool continuations
+ * is provided by integrations such as `useAgentChat`.
  */
 export class WebSocketChatTransport<
   ChatMessage extends UIMessage = UIMessage

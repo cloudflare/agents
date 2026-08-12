@@ -41,7 +41,7 @@ const EMPTY_MCP_STATE: MCPServersState = {
   tools: []
 };
 
-/** Result of `addMcpServer` — mirrors the framework's return shape. */
+/** Result of `addMcpServer` — mirrors the Agents SDK return shape. */
 export interface AddMcpServerResult {
   id: string;
   state: string;

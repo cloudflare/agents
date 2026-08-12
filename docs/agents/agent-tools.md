@@ -48,6 +48,35 @@ export class Assistant extends Think<Env> {
 }
 ```
 
+### Use Valibot or another schema library
+
+`agentTool()` accepts the AI SDK's flexible schema format. For Valibot, wrap the
+schema with `valibotSchema()` so the AI SDK receives both runtime validation and
+the JSON Schema required by the model. Use `@ai-sdk/valibot` v2 with AI SDK 6
+and v3 with AI SDK 7:
+
+```ts
+import { valibotSchema } from "@ai-sdk/valibot";
+import { agentTool } from "agents/agent-tools";
+import * as v from "valibot";
+
+const researchInput = valibotSchema(
+  v.object({
+    query: v.pipe(v.string(), v.minLength(3))
+  })
+);
+
+const research = agentTool(Researcher, {
+  description: "Research one topic in depth.",
+  inputSchema: researchInput
+});
+```
+
+You can also provide a Zod schema, a Standard JSON Schema-compatible schema, or
+a raw JSON Schema wrapped with `jsonSchema()` from `ai`. A validation-only
+Standard Schema is not sufficient for a tool input because it does not provide
+the JSON Schema sent to the model.
+
 The child can also be an `AIChatAgent`:
 
 ```ts

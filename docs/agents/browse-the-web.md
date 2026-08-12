@@ -244,7 +244,7 @@ const md = await browserMarkdown(this.env.BROWSER, { url });
 const data = await browserExtract<{ price: number }>(this.env.BROWSER, {
   url,
   prompt: "the product price",
-  response_format: { type: "json_schema", schema: priceSchema }
+  response_format: { type: "json_schema", json_schema: priceSchema }
 });
 ```
 

@@ -1,6 +1,5 @@
 {
   "name": "@cloudflare/voice-assemblyai",
-  "private": true,
   "version": "0.0.2",
   "description": "AssemblyAI Universal 3.5 Pro Realtime STT provider for Cloudflare Agents voice pipeline",
   "repository": {

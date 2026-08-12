@@ -491,7 +491,9 @@ export function createQuickActionTools(
             .optional()
             .describe("What to extract, in natural language"),
           schema: z
-            .unknown()
+            .record(z.string(), z.unknown(), {
+              error: "Schema must be a JSON object"
+            })
             .optional()
             .describe("Optional JSON Schema describing the desired output")
         })
@@ -507,7 +509,7 @@ export function createQuickActionTools(
             ...toPage(input, requestOptions),
             prompt: input.prompt,
             response_format: input.schema
-              ? { type: "json_schema", schema: input.schema }
+              ? { type: "json_schema", json_schema: input.schema }
               : undefined
           }),
           maxChars

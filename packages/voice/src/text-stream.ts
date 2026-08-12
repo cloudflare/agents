@@ -1,3 +1,5 @@
+import { TextSegmentJoiner } from "agents/chat";
+
 /**
  * Utilities for normalising various text-producing sources into a uniform
  * `AsyncGenerator<string>`.  This lets `onTurn()` return any of:
@@ -167,9 +169,8 @@ function hasCustomAsyncIterator(source: Exclude<TextSource, string>): boolean {
 async function* iterateAsyncTextEvents(
   source: AsyncIterable<unknown>
 ): AsyncGenerator<TextStreamEvent> {
-  let needsBoundarySpace = false;
+  const textSegmentJoiner = new TextSegmentJoiner();
   let hasYieldedText = false;
-  let lastTextEndedWithWhitespace = false;
 
   for await (const chunk of source) {
     if (typeof chunk === "string") {
@@ -180,26 +181,6 @@ async function* iterateAsyncTextEvents(
 
     if (!isRecord(chunk)) continue;
 
-    if (chunk.type === "text-delta") {
-      const text = getTextDelta(chunk);
-      if (!text) continue;
-
-      if (
-        needsBoundarySpace &&
-        hasYieldedText &&
-        !lastTextEndedWithWhitespace &&
-        !startsWithWhitespace(text)
-      ) {
-        yield textEvent(" ");
-      }
-
-      yield textEvent(text);
-      hasYieldedText = true;
-      lastTextEndedWithWhitespace = endsWithWhitespace(text);
-      needsBoundarySpace = false;
-      continue;
-    }
-
     if (chunk.type === "error") {
       if (hasYieldedText) {
         yield { type: "boundary" };
@@ -208,9 +189,9 @@ async function* iterateAsyncTextEvents(
       return;
     }
 
-    if (hasYieldedText && isTextBoundary(chunk.type)) {
-      if (!needsBoundarySpace) yield { type: "boundary" };
-      needsBoundarySpace = true;
+    for (const event of textSegmentJoiner.pushChunk(chunk)) {
+      yield event;
+      if (event.type === "text") hasYieldedText = true;
     }
   }
 }
@@ -227,32 +208,6 @@ function warnDeprecatedTextStream(source?: object): void {
   console.warn(
     "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.stream from onTurn() instead."
   );
-}
-
-function getTextDelta(chunk: Record<string, unknown>): string | null {
-  if (typeof chunk.text === "string") return chunk.text;
-  if (typeof chunk.delta === "string") return chunk.delta;
-  return null;
-}
-
-function isTextBoundary(type: unknown): boolean {
-  return (
-    typeof type === "string" &&
-    type !== "text-start" &&
-    type !== "text-end" &&
-    type !== "start" &&
-    type !== "finish" &&
-    type !== "start-step" &&
-    type !== "finish-step"
-  );
-}
-
-function startsWithWhitespace(text: string): boolean {
-  return /^\s/.test(text);
-}
-
-function endsWithWhitespace(text: string): boolean {
-  return /\s$/.test(text);
 }
 
 function toError(error: unknown): Error {

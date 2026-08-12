@@ -2174,6 +2174,19 @@ export interface TurnConfig {
     typeof streamText
   >[0]["experimental_transform"];
   /**
+   * Repairs tool calls that the AI SDK cannot parse or validate before tool
+   * execution. The returned tool call is parsed and validated again. Configure
+   * this function from a Think subclass; sandboxed extensions cannot send
+   * functions over RPC.
+   *
+   * Typed via the `experimental_repairToolCall` key, which exists in both AI
+   * SDK v6 and v7 (`repairToolCall` is v7-only), so this type resolves under
+   * either supported major.
+   */
+  repairToolCall?: Parameters<
+    typeof streamText
+  >[0]["experimental_repairToolCall"];
+  /**
    * Optional structured-output specification (AI SDK `output`).
    * Forwarded to `streamText` so the model's final response is parsed
    * against the supplied schema. Use the AI SDK's `Output.object({ schema })`
@@ -5843,6 +5856,10 @@ export class Think<
       // can inspect/rewrite the stream (e.g. emit `source` parts derived from
       // tool results) without owning the stream pipeline themselves.
       experimental_transform: config.experimental_transform,
+      // `experimental_repairToolCall` is the common option name across AI SDK
+      // v6 and v7. TurnConfig exposes the stable v7 name while this boundary
+      // keeps both supported majors working.
+      experimental_repairToolCall: config.repairToolCall,
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
