@@ -61,6 +61,37 @@ describe("Computer workspace state connector", () => {
   });
 });
 
+describe("Computer Bash workspace", () => {
+  it("runs turn-level bash against the durable Computer filesystem", async () => {
+    const agent = await getAgentByName(
+      env.ThinkBashWorkspaceAgent,
+      crypto.randomUUID()
+    );
+
+    await expect(
+      agent.runBash("printf 'from shell' > /workspace/result.txt")
+    ).resolves.toMatchObject({ exitCode: 0 });
+    await expect(agent.readFile("/workspace/result.txt")).resolves.toBe(
+      "from shell"
+    );
+  });
+
+  it("keeps codemode on state.* without adding workspace.bash", async () => {
+    const agent = await getAgentByName(
+      env.ThinkBashWorkspaceAgent,
+      crypto.randomUUID()
+    );
+
+    await agent.runBash("printf codemode > /workspace/codemode.txt");
+    await expect(
+      agent.runCodemodeState(`async () => {
+        const file = await state.readFile({ path: "/workspace/codemode.txt" });
+        return file === "codemode" && typeof workspace === "undefined";
+      }`)
+    ).resolves.toMatchObject({ status: "completed", result: true });
+  });
+});
+
 describe("execute tool on the codemode runtime", () => {
   it("runs sandbox code against tools.* (ToolSetConnector)", async () => {
     const agent = await freshAgent();

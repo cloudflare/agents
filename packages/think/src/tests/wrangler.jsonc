@@ -2,6 +2,7 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": [
     "nodejs_compat",
+    "experimental",
     "enable_nodejs_tty_module",
     "enable_nodejs_fs_module",
     "enable_nodejs_http_modules",
@@ -124,6 +125,10 @@
         "name": "ThinkMcpToolMaterializationAgent"
       },
       {
+        "class_name": "ThinkBashWorkspaceAgent",
+        "name": "ThinkBashWorkspaceAgent"
+      },
+      {
         "class_name": "ThinkComputerWorkspaceExecuteAgent",
         "name": "ThinkComputerWorkspaceExecuteAgent"
       },
@@ -205,6 +210,7 @@
         "ThinkExtensionHookAgent",
         "ThinkMessengerRouteTestAgent",
         "ThinkMcpToolMaterializationAgent",
+        "ThinkBashWorkspaceAgent",
         "ThinkComputerWorkspaceExecuteAgent",
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",

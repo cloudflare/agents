@@ -1,3 +1,4 @@
+import type { WorkspaceStub } from "@cloudflare/computer";
 import type {
   FileInfo as LegacyFileInfo,
   WorkspaceFsLike
@@ -124,6 +125,10 @@ export const workspaceToolProvider: unique symbol = Symbol.for(
   "@cloudflare/think/workspace-tool-provider"
 ) as unknown as typeof workspaceToolProvider;
 
+export const workspaceStubProvider: unique symbol = Symbol.for(
+  "@cloudflare/think/workspace-stub-provider"
+) as unknown as typeof workspaceStubProvider;
+
 export const workspaceLegacyBashProvider: unique symbol = Symbol.for(
   "@cloudflare/think/workspace-legacy-bash-provider"
 ) as unknown as typeof workspaceLegacyBashProvider;
@@ -146,6 +151,10 @@ export interface WorkspaceToolProvider {
   [workspaceToolProvider](options?: WorkspaceToolProviderOptions): ToolSet;
 }
 
+export interface WorkspaceStubProvider {
+  [workspaceStubProvider](): Promise<WorkspaceStub>;
+}
+
 export interface WorkspaceLegacyBashProvider {
   readonly [workspaceLegacyBashProvider]: true;
 }
@@ -155,6 +164,13 @@ export function hasWorkspaceToolProvider(
 ): workspace is WorkspaceLike & WorkspaceToolProvider {
   const candidate = workspace as WorkspaceLike & Partial<WorkspaceToolProvider>;
   return typeof candidate[workspaceToolProvider] === "function";
+}
+
+export function hasWorkspaceStubProvider(
+  workspace: WorkspaceLike
+): workspace is WorkspaceLike & WorkspaceStubProvider {
+  const candidate = workspace as WorkspaceLike & Partial<WorkspaceStubProvider>;
+  return typeof candidate[workspaceStubProvider] === "function";
 }
 
 export function hasWorkspaceLegacyBashProvider(

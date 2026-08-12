@@ -1,3 +1,4 @@
+export { WorkspaceServiceProxy } from "../workspace/workspace-bash";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { createBrowserRuntime, createBrowserTools } from "../tools/browser";
@@ -34,6 +35,7 @@ export {
   ThinkNestedMiddleAgent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkBashWorkspaceAgent,
   ThinkComputerWorkspaceExecuteAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
@@ -74,6 +76,7 @@ import type {
   ThinkNestedMiddleAgent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkBashWorkspaceAgent,
   ThinkComputerWorkspaceExecuteAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
@@ -220,6 +223,7 @@ export type Env = {
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   ThinkMcpToolMaterializationAgent: DurableObjectNamespace<ThinkMcpToolMaterializationAgent>;
+  ThinkBashWorkspaceAgent: DurableObjectNamespace<ThinkBashWorkspaceAgent>;
   ThinkComputerWorkspaceExecuteAgent: DurableObjectNamespace<ThinkComputerWorkspaceExecuteAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
