@@ -7,7 +7,7 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 **Server (`src/server.ts`):**
 
 - `toUIMessageStreamResponse()` -- the simplest streaming pattern
-- Browser Rendering tools via `agents/browser/ai` -- the durable CDP `browser_execute` tool plus the default-on stateless Quick Actions (`browser_markdown`, `browser_extract`, `browser_links`, `browser_scrape`)
+- One-shot Kitesurf browser automation via the CDP-backed `browser_execute` tool from `agents/browser/ai`
 - Server-side tools with `execute` (weather lookup)
 - Client-side tools without `execute` (browser timezone)
 - Tool approval with `needsApproval` (calculation with amount threshold)
@@ -32,16 +32,19 @@ npm start
 
 Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.7-code`.
 
-Recent Wrangler releases run the Browser Rendering binding locally, so no separate Chrome process is required.
+The Browser Run binding is configured with `remote: true`, so Kitesurf runs remotely while the rest of the Worker runs locally. No separate browser process is required.
 
 ## Try it
 
-- "Read https://example.com as markdown" -- one-shot `browser_markdown` Quick Action (no CDP session)
-- "List the links on https://developers.cloudflare.com/agents/" -- `browser_links` Quick Action
-- "Open https://example.com and tell me the page title" -- uses the browser binding and CDP tools
-- "Search the CDP spec for screenshot commands" -- exercises `cdp.spec()` inside `browser_execute`
-- "Take a screenshot of https://example.com" -- exercises `browser_execute` and renders the image inline
+- "Open https://example.com and tell me the page title" -- navigates and evaluates the page through Kitesurf CDP
+- "Visit https://developers.cloudflare.com/agents/ and summarize the page" -- reads a page in one Kitesurf execution
+- "Take a screenshot of https://example.com" -- calls Kitesurf's `Page.captureScreenshot` and renders the image inline. Kitesurf navigation can finish before layout and paint, so the generated program polls for a complete, non-empty document and waits another second before capturing. It returns `{ type: "browser_screenshot", mediaType: "image/png", data }`; the full base64 is retained for the UI while `toModelOutput` gives the model only a short attachment summary.
+- "Visit https://example.com, list its links, and take a screenshot" -- exercises multi-step automation over one Kitesurf connection
 - "What's the weather in London?" -- server-side tool, executes automatically
 - "What timezone am I in?" -- client-side tool, browser provides the result
 - "Calculate 150 \* 3, amount is $450" -- requires approval before executing
 - Have a long conversation -- old tool calls are pruned from LLM context automatically
+
+Kitesurf is scoped to one CDP WebSocket. The browser tool therefore does not expose session reuse, pause/resume, Live View, recording, or CDP protocol discovery. Binding-backed Quick Actions remain disabled because `BrowserRun.quickAction()` does not currently expose a Kitesurf selector.
+
+`cdp.send()` returns the CDP method result directly rather than the outer JSON-RPC envelope. For example, read `target.targetId`, `evaluation.result.value`, and `screenshot.data`—not `target.result.targetId`, `evaluation.result.result.value`, or `screenshot.result.data`. Use `cdp.attachToTarget({ targetId })` rather than sending `Target.attachToTarget` manually.

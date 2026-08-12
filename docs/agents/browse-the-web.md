@@ -279,6 +279,27 @@ class Researcher extends Think<Env> {
 
 Quick Actions require a Worker `compatibility_date` of `2026-03-24` or later and `remote: true` on the browser binding for local `wrangler dev`.
 
+## Using Kitesurf
+
+To use Kitesurf with the CDP-based `browser_execute` tool, select it in the session options:
+
+```ts
+const tools = createBrowserTools({
+  ctx: this.ctx,
+  browser: this.env.BROWSER,
+  loader: this.env.LOADER,
+  session: { browser: "kitesurf" }
+});
+```
+
+A Kitesurf browser is scoped to its CDP WebSocket. It therefore supports only one-shot execution. Session reuse, pause and resume, Live View, recording, and `keepAliveMs` are not available. The connector rejects those options rather than silently changing their behavior. Kitesurf also implements a subset of CDP and does not expose a protocol specification through `cdp.spec()`.
+
+The `cdp.send()` connector method returns each CDP method's result directly, without the outer JSON-RPC envelope. Use `cdp.attachToTarget({ targetId })` for page-scoped commands. Kitesurf navigation may complete before layout and paint; the connector instructions tell code-generating models to poll for a complete, non-empty document and wait briefly before capturing a screenshot.
+
+When `browser_execute` should return a screenshot to an AI SDK UI, return `{ type: "browser_screenshot", mediaType: "image/png", data: screenshot.data }`. Browser Tools preserve that structured output for the UI while `toModelOutput` replaces the base64 with a compact summary for the model.
+
+The Browser Run binding's `quickAction()` method does not currently expose a Kitesurf selector. Do not pass `browser` in Quick Action options; the binding validates those options as the action request body and rejects that key.
+
 ## Live View and human-in-the-loop
 
 [Live View](https://developers.cloudflare.com/browser-run/features/live-view/) lets a human open a URL and watch — or take control of — a running browser session in real time. It is the building block for human-in-the-loop steps such as logging in, solving a CAPTCHA, completing MFA, or entering data you do not want to pass through an automation script.

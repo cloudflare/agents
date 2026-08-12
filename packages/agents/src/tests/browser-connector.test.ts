@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BrowserConnector } from "../browser/connector";
-import { getBrowserRecording } from "../browser/browser-run";
+import { connectBrowser, getBrowserRecording } from "../browser/browser-run";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
@@ -213,6 +213,51 @@ function deletesFor(requests: BrowserRequest[], sessionId: string) {
   );
 }
 
+describe("Kitesurf Browser Run connections", () => {
+  it("acquires Kitesurf directly over WebSocket without session endpoints", async () => {
+    const { browser, requests } = createFakeBrowser();
+
+    const session = await connectBrowser(browser, { browser: "kitesurf" });
+    session.disconnect();
+
+    expect(requests).toEqual([
+      {
+        url: "https://localhost/v1/devtools/browser?browser=kitesurf",
+        method: "GET",
+        upgrade: true
+      }
+    ]);
+  });
+
+  it.each([
+    ["keepAliveMs", { keepAliveMs: 60_000 }],
+    ["includeTargets", { includeTargets: true }],
+    ["recording", { recording: true }]
+  ] as const)("rejects the unsupported %s option", async (_name, option) => {
+    const { browser, requests } = createFakeBrowser();
+
+    await expect(
+      connectBrowser(browser, { browser: "kitesurf", ...option })
+    ).rejects.toThrow("does not support");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("allows explicitly disabled Chromium-only options", async () => {
+    const { browser, requests } = createFakeBrowser();
+
+    const session = await connectBrowser(browser, {
+      browser: "kitesurf",
+      includeTargets: false,
+      recording: false
+    });
+    session.disconnect();
+
+    expect(requests[0]?.url).toBe(
+      "https://localhost/v1/devtools/browser?browser=kitesurf"
+    );
+  });
+});
+
 describe("BrowserConnector", () => {
   it("is named cdp and validates its options", async () => {
     const { browser } = createFakeBrowser();
@@ -273,6 +318,109 @@ describe("BrowserConnector", () => {
     expect(dynamicDesc.annotations?.sessionInfo).toEqual({
       replay: "reexecute"
     });
+  });
+
+  it("exposes only connection-scoped surfaces for Kitesurf", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { browser: "kitesurf" }
+    });
+
+    const description = await connector.describe();
+    expect(description.descriptors).not.toHaveProperty("getLiveViewUrl");
+    expect(description.descriptors).not.toHaveProperty("spec");
+    expect(description.descriptors).not.toHaveProperty("startSession");
+    expect(description.instructions).toContain("do not pause for approval");
+    expect(description.instructions).toContain(
+      "returns the CDP method result directly"
+    );
+    expect(description.instructions).toContain(
+      "wait 1000ms before Page.captureScreenshot"
+    );
+    expect(description.descriptors.attachToTarget.description).toContain(
+      "for this connection"
+    );
+
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-kitesurf" }
+    );
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-kitesurf" }
+    );
+
+    expect(requests).toEqual([
+      {
+        url: "https://localhost/v1/devtools/browser?browser=kitesurf",
+        method: "GET",
+        upgrade: true
+      }
+    ]);
+    expect(store.sessions.has("cdp:exec:exec-kitesurf")).toBe(true);
+  });
+
+  it("fails explicitly instead of reconnecting Kitesurf after a pause", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store: new MemorySessionStore(),
+      session: { browser: "kitesurf" }
+    });
+
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-kitesurf" }
+    );
+    await connector.onPassEnd("exec-kitesurf", "paused");
+
+    await expect(
+      connector.executeTool(
+        "send",
+        { method: "Browser.getVersion" },
+        { executionId: "exec-kitesurf" }
+      )
+    ).rejects.toThrow("cannot be resumed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it.each([
+    ["reuse mode", { mode: "reuse" as const }],
+    ["dynamic mode", { mode: "dynamic" as const }],
+    ["keep alive", { keepAliveMs: 60_000 }],
+    ["recording", { recording: true }]
+  ])("rejects unsupported Kitesurf %s", (_name, session) => {
+    const { browser } = createFakeBrowser();
+    expect(
+      () =>
+        new BrowserConnector(fakeCtx, {
+          browser,
+          store: new MemorySessionStore(),
+          session: { browser: "kitesurf", ...session }
+        })
+    ).toThrow("Kitesurf");
+  });
+
+  it("allows explicitly disabled Kitesurf session options", () => {
+    const { browser } = createFakeBrowser();
+    expect(
+      () =>
+        new BrowserConnector(fakeCtx, {
+          browser,
+          store: new MemorySessionStore(),
+          session: {
+            browser: "kitesurf",
+            keepAliveMs: 0,
+            recording: false
+          }
+        })
+    ).not.toThrow();
   });
 
   it("requires an execution context for session-bound tools", async () => {

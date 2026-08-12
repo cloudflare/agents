@@ -36,6 +36,11 @@ export interface ConnectBrowserOptions {
    * {@link getBrowserRecording}.
    */
   recording?: boolean;
+  /**
+   * Select the browser engine. Defaults to Chromium. Use `"kitesurf"` for
+   * Cloudflare's connection-scoped, agent-first browser engine.
+   */
+  browser?: "kitesurf";
 }
 
 /** An rrweb session recording for a closed Browser Run session. */
@@ -66,6 +71,7 @@ function browserSessionEndpoint(
     keepAliveMs?: number;
     includeTargets?: boolean;
     recording?: boolean;
+    browser?: "kitesurf";
   }
 ): string {
   const path = sessionId
@@ -81,6 +87,9 @@ function browserSessionEndpoint(
   }
   if (options?.recording) {
     url.searchParams.set("recording", "true");
+  }
+  if (options?.browser) {
+    url.searchParams.set("browser", options.browser);
   }
 
   return url.toString();
@@ -181,11 +190,23 @@ export async function connectBrowser(
 ): Promise<CdpSession> {
   const normalizedOptions =
     typeof options === "number" ? { timeoutMs: options } : (options ?? {});
+  if (
+    normalizedOptions.browser === "kitesurf" &&
+    (normalizedOptions.keepAliveMs ||
+      normalizedOptions.includeTargets ||
+      normalizedOptions.recording)
+  ) {
+    throw new Error(
+      "Kitesurf does not support keepAliveMs, includeTargets, or recording"
+    );
+  }
+
   const response = await browser.fetch(
     browserSessionEndpoint(undefined, {
       keepAliveMs: normalizedOptions.keepAliveMs,
       includeTargets: normalizedOptions.includeTargets,
-      recording: normalizedOptions.recording
+      recording: normalizedOptions.recording,
+      browser: normalizedOptions.browser
     }),
     { headers: { Upgrade: "websocket" } }
   );
@@ -196,6 +217,14 @@ export async function connectBrowser(
       "Browser Rendering binding did not return a WebSocket. " +
         "Ensure the 'browser' binding is configured in wrangler.jsonc."
     );
+  }
+
+  if (normalizedOptions.browser === "kitesurf") {
+    // A Kitesurf browser is scoped to this WebSocket. Browser Run may return
+    // an ID for analytics correlation, but it cannot be used with the
+    // session-scoped reconnect or delete endpoints.
+    ws.accept();
+    return new CdpSession(ws, normalizedOptions.timeoutMs);
   }
 
   const sessionId = response.headers.get("cf-browser-session-id");

@@ -109,13 +109,16 @@ function getScreenshotPreview(outer: unknown): {
   // browser_execute wraps the sandbox return value: { status, result, ... }
   const output =
     isRecord(outer) && isRecord(outer.result) ? outer.result : outer;
-  if (!isRecord(output) || typeof output.data !== "string") {
+  if (
+    !isRecord(output) ||
+    output.type !== "browser_screenshot" ||
+    typeof output.mediaType !== "string" ||
+    typeof output.data !== "string"
+  ) {
     return null;
   }
 
-  const format = output.format;
-  const mimeType =
-    format === "jpeg" || format === "jpg" ? "image/jpeg" : "image/png";
+  const mimeType = output.mediaType;
 
   return {
     src: `data:${mimeType};base64,${output.data}`,

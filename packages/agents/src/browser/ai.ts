@@ -1,4 +1,4 @@
-import { tool, type ToolSet } from "ai";
+import { tool, type JSONValue, type ToolSet } from "ai";
 import { z } from "zod";
 import {
   createCodemodeRuntime,
@@ -107,8 +107,10 @@ export interface CreateBrowserToolsOptions {
    * `browser_execute` tool.
    *
    * Enabled by default whenever a Browser Run `browser` binding is available
-   * (they share it). Pass an object to configure them, or `false` to disable.
-   * The Quick Action binding defaults to `browser`; override it via
+   * (they share it), except when `session.browser` selects Kitesurf because
+   * the binding RPC cannot select that engine. Pass `true` or an object to
+   * explicitly add Chromium Quick Actions alongside Kitesurf, or `false` to
+   * disable them. The Quick Action binding defaults to `browser`; override it via
    * `quickActions.browser`. When only `cdpUrl` is set (no binding), the
    * defaults are skipped silently — pass `quickActions: { browser }` to force
    * them.
@@ -140,6 +142,81 @@ export interface BrowserRuntime {
 
 let didWarnExperimental = false;
 let didDebugQuickActionSkip = false;
+
+interface BrowserScreenshotOutput {
+  type: "browser_screenshot";
+  mediaType: string;
+  data: string;
+}
+
+function browserScreenshotOutput(
+  value: unknown
+): BrowserScreenshotOutput | null {
+  const outer =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : null;
+  const result =
+    outer && typeof outer.result === "object" && outer.result !== null
+      ? (outer.result as Record<string, unknown>)
+      : outer;
+  if (
+    result?.type !== "browser_screenshot" ||
+    typeof result.mediaType !== "string" ||
+    typeof result.data !== "string"
+  ) {
+    return null;
+  }
+  return result as unknown as BrowserScreenshotOutput;
+}
+
+function transformBrowserResult(value: unknown): unknown {
+  // Keep canonical screenshot output intact for UIMessage persistence and the
+  // chat renderer. `toModelOutput` below prevents the base64 from entering the
+  // model context.
+  return browserScreenshotOutput(value) ? value : truncateResult(value);
+}
+
+const BROWSER_EXECUTE_DESCRIPTION = `Execute JavaScript in a sandbox with the \`cdp\` connector to control a browser through the Chrome DevTools Protocol.
+
+\`codemode.search()\` discovers connector methods, not CDP commands. Do not use it to search for \`Page.*\`, \`Runtime.*\`, \`Target.*\`, or screenshot commands. The connector methods are \`cdp.send\`, \`cdp.attachToTarget\`, \`cdp.getDebugLog\`, and \`cdp.clearDebugLog\`.
+
+\`cdp.send\` takes one object and returns the CDP method result directly:
+\`await cdp.send({ method: "Browser.getVersion" })\`
+Do not use positional arguments or invent convenience methods such as \`cdp.goto\`. CDP events are not commands and there is no \`cdp.on\`; poll with \`Runtime.evaluate\` when waiting for page state. Connector calls are already recorded, so do not wrap them in \`codemode.step\`.
+
+For page-scoped commands, create a target and attach to it:
+\`const { targetId } = await cdp.send({ method: "Target.createTarget", params: { url: "about:blank" } });\`
+\`const { sessionId } = await cdp.attachToTarget({ targetId });\`
+Then pass \`sessionId\` to every \`Page.*\`, \`Runtime.*\`, and \`DOM.*\` command.
+
+For navigation and screenshots: call \`Page.enable\`, call \`Page.navigate\`, then poll readiness with:
+\`const evaluation = await cdp.send({ method: "Runtime.evaluate", params: { expression: "document.readyState === 'complete' && Boolean(document.body?.innerText?.trim())", returnByValue: true }, sessionId });\`
+Read the boolean from \`evaluation.result.value\`. Poll at most 40 times, 250ms apart. If the page does not become ready, return a concise error instead of capturing. Once ready, wait another 1000ms for layout and paint, then call \`Page.captureScreenshot\`.
+
+Return screenshots exactly as:
+\`{ type: "browser_screenshot", mediaType: "image/png", data: screenshot.data }\`
+The UI keeps the image while the model receives a compact summary. Complete the browser task in one execution whenever possible.`;
+
+function browserExecuteModelOutput(
+  output: unknown
+): { type: "text"; value: string } | { type: "json"; value: JSONValue } {
+  const screenshot = browserScreenshotOutput(output);
+  if (screenshot) {
+    const approximateBytes = Math.floor((screenshot.data.length * 3) / 4);
+    return {
+      type: "text",
+      value: `Screenshot captured successfully (${screenshot.mediaType}, approximately ${approximateBytes.toLocaleString()} bytes) and attached to the chat.`
+    };
+  }
+
+  const serialized = JSON.stringify(output);
+  return {
+    type: "json",
+    value:
+      serialized === undefined ? null : (JSON.parse(serialized) as JSONValue)
+  };
+}
 
 /**
  * The Durable Object state to build the runtime in: the explicit `ctx` if
@@ -231,20 +308,38 @@ export function createBrowserRuntime(
     }),
     connectors: [connector],
     name: options.name ?? "browser",
-    transformResult: truncateResult
+    transformResult: transformBrowserResult
   });
 
-  const tools: ToolSet = { browser_execute: runtime.tool() };
+  const isKitesurf = options.session?.browser === "kitesurf";
+  const browserExecute = isKitesurf
+    ? runtime.tool({ description: BROWSER_EXECUTE_DESCRIPTION })
+    : runtime.tool({
+        connectorHints: {
+          cdp: "Browser CDP. Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
+        }
+      });
+  const tools: ToolSet = {
+    browser_execute: {
+      ...browserExecute,
+      toModelOutput: ({ output }: { output: unknown }) =>
+        browserExecuteModelOutput(output)
+    }
+  };
 
-  // Quick Actions ride the same `browser` binding, so they are on by default.
+  // Quick Actions ride the same `browser` binding, so they are on by default
+  // for Chromium. The binding RPC cannot select Kitesurf, so selecting
+  // Kitesurf disables the defaults rather than silently adding Chromium tools.
+  // Callers can still request a mixed-engine toolset explicitly.
+  const enableQuickActions =
+    options.quickActions !== false &&
+    (!isKitesurf || options.quickActions !== undefined);
   // `env.BROWSER` satisfies both the CDP `BrowserBinding` (fetch) and the
   // `QuickActionBinding` (quickAction) surfaces; our narrower option type only
   // sees the former, so reuse it here unless an explicit binding wins.
-  if (options.quickActions !== false) {
+  if (enableQuickActions) {
     const qa =
-      options.quickActions == null || options.quickActions === true
-        ? {}
-        : options.quickActions;
+      typeof options.quickActions === "object" ? options.quickActions : {};
     const quickActionBrowser =
       qa.browser ??
       (options.browser as unknown as QuickActionBinding | undefined);

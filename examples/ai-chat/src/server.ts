@@ -72,15 +72,15 @@ export class ChatAgent extends AIChatAgent {
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
-    // `createBrowserTools` returns the durable CDP `browser_execute` tool plus
-    // the stateless Quick Action tools (browser_markdown/extract/links/scrape)
-    // by default, since the BROWSER binding supports both. Prefer the Quick
-    // Actions for simple one-shot reads, and browser_execute for interactive,
-    // multi-step automation.
+    // Kitesurf is scoped to one CDP WebSocket, so this example exposes only
+    // the one-shot browser_execute tool. Browser Run's binding-backed Quick
+    // Action RPC does not currently expose a Kitesurf engine selector.
     const browserTools = createBrowserTools({
       ctx: this.ctx,
       browser: this.env.BROWSER,
-      loader: this.env.LOADER
+      loader: this.env.LOADER,
+      session: { browser: "kitesurf" },
+      quickActions: false
     });
     const workersai = createWorkersAI({ binding: this.env.AI });
 
@@ -91,14 +91,10 @@ export class ChatAgent extends AIChatAgent {
       }),
       instructions:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
-        "run calculations, and browse the web. " +
-        "For simple one-shot reads, prefer the Quick Action tools: browser_markdown (read a " +
-        "page as Markdown), browser_extract (pull structured data with a prompt/schema), " +
-        "browser_links (list links), and browser_scrape (grab elements by CSS selector). " +
-        "For interactive, multi-step automation use browser_execute, which runs TypeScript " +
-        "with a cdp connector: create a target with cdp.send({ method: 'Target.createTarget', ... }), " +
-        "attach with const { sessionId } = await cdp.attachToTarget({ targetId }), and pass " +
-        "that sessionId to Page, Runtime, and DOM commands. " +
+        "run calculations, and browse the web with Kitesurf. " +
+        "Use browser_execute for browsing requests and follow the cdp connector's documented " +
+        "method shapes and Kitesurf lifecycle guidance. Complete each browser task in one " +
+        "execution; do not pause it for approval. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
@@ -110,7 +106,7 @@ export class ChatAgent extends AIChatAgent {
         // MCP tools from connected servers
         ...mcpTools,
 
-        // Browser tools: durable CDP browser_execute + stateless Quick Actions
+        // One-shot Kitesurf CDP browser_execute tool
         ...browserTools,
 
         // Server-side tool: executes automatically
