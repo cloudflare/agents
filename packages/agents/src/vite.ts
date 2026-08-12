@@ -4,7 +4,6 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Plugin } from "vite";
-import { compileSkillScript, isCompilableSkillScript } from "./skills/compile";
 
 const SKILLS_SPECIFIER = "agents:skills";
 const SKILLS_VIRTUAL_PREFIX = "\0agents:skills:";
@@ -61,7 +60,6 @@ interface SkillFile {
     encoding: "text" | "base64";
     mimeType?: string;
     content: string;
-    precompiled?: boolean;
   }>;
 }
 
@@ -263,42 +261,16 @@ async function readSkill(
       const encoding = resourceEncoding(file.path);
       const bytes = await readFile(file.absolutePath);
       const kind = resourceKind(file.path);
-      let content =
+      const content =
         encoding === "base64" ? bytes.toString("base64") : bytes.toString();
-      let precompiled = false;
-
-      // Compile text script resources to self-contained JS at build time so the
-      // runtime never needs an in-Worker bundler to run them.
-      let size = file.size;
-      if (
-        kind === "script" &&
-        encoding === "text" &&
-        isCompilableSkillScript(file.path)
-      ) {
-        try {
-          content = (await compileSkillScript(file.absolutePath)).content;
-          precompiled = true;
-          // The compiled bundle (which may inline sibling files and bundled
-          // dependencies) is what actually ships, so report its size for the
-          // bundle-size warnings rather than the raw source size.
-          size = Buffer.byteLength(content);
-        } catch (error) {
-          warn?.(
-            `Failed to compile skill script "${file.path}": ${
-              error instanceof Error ? error.message : String(error)
-            }. Skill scripts must be self-contained, compilable modules to run at runtime.`
-          );
-        }
-      }
 
       return {
         path: file.path,
         kind,
-        size,
+        size: file.size,
         encoding,
         mimeType: resourceMimeType(file.path),
-        content,
-        precompiled
+        content
       };
     })
   );
@@ -375,13 +347,13 @@ const TURNDOWN_STUB_MESSAGE =
   "bundles compatible with just-bash. If your app uses turndown directly, " +
   "configure the plugin with agents({ stubTurndown: false }).";
 
-// `just-bash` (pulled in by the workspace bash tool / skill runner) statically
-// depends on `turndown`, whose ESM build runs a top-level `require()` on its
-// Node DOM fallback. Workers is ESM with no global `require`, so the module
-// throws at startup — even when the bash tool is never used. turndown is only
-// needed by just-bash's niche `html-to-markdown` command, so we replace it with
-// a diagnostic stub by default to keep Workers deploys clean. Opt out with
-// `agents({ stubTurndown: false })` if you rely on turndown elsewhere.
+// `just-bash` (used by Think's default workspace Bash tool) statically depends
+// on `turndown`, whose ESM build runs a top-level `require()` on its Node DOM
+// fallback. Workers is ESM with no global `require`, so the module throws at
+// startup even when the Bash tool is never used. Turndown is only needed by
+// just-bash's niche `html-to-markdown` command, so we replace it with a
+// diagnostic stub by default to keep Workers deploys clean. Opt out with
+// `agents({ stubTurndown: false })` if you rely on Turndown elsewhere.
 function turndownStubPlugin(): Plugin {
   return {
     name: "agents-turndown-stub",
@@ -440,11 +412,11 @@ function skillsImportPlugin(): Plugin {
 
 export interface AgentsPluginOptions {
   /**
-   * Replace `turndown` with a diagnostic stub so `just-bash` (workspace bash
-   * tool / skill runner) doesn't drag turndown's `require()`-using DOM fallback
-   * into the Worker's module-init path and break deploys. Enabled by default.
-   * Set to `false` if your app uses turndown directly and needs the real
-   * implementation.
+   * Replace `turndown` with a diagnostic stub so `just-bash` (used by Think's
+   * default workspace Bash tool) does not drag Turndown's `require()`-using DOM
+   * fallback into the Worker's module-init path and break deploys. Enabled by
+   * default. Set to `false` if your app uses Turndown directly and needs the
+   * real implementation.
    */
   stubTurndown?: boolean;
 }

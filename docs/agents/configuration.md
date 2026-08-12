@@ -230,9 +230,9 @@ The `agents()` plugin is safe to include even if your project does not use decor
 
 By default, the `agents()` Vite plugin also replaces imports of the `turndown`
 package with a Worker-safe stub. This prevents `just-bash`, used by Think's
-workspace `bash` tool and skill scripts, from pulling `turndown`'s Node DOM
-fallback into the Worker bundle. That fallback expects Node's global `require()`,
-which is not available in Workers.
+workspace `bash` tool, from pulling `turndown`'s Node DOM fallback into the
+Worker bundle. That fallback expects Node's global `require()`, which is not
+available in Workers.
 
 If your app imports `turndown` directly for HTML-to-Markdown conversion, disable
 the stub so your import resolves to the real package:

@@ -6,11 +6,9 @@ import type {
   SkillRegistrySnapshot,
   SkillResource,
   SkillResourceDescriptor,
-  SkillScriptRunner,
   SkillSource
 } from "./types";
 import { validateSkillResourcePath } from "./types";
-import { validateSkillScriptPath } from "./runner";
 
 const SKILL_CONTEXT_LABEL = "think_skills";
 
@@ -75,17 +73,12 @@ export class SkillRegistry {
   readonly warnings: string[] = [];
 
   private sources: SkillSource[];
-  private scriptRunner: SkillScriptRunner | null;
   private descriptors = new Map<string, SkillDescriptor>();
   private sourceBySkill = new Map<string, SkillSource>();
   private loaded = false;
 
-  constructor(
-    sources: SkillSource[],
-    scriptRunner: SkillScriptRunner | null = null
-  ) {
+  constructor(sources: SkillSource[]) {
     this.sources = sources;
-    this.scriptRunner = scriptRunner;
   }
 
   get fingerprint(): string {
@@ -231,17 +224,6 @@ export class SkillRegistry {
     return resource ?? `Resource not found: ${name}/${path}`;
   }
 
-  private async readSkillResources(
-    skill: SkillContent
-  ): Promise<SkillResource[]> {
-    const resources: SkillResource[] = [];
-    for (const descriptor of skill.resources ?? []) {
-      const resource = await this.readResource(skill.name, descriptor.path);
-      if (typeof resource !== "string") resources.push(resource);
-    }
-    return resources;
-  }
-
   tools(): ToolSet {
     const modelSkillNames = [...this.descriptors.values()].map(
       (skill) => skill.name
@@ -295,64 +277,6 @@ export class SkillRegistry {
             resource.content,
             "</skill_resource>"
           ].join("\n");
-        }
-      });
-    }
-
-    if (modelSkillNames.length > 0 && this.scriptRunner) {
-      tools.run_skill_script = tool({
-        description:
-          "Run a bundled script resource from an available skill. Use only when a skill instructs you to run a script.",
-        inputSchema: z.object({
-          name: z.enum(modelSkillNames as [string, ...string[]]),
-          path: z.string().min(1),
-          input: z.unknown().default({})
-        }),
-        execute: async ({
-          name,
-          path,
-          input = {}
-        }: {
-          name: string;
-          path: string;
-          input: unknown;
-        }) => {
-          const validation = validateSkillScriptPath(path);
-          if (!validation.ok) return validation.error;
-
-          const skill = await this.loadSkill(name);
-          if (!skill) return `Skill not found: ${name}`;
-
-          const script = skill.resources?.find(
-            (resource) => resource.path === path
-          );
-          if (!script) return `Script not found: ${name}/${path}`;
-          if (script.kind !== "script") {
-            return `Resource is not a script: ${name}/${path}`;
-          }
-
-          const source = this.sourceBySkill.get(name);
-          if (!source?.readResource) {
-            return `Skill "${name}" has no readable resources.`;
-          }
-
-          const resource = await source.readResource(name, path);
-          if (!resource) return `Script not found: ${name}/${path}`;
-          if ((resource.encoding ?? "text") !== "text") {
-            return `Script resource must be text, got ${resource.encoding}: ${name}/${path}`;
-          }
-
-          try {
-            return await this.scriptRunner!.run({
-              skill,
-              path,
-              source: resource.content,
-              input,
-              resources: await this.readSkillResources(skill)
-            });
-          } catch (error) {
-            return `Skill script failed: ${error instanceof Error ? error.message : String(error)}`;
-          }
         }
       });
     }
