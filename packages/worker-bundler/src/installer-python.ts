@@ -1,9 +1,9 @@
-import {
-  isTextFile,
-  fetchWithTimeout,
-  DEFAULT_TIMEOUT_MS
-} from "./installer.ts";
-import type { InstallResult } from "./installer.ts";
+/*
+ * Package resolution logic for Python dynamic workers
+ */
+
+import { isTextFile, fetchWithTimeout, DEFAULT_TIMEOUT_MS } from "./common.ts";
+import type { InstallResult } from "./common.ts";
 import type { FileSystem, FileEntry } from "./file-system";
 import { unzipSync } from "fflate";
 import { parse as parseToml } from "smol-toml";

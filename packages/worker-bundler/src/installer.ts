@@ -3,8 +3,12 @@
  *
  * This module fetches packages from the npm registry and populates
  * a virtual node_modules directory structure.
+ * It also branches into the Python logic in installer-python.ts
+ * if dependencies are declared for a Python dynamic worker.
  */
 
+import { isTextFile, fetchWithTimeout, DEFAULT_TIMEOUT_MS } from "./common.ts";
+import type { InstallResult } from "./common.ts";
 import { installDependenciesPython } from "./installer-python";
 import type { PyprojectToml } from "./installer-python";
 import * as semver from "semver";
@@ -12,33 +16,6 @@ import type { FileSystem } from "./file-system";
 import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
-export const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
-
-/**
- * Fetch with a timeout.
- * Throws an error if the request takes longer than the specified timeout.
- */
-export async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeoutMs = DEFAULT_TIMEOUT_MS
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(
-        `Request to ${url} timed out after ${timeoutMs}ms (npm registry slow or unreachable from this Worker)`
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
 
 interface PackageJson {
   name: string;
@@ -71,19 +48,6 @@ interface InstallOptions {
    * Registry URL (default: https://registry.npmjs.org)
    */
   registry?: string;
-}
-
-export interface InstallResult {
-  /**
-   * Packages that were freshly installed in this call.
-   * Packages already present in the filesystem are skipped and not listed here.
-   */
-  installed: string[];
-
-  /**
-   * Warnings encountered during installation
-   */
-  warnings: string[];
 }
 
 /**
@@ -547,58 +511,6 @@ function readString(
   const nullIndex = bytes.indexOf(0);
   const relevantBytes = nullIndex >= 0 ? bytes.slice(0, nullIndex) : bytes;
   return new TextDecoder().decode(relevantBytes);
-}
-
-/**
- * Check if a file path is likely a text file.
- */
-export function isTextFile(path: string): boolean {
-  const textExtensions = [
-    ".js",
-    ".mjs",
-    ".cjs",
-    ".ts",
-    ".mts",
-    ".cts",
-    ".tsx",
-    ".jsx",
-    ".json",
-    ".md",
-    ".txt",
-    ".css",
-    ".html",
-    ".yml",
-    ".yaml",
-    ".toml",
-    ".xml",
-    ".svg",
-    ".map",
-    ".d.ts",
-    ".d.mts",
-    ".d.cts",
-    ".py"
-  ];
-
-  // Check common config files without extensions
-  const configFiles = [
-    "LICENSE",
-    "README",
-    "CHANGELOG",
-    "package.json",
-    "tsconfig.json",
-    ".npmignore",
-    ".gitignore"
-  ];
-
-  const fileName = path.split("/").pop() ?? "";
-
-  if (
-    configFiles.some((f) => fileName.toUpperCase().startsWith(f.toUpperCase()))
-  ) {
-    return true;
-  }
-
-  return textExtensions.some((ext) => path.toLowerCase().endsWith(ext));
 }
 
 /**
