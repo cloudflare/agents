@@ -218,18 +218,19 @@ first use and its capability shape may change.
 ```ts
 skills.runner({
   loader: this.env.LOADER,
-  workspaceInstance: this.workspace,
+  list: () => this.workspace.glob("**/*"),
+  read: (path) => this.workspace.readFile(path),
   tools: {
     search_docs: this.getTools().search_docs
   }
 });
 ```
 
-The default is useful but not ambiently powerful: no network and no tools, with
-read-only workspace access when `workspaceInstance` is provided, and a 30 second
-script timeout. Tool access is explicit; Think does not expose the full turn
-toolset to a script by default. Workspace access is `"none"`, `"read"`, or
-`"read-write"`, with `workspace: "read-write"` required for mutating operations.
+The default is useful but not ambiently powerful: no network, no tools, and no
+external file access unless `list` and/or `read` are provided. Scripts cannot
+write through this file access surface. Tool access is explicit; Think does not
+expose the full turn toolset to a script by default. The default timeout is 30
+seconds.
 
 A single host bridge (`SkillScriptHostBridge`) is the one source of truth for
 capabilities and permission enforcement; it is constructed fresh per `run()` so
@@ -245,14 +246,14 @@ export default async function run(input, ctx) {
 }
 ```
 
-`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
-text resources by relative path (replacing the earlier `node:fs` shim, which was
-removed); `ctx.workspace` exposes async `readFile`/`listFiles`/`glob`/`stat`/
-`writeFile` gated by the workspace permission; `ctx.tools` exposes
+`ctx` is `{ skill, files, read, list, tools, output }`. `ctx.files` holds
+bundled text resources by relative path (replacing the earlier `node:fs` shim,
+which was removed); `ctx.read(path)` and `ctx.list()` expose read-only host file
+access when those top-level runner options are provided; `ctx.tools` exposes
 `tools.call(name, input)` and `tools.<name>(input)` for explicitly granted
 tools; and `ctx.output.writeFile(name, content)` records scratch artifacts
-returned by `run_skill_script` without mutating the workspace. TypeScript and
-multi-file scripts are compiled/bundled with `@cloudflare/worker-bundler`.
+returned by `run_skill_script`. TypeScript and multi-file scripts are
+compiled/bundled with `@cloudflare/worker-bundler`.
 
 Python (`.py`) and Bash (`.sh`/`.bash`) keep the path-based contract, matching
 CLI-oriented Agent Skills. The runner mounts:
@@ -264,12 +265,11 @@ CLI-oriented Agent Skills. The runner mounts:
 
 Python runs as a Python Dynamic Worker with `python_workers`, supporting both
 `def run(input, ctx)` and CLI-style scripts; it exposes `tools.<name>(input)`,
-`tools.call(name, input)`, and `workspace.read_file()` / `list_files()` /
-`glob()` / `write_file()` per the workspace permission. Bash runs through
-`just-bash` and exposes `workspace-read` / `workspace-list` / `workspace-glob`
-(plus `workspace-write` with read-write access) and a `tool <name> <json>`
-command. Python Workers have slower cold starts than JavaScript, so JavaScript
-remains the preferred runtime for one-off generated code.
+`tools.call(name, input)`, `read(path)`, and `list()` when those capabilities
+are provided. Bash runs through `just-bash` and exposes `skill-read`,
+`skill-list`, and a `tool <name> <json>` command. Python Workers have slower
+cold starts than JavaScript, so JavaScript remains the preferred runtime for
+one-off generated code.
 
 ## MVP
 

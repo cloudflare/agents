@@ -22,7 +22,8 @@ export class SkillsAgent extends Think<Env> {
   getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      list: () => this.workspace.glob("**/*"),
+      read: (path) => this.workspace.readFile(path)
     });
   }
 

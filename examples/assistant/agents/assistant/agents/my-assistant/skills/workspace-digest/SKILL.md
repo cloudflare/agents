@@ -17,7 +17,7 @@ workspace (the same workspace every chat under this user shares).
 3. Offer to open or read any specific file the user is interested in.
 
 The TypeScript script is function-style (`export default run(input, ctx)`). It
-reads the workspace through `ctx.workspace` (read-only) and a formatting hint
+reads the host-provided file list through `ctx.list()` and a formatting hint
 bundled alongside the skill via `ctx.files`.
 
 ## Output format

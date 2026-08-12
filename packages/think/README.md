@@ -222,7 +222,8 @@ export class MyAgent extends Think<Env> {
   getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      list: () => this.workspace.glob("**/*"),
+      read: (path) => this.workspace.readFile(path)
     });
   }
 }
@@ -298,17 +299,17 @@ export default async function run(input: unknown, ctx: SkillRunContext) {
 }
 ```
 
-`ctx` is `{ skill, files, workspace, tools, output }`: `ctx.files` holds bundled
-text resources by relative path, `ctx.workspace` is gated by the workspace
-permission, `ctx.tools` exposes only the tools the runner was given, and
-`ctx.output.writeFile(name, content)` returns scratch artifacts without mutating
-the workspace. Python and Bash scripts instead use the path-based contract:
+`ctx` is `{ skill, files, read, list, tools, output }`: `ctx.files` holds
+bundled text resources by relative path, `ctx.read(path)` and `ctx.list()` are
+gated by top-level runner options, `ctx.tools` exposes only the tools the runner
+was given, and `ctx.output.writeFile(name, content)` returns scratch artifacts.
+Python and Bash scripts instead use the path-based contract:
 `/input.json`, `/context.json`, bundled resources under `/skill`, and `/output`
 for artifacts (Python supports both `def run(input, ctx)` and CLI-style scripts).
 
-If `workspaceInstance` is provided, scripts get read-only workspace access by
-default. Workspace writes, tools, and network access are opt-in. Scripts default
-to a 30 second timeout, which can be overridden with `timeout`. TypeScript
+If `list` and/or `read` are provided, scripts get read-only file access.
+Tools and network access are opt-in. Scripts default to a 30 second timeout,
+which can be overridden with `timeout`. TypeScript
 scripts are compiled with `@cloudflare/worker-bundler`; Python scripts run as
 Python Dynamic Workers; Bash scripts run through `just-bash`.
 

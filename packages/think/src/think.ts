@@ -293,7 +293,6 @@ import {
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute-output";
-import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
   DeliveryKind,
@@ -2625,7 +2624,7 @@ export type ChunkPart<TOOLS extends ToolSet = ToolSet> =
  */
 export interface ExtensionConfig {
   /** Extension manifest (name, version, permissions, contributions). */
-  manifest: import("./extensions/types").ExtensionManifest;
+  manifest: import("./extensions").ExtensionManifest;
   /** JavaScript source code defining the extension's tools. */
   source: string;
 }
@@ -2882,7 +2881,7 @@ export class Think<
    * Extension manager — created automatically when `extensionLoader` is set.
    * Use for dynamic `load()` / `unload()` at runtime.
    */
-  extensionManager?: import("./extensions/manager").ExtensionManager;
+  extensionManager?: import("./extensions").ExtensionManager;
 
   /**
    * Workspace filesystem available in `getTools()` and lifecycle hooks.
@@ -5257,13 +5256,15 @@ export class Think<
     const hasBridge =
       ctxExports && typeof ctxExports.HostBridgeLoopback === "function";
 
+    const { ExtensionManager, sanitizeName } = await import("./extensions");
+
     this.extensionManager = new ExtensionManager({
       loader: this.extensionLoader!,
       storage: this.ctx.storage,
       ...(hasBridge
         ? {
             createHostBinding: (
-              permissions: import("./extensions/types").ExtensionPermissions,
+              permissions: import("./extensions").ExtensionPermissions,
               ownContextLabels: string[]
             ) =>
               (
@@ -6648,8 +6649,9 @@ export class Think<
     const subscribers = this.extensionManager.getHookSubscribers("beforeTurn");
     if (subscribers.length === 0) return subclassConfig;
 
-    const { createTurnContextSnapshot, parseHookResult } =
-      await import("./extensions/hook-proxy");
+    const { createTurnContextSnapshot, parseHookResult } = await import(
+      "./extensions"
+    );
 
     let snapshot = createTurnContextSnapshot(ctx);
     let accumulated = { ...subclassConfig };
@@ -7027,8 +7029,7 @@ export class Think<
     if (!this.extensionManager) return;
     if (this.extensionManager.getHookSubscribers("beforeToolCall").length === 0)
       return;
-    const { createToolCallStartSnapshot } =
-      await import("./extensions/hook-proxy");
+    const { createToolCallStartSnapshot } = await import("./extensions");
     await this._dispatchExtensionObservation(
       "beforeToolCall",
       createToolCallStartSnapshot(event)
@@ -7046,8 +7047,7 @@ export class Think<
     if (!this.extensionManager) return;
     if (this.extensionManager.getHookSubscribers("afterToolCall").length === 0)
       return;
-    const { createToolCallFinishSnapshot } =
-      await import("./extensions/hook-proxy");
+    const { createToolCallFinishSnapshot } = await import("./extensions");
     await this._dispatchExtensionObservation(
       "afterToolCall",
       createToolCallFinishSnapshot(event)
@@ -7060,8 +7060,7 @@ export class Think<
     if (!this.extensionManager) return;
     if (this.extensionManager.getHookSubscribers("onStepFinish").length === 0)
       return;
-    const { createStepFinishSnapshot } =
-      await import("./extensions/hook-proxy");
+    const { createStepFinishSnapshot } = await import("./extensions");
     await this._dispatchExtensionObservation(
       "onStepFinish",
       createStepFinishSnapshot(event)
@@ -7072,7 +7071,7 @@ export class Think<
     if (!this.extensionManager) return;
     if (this.extensionManager.getHookSubscribers("onChunk").length === 0)
       return;
-    const { createChunkSnapshot } = await import("./extensions/hook-proxy");
+    const { createChunkSnapshot } = await import("./extensions");
     await this._dispatchExtensionObservation(
       "onChunk",
       createChunkSnapshot(event as { chunk: { type: string } })

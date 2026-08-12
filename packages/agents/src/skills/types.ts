@@ -43,7 +43,7 @@ export interface SkillScriptContext {
  * The `ctx` object passed as the second argument to function-style JS/TS
  * skill scripts (`export default async function run(input, ctx)`).
  *
- * Capabilities are gated by the runner: `workspace` throws unless workspace
+ * Capabilities are gated by the runner: `read` / `list` throw unless file
  * access is enabled, and `tools` only resolves tools the runner was given.
  */
 export interface SkillRunContext {
@@ -51,14 +51,10 @@ export interface SkillRunContext {
   skill: SkillDescriptor;
   /** Text bundled resources by relative path (e.g. `references/style-guide.md`). */
   files: Record<string, string>;
-  /** Workspace access, gated by the runner's `workspace` permission. */
-  workspace: {
-    readFile(path: string): Promise<string | null>;
-    listFiles(path?: string): Promise<unknown>;
-    glob(pattern: string): Promise<unknown>;
-    stat(path: string): Promise<{ type: string; size: number } | null>;
-    writeFile(path: string, content: string): Promise<void>;
-  };
+  /** Read a host-provided file, gated by the runner's `files` option. */
+  read(path: string): Promise<string | null>;
+  /** List host-provided files, gated by the runner's `files` option. */
+  list(): Promise<unknown>;
   /** Explicitly granted tools: `tools.call(name, input)` or `tools.<name>(input)`. */
   tools: {
     call(name: string, input?: unknown): Promise<unknown>;

@@ -467,7 +467,8 @@ export class MyAgent extends Think<Env> {
   getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      list: () => this.workspace.glob("**/*"),
+      read: (path) => this.workspace.readFile(path)
     });
   }
 }
@@ -531,24 +532,23 @@ import type { SkillRunContext } from "@cloudflare/think";
 
 export default async function run(input: unknown, ctx: SkillRunContext) {
   const guide = ctx.files["references/style-guide.md"]; // bundled text resources
-  const docs = await ctx.workspace.readFile("README.md"); // gated by permission
+  const docs = await ctx.read("README.md"); // gated by runner option
   const summary = await ctx.tools.call("summarize", { input }); // explicit tools
   await ctx.output.writeFile("notes.md", summary); // scratch artifact
   return { ok: true };
 }
 ```
 
-`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
-text resources by relative path, `ctx.workspace` is gated by the workspace
-permission, `ctx.tools` only exposes tools the runner was given, and
-`ctx.output.writeFile(name, content)` returns scratch artifacts to the model
-(it does not mutate the workspace). Python and Bash use the path-based contract
-instead: `/input.json`, `/context.json`, bundled resources under `/skill`, and
-`/output` for artifacts.
+`ctx` is `{ skill, files, read, list, tools, output }`. `ctx.files` holds bundled
+text resources by relative path, `ctx.read(path)` and `ctx.list()` are gated by
+the top-level runner options, `ctx.tools` only exposes tools the runner was
+given, and `ctx.output.writeFile(name, content)` returns scratch artifacts to
+the model. Python and Bash use the path-based contract instead: `/input.json`,
+`/context.json`, bundled resources under `/skill`, and `/output` for
+artifacts.
 
-Passing `workspaceInstance` gives scripts read-only workspace access by default.
-Network access, tools, and workspace writes are opt-in. The default timeout is
-30 seconds.
+Passing `list` and/or `read` gives scripts read-only file access. Network
+access and tools are opt-in. The default timeout is 30 seconds.
 
 ### Chat Recovery
 

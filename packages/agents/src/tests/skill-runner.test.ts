@@ -3,36 +3,22 @@ import { env } from "cloudflare:workers";
 import { tool } from "ai";
 import { z } from "zod";
 import * as skills from "../skills";
-import type { SkillWorkspace } from "../skills";
+import type { SkillFileAccess } from "../skills";
 
-function testWorkspace(files: Record<string, string>): SkillWorkspace {
+function testFiles(files: Record<string, string>): SkillFileAccess {
   const info = (path: string) => ({
     name: path,
     path,
     size: files[path].length,
-    type: "file" as const,
-    mimeType: "text/plain",
-    createdAt: 0,
-    updatedAt: 0
+    type: "file" as const
   });
 
   return {
-    async readFile(path: string) {
+    async list() {
+      return Object.keys(files).map(info);
+    },
+    async read(path: string) {
       return files[path] ?? null;
-    },
-    async writeFile(path: string, content: string) {
-      files[path] = content;
-    },
-    async readDir() {
-      return Object.keys(files).map(info);
-    },
-    async glob() {
-      return Object.keys(files).map(info);
-    },
-    async stat(path: string) {
-      const content = files[path];
-      if (content === undefined) return null;
-      return info(path);
     }
   };
 }
@@ -298,10 +284,8 @@ export {
   });
 
   it("returns output artifacts written through ctx.output", async () => {
-    const workspace = testWorkspace({});
     const runner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: workspace
+      loader: env.LOADER
     });
 
     await expect(
@@ -328,8 +312,6 @@ export {
         }
       ]
     });
-    // Output artifacts are scratch, not durable workspace writes.
-    await expect(workspace.readFile("notes.md")).resolves.toBeNull();
   });
 
   it("rejects oversized output artifacts", async () => {
@@ -353,10 +335,10 @@ export {
     ).rejects.toThrow("exceeds");
   });
 
-  it("reads workspace files through ctx.workspace by default", async () => {
+  it("reads provided files through ctx.read", async () => {
     const runner = skills.runner({
       loader: env.LOADER,
-      workspaceInstance: testWorkspace({
+      ...testFiles({
         "README.md": "hello from workspace"
       })
     });
@@ -364,91 +346,20 @@ export {
     await expect(
       runner.run({
         skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
+          name: "skill-reader",
+          description: "Read provided files.",
           body: "Use JS."
         },
         path: "scripts/read.js",
         input: {},
         source: `export default async function run(input, ctx) {
-  return await ctx.workspace.readFile("README.md");
+  return await ctx.read("README.md");
 }`
       })
     ).resolves.toBe("hello from workspace");
   });
 
-  it("normalizes ctx.workspace.stat to { type, size }", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: testWorkspace({
-        "README.md": "hello from workspace"
-      })
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
-          body: "Use JS."
-        },
-        path: "scripts/stat.js",
-        input: {},
-        source: `export default async function run(input, ctx) {
-  return await ctx.workspace.stat("README.md");
-}`
-      })
-    ).resolves.toEqual({ type: "file", size: 20 });
-  });
-
-  it("requires read-write access for ctx.workspace writes", async () => {
-    const readOnlyWorkspace = testWorkspace({});
-    const readOnlyRunner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: readOnlyWorkspace
-    });
-
-    await expect(
-      readOnlyRunner.run({
-        skill: {
-          name: "workspace-writer",
-          description: "Write workspace files.",
-          body: "Use JS."
-        },
-        path: "scripts/write.js",
-        input: {},
-        source: `export default async function run(input, ctx) {
-  await ctx.workspace.writeFile("generated.md", "nope");
-}`
-      })
-    ).rejects.toThrow("Workspace write access is not available");
-
-    const writeWorkspace = testWorkspace({});
-    const writeRunner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: writeWorkspace,
-      workspace: "read-write"
-    });
-
-    await expect(
-      writeRunner.run({
-        skill: {
-          name: "workspace-writer",
-          description: "Write workspace files.",
-          body: "Use JS."
-        },
-        path: "scripts/write.js",
-        input: {},
-        source: `export default async function run(input, ctx) {
-  await ctx.workspace.writeFile("generated.md", "ok");
-  return "done";
-}`
-      })
-    ).resolves.toBe("done");
-    await expect(writeWorkspace.readFile("generated.md")).resolves.toBe("ok");
-  });
-
-  it("denies ctx.workspace access when no workspace is provided", async () => {
+  it("denies file read access when read is not provided", async () => {
     const runner = skills.runner({
       loader: env.LOADER
     });
@@ -456,17 +367,17 @@ export {
     await expect(
       runner.run({
         skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
+          name: "skill-reader",
+          description: "Read provided files.",
           body: "Use JS."
         },
         path: "scripts/read.js",
         input: {},
         source: `export default async function run(input, ctx) {
-  return await ctx.workspace.readFile("README.md");
+  return await ctx.read("README.md");
 }`
       })
-    ).rejects.toThrow("Workspace access is not available");
+    ).rejects.toThrow("File read access is not available");
   });
 
   it("runs bash skill scripts with input files and explicit tools", async () => {
@@ -806,10 +717,10 @@ print("done")`
     });
   });
 
-  it("allows python scripts to read from a provided workspace by default", async () => {
+  it("allows python scripts to read from provided files", async () => {
     const runner = skills.runner({
       loader: env.LOADER,
-      workspaceInstance: testWorkspace({
+      ...testFiles({
         "README.md": "hello from workspace"
       })
     });
@@ -817,41 +728,16 @@ print("done")`
     await expect(
       runner.run({
         skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
+          name: "skill-reader",
+          description: "Read provided files.",
           body: "Use python."
         },
         path: "scripts/read.py",
         input: {},
         source: `async def run(input, ctx):
-    return await workspace.read_file("README.md")`
+    return await read("README.md")`
       })
     ).resolves.toBe("hello from workspace");
-  });
-
-  it("does not expose python workspace writes for read-only workspace access", async () => {
-    const workspace = testWorkspace({});
-    const runner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: workspace
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "workspace-writer",
-          description: "Write workspace files.",
-          body: "Use python."
-        },
-        path: "scripts/write.py",
-        input: {},
-        source: `async def run(input, ctx):
-    await workspace.write_file("generated.txt", "nope")
-    return "ok"`
-      })
-    ).rejects.toThrow("Workspace write access is not available");
-
-    await expect(workspace.readFile("generated.txt")).resolves.toBeNull();
   });
 
   it("surfaces python script failures", async () => {
@@ -895,10 +781,10 @@ print("done")`
     ).rejects.toThrow("Python script execution timed out");
   });
 
-  it("allows bash scripts to read from a provided workspace by default", async () => {
+  it("allows bash scripts to read from provided files", async () => {
     const runner = skills.runner({
       loader: env.LOADER,
-      workspaceInstance: testWorkspace({
+      ...testFiles({
         "README.md": "hello from workspace"
       })
     });
@@ -906,43 +792,18 @@ print("done")`
     await expect(
       runner.run({
         skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
+          name: "skill-reader",
+          description: "Read provided files.",
           body: "Use bash."
         },
         path: "scripts/read.sh",
         input: {},
-        source: "workspace-read README.md"
+        source: "skill-read README.md"
       })
     ).resolves.toEqual({
       stdout: "hello from workspace",
       stderr: "",
       exitCode: 0
     });
-  });
-
-  it("does not expose bash workspace writes for read-only workspace access", async () => {
-    const workspace = testWorkspace({});
-    const runner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: workspace
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "workspace-writer",
-          description: "Write workspace files.",
-          body: "Use bash."
-        },
-        path: "scripts/write.sh",
-        input: {},
-        source: "echo nope | workspace-write generated.txt"
-      })
-    ).resolves.toMatchObject({
-      exitCode: 127
-    });
-
-    await expect(workspace.readFile("generated.txt")).resolves.toBeNull();
   });
 });

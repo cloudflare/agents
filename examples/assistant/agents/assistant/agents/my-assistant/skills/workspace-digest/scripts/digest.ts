@@ -1,11 +1,11 @@
 import type { SkillRunContext } from "@cloudflare/think";
 
-type WorkspaceEntry = { path: string; type: string; size: number };
+type FileEntry = { path: string; type?: string; size?: number };
 
 /**
  * Function-style skill script (`export default run(input, ctx)`). Reads the
- * assistant's shared workspace through `ctx.workspace` (read-only) and a
- * bundled formatting hint through `ctx.files`, then returns a compact digest.
+ * host-provided file list through `ctx.list()` and a bundled formatting hint
+ * through `ctx.files`, then returns a compact digest.
  */
 export default async function run(input: unknown, ctx: SkillRunContext) {
   const dir =
@@ -15,10 +15,13 @@ export default async function run(input: unknown, ctx: SkillRunContext) {
       ? (input as { dir: string }).dir
       : "/";
 
-  const pattern = dir === "/" ? "**/*" : `${dir.replace(/\/$/, "")}/**/*`;
-  const entries = ((await ctx.workspace.glob(pattern).catch(() => [])) ??
-    []) as WorkspaceEntry[];
-  const files = entries.filter((entry) => entry.type === "file");
+  const prefix = dir === "/" ? "" : `${dir.replace(/\/$/, "")}/`;
+  const entries = ((await ctx.list().catch(() => [])) ?? []) as FileEntry[];
+  const files = entries.filter(
+    (entry) =>
+      (entry.type === undefined || entry.type === "file") &&
+      (prefix === "" || entry.path.startsWith(prefix))
+  );
 
   const totalBytes = files.reduce((sum, file) => sum + (file.size ?? 0), 0);
   const listing = [...files]

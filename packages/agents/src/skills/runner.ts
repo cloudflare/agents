@@ -10,17 +10,10 @@ import type {
 } from "./types";
 import { validateSkillResourcePath } from "./types";
 
-/**
- * Minimal workspace surface the skill runner needs. A concrete `Workspace`
- * from `@cloudflare/shell` (or Think's `WorkspaceLike`) satisfies this
- * structurally, so the runner does not depend on a filesystem package.
- */
-export interface SkillWorkspace {
-  readFile(path: string): Promise<string | null>;
-  writeFile(path: string, content: string): Promise<void>;
-  readDir(path: string): Promise<unknown>;
-  glob(pattern: string): Promise<unknown>;
-  stat(path: string): Promise<{ type: string; size?: number } | null>;
+/** Read-only file access exposed to skill scripts. */
+export interface SkillFileAccess {
+  list(): Promise<unknown>;
+  read(path: string): Promise<string | null>;
 }
 
 /**
@@ -33,13 +26,12 @@ export interface WorkerSkillScriptRunnerOptions {
   loader: WorkerLoader;
   timeout?: number;
   network?: boolean;
-  workspace?: "none" | "read" | "read-write";
-  workspaceInstance?: SkillWorkspace;
+  list?: SkillFileAccess["list"];
+  read?: SkillFileAccess["read"];
   tools?: ToolSet | (() => ToolSet | Promise<ToolSet>);
 }
 
 type SkillScriptRuntime = "javascript" | "typescript" | "python" | "bash";
-type WorkspaceAccess = "none" | "read" | "read-write";
 
 const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_ARTIFACT_BYTES = 64_000;
@@ -66,13 +58,6 @@ function extensionOf(path: string): string {
 
 function effectiveTimeout(options: WorkerSkillScriptRunnerOptions): number {
   return options.timeout ?? DEFAULT_SCRIPT_TIMEOUT_MS;
-}
-
-function effectiveWorkspaceAccess(
-  options: WorkerSkillScriptRunnerOptions
-): WorkspaceAccess {
-  if (options.workspace) return options.workspace;
-  return options.workspaceInstance ? "read" : "none";
 }
 
 export function validateSkillScriptPath(path: string):
@@ -259,13 +244,8 @@ function scriptModule(source: string, request: SkillScriptRequest): string {
     `  const input = ${JSON.stringify(request.input)};`,
     `  const __skill = ${JSON.stringify(skillMeta)};`,
     `  const __files = ${JSON.stringify(textFilesMap(request))};`,
-    "  const workspace = {",
-    "    readFile: (path) => __host.readFile(path),",
-    '    listFiles: (path = ".") => __host.listFiles(path),',
-    "    glob: (pattern) => __host.glob(pattern),",
-    "    stat: (path) => __host.stat(path),",
-    "    writeFile: (path, content) => __host.writeFile({ path, content })",
-    "  };",
+    "  const read = (path) => __host.read(path);",
+    "  const list = () => __host.list();",
     "  const tools = new Proxy(",
     "    { call: (name, input) => __host.callTool({ name, input }) },",
     "    {",
@@ -278,7 +258,7 @@ function scriptModule(source: string, request: SkillScriptRequest): string {
     "  const output = {",
     "    writeFile: (name, content) => __host.writeOutput({ name, content })",
     "  };",
-    "  const ctx = { skill: __skill, files: __files, workspace, tools, output };",
+    "  const ctx = { skill: __skill, files: __files, read, list, tools, output };",
     "",
     runnableSource,
     "",
@@ -415,24 +395,23 @@ interface OutputArtifact {
  */
 class SkillScriptHostBridge extends RpcTarget {
   readonly #tools: ToolSet | undefined;
-  readonly #workspace: SkillWorkspace | undefined;
-  readonly #workspaceAccess: WorkspaceAccess;
+  readonly #list: SkillFileAccess["list"] | undefined;
+  readonly #read: SkillFileAccess["read"] | undefined;
   readonly #outputs = new Map<string, OutputArtifact>();
 
   constructor(
     tools: ToolSet | undefined,
-    workspace: SkillWorkspace | undefined,
-    workspaceAccess: WorkspaceAccess
+    options: Pick<WorkerSkillScriptRunnerOptions, "list" | "read">
   ) {
     super();
     this.#tools = tools;
-    this.#workspace = workspace;
-    this.#workspaceAccess = workspaceAccess;
+    this.#list = options.list;
+    this.#read = options.read;
   }
 
   // ── Introspection (host-side only) ──
-  get workspaceAccess(): WorkspaceAccess {
-    return this.#workspaceAccess;
+  hasFiles(): boolean {
+    return Boolean(this.#list || this.#read);
   }
 
   hasTools(): boolean {
@@ -444,26 +423,14 @@ class SkillScriptHostBridge extends RpcTarget {
     return executeToolFromSet(this.#tools, name, input);
   }
 
-  async readFile(path: string): Promise<string | null> {
-    return this.#requireWorkspace("read").readFile(path);
+  async read(path: string): Promise<string | null> {
+    if (!this.#read) throw new Error("File read access is not available.");
+    return this.#read(path);
   }
 
-  async listFiles(path = "."): Promise<unknown> {
-    return this.#requireWorkspace("read").readDir(path);
-  }
-
-  async glob(pattern: string): Promise<unknown> {
-    return this.#requireWorkspace("read").glob(pattern);
-  }
-
-  async stat(path: string): Promise<{ type: string; size: number } | null> {
-    const info = await this.#requireWorkspace("read").stat(path);
-    if (!info) return null;
-    return { type: info.type, size: info.size ?? 0 };
-  }
-
-  async writeFile(path: string, content: string): Promise<void> {
-    await this.#requireWorkspace("read-write").writeFile(path, content);
+  async list(): Promise<unknown> {
+    if (!this.#list) throw new Error("File list access is not available.");
+    return this.#list();
   }
 
   writeOutput(name: string, content: string): void {
@@ -497,54 +464,27 @@ class SkillScriptHostBridge extends RpcTarget {
     }
   }
 
-  async workspaceReadFile(path: string): Promise<string> {
+  async fileRead(path: string): Promise<string> {
     try {
-      return stringifyHostResult(await this.readFile(path));
+      return stringifyHostResult(await this.read(path));
     } catch (error) {
       return stringifyHostError(error);
     }
   }
 
-  async workspaceListFiles(path = "."): Promise<string> {
+  async fileList(): Promise<string> {
     try {
-      return stringifyHostResult(await this.listFiles(path));
+      return stringifyHostResult(await this.list());
     } catch (error) {
       return stringifyHostError(error);
     }
-  }
-
-  async workspaceGlob(pattern: string): Promise<string> {
-    try {
-      return stringifyHostResult(await this.glob(pattern));
-    } catch (error) {
-      return stringifyHostError(error);
-    }
-  }
-
-  async workspaceWriteFile(path: string, content: string): Promise<string> {
-    try {
-      await this.writeFile(path, content);
-      return stringifyHostResult(null);
-    } catch (error) {
-      return stringifyHostError(error);
-    }
-  }
-
-  #requireWorkspace(access: "read" | "read-write"): SkillWorkspace {
-    if (!this.#workspace || this.#workspaceAccess === "none") {
-      throw new Error("Workspace access is not available.");
-    }
-    if (access === "read-write" && this.#workspaceAccess !== "read-write") {
-      throw new Error("Workspace write access is not available.");
-    }
-    return this.#workspace;
   }
 }
 
 /**
  * Expose the bridge to JS/TS scripts as a single codemode provider namespace
  * (`__host`). The sandbox `ctx` object wraps these calls into the friendly
- * `workspace` / `tools` / `output` surface (see {@link scriptModule}).
+ * `read` / `list` / `tools` / `output` surface (see {@link scriptModule}).
  */
 function hostProvider(bridge: SkillScriptHostBridge): ToolProvider {
   return {
@@ -556,24 +496,11 @@ function hostProvider(bridge: SkillScriptHostBridge): ToolProvider {
           return bridge.callTool(name, input);
         }
       },
-      readFile: {
-        execute: (a: unknown) => bridge.readFile(String(a))
+      read: {
+        execute: (a: unknown) => bridge.read(String(a))
       },
-      listFiles: {
-        execute: (a: unknown) =>
-          bridge.listFiles(typeof a === "string" ? a : ".")
-      },
-      glob: {
-        execute: (a: unknown) => bridge.glob(String(a))
-      },
-      stat: {
-        execute: (a: unknown) => bridge.stat(String(a))
-      },
-      writeFile: {
-        execute: (a: unknown) => {
-          const { path, content } = a as { path: string; content: string };
-          return bridge.writeFile(path, content);
-        }
+      list: {
+        execute: () => bridge.list()
       },
       writeOutput: {
         execute: async (a: unknown) => {
@@ -688,34 +615,23 @@ class ToolNamespace:
             return await self.call(name, input)
         return call_tool
 
-class WorkspaceNamespace:
-    def __init__(self, host):
-        self.host = host
-
-    async def read_file(self, path):
-        raw = await self.host.workspaceReadFile(path)
-        return await decode_host_response(raw)
-
-    async def list_files(self, path="."):
-        raw = await self.host.workspaceListFiles(path)
-        return await decode_host_response(raw)
-
-    async def glob(self, pattern):
-        raw = await self.host.workspaceGlob(pattern)
-        return await decode_host_response(raw)
-
-    async def write_file(self, path, content):
-        raw = await self.host.workspaceWriteFile(path, content)
-        return await decode_host_response(raw)
-
 class Default(WorkerEntrypoint):
     async def evaluate(self, input, ctx, host, timeout_ms=None):
         materialize_files()
         try:
             if looks_function_style(SKILL_SOURCE):
+                async def read(path):
+                    raw = await host.fileRead(path)
+                    return await decode_host_response(raw)
+
+                async def list():
+                    raw = await host.fileList()
+                    return await decode_host_response(raw)
+
                 skill_module = types.ModuleType("skill_script")
                 skill_module.tools = ToolNamespace(host)
-                skill_module.workspace = WorkspaceNamespace(host)
+                skill_module.read = read
+                skill_module.list = list
                 exec(SKILL_SOURCE, skill_module.__dict__)
                 if not hasattr(skill_module, "run") or not callable(skill_module.run):
                     raise Exception("Python function-style skill script must define a callable run(input, ctx).")
@@ -873,14 +789,14 @@ async function runBashScript(
 ): Promise<unknown> {
   const customCommands = [];
 
-  if (bridge.workspaceAccess !== "none") {
+  if (bridge.hasFiles()) {
     customCommands.push(
-      defineCommand("workspace-read", async (args) => {
+      defineCommand("skill-read", async (args) => {
         const path = args[0];
         if (!path) return { stdout: "", stderr: "Missing path\n", exitCode: 2 };
         try {
           return {
-            stdout: (await bridge.readFile(path)) ?? "",
+            stdout: (await bridge.read(path)) ?? "",
             stderr: "",
             exitCode: 0
           };
@@ -892,30 +808,10 @@ async function runBashScript(
           };
         }
       }),
-      defineCommand("workspace-list", async (args) => {
-        const path = args[0] ?? ".";
+      defineCommand("skill-list", async () => {
         try {
           return {
-            stdout: JSON.stringify(await bridge.listFiles(path)) + "\n",
-            stderr: "",
-            exitCode: 0
-          };
-        } catch (error) {
-          return {
-            stdout: "",
-            stderr: `${error instanceof Error ? error.message : String(error)}\n`,
-            exitCode: 1
-          };
-        }
-      }),
-      defineCommand("workspace-glob", async (args) => {
-        const pattern = args[0];
-        if (!pattern) {
-          return { stdout: "", stderr: "Missing pattern\n", exitCode: 2 };
-        }
-        try {
-          return {
-            stdout: JSON.stringify(await bridge.glob(pattern)) + "\n",
+            stdout: JSON.stringify(await bridge.list()) + "\n",
             stderr: "",
             exitCode: 0
           };
@@ -928,27 +824,6 @@ async function runBashScript(
         }
       })
     );
-
-    if (bridge.workspaceAccess === "read-write") {
-      customCommands.push(
-        defineCommand("workspace-write", async (args, ctx) => {
-          const path = args[0];
-          if (!path) {
-            return { stdout: "", stderr: "Missing path\n", exitCode: 2 };
-          }
-          try {
-            await bridge.writeFile(path, stdinText(ctx.stdin));
-            return { stdout: "", stderr: "", exitCode: 0 };
-          } catch (error) {
-            return {
-              stdout: "",
-              stderr: `${error instanceof Error ? error.message : String(error)}\n`,
-              exitCode: 1
-            };
-          }
-        })
-      );
-    }
   }
 
   if (bridge.hasTools()) {
@@ -1052,11 +927,13 @@ async function runJavaScriptScript(
 /**
  * Create a skill script runner backed by a Worker Loader.
  *
- * Capabilities are opt-in and enforced by a single host bridge: no network and
- * no tools by default, read-only workspace access when `workspaceInstance` is
- * provided. JS/TS scripts are function-style (`export default run(input, ctx)`)
- * and receive `ctx = { skill, files, workspace, tools, output }`. Python and
- * Bash use the path-based `/skill`, `/input.json`, `/output` contract.
+ * Capabilities are opt-in and enforced by a single host bridge: no network,
+ * no tools, and no external file access by default. When `list` and/or
+ * `read` are provided, scripts get read-only `list()` and `read(path)`
+ * helpers. JS/TS scripts are
+ * function-style (`export default run(input, ctx)`) and receive
+ * `ctx = { skill, files, read, list, tools, output }`. Python and Bash use the
+ * path-based `/skill`, `/input.json`, `/output` contract.
  *
  * @experimental Skill script execution is experimental and may change before
  * stabilizing.
@@ -1083,11 +960,7 @@ export function runner(
 
       // Fresh bridge per run so /output artifacts never leak between
       // concurrent script invocations.
-      const bridge = new SkillScriptHostBridge(
-        tools,
-        options.workspaceInstance,
-        effectiveWorkspaceAccess(options)
-      );
+      const bridge = new SkillScriptHostBridge(tools, options);
 
       if (validation.runtime === "bash") {
         return await runBashScript(request, options, bridge);

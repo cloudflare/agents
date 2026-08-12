@@ -130,12 +130,13 @@ export class MyAssistant extends Think<Env> {
   }
 
   // Lets skills expose runnable scripts (`run_skill_script`). Scripts run in
-  // a bounded Worker via the Worker Loader, with read-only access to this
-  // chat's shared workspace so a script can inspect saved files.
+  // a bounded Worker via the Worker Loader, with read-only file access so a
+  // script can inspect saved files.
   getSkillScriptRunner() {
     return skills.runner({
       loader: this.env.LOADER,
-      workspaceInstance: this.workspace
+      list: () => this.workspace.glob("**/*"),
+      read: (path) => this.workspace.readFile(path)
     });
   }
 
