@@ -1,7 +1,11 @@
 import { Agent } from "agents";
-import { Workspace } from "@cloudflare/shell";
+import type { ToolSet } from "ai";
+import {
+  Workspace,
+  type BashToolOptions
+} from "../../workspace/workspace-legacy";
 import { createWorkspaceTools } from "../../tools/workspace";
-import type { WorkspaceToolsOptions } from "../../tools/workspace";
+import { workspaceToolProvider } from "../../workspace/types";
 
 export class TestAssistantToolsAgent extends Agent {
   workspace = new Workspace({
@@ -10,7 +14,10 @@ export class TestAssistantToolsAgent extends Agent {
   });
 
   private getTools() {
-    return createWorkspaceTools(this.workspace);
+    return {
+      ...createWorkspaceTools(this.workspace),
+      ...this.workspace[workspaceToolProvider]()
+    };
   }
 
   // Seed workspace with files for testing
@@ -163,10 +170,13 @@ export class TestAssistantToolsAgent extends Agent {
   async toolBash(
     script: string,
     cwd?: string,
-    options?: Exclude<WorkspaceToolsOptions["bash"], boolean>
+    options?: Omit<BashToolOptions, "ops">
   ): Promise<unknown> {
-    const tools = options
-      ? createWorkspaceTools(this.workspace, { bash: options })
+    const tools: ToolSet = options
+      ? {
+          ...createWorkspaceTools(this.workspace),
+          ...this.workspace[workspaceToolProvider]({ legacyBash: options })
+        }
       : this.getTools();
     const bash = tools.bash;
     if (!bash?.execute) throw new Error("bash tool is not available");
