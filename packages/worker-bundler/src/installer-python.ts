@@ -21,7 +21,7 @@ export interface PyprojectToml {
   };
 }
 
-interface PypiSimpleFile {
+interface PyPASimpleFile {
   filename: string;
   url: string;
   hashes?: Record<string, string>;
@@ -30,9 +30,9 @@ interface PypiSimpleFile {
   yanked?: boolean | string;
 }
 
-interface PypiSimpleMetadata {
+interface PyPASimpleMetadata {
   name: string;
-  files: PypiSimpleFile[];
+  files: PyPASimpleFile[];
 }
 
 // Describes the packages that are available on the Pyodide CDN for a given Pyodide version
@@ -65,11 +65,11 @@ interface PyodideLockfilePackage {
 interface PyodideWheelInfo {
   package: PyodideLockfilePackage;
   url: string;
-  file: PypiSimpleFile;
+  file: PyPASimpleFile;
 }
 
 // Making this global so it will only need to be fetched once per invocation
-// TODO: Consider distributing this with Pyodide itself since it's not likely to change very much between runs
+// TODO: Consider caching this somewhere since it's not likely to change between runs
 let pyodideLockfile: PyodideLockfile | null = null;
 
 /**
@@ -92,15 +92,9 @@ export async function installDependenciesPython(
     return result;
   }
 
-  // Collect dependencies to install
-  const depsToInstall: Record<string, string> = {};
-  depsToInstall["workers-runtime-sdk"] = "*"; // TODO: Should this always take the latest?
-  for (const dep of pyprojectToml.project?.dependencies ?? []) {
-    const { name } = parsePythonVersionString(dep.trim());
-    if (!name) continue;
-
-    depsToInstall[dep] = dep;
-  }
+  // Collect dependencies to install. We will keep these as full dependency strings.
+  const depsToInstall: string[] = pyprojectToml.project?.dependencies ?? [];
+  depsToInstall.push("workers-runtime-sdk");
 
   if (!pyodideLockfile) {
     try {
@@ -114,15 +108,15 @@ export async function installDependenciesPython(
   }
 
   // Track installed packages to avoid duplicates
-  const installedPackages = new Map<string, string>(); // name -> version
+  const installedPackages = new Set<string>();
   // Track in-progress installations to avoid duplicate work
   const inProgress = new Map<string, Promise<void>>();
 
   // Install all dependencies in parallel
   await Promise.all(
-    Object.entries(depsToInstall).map(([depName]) =>
+    depsToInstall.map((dependencySpecifier) =>
       installPythonPackage(
-        depName,
+        dependencySpecifier,
         result,
         fileSystem,
         installedPackages,
@@ -135,21 +129,10 @@ export async function installDependenciesPython(
 }
 
 /**
- * Parse a Python version specifier string (PEP 508) and extract the package name.
- *
- * Accepts strings as they appear in `pyproject.toml` `[project].dependencies`
- * or in PyPI JSON API `info.requires_dist` responses. Examples:
- *   "requests"
- *   "requests>=2.0"
- *   "requests[security]>=2.0"
- *   "requests (>=2.0)"
- *   "requests; python_version < '3.8'"
- *   "requests[security] >= 2.0 ; python_version < '3.8'"
- *
- * Returns a tuple of `[package_name, null, null]`. The second and third slots
- * are placeholders reserved for future use (e.g. extras, version specifier).
+ * Parse a Python version specifier string (PEP 508).
+ * Currently only extracts the package name.
  */
-function parsePythonVersionString(spec: string): { name: string } {
+function parsePythonDependencySpecifier(spec: string): { name: string } {
   // Drop the PEP 508 environment marker (everything after `;`)
   let head = spec.split(";", 1)[0] ?? "";
 
@@ -162,21 +145,18 @@ function parsePythonVersionString(spec: string): { name: string } {
   return { name: name };
 }
 /**
- * Install a single Python package from PyPI.
- *
- * This is an in-progress minimal implementation: it downloads the
- * latest version of the wheel and adds it to python_modules/. It does not
- * resolve version ranges.
+ * Install a single Python package from the Pyodide index.
+ * Uses PyPI as a fallback.
  */
 export async function installPythonPackage(
   dependencySpecifier: string, // the full dependency specifier
   result: InstallResult,
   fileSystem: FileSystem,
-  installedPackages: Map<string, string>,
+  installedPackages: Set<string>,
   inProgress: Map<string, Promise<void>>,
   backupRegistry: string
 ): Promise<void> {
-  const name = parsePythonVersionString(dependencySpecifier)["name"];
+  const name = parsePythonDependencySpecifier(dependencySpecifier)["name"];
   // Skip if already installed in this run
   if (installedPackages.has(name)) {
     return;
@@ -188,7 +168,7 @@ export async function installPythonPackage(
 
   // We explicitly want to deal in names only here, not full dep strings. Only allowing one version of a package per Python environment is defined behavior
   // This was previously in installPromise, but was moved up upon observing that races could still lead to redundant fetches
-  installedPackages.set(name, "");
+  installedPackages.add(name);
 
   // TODO: In the JS impl., a check is done here for whether the package already exists in the filesystem
   // Assess in the future whether this is sensible to repeat
@@ -201,9 +181,8 @@ export async function installPythonPackage(
 
   const installPromise = (async () => {
     try {
-      // Setting default values since some of the errors below access these and they may not all be set in all cases
       let response: Response = {} as Response;
-      let wheel: PypiSimpleFile = {} as PypiSimpleFile;
+      let wheel: PyPASimpleFile = {} as PyPASimpleFile;
       let version: string = "";
 
       // Try the Pyodide index first, then fall back to PyPI if that fails
@@ -236,7 +215,7 @@ export async function installPythonPackage(
       await Promise.all(
         dependencies.map((dep) =>
           installPythonPackage(
-            dep, // This will change (ie look nicer) after we've completely fleshed out what this should return
+            dep,
             result,
             fileSystem,
             installedPackages,
@@ -260,10 +239,11 @@ export async function installPythonPackage(
   }
 }
 
+// TODO: Genericize this to use the HTML version of this API and use it for both the Pyodide index and PyPI
 async function retrieveFromPyPI(
   name: string,
   registry: string
-): Promise<[Response, PypiSimpleFile, string] | null> {
+): Promise<[Response, PyPASimpleFile, string] | null> {
   const metadata = await fetchPythonPackageMetadata(name, registry);
   const version = metadata.version;
   const wheel = metadata.wheel;
@@ -284,7 +264,7 @@ async function retrieveFromPyPI(
 // TODO: Alter the flow to use the PyPA simple api (index.pyodide.org)
 async function retrieveFromPyodide(
   name: string
-): Promise<[Response, PypiSimpleFile, string] | null> {
+): Promise<[Response, PyPASimpleFile, string] | null> {
   const pyodideWheel = getPyodideWheel(name);
   if (!pyodideWheel) {
     return null;
@@ -304,14 +284,15 @@ async function retrieveFromPyodide(
   return [response, wheel, version];
 }
 
-function shouldInstallDependency(dependencyString: string): boolean {
+// Determine whether a dependency (as listed in a wheel's METADATA) is appropriate to install
+function shouldInstallDependency(dependencySpecifier: string): boolean {
   // TODO: This should actually check whether extras are called for, as well as other environment and compatibility attributes
   // For the time being, it excludes any dependency that is behind an 'extra'
-  const semicolonPos = dependencyString.indexOf(";");
+  const semicolonPos = dependencySpecifier.indexOf(";");
   if (
     semicolonPos > -1 &&
-    (dependencyString.substring(semicolonPos).includes("extra ==") ||
-      dependencyString.substring(semicolonPos).includes("extra=="))
+    (dependencySpecifier.substring(semicolonPos).includes("extra ==") ||
+      dependencySpecifier.substring(semicolonPos).includes("extra=="))
   ) {
     return false;
   }
@@ -399,10 +380,14 @@ function getPyodideWheel(name: string): PyodideWheelInfo | null {
   };
 }
 
+/*
+ * Fetch metadata about the 'name' package from 'registry' registry.
+ * Expects the registry to support the PyPA Simple API (JSON ver)
+ */
 async function fetchPythonPackageMetadata(
   name: string,
   registry: string
-): Promise<{ version: string; wheel: PypiSimpleFile }> {
+): Promise<{ version: string; wheel: PyPASimpleFile }> {
   const normalizedName = normalizePythonName(name);
 
   // Fetch package metadata from PyPI Simple API
@@ -421,17 +406,19 @@ async function fetchPythonPackageMetadata(
         ? " (package not found — check the name in pyproject.toml)"
         : "";
     throw new Error(
-      `PyPI returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
+      `Registry ${registry} returned ${metadataResponse.status} ${metadataResponse.statusText} for "${name}"${hint}`
     );
   }
-  const metadata = (await metadataResponse.json()) as PypiSimpleMetadata;
+  const metadata = (await metadataResponse.json()) as PyPASimpleMetadata;
 
-  const wheel = selectWheel(metadata.files);
+  const wheel = selectLatestCompatibleWheel(metadata.files);
   if (!wheel) {
-    throw new Error(`No compatible wheel found for ${name} on PyPI`);
+    throw new Error(
+      `No compatible wheel found for ${name} on registry ${registry}`
+    );
   }
 
-  const version = parseWheelVersion(wheel.filename);
+  const version = parseVersionFromWheelName(wheel.filename);
   if (!version) {
     throw new Error(
       `Could not parse version from wheel filename: ${wheel.filename}`
@@ -447,7 +434,9 @@ async function fetchPythonPackageMetadata(
  * Selects the latest version from compatible wheels.
  * TODO: implement proper platform/python version matching
  */
-function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | null {
+function selectLatestCompatibleWheel(
+  files: PyPASimpleFile[]
+): PyPASimpleFile | null {
   const wheels = files.filter((f) => f.filename.endsWith(".whl"));
   if (wheels.length === 0) return null;
 
@@ -461,11 +450,11 @@ function selectWheel(files: PypiSimpleFile[]): PypiSimpleFile | null {
   const candidates = universal.length > 0 ? universal : wheels;
 
   // Select the wheel with the highest version
-  let latest: PypiSimpleFile | null = null;
+  let latest: PyPASimpleFile | null = null;
   let latestVersion: string | undefined;
 
   for (const wheel of candidates) {
-    const version = parseWheelVersion(wheel.filename);
+    const version = parseVersionFromWheelName(wheel.filename);
     if (!version) continue;
 
     if (
@@ -521,10 +510,8 @@ export function comparePythonVersions(a: string, b: string): number {
  *
  * With no build tag (5 parts): distribution-version-python-abi-platform.whl
  * With build tag (6+ parts): distribution-version-build-python-abi-platform.whl
- *
- * TODO: handle edge cases with distribution names containing hyphens
  */
-function parseWheelVersion(filename: string): string | undefined {
+function parseVersionFromWheelName(filename: string): string | undefined {
   const parts = filename.replace(/\.whl$/, "").split("-");
   if (parts.length < 5) return undefined;
 
@@ -569,8 +556,6 @@ function parseRequiresDist(metadata: string): string[] {
 
 /**
  * Extract files from a ZIP archive (Python wheel).
- *
- * Python wheels are distributed as .whl files (ZIP archives).
  */
 function extractWheel(data: Uint8Array): Record<string, FileEntry> {
   const unzipped = unzipSync(data);

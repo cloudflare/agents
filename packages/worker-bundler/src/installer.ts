@@ -136,7 +136,7 @@ export async function installDependencies(
     }
 
     // Track installed packages to avoid duplicates
-    const installedPackages = new Map<string, string>(); // name -> version
+    const installedPackages = new Set<string>();
     // Track in-progress installations to avoid duplicate work
     const inProgress = new Map<string, Promise<void>>();
 
@@ -168,7 +168,7 @@ async function installPackage(
   versionRange: string,
   result: InstallResult,
   fileSystem: FileSystem,
-  installedPackages: Map<string, string>,
+  installedPackages: Set<string>,
   inProgress: Map<string, Promise<void>>,
   registry: string
 ): Promise<void> {
@@ -184,7 +184,7 @@ async function installPackage(
   // already present. Transitive deps are assumed to also be present when the
   // top-level package.json is found.
   if (fileSystem.read(`node_modules/${name}/package.json`) !== null) {
-    installedPackages.set(name, "existing");
+    installedPackages.add(name);
     return;
   }
 
@@ -217,7 +217,7 @@ async function installPackage(
       }
 
       // Mark as installed (before fetching to prevent cycles)
-      installedPackages.set(name, version);
+      installedPackages.add(name);
       result.installed.push(`${name}@${version}`);
 
       // Fetch and extract the package tarball
