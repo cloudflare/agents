@@ -14,6 +14,12 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 - **`McpAgent`** is a retained, feature-frozen SDK v1 path for existing stateful deployments. New servers should use `createMcpHandler()`.
 - **Raw transport** gives you low-level control if the standard handler lifecycle is not suitable.
 
+`McpAgent` and the other retained SDK v1 registration APIs use the upstream
+Zod-based schema contract. Define their tool input and output schemas as Zod
+shapes; AI SDK flexible-schema adapters are not accepted. For a new MCP server
+that needs Standard Schema support, use `@modelcontextprotocol/server` v2 with
+`createMcpHandler()`.
+
 ## Stateless MCP Server with `createMcpHandler()`
 
 The simplest way to create an MCP server. Install the exact SDK v2 server peer, then use the isolated server entry point so legacy Agents transports and MCP clients stay out of your Worker bundle:

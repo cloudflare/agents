@@ -11,7 +11,7 @@ export interface FileSystem {
    * @param path The path to the file.
    * @param content The contents of the file.
    */
-  write(path: string, content: string): void;
+  write(path: string, content: FileEntry): void;
 
   /**
    * Deletes a file from the file system.
@@ -294,3 +294,7 @@ export function isFileSystem(
     typeof obj.delete === "function"
   );
 }
+
+// Python packages can contain both text and data entries
+// This type allows filesystem entries to properly support both in the way workerd wants to receive them
+export type FileEntry = string | { data: Uint8Array<ArrayBuffer> };

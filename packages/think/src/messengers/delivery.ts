@@ -1,5 +1,6 @@
 import { RpcTarget } from "cloudflare:workers";
 import type { FiberContext } from "agents";
+import { TextSegmentJoiner } from "agents/chat";
 import type { UIMessage } from "ai";
 import type { ChatStartEvent, StreamCallback } from "../think";
 import type { MessengerEvent } from "./events";
@@ -23,6 +24,7 @@ export interface TextStreamCallbackOptions {
 
 export class TextStreamCallback extends RpcTarget implements StreamCallback {
   private readonly onVisibleStart?: () => Promise<void> | void;
+  private readonly textSegmentJoiner = new TextSegmentJoiner();
   private readonly visibleChunks: string[] = [];
   private readonly wakeups: Wake[] = [];
   private readonly visibleSoftLimit?: number;
@@ -47,14 +49,17 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
   }
 
   onEvent(json: string): void {
-    const text = textDeltaFromStreamChunk(json);
-    if (!text) {
-      return;
-    }
+    const chunk = streamChunkFromJson(json);
+    if (!chunk) return;
 
-    this.text += text;
-    this.pushVisibleText(text);
-    this.wake();
+    let pushedText = false;
+    for (const event of this.textSegmentJoiner.pushChunk(chunk)) {
+      if (event.type !== "text") continue;
+      this.text += event.text;
+      this.pushVisibleText(event.text);
+      pushedText = true;
+    }
+    if (pushedText) this.wake();
   }
 
   onDone(): void {
@@ -187,11 +192,13 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
   }
 }
 
-export function textDeltaFromStreamChunk(json: string): string | null {
+function streamChunkFromJson(
+  json: string
+): { delta?: unknown; type?: unknown } | null {
   try {
-    const chunk = JSON.parse(json) as { delta?: unknown; type?: string };
-    return chunk.type === "text-delta" && typeof chunk.delta === "string"
-      ? chunk.delta
+    const chunk: unknown = JSON.parse(json);
+    return typeof chunk === "object" && chunk !== null
+      ? (chunk as { delta?: unknown; type?: unknown })
       : null;
   } catch {
     return null;

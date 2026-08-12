@@ -1,0 +1,31 @@
+{
+  "name": "@cloudflare/agents-vue-chat-example",
+  "description": "Minimal Vue chat using AI SDK useChat over an Agent WebSocket",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "check": "vue-tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@ai-sdk/vue": "4.0.0",
+    "@cloudflare/ai-chat": "*",
+    "agents": "*",
+    "ai": "^7.0.0",
+    "vue": "^3.5.0",
+    "workers-ai-provider": "^4.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.48.0",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "vue-tsc": "^3.3.0",
+    "wrangler": "^4.115.0"
+  }
+}

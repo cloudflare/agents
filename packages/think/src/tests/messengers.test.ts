@@ -25,7 +25,6 @@ import {
   parseMessengerReplySnapshot,
   serializableMessengerEvent,
   TextStreamCallback,
-  textDeltaFromStreamChunk,
   ThinkMessengerRuntime,
   toMessengerAttachment,
   toMessengerUserMessage,
@@ -746,13 +745,25 @@ describe("think messengers core", () => {
     expect(resolved).toEqual([{ status: "completed" }]);
   });
 
-  it("extracts streamed text deltas", () => {
-    expect(
-      textDeltaFromStreamChunk(
-        JSON.stringify({ type: "text-delta", delta: "hello" })
-      )
-    ).toBe("hello");
-    expect(textDeltaFromStreamChunk("{")).toBeNull();
+  it("separates text segments across tool-call boundaries (#1841)", async () => {
+    const callback = new TextStreamCallback();
+
+    for (const chunk of [
+      { type: "text-delta", id: "before", delta: "Before." },
+      { type: "tool-call", toolCallId: "tool", toolName: "example" },
+      { type: "tool-result", toolCallId: "tool", toolName: "example" },
+      { type: "text-delta", id: "after", delta: "After." }
+    ]) {
+      callback.onEvent(JSON.stringify(chunk));
+    }
+    callback.close();
+
+    await expect(collectText(callback.stream())).resolves.toEqual([
+      "Before.",
+      " ",
+      "After."
+    ]);
+    expect(callback.textSoFar()).toBe("Before. After.");
   });
 
   it("streams visible text while retaining overflow", async () => {

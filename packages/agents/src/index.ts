@@ -20,15 +20,22 @@ export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
 export { withInvocationScope as __DO_NOT_USE_WILL_BREAK__withInvocationScope } from "./observability/tracing/tracer";
 import {
   SUB_PREFIX,
-  parseSubAgentPath as _parseSubAgentPath
+  parseSubAgentPath as _parseSubAgentPath,
+  type AgentPathStep
 } from "./sub-routing";
 export {
+  buildAgentPath,
+  buildAgentUrl,
   routeSubAgentRequest,
   getSubAgentByName,
   parseSubAgentPath,
   SUB_PREFIX
 } from "./sub-routing";
-export type { SubAgentPathMatch } from "./sub-routing";
+export type {
+  AgentPathStep,
+  BuildAgentPathOptions,
+  SubAgentPathMatch
+} from "./sub-routing";
 import { signAgentHeaders } from "./email";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
@@ -701,8 +708,6 @@ export type Schedule<T = string> = {
       intervalSeconds: number;
     }
 );
-
-type AgentPathStep = { className: string; name: string };
 
 type ScheduleStorageRow = {
   id: string;
@@ -1745,7 +1750,7 @@ export class Agent<
    * via the `parentPath` getter.
    * @internal
    */
-  private _parentPath: ReadonlyArray<{ className: string; name: string }> = [];
+  private _parentPath: ReadonlyArray<AgentPathStep> = [];
 
   /** True while user's onStart() is executing. Used to warn about non-idempotent schedule() calls. */
   private _insideOnStart = false;
@@ -8024,7 +8029,7 @@ export class Agent<
    *
    * @experimental The API surface may change before stabilizing.
    */
-  get parentPath(): ReadonlyArray<{ className: string; name: string }> {
+  get parentPath(): ReadonlyArray<AgentPathStep> {
     return this._parentPath;
   }
 
@@ -8033,7 +8038,7 @@ export class Agent<
    *
    * @experimental The API surface may change before stabilizing.
    */
-  get selfPath(): ReadonlyArray<{ className: string; name: string }> {
+  get selfPath(): ReadonlyArray<AgentPathStep> {
     return [
       ...this._parentPath,
       {

@@ -412,6 +412,19 @@ export function createReadTool(options: ReadToolOptions): Tool {
       const data = uint8ArrayToBase64(bytes);
       const note = `Read ${replayOutput.path} (${replayOutput.mediaType}, ${formatSize(bytes.byteLength)}).`;
 
+      // AI SDK v6 routes `image-data` as an image but `file-data` as a
+      // document. v7 accepts and normalizes `image-data`, so preserve this
+      // distinction across both supported majors.
+      if (replayOutput.kind === "image") {
+        return {
+          type: "content",
+          value: [
+            { type: "text", text: note },
+            { type: "image-data", data, mediaType: replayOutput.mediaType }
+          ]
+        };
+      }
+
       return {
         type: "content",
         value: [

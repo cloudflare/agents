@@ -254,6 +254,13 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
 
+    if (url.pathname.startsWith("/api/agents/")) {
+      return (
+        (await routeAgentRequest(request, env, { prefix: "api/agents" })) ??
+        new Response("Not found", { status: 404 })
+      );
+    }
+
     // Custom routing exercising `routeSubAgentRequest` directly —
     // URL shape: /custom-sub/{parent}/sub/{child-class-kebab}/{child-name}
     // The test worker parses the outer shape itself and delegates

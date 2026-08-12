@@ -38,8 +38,7 @@ export {
   messengerReplyRecoveryMode,
   messengerReplySnapshot,
   parseMessengerReplySnapshot,
-  TextStreamCallback,
-  textDeltaFromStreamChunk
+  TextStreamCallback
 } from "./delivery";
 
 export type {

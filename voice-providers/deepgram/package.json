@@ -1,6 +1,5 @@
 {
   "name": "@cloudflare/voice-deepgram",
-  "private": true,
   "version": "0.0.1",
   "description": "Deepgram streaming STT provider for Cloudflare Agents voice pipeline",
   "repository": {
