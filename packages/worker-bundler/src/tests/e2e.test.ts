@@ -8,7 +8,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
 import { createTypescriptLanguageService } from "../typescript";
-import { comparePythonVersions } from "../installer";
+import { comparePythonVersions } from "../installer-python";
 
 let testId = 0;
 
