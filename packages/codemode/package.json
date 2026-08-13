@@ -15,17 +15,9 @@
     "acorn": "^8.17.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "catalog:",
-    "@cloudflare/workers-types": "catalog:",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "@playwright/test": "catalog:",
     "@tanstack/ai": "0.38.0",
-    "@types/node": "catalog:",
-    "@vitest/browser-playwright": "catalog:",
     "ai": "^7.0.0",
-    "playwright": "catalog:",
-    "vite": "catalog:",
-    "vitest": "catalog:",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

@@ -22,20 +22,7 @@
     "nanoid": "^5.1.16"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "catalog:",
-    "@cloudflare/workers-types": "catalog:",
-    "@playwright/test": "catalog:",
-    "@types/node": "catalog:",
-    "@types/react": "catalog:",
-    "@types/react-dom": "catalog:",
-    "@vitest/browser-playwright": "catalog:",
     "ai": "^7.0.0",
-    "playwright": "catalog:",
-    "react": "catalog:",
-    "react-dom": "catalog:",
-    "vite": "catalog:",
-    "vitest": "catalog:",
-    "vitest-browser-react": "catalog:",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

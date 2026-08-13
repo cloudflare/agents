@@ -14,13 +14,6 @@
     "@cloudflare/codemode": ">=0.5.0",
     "isomorphic-git": "^1.38.5"
   },
-  "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "catalog:",
-    "@cloudflare/workers-types": "catalog:",
-    "@types/node": "catalog:",
-    "vite": "catalog:",
-    "vitest": "catalog:"
-  },
   "types": "dist/index.d.ts",
   "exports": {
     ".": {

@@ -12,9 +12,5 @@
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
     "agents": "*"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.3.2"
   }
 }

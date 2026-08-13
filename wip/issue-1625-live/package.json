@@ -15,12 +15,5 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "agents": "*",
     "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260729.1",
-    "@types/node": "^26.0.1",
-    "tsx": "^4.22.4",
-    "typescript": "^6.0.3",
-    "wrangler": "^4.115.0"
   }
 }

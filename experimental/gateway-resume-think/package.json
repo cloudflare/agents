@@ -16,11 +16,5 @@
     "@cloudflare/think": "*",
     "agents": "*",
     "ai": "^7.0.0"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260729.1",
-    "typescript": "^6.0.3",
-    "vitest": "catalog:",
-    "wrangler": "^4.115.0"
   }
 }

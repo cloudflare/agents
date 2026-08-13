@@ -32,17 +32,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "catalog:",
-    "@cloudflare/workers-types": "catalog:",
     "@types/diff": "^8.0.0",
-    "@types/node": "catalog:",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.3",
-    "msw": "^2.7.0",
-    "typescript": "^6.0.3",
-    "vite": "catalog:",
-    "vitest": "catalog:",
-    "wrangler": "^4.115.0"
+    "msw": "^2.7.0"
   }
 }
