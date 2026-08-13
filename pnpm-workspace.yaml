@@ -36,9 +36,9 @@ minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
   - workerd@1.20260722.1
-  - miniflare@4.20260722.1
+  - miniflare@4.20260722.1 || 5.20260811.0-alpha
   - partyserver@0.5.9
-  - wrangler@4.115.0
+  - wrangler@4.115.0 || 4.122.0
   - workers-ai-provider@3.2.1 || 3.3.0 || 4.0.0
   - "@shikijs/core@4.3.0"
   - "@shikijs/engine-javascript@4.3.0"

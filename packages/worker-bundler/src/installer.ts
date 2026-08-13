@@ -38,7 +38,7 @@ interface NpmPackageMetadata {
   versions: Record<string, PackageJson>;
 }
 
-interface InstallOptions {
+export interface InstallOptions {
   /**
    * Include devDependencies (default: false)
    */
@@ -48,6 +48,11 @@ interface InstallOptions {
    * Registry URL (default: https://registry.npmjs.org)
    */
   registry?: string;
+
+  /**
+   * Workers compatibility date
+   */
+  compatibilityDate?: string;
 }
 
 /**
@@ -119,7 +124,11 @@ export async function installDependencies(
       )
     );
   } else if (pyprojectTomlContent) {
-    return await installDependenciesPython(fileSystem, pyprojectTomlContent);
+    return await installDependenciesPython(
+      fileSystem,
+      pyprojectTomlContent,
+      options
+    );
   }
   return result;
 }

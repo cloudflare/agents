@@ -38,7 +38,7 @@
     "@changesets/cli": "^2.31.0",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/vite-plugin": "^1.48.0",
-    "@cloudflare/vitest-pool-workers": "^0.19.0",
+    "@cloudflare/vitest-pool-workers": "^0.21.2",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@openai/agents": "^0.12.0",

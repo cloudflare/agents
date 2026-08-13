@@ -113,12 +113,14 @@ export async function createWorker(
   // Parse wrangler config for compatibility settings
   const wranglerConfig = parseWranglerConfig(fileSystem);
   const nodejsCompat = hasNodejsCompat(wranglerConfig);
+  const compatibilityDate = wranglerConfig?.compatibilityDate ?? "2026-07-02";
 
   // Auto-install dependencies if package.json or pyproject.toml has dependencies
   const installWarnings: string[] = [];
   if (hasDependencies(fileSystem)) {
     const installResult = await installDependencies(fileSystem, {
-      ...(registry ? { registry } : {})
+      ...(registry ? { registry } : {}),
+      compatibilityDate: compatibilityDate
     });
     installWarnings.push(...installResult.warnings);
   }
@@ -155,7 +157,7 @@ export async function createWorker(
       mainModule: entryPoint,
       modules,
       wranglerConfig: {
-        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-07-02",
+        compatibilityDate: compatibilityDate,
         compatibilityFlags: wranglerConfig?.compatibilityFlags ?? []
       },
       warnings: installWarnings
