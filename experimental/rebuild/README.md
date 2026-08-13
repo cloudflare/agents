@@ -77,6 +77,14 @@ host and starting another over the same database is a faithful crash test.
 
 ## Contract findings (friction discovered while implementing)
 
+> **Status:** findings 1, 2, 4, 5, 6 and 7 were resolved by contract ADR 0004
+> (`openClaims` on TurnDeps; `Role` gains `tool`; `Steps`/`StepHandle`
+> deleted; claims born correlated + `openClaimByCorrelation`; approval mode
+> `policy` removed; retry-vs-wait clarified as budgetary). This implementation
+> and its tests were updated in the same change. Findings 3 (TurnStatus lacks
+> `queued`) and 8 (merge-is-free) remain open. The original findings are kept
+> below as the record of what implementation surfaced.
+
 1. **`TurnDeps.view` cannot reach `openClaims`.** CONTEXT.md says a harness
    rehydrates from "the tail, openClaims(), and the newest correlated entry",
    but ADR 0003 moved `openClaims` to the Ledger and ADR 0002 excludes the

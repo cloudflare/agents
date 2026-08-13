@@ -57,8 +57,14 @@ export interface ApprovalDescriptor {
   readonly input: Json;
 }
 
+/**
+ * Conditional approval ("ask only when...") is NOT a descriptor mode: it
+ * composes as a ToolMiddleware that rewrites descriptors' approval between
+ * always and never based on its own policy (ADR 0004). Tools declare the
+ * unconditional truth; middleware, where authority already composes, bends it.
+ */
 export interface ApprovalRequirement {
-  readonly mode: "always" | "never" | "policy";
+  readonly mode: "always" | "never";
   describe?(input: Json): ApprovalDescriptor;
 }
 

@@ -177,6 +177,7 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
         },
         write: (chunk) => internal.emitChunk(turnId, pseudoStep, chunk),
         putBlob: (data, meta) => engine.blobs.putBlob(data, meta),
+        openClaims: (filter) => engine.ledger.openClaims(filter),
         tools: tools.forTurn(info, controller.signal),
         signal: controller.signal
       });
@@ -260,7 +261,7 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
   async function admit(entry: Entry): Promise<void> {
     // Pending async settles first: a correlated settlement entry closes its
     // claim, which in turn emits the effect/settled entry admission acts on.
-    await settlePendingFromEntry(engine, internal.openClaimKeyByCorrelation, entry);
+    await settlePendingFromEntry(engine, entry);
 
     const kinds = definition.admission.triggers.kinds;
     if (kinds !== undefined && !kinds.includes(entry.payload.kind)) return;

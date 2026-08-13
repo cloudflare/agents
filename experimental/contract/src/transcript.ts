@@ -1,8 +1,9 @@
 /**
  * transcript — contracts for the durable Log and the Engine services that own
  * it. The Log is ordered, branch-aware data; the Engine composes the deep
- * modules that append, stream, claim/settle, reconcile, consume, and store
- * referenced blobs.
+ * modules that append, claim/settle, reconcile, consume, and store referenced
+ * blobs. Live streaming rides TurnDeps.write; there is no Steps sub-module
+ * (ADR 0004).
  *
  * Must not know about: models, tools, channels, or context assembly. The
  * Engine sees opaque versioned payloads; only the reserved core kinds below
@@ -31,7 +32,6 @@ import type {
   Seq,
   StepId,
   TurnId,
-  TurnInfo,
   Versioned
 } from "./kernel";
 
@@ -68,7 +68,12 @@ export interface NewEntry<P extends Versioned = Versioned> {
 // Modules add their own kinds under a "<module>/" namespace. Only the kinds
 // below carry engine-visible semantics.
 
-export type Role = "user" | "assistant" | "system";
+/**
+ * "tool" is the carrier role for messages holding tool-result parts —
+ * first-class so LanguageModel adapters can map results to their provider's
+ * tool-message format without a smuggling convention (amended per ADR 0004).
+ */
+export type Role = "user" | "assistant" | "system" | "tool";
 
 export type Part =
   | { readonly type: "text"; readonly text: string }
@@ -221,12 +226,7 @@ export interface LiveChunk {
 
 export type TailEvent =
   | { readonly type: "entry"; readonly entry: Entry }
-  | { readonly type: "chunk"; readonly chunk: LiveChunk }
-  | {
-      readonly type: "step-abandoned";
-      readonly turn: TurnId;
-      readonly step: StepId;
-    };
+  | { readonly type: "chunk"; readonly chunk: LiveChunk };
 
 export interface TailOptions {
   readonly branch?: BranchId;
@@ -260,6 +260,13 @@ export interface ClaimRequest {
   readonly input: Json | BlobRef;
   readonly origin: Origin;
   readonly turn?: TurnId;
+  /**
+   * The correlation an out-of-band settlement will carry, for effects that
+   * outlive their call (pending tools, subagents, workflows). Claims are born
+   * correlated so the runtime can resolve an arriving settlement entry to its
+   * claim via openClaimByCorrelation (ADR 0004).
+   */
+  readonly correlation?: CorrelationId;
   /** After this long unsettled, the matching reconciler is invoked. */
   readonly reconcileAfterMs: number;
   readonly reconciler: ReconcilerName;
@@ -288,10 +295,16 @@ export interface ReconcileDeps {
   readonly view: LogView;
 }
 
+/**
+ * Both non-terminal outcomes re-invoke the handler later — the Ledger cannot
+ * execute effects itself, so "doing it again" happens inside handle(). The
+ * difference is budgetary: "retry" counts against policy.maxAttempts (a stuck
+ * effect eventually expires); "wait" does not (waiting on a slow external
+ * signal should not burn the retry budget).
+ */
 export type ReconcileOutcome =
   | { readonly action: "retry"; readonly afterMs?: number }
   | { readonly action: "settle"; readonly result: SettleOutcome }
-  /** Someone else's signal will settle it; check again later. */
   | { readonly action: "wait"; readonly afterMs: number };
 
 /**
@@ -311,6 +324,14 @@ export interface Ledger {
   openClaims(filter?: {
     effectPrefix?: string;
   }): Promise<readonly Entry<EffectClaimedPayload>[]>;
+  /**
+   * Resolve an arriving out-of-band settlement to its claim: the open claim
+   * (if any) born with this correlation (ADR 0004). The claim's key is in the
+   * returned payload.
+   */
+  openClaimByCorrelation(
+    correlation: CorrelationId
+  ): Promise<Entry<EffectClaimedPayload> | null>;
   /** Registration is per-wake and code-defined; the NAME is durable. */
   reconciler(name: ReconcilerName, reconciler: Reconciler): void;
 }
@@ -318,24 +339,10 @@ export interface Ledger {
 // ---------------------------------------------------------------------------
 // Engine sub-modules
 // ---------------------------------------------------------------------------
-
-/**
- * The in-flight step used by the default harness. At most one is open per
- * branch. Chunks are ephemeral until commit() atomically folds entries plus a
- * turn marker into the Log. abandon() discards chunks; committed claims from
- * the step survive.
- */
-export interface StepHandle {
-  readonly turn: TurnId;
-  readonly step: StepId;
-  write(chunk: Json): void;
-  commit(entries: readonly NewEntry[]): Promise<readonly EntryRef[]>;
-  abandon(reason?: string): Promise<void>;
-}
-
-export interface Steps {
-  beginStep(turn: TurnInfo): Promise<StepHandle>;
-}
+// Steps/StepHandle were removed (ADR 0004): TurnDeps.commit + write are the
+// shared step-agnostic primitives; a harness stamps its own markers into
+// commit batches. "Step" survives as vocabulary (StepId, turn/marker.step),
+// not as an engine service.
 
 export interface Consumers {
   consumer(
@@ -368,7 +375,6 @@ export interface Log {
 export interface Engine {
   readonly log: Log;
   readonly ledger: Ledger;
-  readonly steps: Steps;
   readonly consumers: Consumers;
   readonly blobs: Blobs;
   readonly export: LogExport;

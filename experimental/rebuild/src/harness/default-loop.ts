@@ -11,9 +11,9 @@
  *   those calls; the Ledger makes re-execution safe (settled calls replay
  *   their recorded result).
  *
- * Tool results are committed as a user-role message carrying tool-result
- * parts (the Part vocabulary has no "tool" role — noted as a contract
- * finding); LanguageModel adapters map them to their provider's format.
+ * Tool results are committed as tool-role carrier messages (Role gained
+ * "tool" in ADR 0004); LanguageModel adapters map them to their provider's
+ * tool-message format.
  */
 
 import type {
@@ -200,7 +200,7 @@ async function commitResults(deps: StepDeps, results: readonly Part[]): Promise<
   const payload: MessagePayload = {
     kind: "message",
     v: 1,
-    role: "user",
+    role: "tool",
     parts: results
   };
   await deps.commit([message(deps, payload)]);

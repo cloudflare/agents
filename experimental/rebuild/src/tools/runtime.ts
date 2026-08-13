@@ -30,7 +30,6 @@ import type {
   TurnInfo,
   Versioned
 } from "../contract";
-import { setClaimCorrelation } from "../engine/engine";
 import { asClaimKey, asCorrelationId, asReconcilerName } from "../ids";
 
 export const TOOLS_RECONCILER = asReconcilerName("tools");
@@ -194,8 +193,8 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
       };
     }
 
-    // 1. Approval gate. "policy" without a decider is treated as "always"
-    //    (conservative); a real policy source composes in as middleware.
+    // 1. Approval gate. Conditional approval is a middleware that rewrites
+    //    descriptors between always and never (ADR 0004).
     const mode = descriptor.approval?.mode ?? "never";
     if (mode !== "never") {
       const verdict = await approvalVerdict(call);
@@ -258,7 +257,8 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
 
     const result = await runProvider(call, turn, signal);
     if (result.status === "pending") {
-      setClaimCorrelation(engine, key, result.correlation);
+      // The claim was born with this correlation (claimReq below), so the
+      // arriving settlement entry resolves to it via openClaimByCorrelation.
       return { status: "pending", correlation: result.correlation };
     }
     const settled: SettleOutcome =
@@ -281,6 +281,7 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
       input: { callId: call.callId, name: call.name, input: call.input } as Json,
       origin: { module: "tools" },
       turn: turn.turnId,
+      correlation: correlationForCall(call),
       reconcileAfterMs,
       reconciler: TOOLS_RECONCILER
     };
@@ -372,21 +373,21 @@ export interface ToolSettlementPayload extends Versioned {
 }
 
 /**
- * Runtime hook: when a correlated entry lands for an open claim, settle it.
- * Returns true if a claim was settled by this entry.
+ * Runtime hook: when a correlated settlement entry lands for an open claim,
+ * settle it through the Ledger's correlation lookup (ADR 0004). Returns true
+ * if a claim was settled by this entry.
  */
 export async function settlePendingFromEntry(
   engine: Engine,
-  openClaimKeyByCorrelation: (correlation: string) => ClaimKey | null,
   entry: Entry
 ): Promise<boolean> {
   if (entry.correlation === undefined) return false;
-  const key = openClaimKeyByCorrelation(entry.correlation);
-  if (key === null) return false;
   const payload = entry.payload as Partial<ToolSettlementPayload>;
   if (payload.kind !== "tools/settlement") return false;
+  const claim = await engine.ledger.openClaimByCorrelation(entry.correlation);
+  if (claim === null) return false;
   await engine.ledger.settle(
-    key,
+    claim.payload.key,
     payload.isError === true
       ? { status: "error", message: String(payload.output), retryable: false }
       : { status: "ok", output: (payload.output ?? null) as Json }

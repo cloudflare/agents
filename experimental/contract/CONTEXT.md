@@ -327,12 +327,15 @@ claim/settle/replay), ToolExecutionRuntimeResult (too long); `completed` +
 fresh-vs-replay is the `attempt` count, not a member); `replayed: boolean`.
 
 **Approval** (`ApprovalRequirement` / `ApprovalDescriptor`, modes
-`always` | `never` | `policy`):
-The HITL vocabulary. A tool's `ApprovalRequirement` says whether it always,
-never, or by-policy needs sign-off; `ApprovalDescriptor` (title/detail/input)
-is what the human sees. The approval LIFECYCLE spans three files: requirement
-declared here → `awaiting-approval` ToolOutcome parks the turn → the verdict
-entry landing is a trigger that `resume`s it (admission).
+`always` | `never`):
+The HITL vocabulary. A tool's `ApprovalRequirement` declares the
+unconditional truth — always or never needs sign-off; `ApprovalDescriptor`
+(title/detail/input) is what the human sees. Conditional approval ("ask only
+when...") is a ToolMiddleware that rewrites descriptors, not a mode — the
+`policy` mode named a decider the contract gave no seam for (removed, ADR
+0004). The approval LIFECYCLE spans three files: requirement declared here →
+`awaiting-approval` ToolOutcome parks the turn → the verdict entry landing is
+a trigger that `resume`s it (admission).
 
 **ToolExecutionDeps**:
 The dependencies injected into one tool execution — the run, correlation,
@@ -383,8 +386,13 @@ The purpose-built, deliberately NARROWED surface a harness is handed to drive
 one turn/one wake — NOT the full Engine. Members:
 - `turn: TurnInfo` — identity (which turn/branch), not situation (why is in
   the log).
-- `view: LogView` — read the tail / `openClaims` / correlated entries to
-  rehydrate; also resolves `getBlob` (reading bulk is part of reading).
+- `view: LogView` — read the tail / correlated entries to rehydrate; also
+  resolves `getBlob` (reading bulk is part of reading).
+- `openClaims(filter?)` — the unsettled-claims worklist, read-only (ADR 0004).
+  The Ledger's write half stays behind ToolRuntime; this is the read a
+  rehydrating harness needs (a span-granular foreign harness has effects with
+  no transcript trace, so the transcript-as-proxy trick the default harness
+  uses does not generalize).
 - `commit(entries): Promise<refs>` — the STEP-AGNOSTIC atomic append (folds
   entries + marker in one transaction; `putBlob` pairs with it, since writing
   bulk is part of writing an entry). The shared commit primitive; "Step" is one
@@ -396,10 +404,10 @@ one turn/one wake — NOT the full Engine. Members:
   the easy path.
 - `signal: AbortSignal` — preempt/cancel.
 Deliberately EXCLUDED (kept behind the runtime/substrate): `fork`, `consumer`
-registration, `reconciler` registration, raw un-committed `append`, and
-`Ledger` (claim/settle is reachable ONLY through `ToolRuntime` — a harness
-cannot half-use the ledger; its own effects are the ungoverned ones by
-definition).
+registration, `reconciler` registration, raw un-committed `append`, and the
+Ledger's WRITE half (claim/settle is reachable ONLY through `ToolRuntime` — a
+harness cannot half-use the ledger; its own effects are the ungoverned ones by
+definition). The ledger READ (`openClaims`) is on TurnDeps per ADR 0004.
 _Avoid_: passing the whole `Engine` (violates "receive only the sub-modules you
 need"); a `trigger`/`resumeEntry` parameter (the trigger is the newest
 correlated entry on `view` — the log is the snapshot); `StepHandle` in the
@@ -547,10 +555,13 @@ Kept verbatim.
 
 **Part** / **Role** / **MessagePayload**:
 The reserved `"message"` core kind — the ONE place chat vocabulary legitimately
-lives. Note there are THREE distinct "piece of model output" vocabularies,
-intentionally not merged because they serve different layers: `Part`
-(committed payload), `LanguageModelStreamChunk` (streaming deltas from the
-model), `LiveChunk` (ephemeral in-flight step output). Kept.
+lives. `Role` is `user | assistant | system | tool`; `tool` (added, ADR 0004)
+is the carrier role for messages holding tool-result parts, so LanguageModel
+adapters translate rather than infer a smuggling convention. Note there are
+THREE distinct "piece of model output" vocabularies, intentionally not merged
+because they serve different layers: `Part` (committed payload),
+`LanguageModelStreamChunk` (streaming deltas from the model), `LiveChunk`
+(ephemeral in-flight step output).
 
 **Ledger** (claim / settle + reconciliation):
 The double-entry effect record: every world-changing effect gets a CLAIM entry
@@ -584,9 +595,15 @@ The named, pluggable handler the Ledger drives to resolve a stale open claim
 to a terminal outcome (uncertain → certain). Registered under a STABLE name
 that is persisted with the claim and must survive deploys (the name is the
 durable contract; the code is re-registered each wake). Carries a RetryPolicy.
-- **ReconcileOutcome** (`retry` | `settle` | `wait`): `retry` = effect didn't
-  happen, do it again; `settle` = I determined the outcome, close it; `wait` =
-  someone else's correlated signal will settle it, check later.
+- **ReconcileOutcome** (`retry` | `settle` | `wait`): `settle` = I determined
+  the outcome, close it. `retry` and `wait` both re-invoke the handler later
+  (the Ledger cannot execute effects — re-execution happens inside handle());
+  the difference is budgetary: `retry` counts against `maxAttempts`, `wait`
+  does not (ADR 0004 clarification).
+- **Correlation lookup** (ADR 0004): claims are BORN correlated
+  (`ClaimRequest.correlation`) when their effect will settle out-of-band, and
+  `openClaimByCorrelation` resolves an arriving settlement entry to its claim.
+  This closes the tool-out / entry-back pattern through contract surface.
 - Unifies the async patterns: a `pending` tool / subagent / workflow / HITL
   approval is just an open claim awaiting a correlated settle, with the
   reconciler as backstop. Hence "not subsystems."
@@ -597,17 +614,16 @@ The bag a reconciler's `handle()` receives (the open `claim` entry, `attempt`
 count, `policy`, and a `LogView`). `Deps`, not `Context`.
 _Avoid_: ReconcileContext.
 
-**Step / StepHandle / DurableConsumer / Blobs** (other Engine sub-modules):
-- **StepHandle** (`write`/`commit`/`abandon`): the in-flight step — our commit
-  unit. `write` streams ephemeral LiveChunks; `commit` atomically folds
-  entries + run-marker into the Log; `abandon` discards chunks (committed
-  claims survive — the point of claims). Harness-specific: a foreign harness
-  need not use it.
+**DurableConsumer / Blobs** (other Engine sub-modules):
 - **DurableConsumer** (`pull`/`ack`): the at-least-once delivery cursor — the
   outbox engine, generalizing every outbox (workflow notices, channel
   delivery, client replay).
 - **Blobs** (`putBlob`/`getBlob`): content store the Log references by BlobRef,
   so bulk (media, big outputs) never enters the Log inline.
+- **StepHandle/Steps — DELETED (ADR 0004).** `TurnDeps.commit`/`write` are the
+  shared step-agnostic primitives; the default harness stamps its own markers
+  into commit batches and owns its single-open-step rule. "Step" survives as
+  vocabulary (`StepId`, `turn/marker.step`), not as an engine service.
 
 ### The composition root
 
@@ -774,3 +790,4 @@ Files walked and approved together, file-by-file.
 | `src/transcript.ts` (design) | 2026-08-13 | **LogView query surface designed** — see ADR 0003. One `query(q: Query)` primitive over a closed indexable struct (`kinds`/`correlation`/`turn`/`after`/`before`/`limit`), newest-first-always, bounded-always (≥1 of `{after,before,limit}`), array results, constructors (`since`/`between`/`latest`/`window`). `openClaims`→`Ledger`. `LogExport.scan` oldest-first escape hatch. Unblocks compaction-awareness deletion. |
 | `src/kernel.ts` | 2026-08-13 | **`Run`→`Turn`** everywhere (schemas-are-forever rename, full blast radius listed under Turn). Formalized `Turn`/`Step`/`quiescence` (quiescence sharpened: terminal vs suspended; distinct from effect-level `settled`). `Versioned`/tolerant-reader rule and `RetryPolicy` documented. `Brand`/`Json`/`JSONSchema`/`Seq`/`Backoff`/`TokenBudget`/`EntryRef`/id-brands kept (foundational). |
 | `src/agent.ts` | 2026-08-13 | `AgentDefinition` kept (`Agent` reserved for the running thing). Field renames: `ChannelAdapter`→`Channel`, `ModelPort`→`LanguageModel`, `RunFailureNotice`→`TurnFailureNotice`, `ReconcilerSpec`→`Reconciler`. `compaction?` DELETED. Two-tier re-partition: substrate (`channels`, `tools`, `admission`, `reconcilers`) vs harness-internal (`model`/`context`/`loop`/`policy`/`failureNotice` move inside `stepHarness({...})`). `channels` and `tools` are peer world-boundaries. |
+| ADR 0004 amendments | 2026-08-13 | Post-implementation pass from `experimental/rebuild` findings: `openClaims` onto `TurnDeps` (read half only); `Role` gains `tool`; `Steps`/`StepHandle` deleted; claims born correlated + `openClaimByCorrelation`; approval mode `policy` removed (middleware's job); `retry` vs `wait` clarified as budgetary. Open findings not amended: `TurnStatus` lacks `queued`; merge-is-free semantics. |

@@ -1,6 +1,6 @@
 /**
  * The Engine (ADR 0001): behavioral service owning the Log, composed of the
- * deep sub-modules — Ledger, Steps, Consumers, Blobs, LogExport — plus
+ * deep sub-modules — Ledger, Consumers, Blobs, LogExport — plus
  * append/view/tail/fork. Implemented over the SqlDatabase seam so the same
  * code runs against DO SqlStorage and node:sqlite.
  *
@@ -28,7 +28,6 @@ import type {
   EntryRef,
   Json,
   Ledger,
-  LiveChunk,
   Log,
   LogExport,
   LogView,
@@ -38,13 +37,9 @@ import type {
   ReconcilerName,
   Seq,
   SettleOutcome,
-  StepHandle,
-  Steps,
   TailEvent,
   TailOptions,
   TurnId,
-  TurnInfo,
-  TurnMarkerPayload,
   Versioned
 } from "../contract";
 import type { Clock, SqlDatabase, SqlRow } from "../substrate";
@@ -66,8 +61,6 @@ export interface EngineInternal {
    * of the next due claim, or null when nothing is open.
    */
   reconcilePass(now: number): Promise<number | null>;
-  /** The open claim (if any) whose pending settle rides this correlation. */
-  openClaimKeyByCorrelation(correlation: string): ClaimKey | null;
   /** Emit an ephemeral live chunk (backs TurnDeps.write). */
   emitChunk(turn: TurnId, step: string, chunk: Json): void;
 }
@@ -99,7 +92,6 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
   const committedListeners = new Set<(entries: readonly Entry[]) => void>();
   const liveListeners = new Set<(ev: TailEvent) => void>();
   const reconcilers = new Map<ReconcilerName, Reconciler>();
-  const openSteps = new Map<BranchId, string>(); // branch -> stepId
   const warnedMissingReconcilers = new Set<string>();
 
   function emitCommitted(entries: readonly Entry[]): void {
@@ -376,6 +368,7 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
         };
         const newEntry: Record<string, unknown> = { origin: req.origin, payload };
         if (req.turn !== undefined) newEntry.turn = req.turn;
+        if (req.correlation !== undefined) newEntry.correlation = req.correlation;
         committed = insertEntries(ROOT_BRANCH, [newEntry as unknown as NewEntry]);
         const entry = committed[0];
         const now = clock.now();
@@ -392,7 +385,7 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
           now,
           now + req.reconcileAfterMs,
           req.turn ?? null,
-          null
+          req.correlation ?? null
         );
         decision = { outcome: "acquired", entry: entry.ref };
       });
@@ -440,6 +433,16 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       );
     },
 
+    async openClaimByCorrelation(correlation) {
+      const rows = db.exec(
+        "SELECT claim_entry_id FROM rb_claims WHERE status = 'open' AND correlation = ?",
+        correlation
+      );
+      return rows.length === 0
+        ? null
+        : (entryById(str(rows[0].claim_entry_id)) as Entry<EffectClaimedPayload>);
+    },
+
     reconciler(name: ReconcilerName, reconciler: Reconciler): void {
       reconcilers.set(name, reconciler);
     }
@@ -454,68 +457,6 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
   function refOfEntryId(id: string): EntryRef {
     return entryById(id).ref;
   }
-
-  /** Attach the pending correlation to an open claim (tool "pending" path). */
-  function setClaimCorrelation(key: ClaimKey, correlation: string): void {
-    db.exec("UPDATE rb_claims SET correlation = ? WHERE key = ?", correlation, key);
-  }
-
-  // -- Steps -----------------------------------------------------------------
-
-  const steps: Steps = {
-    async beginStep(turn: TurnInfo): Promise<StepHandle> {
-      if (openSteps.has(turn.branch)) {
-        throw new Error(`a step is already open on branch ${turn.branch}`);
-      }
-      const stepId = asStepId(uuid());
-      openSteps.set(turn.branch, stepId);
-      let done = false;
-      const finish = () => {
-        done = true;
-        openSteps.delete(turn.branch);
-      };
-      return {
-        turn: turn.turnId,
-        step: stepId,
-        write(chunk: Json) {
-          if (done) return;
-          const live: LiveChunk = { turn: turn.turnId, step: stepId, chunk };
-          emitLive({ type: "chunk", chunk: live });
-        },
-        async commit(entries: readonly NewEntry[]) {
-          if (done) throw new Error("step already closed");
-          const marker: TurnMarkerPayload = {
-            kind: "turn/marker",
-            v: 1,
-            marker: "step-committed",
-            turnId: turn.turnId,
-            step: stepId,
-            attempt: turn.attempt
-          };
-          const batch: NewEntry[] = [
-            ...entries,
-            {
-              origin: { module: "harness" },
-              turn: turn.turnId,
-              payload: marker
-            } as unknown as NewEntry
-          ];
-          const result = append(batch, { branch: turn.branch });
-          finish();
-          if (result.outcome !== "committed") {
-            throw new Error(`step commit failed: ${result.outcome}`);
-          }
-          return result.refs;
-        },
-        async abandon(reason?: string) {
-          if (done) return;
-          finish();
-          emitLive({ type: "step-abandoned", turn: turn.turnId, step: stepId });
-          void reason;
-        }
-      };
-    }
-  };
 
   // -- Consumers -------------------------------------------------------------
 
@@ -749,7 +690,6 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
   const engine: Engine = {
     log,
     ledger,
-    steps,
     consumers,
     blobs,
     export: logExport,
@@ -769,35 +709,12 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       return () => liveListeners.delete(cb);
     },
     reconcilePass,
-    openClaimKeyByCorrelation(correlation) {
-      const rows = db.exec(
-        "SELECT key FROM rb_claims WHERE status = 'open' AND correlation = ?",
-        correlation
-      );
-      return rows.length === 0 ? null : (str(rows[0].key) as ClaimKey);
-    },
     emitChunk(turn, step, chunk) {
       emitLive({ type: "chunk", chunk: { turn, step: asStepId(step), chunk } });
     }
   };
 
-  // Non-contract helper used by the ToolRuntime (same module family).
-  (engine as unknown as { _setClaimCorrelation: typeof setClaimCorrelation })._setClaimCorrelation =
-    setClaimCorrelation;
-
   return { engine, internal };
-}
-
-export function setClaimCorrelation(
-  engine: Engine,
-  key: ClaimKey,
-  correlation: string
-): void {
-  (
-    engine as unknown as {
-      _setClaimCorrelation: (key: ClaimKey, correlation: string) => void;
-    }
-  )._setClaimCorrelation(key, correlation);
 }
 
 async function collectStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {

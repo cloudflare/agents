@@ -30,7 +30,7 @@ test("happy path: message → tool call → tool result → answer → delivery"
   const view = agent.engine.view();
   const messages = await view.query({ kinds: ["message"], limit: 10 });
   const roles = messages.map((m) => (m.payload as MessagePayload).role).reverse();
-  assert.deepEqual(roles, ["user", "assistant", "user", "assistant"]);
+  assert.deepEqual(roles, ["user", "assistant", "tool", "assistant"]);
 
   const markers = await view.query({ kinds: ["turn/marker"], limit: 10 });
   const states = markers.map((m) => (m.payload as TurnMarkerPayload).marker).reverse();
@@ -98,5 +98,43 @@ test("readonly tools need no claim; mutating tools are ledgered", async () => {
   assert.equal(claims.length, 1);
   assert.equal(settles.length, 1);
 
+  await agent.stop();
+});
+
+test("a custom harness can rehydrate from TurnDeps.openClaims", async () => {
+  const db = sqliteDb();
+  const { provider } = testProviders();
+  const seen: number[] = [];
+  const { definition, channel } = testAgent({
+    model: new MockLanguageModel([mockText("unused")]),
+    providers: [provider]
+  });
+  // Swap in a minimal foreign harness: read the open-claims worklist off the
+  // narrowed surface, then leave the log quiescent.
+  const custom: typeof definition = {
+    ...definition,
+    harness: {
+      async drive(deps) {
+        seen.push((await deps.openClaims()).length);
+        await deps.commit([
+          {
+            origin: { module: "harness" },
+            turn: deps.turn.turnId,
+            payload: {
+              kind: "turn/marker",
+              v: 1,
+              marker: "completed",
+              turnId: deps.turn.turnId,
+              attempt: deps.turn.attempt
+            }
+          } as never
+        ]);
+      }
+    }
+  };
+  const agent = startAgent(custom, { db });
+  await channel.send("hello");
+  await agent.waitUntilQuiescent();
+  assert.deepEqual(seen, [0]); // seam reachable, empty worklist
   await agent.stop();
 });

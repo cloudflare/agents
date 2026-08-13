@@ -150,12 +150,12 @@ export class WorkersAiLanguageModel implements LanguageModel {
 }
 
 /**
- * Map our Part vocabulary onto OpenAI-compatible chat messages. Tool results
- * travel as role:"tool" provider messages regardless of the carrier role in
- * our log (the Part vocabulary has no tool role — contract finding).
+ * Map our Part vocabulary onto OpenAI-compatible chat messages. Tool-result
+ * parts become role:"tool" provider messages; since ADR 0004 the log-side
+ * carrier role is "tool" too, so this is a translation, not an inference.
  */
 function toProviderMessages(
-  role: "user" | "assistant" | "system",
+  role: "user" | "assistant" | "system" | "tool",
   parts: readonly Part[]
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];

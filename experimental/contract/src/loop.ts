@@ -16,7 +16,12 @@
  */
 
 import type { BlobRef, EntryRef, Json, RetryPolicy, TurnInfo } from "./kernel";
-import type { LogView, NewEntry } from "./transcript";
+import type {
+  EffectClaimedPayload,
+  Entry,
+  LogView,
+  NewEntry
+} from "./transcript";
 import type { ToolRuntime } from "./tools";
 import type { LanguageModel } from "./model";
 import type { ContextAssembler } from "./context";
@@ -34,6 +39,15 @@ export interface TurnDeps {
     data: ReadableStream<Uint8Array> | Uint8Array,
     meta: { mediaType: string }
   ): Promise<BlobRef>;
+  /**
+   * Read-only worklist of unsettled effect claims — what this turn was
+   * waiting on (rehydration on wake). Added per ADR 0004: the Ledger's WRITE
+   * half (claim/settle) stays reachable only through ToolRuntime; this is the
+   * read a rehydrating harness needs.
+   */
+  openClaims(filter?: {
+    effectPrefix?: string;
+  }): Promise<readonly Entry<EffectClaimedPayload>[]>;
   readonly tools: ToolRuntime;
   readonly signal: AbortSignal;
 }
