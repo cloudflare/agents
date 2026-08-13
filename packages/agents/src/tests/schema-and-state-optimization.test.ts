@@ -91,6 +91,7 @@ const EXPECTED_SCHEMA_DDL = [
   `CREATE TABLE cf_agents_workflows (
           id TEXT PRIMARY KEY NOT NULL,
           workflow_id TEXT NOT NULL UNIQUE,
+          idempotency_key TEXT,
           workflow_name TEXT NOT NULL,
           status TEXT NOT NULL CHECK(status IN (
             'queued', 'running', 'paused', 'errored',
@@ -106,7 +107,7 @@ const EXPECTED_SCHEMA_DDL = [
         )`
 ];
 
-const EXPECTED_SCHEMA_VERSION = 11;
+const EXPECTED_SCHEMA_VERSION = 12;
 
 describe("schema DDL snapshot", () => {
   it("should match the expected DDL for the current schema version", async () => {

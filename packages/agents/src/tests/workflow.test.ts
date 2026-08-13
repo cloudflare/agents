@@ -972,6 +972,64 @@ describe("workflow operations", () => {
     });
   });
 
+  describe("workflow idempotency", () => {
+    it("returns one active workflow for concurrent calls with the same key", async () => {
+      const agentStub = await getTestAgent("workflow-idempotency-concurrent");
+
+      const [firstId, secondId] = await Promise.all([
+        agentStub.runIdempotentWorkflowTest("singleton", {
+          taskId: "first",
+          waitForApproval: true
+        }),
+        agentStub.runIdempotentWorkflowTest("singleton", {
+          taskId: "second",
+          waitForApproval: true
+        })
+      ]);
+
+      expect(secondId).toBe(firstId);
+
+      const workflows = (await agentStub.getWorkflowsForTest(
+        {}
+      )) as WorkflowInfo[];
+      expect(workflows).toHaveLength(1);
+      expect(workflows[0].idempotencyKey).toBe("singleton");
+    });
+
+    it("makes a key available after the active workflow terminates", async () => {
+      const agentStub = await getTestAgent("workflow-idempotency-reuse");
+      const firstId = await agentStub.runIdempotentWorkflowTest("singleton", {
+        taskId: "first",
+        waitForApproval: true
+      });
+
+      const termination = await agentStub.expectThrow(
+        "terminateWorkflow",
+        firstId
+      );
+      expect(termination.threw).toBe(false);
+
+      const secondId = await agentStub.runIdempotentWorkflowTest("singleton", {
+        taskId: "second",
+        waitForApproval: true
+      });
+
+      expect(secondId).not.toBe(firstId);
+    });
+
+    it("rejects blank keys", async () => {
+      const agentStub = await getTestAgent("workflow-idempotency-blank");
+      const result = await agentStub.expectThrow(
+        "runIdempotentWorkflowTest",
+        "   ",
+        { taskId: "blank" }
+      );
+
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain("idempotencyKey must not be blank");
+    });
+  });
+
   describe("workflow lifecycle integration", () => {
     async function waitForRunning(
       agentStub: Awaited<ReturnType<typeof getTestAgent>>,

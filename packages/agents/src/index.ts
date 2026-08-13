@@ -1130,7 +1130,7 @@ type AgentToolRecoveryInspection =
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 11;
+const CURRENT_SCHEMA_VERSION = 12;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -2131,6 +2131,7 @@ export class Agent<
         CREATE TABLE IF NOT EXISTS cf_agents_workflows (
           id TEXT PRIMARY KEY NOT NULL,
           workflow_id TEXT NOT NULL UNIQUE,
+          idempotency_key TEXT,
           workflow_name TEXT NOT NULL,
           status TEXT NOT NULL CHECK(status IN (
             'queued', 'running', 'paused', 'errored',
@@ -2152,6 +2153,17 @@ export class Agent<
 
       this.sql`
         CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
+      `;
+
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_workflows ADD COLUMN idempotency_key TEXT"
+      );
+
+      this.sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_active_idempotency_key
+        ON cf_agents_workflows(workflow_name, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+          AND status NOT IN ('complete', 'errored', 'terminated')
       `;
 
       // Clean up legacy STATE_WAS_CHANGED rows from the single-row state optimization
@@ -11240,8 +11252,46 @@ export class Agent<
       );
     }
 
+    const idempotencyKey = options?.idempotencyKey;
+    if (idempotencyKey !== undefined && idempotencyKey.trim() === "") {
+      throw new Error("idempotencyKey must not be blank");
+    }
+
     // Workflows instance IDs must start with [a-zA-Z0-9_].
     const workflowId = options?.id ?? `wf_${nanoid()}`;
+    const trackingId = nanoid();
+    const metadataJson = options?.metadata
+      ? JSON.stringify(options.metadata)
+      : null;
+
+    if (idempotencyKey !== undefined) {
+      const claimed = this.sql<{ workflow_id: string }>`
+        INSERT OR IGNORE INTO cf_agents_workflows
+          (id, workflow_id, idempotency_key, workflow_name, status, metadata)
+        VALUES
+          (${trackingId}, ${workflowId}, ${idempotencyKey}, ${workflowName}, 'queued', ${metadataJson})
+        RETURNING workflow_id
+      `;
+
+      if (claimed.length === 0) {
+        const [existing] = this.sql<{ workflow_id: string }>`
+          SELECT workflow_id
+          FROM cf_agents_workflows
+          WHERE workflow_name = ${workflowName}
+            AND idempotency_key = ${idempotencyKey}
+            AND status NOT IN ('complete', 'errored', 'terminated')
+          LIMIT 1
+        `;
+
+        if (existing) {
+          return existing.workflow_id;
+        }
+
+        throw new Error(
+          `Workflow with ID "${workflowId}" is already being tracked`
+        );
+      }
+    }
 
     // Inject agent identity and workflow name into params
     const augmentedParams = {
@@ -11255,32 +11305,40 @@ export class Agent<
       __agentOrigin: agentOrigin
     };
 
-    // Create the workflow instance
-    const instance = await workflow.create({
-      id: workflowId,
-      params: augmentedParams
-    });
-
-    // Track the workflow in our database
-    const id = nanoid();
-    const metadataJson = options?.metadata
-      ? JSON.stringify(options.metadata)
-      : null;
+    let instance: { id: string };
     try {
-      this.sql`
-        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
-        VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
-      `;
-    } catch (e) {
-      if (
-        e instanceof Error &&
-        e.message.includes("UNIQUE constraint failed")
-      ) {
-        throw new Error(
-          `Workflow with ID "${workflowId}" is already being tracked`
-        );
+      instance = await workflow.create({
+        id: workflowId,
+        params: augmentedParams
+      });
+    } catch (error) {
+      if (idempotencyKey !== undefined) {
+        this.sql`
+          DELETE FROM cf_agents_workflows
+          WHERE workflow_id = ${workflowId} AND status = 'queued'
+        `;
       }
-      throw e;
+
+      throw error;
+    }
+
+    if (idempotencyKey === undefined) {
+      try {
+        this.sql`
+          INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
+          VALUES (${trackingId}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
+        `;
+      } catch (e) {
+        if (
+          e instanceof Error &&
+          e.message.includes("UNIQUE constraint failed")
+        ) {
+          throw new Error(
+            `Workflow with ID "${workflowId}" is already being tracked`
+          );
+        }
+        throw e;
+      }
     }
 
     this._emit("workflow:start", { workflowId: instance.id, workflowName });
@@ -12020,6 +12078,7 @@ export class Agent<
     return {
       id: row.id,
       workflowId: row.workflow_id,
+      idempotencyKey: row.idempotency_key,
       workflowName: row.workflow_name,
       status: row.status,
       metadata: row.metadata ? JSON.parse(row.metadata) : null,
