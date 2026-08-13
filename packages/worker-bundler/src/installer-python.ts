@@ -373,7 +373,7 @@ function stripWheelToPackage(
  * The lockfile lists all pre-built packages available in the Pyodide
  * distribution, including their wheel URLs, hashes, and dependencies.
  */
-async function fetchPyodideLockfile(
+export async function fetchPyodideLockfile(
   version: string
 ): Promise<PyodideLockfile | null> {
   const url = `https://cdn.jsdelivr.net/pyodide/${version}/full/pyodide-lock.json`;
