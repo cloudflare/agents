@@ -1,0 +1,102 @@
+/**
+ * End-to-end: channel → admission → turn → step harness → model → tools →
+ * log → outbox delivery. The whole architecture, mock model, real engine.
+ */
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { startAgent } from "../src/runtime/host";
+import { MockLanguageModel, mockText, mockToolCall } from "../src/models/mock";
+import { sqliteDb, testAgent, testProviders } from "./helpers";
+import type { MessagePayload, TurnMarkerPayload } from "../src/contract";
+
+test("happy path: message → tool call → tool result → answer → delivery", async () => {
+  const db = sqliteDb();
+  const { provider } = testProviders();
+  const model = new MockLanguageModel([
+    mockToolCall("c1", "test/add", { a: 2, b: 3 }),
+    mockText("The sum is 5.")
+  ]);
+  const { definition, channel } = testAgent({ model, providers: [provider] });
+  const agent = startAgent(definition, { db });
+
+  await channel.send("What is 2 + 3?");
+  await agent.waitUntilQuiescent();
+
+  // Outbox delivered the answer.
+  assert.deepEqual(channel.delivered, ["The sum is 5."]);
+
+  // The log tells the whole story.
+  const view = agent.engine.view();
+  const messages = await view.query({ kinds: ["message"], limit: 10 });
+  const roles = messages.map((m) => (m.payload as MessagePayload).role).reverse();
+  assert.deepEqual(roles, ["user", "assistant", "user", "assistant"]);
+
+  const markers = await view.query({ kinds: ["turn/marker"], limit: 10 });
+  const states = markers.map((m) => (m.payload as TurnMarkerPayload).marker).reverse();
+  assert.deepEqual(states, ["step-committed", "completed"]);
+
+  // The model saw the tool result on its second call.
+  assert.equal(model.requests.length, 2);
+  const second = model.requests[1];
+  const resultParts = second.messages.flatMap((m) =>
+    m.parts.filter((p) => p.type === "tool-result")
+  );
+  assert.equal(resultParts.length, 1);
+
+  await agent.stop();
+});
+
+test("a second message while a turn is active queues and then runs", async () => {
+  const db = sqliteDb();
+  const { provider } = testProviders();
+  // Model: turn 1 = slow tool then answer; turn 2 = immediate answer.
+  const model = new MockLanguageModel((req, call) => {
+    if (call === 0) return mockToolCall("q1", "test/add", { a: 1, b: 1 });
+    const lastUser = [...req.messages]
+      .reverse()
+      .find((m) => m.role === "user" && m.parts.some((p) => p.type === "text"));
+    const text = lastUser?.parts.find((p) => p.type === "text");
+    return mockText(`answer to: ${text !== undefined && "text" in text ? text.text : "?"}`);
+  });
+  const { definition, channel } = testAgent({ model, providers: [provider] });
+  const agent = startAgent(definition, { db });
+
+  await channel.send("first");
+  await channel.send("second");
+  await agent.waitUntilQuiescent();
+
+  assert.equal(channel.delivered.length, 2);
+  assert.match(channel.delivered[1], /second/);
+
+  // Two turns, both completed.
+  const markers = await agent.engine.view().query({ kinds: ["turn/marker"], limit: 20 });
+  const completed = markers.filter(
+    (m) => (m.payload as TurnMarkerPayload).marker === "completed"
+  );
+  assert.equal(completed.length, 2);
+
+  await agent.stop();
+});
+
+test("readonly tools need no claim; mutating tools are ledgered", async () => {
+  const db = sqliteDb();
+  const { provider, effects } = testProviders();
+  const model = new MockLanguageModel([
+    mockToolCall("m1", "test/notify", { to: "ops" }),
+    mockText("Notified.")
+  ]);
+  const { definition, channel } = testAgent({ model, providers: [provider] });
+  const agent = startAgent(definition, { db });
+
+  await channel.send("notify ops");
+  await agent.waitUntilQuiescent();
+
+  assert.deepEqual(effects, ['notify:{"to":"ops"}']);
+  const claims = await agent.engine.view().query({ kinds: ["effect/claimed"], limit: 5 });
+  const settles = await agent.engine.view().query({ kinds: ["effect/settled"], limit: 5 });
+  assert.equal(claims.length, 1);
+  assert.equal(settles.length, 1);
+
+  await agent.stop();
+});

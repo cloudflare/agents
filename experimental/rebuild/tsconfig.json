@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": [
+      "es2022",
+      "dom"
+    ],
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "rootDir": "..",
+    "outDir": "dist",
+    "strict": true,
+    "noUnusedLocals": true,
+    "exactOptionalPropertyTypes": true,
+    "declaration": false,
+    "sourceMap": false,
+    "types": [],
+    "esModuleInterop": true
+  },
+  "include": [
+    "src",
+    "tests",
+    "../contract/src"
+  ]
+}
