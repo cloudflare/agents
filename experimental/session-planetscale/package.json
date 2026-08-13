@@ -21,6 +21,8 @@
     "workers-ai-provider": "^4.0.0"
   },
   "devDependencies": {
-    "@types/pg": "^8.20.0"
+    "@tailwindcss/vite": "^4",
+    "@types/pg": "^8.20.0",
+    "tailwindcss": "^4.3.2"
   }
 }

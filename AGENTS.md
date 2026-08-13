@@ -85,12 +85,6 @@ Example apps will normally hot reload when the dev server is running. When the d
 
 ## Code standards
 
-### Shared development tooling
-
-- Define shared build, test, type, framework, and CLI tooling only in the root `devDependencies`.
-- Do not repeat root-owned tooling in workspace package `devDependencies`; package scripts and imports intentionally resolve it from the workspace root.
-- Keep runtime dependencies, published peer dependencies, and package-specific peer-development fixtures in the owning package.
-
 ### TypeScript
 
 - Strict mode enabled (`agents/tsconfig`)

@@ -20,7 +20,12 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.48.0",
+    "@cloudflare/workers-types": "^5.20260729.1",
     "@vitejs/plugin-vue": "^6.0.0",
-    "vue-tsc": "^3.3.0"
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "vue-tsc": "^3.3.0",
+    "wrangler": "^4.115.0"
   }
 }

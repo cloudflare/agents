@@ -14,5 +14,10 @@
     "@modelcontextprotocol/server": "2.0.0",
     "agents": "*",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.115.0"
   }
 }
