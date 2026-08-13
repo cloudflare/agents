@@ -44,3 +44,28 @@ declare module "node:sqlite" {
 }
 
 // setTimeout/console/queueMicrotask/ReadableStream come from lib "dom".
+
+declare module "node:readline" {
+  interface ReadLine {
+    setPrompt(p: string): void;
+    prompt(): void;
+    on(event: "line", cb: (line: string) => void): void;
+    on(event: "close", cb: () => void): void;
+    close(): void;
+  }
+  function createInterface(opts: { input: unknown; output: unknown }): ReadLine;
+  export { createInterface, ReadLine };
+}
+
+declare module "node:fs" {
+  function appendFileSync(path: string, data: string): void;
+  function writeFileSync(path: string, data: string): void;
+  export { appendFileSync, writeFileSync };
+}
+
+declare const process: {
+  argv: readonly string[];
+  stdin: unknown;
+  stdout: { write(s: string): void };
+  exit(code?: number): never;
+};
