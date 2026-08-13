@@ -1,0 +1,19 @@
+packages/agents/src/index.ts
+  s_334a9720165218::t_6e90dfce89c3ba 11262
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cedeedc9362124de4ab71cf682c1a206f9114d9e",
+  "prompts": {},
+  "sessions": {
+    "s_334a9720165218": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff785-6e3a-74a3-8075-1e70c27f4c27",
+        "model": "unknown"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}
