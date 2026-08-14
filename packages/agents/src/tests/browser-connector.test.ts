@@ -1316,6 +1316,13 @@ describe("BrowserConnector", () => {
       createdAt: now,
       updatedAt: now
     });
+    // Left behind by a real Chromium run before this agent switched engines:
+    // its session is real and still has to be closed.
+    store.set("cdp:exec:exec-chromium", {
+      sessionId: "session-chromium",
+      createdAt: now - dayMs - 1,
+      updatedAt: now - dayMs - 1
+    });
     const connector = new BrowserConnector(fakeCtx, {
       browser,
       store,
@@ -1323,13 +1330,16 @@ describe("BrowserConnector", () => {
     });
 
     const result = await connector.sweep();
-    expect(result.swept.map((entry) => entry.key)).toEqual([
+    expect(result.swept.map((entry) => entry.key).sort()).toEqual([
+      "cdp:exec:exec-chromium",
       "cdp:exec:exec-orphan"
     ]);
     expect(store.sessions.has("cdp:exec:exec-live")).toBe(true);
-    expect(requests.filter((request) => request.method === "DELETE")).toEqual(
-      []
-    );
+    // No DELETE for the synthetic marker, one for the real leftover session.
+    expect(deletesFor(requests, "session-chromium")).toHaveLength(1);
+    expect(
+      requests.filter((request) => request.method === "DELETE")
+    ).toHaveLength(1);
 
     // The tombstone is dropped once it ages past the threshold again.
     store.set("cdp:exec:exec-orphan", {

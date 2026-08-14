@@ -154,6 +154,12 @@ export interface BrowserLiveView {
 }
 
 const EXEC_KEY_PREFIX = "cdp:exec:";
+/**
+ * Prefix of the synthetic session id stored for a Kitesurf execution: the
+ * connection is scoped to its execution, so the entry is a marker rather than
+ * a Browser Run session that can be reconnected to or deleted.
+ */
+const KITESURF_SESSION_PREFIX = "kitesurf:";
 const REUSE_KEY_PREFIX = "cdp:reuse:";
 
 /**
@@ -782,7 +788,6 @@ export class BrowserConnector extends CodemodeConnector {
   ): Promise<BrowserConnectorSweepResult> {
     if (!this.#options.browser) return { swept: [] };
     const browser = this.#options.browser;
-    const isKitesurf = this.#isKitesurf();
     const store = this.#options.store;
     const maxIdleMs =
       options?.maxIdleMs ??
@@ -823,10 +828,12 @@ export class BrowserConnector extends CodemodeConnector {
       } finally {
         await lock.release();
       }
-      // Kitesurf entries hold a synthetic `kitesurf:<uuid>` marker rather than
-      // a Browser Run session id: the connection died with its execution, so
-      // there is nothing remote to close.
-      if (!isKitesurf) {
+      // Kitesurf entries hold a synthetic marker rather than a Browser Run
+      // session id: the connection died with its execution, so there is
+      // nothing remote to close. Entries written before the connector was
+      // reconfigured still need their session deleted, so this is decided per
+      // entry rather than from the current options.
+      if (!toClose.sessionId.startsWith(KITESURF_SESSION_PREFIX)) {
         try {
           await deleteBrowserSession(browser, toClose.sessionId);
         } catch (error) {
@@ -1038,7 +1045,7 @@ export class BrowserConnector extends CodemodeConnector {
         }
         const now = Date.now();
         await this.#store.set(key, {
-          sessionId: `kitesurf:${crypto.randomUUID()}`,
+          sessionId: `${KITESURF_SESSION_PREFIX}${crypto.randomUUID()}`,
           createdAt: now,
           updatedAt: now
         });
