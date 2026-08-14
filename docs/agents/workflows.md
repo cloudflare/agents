@@ -262,8 +262,8 @@ const instanceId = await this.runWorkflow(
 - `options.id` - Custom workflow ID (auto-generated if not provided)
 - `options.metadata` - Optional metadata stored for querying (not passed to workflow)
 - `options.agentBinding` - Agent binding name (auto-detected from class name if not provided). When called from a sub-agent, this is the root Agent binding name.
-- `options.retention` - Workflow instance retention passed unchanged to
-  [`Workflow.create()`](https://developers.cloudflare.com/workflows/build/workers-api/#workflowinstancecreateoptions).
+- [`options.retention`](https://developers.cloudflare.com/workflows/build/workers-api/#workflowinstancecreateoptions) - Workflow retention passed unchanged to
+  `Workflow.create()`.
   Use `successRetention` for successful instances and `errorRetention` for
   errored or terminated instances.
 
