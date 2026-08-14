@@ -42,9 +42,25 @@ pnpm demo --help
 ```
 
 The flags swap strategies independently, so every module above can run through
-the same in-memory SQLite-backed stack. The bouncer requires "please" in user
-messages. Tollbooth requests print their call ID; resolve one with
-`/approve <call-id>` or `/reject <call-id>`.
+the same in-memory SQLite-backed stack. The terminal renders from the engine's
+**live tail** — the same rail a client uses to replay or attach — so model
+output streams token by token, and everything else the turn does surfaces the
+moment it hits the log: tool calls and results as dim `·` lines, plans, debate
+arguments and compaction summaries as attributed pass-through entries, failed
+turns as a visible `✗` line. When streamed text turns out to be a pass-through
+entry rather than the reply, an `↳` attribution line under it says what it
+was committed as.
+
+The bouncer requires "please" in user messages (and says so when it ignores
+you). Tollbooth approval requests print inline; resolve the newest with bare
+`/approve` / `/reject`, or name one — call ids accept any unique prefix. A
+turn parked on a pending effect (the oracle) prints the `/settle <call-id>
+<answer>` line that lets you play the outside world.
+
+Pass `--db <path>` for a persistent session: restart with the same path and
+the recent conversation replays before the prompt; kill the process mid-turn
+and the next start's wake scan re-drives the interrupted turn — the durability
+suite, live at a terminal.
 
 ELIZA runs with no configuration. The provider-backed model routes deliberately
 have no local fallback:

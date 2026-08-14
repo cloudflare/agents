@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const DEMO_ENTRYPOINT = "dist/rebuild/src/demo/interactive.js";
 
@@ -68,6 +71,28 @@ test("CLI composes the wacky strategy choices", async () => {
   assert.match(result.output, /admission=bouncer/);
   assert.match(result.output, /loop=debater/);
   assert.match(result.output, /Agent>/);
+});
+
+test("--db persists the session: a second run replays the conversation", async () => {
+  const db = join(mkdtempSync(join(tmpdir(), "rebuild-demo-")), "session.db");
+  const first = await runDemo(["--db", db], "I feel optimistic\n/quit\n");
+  assert.equal(first.exitCode, 0, first.errors);
+  assert.match(first.output, /Agent> Tell me more about feeling optimistic\./);
+
+  const second = await runDemo(["--db", db], "/quit\n");
+  assert.equal(second.exitCode, 0, second.errors);
+  assert.match(second.output, /resuming session/);
+  assert.match(second.output, /You> I feel optimistic/);
+  assert.match(second.output, /Agent> Tell me more about feeling optimistic\./);
+});
+
+test("the bouncer's silence is made visible", async () => {
+  const result = await runDemo(
+    ["--admission", "bouncer"],
+    "no magic word here\n/quit\n"
+  );
+  assert.equal(result.exitCode, 0, result.errors);
+  assert.match(result.output, /no turn was admitted/);
 });
 
 test("AI SDK selection crashes when no provider is supplied", async () => {
