@@ -276,7 +276,7 @@ function browserExecuteModelOutput(
     const approximateBytes = Math.floor((screenshot.data.length * 3) / 4);
     return {
       type: "text",
-      value: `Screenshot captured successfully (${screenshot.mediaType}, approximately ${approximateBytes.toLocaleString()} bytes) and attached to the chat.`
+      value: `Screenshot captured successfully (${screenshot.mediaType}, approximately ${approximateBytes.toLocaleString()} bytes); the image is kept for the UI and omitted here.`
     };
   }
 

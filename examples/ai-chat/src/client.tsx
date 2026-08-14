@@ -102,6 +102,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+// The sandbox script chooses these fields, so only render media types and
+// payloads we know are safe to inline.
+const SCREENSHOT_MEDIA_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
 function getScreenshotPreview(outer: unknown): { src: string } | null {
   // browser_execute wraps the sandbox return value: { status, result, ... }
   const output =
@@ -110,14 +115,14 @@ function getScreenshotPreview(outer: unknown): { src: string } | null {
     !isRecord(output) ||
     output.type !== "browser_screenshot" ||
     typeof output.mediaType !== "string" ||
-    typeof output.data !== "string"
+    !SCREENSHOT_MEDIA_TYPES.includes(output.mediaType) ||
+    typeof output.data !== "string" ||
+    !BASE64_PATTERN.test(output.data)
   ) {
     return null;
   }
 
-  const mimeType = output.mediaType;
-
-  return { src: `data:${mimeType};base64,${output.data}` };
+  return { src: `data:${output.mediaType};base64,${output.data}` };
 }
 
 // Any large `data` string is an inline payload (a screenshot or another

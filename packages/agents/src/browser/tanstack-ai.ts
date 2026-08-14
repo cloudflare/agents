@@ -66,16 +66,20 @@ export function createBrowserTools(
       messages: [],
       context: {}
     } as never)) as ProxyToolOutput;
-    // This wrapper hands the result straight to the model, so apply the same
-    // model-facing summary the AI SDK path gets from `toModelOutput` — a
-    // screenshot is kept out of the model context.
+    // TanStack has a single return channel, so what the host sees is what the
+    // model sees: apply the AI SDK path's `toModelOutput` projection so a
+    // screenshot's base64 cannot reach the model. The execution envelope
+    // (status, executionId, calls) is preserved either way.
     const modelOutput = await executeTool.toModelOutput?.({
       toolCallId: crypto.randomUUID(),
       input: { code },
       output: result
     });
-    if (modelOutput?.type === "text" || modelOutput?.type === "error-text") {
-      return modelOutput.value;
+    if (modelOutput?.type === "error-text") {
+      throw new Error(modelOutput.value);
+    }
+    if (modelOutput?.type === "text") {
+      return { ...result, result: modelOutput.value };
     }
     if (modelOutput?.type === "json") {
       return modelOutput.value;
