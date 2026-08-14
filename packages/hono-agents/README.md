@@ -113,6 +113,12 @@ The `agentsMiddleware` function:
 3. Handles WebSocket upgrades for persistent connections
 4. Provides error handling and custom routing options
 
+Requests that do not match an Agent route continue through later Hono middleware
+and routes. Once an Agent route matches, its response—including an HTTP
+rejection—is returned without invoking later handlers. Mount `agentsMiddleware`
+on a narrower path or configure a distinct prefix if the app has other WebSocket
+routes under the same URL prefix.
+
 Agents can:
 
 - Maintain state across requests
