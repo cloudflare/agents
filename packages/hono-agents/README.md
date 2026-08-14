@@ -19,13 +19,13 @@ import { agentsMiddleware } from "hono-agents";
 
 // Define your agent classes
 export class ChatAgent extends Agent {
-  async onRequest(request) {
+  async onRequest(_request: Request) {
     return new Response("Ready to assist with chat.");
   }
 }
 
 export class AssistantAgent extends Agent {
-  async onRequest(request) {
+  async onRequest(_request: Request) {
     return new Response("I'm your AI assistant.");
   }
 }
@@ -34,24 +34,45 @@ export class AssistantAgent extends Agent {
 const app = new Hono();
 app.use("*", agentsMiddleware());
 
-// or with authentication
+export default app;
+```
+
+### Authentication
+
+Replace the basic middleware registration with one that authenticates both
+WebSocket connections and HTTP requests:
+
+```ts
+const authorizeAgentRequest = async (req: Request) => {
+  const token = req.headers.get("authorization");
+  // Validate token
+  if (!token) return new Response("Unauthorized", { status: 401 });
+};
+
 app.use(
   "*",
   agentsMiddleware({
     options: {
-      onBeforeConnect: async (req) => {
-        const token = req.headers.get("authorization");
-        // validate token
-        if (!token) return new Response("Unauthorized", { status: 401 });
-      }
+      onBeforeConnect: authorizeAgentRequest,
+      onBeforeRequest: authorizeAgentRequest
     }
   })
 );
+```
 
-// With error handling
+### Error handling
+
+Replace the basic middleware registration to add an error handler:
+
+```ts
 app.use("*", agentsMiddleware({ onError: (error) => console.error(error) }));
+```
 
-// With custom routing
+### Custom routing
+
+Replace the basic middleware registration to customize routing:
+
+```ts
 app.use(
   "*",
   agentsMiddleware({
@@ -60,8 +81,6 @@ app.use(
     }
   })
 );
-
-export default app;
 ```
 
 ## Configuration
