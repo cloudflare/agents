@@ -26,13 +26,13 @@ interface Harness {
 
 - **Unified (not two types, no branch).** The default step-harness and a
   foreign harness satisfy the SAME interface. The distinction between them is
-  BEHAVIORAL — commit *granularity* — not STRUCTURAL. There is no
+  BEHAVIORAL — commit _granularity_ — not STRUCTURAL. There is no
   `if (foreign)` path and no different injected surface. This supersedes ADR
   0001's phrasing that the seam is "which sub-modules you receive."
 
 - **Fresh per wake (A1).** A parked turn holds NO in-memory state; every wake
   is a new `drive()`. The harness rehydrates from `deps.view`. It is not told
-  *why* it woke — the log is the snapshot. The harness reads the tail (latest
+  _why_ it woke — the log is the snapshot. The harness reads the tail (latest
   `turn/marker`), `openClaims()` (what it was waiting on), and the newest
   correlated entry (the trigger). A harness needing an idiosyncratic wake
   signal writes its own private pass-through entry and reads it back — no new
@@ -53,11 +53,11 @@ interface Harness {
 
 ```ts
 interface TurnDeps {
-  readonly turn: TurnInfo;                       // identity, not situation
-  readonly view: LogView;                        // read tail/openClaims + getBlob
+  readonly turn: TurnInfo; // identity, not situation
+  readonly view: LogView; // read tail/openClaims + getBlob
   commit(entries: readonly NewEntry[]): Promise<readonly EntryRef[]>; // + putBlob pairing
-  write(chunk: Json): void;                       // live streaming
-  readonly tools: ToolRuntime;                    // governed; BYO is additive/ungoverned
+  write(chunk: Json): void; // live streaming
+  readonly tools: ToolRuntime; // governed; BYO is additive/ungoverned
   readonly signal: AbortSignal;
 }
 ```
@@ -87,8 +87,10 @@ interface TurnDeps {
 
 ```ts
 function stepHarness(config: {
-  loop: AgentLoop; model: LanguageModel;
-  context: ContextAssembler; policy: LoopPolicy;
+  loop: AgentLoop;
+  model: LanguageModel;
+  context: ContextAssembler;
+  policy: LoopPolicy;
 }): Harness;
 ```
 

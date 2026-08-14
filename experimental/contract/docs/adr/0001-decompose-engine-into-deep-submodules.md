@@ -11,7 +11,7 @@ an 11-method god-interface that was both a noun and a behavioral service.
 
 ## Decision
 
-Separate the *thing* from the *service that operates on it*, and decompose the
+Separate the _thing_ from the _service that operates on it_, and decompose the
 service into deep sub-modules related by dependency rather than one wide
 interface:
 

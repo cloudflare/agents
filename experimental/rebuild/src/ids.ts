@@ -15,8 +15,6 @@ import type {
   TurnId
 } from "./contract.js";
 
-declare const globalThis: { crypto: { randomUUID(): string } };
-
 export function uuid(): string {
   return globalThis.crypto.randomUUID();
 }

@@ -17,9 +17,34 @@ demo model adapters. Tests run under `node --test` against Node's built-in
 cd experimental/rebuild
 pnpm install   # or npm install when working outside the workspace
 pnpm test      # tsc -p . && node --test dist/rebuild/tests/*.test.js
+pnpm demo      # start an interactive, composable terminal agent
 ```
 
-24 tests, all passing: engine unit tests, demo-module tests (append idempotency, bounded query,
+The interactive demo runs the full local stack: terminal channel → admission →
+runtime → harness → model → SQLite-backed log → outbox. Every demo seam can be
+swapped independently:
+
+```bash
+pnpm demo --model eliza --context librarian --admission bouncer --loop debater
+pnpm demo --model ai-sdk --provider ./my-provider.mjs --context compactor --loop planner
+pnpm demo --help
+```
+
+Provider-backed choices have no local fallback: `ai-sdk`, `workers-ai`, and
+`workers-ai-sdk` require `--provider` and crash if it cannot supply the selected
+model or binding. A ready-to-run Codex subscription provider is included:
+
+```bash
+codex login
+pnpm demo --model ai-sdk --provider ./my-ai-sdk-model.mjs
+```
+
+It invokes Codex in a read-only sandbox, disables Codex's own MCP servers, and
+leaves tools and effects to this runtime. Tollbooth approvals are resolved with
+`/approve <call-id>` or `/reject <call-id>`. Type `/quit` or press Ctrl-D to
+exit.
+
+28 tests, all passing: engine unit tests, demo-module tests (append idempotency, bounded query,
 claim/settle, consumer redelivery, fork lineage, blobs), the happy-path e2e,
 queueing, and the durability suite — crash mid-turn with zero duplicated
 effects across two hosts, crash-after-answer with no regeneration, approval
@@ -70,7 +95,7 @@ host and starting another over the same database is a faithful crash test.
 - **The ledger confines the two-generals gap.** The mutating tool in the crash
   test executes exactly once across two host processes because re-execution
   hits `already-settled` and replays the recorded result.
-- **Parked turns hold no memory.** Both park tests resume on a *different*
+- **Parked turns hold no memory.** Both park tests resume on a _different_
   host than the one that parked. Approval, pending effects, and
   auto-continuation are all the same mechanism: a correlated entry landing at
   admission.

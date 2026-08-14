@@ -1,8 +1,31 @@
 # contract — domain interfaces for the composable rebuild (v0)
 
-TypeScript interfaces only. No implementation, no dependencies, no package.json
-(deliberately not a workspace member). Typecheck with
-`npx tsc -p experimental/contract`.
+This package contains TypeScript interfaces only. It has no runtime code or
+third-party dependencies; its minimal `package.json` makes it a private
+workspace member so the repository toolchain can discover it.
+
+The working implementation is the sibling
+[`experimental/rebuild`](../rebuild/) package. It contains the engine, runtime
+host, default harness and loop, model adapters, demo strategies, and 24 tests.
+Its runtime dependencies (`ai` and `workers-ai-provider`) are declared in that
+package, not here.
+
+From the repository root:
+
+```bash
+pnpm install
+pnpm --filter @cloudflare/agents-rebuild-experiment test
+```
+
+The test command compiles both the implementation and these contracts, then
+runs the implementation's test suite. To typecheck only these interfaces:
+
+```bash
+pnpm exec tsc -p experimental/contract
+```
+
+See the [implementation README](../rebuild/README.md) for its architecture,
+layout, durability guarantees, and known limitations.
 
 Background: [design/think-capability-inventory.md](../../design/think-capability-inventory.md)
 and [design/rfc-composable-rebuild.md](../../design/rfc-composable-rebuild.md).
@@ -55,13 +78,13 @@ A robust engine does not make durability disappear; it makes durability
 someone else's job exactly once. What remains for component implementers is
 five declarations/disciplines, each pinned to a type:
 
-| Residue | Where it lives in the contract |
-| --- | --- |
-| 1. Last-mile effects (two generals) | `EffectDeclaration` on `ToolDescriptor`; `DeliveryContract` on `OutboundSpec` |
-| 2. At-least-once handlers | `attempt` fields on `ReconcileContext`, `DeliveryContext`, `RunInfo`; discipline notes on `AgentLoop.step`, `AdmissionPolicy.decide` |
-| 3. External resource lifecycles | `Resource` (ensure/health/dispose), carried by `ToolProvider.resources` |
-| 4. Policy is domain knowledge | `RetryPolicy`, `LoopPolicy`, `AdmissionPolicy` — declarations the runtime enforces |
-| 5. Entry schemas are forever | `Versioned` envelope; namespaced kinds; tolerant-reader rule in kernel.ts |
+| Residue                             | Where it lives in the contract                                                                                                       |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Last-mile effects (two generals) | `EffectDeclaration` on `ToolDescriptor`; `DeliveryContract` on `OutboundSpec`                                                        |
+| 2. At-least-once handlers           | `attempt` fields on `ReconcileContext`, `DeliveryContext`, `RunInfo`; discipline notes on `AgentLoop.step`, `AdmissionPolicy.decide` |
+| 3. External resource lifecycles     | `Resource` (ensure/health/dispose), carried by `ToolProvider.resources`                                                              |
+| 4. Policy is domain knowledge       | `RetryPolicy`, `LoopPolicy`, `AdmissionPolicy` — declarations the runtime enforces                                                   |
+| 5. Entry schemas are forever        | `Versioned` envelope; namespaced kinds; tolerant-reader rule in kernel.ts                                                            |
 
 Plus the boundary: realtime media never rides the log (`RealtimeSession`).
 

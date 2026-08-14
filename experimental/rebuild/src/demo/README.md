@@ -31,8 +31,38 @@ mutating / pending).
 
 ## Running
 
-Deterministic modules are covered by `tests/demo.test.ts` (mock model, local
-sqlite). `models/ai-sdk.ts` compiles against the real `ai` package but is
-not exercised locally — hand `aiSdkModel(...)` a real provider model in a
-deployed worker. There is deliberately no fallback: broken until a real
-provider is wired, by design.
+From `experimental/rebuild`, start an interactive terminal conversation:
+
+```bash
+pnpm demo
+pnpm demo --context librarian --admission bouncer --loop debater
+pnpm demo --context compactor --admission priority \
+  --middleware tollbooth --loop planner
+pnpm demo --help
+```
+
+The flags swap strategies independently, so every module above can run through
+the same in-memory SQLite-backed stack. The bouncer requires "please" in user
+messages. Tollbooth requests print their call ID; resolve one with
+`/approve <call-id>` or `/reject <call-id>`.
+
+ELIZA runs with no configuration. The provider-backed model routes deliberately
+have no local fallback:
+
+```bash
+pnpm demo --model ai-sdk --provider ./my-ai-sdk-model.mjs
+pnpm demo --model workers-ai --provider ./my-ai-binding.mjs
+pnpm demo --model workers-ai-sdk --provider ./my-ai-binding.mjs
+```
+
+An AI SDK provider module exports its model as `default` or `model`; a Workers
+AI module exports its binding as `default` or `binding`. The included
+`my-ai-sdk-model.mjs` uses the ChatGPT subscription authenticated by
+`codex login`:
+
+```bash
+pnpm demo --model ai-sdk --provider ./my-ai-sdk-model.mjs
+```
+
+Missing or invalid providers crash at startup. Relative paths resolve from the
+current directory. Type `/quit` or press Ctrl-D to exit.

@@ -6,10 +6,12 @@
   "version": "0.0.0",
   "scripts": {
     "build": "tsc -p .",
+    "demo": "tsc -p . && node dist/rebuild/src/demo/interactive.js",
     "test": "tsc -p . && node --test dist/rebuild/tests/*.test.js"
   },
   "dependencies": {
     "ai": "^7.0.0",
+    "ai-sdk-provider-codex-cli": "^2.1.2",
     "workers-ai-provider": "^4.0.0"
   },
   "devDependencies": {

@@ -1,10 +1,7 @@
 {
   "compilerOptions": {
     "target": "es2022",
-    "lib": [
-      "es2022",
-      "dom"
-    ],
+    "lib": ["es2022", "dom"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "rootDir": "..",
@@ -16,13 +13,7 @@
     "skipLibCheck": true,
     "declaration": false,
     "sourceMap": false,
-    "types": [
-      "node"
-    ]
+    "types": ["node"]
   },
-  "include": [
-    "src",
-    "tests",
-    "../contract/src"
-  ]
+  "include": ["src", "tests", "../contract/src"]
 }

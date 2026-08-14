@@ -50,6 +50,7 @@ One shared type used by BOTH channel outboxes and tool effects, answering the
 same question in the same words: is repeating this last-mile action safe? The
 engine always runs handlers at-least-once (residue 2), so every last-mile
 actor declares whether that is safe.
+
 - `at-least-once`: repeating is safe. HOW it stays safe is the actor's own
   business — rely on natural idempotency, or thread a dedupe key (the
   channel's `ctx.dedupeKey`, or a tool effect's optional `key(input)`). The
@@ -58,10 +59,10 @@ actor declares whether that is safe.
   so the engine acts once and never retries after failure. For a tool effect
   this is the "none" case — the reconciler surfaces ambiguity rather than
   silently re-executing.
-_Avoid_: DeliveryContract (too channel-specific — a tool effect does not
-"deliver"; RetryContract fits both), DeliveryGuarantee, dedupe-key /
-idempotent-receiver / natural / keyed as separate enum variants (collapsed —
-those differ only in the actor's own implementation, not engine behavior).
+  _Avoid_: DeliveryContract (too channel-specific — a tool effect does not
+  "deliver"; RetryContract fits both), DeliveryGuarantee, dedupe-key /
+  idempotent-receiver / natural / keyed as separate enum variants (collapsed —
+  those differ only in the actor's own implementation, not engine behavior).
 
 An Outbox declares its RetryContract (above); the engine honors it.
 
@@ -89,12 +90,13 @@ is free to take the human word). At most one open step per branch. Turn-level
 and step-level status words deliberately RHYME (`parked`/`completed`/`failed`
 appear at both levels — a turn is parked because its current step parked).
 
-**Quiescence** (a TURN property — distinct from *settled*):
+**Quiescence** (a TURN property — distinct from _settled_):
 The state a turn reaches when it is no longer actively stepping. Two flavors:
+
 - TERMINAL quiescence: `completed` or `failed` — the turn is over.
 - SUSPENDED quiescence: `parked` — the turn is alive and sleeping, resumable
   when a correlated entry arrives.
-Admission's `queue` holds new work "until the active turn reaches quiescence."
+  Admission's `queue` holds new work "until the active turn reaches quiescence."
 
 NOT the same as **settled**, which is an EFFECT property (a single Ledger claim
 reaching a terminal `SettleOutcome`). Different levels: settled = one external
@@ -141,6 +143,7 @@ An entry that can cause a turn to start or resume. `triggers` pre-filters the
 log down to trigger candidates so everything else is cheaply ignored.
 
 **AdmissionDecision** — the six verbs, each a decision about turns:
+
 - `start`: a fresh request arrives and nothing is running → begin a new turn.
 - `resume`: the thing a parked turn was waiting for lands (tool result,
   approval verdict, sub-agent completion) → wake that turn. THIS is the
@@ -154,8 +157,8 @@ log down to trigger candidates so everything else is cheaply ignored.
   turn and start over with the new entry.
 - `ignore`: not a trigger (the agent's own bookkeeping entries) → no turn
   implications.
-_Avoid_: `continue` for the resume case (collides with `loop`'s StepOutcome
-`continue`, which means "take another step"; a parked turn is *resumed*).
+  _Avoid_: `continue` for the resume case (collides with `loop`'s StepOutcome
+  `continue`, which means "take another step"; a parked turn is _resumed_).
 
 ### Context (what the model sees)
 
@@ -289,17 +292,19 @@ layer).
 The durability facts a tool declares so the runtime can run claim/settle
 generically. A wrong declaration is the one durability bug the framework cannot
 catch (residue 1 as a declaration). Fields:
+
 - `effect`: `"readonly" | "mutating"` — the one bit the runtime needs: does
   this change the world (claim first) or not (replay-safe, no claim)? A union
   of two, not a boolean, so a third can be added later. Collapses the old
   `pure`/`read`/`write`: pure and read were identical to the runtime.
 - a RetryContract (only meaningful when `mutating`) + optional `key(input)`.
-_Avoid_: `clazz` (keyword-dodge for a field that was never really a "class");
-`pure`/`read`/`write` as three durability values.
+  _Avoid_: `clazz` (keyword-dodge for a field that was never really a "class");
+  `pure`/`read`/`write` as three durability values.
 
 **ToolExecutionResult** (provider-side: `completed` | `pending` | `failed`):
 What `ToolProvider.execute()` returns — the RAW result BEFORE the runtime
 resolves it. The provider has no concept of settle.
+
 - `completed`: answer is ready now (`getWeather` → `{temp:72}`).
 - `pending`: the effect outlives this call; a correlated entry will settle it
   later (spawn a subagent, start a workflow, a long tool). Tool-out /
@@ -312,6 +317,7 @@ approval + claim + settle ran. Sits in the package's `-Outcome` family
 (SettleOutcome, ReconcileOutcome). The result/outcome pairing is the teaching
 distinction: a `Result` is the provider's raw return; an `Outcome` is the
 runtime's resolved verdict.
+
 - `settled`: the effect reached a terminal outcome — success OR error, both
   carried by `result: SettleOutcome`. There is no separate success member;
   by the time the runtime returns, every terminal result has been settled.
@@ -321,10 +327,10 @@ runtime's resolved verdict.
 - `pending`: claim recorded, effect in flight → the loop PARKS.
 - `awaiting-approval`: approval gate tripped → the loop PARKS until the verdict
   entry lands.
-_Avoid_: GatedToolResult (undersells — implies only the approval gate, not
-claim/settle/replay), ToolExecutionRuntimeResult (too long); `completed` +
-`settled` as separate members (collapsed — the loop treats them identically;
-fresh-vs-replay is the `attempt` count, not a member); `replayed: boolean`.
+  _Avoid_: GatedToolResult (undersells — implies only the approval gate, not
+  claim/settle/replay), ToolExecutionRuntimeResult (too long); `completed` +
+  `settled` as separate members (collapsed — the loop treats them identically;
+  fresh-vs-replay is the `attempt` count, not a member); `replayed: boolean`.
 
 **Approval** (`ApprovalRequirement` / `ApprovalDescriptor`, modes
 `always` | `never`):
@@ -358,7 +364,7 @@ a different injected surface, never an `if (foreign)` branch).
 
 Called FRESH per wake (A1): a parked turn holds NO in-memory state, so every
 wake is a new `drive()`; the harness rehydrates from `deps.view`. It is not
-handed *why* it woke — the log is the snapshot: the harness reads the tail
+handed _why_ it woke — the log is the snapshot: the harness reads the tail
 (latest `turn/marker`), `openClaims()` (what it was waiting on), and the newest
 correlated entry (the trigger that settles it). A harness needing an
 idiosyncratic wake signal writes its own private pass-through entry and reads
@@ -384,6 +390,7 @@ with the transcript "engine"). Faint "test harness" connotation is tolerable;
 **TurnDeps** (the injected surface for one `drive()`):
 The purpose-built, deliberately NARROWED surface a harness is handed to drive
 one turn/one wake — NOT the full Engine. Members:
+
 - `turn: TurnInfo` — identity (which turn/branch), not situation (why is in
   the log).
 - `view: LogView` — read the tail / correlated entries to rehydrate; also
@@ -403,15 +410,15 @@ one turn/one wake — NOT the full Engine. Members:
   UNGOVERNED; runtime tools are the encouraged default, so the durable path is
   the easy path.
 - `signal: AbortSignal` — preempt/cancel.
-Deliberately EXCLUDED (kept behind the runtime/substrate): `fork`, `consumer`
-registration, `reconciler` registration, raw un-committed `append`, and the
-Ledger's WRITE half (claim/settle is reachable ONLY through `ToolRuntime` — a
-harness cannot half-use the ledger; its own effects are the ungoverned ones by
-definition). The ledger READ (`openClaims`) is on TurnDeps per ADR 0004.
-_Avoid_: passing the whole `Engine` (violates "receive only the sub-modules you
-need"); a `trigger`/`resumeEntry` parameter (the trigger is the newest
-correlated entry on `view` — the log is the snapshot); `StepHandle` in the
-shared surface (default-harness-internal, see Step below).
+  Deliberately EXCLUDED (kept behind the runtime/substrate): `fork`, `consumer`
+  registration, `reconciler` registration, raw un-committed `append`, and the
+  Ledger's WRITE half (claim/settle is reachable ONLY through `ToolRuntime` — a
+  harness cannot half-use the ledger; its own effects are the ungoverned ones by
+  definition). The ledger READ (`openClaims`) is on TurnDeps per ADR 0004.
+  _Avoid_: passing the whole `Engine` (violates "receive only the sub-modules you
+  need"); a `trigger`/`resumeEntry` parameter (the trigger is the newest
+  correlated entry on `view` — the log is the snapshot); `StepHandle` in the
+  shared surface (default-harness-internal, see Step below).
 
 **AgentLoop** / **step**:
 The step-strategy the DEFAULT harness consumes — one step of "what to do next":
@@ -424,13 +431,14 @@ StepDeps.
 
 **Step** (DEFAULT-harness-internal commit unit) and its outcomes (`continue` |
 `completed` | `parked` | `failed`):
-A `Step` (and its `StepHandle`: open → `write`* → commit-with-marker) is the
+A `Step` (and its `StepHandle`: open → `write`\* → commit-with-marker) is the
 DEFAULT harness's way of using the shared `TurnDeps.commit`/`write` primitives
 — NOT part of the Harness seam. It bundles the default harness's own rules
 (single-open-step-per-branch invariant, `turn/marker` stamping). A foreign
 harness has no Step at all — it commits at its own granularity through the same
 `commit`. One step = one `AgentLoop.step()` the default harness commits
 atomically. Outcomes:
+
 - `continue`: committed; drive the next step. (Distinct from admission's
   `resume` — continue = keep looping; resume = wake a sleeper. This is why
   admission's verb was renamed.)
@@ -442,7 +450,7 @@ atomically. Outcomes:
   turns, and auto-continuation all at once. New at the turn level — the
   higher-level sibling of a tool's `pending`.
 - `failed`: retryable per policy (transient model error, stall).
-_Avoid_: `done` (use `completed`).
+  _Avoid_: `done` (use `completed`).
 
 **StepDeps** (= `TurnDeps` ⊕ the default harness's brain):
 The composed world one step operates in. It is exactly `TurnDeps` (`view`,
@@ -497,6 +505,7 @@ clients (context assemblers, reconcilers, every harness's rehydrate) receive.
 Holding an Engine where a LogView suffices is a design bug. Surface:
 `branch`, `head()`, `get(id)`, `getBlob(ref)` (reading bulk is part of
 reading), and ONE read primitive `query(q: Query): Promise<readonly Entry[]>`.
+
 - Results are ALWAYS NEWEST-FIRST — there is no direction knob. "Latest entry
   of kind X" (the self-resume requirement) is just `{ kinds:[X], limit:1 }`;
   the performance-critical query is the simplest query. Chronological
@@ -505,9 +514,9 @@ reading), and ONE read primitive `query(q: Query): Promise<readonly Entry[]>`.
 - Returns a finite ARRAY, not an AsyncIterable — because bounded-always (see
   Query). No streaming/backpressure on the normal surface; unbounded
   traversal is a separate deliberate escape hatch (LogExport, below).
-_Avoid_: TranscriptView; a `read()` AsyncIterable (bounded reads return
-arrays); baking `latest`/`after`/`until`/`filter` as first-class METHODS
-(access patterns are Query values, not methods).
+  _Avoid_: TranscriptView; a `read()` AsyncIterable (bounded reads return
+  arrays); baking `latest`/`after`/`until`/`filter` as first-class METHODS
+  (access patterns are Query values, not methods).
 
 **Query** (the value LogView.query interprets):
 A closed struct of INDEXABLE dimensions — NOT an open predicate — so every
@@ -517,6 +526,7 @@ access patterns are new field combinations, not new methods. Fields (all
 optional): `kinds?` (namespaced), `correlation?`, `turn?`, `after?` (seq floor,
 EXCLUSIVE — the resume cursor), `before?` (seq ceiling, exclusive), `limit?`
 (count cap, newest-first).
+
 - BOUNDEDNESS INVARIANT: at least one of `{after, before, limit}` must be
   present. A fully-unbounded query (none of them — "the whole branch") is
   rejected at runtime. `limit` is OPTIONAL, not required: "everything since the
@@ -533,10 +543,10 @@ EXCLUSIVE — the resume cursor), `before?` (seq ceiling, exclusive), `limit?`
   `between(after, before)`, `latest(kind, n?)`, `window({...})`. The named
   access patterns we enumerated become the readable interface; Query stays the
   closed representation.
-_Avoid_: an open predicate `(entry) => boolean` (un-indexable — the trap that
-makes a Query value shallow); a `direction` field (newest-first always);
-`originModule` (no reader needed it — re-add as a field if one appears, which
-is exactly what a closed struct makes cheap).
+  _Avoid_: an open predicate `(entry) => boolean` (un-indexable — the trap that
+  makes a Query value shallow); a `direction` field (newest-first always);
+  `originModule` (no reader needed it — re-add as a field if one appears, which
+  is exactly what a closed struct makes cheap).
 
 **LogExport** (`scan(branch, from?): AsyncIterable<Entry>`):
 The DELIBERATE full-branch traversal for export / debug / migration ONLY —
@@ -568,6 +578,7 @@ The double-entry effect record: every world-changing effect gets a CLAIM entry
 before the action and a SETTLE entry after. This is how the two-generals
 problem is contained — not eliminated (impossible), but confined to exactly one
 state: an open claim that has not settled. A deep sub-module depending on Log.
+
 - **ClaimKey**: the stable identity of an effect, recomputed identically on
   replay (from callId, or `key(input)` for keyed effects). Same key ⇒ same
   effect, so replay can ask "already claimed?".
@@ -588,13 +599,14 @@ state: an open claim that has not settled. A deep sub-module depending on Log.
 - Reconciliation is the Ledger's LIVENESS half (not a peer module — a
   reconciler only ever acts on open Ledger claims). It guarantees no claim
   stays open forever — the fix for the "eternal spinner."
-_Avoid_: naming the ledger part of "Transcript"; action-log.
+  _Avoid_: naming the ledger part of "Transcript"; action-log.
 
 **Reconciler**:
 The named, pluggable handler the Ledger drives to resolve a stale open claim
 to a terminal outcome (uncertain → certain). Registered under a STABLE name
 that is persisted with the claim and must survive deploys (the name is the
 durable contract; the code is re-registered each wake). Carries a RetryPolicy.
+
 - **ReconcileOutcome** (`retry` | `settle` | `wait`): `settle` = I determined
   the outcome, close it. `retry` and `wait` both re-invoke the handler later
   (the Ledger cannot execute effects — re-execution happens inside handle());
@@ -607,7 +619,7 @@ durable contract; the code is re-registered each wake). Carries a RetryPolicy.
 - Unifies the async patterns: a `pending` tool / subagent / workflow / HITL
   approval is just an open claim awaiting a correlated settle, with the
   reconciler as backstop. Hence "not subsystems."
-_Avoid_: ReconcilerSpec ("Spec" is filler); ReconcileContext (→ ReconcileDeps).
+  _Avoid_: ReconcilerSpec ("Spec" is filler); ReconcileContext (→ ReconcileDeps).
 
 **ReconcileDeps**:
 The bag a reconciler's `handle()` receives (the open `claim` entry, `attempt`
@@ -615,6 +627,7 @@ count, `policy`, and a `LogView`). `Deps`, not `Context`.
 _Avoid_: ReconcileContext.
 
 **DurableConsumer / Blobs** (other Engine sub-modules):
+
 - **DurableConsumer** (`pull`/`ack`): the at-least-once delivery cursor — the
   outbox engine, generalizing every outbox (workflow notices, channel
   delivery, client replay).
@@ -639,6 +652,7 @@ hand the runtime, Agent is what runs), AgentSpec, AgentConfig (undersells — it
 is composed implementations, not config).
 
 **Two tiers of an AgentDefinition** (the Harness re-partition):
+
 - SUBSTRATE — true under ANY harness, governed by the runtime + Ledger:
   - `channels` (world → log → world) and `tools` (agent → world → agent) are
     PEERS: the two governed world-boundaries around the agent. Channels are
@@ -650,12 +664,12 @@ is composed implementations, not config).
 - HARNESS-INTERNAL — how a SPECIFIC harness thinks; moves INSIDE the harness:
   `model` (LanguageModel), `context` (ContextAssembler), `loop` (AgentLoop),
   `policy` (LoopPolicy), `failureNotice`. The default `stepHarness({ model,
-  context, loop, policy, failureNotice })` takes exactly these; a foreign
+context, loop, policy, failureNotice })` takes exactly these; a foreign
   harness constructor takes whatever IT needs.
-Mental model: channels and tools are the substrate's two world-boundaries; the
-harness is the thinking in the middle. A foreign harness calling tools
-out-of-band is an ungoverned side-effect — possible, but off the reservation,
-not a first-class field.
+  Mental model: channels and tools are the substrate's two world-boundaries; the
+  harness is the thinking in the middle. A foreign harness calling tools
+  out-of-band is an ungoverned side-effect — possible, but off the reservation,
+  not a first-class field.
 
 **Deleted from AgentDefinition**: `compaction?` (compaction is one
 ContextAssembler impl, not a top-level concern — a compacting agent just
@@ -665,10 +679,11 @@ supplies a `context` that compacts).
 
 **Realtime / streaming story** — UNRESOLVED, revisit before implementation.
 Two separable concerns live under "realtime":
+
 1. Streaming the ordinary loop (model token deltas to a live client) — already
    first-class via the live-step buffer (`LiveChunk` / tail chunks /
    `StepHandle.write` in the engine). Not an afterthought.
-2. Bidirectional live *media* (voice, screen share) where frames flow both
+2. Bidirectional live _media_ (voice, screen share) where frames flow both
    ways and only semantic outcomes get logged — currently modelled as
    `RealtimeSession`, an escape hatch that bypasses the log. Christopher is
    unsure this should be an escape hatch at all; streaming/realtime is meant to
@@ -687,6 +702,7 @@ way."
 This relocates the seam. It is not a `LanguageModel` variant (a foreign harness
 executes its own tools and manages its own steps); it is closer to a LOOP
 substitution:
+
 - Native loop: implement `AgentLoop.step()`; the engine owns the commit
   boundary, claims/settles every effect, durability is ours (full residues).
 - Foreign loop (harness adapter): hand us an opaque harness that runs to
@@ -745,6 +761,7 @@ moved to Ledger, `LogExport.scan` as the separate oldest-first full-traversal
 escape hatch. Satisfies read-slice + self-resume (`latest(kind,1)`).
 
 **Blobs lifecycle** — RESOLVED: it is NOT a lifecycle, it is a store.
+
 - NO GC / refcounting. A blob's lifetime = the LOG's lifetime; deleting a
   branch/log deletes its blobs. Per-blob collection against an append-only,
   forkable, replayable log is a distributed-refcounting problem with replay
@@ -756,7 +773,7 @@ escape hatch. Satisfies read-slice + self-resume (`latest(kind,1)`).
 - NO quota type in the contract. Any size limit is a log-level or platform
   (R2/DO) policy, not something the blob store models.
 - Streaming (`putBlob(ReadableStream | Uint8Array)`, `getBlob() =>
-  ReadableStream`) is about MEMORY-BOUNDEDNESS, not lifecycle: a large blob is
+ReadableStream`) is about MEMORY-BOUNDEDNESS, not lifecycle: a large blob is
   streamed to/from R2 so it never fully materializes in Workers memory. Keep
   the `ReadableStream` shape — it is the correct primitive.
 - Surface placement (settled at Harness): `getBlob` on `LogView` (reading bulk
@@ -776,18 +793,18 @@ engine-served overlay is no longer needed.
 
 Files walked and approved together, file-by-file.
 
-| File | Reviewed | Notes |
-| --- | --- | --- |
-| `src/resource.ts` | 2026-08-13 | `Resource` → `ExternalResource`; health states kept. |
-| `src/channel.ts` | 2026-08-13 | `ChannelAdapter`→`Channel`, `InboundGateway`→`Inbox`, `OutboundSpec`→`Outbox`; `DeliveryContract` collapsed to `at-least-once`/`at-most-once`. `RealtimeSession` deferred (see open questions). |
-| `src/admission.ts` | 2026-08-13 | `Admission`/`AdmissionPolicy` kept; decision `continue`→`resume`; other verbs kept. "Run" concept introduced informally (formalized with kernel/transcript). |
-| `src/model.ts` | 2026-08-13 | `ModelPort`→`LanguageModel` (+ `Model*`→`LanguageModel*` prefix); `ModelStepOutput`→`LanguageModelOutput`; `classifyError`/`ErrorKind` kept. Composite/provider-loop "escape hatch" — later RETIRED (never a desired thing; Harness supersedes it). Kept only the adapter internal-loop safety boundary: `generate()` may loop internally but must perform no mutating effects. |
-| `src/context.ts` | 2026-08-13 | `ContextAssembler`/"context"/`assemble` KEPT (context = what the model sees). Compaction trio REMOVED from contract (it is one assembler impl using private entries). `...Context` bags flagged for rename. `transcript.ts` review must reconsider `CompactionPayload` + `ReadOptions.compacted` and add read-slice/self-resume. |
-| `src/tools.ts` | 2026-08-13 | `ToolProvider`/`ToolMiddleware`/`ToolRuntime` kept; capability ruled out-of-domain. `EffectDeclaration.clazz`→`effect: readonly\|mutating`; idempotency collapsed into shared `RetryContract` (`at-least-once`\|`at-most-once`) used by BOTH tools and channels. `GatedToolResult`→`ToolOutcome` (3 members; success/error both `settled`; `attempt` count not `replayed`). `ToolExecutionResult` (provider) kept. `ToolExecutionContext`→`ToolExecutionDeps`. |
-| `src/loop.ts` | 2026-08-13 | Introduced **`Harness`** as the run-driving seam (ships default, BYO peer; owns durability); `AgentLoop`/`step` kept but demoted to the default harness's step-strategy. `StepOutcome.done`→`completed`; `parked` documented; `continue` kept (collision resolved via admission `resume`). `StepContext`→`StepDeps`. `LoopPolicy`/`RunFailureNotice` kept. Reshapes `AgentDefinition.loop` — confirm at `agent.ts`. |
-| `src/transcript.ts` | 2026-08-13 | Split `Transcript` into **`Log`** (data) + **`Engine`** (service) + **`LogView`** (read view). Engine decomposed into deep sub-modules — see ADR 0001. Taught claim/settle + reconciliation; named the **`Ledger`** (claim/settle + its liveness half) and **`Reconciler`** (`ReconcilerSpec`→`Reconciler`, `ReconcileContext`→`ReconcileDeps`). `Entry`/`Part`/`DurableConsumer`/`StepHandle`/blobs kept. `CompactionPayload` + `ReadOptions.compacted` marked for deletion. LogView query surface deferred. |
-| `src/loop.ts` (design) | 2026-08-13 | **Harness type designed** — see ADR 0002. `drive(deps: TurnDeps): Promise<void>`, unified interface, fresh per wake (A1), leaves log quiescent via marker. `TurnDeps` = `turn`/`view`/`commit`/`write`/`tools`/`signal` (narrowed; `Ledger`/`Blobs`/`StepHandle`/Engine excluded). `Step`/`StepHandle`→default-harness-internal; `StepDeps = TurnDeps ⊕ {model,context,loop}`. `Quiescence` return type dropped (void). |
-| `src/transcript.ts` (design) | 2026-08-13 | **LogView query surface designed** — see ADR 0003. One `query(q: Query)` primitive over a closed indexable struct (`kinds`/`correlation`/`turn`/`after`/`before`/`limit`), newest-first-always, bounded-always (≥1 of `{after,before,limit}`), array results, constructors (`since`/`between`/`latest`/`window`). `openClaims`→`Ledger`. `LogExport.scan` oldest-first escape hatch. Unblocks compaction-awareness deletion. |
-| `src/kernel.ts` | 2026-08-13 | **`Run`→`Turn`** everywhere (schemas-are-forever rename, full blast radius listed under Turn). Formalized `Turn`/`Step`/`quiescence` (quiescence sharpened: terminal vs suspended; distinct from effect-level `settled`). `Versioned`/tolerant-reader rule and `RetryPolicy` documented. `Brand`/`Json`/`JSONSchema`/`Seq`/`Backoff`/`TokenBudget`/`EntryRef`/id-brands kept (foundational). |
-| `src/agent.ts` | 2026-08-13 | `AgentDefinition` kept (`Agent` reserved for the running thing). Field renames: `ChannelAdapter`→`Channel`, `ModelPort`→`LanguageModel`, `RunFailureNotice`→`TurnFailureNotice`, `ReconcilerSpec`→`Reconciler`. `compaction?` DELETED. Two-tier re-partition: substrate (`channels`, `tools`, `admission`, `reconcilers`) vs harness-internal (`model`/`context`/`loop`/`policy`/`failureNotice` move inside `stepHarness({...})`). `channels` and `tools` are peer world-boundaries. |
-| ADR 0004 amendments | 2026-08-13 | Post-implementation pass from `experimental/rebuild` findings: `openClaims` onto `TurnDeps` (read half only); `Role` gains `tool`; `Steps`/`StepHandle` deleted; claims born correlated + `openClaimByCorrelation`; approval mode `policy` removed (middleware's job); `retry` vs `wait` clarified as budgetary. Open findings not amended: `TurnStatus` lacks `queued`; merge-is-free semantics. |
+| File                         | Reviewed   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/resource.ts`            | 2026-08-13 | `Resource` → `ExternalResource`; health states kept.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `src/channel.ts`             | 2026-08-13 | `ChannelAdapter`→`Channel`, `InboundGateway`→`Inbox`, `OutboundSpec`→`Outbox`; `DeliveryContract` collapsed to `at-least-once`/`at-most-once`. `RealtimeSession` deferred (see open questions).                                                                                                                                                                                                                                                                                                               |
+| `src/admission.ts`           | 2026-08-13 | `Admission`/`AdmissionPolicy` kept; decision `continue`→`resume`; other verbs kept. "Run" concept introduced informally (formalized with kernel/transcript).                                                                                                                                                                                                                                                                                                                                                  |
+| `src/model.ts`               | 2026-08-13 | `ModelPort`→`LanguageModel` (+ `Model*`→`LanguageModel*` prefix); `ModelStepOutput`→`LanguageModelOutput`; `classifyError`/`ErrorKind` kept. Composite/provider-loop "escape hatch" — later RETIRED (never a desired thing; Harness supersedes it). Kept only the adapter internal-loop safety boundary: `generate()` may loop internally but must perform no mutating effects.                                                                                                                               |
+| `src/context.ts`             | 2026-08-13 | `ContextAssembler`/"context"/`assemble` KEPT (context = what the model sees). Compaction trio REMOVED from contract (it is one assembler impl using private entries). `...Context` bags flagged for rename. `transcript.ts` review must reconsider `CompactionPayload` + `ReadOptions.compacted` and add read-slice/self-resume.                                                                                                                                                                              |
+| `src/tools.ts`               | 2026-08-13 | `ToolProvider`/`ToolMiddleware`/`ToolRuntime` kept; capability ruled out-of-domain. `EffectDeclaration.clazz`→`effect: readonly\|mutating`; idempotency collapsed into shared `RetryContract` (`at-least-once`\|`at-most-once`) used by BOTH tools and channels. `GatedToolResult`→`ToolOutcome` (3 members; success/error both `settled`; `attempt` count not `replayed`). `ToolExecutionResult` (provider) kept. `ToolExecutionContext`→`ToolExecutionDeps`.                                                |
+| `src/loop.ts`                | 2026-08-13 | Introduced **`Harness`** as the run-driving seam (ships default, BYO peer; owns durability); `AgentLoop`/`step` kept but demoted to the default harness's step-strategy. `StepOutcome.done`→`completed`; `parked` documented; `continue` kept (collision resolved via admission `resume`). `StepContext`→`StepDeps`. `LoopPolicy`/`RunFailureNotice` kept. Reshapes `AgentDefinition.loop` — confirm at `agent.ts`.                                                                                           |
+| `src/transcript.ts`          | 2026-08-13 | Split `Transcript` into **`Log`** (data) + **`Engine`** (service) + **`LogView`** (read view). Engine decomposed into deep sub-modules — see ADR 0001. Taught claim/settle + reconciliation; named the **`Ledger`** (claim/settle + its liveness half) and **`Reconciler`** (`ReconcilerSpec`→`Reconciler`, `ReconcileContext`→`ReconcileDeps`). `Entry`/`Part`/`DurableConsumer`/`StepHandle`/blobs kept. `CompactionPayload` + `ReadOptions.compacted` marked for deletion. LogView query surface deferred. |
+| `src/loop.ts` (design)       | 2026-08-13 | **Harness type designed** — see ADR 0002. `drive(deps: TurnDeps): Promise<void>`, unified interface, fresh per wake (A1), leaves log quiescent via marker. `TurnDeps` = `turn`/`view`/`commit`/`write`/`tools`/`signal` (narrowed; `Ledger`/`Blobs`/`StepHandle`/Engine excluded). `Step`/`StepHandle`→default-harness-internal; `StepDeps = TurnDeps ⊕ {model,context,loop}`. `Quiescence` return type dropped (void).                                                                                       |
+| `src/transcript.ts` (design) | 2026-08-13 | **LogView query surface designed** — see ADR 0003. One `query(q: Query)` primitive over a closed indexable struct (`kinds`/`correlation`/`turn`/`after`/`before`/`limit`), newest-first-always, bounded-always (≥1 of `{after,before,limit}`), array results, constructors (`since`/`between`/`latest`/`window`). `openClaims`→`Ledger`. `LogExport.scan` oldest-first escape hatch. Unblocks compaction-awareness deletion.                                                                                  |
+| `src/kernel.ts`              | 2026-08-13 | **`Run`→`Turn`** everywhere (schemas-are-forever rename, full blast radius listed under Turn). Formalized `Turn`/`Step`/`quiescence` (quiescence sharpened: terminal vs suspended; distinct from effect-level `settled`). `Versioned`/tolerant-reader rule and `RetryPolicy` documented. `Brand`/`Json`/`JSONSchema`/`Seq`/`Backoff`/`TokenBudget`/`EntryRef`/id-brands kept (foundational).                                                                                                                  |
+| `src/agent.ts`               | 2026-08-13 | `AgentDefinition` kept (`Agent` reserved for the running thing). Field renames: `ChannelAdapter`→`Channel`, `ModelPort`→`LanguageModel`, `RunFailureNotice`→`TurnFailureNotice`, `ReconcilerSpec`→`Reconciler`. `compaction?` DELETED. Two-tier re-partition: substrate (`channels`, `tools`, `admission`, `reconcilers`) vs harness-internal (`model`/`context`/`loop`/`policy`/`failureNotice` move inside `stepHarness({...})`). `channels` and `tools` are peer world-boundaries.                         |
+| ADR 0004 amendments          | 2026-08-13 | Post-implementation pass from `experimental/rebuild` findings: `openClaims` onto `TurnDeps` (read half only); `Role` gains `tool`; `Steps`/`StepHandle` deleted; claims born correlated + `openClaimByCorrelation`; approval mode `policy` removed (middleware's job); `retry` vs `wait` clarified as budgetary. Open findings not amended: `TurnStatus` lacks `queued`; merge-is-free semantics.                                                                                                             |

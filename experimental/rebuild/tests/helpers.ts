@@ -3,7 +3,6 @@
  * SqlStorage adapter's twin), and a standard test agent assembly.
  */
 
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
   AgentDefinition,
   Json,
@@ -11,50 +10,14 @@ import type {
   ToolMiddleware,
   ToolProvider
 } from "../src/contract.js";
-import type { SqlDatabase, SqlRow } from "../src/substrate.js";
+import { nodeSqliteDb } from "../src/adapters/node-sqlite.js";
 import { defaultAdmission } from "../src/admission/default.js";
 import { windowAssembler } from "../src/context/window-assembler.js";
 import { defaultLoop } from "../src/harness/default-loop.js";
 import { stepHarness } from "../src/harness/step-harness.js";
 import { localChannel, type LocalChannel } from "../src/channels/local.js";
 
-export function sqliteDb(): SqlDatabase & { raw: DatabaseSync } {
-  const raw = new DatabaseSync(":memory:");
-  let txDepth = 0;
-  return {
-    raw,
-    exec(query: string, ...bindings: ReadonlyArray<unknown>): SqlRow[] {
-      if (/^\s*(CREATE|DROP|BEGIN|COMMIT|ROLLBACK)/i.test(query)) {
-        raw.exec(query);
-        return [];
-      }
-      // The seam types bindings as unknown (DO SqlStorage is looser than
-      // node:sqlite); narrowing happens here, at the adapter.
-      const params = bindings as SQLInputValue[];
-      const stmt = raw.prepare(query);
-      if (/^\s*SELECT/i.test(query)) {
-        return stmt.all(...params) as SqlRow[];
-      }
-      stmt.run(...params);
-      return [];
-    },
-    transaction<T>(fn: () => T): T {
-      if (txDepth > 0) return fn(); // join outer transaction
-      raw.exec("BEGIN");
-      txDepth += 1;
-      try {
-        const result = fn();
-        raw.exec("COMMIT");
-        return result;
-      } catch (error) {
-        raw.exec("ROLLBACK");
-        throw error;
-      } finally {
-        txDepth -= 1;
-      }
-    }
-  };
-}
+export const sqliteDb = nodeSqliteDb;
 
 /** A readonly adding tool plus a mutating side-effect tool with a counter. */
 export function testProviders(): {

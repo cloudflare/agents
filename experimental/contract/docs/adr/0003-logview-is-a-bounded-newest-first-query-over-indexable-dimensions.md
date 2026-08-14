@@ -17,7 +17,7 @@ two requirements that pull against each other:
   compacting assembler needs so a heavily-compacted conversation never forces
   an O(full log) read. (Removing engine compaction-awareness depends on this.)
 
-The tension: a `Query`-value surface is only *deep* if the store can execute
+The tension: a `Query`-value surface is only _deep_ if the store can execute
 every expressible query from an index; the classic failure is a query object
 that degrades to "scan everything and filter in memory."
 
@@ -38,8 +38,8 @@ interface Query {
   readonly kinds?: readonly string[];
   readonly correlation?: CorrelationId;
   readonly turn?: TurnId;
-  readonly after?: Seq;   // seq floor, exclusive — the resume cursor
-  readonly before?: Seq;  // seq ceiling, exclusive
+  readonly after?: Seq; // seq floor, exclusive — the resume cursor
+  readonly before?: Seq; // seq ceiling, exclusive
   readonly limit?: number; // count cap, newest-first
   // INVARIANT: at least one of {after, before, limit} present.
 }
