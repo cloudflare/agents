@@ -129,6 +129,9 @@ const loopChoice = choice("loop", values.loop, [
 ]);
 const dbPath = values.db ?? ":memory:";
 
+/** Set when the provider module exports one; awaited during shutdown. */
+let closeProvider: (() => Promise<void>) | undefined;
+
 const model = await createModel(modelChoice, values.provider);
 let loop: AgentLoop =
   loopChoice === "planner"
@@ -213,6 +216,9 @@ try {
 }
 await agent.stop();
 db.close();
+// A provider holding a connection or child process (the Codex app server)
+// would otherwise keep the event loop alive forever.
+await closeProvider?.();
 
 async function printReplay(view: LogView): Promise<void> {
   const dim = (s: string) => (stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
@@ -256,7 +262,11 @@ async function createModel(
     readonly default?: unknown;
     readonly model?: unknown;
     readonly binding?: unknown;
+    readonly close?: () => Promise<void>;
   };
+  // Optional teardown: a provider owning a socket or child process exports
+  // close(), and the runner awaits it last. Without it the process hangs.
+  closeProvider = imported.close;
   if (selected === "ai-sdk") {
     const candidate = imported.default ?? imported.model;
     if (candidate === undefined) {

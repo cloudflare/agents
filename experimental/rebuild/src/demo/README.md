@@ -81,13 +81,19 @@ pnpm demo --model workers-ai-sdk --provider ./my-ai-binding.mjs
 ```
 
 An AI SDK provider module exports its model as `default` or `model`; a Workers
-AI module exports its binding as `default` or `binding`. The included
-`my-ai-sdk-model.mjs` uses the ChatGPT subscription authenticated by
-`codex login`:
+AI module exports its binding as `default` or `binding`. A module owning a
+socket or child process may also export `close()`, which the runner awaits
+last — without it the process cannot exit.
 
-```bash
-pnpm demo --model ai-sdk --provider ./my-ai-sdk-model.mjs
-```
+The included `my-ai-sdk-model.mjs` uses the ChatGPT subscription authenticated
+by `codex login`. It goes through Codex's **app-server** transport rather than
+`codexExec`, and the difference is visible: `codex exec` returns its answer as
+one blob, so the AI SDK emits a single text-delta at the end and nothing
+streams; the app server holds a JSON-RPC connection open and forwards token
+deltas as they arrive. If a provider looks like it "doesn't stream", check
+this first — the seam faithfully streams whatever the provider gives it.
+Codex also ignores tool definitions, so tool-driven strategies (tollbooth
+approvals, the oracle) stay quiet with it.
 
 Missing or invalid providers crash at startup. Relative paths resolve from the
 current directory. Type `/quit` or press Ctrl-D to exit.
