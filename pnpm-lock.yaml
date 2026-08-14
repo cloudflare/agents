@@ -3850,6 +3850,9 @@ importers:
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
+      itty-time:
+        specifier: 2.0.1
+        version: 2.0.1
       mimetext:
         specifier: ^3.0.28
         version: 3.0.28
@@ -9405,6 +9408,9 @@ packages:
     resolution: {integrity: sha512-I1fSfDCZL5P0v33sVqeTDSpcstAg/N+wF5HS033mogOVIp4B+oHC7oOCsA3axAbBSGTJ8QubbNmnIRN/h8U7hg==}
     peerDependencies:
       ws: '*'
+
+  itty-time@2.0.1:
+    resolution: {integrity: sha512-p612bgdK5YKgsg0nm8Wx4nYipHphdR+LD5yfDbIJOEEtkdrQyUcVDHlAkGmazCU4GaGx/6RhGrvucfOXifwxog==}
 
   jackspeak@4.2.3:
     resolution: {integrity: sha512-ykkVRwrYvFm1nb2AJfKKYPr0emF6IiXDYUaFx4Zn9ZuIH7MrzEZ3sD5RlqGXNRpHtvUHJyOnCEFxOlNDtGo7wg==}
@@ -17506,6 +17512,8 @@ snapshots:
   isows@1.0.7(ws@8.20.1):
     dependencies:
       ws: 8.20.1
+
+  itty-time@2.0.1: {}
 
   jackspeak@4.2.3:
     dependencies:

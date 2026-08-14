@@ -163,6 +163,18 @@ describe("workflow operations", () => {
       expect(state?.errorRetentionSeconds).toBe(120);
     });
 
+    it("uses the Workflows duration parser for calendar units", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-year");
+      const workflowId = "wf-cleanup-year";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: "1 year"
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(365.25 * 24 * 60 * 60);
+    });
+
     it("uses the 30-day fallback for an omitted outcome", async () => {
       const agentStub = await getTestAgent("workflow-cleanup-partial");
       const workflowId = "wf-cleanup-partial";

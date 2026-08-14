@@ -1,9 +1,6 @@
-const DEFAULT_TRACKING_RETENTION_SECONDS = 30 * 24 * 60 * 60;
+import { ms } from "itty-time";
 
-// Keep this parser aligned with Workerd's WorkflowRetentionDuration type.
-// Workerd does not export the binding's duration normalizer, while Agent
-// tracking needs the equivalent duration to derive its local cleanup time.
-// https://github.com/cloudflare/workerd/blob/main/types/defines/workflows.d.ts
+const DEFAULT_TRACKING_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 
 type WorkflowRetention = NonNullable<
   WorkflowInstanceCreateOptions["retention"]
@@ -12,38 +9,12 @@ type WorkflowRetentionDuration = NonNullable<
   WorkflowRetention["successRetention"]
 >;
 
-const UNIT_SECONDS = {
-  second: 1,
-  minute: 60,
-  hour: 60 * 60,
-  day: 24 * 60 * 60,
-  week: 7 * 24 * 60 * 60,
-  month: 30 * 24 * 60 * 60,
-  year: 365 * 24 * 60 * 60
-} as const;
-
 function retentionSeconds(duration: WorkflowRetentionDuration): number {
-  if (typeof duration === "number") {
-    if (!Number.isFinite(duration) || duration < 0) {
-      throw new Error(`Invalid Workflow retention duration: ${duration}`);
-    }
-    return Math.ceil(duration / 1000);
-  }
-
-  const match = duration.match(
-    /^(.+) (second|minute|hour|day|week|month|year)s?$/
-  );
-  if (!match) {
+  const durationMs = ms(duration);
+  if (!Number.isFinite(durationMs)) {
     throw new Error(`Invalid Workflow retention duration: ${duration}`);
   }
-
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount) || amount < 0) {
-    throw new Error(`Invalid Workflow retention duration: ${duration}`);
-  }
-
-  const unit = match[2] as keyof typeof UNIT_SECONDS;
-  return Math.ceil(amount * UNIT_SECONDS[unit]);
+  return Math.ceil(durationMs / 1000);
 }
 
 export function normalizeWorkflowRetention(
