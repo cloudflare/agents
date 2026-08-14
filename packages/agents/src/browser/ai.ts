@@ -219,6 +219,11 @@ function redactBase64Payloads(value: unknown): unknown {
     if (++nodes > MAX_REDACTION_NODES) return "[remaining values omitted]";
     if (typeof current === "string") return base64Redaction(current);
     if (typeof current !== "object" || current === null) return current;
+    // Binary values cross the sandbox boundary as Uint8Array/ArrayBuffer —
+    // walking them would rebuild them as index-keyed plain objects.
+    if (current instanceof ArrayBuffer || ArrayBuffer.isView(current)) {
+      return current;
+    }
     if (ancestors.has(current)) return "[circular reference omitted]";
 
     ancestors.add(current);
@@ -378,7 +383,9 @@ export function createBrowserRuntime(
     transformResult: transformBrowserResult
   });
 
-  const isKitesurf = options.session?.browser === "kitesurf";
+  // `connectorOptions` drops `session` when a custom endpoint is used, so the
+  // connector is plain Chromium there whatever the session options say.
+  const isKitesurf = !options.cdpUrl && options.session?.browser === "kitesurf";
   const browserExecute = runtime.tool({
     connectorHints: {
       cdp: isKitesurf
