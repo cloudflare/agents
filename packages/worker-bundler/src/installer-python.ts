@@ -29,7 +29,7 @@ const PYODIDE_VERSIONS_BY_COMPATIBILITY_DATE: Array<{
  * earliest mapped version.
  */
 export function getPyodideVersionForCompatibilityDate(
-  compatibilityDate: string | undefined
+  compatibilityDate: string
 ): string {
   const earliestVersion = PYODIDE_VERSIONS_BY_COMPATIBILITY_DATE[0]?.version;
 
@@ -134,7 +134,7 @@ export async function installDependenciesPython(
   depsToInstall.push("workers-runtime-sdk");
 
   const pyodideVersion = getPyodideVersionForCompatibilityDate(
-    options["compatibilityDate"]
+    options["compatibilityDate"]!
   );
 
   if (!pyodideLockfile) {
