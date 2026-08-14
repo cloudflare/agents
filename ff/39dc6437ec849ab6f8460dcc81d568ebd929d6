@@ -1,0 +1,31 @@
+packages/agents/src/tests/agents/workflow.ts
+  s_334a9720165218::t_ed1466f365a438 367,387,395-403,408
+.changeset/workflow-tracking-retention.md
+  s_334a9720165218::t_14283b07b3b764 5
+docs/agents/workflows.md
+  s_334a9720165218::t_4a7720d91bc986 556,562-565
+packages/agents/src/index.ts
+  s_334a9720165218::t_98a127083aa153 1140-1142,1144-1145,2159-2161,2166,2169,2172,6087-6099,6807-6810,6815,6818
+packages/agents/src/tests/schema-and-state-optimization.test.ts
+  s_334a9720165218::t_ba3d0f70344c77 106-108
+packages/agents/src/tests/workflow.test.ts
+  s_334a9720165218::t_c081e13cac65dd 194,210,212,217-231
+packages/agents/src/workflow-retention.ts
+  s_334a9720165218::t_9de3b0b89e2d3e 3-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ff39dc6437ec849ab6f8460dcc81d568ebd929d6",
+  "prompts": {},
+  "sessions": {
+    "s_334a9720165218": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff785-6e3a-74a3-8075-1e70c27f4c27",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}
