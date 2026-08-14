@@ -196,7 +196,7 @@ Define tools with `needsApproval` to require human confirmation:
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createWorkersAI } from "workers-ai-provider";
-import { streamText, tool, convertToModelMessages } from "ai";
+import { streamText, tool, convertToModelMessages, stepCountIs } from "ai";
 import { z } from "zod";
 
 export class MyAgent extends AIChatAgent {
@@ -238,7 +238,7 @@ export class MyAgent extends AIChatAgent {
           execute: async ({ city }) => fetchWeather(city)
         })
       },
-      maxSteps: 5
+      stopWhen: stepCountIs(5)
     });
 
     return result.toUIMessageStreamResponse();
@@ -380,7 +380,7 @@ export class MyAgent extends AIChatAgent {
           inputSchema: z.object({})
         })
       },
-      maxSteps: 3
+      stopWhen: stepCountIs(3)
     });
 
     return result.toUIMessageStreamResponse();
@@ -410,17 +410,18 @@ const { messages, sendMessage } = useAgentChat({
 });
 ```
 
-The server receives the tool output via `CF_AGENT_TOOL_RESULT` and can auto-continue the conversation (with `maxSteps > 1`), letting the LLM respond to the location data in the same turn.
+The server receives the tool output via `CF_AGENT_TOOL_RESULT` and can auto-continue the conversation when `stopWhen` allows another step, letting the LLM respond to the location data in the same turn.
 
 ### OpenAI Agents SDK Pattern
 
 When using the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/), use the `needsApproval` function for conditional approval:
 
 ```typescript
-import { Agent } from "agents";
-import { tool, run } from "@openai/agents";
+import { Agent as CloudflareAgent } from "agents";
+import { Agent as OpenAIAgent, tool, run } from "@openai/agents";
+import { z } from "zod";
 
-export class WeatherAgent extends Agent<Env, AgentState> {
+export class WeatherAgent extends CloudflareAgent<Env> {
   async processQuery(query: string) {
     const weatherTool = tool({
       name: "get_weather",
@@ -438,13 +439,13 @@ export class WeatherAgent extends Agent<Env, AgentState> {
       }
     });
 
-    const result = await run(this.openai, {
-      model: "gpt-4o",
-      tools: [weatherTool],
-      input: query
+    const openaiAgent = new OpenAIAgent({
+      name: "Weather assistant",
+      instructions: "Help the user check the weather.",
+      tools: [weatherTool]
     });
 
-    return result;
+    return run(openaiAgent, query);
   }
 }
 ```
