@@ -75,6 +75,21 @@ host and starting another over the same database is a faithful crash test.
   auto-continuation are all the same mechanism: a correlated entry landing at
   admission.
 
+## Demo modules
+
+`src/demo/` holds ten strategies across five seams — one practical and one
+wacky per seam, each a single readable file — plus `presets.ts`, three
+complete agents that share no strategy but run on identical machinery. See
+`src/demo/README.md` for the tour. The AI SDK adapter typechecks against
+`vendor/node_modules/ai` (nested so the workspace glob ignores it; run
+`npm install` in `vendor/` after a fresh clone) and deliberately has no
+local runtime or fallback.
+
+Building the demo caught a real ToolRuntime bug: the catalog was assembled
+from raw providers, so middleware descriptor rewrites (the ADR 0004
+conditional-approval mechanism) never took effect. The runtime now serves
+the composed catalog.
+
 ## Contract findings (friction discovered while implementing)
 
 > **Status:** findings 1, 2, 4, 5, 6 and 7 were resolved by contract ADR 0004

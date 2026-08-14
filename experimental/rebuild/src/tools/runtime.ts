@@ -90,30 +90,34 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
   const reconcileAfterMs = opts.reconcileAfterMs ?? 30_000;
   const retry = opts.retry ?? DEFAULT_RETRY;
 
-  // Compose middleware outermost-first over a dispatching provider.
+  // Compose middleware outermost-first over a dispatching provider. The
+  // catalog the runtime acts on is the COMPOSED one — middleware descriptor
+  // rewrites (approval gating, pricing) are part of the effective contract,
+  // not decoration.
   const providersByTool = new Map<string, ToolProvider>();
-  const catalogCache = new Map<string, ToolDescriptor>();
+  const rawCatalogCache = new Map<string, ToolDescriptor>();
+  let composedCatalogCache: Map<string, ToolDescriptor> | null = null;
 
-  async function buildCatalog(): Promise<readonly ToolDescriptor[]> {
-    if (catalogCache.size === 0) {
+  async function rawCatalog(): Promise<readonly ToolDescriptor[]> {
+    if (rawCatalogCache.size === 0) {
       for (const provider of opts.providers) {
         for (const descriptor of await provider.catalog()) {
-          if (catalogCache.has(descriptor.name)) {
+          if (rawCatalogCache.has(descriptor.name)) {
             throw new Error(`duplicate tool name in catalog: ${descriptor.name}`);
           }
-          catalogCache.set(descriptor.name, descriptor);
+          rawCatalogCache.set(descriptor.name, descriptor);
           providersByTool.set(descriptor.name, provider);
         }
       }
     }
-    return [...catalogCache.values()];
+    return [...rawCatalogCache.values()];
   }
 
   const dispatcher: ToolProvider = {
     name: "dispatch",
-    catalog: buildCatalog,
+    catalog: rawCatalog,
     async execute(call, deps) {
-      await buildCatalog();
+      await rawCatalog();
       const provider = providersByTool.get(call.name);
       if (provider === undefined) {
         return {
@@ -131,9 +135,18 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
     dispatcher
   );
 
+  async function buildCatalog(): Promise<readonly ToolDescriptor[]> {
+    if (composedCatalogCache === null) {
+      composedCatalogCache = new Map(
+        (await composed.catalog()).map((d) => [d.name, d])
+      );
+    }
+    return [...composedCatalogCache.values()];
+  }
+
   async function descriptorFor(name: string): Promise<ToolDescriptor | undefined> {
     await buildCatalog();
-    return catalogCache.get(name);
+    return composedCatalogCache?.get(name);
   }
 
   /** Look for an approval verdict correlated with this call on the log. */

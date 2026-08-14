@@ -15,7 +15,14 @@
     "declaration": false,
     "sourceMap": false,
     "types": [],
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "baseUrl": ".",
+    "paths": {
+      "ai": [
+        "vendor/node_modules/ai"
+      ]
+    },
+    "skipLibCheck": true
   },
   "include": [
     "src",

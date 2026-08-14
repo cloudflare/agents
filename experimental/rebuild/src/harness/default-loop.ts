@@ -153,7 +153,7 @@ function classifyResume(
   return { kind: "unresolved-tools", calls: unresolved };
 }
 
-async function executeCalls(
+export async function executeCalls(
   deps: StepDeps,
   calls: readonly ToolCallPart[]
 ): Promise<StepOutcome> {
