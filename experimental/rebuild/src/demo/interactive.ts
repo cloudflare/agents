@@ -14,17 +14,13 @@
  * scan re-drive it on the next start.
  */
 
-import { resolve } from "node:path";
 import { stdout } from "node:process";
-import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import type { LanguageModel as AiSdkLanguageModel } from "ai";
 import type {
   AdmissionPolicy,
   AgentDefinition,
   AgentLoop,
   ContextAssembler,
-  LanguageModel,
   LogView,
   MessagePayload,
   Part,
@@ -34,10 +30,6 @@ import { nodeSqliteDb } from "../adapters/node-sqlite.js";
 import { defaultAdmission } from "../admission/default.js";
 import { defaultLoop } from "../harness/default-loop.js";
 import { stepHarness } from "../harness/step-harness.js";
-import {
-  WorkersAiLanguageModel,
-  type AiBinding
-} from "../models/workers-ai.js";
 import { startAgent } from "../runtime/host.js";
 import { bouncer } from "./admission/bouncer.js";
 import { priorityLanes } from "./admission/priority.js";
@@ -48,17 +40,14 @@ import { rollingWindow } from "./context/window.js";
 import { debater } from "./loops/debater.js";
 import { planner } from "./loops/planner.js";
 import { tollbooth } from "./middleware/tollbooth.js";
-import { aiSdkModel } from "./models/ai-sdk.js";
+import { aiGateway } from "./models/ai-gateway.js";
 import { eliza } from "./models/eliza.js";
-import { workersAiViaAiSdk } from "./models/workers-ai-via-ai-sdk.js";
 import { demoTools } from "./tools.js";
 
 const HELP = `Usage: pnpm demo [options]
 
 Swap strategies independently at their composition seams:
-  --model eliza|ai-sdk|workers-ai|workers-ai-sdk
-                                      LanguageModel (default: eliza)
-  --provider <module>                 Provider model or binding module
+  --model eliza|ai-sdk                LanguageModel (default: eliza)
   --context window|compactor|librarian
   --admission default|priority|bouncer
   --middleware none|tollbooth
@@ -67,10 +56,10 @@ Swap strategies independently at their composition seams:
                                       (default: in-memory, gone on exit)
   --help
 
-For ai-sdk, the provider module exports an AI SDK LanguageModel as default or
-"model". For either Workers AI route, it exports an AI binding as default or
-"binding". Relative paths resolve from the current directory. No provider
-fallback is installed: a missing or broken provider crashes at startup.
+--model ai-sdk goes through Cloudflare AI Gateway and needs a gateway token in
+AI_GATEWAY_API_KEY (or AI_GATEWAY_KEY). Point it at another vendor with
+AI_GATEWAY_SLUG / AI_GATEWAY_MODEL. There is deliberately no fallback: without
+a token it crashes at startup rather than quietly degrading.
 
 While running:
   /approve [call-id]   grant the newest (or the named) approval request
@@ -86,7 +75,6 @@ Call ids accept any unique prefix.
 const { values } = parseArgs({
   options: {
     model: { type: "string", default: "eliza" },
-    provider: { type: "string" },
     context: { type: "string", default: "window" },
     admission: { type: "string", default: "default" },
     middleware: { type: "string", default: "none" },
@@ -102,12 +90,7 @@ if (values.help === true) {
   process.exit(0);
 }
 
-const modelChoice = choice("model", values.model, [
-  "eliza",
-  "ai-sdk",
-  "workers-ai",
-  "workers-ai-sdk"
-]);
+const modelChoice = choice("model", values.model, ["eliza", "ai-sdk"]);
 const contextChoice = choice("context", values.context, [
   "window",
   "compactor",
@@ -129,10 +112,7 @@ const loopChoice = choice("loop", values.loop, [
 ]);
 const dbPath = values.db ?? ":memory:";
 
-/** Set when the provider module exports one; awaited during shutdown. */
-let closeProvider: (() => Promise<void>) | undefined;
-
-const model = await createModel(modelChoice, values.provider);
+const model = modelChoice === "eliza" ? eliza() : aiGateway();
 let loop: AgentLoop =
   loopChoice === "planner"
     ? planner()
@@ -216,9 +196,6 @@ try {
 }
 await agent.stop();
 db.close();
-// A provider holding a connection or child process (the Codex app server)
-// would otherwise keep the event loop alive forever.
-await closeProvider?.();
 
 async function printReplay(view: LogView): Promise<void> {
   const dim = (s: string) => (stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
@@ -244,45 +221,4 @@ function choice<const T extends string>(
 ): T {
   if (value !== undefined && allowed.includes(value as T)) return value as T;
   throw new Error(`invalid --${flag}: ${value}; expected ${allowed.join("|")}`);
-}
-
-async function createModel(
-  selected: "eliza" | "ai-sdk" | "workers-ai" | "workers-ai-sdk",
-  provider: string | undefined
-): Promise<LanguageModel> {
-  if (selected === "eliza") return eliza();
-  if (provider === undefined) {
-    throw new Error(`--model ${selected} requires --provider <module>`);
-  }
-  const specifier =
-    provider.startsWith(".") || provider.startsWith("/")
-      ? pathToFileURL(resolve(provider)).href
-      : provider;
-  const imported = (await import(specifier)) as {
-    readonly default?: unknown;
-    readonly model?: unknown;
-    readonly binding?: unknown;
-    readonly close?: () => Promise<void>;
-  };
-  // Optional teardown: a provider owning a socket or child process exports
-  // close(), and the runner awaits it last. Without it the process hangs.
-  closeProvider = imported.close;
-  if (selected === "ai-sdk") {
-    const candidate = imported.default ?? imported.model;
-    if (candidate === undefined) {
-      throw new Error(
-        `${provider} must export an AI SDK model as default or model`
-      );
-    }
-    return aiSdkModel(candidate as AiSdkLanguageModel);
-  }
-  const binding = imported.default ?? imported.binding;
-  if (binding === undefined) {
-    throw new Error(
-      `${provider} must export a Workers AI binding as default or binding`
-    );
-  }
-  return selected === "workers-ai"
-    ? new WorkersAiLanguageModel(binding as AiBinding)
-    : workersAiViaAiSdk(binding as AiBinding);
 }

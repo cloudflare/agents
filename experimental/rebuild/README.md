@@ -26,25 +26,24 @@ swapped independently:
 
 ```bash
 pnpm demo --model eliza --context librarian --admission bouncer --loop debater
-pnpm demo --model ai-sdk --provider ./my-provider.mjs --context compactor --loop planner
+pnpm demo --model ai-sdk --context compactor --loop planner
 pnpm demo --help
 ```
 
-Provider-backed choices have no local fallback: `ai-sdk`, `workers-ai`, and
-`workers-ai-sdk` require `--provider` and crash if it cannot supply the selected
-model or binding. A ready-to-run Codex subscription provider is included:
+`--model ai-sdk` is a real model with no local fallback: it goes through
+Cloudflare AI Gateway (`src/demo/models/ai-gateway.ts`) and needs a gateway
+token in `AI_GATEWAY_API_KEY` (or `AI_GATEWAY_KEY`), crashing at startup
+without one. Nothing else to configure — it streams and calls tools:
 
 ```bash
-codex login
-pnpm demo --model ai-sdk --provider ./my-ai-sdk-model.mjs
+pnpm demo --model ai-sdk --middleware tollbooth
 ```
 
-It invokes Codex in a read-only sandbox, disables Codex's own MCP servers, and
-leaves tools and effects to this runtime. Tollbooth approvals are resolved with
-`/approve <call-id>` or `/reject <call-id>`. Type `/quit` or press Ctrl-D to
-exit.
+Tollbooth approvals are resolved with `/approve` (bare, or with a call-id
+prefix) and pending effects with `/settle <call-id> <answer>`. Type `/quit` or
+press Ctrl-D to exit.
 
-28 tests, all passing: engine unit tests, demo-module tests (append idempotency, bounded query,
+31 tests, all passing: engine unit tests, demo-module tests (append idempotency, bounded query,
 claim/settle, consumer redelivery, fork lineage, blobs), the happy-path e2e,
 queueing, and the durability suite — crash mid-turn with zero duplicated
 effects across two hosts, crash-after-answer with no regeneration, approval
@@ -102,7 +101,7 @@ host and starting another over the same database is a faithful crash test.
 
 ## Demo modules
 
-`src/demo/` holds eleven strategies across six seams — one practical and one
+`src/demo/` holds twelve strategies across six seams — one practical and one
 wacky per seam, each a single readable file — plus `presets.ts`, three
 complete agents that share no strategy but run on identical machinery, and an
 interactive runner whose terminal is itself a Channel (input through the

@@ -1,4 +1,4 @@
-# demo — eleven strategies across six seams
+# demo — twelve strategies across six seams
 
 The demo _is the code_: each file is one module, small enough to read on a
 slide, focused on the pattern its seam supports. `presets.ts` is the payoff —
@@ -7,6 +7,7 @@ three complete agents that share no strategy yet run on identical machinery.
 | Seam               | Practical                                                                                                                                  | Wacky                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `LanguageModel`    | `models/ai-sdk.ts` — the whole AI SDK ecosystem as one adapter among peers                                                                 | `models/eliza.ts` — a 1966 therapist behind the same seam                            |
+| (runnable)         | `models/ai-gateway.ts` — Workers AI via AI Gateway over plain HTTPS; what `--model ai-sdk` actually uses                                   |                                                                                      |
 | (composition)      | `models/workers-ai-via-ai-sdk.ts` — the same env.AI binding through both routes: direct adapter or workers-ai-provider → AI SDK → our seam |                                                                                      |
 | `ContextAssembler` | `context/compactor.ts` — summaries as private pass-through entries; the engine never knows                                                 | `context/librarian.ts` — an assembler containing a second model that curates context |
 | (baseline)         | `context/window.ts` — a context strategy is ~25 lines                                                                                      |                                                                                      |
@@ -71,47 +72,45 @@ the recent conversation replays before the prompt; kill the process mid-turn
 and the next start's wake scan re-drives the interrupted turn — the durability
 suite, live at a terminal.
 
-ELIZA runs with no configuration. The provider-backed model routes deliberately
-have no local fallback:
+ELIZA runs with no configuration. `--model ai-sdk` is a real model:
+`models/ai-gateway.ts` reaches Workers AI through Cloudflare AI Gateway over
+plain HTTPS — no Workers runtime, no per-vendor key, nothing to pass on the
+command line. It needs only a gateway token in `AI_GATEWAY_API_KEY` (or
+`AI_GATEWAY_KEY`, the name the shared direnv `.envrc` uses), and every request
+carries the team's `cf-aig-metadata` project header. There is deliberately no
+fallback: without a token it crashes at startup rather than quietly degrading.
+
+This is the route that streams _and_ calls tools, so it is what brings the
+tool-driven strategies to life. Both durability rails are verified against it
+end to end:
 
 ```bash
-pnpm demo --model ai-sdk --provider ./my-ai-gateway-model.mjs   # recommended
-pnpm demo --model ai-sdk --provider ./my-ai-sdk-model.mjs
-pnpm demo --model workers-ai --provider ./my-ai-binding.mjs
-pnpm demo --model workers-ai-sdk --provider ./my-ai-binding.mjs
-```
-
-An AI SDK provider module exports its model as `default` or `model`; a Workers
-AI module exports its binding as `default` or `binding`. A module owning a
-socket or child process may also export `close()`, which the runner awaits
-last — without it the process cannot exit.
-
-**`my-ai-gateway-model.mjs` (recommended)** reaches Workers AI through
-Cloudflare AI Gateway over plain HTTPS — no Workers runtime, no per-provider
-key, just a gateway token in `AI_GATEWAY_API_KEY` (or `AI_GATEWAY_KEY`, the
-name direnv's shared `.envrc` uses). Put it in a git-ignored `.env` beside
-`package.json` — the `demo` script loads it with `--env-file-if-exists` — or
-export it. Every request carries the team's `cf-aig-metadata` project header.
-This is the route that streams _and_ calls tools, so it brings the tool-driven
-strategies to life; the tollbooth and oracle flows below are verified against
-it end to end:
-
-```bash
-echo 'AI_GATEWAY_API_KEY=…' > .env
-pnpm demo --model ai-sdk --provider ./my-ai-gateway-model.mjs \
-  --middleware tollbooth
+pnpm demo --model ai-sdk
 #   → · calling demo/roll_dice {"sides":20}
+#   → · demo/roll_dice → rolled a 11 (d20)
+#   → Agent> I rolled a 20-sided die for you and got **11**.
+
+pnpm demo --model ai-sdk --middleware tollbooth
 #   → Approval required — 402 Payment Required — demo/roll_dice costs 2 credits
 #   → /approve …  · demo/roll_dice → rolled a 19 (d20)  Agent> I rolled …
+
+pnpm demo --model ai-sdk        # then: ask the oracle something
+#   → Waiting on demo/consult_oracle — its answer arrives from outside.
+#   → /settle <id> the answer is 42  → · demo/consult_oracle → the answer is 42
 ```
 
 The gateway speaks an OpenAI-compatible protocol per provider slug, so the
-same file reaches other vendors: set `AI_GATEWAY_SLUG=grok` +
-`AI_GATEWAY_MODEL=grok-4.3`, or `AI_GATEWAY_SLUG=openai` +
-`AI_GATEWAY_MODEL=gpt-5.2`.
+same module reaches other vendors without code changes: set
+`AI_GATEWAY_SLUG=grok` + `AI_GATEWAY_MODEL=grok-4.3`, or
+`AI_GATEWAY_SLUG=openai` + `AI_GATEWAY_MODEL=gpt-5.2`.
 
-Three gateway quirks are handled inside that file, each verified rather than
-assumed — worth knowing if you write your own provider module:
+The two Workers AI adapters that need a real `env.AI` binding
+(`src/models/workers-ai.ts` and `models/workers-ai-via-ai-sdk.ts`) are not
+CLI-selectable, because a binding does not exist outside a deployed Worker.
+They stay as library modules for that setting.
+
+Three gateway quirks are handled inside `ai-gateway.ts`, each verified rather
+than assumed — worth knowing if you point the AI SDK at Workers AI yourself:
 
 - **Do not send an `Authorization` header.** The gateway forwards it verbatim
   to the vendor, where a placeholder key earns a 401. Gateway auth belongs in
@@ -126,15 +125,10 @@ assumed — worth knowing if you write your own provider module:
   `'string' not in 'null'`, which would break every turn after a tool call.
   The module rewrites it to `""` on the way out.
 
-**`my-ai-sdk-model.mjs`** uses the ChatGPT subscription authenticated by
-`codex login`. It goes through Codex's **app-server** transport rather than
-`codexExec`, and the difference is visible: `codex exec` returns its answer as
-one blob, so the AI SDK emits a single text-delta at the end and nothing
-streams; the app server holds a JSON-RPC connection open and forwards token
-deltas as they arrive. If a provider looks like it "doesn't stream", check
-this first — the seam faithfully streams whatever the provider gives it.
-Codex also ignores tool definitions, so tool-driven strategies (tollbooth
-approvals, the oracle) stay quiet with it.
+One lesson kept from an earlier Codex-backed route, since it will recur: if a
+model appears not to stream, suspect the provider transport before this code.
+`codex exec` returns its whole answer as one blob, so the AI SDK emitted a
+single text-delta at the very end and the terminal printed one line — the seam
+faithfully streams whatever the provider gives it, and no more.
 
-Missing or invalid providers crash at startup. Relative paths resolve from the
-current directory. Type `/quit` or press Ctrl-D to exit.
+Missing credentials crash at startup. Type `/quit` or press Ctrl-D to exit.

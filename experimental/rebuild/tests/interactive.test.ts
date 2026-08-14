@@ -9,10 +9,12 @@ const DEMO_ENTRYPOINT = "dist/rebuild/src/demo/interactive.js";
 
 async function runDemo(
   args: readonly string[],
-  input: string
+  input: string,
+  env?: NodeJS.ProcessEnv
 ): Promise<{ exitCode: number | null; output: string; errors: string }> {
   const child = spawn(process.execPath, [DEMO_ENTRYPOINT, ...args], {
-    stdio: ["pipe", "pipe", "pipe"]
+    stdio: ["pipe", "pipe", "pipe"],
+    ...(env !== undefined ? { env } : {})
   });
   let output = "";
   let errors = "";
@@ -95,8 +97,18 @@ test("the bouncer's silence is made visible", async () => {
   assert.match(result.output, /no turn was admitted/);
 });
 
-test("AI SDK selection crashes when no provider is supplied", async () => {
-  const result = await runDemo(["--model", "ai-sdk"], "");
+test("AI SDK selection crashes when no gateway token is present", async () => {
+  // No fallback model, by design: it fails loudly rather than degrading.
+  const env = { ...process.env };
+  delete env.AI_GATEWAY_API_KEY;
+  delete env.AI_GATEWAY_KEY;
+  const result = await runDemo(["--model", "ai-sdk"], "", env);
   assert.notEqual(result.exitCode, 0);
-  assert.match(result.errors, /requires --provider/);
+  assert.match(result.errors, /No gateway token/);
+});
+
+test("the removed --provider flag is rejected, not silently ignored", async () => {
+  const result = await runDemo(["--provider", "./whatever.mjs"], "");
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.errors, /Unknown option/);
 });
