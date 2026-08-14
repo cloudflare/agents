@@ -262,6 +262,29 @@ export class Assistant extends Think<Env> {
 }
 ```
 
+`inputSchema` accepts schemas supported by the AI SDK, including Zod, Standard
+JSON Schema-compatible schemas, raw JSON Schema through `jsonSchema()`, and
+schemas exposed through AI SDK adapters. For example, use `@ai-sdk/valibot` v2
+with AI SDK 6 or v3 with AI SDK 7:
+
+```typescript
+import { valibotSchema } from "@ai-sdk/valibot";
+import * as v from "valibot";
+
+const researchInput = valibotSchema(
+  v.object({ query: v.pipe(v.string(), v.minLength(3)) })
+);
+
+agentTool(Researcher, {
+  description: "Research one topic in depth.",
+  inputSchema: researchInput
+});
+```
+
+Tool inputs need model-facing JSON Schema in addition to runtime validation. A
+validation-only Standard Schema is therefore insufficient; use its Standard
+JSON Schema extension or an AI SDK adapter.
+
 For deterministic fan-out, call `this.runAgentTool(Researcher, { input })`
 directly. Parent recovery reconciles stale child rows after restarts and marks
 unrecoverable runs `interrupted` instead of hanging. In React, use

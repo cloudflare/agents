@@ -8,53 +8,48 @@ Works as both a **top-level agent** (WebSocket chat protocol for browser clients
 
 ## Quick start
 
+Create an explicit Worker entry:
+
 ```ts
 import { Think } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
+import { routeAgentRequest } from "agents";
 
 export class MyAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {
     return "You are a helpful coding assistant.";
   }
 }
+
+export default {
+  async fetch(request: Request, env: Env) {
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
+} satisfies ExportedHandler<Env>;
 ```
 
-That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/think/react`.
+Export the class from the Worker entry and configure its binding and migration:
 
-## Think framework
-
-The Think Vite plugin can generate the Worker entry, stable Durable Object
-exports, friendly route helpers, and inferred Worker config from an `agents/`
-directory:
-
-```ts
-import { cloudflare } from "@cloudflare/vite-plugin";
-import { think } from "@cloudflare/think/vite";
-import { defineConfig } from "vite";
-
-export default defineConfig({
-  plugins: [think(), cloudflare()]
-});
+```jsonc
+{
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [{ "class_name": "MyAgent", "name": "MyAgent" }]
+  },
+  "migrations": [{ "new_sqlite_classes": ["MyAgent"], "tag": "v1" }]
+}
 ```
 
-Use `main: "virtual:think/entry"` in framework projects. Top-level agents under
-`agents/` get generated Durable Object bindings and migrations; nested
-`agents/*/agents/*` entries are facet exports for `ctx.exports` and do not need
-production Wrangler bindings or migrations. Apps with auth or custom routing can
-add `src/server.ts`; the generated entry still wraps it and injects
-`think.router` for manifest-aware routing.
-
-The framework supports one sub-agent layer today. If you need nested sub-agents,
-please reach out with your use case so we can design that model deliberately.
-
-The published package includes the full Think documentation at
-`docs/index.md`.
+Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/think/react`.
 
 ## Messengers
 
@@ -82,9 +77,8 @@ export class SupportAgent extends Think<Env> {
 }
 ```
 
-The root Think agent handles the webhook route with this precedence: framework
-sub-agent routing, Think internal routes, messenger routes, then user
-`onRequest`. By default, `telegram` maps to
+The root Think agent handles the webhook route with this precedence: sub-agent
+routing, Think internal routes, messenger routes, then user `onRequest`. By default, `telegram` maps to
 `/messengers/telegram/webhook`, direct messages and mentions are routed to the
 agent, and new mentions subscribe the thread so later mentions in the same
 thread are still observed. Ordinary subscribed-thread messages and button
@@ -234,9 +228,22 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Bundled skills use the Agents Vite plugin. The `agents:skills` specifier
-resolves to a `./skills` directory next to the importing file; use
-`agents:skills/<dir>` for a differently named sibling directory:
+Bundled skills use the Agents Vite plugin. Register it alongside the Cloudflare
+plugin in `vite.config.ts`:
+
+```ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import agents from "agents/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [agents(), cloudflare()]
+});
+```
+
+The `agents:skills` specifier resolves to a `./skills` directory next to the
+importing file; use `agents:skills/<dir>` for a differently named sibling
+directory:
 
 ```ts
 import bundledSkills from "agents:skills";
@@ -318,8 +325,6 @@ Script execution requires a Worker Loader binding:
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
-| `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
@@ -327,7 +332,6 @@ Script execution requires a Worker Loader binding:
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
-| `@cloudflare/think/vite`                | Think Vite plugin and generated Worker config helpers         |
 
 ## Think
 
@@ -577,6 +581,8 @@ The AI SDK-derived contexts spread the SDK's own types at the top level — no i
 
 `TurnConfig.stopWhen` accepts AI SDK stop conditions such as `hasToolCall("finalAnswer")` for ending a turn early. Think composes these with its own `maxSteps` bound, so a custom condition can stop before the cap without removing the safety limit. Because stop conditions are functions, return `stopWhen` from a Think subclass's `beforeTurn`; sandboxed extension hooks cannot provide it over RPC.
 
+`TurnConfig.repairToolCall` repairs a complete tool call that the AI SDK cannot parse or validate. Return the original raw call with a corrected `input` JSON string, or `null` when it cannot be repaired. The AI SDK revalidates the returned call before Think's `beforeToolCall` hook and tool execution. Configure this function from a Think subclass; sandboxed extension hooks cannot provide it over RPC.
+
 `TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; the previous `experimental_telemetry` name remains as a deprecated alias. Trace payload storage is separately controlled by the agent fields `storeMessages` (chat messages) and `storeTools` (tool arguments/results); both default to `false`. Stored messages follow the OpenTelemetry GenAI schemas: `{ role, parts }`, `{ type, content }` for text/reasoning, `tool_call` / `tool_call_response` for tools, and `finish_reason` on model output.
 
 Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `onToolExecutionEnd`) with `toolExecutionMs` and `toolOutput`. Deprecated `durationMs` and `success`/`output`/`error` aliases remain for compatibility. `beforeToolCall` can return a `ToolCallDecision` to:
@@ -708,6 +714,7 @@ interface TurnConfig {
   timeout?: TimeoutConfiguration;
   headers?: Record<string, string | undefined>;
   providerOptions?: Record<string, unknown>;
+  repairToolCall?: ToolCallRepairFunction;
   telemetry?: TelemetrySettings;
   /** @deprecated Prefer telemetry. */
   experimental_telemetry?: TelemetrySettings;

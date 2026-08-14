@@ -8,7 +8,6 @@ packages:
   - "openai-sdk/*"
   - "site/*"
   - "wip/*"
-  - "think-starters/*"
 linkWorkspacePackages: true
 preferWorkspacePackages: true
 patchedDependencies:

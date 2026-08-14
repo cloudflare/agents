@@ -111,6 +111,7 @@ export type {
 /** Context passed to the `onTurn()` hook. */
 export interface VoiceTurnContext {
   connection: Connection;
+  /** Completed conversation history before the current transcript. */
   messages: Array<{ role: VoiceRole; content: string }>;
   signal: AbortSignal;
 }
@@ -728,6 +729,7 @@ export function withVoice<TBase extends AgentLike>(
 
       this.#sendJSON(connection, { type: "status", status: "thinking" });
 
+      const priorMessages = this.getConversationHistory();
       this.saveMessage("user", userText);
       this.#sendJSON(connection, {
         type: "transcript",
@@ -738,7 +740,7 @@ export function withVoice<TBase extends AgentLike>(
       try {
         const context: VoiceTurnContext = {
           connection,
-          messages: this.getConversationHistory(),
+          messages: priorMessages,
           signal
         };
 
@@ -840,6 +842,7 @@ export function withVoice<TBase extends AgentLike>(
           return;
         }
 
+        const priorMessages = this.getConversationHistory();
         this.saveMessage("user", userText);
         this.#sendJSON(connection, {
           type: "transcript",
@@ -851,7 +854,7 @@ export function withVoice<TBase extends AgentLike>(
 
         const context: VoiceTurnContext = {
           connection,
-          messages: this.getConversationHistory(),
+          messages: priorMessages,
           signal
         };
 

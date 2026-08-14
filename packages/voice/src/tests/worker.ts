@@ -3,6 +3,7 @@ import { routeAgentRequest } from "agents";
 export {
   TestVoiceAgent,
   TestEmptyResponseVoiceAgent,
+  TestContextVoiceAgent,
   TestAiSdkFullStreamVoiceAgent,
   TestAiSdkTextStreamVoiceAgent,
   TestPcm24kVoiceAgent
@@ -16,6 +17,7 @@ export {
 export type Env = {
   TestVoiceAgent: DurableObjectNamespace;
   TestEmptyResponseVoiceAgent: DurableObjectNamespace;
+  TestContextVoiceAgent: DurableObjectNamespace;
   TestAiSdkFullStreamVoiceAgent: DurableObjectNamespace;
   TestAiSdkTextStreamVoiceAgent: DurableObjectNamespace;
   TestPcm24kVoiceAgent: DurableObjectNamespace;

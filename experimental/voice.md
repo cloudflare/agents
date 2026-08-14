@@ -153,7 +153,7 @@ Browser                             VoiceAgent (Durable Object)
 2. When the client detects 500 ms of silence, it sends `end_of_speech`.
 3. The agent runs server-side VAD (`smart-turn-v2`) to confirm the user actually finished speaking.
 4. STT transcribes the audio to text.
-5. `onTurn()` is called with the transcript and conversation history.
+5. `onTurn()` is called with the transcript and completed prior conversation history.
 6. If `onTurn()` returns an `AsyncIterable<string>` (streaming), the pipeline chunks the token stream into sentences and synthesizes TTS concurrently — the user hears the first sentence while the LLM is still generating.
 7. If `onTurn()` returns a plain `string`, the full text is synthesized at once.
 
@@ -163,7 +163,7 @@ If the user speaks while the agent is talking, the client detects it (sustained 
 
 ### Conversation persistence
 
-`VoiceAgent` automatically creates a SQLite table (`cf_voice_messages`) and saves every user and assistant message. Conversation history survives restarts and hibernation. The `context.messages` array passed to `onTurn()` contains the most recent messages (configurable via `voiceOptions.historyLimit`, default 20).
+`VoiceAgent` automatically creates a SQLite table (`cf_voice_messages`) and saves every user and assistant message. Conversation history survives restarts and hibernation. The `context.messages` array passed to `onTurn()` contains the most recent completed messages before the current transcript (configurable via `voiceOptions.historyLimit`, default 20). Append `transcript` exactly once when constructing an LLM message list.
 
 ## VoiceAgent reference
 
@@ -182,7 +182,7 @@ async onTurn(
 
 - `transcript` — The user's transcribed speech.
 - `context.connection` — The WebSocket `Connection` that sent the audio.
-- `context.messages` — Conversation history from SQLite (chronological order).
+- `context.messages` — Completed conversation history before the current transcript (chronological order).
 - `context.signal` — An `AbortSignal` that fires if the user interrupts or disconnects. Pass it to your LLM call.
 
 **Return value:**
@@ -254,7 +254,7 @@ Save a message to the conversation history table. The pipeline calls this automa
 getConversationHistory(limit?: number): Array<{ role: string; content: string }>
 ```
 
-Load the most recent messages from SQLite. Defaults to `voiceOptions.historyLimit` (20).
+Load the most recent messages from SQLite. Defaults to `voiceOptions.historyLimit` (20). The pipeline persists the current transcript before invoking `onTurn()`, so calling this method inside the hook includes the current transcript even though `context.messages` does not.
 
 ### beforeCallStart(connection) — optional
 

@@ -3484,7 +3484,9 @@ export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
 // Extends Think with tools configured for tool integration testing.
 // Uses a mock model that calls the "echo" tool on first invocation.
 
-function createToolCallingMockModel(): LanguageModel {
+function createToolCallingMockModel(
+  toolInput = JSON.stringify({ message: "hello" })
+): LanguageModel {
   let callCount = 0;
   return {
     specificationVersion: "v3",
@@ -3515,7 +3517,7 @@ function createToolCallingMockModel(): LanguageModel {
             controller.enqueue({
               type: "tool-input-delta",
               id: "tc1",
-              delta: JSON.stringify({ message: "hello" })
+              delta: toolInput
             });
             controller.enqueue({ type: "tool-input-end", id: "tc1" });
             // v3 spec also requires an explicit `tool-call` chunk so the
@@ -3524,7 +3526,7 @@ function createToolCallingMockModel(): LanguageModel {
               type: "tool-call",
               toolCallId: "tc1",
               toolName: "echo",
-              input: JSON.stringify({ message: "hello" })
+              input: toolInput
             });
             controller.enqueue({
               type: "finish",
@@ -3803,6 +3805,9 @@ export class ThinkToolsTestAgent extends Think {
   override getModel(): LanguageModel {
     if (this._useAttachReplyAction) return createAttachReplyMockModel();
     if (this._useDurablePauseAction) return createDurablePauseMockModel();
+    if (this._repairToolCalls) {
+      return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
+    }
     return createToolCallingMockModel();
   }
 
@@ -4563,8 +4568,23 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   private _turnStopCondition: TurnConfig["stopWhen"];
+  private _repairToolCalls = false;
+
+  /** Enables deterministic malformed tool-call repair inside the test agent. */
+  async enableToolCallRepairForTest(): Promise<void> {
+    this._repairToolCalls = true;
+  }
 
   override beforeTurn(): TurnConfig | void {
+    if (this._repairToolCalls) {
+      return {
+        stopWhen: this._turnStopCondition,
+        repairToolCall: async ({ toolCall }) => ({
+          ...toolCall,
+          input: JSON.stringify({ message: "repaired" })
+        })
+      };
+    }
     if (this._turnStopCondition) {
       return { stopWhen: this._turnStopCondition };
     }

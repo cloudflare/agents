@@ -43,7 +43,7 @@ export class MyAssistant extends Think<Env> {
    * can read pages/APIs directly without spinning up the browser. This demo
    * allows any public URL (`http(s)://**`); a real app should narrow this to
    * the origins it actually needs. Note that even with a wildcard allowlist,
-   * the framework still refuses private/loopback/`*.internal` targets (SSRF
+   * the fetch tool still refuses private/loopback/`*.internal` targets (SSRF
    * defense) — that protection is independent of the allowlist.
    *
    * Think injects `this.workspace` automatically, so with `spillToWorkspace` a
@@ -87,7 +87,7 @@ export class MyAssistant extends Think<Env> {
    * splice the user's shared MCP tools into each turn's tool set.
    *
    * The child's own `this.mcp` (Think's default) stays around but is
-   * never registered against — it exists solely so Agent framework
+   * never registered against — it exists solely so Agent runtime
    * paths that reach for `this.mcp.*` (hibernation restore, OAuth
    * callback routing, broadcast plumbing) don't need to care about
    * the parallel-field arrangement. Those paths all resolve to an
@@ -95,7 +95,7 @@ export class MyAssistant extends Think<Env> {
    *
    * OAuth callbacks (`/chat/mcp-callback`) are routed to the parent
    * directory by the Worker, never to a child, so child-side
-   * `isCallbackRequest` in the framework reliably returns false here.
+   * `isCallbackRequest` in Think reliably returns false here.
    */
   sharedMcp = new SharedMCPClient(() => this.parentAgent(AssistantDirectory));
 
