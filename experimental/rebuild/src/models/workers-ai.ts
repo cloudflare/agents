@@ -21,7 +21,7 @@ import type {
   LanguageModelRequest,
   LanguageModelStreamChunk,
   Part
-} from "../contract";
+} from "../contract.js";
 
 /** Structural subset of the Workers AI binding. */
 export interface AiBinding {
@@ -104,8 +104,11 @@ export class WorkersAiLanguageModel implements LanguageModel {
       const tc = toolCalls[i];
       const name = tc.name ?? tc.function?.name ?? "";
       const args = tc.arguments ?? tc.function?.arguments ?? {};
-      const input = (typeof args === "string" ? JSON.parse(args) : args) as Json;
-      const callId = tc.id ?? `wai-${i}-${Math.random().toString(36).slice(2, 10)}`;
+      const input = (
+        typeof args === "string" ? JSON.parse(args) : args
+      ) as Json;
+      const callId =
+        tc.id ?? `wai-${i}-${Math.random().toString(36).slice(2, 10)}`;
       io.onChunk?.({ type: "tool-call", callId, name, input });
       parts.push({ type: "tool-call", callId, name, input });
     }
@@ -125,14 +128,22 @@ export class WorkersAiLanguageModel implements LanguageModel {
   }
 
   classifyError(error: unknown): LanguageModelErrorKind {
-    const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    const message = (
+      error instanceof Error ? error.message : String(error)
+    ).toLowerCase();
     if (
       message.includes("context") &&
-      (message.includes("length") || message.includes("window") || message.includes("token"))
+      (message.includes("length") ||
+        message.includes("window") ||
+        message.includes("token"))
     ) {
       return "context-overflow";
     }
-    if (message.includes("429") || message.includes("rate limit") || message.includes("capacity")) {
+    if (
+      message.includes("429") ||
+      message.includes("rate limit") ||
+      message.includes("capacity")
+    ) {
       return "rate-limit";
     }
     if (
@@ -175,7 +186,9 @@ function toProviderMessages(
         role: "tool",
         tool_call_id: part.callId,
         content:
-          typeof part.output === "string" ? part.output : JSON.stringify(part.output)
+          typeof part.output === "string"
+            ? part.output
+            : JSON.stringify(part.output)
       });
     }
   }

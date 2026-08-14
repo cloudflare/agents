@@ -4,4 +4,4 @@
  * body, so any value import from it would resolve to nothing. Everything
  * callable is implemented in this package.
  */
-export type * from "../../contract/src/index";
+export type * from "../../contract/src/index.js";

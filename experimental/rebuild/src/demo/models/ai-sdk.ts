@@ -15,18 +15,14 @@
  */
 
 import { jsonSchema, streamText, tool } from "ai";
-import type {
-  LanguageModel as AiSdkModel,
-  ModelMessage,
-  ToolSet
-} from "ai";
+import type { LanguageModel as AiSdkModel, ModelMessage, ToolSet } from "ai";
 import type {
   Json,
   LanguageModel,
   LanguageModelErrorKind,
   LanguageModelRequest,
   Part
-} from "../../contract";
+} from "../../contract.js";
 
 export function aiSdkModel(model: AiSdkModel): LanguageModel {
   return {
@@ -44,7 +40,12 @@ export function aiSdkModel(model: AiSdkModel): LanguageModel {
       let text = "";
       let reasoning = "";
       const calls: Part[] = [];
-      let finish: "stop" | "tool-calls" | "length" | "content-filter" | "error" = "stop";
+      let finish:
+        | "stop"
+        | "tool-calls"
+        | "length"
+        | "content-filter"
+        | "error" = "stop";
       let usage: { inputTokens?: number; outputTokens?: number } = {};
 
       for await (const part of result.fullStream) {
@@ -70,11 +71,15 @@ export function aiSdkModel(model: AiSdkModel): LanguageModel {
           }
           case "finish":
             finish =
-              part.finishReason === "tool-calls" ? "tool-calls"
-              : part.finishReason === "length" ? "length"
-              : part.finishReason === "content-filter" ? "content-filter"
-              : part.finishReason === "stop" ? "stop"
-              : "error";
+              part.finishReason === "tool-calls"
+                ? "tool-calls"
+                : part.finishReason === "length"
+                  ? "length"
+                  : part.finishReason === "content-filter"
+                    ? "content-filter"
+                    : part.finishReason === "stop"
+                      ? "stop"
+                      : "error";
             usage = {
               ...(part.totalUsage.inputTokens !== undefined
                 ? { inputTokens: part.totalUsage.inputTokens }
@@ -85,12 +90,16 @@ export function aiSdkModel(model: AiSdkModel): LanguageModel {
             };
             break;
           case "error":
-            throw part.error instanceof Error ? part.error : new Error(String(part.error));
+            throw part.error instanceof Error
+              ? part.error
+              : new Error(String(part.error));
         }
       }
 
       const parts: Part[] = [
-        ...(reasoning.length > 0 ? [{ type: "reasoning", text: reasoning } as Part] : []),
+        ...(reasoning.length > 0
+          ? [{ type: "reasoning", text: reasoning } as Part]
+          : []),
         ...(text.length > 0 ? [{ type: "text", text } as Part] : []),
         ...calls
       ];
@@ -99,8 +108,14 @@ export function aiSdkModel(model: AiSdkModel): LanguageModel {
 
     classifyError(error: unknown): LanguageModelErrorKind {
       const status = (error as { statusCode?: number })?.statusCode;
-      const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-      if (message.includes("context length") || message.includes("maximum context") || message.includes("too many tokens")) {
+      const message = (
+        error instanceof Error ? error.message : String(error)
+      ).toLowerCase();
+      if (
+        message.includes("context length") ||
+        message.includes("maximum context") ||
+        message.includes("too many tokens")
+      ) {
         return "context-overflow";
       }
       if (status === 429 || message.includes("rate limit")) return "rate-limit";
@@ -155,7 +170,12 @@ function toModelMessages(req: LanguageModelRequest): ModelMessage[] {
     } else if (m.role === "assistant") {
       type AssistantPart =
         | { type: "text"; text: string }
-        | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown };
+        | {
+            type: "tool-call";
+            toolCallId: string;
+            toolName: string;
+            input: unknown;
+          };
       out.push({
         role: "assistant",
         content: m.parts.flatMap((p): AssistantPart[] => {
@@ -183,7 +203,9 @@ function toModelMessages(req: LanguageModelRequest): ModelMessage[] {
             {
               type: "tool-result" as const,
               toolCallId: p.callId,
-              toolName: toProviderToolName(callNames.get(p.callId) ?? "unknown"),
+              toolName: toProviderToolName(
+                callNames.get(p.callId) ?? "unknown"
+              ),
               output:
                 typeof p.output === "string"
                   ? { type: "text" as const, value: p.output }

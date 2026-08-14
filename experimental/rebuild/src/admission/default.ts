@@ -13,7 +13,7 @@ import type {
   AdmissionInput,
   AdmissionPolicy,
   MessagePayload
-} from "../contract";
+} from "../contract.js";
 
 const TRIGGER_KINDS = [
   "message",

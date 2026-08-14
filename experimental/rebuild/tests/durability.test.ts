@@ -7,10 +7,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startAgent } from "../src/runtime/host";
-import { MockLanguageModel, mockText, mockToolCall } from "../src/models/mock";
-import { sqliteDb, testAgent, testProviders } from "./helpers";
-import type { MessagePayload, TurnMarkerPayload } from "../src/contract";
+import { startAgent } from "../src/runtime/host.js";
+import {
+  MockLanguageModel,
+  mockText,
+  mockToolCall
+} from "../src/models/mock.js";
+import { sqliteDb, testAgent, testProviders } from "./helpers.js";
+import type { MessagePayload, TurnMarkerPayload } from "../src/contract.js";
 
 test("crash after the tool step, before the answer: resumes, no double effect", async () => {
   const db = sqliteDb();
@@ -109,7 +113,9 @@ test("crash after the final answer, before the marker: no regeneration", async (
     .query({ kinds: ["turn/marker"], limit: 5 });
   assert.equal((markers[0].payload as TurnMarkerPayload).marker, "completed");
   // Exactly one assistant answer on the log — not regenerated.
-  const messages = await host2.engine.view().query({ kinds: ["message"], limit: 10 });
+  const messages = await host2.engine
+    .view()
+    .query({ kinds: ["message"], limit: 10 });
   const assistants = messages.filter(
     (m) => (m.payload as MessagePayload).role === "assistant"
   );
@@ -127,7 +133,10 @@ function hostView(db: ReturnType<typeof sqliteDb>, _p: unknown) {
         .exec(
           "SELECT payload_json FROM rb_entries WHERE kind = 'turn/marker' ORDER BY seq ASC"
         )
-        .map((r) => (JSON.parse(r.payload_json as string) as TurnMarkerPayload).marker);
+        .map(
+          (r) =>
+            (JSON.parse(r.payload_json as string) as TurnMarkerPayload).marker
+        );
     }
   };
 }

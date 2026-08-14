@@ -11,12 +11,12 @@
  * Allowed imports: everything in this package.
  */
 
-import type { ReconcilerName } from "./kernel";
-import type { Reconciler } from "./transcript";
-import type { Channel } from "./channel";
-import type { AdmissionPolicy } from "./admission";
-import type { ToolMiddleware, ToolProvider } from "./tools";
-import type { Harness } from "./loop";
+import type { ReconcilerName } from "./kernel.js";
+import type { Reconciler } from "./transcript.js";
+import type { Channel } from "./channel.js";
+import type { AdmissionPolicy } from "./admission.js";
+import type { ToolMiddleware, ToolProvider } from "./tools.js";
+import type { Harness } from "./loop.js";
 
 export interface AgentDefinition {
   /** Substrate world-boundary: external surfaces into and out of the log. */

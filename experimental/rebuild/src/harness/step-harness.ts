@@ -21,8 +21,8 @@ import type {
   TurnDeps,
   TurnFailureNotice,
   TurnMarkerPayload
-} from "../contract";
-import { asStepId, uuid } from "../ids";
+} from "../contract.js";
+import { asStepId, uuid } from "../ids.js";
 
 export interface StepHarnessConfig {
   readonly loop: AgentLoop;
@@ -47,7 +47,10 @@ export function stepHarness(config: StepHarnessConfig): Harness {
         limit: config.policy.maxSteps * 2 + 8
       });
       const latest = markers[0]?.payload as TurnMarkerPayload | undefined;
-      if (latest !== undefined && (latest.marker === "completed" || latest.marker === "failed")) {
+      if (
+        latest !== undefined &&
+        (latest.marker === "completed" || latest.marker === "failed")
+      ) {
         return; // idempotent re-drive of a finished turn
       }
       let stepsCommitted = markers.filter(
@@ -107,7 +110,12 @@ export function stepHarness(config: StepHarnessConfig): Harness {
         );
         return;
       }
-      await failTerminally(deps, config, "exhausted", `step budget spent (${config.policy.maxSteps})`);
+      await failTerminally(
+        deps,
+        config,
+        "exhausted",
+        `step budget spent (${config.policy.maxSteps})`
+      );
     }
   };
 }

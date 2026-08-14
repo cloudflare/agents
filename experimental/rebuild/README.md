@@ -8,18 +8,18 @@ body); every callable thing is implemented here.
 
 ## Build and test
 
-No dependencies, not a workspace member (deliberately — a new workspace
-package would break frozen-lockfile CI). Compiles with a pinned tsc via npx,
-tests run under `node --test` against Node's built-in `node:sqlite`:
+A private workspace member (in pnpm-lock.yaml; CI builds and tests it via
+`nx run-many`). Dependencies are real: `ai` and `workers-ai-provider` for the
+demo model adapters. Tests run under `node --test` against Node's built-in
+`node:sqlite`:
 
 ```bash
 cd experimental/rebuild
-npx -y -p typescript@5.9.3 tsc -p .
-echo '{ "type": "commonjs" }' > dist/package.json   # root package.json is ESM
-node --test dist/rebuild/tests/*.test.js
+pnpm install   # or npm install when working outside the workspace
+pnpm test      # tsc -p . && node --test dist/rebuild/tests/*.test.js
 ```
 
-14 tests, all passing: engine unit tests (append idempotency, bounded query,
+24 tests, all passing: engine unit tests, demo-module tests (append idempotency, bounded query,
 claim/settle, consumer redelivery, fork lineage, blobs), the happy-path e2e,
 queueing, and the durability suite — crash mid-turn with zero duplicated
 effects across two hosts, crash-after-answer with no regeneration, approval
@@ -80,10 +80,9 @@ host and starting another over the same database is a faithful crash test.
 `src/demo/` holds ten strategies across five seams — one practical and one
 wacky per seam, each a single readable file — plus `presets.ts`, three
 complete agents that share no strategy but run on identical machinery. See
-`src/demo/README.md` for the tour. The AI SDK adapter typechecks against
-`vendor/node_modules/ai` (nested so the workspace glob ignores it; run
-`npm install` in `vendor/` after a fresh clone) and deliberately has no
-local runtime or fallback.
+`src/demo/README.md` for the tour. The AI SDK adapters compile against the
+real `ai` / `workers-ai-provider` packages and deliberately have no local
+runtime or fallback — they come alive in a deployed Worker.
 
 Building the demo caught a real ToolRuntime bug: the catalog was assembled
 from raw providers, so middleware descriptor rewrites (the ADR 0004

@@ -12,9 +12,11 @@
  * rewriting descriptors between always and never — not a descriptor mode.
  */
 
-import type { ToolMiddleware } from "../../contract";
+import type { ToolMiddleware } from "../../contract.js";
 
-export function tollbooth(prices: Readonly<Record<string, number>>): ToolMiddleware {
+export function tollbooth(
+  prices: Readonly<Record<string, number>>
+): ToolMiddleware {
   return (next) => ({
     name: `tollbooth(${next.name})`,
     ...(next.resources !== undefined ? { resources: next.resources } : {}),
@@ -29,7 +31,8 @@ export function tollbooth(prices: Readonly<Record<string, number>>): ToolMiddlew
             mode: "always" as const,
             describe: (input: unknown) => ({
               title: `402 Payment Required — ${descriptor.name} costs ${price} credit${price === 1 ? "" : "s"}`,
-              detail: "Approving this request stands in for settling the charge.",
+              detail:
+                "Approving this request stands in for settling the charge.",
               input: input as never
             })
           }

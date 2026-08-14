@@ -11,7 +11,7 @@ import type {
   LanguageModelMessage,
   LanguageModelRequest,
   MessagePayload
-} from "../contract";
+} from "../contract.js";
 
 export interface WindowAssemblerOptions {
   readonly system?: string;
@@ -19,7 +19,9 @@ export interface WindowAssemblerOptions {
   readonly windowSize?: number;
 }
 
-export function windowAssembler(opts: WindowAssemblerOptions = {}): ContextAssembler {
+export function windowAssembler(
+  opts: WindowAssemblerOptions = {}
+): ContextAssembler {
   const windowSize = opts.windowSize ?? 50;
   return {
     async assemble(input: AssembleInput): Promise<LanguageModelRequest> {

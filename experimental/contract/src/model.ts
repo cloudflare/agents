@@ -11,8 +11,8 @@
  * Allowed imports: kernel, transcript (Part vocabulary only).
  */
 
-import type { Json, JSONSchema, TokenBudget } from "./kernel";
-import type { Part, Role } from "./transcript";
+import type { Json, JSONSchema, TokenBudget } from "./kernel.js";
+import type { Part, Role } from "./transcript.js";
 
 export interface LanguageModelMessage {
   readonly role: Role;

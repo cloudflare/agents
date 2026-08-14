@@ -29,8 +29,8 @@ import type {
   ToolProvider,
   TurnInfo,
   Versioned
-} from "../contract";
-import { asClaimKey, asCorrelationId, asReconcilerName } from "../ids";
+} from "../contract.js";
+import { asClaimKey, asCorrelationId, asReconcilerName } from "../ids.js";
 
 export const TOOLS_RECONCILER = asReconcilerName("tools");
 
@@ -62,7 +62,10 @@ export interface ToolRuntimeOptions {
 export interface BoundToolRuntime {
   catalog(): Promise<readonly ToolDescriptor[]>;
   /** Bind the per-turn ambient state and get the contract ToolRuntime. */
-  forTurn(turn: TurnInfo, signal: AbortSignal): {
+  forTurn(
+    turn: TurnInfo,
+    signal: AbortSignal
+  ): {
     catalog(): Promise<readonly ToolDescriptor[]>;
     execute(call: ToolCall): Promise<ToolOutcome>;
   };
@@ -73,9 +76,17 @@ const DEFAULT_RETRY: RetryPolicy = {
   backoff: { initialMs: 250, factor: 4, maxMs: 60_000 }
 };
 
-export function claimKeyForCall(descriptor: ToolDescriptor, call: ToolCall): ClaimKey {
-  if (descriptor.effect.effect === "mutating" && descriptor.effect.key !== undefined) {
-    return asClaimKey(`tool:${descriptor.name}:${descriptor.effect.key(call.input)}`);
+export function claimKeyForCall(
+  descriptor: ToolDescriptor,
+  call: ToolCall
+): ClaimKey {
+  if (
+    descriptor.effect.effect === "mutating" &&
+    descriptor.effect.key !== undefined
+  ) {
+    return asClaimKey(
+      `tool:${descriptor.name}:${descriptor.effect.key(call.input)}`
+    );
   }
   return asClaimKey(`tool:call:${call.callId}`);
 }
@@ -103,7 +114,9 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
       for (const provider of opts.providers) {
         for (const descriptor of await provider.catalog()) {
           if (rawCatalogCache.has(descriptor.name)) {
-            throw new Error(`duplicate tool name in catalog: ${descriptor.name}`);
+            throw new Error(
+              `duplicate tool name in catalog: ${descriptor.name}`
+            );
           }
           rawCatalogCache.set(descriptor.name, descriptor);
           providersByTool.set(descriptor.name, provider);
@@ -144,7 +157,9 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
     return [...composedCatalogCache.values()];
   }
 
-  async function descriptorFor(name: string): Promise<ToolDescriptor | undefined> {
+  async function descriptorFor(
+    name: string
+  ): Promise<ToolDescriptor | undefined> {
     await buildCatalog();
     return composedCatalogCache?.get(name);
   }
@@ -202,7 +217,11 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
       return {
         status: "settled",
         attempt: 1,
-        result: { status: "error", message: `unknown tool: ${call.name}`, retryable: false }
+        result: {
+          status: "error",
+          message: `unknown tool: ${call.name}`,
+          retryable: false
+        }
       };
     }
 
@@ -217,9 +236,14 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
       }
       if (verdict === "rejected") {
         const key = claimKeyForCall(descriptor, call);
-        const decision = await ledger.claim(claimReq(key, descriptor, call, turn));
+        const decision = await ledger.claim(
+          claimReq(key, descriptor, call, turn)
+        );
         if (decision.outcome === "acquired") {
-          await ledger.settle(key, { status: "aborted", reason: "approval rejected" });
+          await ledger.settle(key, {
+            status: "aborted",
+            reason: "approval rejected"
+          });
         }
         return {
           status: "settled",
@@ -252,7 +276,11 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
         result:
           result.status === "completed"
             ? { status: "ok", output: result.output }
-            : { status: "error", message: result.message, retryable: result.retryable }
+            : {
+                status: "error",
+                message: result.message,
+                retryable: result.retryable
+              }
       };
     }
 
@@ -277,7 +305,11 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
     const settled: SettleOutcome =
       result.status === "completed"
         ? { status: "ok", output: result.output }
-        : { status: "error", message: result.message, retryable: result.retryable };
+        : {
+            status: "error",
+            message: result.message,
+            retryable: result.retryable
+          };
     await ledger.settle(key, settled);
     return { status: "settled", attempt: 1, result: settled };
   }
@@ -291,7 +323,11 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
     return {
       key,
       effect: `tool/${descriptor.name}`,
-      input: { callId: call.callId, name: call.name, input: call.input } as Json,
+      input: {
+        callId: call.callId,
+        name: call.name,
+        input: call.input
+      } as Json,
       origin: { module: "tools" },
       turn: turn.turnId,
       correlation: correlationForCall(call),
@@ -300,7 +336,11 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
     };
   }
 
-  async function runProvider(call: ToolCall, turn: TurnInfo, signal: AbortSignal) {
+  async function runProvider(
+    call: ToolCall,
+    turn: TurnInfo,
+    signal: AbortSignal
+  ) {
     return composed.execute(call, {
       turn,
       correlation: correlationForCall(call),
@@ -314,7 +354,11 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
     policy: retry,
     async handle(deps) {
       const payload = deps.claim.payload;
-      const input = payload.input as { callId: string; name: string; input: Json };
+      const input = payload.input as {
+        callId: string;
+        name: string;
+        input: Json;
+      };
       const descriptor = await descriptorFor(input.name);
       if (descriptor === undefined || descriptor.effect.effect !== "mutating") {
         return {
@@ -348,9 +392,16 @@ export function createToolRuntime(opts: ToolRuntimeOptions): BoundToolRuntime {
         attempt: deps.attempt,
         startedAt: deps.claim.at
       };
-      const result = await runProvider(call, turnStub, new AbortController().signal);
+      const result = await runProvider(
+        call,
+        turnStub,
+        new AbortController().signal
+      );
       if (result.status === "completed") {
-        return { action: "settle", result: { status: "ok", output: result.output } };
+        return {
+          action: "settle",
+          result: { status: "ok", output: result.output }
+        };
       }
       if (result.status === "pending") {
         return { action: "wait", afterMs: reconcileAfterMs };

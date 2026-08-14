@@ -5,27 +5,20 @@
       "es2022",
       "dom"
     ],
-    "module": "commonjs",
-    "moduleResolution": "node10",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     "rootDir": "..",
     "outDir": "dist",
     "strict": true,
     "noUnusedLocals": true,
     "exactOptionalPropertyTypes": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
     "declaration": false,
     "sourceMap": false,
-    "types": [],
-    "esModuleInterop": true,
-    "baseUrl": ".",
-    "paths": {
-      "ai": [
-        "vendor/node_modules/ai"
-      ],
-      "workers-ai-provider": [
-        "vendor/node_modules/workers-ai-provider"
-      ]
-    },
-    "skipLibCheck": true
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "src",

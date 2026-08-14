@@ -12,10 +12,13 @@ import type {
   LanguageModel,
   LanguageModelMessage,
   LanguageModelOutput
-} from "../../contract";
+} from "../../contract.js";
 
 const RULES: Array<[RegExp, (m: RegExpMatchArray) => string]> = [
-  [/my name is (\w+)/i, (m) => `Nice to meet you, ${m[1]}. What brings you here today?`],
+  [
+    /my name is (\w+)/i,
+    (m) => `Nice to meet you, ${m[1]}. What brings you here today?`
+  ],
   [/i need (.*)/i, (m) => `Why do you need ${m[1]}?`],
   [/i am (.*)/i, (m) => `How long have you been ${m[1]}?`],
   [/i'?m (.*)/i, (m) => `How does being ${m[1]} make you feel?`],
@@ -34,7 +37,9 @@ export function eliza(): LanguageModel {
       if (io.signal?.aborted) throw new Error("aborted");
       const text = latestUserText(req.messages);
       const rule = RULES.find(([pattern]) => pattern.test(text));
-      const reply = rule ? rule[1](text.match(rule[0]) as RegExpMatchArray) : "I see. Please, go on.";
+      const reply = rule
+        ? rule[1](text.match(rule[0]) as RegExpMatchArray)
+        : "I see. Please, go on.";
       for (const word of reply.split(/(?<= )/)) {
         io.onChunk?.({ type: "text-delta", delta: word });
       }

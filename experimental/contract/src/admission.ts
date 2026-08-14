@@ -16,8 +16,8 @@
  * Allowed imports: kernel, transcript.
  */
 
-import type { TurnId, TurnInfo } from "./kernel";
-import type { Entry, Query } from "./transcript";
+import type { TurnId, TurnInfo } from "./kernel.js";
+import type { Entry, Query } from "./transcript.js";
 
 export interface AdmissionInput {
   readonly entry: Entry;

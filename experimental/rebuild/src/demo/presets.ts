@@ -10,22 +10,25 @@
  * new WorkersAiLanguageModel(env.AI) at the composition edge.
  */
 
-import type { AgentDefinition, Channel, LanguageModel } from "../contract";
-import { stepHarness } from "../harness/step-harness";
-import { defaultLoop } from "../harness/default-loop";
-import { defaultAdmission } from "../admission/default";
-import { eliza } from "./models/eliza";
-import { rollingWindow } from "./context/window";
-import { compactor } from "./context/compactor";
-import { librarian } from "./context/librarian";
-import { priorityLanes } from "./admission/priority";
-import { bouncer } from "./admission/bouncer";
-import { tollbooth } from "./middleware/tollbooth";
-import { planner } from "./loops/planner";
-import { debater } from "./loops/debater";
-import { demoTools } from "./tools";
+import type { AgentDefinition, Channel, LanguageModel } from "../contract.js";
+import { stepHarness } from "../harness/step-harness.js";
+import { defaultLoop } from "../harness/default-loop.js";
+import { defaultAdmission } from "../admission/default.js";
+import { eliza } from "./models/eliza.js";
+import { rollingWindow } from "./context/window.js";
+import { compactor } from "./context/compactor.js";
+import { librarian } from "./context/librarian.js";
+import { priorityLanes } from "./admission/priority.js";
+import { bouncer } from "./admission/bouncer.js";
+import { tollbooth } from "./middleware/tollbooth.js";
+import { planner } from "./loops/planner.js";
+import { debater } from "./loops/debater.js";
+import { demoTools } from "./tools.js";
 
-const RETRY = { maxAttempts: 3, backoff: { initialMs: 250, factor: 4, maxMs: 5_000 } };
+const RETRY = {
+  maxAttempts: 3,
+  backoff: { initialMs: 250, factor: 4, maxMs: 5_000 }
+};
 
 /**
  * The Therapist: ELIZA + a rolling window + no tools. The smallest complete
@@ -51,7 +54,10 @@ export function therapist(channels: readonly Channel[]): AgentDefinition {
  * and a pager lane that preempts. Every seam differs from the Therapist;
  * the diff between the two functions IS the modularity claim.
  */
-export function strategist(model: LanguageModel, channels: readonly Channel[]): AgentDefinition {
+export function strategist(
+  model: LanguageModel,
+  channels: readonly Channel[]
+): AgentDefinition {
   const memory = compactor({
     system: "You are a careful strategist. Prefer tools over guessing.",
     summarizer: model,

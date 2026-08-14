@@ -9,7 +9,7 @@
  * from turn/marker entries but kept as a table so admission stays O(1).
  */
 
-import type { SqlDatabase } from "../substrate";
+import type { SqlDatabase } from "../substrate.js";
 
 export function ensureSchema(db: SqlDatabase): void {
   db.transaction(() => {

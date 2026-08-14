@@ -22,9 +22,9 @@ import type {
   Json,
   JSONSchema,
   TurnInfo
-} from "./kernel";
-import type { ExternalResource } from "./resource";
-import type { SettleOutcome } from "./transcript";
+} from "./kernel.js";
+import type { ExternalResource } from "./resource.js";
+import type { SettleOutcome } from "./transcript.js";
 
 // ---------------------------------------------------------------------------
 // Descriptors

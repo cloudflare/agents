@@ -1,0 +1,7 @@
+{
+  "name": "@cloudflare/agents-rebuild-contract",
+  "description": "Domain contracts for the composable Agents SDK rebuild - types only, no runtime, no dependencies",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0"
+}

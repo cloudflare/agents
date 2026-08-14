@@ -41,11 +41,19 @@ import type {
   TailOptions,
   TurnId,
   Versioned
-} from "../contract";
-import type { Clock, SqlDatabase, SqlRow } from "../substrate";
-import { assertBounded } from "./query";
-import { ensureSchema } from "./schema";
-import { asBlobId, asBranchId, asEntryId, asStepId, digest, ROOT_BRANCH, uuid } from "../ids";
+} from "../contract.js";
+import type { Clock, SqlDatabase, SqlRow } from "../substrate.js";
+import { assertBounded } from "./query.js";
+import { ensureSchema } from "./schema.js";
+import {
+  asBlobId,
+  asBranchId,
+  asEntryId,
+  asStepId,
+  digest,
+  ROOT_BRANCH,
+  uuid
+} from "../ids.js";
 
 // ---------------------------------------------------------------------------
 // Internal surface the runtime uses beyond the contract Engine
@@ -82,7 +90,9 @@ const str = (v: SqlRow[string]): string => v as string;
 
 export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
   ensureSchema(db);
-  if (db.exec("SELECT id FROM rb_branches WHERE id = ?", ROOT_BRANCH).length === 0) {
+  if (
+    db.exec("SELECT id FROM rb_branches WHERE id = ?", ROOT_BRANCH).length === 0
+  ) {
     db.exec(
       "INSERT INTO rb_branches (id, parent_branch, fork_seq, next_seq) VALUES (?, NULL, NULL, 1)",
       ROOT_BRANCH
@@ -106,7 +116,9 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
   // -- lineage ---------------------------------------------------------------
 
   /** [own branch (no cap), ...ancestors (capped at fork seq)] */
-  function lineage(branch: BranchId): Array<{ branch: string; cap: number | null }> {
+  function lineage(
+    branch: BranchId
+  ): Array<{ branch: string; cap: number | null }> {
     const chain: Array<{ branch: string; cap: number | null }> = [];
     let current: string | null = branch;
     let cap: number | null = null;
@@ -123,10 +135,7 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
     return chain;
   }
 
-  function lineageWhere(
-    branch: BranchId,
-    params: unknown[]
-  ): string {
+  function lineageWhere(branch: BranchId, params: unknown[]): string {
     const parts = lineage(branch).map((seg) => {
       if (seg.cap === null) {
         params.push(seg.branch);
@@ -159,7 +168,10 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       origin:
         row.origin_instance === null
           ? { module: str(row.origin_module) }
-          : { module: str(row.origin_module), instance: str(row.origin_instance) },
+          : {
+              module: str(row.origin_module),
+              instance: str(row.origin_instance)
+            },
       payload
     };
     if (row.turn !== null) entry.turn = str(row.turn) as TurnId;
@@ -174,7 +186,10 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
     entries: readonly NewEntry[]
   ): Entry[] {
     const at = clock.now();
-    const rows = db.exec("SELECT next_seq FROM rb_branches WHERE id = ?", branch);
+    const rows = db.exec(
+      "SELECT next_seq FROM rb_branches WHERE id = ?",
+      branch
+    );
     if (rows.length === 0) throw new Error(`unknown branch: ${branch}`);
     let seq = num(rows[0].next_seq);
     const committed: Entry[] = [];
@@ -224,7 +239,9 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
           opts.idempotencyKey
         );
         if (existing.length > 0) {
-          const contentDigest = digest(JSON.stringify(entries.map((e) => e.payload)));
+          const contentDigest = digest(
+            JSON.stringify(entries.map((e) => e.payload))
+          );
           if (str(existing[0].content_digest) !== contentDigest) {
             throw new Error(
               `idempotency key reused with different content: ${opts.idempotencyKey}`
@@ -257,7 +274,10 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       result = { outcome: "committed", refs };
     });
     if (result === null) throw new Error("append produced no result");
-    if ((result as AppendResult).outcome === "committed" && committed.length > 0) {
+    if (
+      (result as AppendResult).outcome === "committed" &&
+      committed.length > 0
+    ) {
       emitCommitted(committed);
     }
     return result;
@@ -323,7 +343,8 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
           clauses.push("seq < ?");
           params.push(q.before);
         }
-        const limit = q.limit !== undefined ? ` LIMIT ${Math.floor(q.limit)}` : "";
+        const limit =
+          q.limit !== undefined ? ` LIMIT ${Math.floor(q.limit)}` : "";
         const rows = db.exec(
           `SELECT * FROM rb_entries WHERE ${clauses.join(" AND ")} ORDER BY seq DESC${limit}`,
           ...params
@@ -366,10 +387,16 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
           input: req.input,
           inputDigest: digest(JSON.stringify(req.input))
         };
-        const newEntry: Record<string, unknown> = { origin: req.origin, payload };
+        const newEntry: Record<string, unknown> = {
+          origin: req.origin,
+          payload
+        };
         if (req.turn !== undefined) newEntry.turn = req.turn;
-        if (req.correlation !== undefined) newEntry.correlation = req.correlation;
-        committed = insertEntries(ROOT_BRANCH, [newEntry as unknown as NewEntry]);
+        if (req.correlation !== undefined)
+          newEntry.correlation = req.correlation;
+        committed = insertEntries(ROOT_BRANCH, [
+          newEntry as unknown as NewEntry
+        ]);
         const entry = committed[0];
         const now = clock.now();
         db.exec(
@@ -398,15 +425,19 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       let committed: Entry[] = [];
       db.transaction(() => {
         const rows = db.exec("SELECT * FROM rb_claims WHERE key = ?", key);
-        if (rows.length === 0) throw new Error(`settle of unknown claim: ${key}`);
+        if (rows.length === 0)
+          throw new Error(`settle of unknown claim: ${key}`);
         if (str(rows[0].status) === "settled") return; // idempotent
         const newEntry: Record<string, unknown> = {
           origin: { module: "ledger" },
           payload: { kind: "effect/settled", v: 1, key, result }
         };
         if (rows[0].turn !== null) newEntry.turn = str(rows[0].turn);
-        if (rows[0].correlation !== null) newEntry.correlation = str(rows[0].correlation);
-        committed = insertEntries(ROOT_BRANCH, [newEntry as unknown as NewEntry]);
+        if (rows[0].correlation !== null)
+          newEntry.correlation = str(rows[0].correlation);
+        committed = insertEntries(ROOT_BRANCH, [
+          newEntry as unknown as NewEntry
+        ]);
         db.exec(
           "UPDATE rb_claims SET status = 'settled', settle_entry_id = ?, result_json = ? WHERE key = ?",
           committed[0].ref.id,
@@ -440,7 +471,9 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       );
       return rows.length === 0
         ? null
-        : (entryById(str(rows[0].claim_entry_id)) as Entry<EffectClaimedPayload>);
+        : (entryById(
+            str(rows[0].claim_entry_id)
+          ) as Entry<EffectClaimedPayload>);
     },
 
     reconciler(name: ReconcilerName, reconciler: Reconciler): void {
@@ -462,7 +495,10 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
 
   const consumers: Consumers = {
     consumer(name: ConsumerName, opts): DurableConsumer {
-      if (db.exec("SELECT name FROM rb_consumers WHERE name = ?", name).length === 0) {
+      if (
+        db.exec("SELECT name FROM rb_consumers WHERE name = ?", name).length ===
+        0
+      ) {
         db.exec("INSERT INTO rb_consumers (name, cursor) VALUES (?, 0)", name);
       }
       const filter = opts?.filter;
@@ -500,7 +536,11 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
           };
         },
         async ack(cursor: Seq) {
-          db.exec("UPDATE rb_consumers SET cursor = ? WHERE name = ?", cursor, name);
+          db.exec(
+            "UPDATE rb_consumers SET cursor = ? WHERE name = ?",
+            cursor,
+            name
+          );
         }
       };
     }
@@ -566,8 +606,13 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       if (ev.type === "entry") {
         if (ev.entry.ref.branch !== branch) return;
         const f = opts?.filter;
-        if (f?.kinds !== undefined && !f.kinds.includes(ev.entry.payload.kind)) return;
-        if (f?.correlation !== undefined && ev.entry.correlation !== f.correlation) return;
+        if (f?.kinds !== undefined && !f.kinds.includes(ev.entry.payload.kind))
+          return;
+        if (
+          f?.correlation !== undefined &&
+          ev.entry.correlation !== f.correlation
+        )
+          return;
         if (f?.turn !== undefined && ev.entry.turn !== f.turn) return;
       } else if (opts?.live !== true) {
         return;
@@ -578,8 +623,12 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
     liveListeners.add(push);
     try {
       if (opts?.from !== undefined) {
-        const backlog = await view(branch).query({ after: opts.from, ...opts.filter });
-        for (const entry of [...backlog].reverse()) yield { type: "entry", entry };
+        const backlog = await view(branch).query({
+          after: opts.from,
+          ...opts.filter
+        });
+        for (const entry of [...backlog].reverse())
+          yield { type: "entry", entry };
       }
       for (;;) {
         while (queue.length > 0) yield queue.shift() as TailEvent;
@@ -640,7 +689,9 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
       }
       // Persist the attempt before invoking: a crash mid-handle still counts.
       db.exec("UPDATE rb_claims SET attempt = ? WHERE key = ?", attempt, key);
-      const claimEntry = entryById(str(row.claim_entry_id)) as Entry<EffectClaimedPayload>;
+      const claimEntry = entryById(
+        str(row.claim_entry_id)
+      ) as Entry<EffectClaimedPayload>;
       try {
         const outcome = await reconciler.handle({
           claim: claimEntry,
@@ -717,7 +768,9 @@ export function createEngine(db: SqlDatabase, clock: Clock): CreatedEngine {
   return { engine, internal };
 }
 
-async function collectStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+async function collectStream(
+  stream: ReadableStream<Uint8Array>
+): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;

@@ -14,13 +14,16 @@ import type {
   LanguageModelRequest,
   LanguageModelStreamChunk,
   Part
-} from "../contract";
+} from "../contract.js";
 
 export type MockScript =
   | readonly LanguageModelOutput[]
   | ((req: LanguageModelRequest, call: number) => LanguageModelOutput);
 
-export function mockOutput(parts: readonly Part[], finish: FinishReason): LanguageModelOutput {
+export function mockOutput(
+  parts: readonly Part[],
+  finish: FinishReason
+): LanguageModelOutput {
   return { parts, finish, usage: { inputTokens: 10, outputTokens: 10 } };
 }
 
@@ -76,7 +79,9 @@ export class MockLanguageModel implements LanguageModel {
     return output;
   }
 
-  classifyError(error: unknown): "context-overflow" | "rate-limit" | "transient" | "fatal" {
+  classifyError(
+    error: unknown
+  ): "context-overflow" | "rate-limit" | "transient" | "fatal" {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("overflow")) return "context-overflow";
     if (message.includes("429")) return "rate-limit";

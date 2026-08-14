@@ -20,18 +20,18 @@ import type {
   TurnId,
   TurnInfo,
   TurnMarkerPayload
-} from "../contract";
-import type { Clock, SqlDatabase } from "../substrate";
-import { systemClock } from "../substrate";
-import { createEngine } from "../engine/engine";
+} from "../contract.js";
+import type { Clock, SqlDatabase } from "../substrate.js";
+import { systemClock } from "../substrate.js";
+import { createEngine } from "../engine/engine.js";
 import {
   createToolRuntime,
   settlePendingFromEntry,
   type ApprovalRequestedPayload,
   type ApprovalVerdictPayload,
   type ToolSettlementPayload
-} from "../tools/runtime";
-import { asCorrelationId, asTurnId, uuid } from "../ids";
+} from "../tools/runtime.js";
+import { asCorrelationId, asTurnId, uuid } from "../ids.js";
 
 export interface StartAgentOptions {
   readonly db: SqlDatabase;
@@ -53,7 +53,10 @@ export interface Agent {
 const num = (v: unknown): number => v as number;
 const str = (v: unknown): string => v as string;
 
-export function startAgent(definition: AgentDefinition, opts: StartAgentOptions): Agent {
+export function startAgent(
+  definition: AgentDefinition,
+  opts: StartAgentOptions
+): Agent {
   const clock = opts.clock ?? systemClock();
   const db = opts.db;
   const { engine, internal } = createEngine(db, clock);
@@ -65,8 +68,13 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
       : {}),
     engine
   });
-  for (const [name, reconciler] of Object.entries(definition.reconcilers ?? {})) {
-    engine.ledger.reconciler(name as Parameters<typeof engine.ledger.reconciler>[0], reconciler);
+  for (const [name, reconciler] of Object.entries(
+    definition.reconcilers ?? {}
+  )) {
+    engine.ledger.reconciler(
+      name as Parameters<typeof engine.ledger.reconciler>[0],
+      reconciler
+    );
   }
 
   const branch = engine.log.root;
@@ -121,7 +129,8 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
   function insertTurn(trigger: EntryRef, status: "active" | "queued"): TurnId {
     const turnId = asTurnId(uuid());
     const order = num(
-      db.exec("SELECT COALESCE(MAX(queued_order), 0) + 1 AS n FROM rb_turns")[0].n
+      db.exec("SELECT COALESCE(MAX(queued_order), 0) + 1 AS n FROM rb_turns")[0]
+        .n
     );
     db.exec(
       `INSERT INTO rb_turns (turn_id, branch, trigger_json, status, attempt, started_at, queued_order)
@@ -136,7 +145,11 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
     return turnId;
   }
 
-  function setTurnStatus(turnId: string, status: string, bumpAttempt = false): void {
+  function setTurnStatus(
+    turnId: string,
+    status: string,
+    bumpAttempt = false
+  ): void {
     db.exec(
       `UPDATE rb_turns SET status = ?, attempt = attempt + ? WHERE turn_id = ?`,
       status,
@@ -222,7 +235,10 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
             marker: "failed",
             turnId,
             attempt: 0,
-            detail: { reason: "fatal", message: "harness left no quiescent marker" }
+            detail: {
+              reason: "fatal",
+              message: "harness left no quiescent marker"
+            }
           } satisfies TurnMarkerPayload
         } as unknown as NewEntry
       ],
@@ -273,7 +289,10 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
     });
     switch (decision.action) {
       case "start": {
-        const turnId = insertTurn(entry.ref, active === undefined ? "active" : "queued");
+        const turnId = insertTurn(
+          entry.ref,
+          active === undefined ? "active" : "queued"
+        );
         if (active === undefined) scheduleDrive(turnId);
         break;
       }
@@ -356,7 +375,10 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
                     pumpOutboxes();
                   });
                   timers.add(cancel);
-                  console.warn(`[rebuild] outbox ${o.channel.name} delivery failed:`, error);
+                  console.warn(
+                    `[rebuild] outbox ${o.channel.name} delivery failed:`,
+                    error
+                  );
                 }
                 break;
               }
@@ -428,7 +450,8 @@ export function startAgent(definition: AgentDefinition, opts: StartAgentOptions)
         correlation,
         limit: 1
       });
-      if (requests.length === 0) throw new Error(`no approval request for ${callId}`);
+      if (requests.length === 0)
+        throw new Error(`no approval request for ${callId}`);
       const request = requests[0];
       const payload: ApprovalVerdictPayload = {
         kind: "tools/approval-verdict",

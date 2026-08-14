@@ -33,7 +33,7 @@ import type {
   StepId,
   TurnId,
   Versioned
-} from "./kernel";
+} from "./kernel.js";
 
 // ---------------------------------------------------------------------------
 // Entries

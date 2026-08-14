@@ -26,7 +26,7 @@ import type {
   StepDeps,
   StepOutcome,
   ToolOutcome
-} from "../contract";
+} from "../contract.js";
 
 export interface DefaultLoopOptions {
   /** Abort a generate() whose stream goes silent for this long. */
@@ -84,7 +84,10 @@ export function defaultLoop(opts: DefaultLoopOptions = {}): AgentLoop {
         return {
           outcome: "failed",
           message: `model ${kind}: ${error instanceof Error ? error.message : String(error)}`,
-          retryable: kind === "transient" || kind === "rate-limit" || kind === "context-overflow"
+          retryable:
+            kind === "transient" ||
+            kind === "rate-limit" ||
+            kind === "context-overflow"
         };
       } finally {
         if (stallTimer !== undefined) clearTimeout(stallTimer);
@@ -103,7 +106,8 @@ export function defaultLoop(opts: DefaultLoopOptions = {}): AgentLoop {
       }
       if (output.finish === "tool-calls") {
         const calls = output.parts.filter(
-          (p): p is Extract<Part, { type: "tool-call" }> => p.type === "tool-call"
+          (p): p is Extract<Part, { type: "tool-call" }> =>
+            p.type === "tool-call"
         );
         return executeCalls(deps, calls);
       }
@@ -196,7 +200,10 @@ function toolResultPart(call: ToolCallPart, result: SettleOutcome): Part {
   };
 }
 
-async function commitResults(deps: StepDeps, results: readonly Part[]): Promise<void> {
+async function commitResults(
+  deps: StepDeps,
+  results: readonly Part[]
+): Promise<void> {
   const payload: MessagePayload = {
     kind: "message",
     v: 1,

@@ -11,7 +11,7 @@
  * the EffectDeclaration on each descriptor.
  */
 
-import type { Json, ToolProvider } from "../contract";
+import type { Json, ToolProvider } from "../contract.js";
 
 export function demoTools(opts: { random?: () => number } = {}): ToolProvider {
   const random = opts.random ?? Math.random;
@@ -40,7 +40,8 @@ export function demoTools(opts: { random?: () => number } = {}): ToolProvider {
         },
         {
           name: "demo/consult_oracle",
-          description: "Ask the oracle a question. The answer arrives from outside, later.",
+          description:
+            "Ask the oracle a question. The answer arrives from outside, later.",
           input: {
             type: "object",
             properties: { question: { type: "string" } },
@@ -67,12 +68,19 @@ export function demoTools(opts: { random?: () => number } = {}): ToolProvider {
         case "demo/roll_dice": {
           const sides = (call.input as { sides?: number }).sides ?? 6;
           const n = 1 + Math.floor(random() * sides);
-          return { status: "completed", output: `rolled a ${n} (d${sides})` as Json };
+          return {
+            status: "completed",
+            output: `rolled a ${n} (d${sides})` as Json
+          };
         }
         case "demo/consult_oracle":
           return { status: "pending", correlation: deps.correlation };
         default:
-          return { status: "failed", message: `unknown tool ${call.name}`, retryable: false };
+          return {
+            status: "failed",
+            message: `unknown tool ${call.name}`,
+            retryable: false
+          };
       }
     }
   };
@@ -101,12 +109,14 @@ export function evaluate(expression: string): number {
   };
   const mulDiv = (): number => {
     let v = primary();
-    while (s[i] === "*" || s[i] === "/") v = s[i++] === "*" ? v * primary() : v / primary();
+    while (s[i] === "*" || s[i] === "/")
+      v = s[i++] === "*" ? v * primary() : v / primary();
     return v;
   };
   const addSub = (): number => {
     let v = mulDiv();
-    while (s[i] === "+" || s[i] === "-") v = s[i++] === "+" ? v + mulDiv() : v - mulDiv();
+    while (s[i] === "+" || s[i] === "-")
+      v = s[i++] === "+" ? v + mulDiv() : v - mulDiv();
     return v;
   };
   const v = addSub();

@@ -20,9 +20,9 @@
  * Allowed imports: kernel, transcript, tools.
  */
 
-import type { ConsumerName } from "./kernel";
-import type { AppendResult, Entry, NewEntry, Query } from "./transcript";
-import type { RetryContract } from "./tools";
+import type { ConsumerName } from "./kernel.js";
+import type { AppendResult, Entry, NewEntry, Query } from "./transcript.js";
+import type { RetryContract } from "./tools.js";
 
 // ---------------------------------------------------------------------------
 // Inbound

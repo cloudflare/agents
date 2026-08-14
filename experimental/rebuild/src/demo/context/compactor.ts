@@ -24,7 +24,7 @@ import type {
   Seq,
   StepDeps,
   Versioned
-} from "../../contract";
+} from "../../contract.js";
 
 export interface SummaryPayload extends Versioned {
   readonly kind: "compactor/summary";
@@ -51,12 +51,17 @@ export function compactor(opts: CompactorOptions): {
   const keepRecent = opts.keepRecent ?? 6;
   const highWater = opts.highWater ?? 16;
 
-  async function latestSummary(view: StepDeps["view"]): Promise<SummaryPayload | null> {
+  async function latestSummary(
+    view: StepDeps["view"]
+  ): Promise<SummaryPayload | null> {
     const found = await view.query({ kinds: ["compactor/summary"], limit: 1 });
     return found.length > 0 ? (found[0].payload as SummaryPayload) : null;
   }
 
-  async function tailAfter(view: StepDeps["view"], upTo: Seq): Promise<readonly Entry[]> {
+  async function tailAfter(
+    view: StepDeps["view"],
+    upTo: Seq
+  ): Promise<readonly Entry[]> {
     const newestFirst = await view.query({ kinds: ["message"], after: upTo });
     return [...newestFirst].reverse();
   }
@@ -98,7 +103,9 @@ export function compactor(opts: CompactorOptions): {
                 system:
                   "Summarize this conversation fragment in a compact paragraph. " +
                   "Preserve names, decisions, and unresolved questions." +
-                  (summary !== null ? `\nEarlier summary to fold in:\n${summary.summary}` : ""),
+                  (summary !== null
+                    ? `\nEarlier summary to fold in:\n${summary.summary}`
+                    : ""),
                 messages: aging.map((e) => {
                   const m = e.payload as MessagePayload;
                   return { role: m.role, parts: m.parts };
@@ -107,7 +114,10 @@ export function compactor(opts: CompactorOptions): {
               { signal: deps.signal }
             );
             const text = output.parts
-              .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
+              .filter(
+                (p): p is Extract<typeof p, { type: "text" }> =>
+                  p.type === "text"
+              )
               .map((p) => p.text)
               .join("");
             const payload: SummaryPayload = {

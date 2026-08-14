@@ -3,13 +3,13 @@
  * See README.md for dependency rules, the residue model, and open questions.
  */
 
-export * from "./kernel";
-export * from "./transcript";
-export * from "./resource";
-export * from "./model";
-export * from "./tools";
-export * from "./context";
-export * from "./channel";
-export * from "./admission";
-export * from "./loop";
-export * from "./agent";
+export * from "./kernel.js";
+export * from "./transcript.js";
+export * from "./resource.js";
+export * from "./model.js";
+export * from "./tools.js";
+export * from "./context.js";
+export * from "./channel.js";
+export * from "./admission.js";
+export * from "./loop.js";
+export * from "./agent.js";

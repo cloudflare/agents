@@ -3,20 +3,20 @@
  * SqlStorage adapter's twin), and a standard test agent assembly.
  */
 
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
   AgentDefinition,
   Json,
   LanguageModel,
   ToolMiddleware,
   ToolProvider
-} from "../src/contract";
-import type { SqlDatabase, SqlRow } from "../src/substrate";
-import { defaultAdmission } from "../src/admission/default";
-import { windowAssembler } from "../src/context/window-assembler";
-import { defaultLoop } from "../src/harness/default-loop";
-import { stepHarness } from "../src/harness/step-harness";
-import { localChannel, type LocalChannel } from "../src/channels/local";
+} from "../src/contract.js";
+import type { SqlDatabase, SqlRow } from "../src/substrate.js";
+import { defaultAdmission } from "../src/admission/default.js";
+import { windowAssembler } from "../src/context/window-assembler.js";
+import { defaultLoop } from "../src/harness/default-loop.js";
+import { stepHarness } from "../src/harness/step-harness.js";
+import { localChannel, type LocalChannel } from "../src/channels/local.js";
 
 export function sqliteDb(): SqlDatabase & { raw: DatabaseSync } {
   const raw = new DatabaseSync(":memory:");
@@ -28,11 +28,14 @@ export function sqliteDb(): SqlDatabase & { raw: DatabaseSync } {
         raw.exec(query);
         return [];
       }
+      // The seam types bindings as unknown (DO SqlStorage is looser than
+      // node:sqlite); narrowing happens here, at the adapter.
+      const params = bindings as SQLInputValue[];
       const stmt = raw.prepare(query);
       if (/^\s*SELECT/i.test(query)) {
-        return stmt.all(...(bindings as unknown[])) as SqlRow[];
+        return stmt.all(...params) as SqlRow[];
       }
-      stmt.run(...(bindings as unknown[]));
+      stmt.run(...params);
       return [];
     },
     transaction<T>(fn: () => T): T {
@@ -96,7 +99,10 @@ export function testProviders(): {
       switch (call.name) {
         case "test/add": {
           const input = call.input as { a: number; b: number };
-          return { status: "completed", output: { sum: input.a + input.b } as Json };
+          return {
+            status: "completed",
+            output: { sum: input.a + input.b } as Json
+          };
         }
         case "test/notify": {
           effects.push(`notify:${JSON.stringify(call.input)}`);
@@ -111,7 +117,11 @@ export function testProviders(): {
           return { status: "completed", output: "deleted" };
         }
         default:
-          return { status: "failed", message: `unknown ${call.name}`, retryable: false };
+          return {
+            status: "failed",
+            message: `unknown ${call.name}`,
+            retryable: false
+          };
       }
     }
   };
@@ -130,7 +140,9 @@ export function testAgent(config: {
     admission: defaultAdmission(),
     tools: {
       providers: config.providers,
-      ...(config.middleware !== undefined ? { middleware: config.middleware } : {})
+      ...(config.middleware !== undefined
+        ? { middleware: config.middleware }
+        : {})
     },
     harness: stepHarness({
       loop: defaultLoop(),
@@ -138,7 +150,10 @@ export function testAgent(config: {
       context: windowAssembler({ system: "You are a test agent." }),
       policy: {
         maxSteps: config.maxSteps ?? 6,
-        retry: { maxAttempts: 3, backoff: { initialMs: 10, factor: 2, maxMs: 50 } }
+        retry: {
+          maxAttempts: 3,
+          backoff: { initialMs: 10, factor: 2, maxMs: 50 }
+        }
       }
     })
   };

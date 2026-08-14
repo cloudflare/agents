@@ -2,11 +2,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createEngine } from "../src/engine/engine";
-import { systemClock } from "../src/substrate";
-import { sqliteDb } from "./helpers";
-import { asClaimKey, asConsumerName, asReconcilerName } from "../src/ids";
-import type { MessagePayload, NewEntry } from "../src/contract";
+import { createEngine } from "../src/engine/engine.js";
+import { systemClock } from "../src/substrate.js";
+import { sqliteDb } from "./helpers.js";
+import { asClaimKey, asConsumerName, asReconcilerName } from "../src/ids.js";
+import type { MessagePayload, NewEntry } from "../src/contract.js";
 
 function msg(text: string, role: "user" | "assistant" = "user"): NewEntry {
   const payload: MessagePayload = {
@@ -20,11 +20,16 @@ function msg(text: string, role: "user" | "assistant" = "user"): NewEntry {
 
 test("append is atomic, ordered, and idempotent by key", async () => {
   const { engine } = createEngine(sqliteDb(), systemClock());
-  const first = await engine.append([msg("a"), msg("b")], { idempotencyKey: "k1" });
-  if (first.outcome !== "committed") assert.fail(`expected committed, got ${first.outcome}`);
+  const first = await engine.append([msg("a"), msg("b")], {
+    idempotencyKey: "k1"
+  });
+  if (first.outcome !== "committed")
+    assert.fail(`expected committed, got ${first.outcome}`);
   assert.equal(first.refs.length, 2);
 
-  const dup = await engine.append([msg("a"), msg("b")], { idempotencyKey: "k1" });
+  const dup = await engine.append([msg("a"), msg("b")], {
+    idempotencyKey: "k1"
+  });
   assert.equal(dup.outcome, "duplicate");
 
   await assert.rejects(async () => {
@@ -82,8 +87,12 @@ test("ledger claim/settle carries the action-ledger semantics", async () => {
   assert.equal((await engine.ledger.openClaims()).length, 0);
 
   // Both entries exist on the log with the reserved kinds.
-  const claims = await engine.view().query({ kinds: ["effect/claimed"], limit: 5 });
-  const settles = await engine.view().query({ kinds: ["effect/settled"], limit: 5 });
+  const claims = await engine
+    .view()
+    .query({ kinds: ["effect/claimed"], limit: 5 });
+  const settles = await engine
+    .view()
+    .query({ kinds: ["effect/settled"], limit: 5 });
   assert.equal(claims.length, 1);
   assert.equal(settles.length, 1);
 });
@@ -115,7 +124,8 @@ test("durable consumers redeliver unacked batches", async () => {
 test("fork continues the parent's sequence and isolates new entries", async () => {
   const { engine } = createEngine(sqliteDb(), systemClock());
   const result = await engine.append([msg("base1"), msg("base2")]);
-  const refs = (result as { refs: readonly { seq: number; branch: string }[] }).refs;
+  const refs = (result as { refs: readonly { seq: number; branch: string }[] })
+    .refs;
 
   const child = await engine.fork(refs[0] as Parameters<typeof engine.fork>[0]);
   await engine.append([msg("child-only")], { branch: child });

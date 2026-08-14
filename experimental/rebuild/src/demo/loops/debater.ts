@@ -9,7 +9,14 @@
  * committed entry, and the step count picks up exactly where it left off.
  */
 
-import type { AgentLoop, MessagePayload, NewEntry, Part, StepDeps, Versioned } from "../../contract";
+import type {
+  AgentLoop,
+  MessagePayload,
+  NewEntry,
+  Part,
+  StepDeps,
+  Versioned
+} from "../../contract.js";
 
 export interface ArgumentPayload extends Versioned {
   readonly kind: "debater/argument";
@@ -29,7 +36,9 @@ export function debater(opts: { arguments?: number } = {}): AgentLoop {
         turn: deps.turn.turnId,
         limit: total + 1
       });
-      const argued = [...prior].reverse().map((e) => e.payload as ArgumentPayload);
+      const argued = [...prior]
+        .reverse()
+        .map((e) => e.payload as ArgumentPayload);
 
       if (argued.length < total) {
         const persona = PERSONAS[argued.length % PERSONAS.length];
@@ -49,7 +58,11 @@ export function debater(opts: { arguments?: number } = {}): AgentLoop {
           position: textOf(output.parts)
         };
         await deps.commit([
-          { origin: { module: "debater" }, turn: deps.turn.turnId, payload } as NewEntry
+          {
+            origin: { module: "debater" },
+            turn: deps.turn.turnId,
+            payload
+          } as NewEntry
         ]);
         return { outcome: "continue" };
       }
@@ -67,7 +80,11 @@ export function debater(opts: { arguments?: number } = {}): AgentLoop {
         parts: output.parts
       };
       await deps.commit([
-        { origin: { module: "harness" }, turn: deps.turn.turnId, payload: answer } as NewEntry
+        {
+          origin: { module: "harness" },
+          turn: deps.turn.turnId,
+          payload: answer
+        } as NewEntry
       ]);
       return { outcome: "completed" };
     }

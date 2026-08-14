@@ -18,10 +18,10 @@
  * (request types). Type-only, data-only.
  */
 
-import type { TokenBudget, TurnInfo } from "./kernel";
-import type { LogView } from "./transcript";
-import type { ToolDescriptor } from "./tools";
-import type { LanguageModelRequest } from "./model";
+import type { TokenBudget, TurnInfo } from "./kernel.js";
+import type { LogView } from "./transcript.js";
+import type { ToolDescriptor } from "./tools.js";
+import type { LanguageModelRequest } from "./model.js";
 
 export interface AssembleInput {
   readonly view: LogView;

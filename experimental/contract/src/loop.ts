@@ -15,16 +15,22 @@
  * Allowed imports: kernel, transcript, tools, model, context.
  */
 
-import type { BlobRef, EntryRef, Json, RetryPolicy, TurnInfo } from "./kernel";
+import type {
+  BlobRef,
+  EntryRef,
+  Json,
+  RetryPolicy,
+  TurnInfo
+} from "./kernel.js";
 import type {
   EffectClaimedPayload,
   Entry,
   LogView,
   NewEntry
-} from "./transcript";
-import type { ToolRuntime } from "./tools";
-import type { LanguageModel } from "./model";
-import type { ContextAssembler } from "./context";
+} from "./transcript.js";
+import type { ToolRuntime } from "./tools.js";
+import type { LanguageModel } from "./model.js";
+import type { ContextAssembler } from "./context.js";
 
 /** The narrowed, step-agnostic surface injected for one turn wake. */
 export interface TurnDeps {

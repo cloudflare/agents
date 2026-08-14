@@ -17,7 +17,7 @@ import type {
   LanguageModel,
   MessagePayload,
   Part
-} from "../../contract";
+} from "../../contract.js";
 
 export interface LibrarianOptions {
   readonly system?: string;
@@ -40,7 +40,10 @@ export function librarian(opts: LibrarianOptions): ContextAssembler {
       const latest = chronological[chronological.length - 1];
 
       const catalog = chronological
-        .map((e) => `#${e.ref.seq} [${(e.payload as MessagePayload).role}] ${snippet(e.payload as MessagePayload)}`)
+        .map(
+          (e) =>
+            `#${e.ref.seq} [${(e.payload as MessagePayload).role}] ${snippet(e.payload as MessagePayload)}`
+        )
         .join("\n");
 
       const curated = await opts.librarian.generate(
@@ -62,7 +65,9 @@ export function librarian(opts: LibrarianOptions): ContextAssembler {
         .filter((p): p is Extract<Part, { type: "text" }> => p.type === "text")
         .map((p) => p.text)
         .join("");
-      const chosen = new Set([...reply.matchAll(/\d+/g)].map((m) => Number(m[0])));
+      const chosen = new Set(
+        [...reply.matchAll(/\d+/g)].map((m) => Number(m[0]))
+      );
 
       const selected = chronological.filter(
         // The newest message is always included — the librarian curates

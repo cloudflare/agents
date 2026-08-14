@@ -4,7 +4,7 @@
  * assertBounded is the runtime invariant LogView.query enforces.
  */
 
-import type { Query, Seq } from "../contract";
+import type { Query, Seq } from "../contract.js";
 
 /** All entries after an exclusive sequence floor. */
 export function since(seq: Seq): Query {
@@ -28,7 +28,11 @@ export function window(query: Query): Query {
 }
 
 export function assertBounded(q: Query): void {
-  if (q.after === undefined && q.before === undefined && q.limit === undefined) {
+  if (
+    q.after === undefined &&
+    q.before === undefined &&
+    q.limit === undefined
+  ) {
     throw new Error(
       "unbounded query: at least one of {after, before, limit} is required " +
         "(use LogExport.scan for deliberate full traversal)"

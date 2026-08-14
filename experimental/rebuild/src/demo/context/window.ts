@@ -7,9 +7,11 @@
  * window drops is still on the log for a different assembler to find.
  */
 
-import type { ContextAssembler, MessagePayload } from "../../contract";
+import type { ContextAssembler, MessagePayload } from "../../contract.js";
 
-export function rollingWindow(opts: { system?: string; size?: number } = {}): ContextAssembler {
+export function rollingWindow(
+  opts: { system?: string; size?: number } = {}
+): ContextAssembler {
   return {
     async assemble(input) {
       const newestFirst = await input.view.query({

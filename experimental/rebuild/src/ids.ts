@@ -13,7 +13,7 @@ import type {
   ReconcilerName,
   StepId,
   TurnId
-} from "./contract";
+} from "./contract.js";
 
 declare const globalThis: { crypto: { randomUUID(): string } };
 

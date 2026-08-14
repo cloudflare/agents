@@ -8,9 +8,12 @@
  * same shape as tool middleware.
  */
 
-import type { AdmissionPolicy, MessagePayload } from "../../contract";
+import type { AdmissionPolicy, MessagePayload } from "../../contract.js";
 
-export function bouncer(magicWord: string, inner: AdmissionPolicy): AdmissionPolicy {
+export function bouncer(
+  magicWord: string,
+  inner: AdmissionPolicy
+): AdmissionPolicy {
   return {
     triggers: inner.triggers,
     decide(input) {

@@ -1,0 +1,19 @@
+{
+  "name": "@cloudflare/agents-rebuild-experiment",
+  "description": "Minimal working agent implementing the experimental/contract domain interfaces, plus demo strategy modules",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsc -p . && node --test dist/rebuild/tests/*.test.js"
+  },
+  "dependencies": {
+    "ai": "^7.0.0",
+    "workers-ai-provider": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "typescript": "^6.0.3"
+  }
+}

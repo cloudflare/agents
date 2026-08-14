@@ -14,9 +14,9 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { aiSdkModel } from "./ai-sdk";
-import type { LanguageModel } from "../../contract";
-import type { AiBinding } from "../../models/workers-ai";
+import { aiSdkModel } from "./ai-sdk.js";
+import type { LanguageModel } from "../../contract.js";
+import type { AiBinding } from "../../models/workers-ai.js";
 
 export function workersAiViaAiSdk(
   binding: AiBinding,

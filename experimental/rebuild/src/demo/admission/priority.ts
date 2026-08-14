@@ -8,7 +8,7 @@
  * decide() — the runtime enforces it.
  */
 
-import type { AdmissionPolicy, MessagePayload } from "../../contract";
+import type { AdmissionPolicy, MessagePayload } from "../../contract.js";
 
 export interface PriorityOptions {
   /** Channel instances whose messages abort the active turn (latest-wins). */
@@ -18,7 +18,9 @@ export interface PriorityOptions {
 export function priorityLanes(opts: PriorityOptions = {}): AdmissionPolicy {
   const preempt = new Set(opts.preempt ?? []);
   return {
-    triggers: { kinds: ["message", "effect/settled", "tools/approval-verdict"] },
+    triggers: {
+      kinds: ["message", "effect/settled", "tools/approval-verdict"]
+    },
     decide({ entry, active }) {
       const kind = entry.payload.kind;
 
@@ -36,7 +38,10 @@ export function priorityLanes(opts: PriorityOptions = {}): AdmissionPolicy {
         return { action: "ignore" };
       }
       if (active === undefined) return { action: "start" };
-      if (entry.origin.instance !== undefined && preempt.has(entry.origin.instance)) {
+      if (
+        entry.origin.instance !== undefined &&
+        preempt.has(entry.origin.instance)
+      ) {
         return { action: "preempt" };
       }
       return { action: "queue" };

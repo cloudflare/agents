@@ -3273,6 +3273,8 @@ importers:
         specifier: ^4.115.0
         version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
 
+  experimental/contract: {}
+
   experimental/forever-chat:
     dependencies:
       '@ai-sdk/anthropic':
@@ -3526,6 +3528,22 @@ importers:
       wrangler:
         specifier: ^4.115.0
         version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
+
+  experimental/rebuild:
+    dependencies:
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
+      workers-ai-provider:
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.1
+        version: 26.0.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
 
   experimental/session-memory:
     dependencies:

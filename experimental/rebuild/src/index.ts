@@ -4,28 +4,33 @@
  * and reference module implementations. See README.md.
  */
 
-export type * from "./contract";
+export type * from "./contract.js";
 
-export { createEngine } from "./engine/engine";
-export { since, between, latest, window } from "./engine/query";
-export { ensureSchema } from "./engine/schema";
-export { createToolRuntime, TOOLS_RECONCILER } from "./tools/runtime";
+export { createEngine } from "./engine/engine.js";
+export { since, between, latest, window } from "./engine/query.js";
+export { ensureSchema } from "./engine/schema.js";
+export { createToolRuntime, TOOLS_RECONCILER } from "./tools/runtime.js";
 export type {
   ApprovalRequestedPayload,
   ApprovalVerdictPayload,
   ToolSettlementPayload
-} from "./tools/runtime";
-export { stepHarness } from "./harness/step-harness";
-export { defaultLoop } from "./harness/default-loop";
-export { windowAssembler } from "./context/window-assembler";
-export { defaultAdmission } from "./admission/default";
-export { localChannel } from "./channels/local";
-export type { LocalChannel } from "./channels/local";
-export { MockLanguageModel, mockText, mockToolCall, mockOutput } from "./models/mock";
-export { WorkersAiLanguageModel } from "./models/workers-ai";
-export type { AiBinding } from "./models/workers-ai";
-export { startAgent } from "./runtime/host";
-export type { Agent, StartAgentOptions } from "./runtime/host";
-export { systemClock } from "./substrate";
-export type { Clock, SqlDatabase, SqlRow } from "./substrate";
-export * from "./ids";
+} from "./tools/runtime.js";
+export { stepHarness } from "./harness/step-harness.js";
+export { defaultLoop } from "./harness/default-loop.js";
+export { windowAssembler } from "./context/window-assembler.js";
+export { defaultAdmission } from "./admission/default.js";
+export { localChannel } from "./channels/local.js";
+export type { LocalChannel } from "./channels/local.js";
+export {
+  MockLanguageModel,
+  mockText,
+  mockToolCall,
+  mockOutput
+} from "./models/mock.js";
+export { WorkersAiLanguageModel } from "./models/workers-ai.js";
+export type { AiBinding } from "./models/workers-ai.js";
+export { startAgent } from "./runtime/host.js";
+export type { Agent, StartAgentOptions } from "./runtime/host.js";
+export { systemClock } from "./substrate.js";
+export type { Clock, SqlDatabase, SqlRow } from "./substrate.js";
+export * from "./ids.js";

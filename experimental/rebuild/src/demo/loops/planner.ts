@@ -21,8 +21,8 @@ import type {
   Part,
   StepDeps,
   Versioned
-} from "../../contract";
-import { executeCalls } from "../../harness/default-loop";
+} from "../../contract.js";
+import { executeCalls } from "../../harness/default-loop.js";
 
 export interface PlanPayload extends Versioned {
   readonly kind: "planner/plan";
@@ -74,7 +74,12 @@ export function planner(): AgentLoop {
         );
         const calls = toolCalls(output.parts);
         if (calls.length > 0) {
-          await commitMessage(deps, { kind: "message", v: 1, role: "assistant", parts: output.parts });
+          await commitMessage(deps, {
+            kind: "message",
+            v: 1,
+            role: "assistant",
+            parts: output.parts
+          });
           // Claim/settle-governed execution; parks on approval or pending.
           return executeCalls(deps, calls);
         }
@@ -106,7 +111,12 @@ export function planner(): AgentLoop {
         `Your plan is complete. Step outcomes:\n${noteText}\n` +
           `Now give the user the final answer. Do not mention the plan mechanics.`
       );
-      await commitMessage(deps, { kind: "message", v: 1, role: "assistant", parts: output.parts });
+      await commitMessage(deps, {
+        kind: "message",
+        v: 1,
+        role: "assistant",
+        parts: output.parts
+      });
       return { outcome: "completed" };
     }
   };
@@ -138,7 +148,9 @@ async function generateWith(deps: StepDeps, instruction: string) {
 }
 
 const toolCalls = (parts: readonly Part[]) =>
-  parts.filter((p): p is Extract<Part, { type: "tool-call" }> => p.type === "tool-call");
+  parts.filter(
+    (p): p is Extract<Part, { type: "tool-call" }> => p.type === "tool-call"
+  );
 
 const textOf = (parts: readonly Part[]) =>
   parts
@@ -146,14 +158,28 @@ const textOf = (parts: readonly Part[]) =>
     .map((p) => p.text)
     .join("");
 
-async function commitPayload<P extends Versioned>(deps: StepDeps, payload: P): Promise<void> {
+async function commitPayload<P extends Versioned>(
+  deps: StepDeps,
+  payload: P
+): Promise<void> {
   await deps.commit([
-    { origin: { module: "planner" }, turn: deps.turn.turnId, payload } as NewEntry
+    {
+      origin: { module: "planner" },
+      turn: deps.turn.turnId,
+      payload
+    } as NewEntry
   ]);
 }
 
-async function commitMessage(deps: StepDeps, payload: MessagePayload): Promise<void> {
+async function commitMessage(
+  deps: StepDeps,
+  payload: MessagePayload
+): Promise<void> {
   await deps.commit([
-    { origin: { module: "harness" }, turn: deps.turn.turnId, payload } as NewEntry
+    {
+      origin: { module: "harness" },
+      turn: deps.turn.turnId,
+      payload
+    } as NewEntry
   ]);
 }

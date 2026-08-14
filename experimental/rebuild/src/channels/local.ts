@@ -14,8 +14,8 @@ import type {
   MessagePayload,
   NewEntry,
   RetryContract
-} from "../contract";
-import { asConsumerName, uuid } from "../ids";
+} from "../contract.js";
+import { asConsumerName, uuid } from "../ids.js";
 
 export interface LocalDelivery {
   readonly dedupeKey: string;
@@ -77,7 +77,10 @@ export function localChannel(opts: LocalChannelOptions = {}): LocalChannel {
           .map((e) => e.payload as MessagePayload)
           .filter((p) => p.role === "assistant")
           .flatMap((p) => p.parts)
-          .filter((part): part is { type: "text"; text: string } => part.type === "text")
+          .filter(
+            (part): part is { type: "text"; text: string } =>
+              part.type === "text"
+          )
           .map((part) => part.text);
         if (assistantTexts.length === 0) return;
         // Honor the at-least-once contract with the dedupe key.

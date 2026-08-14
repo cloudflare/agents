@@ -6,10 +6,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startAgent } from "../src/runtime/host";
-import { MockLanguageModel, mockText, mockToolCall } from "../src/models/mock";
-import { sqliteDb, testAgent, testProviders } from "./helpers";
-import type { MessagePayload, TurnMarkerPayload } from "../src/contract";
+import { startAgent } from "../src/runtime/host.js";
+import {
+  MockLanguageModel,
+  mockText,
+  mockToolCall
+} from "../src/models/mock.js";
+import { sqliteDb, testAgent, testProviders } from "./helpers.js";
+import type { MessagePayload, TurnMarkerPayload } from "../src/contract.js";
 
 test("approval: park on request, resume on verdict — across hosts", async () => {
   const db = sqliteDb();
@@ -19,13 +23,18 @@ test("approval: park on request, resume on verdict — across hosts", async () =
     mockText("Deleted after approval.")
   ];
 
-  const agents1 = testAgent({ model: new MockLanguageModel(script), providers: [provider] });
+  const agents1 = testAgent({
+    model: new MockLanguageModel(script),
+    providers: [provider]
+  });
   const host1 = startAgent(agents1.definition, { db });
   await agents1.channel.send("please delete /tmp/x");
   await host1.waitUntilQuiescent();
 
   // Parked awaiting approval; nothing executed yet.
-  const markers1 = await host1.engine.view().query({ kinds: ["turn/marker"], limit: 3 });
+  const markers1 = await host1.engine
+    .view()
+    .query({ kinds: ["turn/marker"], limit: 3 });
   assert.equal((markers1[0].payload as TurnMarkerPayload).marker, "parked");
   assert.deepEqual(effects, []);
   const requests = await host1.engine
@@ -35,14 +44,19 @@ test("approval: park on request, resume on verdict — across hosts", async () =
 
   // Host 1 dies while parked. Host 2 wakes; nothing is in memory anywhere.
   await host1.stop();
-  const agents2 = testAgent({ model: new MockLanguageModel(script), providers: [provider] });
+  const agents2 = testAgent({
+    model: new MockLanguageModel(script),
+    providers: [provider]
+  });
   const host2 = startAgent(agents2.definition, { db });
 
   await host2.approve("a1", "granted");
   await host2.waitUntilQuiescent();
 
   assert.deepEqual(effects, ['delete:{"path":"/tmp/x"}']);
-  const markers2 = await host2.engine.view().query({ kinds: ["turn/marker"], limit: 3 });
+  const markers2 = await host2.engine
+    .view()
+    .query({ kinds: ["turn/marker"], limit: 3 });
   assert.equal((markers2[0].payload as TurnMarkerPayload).marker, "completed");
   assert.deepEqual(agents2.channel.delivered, ["Deleted after approval."]);
 
@@ -91,19 +105,28 @@ test("pending tool: park on launch, resume when the settlement lands", async () 
   await agent.waitUntilQuiescent();
 
   assert.deepEqual(pendingCalls, ["p1"]);
-  const markers = await agent.engine.view().query({ kinds: ["turn/marker"], limit: 3 });
+  const markers = await agent.engine
+    .view()
+    .query({ kinds: ["turn/marker"], limit: 3 });
   assert.equal((markers[0].payload as TurnMarkerPayload).marker, "parked");
 
   // The provider's inbound half reports completion (correlated settlement).
   await agent.settleTool("p1", { result: "ok" });
   await agent.waitUntilQuiescent();
 
-  const markersAfter = await agent.engine.view().query({ kinds: ["turn/marker"], limit: 3 });
-  assert.equal((markersAfter[0].payload as TurnMarkerPayload).marker, "completed");
+  const markersAfter = await agent.engine
+    .view()
+    .query({ kinds: ["turn/marker"], limit: 3 });
+  assert.equal(
+    (markersAfter[0].payload as TurnMarkerPayload).marker,
+    "completed"
+  );
   assert.deepEqual(channel.delivered, ["Job finished: ok"]);
 
   // The settled result reached the transcript as a tool-result.
-  const messages = await agent.engine.view().query({ kinds: ["message"], limit: 10 });
+  const messages = await agent.engine
+    .view()
+    .query({ kinds: ["message"], limit: 10 });
   const results = messages
     .map((m) => m.payload as MessagePayload)
     .flatMap((p) => p.parts)
