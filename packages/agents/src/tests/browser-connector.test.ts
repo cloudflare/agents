@@ -286,6 +286,18 @@ describe("browser_execute model output", () => {
     expect(serialized).toContain(shortBase64);
   });
 
+  it("keeps dates and binary values readable in model output", async () => {
+    const tool = createKitesurfBrowserTool();
+    const when = new Date("2026-01-02T03:04:05.000Z");
+
+    const modelOutput = await tool.toModelOutput({
+      output: { when, bytes: new Uint8Array([1, 2, 3]) }
+    });
+    const serialized = JSON.stringify(modelOutput);
+    expect(serialized).toContain("2026-01-02T03:04:05.000Z");
+    expect(serialized).not.toContain("remaining values omitted");
+  });
+
   it("scans adversarial data-URL-like page text in linear time", async () => {
     const tool = createKitesurfBrowserTool();
     // Ambiguous repetition in the data URL detector would backtrack

@@ -220,8 +220,15 @@ function redactBase64Payloads(value: unknown): unknown {
     if (typeof current === "string") return base64Redaction(current);
     if (typeof current !== "object" || current === null) return current;
     // Binary values cross the sandbox boundary as Uint8Array/ArrayBuffer —
-    // walking them would rebuild them as index-keyed plain objects.
-    if (current instanceof ArrayBuffer || ArrayBuffer.isView(current)) {
+    // walking them would rebuild them as index-keyed plain objects. The same
+    // is true of Date/Map/Set, whose own enumerable entries are empty.
+    if (
+      current instanceof ArrayBuffer ||
+      ArrayBuffer.isView(current) ||
+      current instanceof Date ||
+      current instanceof Map ||
+      current instanceof Set
+    ) {
       return current;
     }
     if (ancestors.has(current)) return "[circular reference omitted]";
