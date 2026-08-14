@@ -84,6 +84,73 @@ export class ChatAgent extends AIChatAgent {
     });
     const workersai = createWorkersAI({ binding: this.env.AI });
 
+    const tools = {
+      // MCP tools from connected servers
+      ...mcpTools,
+
+      // One-shot Kitesurf CDP browser_execute tool
+      ...browserTools,
+
+      // Server-side tool: executes automatically
+      getWeather: tool({
+        description: "Get the current weather for a city",
+        inputSchema: z.object({
+          city: z.string().describe("City name")
+        }),
+        execute: async ({ city }) => {
+          // In a real app, call a weather API
+          const conditions = ["sunny", "cloudy", "rainy", "snowy"];
+          const temp = Math.floor(Math.random() * 30) + 5;
+          return {
+            city,
+            temperature: temp,
+            condition:
+              conditions[Math.floor(Math.random() * conditions.length)],
+            unit: "celsius"
+          };
+        }
+      }),
+
+      // Client-side tool: no execute, handled by onToolCall in the client
+      getUserTimezone: tool({
+        description:
+          "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
+        inputSchema: z.object({})
+        // No execute -- the client provides the result via onToolCall
+      }),
+
+      // Tool with approval: requires user confirmation before executing
+      calculate: tool({
+        description:
+          "Perform a math calculation with two numbers. Requires approval for large numbers.",
+        inputSchema: z.object({
+          a: z.number().describe("First number"),
+          b: z.number().describe("Second number"),
+          operator: z
+            .enum(["+", "-", "*", "/", "%"])
+            .describe("Arithmetic operator")
+        }),
+        needsApproval: async ({ a, b }) =>
+          Math.abs(a) > 1000 || Math.abs(b) > 1000,
+        execute: async ({ a, b, operator }) => {
+          const ops: Record<string, (x: number, y: number) => number> = {
+            "+": (x, y) => x + y,
+            "-": (x, y) => x - y,
+            "*": (x, y) => x * y,
+            "/": (x, y) => x / y,
+            "%": (x, y) => x % y
+          };
+          if (operator === "/" && b === 0) {
+            return { error: "Division by zero" };
+          }
+          return {
+            expression: `${a} ${operator} ${b}`,
+            result: ops[operator](a, b)
+          };
+        }
+      })
+    };
+
     const result = streamText({
       abortSignal: options?.abortSignal,
       model: workersai("@cf/moonshotai/kimi-k2.7-code", {
@@ -96,78 +163,15 @@ export class ChatAgent extends AIChatAgent {
         "method shapes and Kitesurf lifecycle guidance. Complete each browser task in one " +
         "execution; do not pause it for approval. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
-      // Prune old tool calls and reasoning to save tokens on long conversations
+      // Prune old tool calls and reasoning to save tokens on long conversations.
+      // Passing `tools` lets each tool's `toModelOutput` shrink persisted
+      // results (e.g. browser screenshots) when history is replayed.
       messages: pruneMessages({
-        messages: await convertToModelMessages(this.messages),
+        messages: await convertToModelMessages(this.messages, { tools }),
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message"
       }),
-      tools: {
-        // MCP tools from connected servers
-        ...mcpTools,
-
-        // One-shot Kitesurf CDP browser_execute tool
-        ...browserTools,
-
-        // Server-side tool: executes automatically
-        getWeather: tool({
-          description: "Get the current weather for a city",
-          inputSchema: z.object({
-            city: z.string().describe("City name")
-          }),
-          execute: async ({ city }) => {
-            // In a real app, call a weather API
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
-          }
-        }),
-
-        // Client-side tool: no execute, handled by onToolCall in the client
-        getUserTimezone: tool({
-          description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
-          inputSchema: z.object({})
-          // No execute -- the client provides the result via onToolCall
-        }),
-
-        // Tool with approval: requires user confirmation before executing
-        calculate: tool({
-          description:
-            "Perform a math calculation with two numbers. Requires approval for large numbers.",
-          inputSchema: z.object({
-            a: z.number().describe("First number"),
-            b: z.number().describe("Second number"),
-            operator: z
-              .enum(["+", "-", "*", "/", "%"])
-              .describe("Arithmetic operator")
-          }),
-          needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
-          execute: async ({ a, b, operator }) => {
-            const ops: Record<string, (x: number, y: number) => number> = {
-              "+": (x, y) => x + y,
-              "-": (x, y) => x - y,
-              "*": (x, y) => x * y,
-              "/": (x, y) => x / y,
-              "%": (x, y) => x % y
-            };
-            if (operator === "/" && b === 0) {
-              return { error: "Division by zero" };
-            }
-            return {
-              expression: `${a} ${operator} ${b}`,
-              result: ops[operator](a, b)
-            };
-          }
-        })
-      },
+      tools,
       stopWhen: isStepCount(20)
     });
 
