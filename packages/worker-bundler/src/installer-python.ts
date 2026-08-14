@@ -104,9 +104,22 @@ interface PyodideWheelInfo {
   file: PyPASimpleFile;
 }
 
-// Making this global so it will only need to be fetched once per invocation
-// TODO: Consider caching this somewhere since it's not likely to change between runs
-let pyodideLockfile: PyodideLockfile | null = null;
+// Cache Pyodide lockfiles per version so that workers using different
+// compatibility dates can resolve packages against the correct Pyodide index.
+const pyodideLockfileCache = new Map<string, Promise<PyodideLockfile | null>>();
+
+function getCachedPyodideLockfile(
+  version: string
+): Promise<PyodideLockfile | null> {
+  const cached = pyodideLockfileCache.get(version);
+  if (cached) {
+    return cached;
+  }
+
+  const promise = fetchPyodideLockfile(version);
+  pyodideLockfileCache.set(version, promise);
+  return promise;
+}
 
 /**
  * Install Python dependencies declared in a pyproject.toml file.
@@ -137,15 +150,14 @@ export async function installDependenciesPython(
     options["compatibilityDate"]!
   );
 
-  if (!pyodideLockfile) {
-    try {
-      pyodideLockfile = await fetchPyodideLockfile(pyodideVersion);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      result.warnings.push(
-        `Could not retrieve Pyodide lockfile, attempts to retrieve packages from the Pyodide CDN may fail. Error: ${message}`
-      );
-    }
+  let pyodideLockfile: PyodideLockfile | null = null;
+  try {
+    pyodideLockfile = await getCachedPyodideLockfile(pyodideVersion);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    result.warnings.push(
+      `Could not retrieve Pyodide lockfile, attempts to retrieve packages from the Pyodide CDN may fail. Error: ${message}`
+    );
   }
 
   // Track installed packages to avoid duplicates
@@ -163,7 +175,8 @@ export async function installDependenciesPython(
         installedPackages,
         inProgress,
         PYPI_SIMPLE_API,
-        pyodideVersion
+        pyodideVersion,
+        pyodideLockfile
       )
     )
   );
@@ -197,7 +210,8 @@ export async function installPythonPackage(
   installedPackages: Set<string>,
   inProgress: Map<string, Promise<void>>,
   backupRegistry: string,
-  pyodideVersion: string
+  pyodideVersion: string,
+  pyodideLockfile: PyodideLockfile | null
 ): Promise<void> {
   const name = parsePythonDependencySpecifier(dependencySpecifier)["name"];
   // Skip if already installed in this run
@@ -229,7 +243,11 @@ export async function installPythonPackage(
       let version: string = "";
 
       // Try the Pyodide index first, then fall back to PyPI if that fails
-      let registryResult = await retrieveFromPyodide(name, pyodideVersion);
+      let registryResult = await retrieveFromPyodide(
+        name,
+        pyodideVersion,
+        pyodideLockfile
+      );
       if (registryResult) {
         [response, wheel, version] = registryResult;
       } else {
@@ -265,7 +283,8 @@ export async function installPythonPackage(
             installedPackages,
             inProgress,
             PYPI_SIMPLE_API,
-            pyodideVersion
+            pyodideVersion,
+            pyodideLockfile
           )
         )
       );
@@ -309,9 +328,10 @@ async function retrieveFromPyPI(
 // TODO: Alter the flow to use the PyPA simple api (index.pyodide.org)
 async function retrieveFromPyodide(
   name: string,
-  pyodideVersion: string
+  pyodideVersion: string,
+  pyodideLockfile: PyodideLockfile | null
 ): Promise<[Response, PyPASimpleFile, string] | null> {
-  const pyodideWheel = getPyodideWheel(name, pyodideVersion);
+  const pyodideWheel = getPyodideWheel(name, pyodideVersion, pyodideLockfile);
   if (!pyodideWheel) {
     return null;
   }
@@ -405,7 +425,8 @@ function normalizePythonName(name: string): string {
  */
 function getPyodideWheel(
   name: string,
-  pyodideVersion: string
+  pyodideVersion: string,
+  pyodideLockfile: PyodideLockfile | null
 ): PyodideWheelInfo | null {
   if (!pyodideLockfile) return null;
 
