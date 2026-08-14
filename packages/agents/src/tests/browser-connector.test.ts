@@ -1328,6 +1328,10 @@ describe("BrowserConnector", () => {
       session: { browser: "kitesurf" }
     });
 
+    // Pausing must not tombstone it: the session is still live.
+    await connector.onPassEnd("exec-a", "paused");
+    expect(store.sessions.get("cdp:exec:exec-a")?.closedAt).toBeUndefined();
+
     await connector.disposeExecution("exec-a", "completed");
     expect(store.sessions.has("cdp:exec:exec-a")).toBe(false);
     expect(deletesFor(requests, "session-chromium")).toHaveLength(1);

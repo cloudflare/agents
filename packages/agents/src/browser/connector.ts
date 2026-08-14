@@ -630,7 +630,9 @@ export class BrowserConnector extends CodemodeConnector {
     const lock = await this.#store.acquireLock(key);
     try {
       const stored = await this.#store.get(key);
-      if (stored) {
+      // Only a Kitesurf marker is gone with its connection; a session left by
+      // an earlier Chromium run is still live and must stay reclaimable.
+      if (stored?.sessionId.startsWith(KITESURF_SESSION_PREFIX)) {
         await this.#store.set(key, { ...stored, closedAt: Date.now() });
       }
     } finally {
