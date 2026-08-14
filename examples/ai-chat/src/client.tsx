@@ -120,21 +120,30 @@ function getScreenshotPreview(outer: unknown): { src: string } | null {
   return { src: `data:${mimeType};base64,${output.data}` };
 }
 
-// Any tool result carrying a large `data` string is treated as an inline
-// payload (screenshot or otherwise) and kept out of the transcript.
+// Any large `data` string is an inline payload (a screenshot or another
+// binary blob) and is kept out of the transcript. The tool output also carries
+// codemode's `calls` log, so the whole object is walked, not just its root.
 const INLINE_DATA_REDACTION_THRESHOLD = 1024;
+const MAX_REDACTION_DEPTH = 20;
 
-function redactInlineData(
-  value: Record<string, unknown>
-): Record<string, unknown> {
-  const data = value.data;
-  if (
-    typeof data !== "string" ||
-    data.length <= INLINE_DATA_REDACTION_THRESHOLD
-  ) {
+function redactInlineData(value: unknown, key?: string, depth = 0): unknown {
+  if (typeof value === "string") {
+    return key === "data" && value.length > INLINE_DATA_REDACTION_THRESHOLD
+      ? `[inline data omitted: ${value.length} chars]`
+      : value;
+  }
+  if (depth >= MAX_REDACTION_DEPTH || !isRecord(value)) {
     return value;
   }
-  return { ...value, data: `[inline data omitted: ${data.length} chars]` };
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactInlineData(entry, key, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entry]) => [
+      entryKey,
+      redactInlineData(entry, entryKey, depth + 1)
+    ])
+  );
 }
 
 function formatToolOutput(output: unknown): string {
@@ -142,14 +151,7 @@ function formatToolOutput(output: unknown): string {
     return output;
   }
 
-  if (isRecord(output)) {
-    const redacted = isRecord(output.result)
-      ? { ...output, result: redactInlineData(output.result) }
-      : redactInlineData(output);
-    return JSON.stringify(redacted, null, 2);
-  }
-
-  return JSON.stringify(output, null, 2);
+  return JSON.stringify(redactInlineData(output), null, 2);
 }
 
 function Chat() {
