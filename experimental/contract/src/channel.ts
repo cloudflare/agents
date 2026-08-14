@@ -21,7 +21,13 @@
  */
 
 import type { ConsumerName } from "./kernel.js";
-import type { AppendResult, Entry, NewEntry, Query } from "./transcript.js";
+import type {
+  AppendResult,
+  Entry,
+  NewEntry,
+  Query,
+  TailEvent
+} from "./transcript.js";
 import type { RetryContract } from "./tools.js";
 
 // ---------------------------------------------------------------------------
@@ -63,6 +69,14 @@ export interface Channel {
   /** Wire external event sources to the inbox. Idempotent per wake. */
   start?(inbox: Inbox): void | Promise<void>;
   readonly outbound?: Outbox;
+  /**
+   * Optional ephemeral half (ADR 0005): the host hands the channel a live
+   * tail — committed entries plus in-flight chunks — once per wake. Surfaces
+   * that can render progress (a terminal, a web socket, Telegram message
+   * edits) attach here; `outbound` remains the durable delivery of record.
+   * Nothing observed on the tail may be treated as delivered.
+   */
+  live?(tail: AsyncIterable<TailEvent>): void;
 }
 
 // ---------------------------------------------------------------------------

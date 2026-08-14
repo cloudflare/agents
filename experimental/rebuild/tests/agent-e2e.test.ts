@@ -42,7 +42,7 @@ test("happy path: message → tool call → tool result → answer → delivery"
   const states = markers
     .map((m) => (m.payload as TurnMarkerPayload).marker)
     .reverse();
-  assert.deepEqual(states, ["step-committed", "completed"]);
+  assert.deepEqual(states, ["admitted", "step-committed", "completed"]);
 
   // The model saw the tool result on its second call.
   assert.equal(model.requests.length, 2);

@@ -102,9 +102,11 @@ host and starting another over the same database is a faithful crash test.
 
 ## Demo modules
 
-`src/demo/` holds ten strategies across five seams — one practical and one
+`src/demo/` holds eleven strategies across six seams — one practical and one
 wacky per seam, each a single readable file — plus `presets.ts`, three
-complete agents that share no strategy but run on identical machinery. See
+complete agents that share no strategy but run on identical machinery, and an
+interactive runner whose terminal is itself a Channel (input through the
+Inbox, streamed display through the channel's live half per ADR 0005). See
 `src/demo/README.md` for the tour. The AI SDK adapters compile against the
 real `ai` / `workers-ai-provider` packages and deliberately have no local
 runtime or fallback — they come alive in a deployed Worker.

@@ -145,6 +145,28 @@ export function startAgent(
     return turnId;
   }
 
+  /** Admission outcomes are log-visible (ADR 0005): tail clients can tell an
+   * admitted message from an ignored one without host access. */
+  async function markAdmitted(turnId: TurnId, action: string): Promise<void> {
+    await engine.append(
+      [
+        {
+          origin: { module: "runtime" },
+          turn: turnId,
+          payload: {
+            kind: "turn/marker",
+            v: 1,
+            marker: "admitted",
+            turnId,
+            attempt: 1,
+            detail: { action }
+          } satisfies TurnMarkerPayload
+        } as unknown as NewEntry
+      ],
+      { branch }
+    );
+  }
+
   function setTurnStatus(
     turnId: string,
     status: string,
@@ -289,11 +311,10 @@ export function startAgent(
     });
     switch (decision.action) {
       case "start": {
-        const turnId = insertTurn(
-          entry.ref,
-          active === undefined ? "active" : "queued"
-        );
-        if (active === undefined) scheduleDrive(turnId);
+        const started = active === undefined;
+        const turnId = insertTurn(entry.ref, started ? "active" : "queued");
+        await markAdmitted(turnId, started ? "start" : "queue");
+        if (started) scheduleDrive(turnId);
         break;
       }
       case "resume": {
@@ -305,7 +326,7 @@ export function startAgent(
         break;
       }
       case "queue": {
-        insertTurn(entry.ref, "queued");
+        await markAdmitted(insertTurn(entry.ref, "queued"), "queue");
         break;
       }
       case "merge": {
@@ -317,7 +338,7 @@ export function startAgent(
         if (active !== undefined) {
           driveControllers.get(active.turnId)?.abort();
         }
-        insertTurn(entry.ref, "queued");
+        await markAdmitted(insertTurn(entry.ref, "queued"), "preempt");
         break;
       }
       case "ignore":
@@ -424,6 +445,8 @@ export function startAgent(
       })
   };
   for (const channel of definition.channels) {
+    // Ephemeral half first (ADR 0005), so early drives stream to the surface.
+    channel.live?.(engine.tail({ live: true }));
     void channel.start?.(inbox);
   }
 

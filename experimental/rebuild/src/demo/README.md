@@ -1,4 +1,4 @@
-# demo — ten strategies across five seams
+# demo — eleven strategies across six seams
 
 The demo _is the code_: each file is one module, small enough to read on a
 slide, focused on the pattern its seam supports. `presets.ts` is the payoff —
@@ -13,6 +13,7 @@ three complete agents that share no strategy yet run on identical machinery.
 | `AdmissionPolicy`  | `admission/priority.ts` — source-aware lanes; the pager preempts                                                                           | `admission/bouncer.ts` — no magic word, no turn; policies compose as decorators      |
 | `ToolMiddleware`   | `middleware/tollbooth.ts` — x402-shaped payment gating on the approval rail                                                                |                                                                                      |
 | `AgentLoop`        | `loops/planner.ts` — plan-and-execute with cold-readable durable plans                                                                     | `loops/debater.ts` — argues with itself before answering                             |
+| `Channel`          | `channels/terminal.ts` — a TTY as a surface: readline in, live-tail streaming out (ADR 0005); approvals and settlements are just entries   |                                                                                      |
 
 Supporting cast: `tools.ts` — one tool per durability shape (readonly /
 mutating / pending).
@@ -42,20 +43,28 @@ pnpm demo --help
 ```
 
 The flags swap strategies independently, so every module above can run through
-the same in-memory SQLite-backed stack. The terminal renders from the engine's
-**live tail** — the same rail a client uses to replay or attach — so model
-output streams token by token, and everything else the turn does surfaces the
-moment it hits the log: tool calls and results as dim `·` lines, plans, debate
-arguments and compaction summaries as attributed pass-through entries, failed
-turns as a visible `✗` line. When streamed text turns out to be a pass-through
-entry rather than the reply, an `↳` attribution line under it says what it
-was committed as.
+the same in-memory SQLite-backed stack. The terminal is itself a Channel
+(`channels/terminal.ts`): input rides the Inbox, and display rides the
+channel's **live half** (ADR 0005) — the host hands it a tail of committed
+entries plus in-flight chunks. Model output streams token by token, and
+everything else the turn does surfaces the moment it hits the log: tool calls
+and results as dim `·` lines, plans, debate arguments and compaction summaries
+as attributed pass-through entries, failed turns as a visible `✗` line. When
+streamed text turns out to be a pass-through entry rather than the reply, an
+`↳` attribution line under it says what it was committed as.
+
+Input does not block on the turn: type while the agent is streaming and your
+message is admitted live — queued under the default policy, preempting under
+`--admission priority`.
 
 The bouncer requires "please" in user messages (and says so when it ignores
-you). Tollbooth approval requests print inline; resolve the newest with bare
+you — admission outcomes are log-visible via the runtime's `admitted` marker).
+Tollbooth approval requests print inline; resolve the newest with bare
 `/approve` / `/reject`, or name one — call ids accept any unique prefix. A
 turn parked on a pending effect (the oracle) prints the `/settle <call-id>
-<answer>` line that lets you play the outside world.
+<answer>` line that lets you play the outside world. Both commands append
+ordinary correlated entries through the channel's own inbox; the host's
+`approve()`/`settleTool()` helpers are not involved.
 
 Pass `--db <path>` for a persistent session: restart with the same path and
 the recent conversation replays before the prompt; kill the process mid-turn
