@@ -67,18 +67,46 @@ turn parked on a pending effect (the oracle) prints the `/settle <call-id>
 ordinary correlated entries through the channel's own inbox; the host's
 `approve()`/`settleTool()` helpers are not involved.
 
-Pass `--db <path>` for a persistent session: restart with the same path and
-the recent conversation replays before the prompt; kill the process mid-turn
-and the next start's wake scan re-drives the interrupted turn — the durability
-suite, live at a terminal.
+## Reading the log back
+
+Every run writes its log to a fresh `.sessions/<timestamp>.db` and prints the
+path at startup — not for durability (the tests already prove that) but for
+**introspection**: when an answer looks wrong, the log is the record of what
+actually happened, and an in-memory session takes it to the grave.
+
+```bash
+pnpm log                     # newest session
+pnpm log .sessions/….db      # a specific one
+pnpm log --full --turn t1    # whole message bodies, one turn
+```
+
+It reads through the Engine's own `LogExport.scan`, so it shows exactly what a
+cold reader — a recovering host, a support tool — would see:
+
+```
+   1 21:22:48.154      user      "Write a detailed 500-word explanation…" [74 chars]
+   2 21:22:48.156 t1   turn      admitted
+   3 21:22:59.649 t1   assistant "**TCP Congestion Control**…" [5101 chars]
+   4 21:22:59.650 t1   turn      completed
+```
+
+What is _absent_ is informative too: streamed chunks are ephemeral and never
+committed, so anything seen on screen but missing from the log existed only in
+flight. That distinction is how you tell a display bug from a model problem —
+if the committed text is short, the model really did stop there.
+
+Pass `--db <path>` to resume an existing session (the recent conversation
+replays before the prompt; kill a run mid-turn and the next start's wake scan
+re-drives the interrupted turn — the durability suite, live at a terminal), or
+`--db :memory:` to keep nothing.
 
 ELIZA runs with no configuration. `--model ai-sdk` is a real model:
 `models/ai-gateway.ts` reaches Workers AI through Cloudflare AI Gateway over
 plain HTTPS — no Workers runtime, no per-vendor key, nothing to pass on the
-command line. It needs only a gateway token in `AI_GATEWAY_API_KEY` (or
-`AI_GATEWAY_KEY`, the name the shared direnv `.envrc` uses), and every request
-carries the team's `cf-aig-metadata` project header. There is deliberately no
-fallback: without a token it crashes at startup rather than quietly degrading.
+command line. It needs only a gateway token in `AI_GATEWAY_KEY` (the name the
+shared direnv `.envrc` uses), and every request carries the team's
+`cf-aig-metadata` project header. There is deliberately no fallback: without a
+token it crashes at startup rather than quietly degrading.
 
 This is the route that streams _and_ calls tools, so it is what brings the
 tool-driven strategies to life. Both durability rails are verified against it
@@ -124,6 +152,10 @@ than assumed — worth knowing if you point the AI SDK at Workers AI yourself:
   message carrying only tool calls (legal at OpenAI); Workers AI 400s with
   `'string' not in 'null'`, which would break every turn after a tool call.
   The module rewrites it to `""` on the way out.
+- **Workers AI stops at 256 output tokens** unless given a cap, so any
+  reasonably long answer just ends mid-sentence. The module sets 4096
+  (`AI_GATEWAY_MAX_TOKENS` overrides), passed through the contract's own
+  `budget.reserveOutputTokens` seam, which nothing had been honouring.
 
 One lesson kept from an earlier Codex-backed route, since it will recur: if a
 model appears not to stream, suspect the provider transport before this code.

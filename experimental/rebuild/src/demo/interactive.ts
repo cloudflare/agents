@@ -14,8 +14,11 @@
  * scan re-drive it on the next start.
  */
 
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { stdout } from "node:process";
 import { parseArgs } from "node:util";
+import { SESSIONS_DIR } from "./sessions.js";
 import type {
   AdmissionPolicy,
   AgentDefinition,
@@ -52,14 +55,22 @@ Swap strategies independently at their composition seams:
   --admission default|priority|bouncer
   --middleware none|tollbooth
   --loop default|planner|debater
-  --db <path>                         SQLite file for a persistent session
-                                      (default: in-memory, gone on exit)
+  --db <path>                         SQLite file to use. Default: a fresh
+                                      file under .sessions/ so the log
+                                      survives for inspection. Pass an
+                                      existing path to resume it, or
+                                      :memory: to keep nothing.
   --help
 
+The log is the whole story of a session — read it back with:
+  pnpm log            # newest session
+  pnpm log <path>     # a specific one
+
 --model ai-sdk goes through Cloudflare AI Gateway and needs a gateway token in
-AI_GATEWAY_API_KEY (or AI_GATEWAY_KEY). Point it at another vendor with
-AI_GATEWAY_SLUG / AI_GATEWAY_MODEL. There is deliberately no fallback: without
-a token it crashes at startup rather than quietly degrading.
+AI_GATEWAY_KEY. Point it at another vendor with AI_GATEWAY_SLUG /
+AI_GATEWAY_MODEL, and raise the output cap with AI_GATEWAY_MAX_TOKENS. There
+is deliberately no fallback: without a token it crashes at startup rather than
+quietly degrading.
 
 While running:
   /approve [call-id]   grant the newest (or the named) approval request
@@ -79,7 +90,7 @@ const { values } = parseArgs({
     admission: { type: "string", default: "default" },
     middleware: { type: "string", default: "none" },
     loop: { type: "string", default: "default" },
-    db: { type: "string", default: ":memory:" },
+    db: { type: "string" },
     help: { type: "boolean", short: "h" }
   },
   strict: true
@@ -110,7 +121,11 @@ const loopChoice = choice("loop", values.loop, [
   "planner",
   "debater"
 ]);
-const dbPath = values.db ?? ":memory:";
+// Persist by default — not for durability (that is already proven by the
+// tests) but for introspection: when an answer looks wrong, the log is the
+// record of what actually happened, and an in-memory session takes it to the
+// grave. A fresh file per run, so no run silently resumes another.
+const dbPath = values.db ?? newSessionPath();
 
 const model = modelChoice === "eliza" ? eliza() : aiGateway();
 let loop: AgentLoop =
@@ -178,10 +193,10 @@ const PROVIDER_TURN_TIMEOUT_MS = 5 * 60_000;
 stdout.write(
   `Rebuild demo: model=${modelChoice}, context=${contextChoice}, ` +
     `admission=${admissionChoice}, middleware=${middlewareChoice}, ` +
-    `loop=${loopChoice}${dbPath === ":memory:" ? "" : `, db=${dbPath}`} ` +
-    `(type /quit to exit)\n`
+    `loop=${loopChoice} (type /quit to exit)\n`
 );
 if (dbPath !== ":memory:") {
+  stdout.write(`log: ${dbPath}  —  read it back with: pnpm log\n`);
   await printReplay(agent.engine.view());
 }
 terminal.begin();
@@ -212,6 +227,13 @@ async function printReplay(view: LogView): Promise<void> {
     if (text.length === 0) continue;
     stdout.write(`${dim(`${m.role === "user" ? "You" : "Agent"}> ${text}`)}\n`);
   }
+}
+
+/** .sessions/<timestamp>.db — sorts chronologically, so "newest" is trivial. */
+function newSessionPath(): string {
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return join(SESSIONS_DIR, `${stamp}.db`);
 }
 
 function choice<const T extends string>(

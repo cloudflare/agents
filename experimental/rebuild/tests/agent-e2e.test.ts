@@ -8,11 +8,62 @@ import assert from "node:assert/strict";
 import { startAgent } from "../src/runtime/host.js";
 import {
   MockLanguageModel,
+  mockOutput,
   mockText,
   mockToolCall
 } from "../src/models/mock.js";
 import { sqliteDb, testAgent, testProviders } from "./helpers.js";
 import type { MessagePayload, TurnMarkerPayload } from "../src/contract.js";
+
+test("a truncated answer fails the turn instead of passing as complete", async () => {
+  // Regression: finish=length used to be retried, and the retried step read
+  // the committed partial answer as "already answered" and completed the
+  // turn — so hitting the output cap looked exactly like success.
+  const db = sqliteDb();
+  const { provider } = testProviders();
+  const model = new MockLanguageModel([
+    mockOutput([{ type: "text", text: "It begins like th" }], "length"),
+    mockText("should never be reached")
+  ]);
+  const { definition } = testAgent({ model, providers: [provider] });
+  const agent = startAgent(definition, { db });
+
+  await agent.engine.append(
+    [
+      {
+        origin: { module: "channel", instance: "test" },
+        payload: {
+          kind: "message",
+          v: 1,
+          role: "user",
+          parts: [{ type: "text", text: "Tell me a long story." }]
+        }
+      } as never
+    ],
+    {}
+  );
+  await agent.waitUntilQuiescent();
+
+  const markers = await agent.engine
+    .view()
+    .query({ kinds: ["turn/marker"], limit: 10 });
+  const latest = markers[0].payload as TurnMarkerPayload;
+  assert.equal(latest.marker, "failed");
+  assert.match(
+    JSON.stringify(latest.detail),
+    /output truncated.*finish=length/,
+    "the failure must say why, not just that"
+  );
+  // The partial text is still on the log — truncated, not discarded.
+  const messages = await agent.engine
+    .view()
+    .query({ kinds: ["message"], limit: 10 });
+  const assistant = messages.find(
+    (m) => (m.payload as MessagePayload).role === "assistant"
+  );
+  assert.ok(assistant !== undefined, "the partial answer is preserved");
+  await agent.stop();
+});
 
 test("happy path: message → tool call → tool result → answer → delivery", async () => {
   const db = sqliteDb();

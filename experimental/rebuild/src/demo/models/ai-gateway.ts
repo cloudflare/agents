@@ -26,18 +26,25 @@ const PROJECT = "agents-team-cls-rebuild-demo";
  * so the agent never sees a call. Verified against the gateway, not assumed. */
 const DEFAULT_MODEL = "@cf/openai/gpt-oss-120b";
 
+/**
+ * Workers AI stops at 256 output tokens unless told otherwise — an answer of
+ * any length just stops mid-sentence. Overridable with AI_GATEWAY_MAX_TOKENS.
+ */
+const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+
 export interface AiGatewayOptions {
   /** Gateway provider slug: workers-ai (default), openai, grok, … */
   readonly slug?: string;
   readonly model?: string;
+  readonly maxOutputTokens?: number;
 }
 
 export function aiGateway(opts: AiGatewayOptions = {}): LanguageModel {
-  const token = process.env.AI_GATEWAY_API_KEY ?? process.env.AI_GATEWAY_KEY;
+  const token = process.env.AI_GATEWAY_KEY;
   if (token === undefined || token.length === 0) {
     throw new Error(
-      "No gateway token: export AI_GATEWAY_API_KEY (or AI_GATEWAY_KEY, the " +
-        "name the shared direnv .envrc uses). There is no fallback model."
+      "No gateway token: export AI_GATEWAY_KEY (the name the shared direnv " +
+        ".envrc uses). There is no fallback model."
     );
   }
   const slug = opts.slug ?? process.env.AI_GATEWAY_SLUG ?? "workers-ai";
@@ -63,9 +70,15 @@ export function aiGateway(opts: AiGatewayOptions = {}): LanguageModel {
     }
   });
 
+  const envMax = Number(process.env.AI_GATEWAY_MAX_TOKENS);
   // .chat() pins the chat-completions API: @ai-sdk/openai v4 would otherwise
   // default to OpenAI's Responses API, which the gateway slugs do not serve.
-  return aiSdkModel(gateway.chat(model));
+  return aiSdkModel(gateway.chat(model), {
+    maxOutputTokens:
+      opts.maxOutputTokens ??
+      (Number.isFinite(envMax) && envMax > 0 ? envMax : undefined) ??
+      DEFAULT_MAX_OUTPUT_TOKENS
+  });
 }
 
 /**

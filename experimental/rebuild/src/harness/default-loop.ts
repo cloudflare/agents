@@ -111,10 +111,26 @@ export function defaultLoop(opts: DefaultLoopOptions = {}): AgentLoop {
         );
         return executeCalls(deps, calls);
       }
+      if (output.finish === "length") {
+        // The answer is truncated, and the partial text is already committed.
+        // NOT retryable: the same prompt hits the same cap. Retrying was also
+        // actively harmful — the retried step's classifyResume() saw a
+        // committed assistant message with no tool calls, read it as a
+        // finished answer, and completed the turn, so truncation looked like
+        // success. Fail terminally instead, and say why.
+        return {
+          outcome: "failed",
+          message:
+            "output truncated: the model hit its output token cap " +
+            "(finish=length). Raise the budget (reserveOutputTokens, or the " +
+            "model adapter's maxOutputTokens).",
+          retryable: false
+        };
+      }
       return {
         outcome: "failed",
         message: `model finished with ${output.finish}`,
-        retryable: output.finish === "length"
+        retryable: false
       };
     }
   };

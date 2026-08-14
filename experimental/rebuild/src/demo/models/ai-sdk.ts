@@ -24,13 +24,29 @@ import type {
   Part
 } from "../../contract.js";
 
-export function aiSdkModel(model: AiSdkModel): LanguageModel {
+export interface AiSdkModelOptions {
+  /**
+   * Output cap when the request carries no `budget.reserveOutputTokens`.
+   * Worth setting: vendor defaults can be brutally low (Workers AI stops at
+   * 256 tokens), and the symptom is an answer that just stops mid-sentence.
+   */
+  readonly maxOutputTokens?: number;
+}
+
+export function aiSdkModel(
+  model: AiSdkModel,
+  opts: AiSdkModelOptions = {}
+): LanguageModel {
   return {
     async generate(req, io) {
+      // The contract's output budget, finally connected to a provider.
+      const maxOutputTokens =
+        req.budget?.reserveOutputTokens ?? opts.maxOutputTokens;
       const result = streamText({
         model,
         ...(req.system !== undefined ? { instructions: req.system } : {}),
         messages: toModelMessages(req),
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
         ...(req.tools !== undefined && req.tools.length > 0
           ? { tools: toToolSet(req) }
           : {}),

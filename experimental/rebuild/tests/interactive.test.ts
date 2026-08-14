@@ -35,7 +35,10 @@ async function runDemo(
 }
 
 test("interactive demo accepts terminal input and prints a reply", async () => {
-  const result = await runDemo([], "I feel optimistic\n/quit\n");
+  const result = await runDemo(
+    ["--db", ":memory:"],
+    "I feel optimistic\n/quit\n"
+  );
   assert.equal(result.exitCode, 0, result.errors);
   assert.match(result.output, /model=eliza, context=window/);
   assert.match(result.output, /Agent> Tell me more about feeling optimistic\./);
@@ -44,6 +47,8 @@ test("interactive demo accepts terminal input and prints a reply", async () => {
 test("CLI composes the practical strategy choices", async () => {
   const result = await runDemo(
     [
+      "--db",
+      ":memory:",
       "--context",
       "compactor",
       "--admission",
@@ -65,7 +70,16 @@ test("CLI composes the practical strategy choices", async () => {
 
 test("CLI composes the wacky strategy choices", async () => {
   const result = await runDemo(
-    ["--context", "librarian", "--admission", "bouncer", "--loop", "debater"],
+    [
+      "--db",
+      ":memory:",
+      "--context",
+      "librarian",
+      "--admission",
+      "bouncer",
+      "--loop",
+      "debater"
+    ],
     "please debate this\n/quit\n"
   );
   assert.equal(result.exitCode, 0, result.errors);
@@ -90,7 +104,7 @@ test("--db persists the session: a second run replays the conversation", async (
 
 test("the bouncer's silence is made visible", async () => {
   const result = await runDemo(
-    ["--admission", "bouncer"],
+    ["--db", ":memory:", "--admission", "bouncer"],
     "no magic word here\n/quit\n"
   );
   assert.equal(result.exitCode, 0, result.errors);
@@ -100,15 +114,21 @@ test("the bouncer's silence is made visible", async () => {
 test("AI SDK selection crashes when no gateway token is present", async () => {
   // No fallback model, by design: it fails loudly rather than degrading.
   const env = { ...process.env };
-  delete env.AI_GATEWAY_API_KEY;
   delete env.AI_GATEWAY_KEY;
-  const result = await runDemo(["--model", "ai-sdk"], "", env);
+  const result = await runDemo(
+    ["--db", ":memory:", "--model", "ai-sdk"],
+    "",
+    env
+  );
   assert.notEqual(result.exitCode, 0);
   assert.match(result.errors, /No gateway token/);
 });
 
 test("the removed --provider flag is rejected, not silently ignored", async () => {
-  const result = await runDemo(["--provider", "./whatever.mjs"], "");
+  const result = await runDemo(
+    ["--db", ":memory:", "--provider", "./whatever.mjs"],
+    ""
+  );
   assert.notEqual(result.exitCode, 0);
   assert.match(result.errors, /Unknown option/);
 });

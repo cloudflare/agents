@@ -18,6 +18,7 @@ cd experimental/rebuild
 pnpm install   # or npm install when working outside the workspace
 pnpm test      # tsc -p . && node --test dist/rebuild/tests/*.test.js
 pnpm demo      # start an interactive, composable terminal agent
+pnpm log       # read the newest session's log back, entry by entry
 ```
 
 The interactive demo runs the full local stack: terminal channel → admission →
@@ -32,7 +33,7 @@ pnpm demo --help
 
 `--model ai-sdk` is a real model with no local fallback: it goes through
 Cloudflare AI Gateway (`src/demo/models/ai-gateway.ts`) and needs a gateway
-token in `AI_GATEWAY_API_KEY` (or `AI_GATEWAY_KEY`), crashing at startup
+token in `AI_GATEWAY_KEY`, crashing at startup
 without one. Nothing else to configure — it streams and calls tools:
 
 ```bash
@@ -43,7 +44,13 @@ Tollbooth approvals are resolved with `/approve` (bare, or with a call-id
 prefix) and pending effects with `/settle <call-id> <answer>`. Type `/quit` or
 press Ctrl-D to exit.
 
-31 tests, all passing: engine unit tests, demo-module tests (append idempotency, bounded query,
+Each run writes its log to `.sessions/<timestamp>.db` so it can be read back
+afterwards; `pnpm log` prints it as a chronological entry dump, which is how
+you tell a display problem from a model problem (streamed chunks are never
+committed, so anything on screen but absent from the log existed only in
+flight).
+
+32 tests, all passing: engine unit tests, demo-module tests (append idempotency, bounded query,
 claim/settle, consumer redelivery, fork lineage, blobs), the happy-path e2e,
 queueing, and the durability suite — crash mid-turn with zero duplicated
 effects across two hosts, crash-after-answer with no regeneration, approval
