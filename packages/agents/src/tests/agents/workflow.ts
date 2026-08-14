@@ -364,7 +364,7 @@ export class TestWorkflowAgent extends Agent {
     expiresAt: number | null;
     alarm: number | null;
   } | null> {
-    const rows = this.sql<{
+    const [row] = this.sql<{
       success_retention_seconds: number;
       error_retention_seconds: number;
       completed_at: number | null;
@@ -374,7 +374,6 @@ export class TestWorkflowAgent extends Agent {
              completed_at, expires_at
       FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
     `;
-    const row = rows[0];
     if (!row) return null;
     return {
       successRetentionSeconds: row.success_retention_seconds,
@@ -385,7 +384,7 @@ export class TestWorkflowAgent extends Agent {
     };
   }
 
-  async expireWorkflowForTest(workflowId: string): Promise<void> {
+  async expireWorkflow(workflowId: string): Promise<void> {
     const past = Math.floor(Date.now() / 1000) - 1;
     this.sql`
       UPDATE cf_agents_workflows SET expires_at = ${past}
@@ -393,12 +392,20 @@ export class TestWorkflowAgent extends Agent {
     `;
   }
 
-  async runWorkflowCleanupForTest(): Promise<void> {
+  async makeWorkflowDueForReconciliation(workflowId: string): Promise<void> {
+    const stale = Math.floor(Date.now() / 1000) - 24 * 60 * 60 - 1;
+    this.sql`
+      UPDATE cf_agents_workflows SET updated_at = ${stale}
+      WHERE workflow_id = ${workflowId}
+    `;
+  }
+
+  async runWorkflowCleanup(): Promise<void> {
     await this._cleanupWorkflowTracking();
     await this._rearmWorkflowCleanup();
   }
 
-  async setWorkflowTerminalForTest(
+  async setWorkflowTerminal(
     workflowId: string,
     status: "complete" | "errored" | "terminated"
   ): Promise<void> {

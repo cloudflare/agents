@@ -191,7 +191,7 @@ describe("workflow operations", () => {
           "queued"
         );
 
-        await agentStub.setWorkflowTerminalForTest(workflowId, status);
+        await agentStub.setWorkflowTerminal(workflowId, status);
         const state = await agentStub.getWorkflowCleanupState(workflowId);
         expect(state?.completedAt).not.toBeNull();
         expect(state?.expiresAt).toBe(
@@ -207,11 +207,26 @@ describe("workflow operations", () => {
         "TEST_WORKFLOW",
         "complete"
       );
-      await agentStub.expireWorkflowForTest("wf-cleanup-expired");
+      await agentStub.expireWorkflow("wf-cleanup-expired");
 
-      await agentStub.runWorkflowCleanupForTest();
+      await agentStub.runWorkflowCleanup();
 
       expect(await agentStub.getWorkflowById("wf-cleanup-expired")).toBeNull();
+    });
+
+    it("deletes stale tracking when the Workflow instance no longer exists", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-missing");
+      const workflowId = "wf-cleanup-missing";
+      await agentStub.insertTestWorkflow(
+        workflowId,
+        "TEST_WORKFLOW",
+        "running"
+      );
+      await agentStub.makeWorkflowDueForReconciliation(workflowId);
+
+      await agentStub.runWorkflowCleanup();
+
+      expect(await agentStub.getWorkflowById(workflowId)).toBeNull();
     });
 
     it("should query workflows by status", async () => {

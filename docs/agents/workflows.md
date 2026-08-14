@@ -553,11 +553,15 @@ Workflows started with `runWorkflow()` are automatically tracked in the originat
 | `created_at`                | INTEGER | Unix timestamp                    |
 | `updated_at`                | INTEGER | Unix timestamp                    |
 | `completed_at`              | INTEGER | Unix timestamp (when done)        |
+| `expires_at`                | INTEGER | Derived local cleanup timestamp   |
 | `success_retention_seconds` | INTEGER | Local success retention           |
 | `error_retention_seconds`   | INTEGER | Local error/termination retention |
-| `expires_at`                | INTEGER | Indexed local cleanup timestamp   |
 
 Note: Workflow params and output are not stored by default. Use `metadata` to store queryable information, and store large payloads in your own tables if needed.
+
+`expires_at` is derived from `completed_at` and the retention period for the
+Workflow's terminal outcome. Storing and indexing the derived value lets the
+Agent find the next row to clean up without recalculating every row's retention.
 
 ### Workflow Status Values
 

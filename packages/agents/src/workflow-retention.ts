@@ -1,5 +1,10 @@
 const DEFAULT_TRACKING_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 
+// Keep this parser aligned with Workerd's WorkflowRetentionDuration type.
+// Workerd does not export the binding's duration normalizer, while Agent
+// tracking needs the equivalent duration to derive its local cleanup time.
+// https://github.com/cloudflare/workerd/blob/main/types/defines/workflows.d.ts
+
 type WorkflowRetention = NonNullable<
   WorkflowInstanceCreateOptions["retention"]
 >;

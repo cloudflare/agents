@@ -1137,7 +1137,12 @@ type AgentToolRecoveryInspection =
  * on wake to skip DDL on established DOs.
  */
 const CURRENT_SCHEMA_VERSION = 12;
+// Workflows retain completed instance state for at most 30 days on Workers
+// Paid. Free accounts retain it for 3 days.
+// https://developers.cloudflare.com/workflows/reference/limits/#_top
 const DEFAULT_WORKFLOW_RETENTION_SECONDS = 30 * 24 * 60 * 60;
+// Recheck non-terminal tracking rows daily so a missed Workflow callback does
+// not leave local state unbounded after the platform instance finishes.
 const WORKFLOW_RECONCILIATION_SECONDS = 24 * 60 * 60;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
@@ -2151,22 +2156,21 @@ export class Agent<
           created_at INTEGER NOT NULL DEFAULT (unixepoch()),
           updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
           completed_at INTEGER,
-          success_retention_seconds INTEGER NOT NULL DEFAULT 2592000,
-          error_retention_seconds INTEGER NOT NULL DEFAULT 2592000,
-          expires_at INTEGER
+          expires_at INTEGER,
+          success_retention_seconds INTEGER NOT NULL DEFAULT (30 * 24 * 60 * 60),
+          error_retention_seconds INTEGER NOT NULL DEFAULT (30 * 24 * 60 * 60)
         )
       `;
 
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_workflows ADD COLUMN expires_at INTEGER"
+      );
       addColumnIfNotExists(
         `ALTER TABLE cf_agents_workflows ADD COLUMN success_retention_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_WORKFLOW_RETENTION_SECONDS}`
       );
       addColumnIfNotExists(
         `ALTER TABLE cf_agents_workflows ADD COLUMN error_retention_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_WORKFLOW_RETENTION_SECONDS}`
       );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_workflows ADD COLUMN expires_at INTEGER"
-      );
-
       if (schemaVersion < 12) {
         this.ctx.storage.sql.exec(`
           UPDATE cf_agents_workflows
@@ -6080,6 +6084,19 @@ export class Agent<
         const status = await instance.status();
         await this._updateWorkflowTracking(row.workflow_id, status);
       } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("instance.not_found")
+        ) {
+          // The Workflow service has already removed this instance, so no
+          // later callback can supply a terminal timestamp. Remove the stale
+          // local tracking row instead of reconciling it forever.
+          this.sql`
+            DELETE FROM cf_agents_workflows
+            WHERE workflow_id = ${row.workflow_id}
+          `;
+          continue;
+        }
         // Platform state can be temporarily unavailable. Keep the local row
         // and retry on the next bounded reconciliation wake.
         console.warn(
@@ -6787,15 +6804,18 @@ export class Agent<
       return;
     }
 
-    const existing = this.sql<{ id: string }>`
+    // Facets cannot own a physical alarm. This mirrors the existing
+    // root-owned schedule pattern: one namespaced schedule row per facet feeds
+    // the root Agent's shared earliest-alarm calculation.
+    const [existing] = this.sql<{ id: string }>`
       SELECT id FROM cf_agents_schedules
       WHERE callback = ${callback} AND owner_path_key = ${ownerPathKey}
       LIMIT 1
     `;
-    if (existing[0]) {
+    if (existing) {
       this.sql`
         UPDATE cf_agents_schedules SET time = ${nextCleanupAt}
-        WHERE id = ${existing[0].id}
+        WHERE id = ${existing.id}
       `;
     } else {
       await this._insertScheduleForOwner(

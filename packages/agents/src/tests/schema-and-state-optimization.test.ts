@@ -103,9 +103,9 @@ const EXPECTED_SCHEMA_DDL = [
           created_at INTEGER NOT NULL DEFAULT (unixepoch()),
           updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
           completed_at INTEGER,
-          success_retention_seconds INTEGER NOT NULL DEFAULT 2592000,
-          error_retention_seconds INTEGER NOT NULL DEFAULT 2592000,
-          expires_at INTEGER
+          expires_at INTEGER,
+          success_retention_seconds INTEGER NOT NULL DEFAULT (30 * 24 * 60 * 60),
+          error_retention_seconds INTEGER NOT NULL DEFAULT (30 * 24 * 60 * 60)
         )`
 ];
 
