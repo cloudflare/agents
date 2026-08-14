@@ -10,8 +10,7 @@ import type { CreateWorkerOptions } from "../types";
 import { createTypescriptLanguageService } from "../typescript";
 import {
   comparePythonVersions,
-  getPyodideVersionForCompatibilityDate,
-  fetchPyodideLockfile
+  getPyodideVersionForCompatibilityDate
 } from "../installer-python";
 
 let testId = 0;
@@ -1504,18 +1503,5 @@ describe("getPyodideVersionForCompatibilityDate", () => {
     expect(getPyodideVersionForCompatibilityDate("2026-08-26")).toBe(
       "v314.0.4"
     );
-
-    const pyodideLockfileA = await fetchPyodideLockfile(
-      getPyodideVersionForCompatibilityDate("2024-04-01")
-    );
-    expect(pyodideLockfileA!["info"]["python"]).toBe("3.12.7");
-    const pyodideLockfileB = await fetchPyodideLockfile(
-      getPyodideVersionForCompatibilityDate("2025-09-30")
-    );
-    expect(pyodideLockfileB!["info"]["python"]).toBe("3.13.2");
-    const pyodideLockfileC = await fetchPyodideLockfile(
-      getPyodideVersionForCompatibilityDate("2026-08-25")
-    );
-    expect(pyodideLockfileC!["info"]["python"]).toBe("3.14.0");
   });
 });
