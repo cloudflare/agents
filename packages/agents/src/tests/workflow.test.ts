@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
-import { getAgentByName } from "..";
+import { describe, expect, it, vi } from "vitest";
+import { Agent, getAgentByName } from "..";
 import type { WorkflowInfo } from "../workflows";
 
 // Helper type for callback records
@@ -25,6 +25,46 @@ async function getTestAgent(name: string) {
 
 describe("workflow operations", () => {
   describe("workflow tracking", () => {
+    it("forwards custom retention to workflow.create", async () => {
+      const retention = {
+        successRetention: "1 day",
+        errorRetention: "2 weeks"
+      } satisfies NonNullable<WorkflowInstanceCreateOptions["retention"]>;
+      const create = vi.fn(async () => ({ id: "workflow-with-retention" }));
+      const agent = {
+        name: "workflow-retention-test",
+        _findWorkflowBindingByName: () => ({ create }),
+        _workflowOrigin: () => ({
+          kind: "agent",
+          binding: "TestWorkflowAgent"
+        }),
+        sql: () => [],
+        _emit: vi.fn()
+      } as unknown as Agent<Cloudflare.Env>;
+
+      await Agent.prototype.runWorkflow.call(
+        agent,
+        "SIMPLE_WORKFLOW",
+        { value: "retention-test" },
+        { id: "workflow-with-retention", retention }
+      );
+
+      expect(create).toHaveBeenCalledWith({
+        id: "workflow-with-retention",
+        params: {
+          value: "retention-test",
+          __agentName: "workflow-retention-test",
+          __agentBinding: "TestWorkflowAgent",
+          __workflowName: "SIMPLE_WORKFLOW",
+          __agentOrigin: {
+            kind: "agent",
+            binding: "TestWorkflowAgent"
+          }
+        },
+        retention
+      });
+    });
+
     it("starts and tracks a workflow with custom retention", async () => {
       const agentStub = await getTestAgent("workflow-retention-test");
       const workflowId = "workflow-with-retention";
