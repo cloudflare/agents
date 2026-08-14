@@ -3,6 +3,7 @@
   "private": true,
   "description": "Type/runtime host for demo-module dependencies; nested so the pnpm workspace glob (experimental/*) does not see it",
   "dependencies": {
-    "ai": "^7.0.0"
+    "ai": "^7.0.0",
+    "workers-ai-provider": "^4.0.0"
   }
 }

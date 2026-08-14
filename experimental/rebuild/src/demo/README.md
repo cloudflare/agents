@@ -7,6 +7,7 @@ three complete agents that share no strategy yet run on identical machinery.
 | Seam | Practical | Wacky |
 | --- | --- | --- |
 | `LanguageModel` | `models/ai-sdk.ts` — the whole AI SDK ecosystem as one adapter among peers | `models/eliza.ts` — a 1966 therapist behind the same seam |
+| (composition) | `models/workers-ai-via-ai-sdk.ts` — the same env.AI binding through both routes: direct adapter or workers-ai-provider → AI SDK → our seam | |
 | `ContextAssembler` | `context/compactor.ts` — summaries as private pass-through entries; the engine never knows | `context/librarian.ts` — an assembler containing a second model that curates context |
 | (baseline) | `context/window.ts` — a context strategy is ~25 lines | |
 | `AdmissionPolicy` | `admission/priority.ts` — source-aware lanes; the pager preempts | `admission/bouncer.ts` — no magic word, no turn; policies compose as decorators |

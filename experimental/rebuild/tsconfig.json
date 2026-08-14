@@ -20,6 +20,9 @@
     "paths": {
       "ai": [
         "vendor/node_modules/ai"
+      ],
+      "workers-ai-provider": [
+        "vendor/node_modules/workers-ai-provider"
       ]
     },
     "skipLibCheck": true
