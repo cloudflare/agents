@@ -39,7 +39,8 @@ describe("workflow operations", () => {
           binding: "TestWorkflowAgent"
         }),
         sql: () => [],
-        _emit: vi.fn()
+        _emit: vi.fn(),
+        _rearmWorkflowCleanup: vi.fn()
       } as unknown as Agent<Cloudflare.Env>;
 
       await Agent.prototype.runWorkflow.call(
