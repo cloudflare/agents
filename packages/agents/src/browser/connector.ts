@@ -652,10 +652,31 @@ export class BrowserConnector extends CodemodeConnector {
     if (this.#isKitesurf()) {
       const key = this.#execKey(executionId);
       const lock = await this.#store.acquireLock(key);
+      // An entry written before the connector was switched to Kitesurf still
+      // holds a real Browser Run session that has to be closed.
+      let stale: StoredBrowserSession | undefined;
       try {
+        const stored = await this.#store.get(key);
+        if (
+          stored &&
+          stored.closedAt === undefined &&
+          !stored.sessionId.startsWith(KITESURF_SESSION_PREFIX)
+        ) {
+          stale = stored;
+        }
         await this.#store.delete(key);
       } finally {
         await lock.release();
+      }
+      if (stale) {
+        try {
+          await deleteBrowserSession(this.#options.browser, stale.sessionId);
+        } catch (error) {
+          console.warn(
+            `[agents/browser] Failed to delete Browser Run session ${stale.sessionId} for execution ${executionId}`,
+            error
+          );
+        }
       }
       return;
     }

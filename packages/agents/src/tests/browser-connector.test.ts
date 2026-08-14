@@ -1300,6 +1300,27 @@ describe("BrowserConnector", () => {
     expect(new URL(create!.url).searchParams.has("recording")).toBe(false);
   });
 
+  it("closes a leftover Chromium session when disposing under Kitesurf", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const now = Date.now();
+    // Written while the agent still ran on Chromium, before the switch.
+    store.set("cdp:exec:exec-a", {
+      sessionId: "session-chromium",
+      createdAt: now,
+      updatedAt: now
+    });
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { browser: "kitesurf" }
+    });
+
+    await connector.disposeExecution("exec-a", "completed");
+    expect(store.sessions.has("cdp:exec:exec-a")).toBe(false);
+    expect(deletesFor(requests, "session-chromium")).toHaveLength(1);
+  });
+
   it("reclaims orphaned Kitesurf exec markers without a session delete", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
