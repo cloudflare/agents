@@ -185,7 +185,7 @@ function base64Details(
   if (value.length < minimumLength) return null;
 
   const dataUrl =
-    /^data:([^;,]+)(?:;[^,]*)*;base64,([A-Za-z0-9+/]*={0,2})$/i.exec(value);
+    /^data:([^;,]+)(?:;[^;,]*)*;base64,([A-Za-z0-9+/]*={0,2})$/i.exec(value);
   const encoded = dataUrl?.[2] ?? value;
   if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
     return null;

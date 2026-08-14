@@ -286,6 +286,20 @@ describe("browser_execute model output", () => {
     expect(serialized).toContain(shortBase64);
   });
 
+  it("scans adversarial data-URL-like page text in linear time", async () => {
+    const tool = createKitesurfBrowserTool();
+    // Ambiguous repetition in the data URL detector would backtrack
+    // exponentially on this page-controlled shape.
+    const adversarial = `data:a${";x".repeat(4096)}Q`;
+
+    const started = Date.now();
+    const modelOutput = await tool.toModelOutput({
+      output: { text: adversarial }
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(JSON.stringify(modelOutput)).toContain(adversarial);
+  });
+
   it("returns serializable model output for circular and bigint values", async () => {
     const tool = createKitesurfBrowserTool();
     const circular: Record<string, unknown> = {};
