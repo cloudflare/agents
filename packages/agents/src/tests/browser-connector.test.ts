@@ -1299,6 +1299,46 @@ describe("BrowserConnector", () => {
     expect(create).toBeDefined();
     expect(new URL(create!.url).searchParams.has("recording")).toBe(false);
   });
+
+  it("reclaims orphaned Kitesurf exec markers without a session delete", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    // A run whose host died before disposeExecution could clear the marker.
+    store.set("cdp:exec:exec-orphan", {
+      sessionId: "kitesurf:00000000-0000-4000-8000-000000000000",
+      createdAt: now - dayMs - 1,
+      updatedAt: now - dayMs - 1
+    });
+    store.set("cdp:exec:exec-live", {
+      sessionId: "kitesurf:00000000-0000-4000-8000-000000000001",
+      createdAt: now,
+      updatedAt: now
+    });
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { browser: "kitesurf" }
+    });
+
+    const result = await connector.sweep();
+    expect(result.swept.map((entry) => entry.key)).toEqual([
+      "cdp:exec:exec-orphan"
+    ]);
+    expect(store.sessions.has("cdp:exec:exec-live")).toBe(true);
+    expect(requests.filter((request) => request.method === "DELETE")).toEqual(
+      []
+    );
+
+    // The tombstone is dropped once it ages past the threshold again.
+    store.set("cdp:exec:exec-orphan", {
+      ...store.sessions.get("cdp:exec:exec-orphan")!,
+      closedAt: now - dayMs - 1
+    });
+    expect((await connector.sweep()).swept).toEqual([]);
+    expect(store.sessions.has("cdp:exec:exec-orphan")).toBe(false);
+  });
 });
 
 describe("getBrowserRecording", () => {

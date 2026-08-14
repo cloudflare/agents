@@ -772,11 +772,17 @@ export class BrowserConnector extends CodemodeConnector {
    * deleted, so a later resume fails with a clear "session expired" error
    * instead of silently continuing in a fresh browser; tombstones are
    * deleted once they age past the threshold again.
+   *
+   * Kitesurf entries are reclaimed the same way, minus the Browser Run
+   * delete: their stored id is a synthetic per-execution marker, not a
+   * session, and the connection died with the execution.
    */
   async sweep(
     options?: BrowserConnectorSweepOptions
   ): Promise<BrowserConnectorSweepResult> {
-    if (!this.#options.browser || this.#isKitesurf()) return { swept: [] };
+    if (!this.#options.browser) return { swept: [] };
+    const browser = this.#options.browser;
+    const isKitesurf = this.#isKitesurf();
     const store = this.#options.store;
     const maxIdleMs =
       options?.maxIdleMs ??
@@ -817,13 +823,18 @@ export class BrowserConnector extends CodemodeConnector {
       } finally {
         await lock.release();
       }
-      try {
-        await deleteBrowserSession(this.#options.browser, toClose.sessionId);
-      } catch (error) {
-        console.warn(
-          `[agents/browser] Sweep failed to delete Browser Run session ${toClose.sessionId}`,
-          error
-        );
+      // Kitesurf entries hold a synthetic `kitesurf:<uuid>` marker rather than
+      // a Browser Run session id: the connection died with its execution, so
+      // there is nothing remote to close.
+      if (!isKitesurf) {
+        try {
+          await deleteBrowserSession(browser, toClose.sessionId);
+        } catch (error) {
+          console.warn(
+            `[agents/browser] Sweep failed to delete Browser Run session ${toClose.sessionId}`,
+            error
+          );
+        }
       }
       swept.push({ key, sessionId: toClose.sessionId });
     }
