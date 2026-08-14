@@ -75,6 +75,7 @@ ELIZA runs with no configuration. The provider-backed model routes deliberately
 have no local fallback:
 
 ```bash
+pnpm demo --model ai-sdk --provider ./my-ai-gateway-model.mjs   # recommended
 pnpm demo --model ai-sdk --provider ./my-ai-sdk-model.mjs
 pnpm demo --model workers-ai --provider ./my-ai-binding.mjs
 pnpm demo --model workers-ai-sdk --provider ./my-ai-binding.mjs
@@ -85,8 +86,48 @@ AI module exports its binding as `default` or `binding`. A module owning a
 socket or child process may also export `close()`, which the runner awaits
 last — without it the process cannot exit.
 
-The included `my-ai-sdk-model.mjs` uses the ChatGPT subscription authenticated
-by `codex login`. It goes through Codex's **app-server** transport rather than
+**`my-ai-gateway-model.mjs` (recommended)** reaches Workers AI through
+Cloudflare AI Gateway over plain HTTPS — no Workers runtime, no per-provider
+key, just a gateway token in `AI_GATEWAY_API_KEY` (or `AI_GATEWAY_KEY`, the
+name direnv's shared `.envrc` uses). Put it in a git-ignored `.env` beside
+`package.json` — the `demo` script loads it with `--env-file-if-exists` — or
+export it. Every request carries the team's `cf-aig-metadata` project header.
+This is the route that streams _and_ calls tools, so it brings the tool-driven
+strategies to life; the tollbooth and oracle flows below are verified against
+it end to end:
+
+```bash
+echo 'AI_GATEWAY_API_KEY=…' > .env
+pnpm demo --model ai-sdk --provider ./my-ai-gateway-model.mjs \
+  --middleware tollbooth
+#   → · calling demo/roll_dice {"sides":20}
+#   → Approval required — 402 Payment Required — demo/roll_dice costs 2 credits
+#   → /approve …  · demo/roll_dice → rolled a 19 (d20)  Agent> I rolled …
+```
+
+The gateway speaks an OpenAI-compatible protocol per provider slug, so the
+same file reaches other vendors: set `AI_GATEWAY_SLUG=grok` +
+`AI_GATEWAY_MODEL=grok-4.3`, or `AI_GATEWAY_SLUG=openai` +
+`AI_GATEWAY_MODEL=gpt-5.2`.
+
+Three gateway quirks are handled inside that file, each verified rather than
+assumed — worth knowing if you write your own provider module:
+
+- **Do not send an `Authorization` header.** The gateway forwards it verbatim
+  to the vendor, where a placeholder key earns a 401. Gateway auth belongs in
+  `cf-aig-authorization` alone; the module strips the other one.
+- **Model choice decides whether tools work at all.**
+  `@cf/meta/llama-3.3-70b-instruct-fp8-fast` returns real `tool_calls` when
+  not streaming, but while streaming it emits the call as ordinary content
+  text — the agent never sees a tool call. `@cf/openai/gpt-oss-120b` streams
+  them properly and is the default here.
+- **Workers AI rejects `content: null`.** The AI SDK sends it on an assistant
+  message carrying only tool calls (legal at OpenAI); Workers AI 400s with
+  `'string' not in 'null'`, which would break every turn after a tool call.
+  The module rewrites it to `""` on the way out.
+
+**`my-ai-sdk-model.mjs`** uses the ChatGPT subscription authenticated by
+`codex login`. It goes through Codex's **app-server** transport rather than
 `codexExec`, and the difference is visible: `codex exec` returns its answer as
 one blob, so the AI SDK emits a single text-delta at the end and nothing
 streams; the app server holds a JSON-RPC connection open and forwards token
