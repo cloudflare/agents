@@ -5,12 +5,48 @@
 import { isTextFile, fetchWithTimeout, DEFAULT_TIMEOUT_MS } from "./common.ts";
 import type { InstallResult } from "./common.ts";
 import type { FileSystem, FileEntry } from "./file-system";
+import type { InstallOptions } from "./installer";
 import { unzipSync } from "fflate";
 import { parse as parseToml } from "smol-toml";
 
-// TODO: Update PYODIDE_VERSION once the patch addressing the Python version mismatch for dynamic workers is merged
-const PYODIDE_VERSION = "v0.27.5"; // Used for retrieving a pyodide lockfile, which is done per Pyodide version. If incompatible wheels are being served, this may be why
 const PYPI_SIMPLE_API = "https://pypi.org/simple";
+
+// Derived from workerd's src/workerd/io/compatibility-date.capnp (the dates
+// when each pythonWorkers* flag is implied by pythonWorkers) and
+// build/python_metadata.bzl (the Pyodide version associated with each flag).
+const PYODIDE_VERSIONS_BY_COMPATIBILITY_DATE: Array<{
+  date: string;
+  version: string;
+}> = [
+  { date: "2024-03-01", version: "v0.27.5" },
+  { date: "2025-09-29", version: "v0.28.2" },
+  { date: "2026-08-25", version: "v314.0.4" }
+];
+
+/**
+ * Return the Pyodide version relevant for a given Cloudflare Workers
+ * compatibility date. Dates earlier than the first mapped entry return the
+ * earliest mapped version.
+ */
+export function getPyodideVersionForCompatibilityDate(
+  compatibilityDate: string
+): string {
+  const earliestVersion = PYODIDE_VERSIONS_BY_COMPATIBILITY_DATE[0]?.version;
+
+  if (!compatibilityDate) {
+    return earliestVersion ?? "v0.27.5";
+  }
+
+  for (let i = PYODIDE_VERSIONS_BY_COMPATIBILITY_DATE.length - 1; i >= 0; i--) {
+    const entry = PYODIDE_VERSIONS_BY_COMPATIBILITY_DATE[i];
+    // note: this works since dates are formatted YYYY-MM-DD
+    if (entry && compatibilityDate >= entry.date) {
+      return entry.version;
+    }
+  }
+
+  return earliestVersion ?? "v0.27.5";
+}
 
 // Deliberately keeping this minimal
 export interface PyprojectToml {
@@ -77,7 +113,8 @@ let pyodideLockfile: PyodideLockfile | null = null;
  */
 export async function installDependenciesPython(
   fileSystem: FileSystem,
-  pyprojectTomlContent: string
+  pyprojectTomlContent: string,
+  options: InstallOptions = {}
 ): Promise<InstallResult> {
   const result: InstallResult = {
     installed: [],
@@ -96,9 +133,13 @@ export async function installDependenciesPython(
   const depsToInstall: string[] = pyprojectToml.project?.dependencies ?? [];
   depsToInstall.push("workers-runtime-sdk");
 
+  const pyodideVersion = getPyodideVersionForCompatibilityDate(
+    options["compatibilityDate"]!
+  );
+
   if (!pyodideLockfile) {
     try {
-      pyodideLockfile = await fetchPyodideLockfile(PYODIDE_VERSION);
+      pyodideLockfile = await fetchPyodideLockfile(pyodideVersion);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.warnings.push(
@@ -121,7 +162,8 @@ export async function installDependenciesPython(
         fileSystem,
         installedPackages,
         inProgress,
-        PYPI_SIMPLE_API
+        PYPI_SIMPLE_API,
+        pyodideVersion
       )
     )
   );
@@ -154,7 +196,8 @@ export async function installPythonPackage(
   fileSystem: FileSystem,
   installedPackages: Set<string>,
   inProgress: Map<string, Promise<void>>,
-  backupRegistry: string
+  backupRegistry: string,
+  pyodideVersion: string
 ): Promise<void> {
   const name = parsePythonDependencySpecifier(dependencySpecifier)["name"];
   // Skip if already installed in this run
@@ -186,10 +229,11 @@ export async function installPythonPackage(
       let version: string = "";
 
       // Try the Pyodide index first, then fall back to PyPI if that fails
-      let registryResult = await retrieveFromPyodide(name);
+      let registryResult = await retrieveFromPyodide(name, pyodideVersion);
       if (registryResult) {
         [response, wheel, version] = registryResult;
       } else {
+        result.warnings.push(`Falling back to PyPI for ${name}`);
         registryResult = await retrieveFromPyPI(name, backupRegistry);
         if (registryResult) {
           [response, wheel, version] = registryResult;
@@ -220,7 +264,8 @@ export async function installPythonPackage(
             fileSystem,
             installedPackages,
             inProgress,
-            PYPI_SIMPLE_API
+            PYPI_SIMPLE_API,
+            pyodideVersion
           )
         )
       );
@@ -263,9 +308,10 @@ async function retrieveFromPyPI(
 
 // TODO: Alter the flow to use the PyPA simple api (index.pyodide.org)
 async function retrieveFromPyodide(
-  name: string
+  name: string,
+  pyodideVersion: string
 ): Promise<[Response, PyPASimpleFile, string] | null> {
-  const pyodideWheel = getPyodideWheel(name);
+  const pyodideWheel = getPyodideWheel(name, pyodideVersion);
   if (!pyodideWheel) {
     return null;
   }
@@ -327,7 +373,7 @@ function stripWheelToPackage(
  * The lockfile lists all pre-built packages available in the Pyodide
  * distribution, including their wheel URLs, hashes, and dependencies.
  */
-async function fetchPyodideLockfile(
+export async function fetchPyodideLockfile(
   version: string
 ): Promise<PyodideLockfile | null> {
   const url = `https://cdn.jsdelivr.net/pyodide/${version}/full/pyodide-lock.json`;
@@ -357,14 +403,17 @@ function normalizePythonName(name: string): string {
  *
  * Returns `null` if the lockfile is not loaded or the package is not present.
  */
-function getPyodideWheel(name: string): PyodideWheelInfo | null {
+function getPyodideWheel(
+  name: string,
+  pyodideVersion: string
+): PyodideWheelInfo | null {
   if (!pyodideLockfile) return null;
 
   const normalizedName = normalizePythonName(name);
   const pkg = pyodideLockfile.packages[normalizedName];
   if (!pkg) return null;
 
-  const baseUrl = `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full`;
+  const baseUrl = `https://cdn.jsdelivr.net/pyodide/${pyodideVersion}/full`;
   const url = pkg.file_name.startsWith("http")
     ? pkg.file_name
     : `${baseUrl}/${pkg.file_name}`;

@@ -8,7 +8,10 @@ import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
 import { createTypescriptLanguageService } from "../typescript";
-import { comparePythonVersions } from "../installer-python";
+import {
+  comparePythonVersions,
+  getPyodideVersionForCompatibilityDate
+} from "../installer-python";
 
 let testId = 0;
 
@@ -1485,5 +1488,20 @@ describe("comparePythonVersions", () => {
     expect(comparePythonVersions("2.0.0beta", "2.0.0")).toBeLessThan(0);
     expect(comparePythonVersions("2.0.0dev", "2.0.0")).toBeLessThan(0);
     expect(comparePythonVersions("2.0.0pre", "2.0.0")).toBeLessThan(0);
+  });
+});
+
+describe("getPyodideVersionForCompatibilityDate", () => {
+  it("accurately returns an appropriate Pyodide version for different compatibility dates", async () => {
+    expect(getPyodideVersionForCompatibilityDate("2024-03-01")).toBe("v0.27.5");
+    expect(getPyodideVersionForCompatibilityDate("2024-04-01")).toBe("v0.27.5");
+    expect(getPyodideVersionForCompatibilityDate("2025-09-29")).toBe("v0.28.2");
+    expect(getPyodideVersionForCompatibilityDate("2025-09-30")).toBe("v0.28.2");
+    expect(getPyodideVersionForCompatibilityDate("2026-08-25")).toBe(
+      "v314.0.4"
+    );
+    expect(getPyodideVersionForCompatibilityDate("2026-08-26")).toBe(
+      "v314.0.4"
+    );
   });
 });
