@@ -1,4 +1,10 @@
-import { tool, type Tool } from "ai";
+import {
+  asSchema,
+  tool,
+  type FlexibleSchema,
+  type InferSchema,
+  type Tool
+} from "ai";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "./internal_context";
 import type {
   ChatCapableAgentClass,
@@ -8,17 +14,31 @@ import type {
   AgentToolFailure
 } from "./agent-tool-types";
 
-type SchemaLike<T = unknown> = {
-  parse(value: unknown): T;
+type ParseSchema<Output = unknown> = {
+  parse(value: unknown): Output;
 };
 
-type AgentToolFactoryOptions<Output = unknown> = {
+type AgentToolOutputSchema<Output> =
+  | FlexibleSchema<Output>
+  | ParseSchema<Output>;
+
+type AgentToolFactoryOptions<Output = unknown, Input = unknown> = {
   description: string;
-  inputSchema: unknown;
-  outputSchema?: SchemaLike<Output>;
+  inputSchema: FlexibleSchema<Input>;
+  outputSchema?: AgentToolOutputSchema<Output>;
   displayName?: string;
   icon?: string;
   display?: AgentToolDisplayMetadata;
+};
+
+// Capture the concrete schema type so the overload below can derive its input
+// with InferSchema. AgentToolFactoryOptions remains available for callers that
+// explicitly supply agentTool<Input, Output>() type arguments.
+type InferredAgentToolFactoryOptions<
+  InputSchema extends FlexibleSchema,
+  Output
+> = Omit<AgentToolFactoryOptions<Output>, "inputSchema"> & {
+  inputSchema: InputSchema;
 };
 
 type ToolExecutionOptions = {
@@ -32,6 +52,33 @@ type AgentToolRunner = {
     options: RunAgentToolOptions<Input>
   ): Promise<RunAgentToolResult<Output>>;
 };
+
+/**
+ * Preserve the existing Zod-style `.parse()` output-schema contract while
+ * extending validation to the other formats supported by AI SDK FlexibleSchema.
+ */
+async function validateOutput<Output>(
+  schema: AgentToolOutputSchema<Output>,
+  value: unknown
+): Promise<Output> {
+  if (
+    typeof schema === "object" &&
+    schema !== null &&
+    "parse" in schema &&
+    typeof schema.parse === "function"
+  ) {
+    return schema.parse(value);
+  }
+
+  const validate = asSchema(schema as FlexibleSchema<Output>).validate;
+  if (!validate) {
+    throw new Error("agentTool outputSchema must provide runtime validation");
+  }
+
+  const result = await validate(value);
+  if (!result.success) throw result.error;
+  return result.value;
+}
 
 function currentAgentToolRunner(): AgentToolRunner {
   const agent = agentContext.getStore()?.agent;
@@ -69,9 +116,18 @@ function failure(
  * Create an AI SDK tool that dispatches a chat-capable sub-agent through
  * `Agent.runAgentTool`.
  */
+export function agentTool<InputSchema extends FlexibleSchema, Output = unknown>(
+  cls: ChatCapableAgentClass,
+  options: InferredAgentToolFactoryOptions<InputSchema, Output>
+): Tool<InferSchema<InputSchema>, string | Output | AgentToolFailure>;
+// Preserve existing callers that explicitly provide agentTool<Input, Output>().
 export function agentTool<Input = unknown, Output = unknown>(
   cls: ChatCapableAgentClass,
-  options: AgentToolFactoryOptions<Output>
+  options: AgentToolFactoryOptions<Output, Input>
+): Tool<Input, string | Output | AgentToolFailure>;
+export function agentTool<Input = unknown, Output = unknown>(
+  cls: ChatCapableAgentClass,
+  options: AgentToolFactoryOptions<Output, Input>
 ): Tool<Input, string | Output | AgentToolFailure> {
   const createTool = tool as unknown as <I, O>(config: {
     description: string;
@@ -125,7 +181,7 @@ export function agentTool<Input = unknown, Output = unknown>(
               false
             );
           }
-          return options.outputSchema.parse(result.output);
+          return validateOutput(options.outputSchema, result.output);
         }
         return result.summary ?? "";
       }

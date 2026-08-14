@@ -424,8 +424,12 @@ export async function routeSubAgentRequest(
     method: req.method,
     headers: new Headers(req.headers)
   };
+  // Stream the body through rather than buffering it — see #2015. This
+  // helper runs in the caller's isolate, but the same request then hits
+  // `_cf_forwardToFacet` on the parent, so buffering here would put a
+  // second unbounded copy in front of the child.
   if (req.body && req.method !== "GET" && req.method !== "HEAD") {
-    forwardInit.body = await req.arrayBuffer();
+    forwardInit.body = req.body;
   }
   const forwardReq = new Request(forwardUrl, forwardInit);
 

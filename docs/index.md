@@ -8,4 +8,4 @@ Documentation is grouped by the package that owns it:
 - [`@cloudflare/shell`](./shell/index.md) — durable workspaces and filesystem tools
 - [`@cloudflare/voice`](./voice/index.md) — voice agents, clients, audio pipelines, and provider contracts
 
-Each package listed above includes its own documentation under `docs/`. Other published packages use their package README as their documentation entry point. Package indexes name relevant dependency documentation by package path, for example `agents/docs/index.md`, `@cloudflare/codemode/docs/index.md`, or `create-think/README.md`.
+Each package listed above includes its own documentation under `docs/`. Other published packages use their package README as their documentation entry point. Package indexes name relevant dependency documentation by package path, for example `agents/docs/index.md` or `@cloudflare/codemode/docs/index.md`.

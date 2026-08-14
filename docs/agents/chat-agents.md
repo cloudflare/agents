@@ -25,7 +25,7 @@ Built on the [AI SDK](https://ai-sdk.dev) and Cloudflare Durable Objects, you ge
 ### Install
 
 ```sh
-npm install @cloudflare/ai-chat agents ai workers-ai-provider
+npm install @cloudflare/ai-chat agents ai @ai-sdk/react workers-ai-provider
 ```
 
 ### Server
@@ -955,6 +955,8 @@ async onChatMessage() {
   return result.toUIMessageStreamResponse();
 }
 ```
+
+The `inputSchema` accepts the AI SDK's flexible schema format, so you are not limited to Zod. You can also use Valibot, a Standard JSON Schema-compatible schema, or a raw JSON Schema wrapped with `jsonSchema()` from `ai`. See [Use Valibot or another schema library](./agent-tools.md#use-valibot-or-another-schema-library) for details.
 
 ### Client-Side Tools
 

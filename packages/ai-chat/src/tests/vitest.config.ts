@@ -6,6 +6,9 @@ import { defineConfig } from "vitest/config";
 const testsDir = import.meta.dirname;
 
 export default defineConfig({
+  resolve: {
+    dedupe: ["vitest"]
+  },
   plugins: [
     stripNodeModulesSourceMapReferences(),
     cloudflareTest({

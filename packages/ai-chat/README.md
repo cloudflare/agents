@@ -8,6 +8,12 @@ AI chat agents with automatic message persistence, resumable streaming, and tool
 npm install @cloudflare/ai-chat agents ai workers-ai-provider
 ```
 
+React clients also need the optional React peers:
+
+```sh
+npm install @ai-sdk/react react
+```
+
 ## Quick Start
 
 ### Server

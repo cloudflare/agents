@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { createBrowserRuntime } from "../browser/ai";
 import { BrowserConnector } from "../browser/connector";
-import { getBrowserRecording } from "../browser/browser-run";
+import { connectBrowser, getBrowserRecording } from "../browser/browser-run";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
@@ -207,11 +208,169 @@ function createFakeBrowser(options?: {
 
 const fakeCtx = {} as ExecutionContext;
 
+function createKitesurfBrowserTool() {
+  const { browser } = createFakeBrowser();
+  const ctx = {
+    exports: { CodemodeRuntime: class {} },
+    facets: { get: () => ({}) }
+  } as unknown as DurableObjectState;
+  return createBrowserRuntime({
+    ctx,
+    browser,
+    store: new MemorySessionStore(),
+    loader: {} as WorkerLoader,
+    session: { browser: "kitesurf" },
+    quickActions: false
+  }).tools.browser_execute as unknown as {
+    description: string;
+    toModelOutput: (options: { output: unknown }) => unknown | Promise<unknown>;
+  };
+}
+
 function deletesFor(requests: BrowserRequest[], sessionId: string) {
   return requests.filter(
     (request) => request.method === "DELETE" && request.url.includes(sessionId)
   );
 }
+
+describe("browser_execute model output", () => {
+  it("keeps the default codemode description with Kitesurf guidance", () => {
+    const tool = createKitesurfBrowserTool();
+
+    expect(tool.description).toContain("The ONLY globals are");
+    expect(tool.description).toContain('codemode.describe("cdp")');
+    expect(tool.description).toContain("not underlying CDP commands");
+  });
+
+  it("recursively redacts base64 without mutating the UI output", async () => {
+    const tool = createKitesurfBrowserTool();
+    const image = "A".repeat(4096);
+    const output = {
+      status: "completed",
+      result: {
+        title: "Example",
+        captures: [
+          {
+            type: "browser_screenshot",
+            mediaType: "image/png",
+            data: "AAAA"
+          },
+          `data:image/jpeg;base64,${image}`
+        ]
+      },
+      calls: [{ result: { data: image } }]
+    };
+
+    const modelOutput = await tool.toModelOutput({ output });
+    const serialized = JSON.stringify(modelOutput);
+    expect(serialized).toContain("base64 image/png data omitted");
+    expect(serialized).toContain("base64 image/jpeg data omitted");
+    expect(serialized).toContain("base64 data omitted");
+    expect(serialized).not.toContain(image);
+    expect(output.result.captures[0]).toHaveProperty("data", "AAAA");
+    expect(output.calls[0].result.data).toBe(image);
+  });
+
+  it("does not redact ordinary strings or base64url values", async () => {
+    const tool = createKitesurfBrowserTool();
+    const prose = "ordinary browser text ".repeat(300);
+    const base64url = `${"A".repeat(4095)}_`;
+    const shortBase64 = "A".repeat(100);
+
+    const modelOutput = await tool.toModelOutput({
+      output: { prose, base64url, shortBase64 }
+    });
+    const serialized = JSON.stringify(modelOutput);
+    expect(serialized).toContain(prose);
+    expect(serialized).toContain(base64url);
+    expect(serialized).toContain(shortBase64);
+  });
+
+  it("keeps dates and binary values readable in model output", async () => {
+    const tool = createKitesurfBrowserTool();
+    const when = new Date("2026-01-02T03:04:05.000Z");
+
+    const modelOutput = await tool.toModelOutput({
+      output: { when, bytes: new Uint8Array([1, 2, 3]) }
+    });
+    const serialized = JSON.stringify(modelOutput);
+    expect(serialized).toContain("2026-01-02T03:04:05.000Z");
+    expect(serialized).not.toContain("remaining values omitted");
+  });
+
+  it("scans adversarial data-URL-like page text in linear time", async () => {
+    const tool = createKitesurfBrowserTool();
+    // Ambiguous repetition in the data URL detector would backtrack
+    // exponentially on this page-controlled shape.
+    const adversarial = `data:a${";x".repeat(4096)}Q`;
+
+    const started = Date.now();
+    const modelOutput = await tool.toModelOutput({
+      output: { text: adversarial }
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(JSON.stringify(modelOutput)).toContain(adversarial);
+  });
+
+  it("returns serializable model output for circular and bigint values", async () => {
+    const tool = createKitesurfBrowserTool();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    expect(await tool.toModelOutput({ output: circular })).toMatchObject({
+      type: "json"
+    });
+    expect(await tool.toModelOutput({ output: { value: 1n } })).toMatchObject({
+      type: "text"
+    });
+  });
+});
+
+describe("Kitesurf Browser Run connections", () => {
+  it("acquires Kitesurf directly over WebSocket without session endpoints", async () => {
+    const { browser, requests } = createFakeBrowser();
+
+    const session = await connectBrowser(browser, { browser: "kitesurf" });
+    session.disconnect();
+
+    expect(requests).toEqual([
+      {
+        url: "https://localhost/v1/devtools/browser?browser=kitesurf",
+        method: "GET",
+        upgrade: true
+      }
+    ]);
+  });
+
+  it.each([
+    ["keepAliveMs", { keepAliveMs: 60_000 }],
+    ["includeTargets", { includeTargets: true }],
+    ["recording", { recording: true }]
+  ] as const)("rejects the unsupported %s option", async (_name, option) => {
+    const { browser, requests } = createFakeBrowser();
+
+    await expect(
+      connectBrowser(browser, { browser: "kitesurf", ...option })
+    ).rejects.toThrow("does not support");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("allows explicitly disabled Chromium-only options", async () => {
+    const { browser, requests } = createFakeBrowser();
+
+    const session = await connectBrowser(browser, {
+      browser: "kitesurf",
+      keepAliveMs: 0,
+      includeTargets: false,
+      recording: false
+    });
+    session.disconnect();
+
+    expect(requests[0]?.url).toBe(
+      "https://localhost/v1/devtools/browser?browser=kitesurf"
+    );
+  });
+});
 
 describe("BrowserConnector", () => {
   it("is named cdp and validates its options", async () => {
@@ -273,6 +432,109 @@ describe("BrowserConnector", () => {
     expect(dynamicDesc.annotations?.sessionInfo).toEqual({
       replay: "reexecute"
     });
+  });
+
+  it("exposes only connection-scoped surfaces for Kitesurf", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { browser: "kitesurf" }
+    });
+
+    const description = await connector.describe();
+    expect(description.descriptors).not.toHaveProperty("getLiveViewUrl");
+    expect(description.descriptors).not.toHaveProperty("spec");
+    expect(description.descriptors).not.toHaveProperty("startSession");
+    expect(description.instructions).toContain("do not pause for approval");
+    expect(description.instructions).toContain(
+      "returns the CDP method result directly"
+    );
+    expect(description.instructions).toContain(
+      "wait 1000ms before Page.captureScreenshot"
+    );
+    expect(description.descriptors.attachToTarget.description).toContain(
+      "for this connection"
+    );
+
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-kitesurf" }
+    );
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-kitesurf" }
+    );
+
+    expect(requests).toEqual([
+      {
+        url: "https://localhost/v1/devtools/browser?browser=kitesurf",
+        method: "GET",
+        upgrade: true
+      }
+    ]);
+    expect(store.sessions.has("cdp:exec:exec-kitesurf")).toBe(true);
+  });
+
+  it("fails explicitly instead of reconnecting Kitesurf after a pause", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store: new MemorySessionStore(),
+      session: { browser: "kitesurf" }
+    });
+
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-kitesurf" }
+    );
+    await connector.onPassEnd("exec-kitesurf", "paused");
+
+    await expect(
+      connector.executeTool(
+        "send",
+        { method: "Browser.getVersion" },
+        { executionId: "exec-kitesurf" }
+      )
+    ).rejects.toThrow("cannot be resumed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it.each([
+    ["reuse mode", { mode: "reuse" as const }],
+    ["dynamic mode", { mode: "dynamic" as const }],
+    ["keep alive", { keepAliveMs: 60_000 }],
+    ["recording", { recording: true }]
+  ])("rejects unsupported Kitesurf %s", (_name, session) => {
+    const { browser } = createFakeBrowser();
+    expect(
+      () =>
+        new BrowserConnector(fakeCtx, {
+          browser,
+          store: new MemorySessionStore(),
+          session: { browser: "kitesurf", ...session }
+        })
+    ).toThrow("Kitesurf");
+  });
+
+  it("allows explicitly disabled Kitesurf session options", () => {
+    const { browser } = createFakeBrowser();
+    expect(
+      () =>
+        new BrowserConnector(fakeCtx, {
+          browser,
+          store: new MemorySessionStore(),
+          session: {
+            browser: "kitesurf",
+            keepAliveMs: 0,
+            recording: false
+          }
+        })
+    ).not.toThrow();
   });
 
   it("requires an execution context for session-bound tools", async () => {
@@ -1048,6 +1310,81 @@ describe("BrowserConnector", () => {
     const create = requests.find((request) => request.method === "POST");
     expect(create).toBeDefined();
     expect(new URL(create!.url).searchParams.has("recording")).toBe(false);
+  });
+
+  it("closes a leftover Chromium session when disposing under Kitesurf", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const now = Date.now();
+    // Written while the agent still ran on Chromium, before the switch.
+    store.set("cdp:exec:exec-a", {
+      sessionId: "session-chromium",
+      createdAt: now,
+      updatedAt: now
+    });
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { browser: "kitesurf" }
+    });
+
+    // Pausing must not tombstone it: the session is still live.
+    await connector.onPassEnd("exec-a", "paused");
+    expect(store.sessions.get("cdp:exec:exec-a")?.closedAt).toBeUndefined();
+
+    await connector.disposeExecution("exec-a", "completed");
+    expect(store.sessions.has("cdp:exec:exec-a")).toBe(false);
+    expect(deletesFor(requests, "session-chromium")).toHaveLength(1);
+  });
+
+  it("reclaims orphaned Kitesurf exec markers without a session delete", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    // A run whose host died before disposeExecution could clear the marker.
+    store.set("cdp:exec:exec-orphan", {
+      sessionId: "kitesurf:00000000-0000-4000-8000-000000000000",
+      createdAt: now - dayMs - 1,
+      updatedAt: now - dayMs - 1
+    });
+    store.set("cdp:exec:exec-live", {
+      sessionId: "kitesurf:00000000-0000-4000-8000-000000000001",
+      createdAt: now,
+      updatedAt: now
+    });
+    // Left behind by a real Chromium run before this agent switched engines:
+    // its session is real and still has to be closed.
+    store.set("cdp:exec:exec-chromium", {
+      sessionId: "session-chromium",
+      createdAt: now - dayMs - 1,
+      updatedAt: now - dayMs - 1
+    });
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { browser: "kitesurf" }
+    });
+
+    const result = await connector.sweep();
+    expect(result.swept.map((entry) => entry.key).sort()).toEqual([
+      "cdp:exec:exec-chromium",
+      "cdp:exec:exec-orphan"
+    ]);
+    expect(store.sessions.has("cdp:exec:exec-live")).toBe(true);
+    // No DELETE for the synthetic marker, one for the real leftover session.
+    expect(deletesFor(requests, "session-chromium")).toHaveLength(1);
+    expect(
+      requests.filter((request) => request.method === "DELETE")
+    ).toHaveLength(1);
+
+    // The tombstone is dropped once it ages past the threshold again.
+    store.set("cdp:exec:exec-orphan", {
+      ...store.sessions.get("cdp:exec:exec-orphan")!,
+      closedAt: now - dayMs - 1
+    });
+    expect((await connector.sweep()).swept).toEqual([]);
+    expect(store.sessions.has("cdp:exec:exec-orphan")).toBe(false);
   });
 });
 
