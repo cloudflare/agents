@@ -36,7 +36,11 @@ export interface ResolvedProvider {
 export interface ConnectorBinding {
   name: string;
   /** The connector instance (WorkerEntrypoint subclass) or ServiceStub. */
-  binding: { callTool(method: string, args: unknown): Promise<unknown> };
+  binding: {
+    callTool(method: string, args: unknown): Promise<unknown>;
+    /** Abort in-flight host work when sandbox execution times out. */
+    abort?(reason?: string): void | Promise<void>;
+  };
 }
 
 export interface ExecuteOptions {

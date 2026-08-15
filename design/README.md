@@ -8,6 +8,8 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 
 | File                                                                             | Scope                                                                         |
 | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [codemode-rlm.md](./codemode-rlm.md)                                             | Code Mode RLM — one-tool boundary, hybrid JSON/Computer memory, recursion     |
+| [rfc-codemode-computer-rlm.md](./rfc-codemode-computer-rlm.md)                   | RFC: Code Mode control plane over Computer Workspace and execution backends   |
 | [think.md](./think.md)                                                           | Think — chat agent base class, sessions, streaming, tools, execution ladder   |
 | [think-durable-submissions.md](./think-durable-submissions.md)                   | Think durable submissions — async programmatic turns, recovery, idempotency   |
 | [visuals.md](./visuals.md)                                                       | UI component library choice, Kumo usage, custom patterns                      |

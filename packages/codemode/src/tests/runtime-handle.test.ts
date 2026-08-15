@@ -87,6 +87,11 @@ describe("createCodemodeRuntime", () => {
 
     expect(codemode).toBeDefined();
     expect(codemode.execute).toBeDefined();
+    expect(codemode.description).toContain("async () =>");
+    expect(codemode.description).toContain("with no arguments");
+    expect(codemode.description).toContain(
+      "not properties of a `ctx` parameter"
+    );
 
     const inputSchema = asSchema(codemode.inputSchema);
     expect(inputSchema.jsonSchema).toEqual({
@@ -174,14 +179,15 @@ describe("createCodemodeRuntime", () => {
         }
       ]
     });
-    await expect(
-      runtime.describe("github.create_issue")
-    ).resolves.toMatchObject({
+    const methodDescription = await runtime.describe("github.create_issue");
+    expect(methodDescription).toMatchObject({
       path: "github.create_issue",
       description: "Create a repository issue",
       requiresApproval: true,
       kind: "method"
     });
+    expect(methodDescription.types).toContain("declare const github");
+    expect(methodDescription.types).toContain("create_issue");
     expect(describe).toHaveBeenCalledTimes(1);
     expect(runtimeStub.listSnippets).toHaveBeenCalledTimes(2);
   });

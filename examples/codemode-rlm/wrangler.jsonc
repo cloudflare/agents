@@ -1,0 +1,52 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "codemode-rlm",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/sessions/*", "/eval/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RlmThinkAgent",
+        "class_name": "RlmThinkAgent"
+      },
+      {
+        "name": "BasicThinkAgent",
+        "class_name": "BasicThinkAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RlmThinkAgent", "BasicThinkAgent"]
+    }
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
+  "secrets": {
+    "required": ["API_TOKEN"]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "MODEL": "@cf/moonshotai/kimi-k2.7-code",
+    "REASONING_EFFORT": "low",
+    "MAX_STEPS": "12",
+    "MAX_RLM_DEPTH": "1",
+    "MAX_RLM_CALLS": "8",
+    "TURN_TIMEOUT_MS": "180000"
+  }
+}
