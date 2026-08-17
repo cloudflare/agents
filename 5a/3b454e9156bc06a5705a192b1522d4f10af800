@@ -1,0 +1,19 @@
+packages/agents/src/tests/workflow.test.ts
+  s_334a9720165218::t_4cf8ee2da61801 2-3,28-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5a3b454e9156bc06a5705a192b1522d4f10af800",
+  "prompts": {},
+  "sessions": {
+    "s_334a9720165218": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff785-6e3a-74a3-8075-1e70c27f4c27",
+        "model": "unknown"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}
