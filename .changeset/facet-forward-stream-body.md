@@ -19,4 +19,4 @@ Both call sites now pass `req.body` through as a stream. Measured on `wrangler d
 
 This restores the behaviour from before #1443, which switched to an explicit `RequestInit` in order to set a header on WebSocket upgrades and re-attached the body with `arrayBuffer()` as a side effect. The `Upgrade` header handling from that fix is unchanged.
 
-One behavioural note: backpressure now reaches the client. A child that returns without reading the body will cause the remainder of the upload to be cancelled, where previously the parent drained it in full.
+One behavioural note: backpressure now reaches the client. A child that returns without reading the body will cause the remainder of the upload to be cancelled, where previously the parent drained it in full. Existing handlers that require the complete upload must consume or stream `request.body` before returning.
