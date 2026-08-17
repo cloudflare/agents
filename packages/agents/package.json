@@ -30,7 +30,7 @@
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
     "mimetext": "^3.0.28",
-    "nanoid": "^5.1.16",
+    "nanoid": "^6.0.0",
     "partyserver": "^0.5.9",
     "partysocket": "1.3.0",
     "yaml": "^2.9.0",

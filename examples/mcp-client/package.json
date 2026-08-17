@@ -12,7 +12,7 @@
     "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "nanoid": "^5.1.16",
+    "nanoid": "^6.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

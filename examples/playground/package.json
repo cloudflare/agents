@@ -20,7 +20,7 @@
     "agents": "*",
     "ai": "^7.0.0",
     "cronstrue": "^3.23.0",
-    "nanoid": "^5.1.16",
+    "nanoid": "^6.0.0",
     "postal-mime": "^2.7.5",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

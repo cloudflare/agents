@@ -1,7 +1,7 @@
 {
   "author": "",
   "dependencies": {
-    "nanoid": "^5.1.16"
+    "nanoid": "^6.0.0"
   },
   "devDependencies": {
     "chalk": "^5.6.2"
