@@ -483,7 +483,6 @@ type SubAgentConnectionBridgeLike = {
 type SubAgentConnectionOperationName = "send" | "setState" | "close";
 
 type StoredSubAgentConnection = {
-  bridge: SubAgentConnectionBridgeLike;
   meta: SubAgentConnectionMeta;
   connection?: Connection;
 };
@@ -7183,7 +7182,6 @@ export class Agent<
       const stored = this._cf_virtualSubAgentConnections.get(id);
       if (stored) {
         return this._cf_createSubAgentBridgeConnection(
-          stored.bridge,
           stored.meta
         ) as Connection<TState>;
       }
@@ -7214,7 +7212,6 @@ export class Agent<
       for (const stored of this._cf_virtualSubAgentConnections.values()) {
         if (!tag || stored.meta.tags.includes(tag)) {
           yield this._cf_createSubAgentBridgeConnection(
-            stored.bridge,
             stored.meta
           ) as Connection<TState>;
         }
@@ -7718,7 +7715,7 @@ export class Agent<
     meta: SubAgentConnectionMeta
   ): Promise<void> {
     await this._cf_runWithSubAgentBridge(bridge, meta.id, async () => {
-      const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+      const connection = this._cf_createSubAgentBridgeConnection(meta);
       const request = new Request(meta.uri ?? "http://placeholder/", {
         headers: meta.requestHeaders
       });
@@ -7742,9 +7739,9 @@ export class Agent<
         connection.id,
         ...childTags.filter((tag) => tag !== connection.id)
       ];
-      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+      this._cf_storeVirtualSubAgentConnection(connection);
       await this.onConnect(connection, { request });
-      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+      this._cf_storeVirtualSubAgentConnection(connection);
     });
   }
 
@@ -7754,8 +7751,8 @@ export class Agent<
     meta: SubAgentConnectionMeta,
     replyBridge: SubAgentConnectionBridge = bridge
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
-    this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    const connection = this._cf_createSubAgentBridgeConnection(meta);
+    this._cf_storeVirtualSubAgentConnection(connection);
     const replyContext: SubAgentRpcReplyInvocationContext = {
       bridge: replyBridge
     };
@@ -7777,8 +7774,8 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
-    this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    const connection = this._cf_createSubAgentBridgeConnection(meta);
+    this._cf_storeVirtualSubAgentConnection(connection);
     await this._cf_runWithSubAgentBridge(bridge, meta.id, () =>
       this.onClose(connection, code, reason, wasClean)
     );
@@ -7801,12 +7798,10 @@ export class Agent<
   }
 
   private _cf_createSubAgentBridgeConnection(
-    bridge: SubAgentConnectionBridgeLike,
     meta: SubAgentConnectionMeta
   ): Connection {
     let stored = this._cf_virtualSubAgentConnections.get(meta.id);
     if (stored) {
-      stored.bridge = bridge;
       stored.meta = meta;
       if (stored.connection) {
         (
@@ -7824,7 +7819,7 @@ export class Agent<
         return stored.connection;
       }
     } else {
-      stored = { bridge, meta };
+      stored = { meta };
       this._cf_virtualSubAgentConnections.set(meta.id, stored);
     }
 
@@ -7876,16 +7871,12 @@ export class Agent<
     return connection;
   }
 
-  private _cf_storeVirtualSubAgentConnection(
-    bridge: SubAgentConnectionBridgeLike,
-    connection: Connection
-  ): void {
+  private _cf_storeVirtualSubAgentConnection(connection: Connection): void {
     this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
       ...connection.tags
     ]);
     const stored = this._cf_virtualSubAgentConnections.get(connection.id);
     this._cf_virtualSubAgentConnections.set(connection.id, {
-      bridge,
       meta: {
         id: connection.id,
         uri: connection.uri,
@@ -7909,10 +7900,7 @@ export class Agent<
     const root = await this._rootAlarmOwner();
     const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
     for (const meta of metas) {
-      this._cf_virtualSubAgentConnections.set(meta.id, {
-        bridge: new RootSubAgentConnectionBridge(root, meta.id),
-        meta
-      });
+      this._cf_virtualSubAgentConnections.set(meta.id, { meta });
     }
   }
 
