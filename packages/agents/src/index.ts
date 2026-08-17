@@ -1746,6 +1746,7 @@ export class Agent<
     string,
     Promise<void>
   >();
+  private _cf_subAgentBroadcastOperationTail?: Promise<void>;
 
   /**
    * User-facing facet name. For legacy facets this is the same as
@@ -7240,9 +7241,8 @@ export class Agent<
   /**
    * Route a virtual sub-agent connection operation through its live frame
    * bridge, or through the durable root Agent after that frame completes.
-   * Root-routed operations are queued per connection to preserve call order,
-   * including operations issued from later live frames. Failures do not block
-   * later work.
+   * Root-routed operations are queued per connection. Facet broadcasts wait
+   * for older queued operations; failures do not block later work.
    */
   private _cf_routeSubAgentConnectionOperation(
     connectionId: string,
@@ -7283,6 +7283,52 @@ export class Agent<
     });
   }
 
+  /**
+   * Route a facet broadcast after every older connection operation.
+   *
+   * This barrier is intentionally one-way: facet startup can broadcast before
+   * a child connection has finished initializing its tags and protocol flags.
+   * Making those later connection operations wait would let the next frame
+   * observe stale root-owned metadata.
+   */
+  private async _cf_routeSubAgentBroadcast(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    const activeBridge = this._cf_activeSubAgentBridge();
+    const previousOperations = new Set([
+      ...(this._cf_subAgentBroadcastOperationTail
+        ? [this._cf_subAgentBroadcastOperationTail]
+        : []),
+      ...this._cf_subAgentConnectionOperationTails.values()
+    ]);
+    if (activeBridge && previousOperations.size === 0) {
+      await activeBridge.broadcast(ownerPath, message, without);
+      return;
+    }
+
+    const pending = Promise.all(previousOperations).then(async () => {
+      const root = await this._rootAlarmOwner();
+      await root._cf_broadcastToSubAgent(ownerPath, message, without);
+    });
+    const completion = pending.catch((error: unknown) => {
+      console.error("[Agent] Sub-agent broadcast operation failed:", {
+        operation: "broadcast",
+        error
+      });
+    });
+
+    this._cf_subAgentBroadcastOperationTail = completion;
+    this.ctx.waitUntil(completion);
+    void completion.then(() => {
+      if (this._cf_subAgentBroadcastOperationTail === completion) {
+        this._cf_subAgentBroadcastOperationTail = undefined;
+      }
+    });
+    await completion;
+  }
+
   private _cf_reportSubAgentConnectionOperationFailure(
     connectionId: string,
     operation: SubAgentConnectionOperationName,
@@ -7299,13 +7345,7 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    const bridge = this._cf_activeSubAgentBridge();
-    if (bridge) {
-      bridge.broadcast(this.selfPath, message, without);
-      return;
-    }
-    const root = await this._rootAlarmOwner();
-    await root._cf_broadcastToSubAgent(this.selfPath, message, without);
+    await this._cf_routeSubAgentBroadcast(this.selfPath, message, without);
   }
 
   async _cf_broadcastToSubAgent(
@@ -7313,15 +7353,8 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    const bridge = this._cf_activeSubAgentBridge();
     if (this._isFacet) {
-      if (bridge) {
-        bridge.broadcast(ownerPath, message, without);
-        return;
-      }
-
-      const root = await this._rootAlarmOwner();
-      await root._cf_broadcastToSubAgent(ownerPath, message, without);
+      await this._cf_routeSubAgentBroadcast(ownerPath, message, without);
       return;
     }
 

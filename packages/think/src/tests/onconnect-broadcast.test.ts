@@ -1,7 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "agents";
-import type { ThinkTestAgent } from "./agents/think-session";
+import { getAgentByName, getSubAgentByName } from "agents";
+import { ThinkTestAgent } from "./agents/think-session";
 
 // Covers the Think server's `onConnect` broadcast policy. The server must
 // not send `cf_agent_chat_messages` while a resumable stream is in flight,
@@ -63,6 +63,49 @@ function collectMessages(
       // frame.
       timer.refresh?.();
     });
+  });
+}
+
+function waitForRequestFrameTypes(
+  ws: WebSocket,
+  requestId: string,
+  expectedTypes: ReadonlySet<string>,
+  timeout = 2000
+): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const received: string[] = [];
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", onMessage);
+      reject(
+        new Error(
+          `Expected request frames never arrived; received ${JSON.stringify(received)}`
+        )
+      );
+    }, timeout);
+
+    const onMessage = (event: MessageEvent) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(event.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (
+        frame.id !== requestId ||
+        typeof frame.type !== "string" ||
+        !expectedTypes.has(frame.type)
+      ) {
+        return;
+      }
+
+      received.push(frame.type);
+      if (received.length !== expectedTypes.size) return;
+      clearTimeout(timer);
+      ws.removeEventListener("message", onMessage);
+      resolve(received);
+    };
+
+    ws.addEventListener("message", onMessage);
   });
 }
 
@@ -229,6 +272,36 @@ describe("Think — onConnect broadcast policy", () => {
     );
 
     await closeWS(ws);
+  });
+});
+
+describe("Think — sub-agent stream frame ordering", () => {
+  it("delivers STREAM_RESUMING before a later terminal broadcast", async () => {
+    const parentRoom = crypto.randomUUID();
+    const childRoom = crypto.randomUUID();
+    const parent = await freshAgent(parentRoom);
+    const { ws } = await connectSubAgentWS(parentRoom, childRoom);
+    try {
+      await collectMessages(ws);
+
+      const child = await getSubAgentByName(parent, ThinkTestAgent, childRoom);
+      await parent.delayNextSubAgentConnectionSendForTest(300);
+      const requestId = crypto.randomUUID();
+      const frames = waitForRequestFrameTypes(
+        ws,
+        requestId,
+        new Set([MSG_STREAM_RESUMING, MSG_CHAT_RESPONSE])
+      );
+
+      await child.testSendStreamResumingBeforeTerminal(requestId);
+
+      await expect(frames).resolves.toEqual([
+        MSG_STREAM_RESUMING,
+        MSG_CHAT_RESPONSE
+      ]);
+    } finally {
+      await closeWS(ws);
+    }
   });
 });
 
