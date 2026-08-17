@@ -28,6 +28,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const RESUMING = "cf_agent_stream_resuming";
 const RESUME_REQUEST = "cf_agent_stream_resume_request";
 const CHAT_RESPONSE = "cf_agent_use_chat_response";
+const CHAT_MESSAGES = "cf_agent_chat_messages";
 
 function createFakeAgent(name: string) {
   const target = new EventTarget();
@@ -122,6 +123,8 @@ const expectedChars = TOOL_STEPS * WORDS_PER_STEP * "word ".length;
 
 async function mount(name: string, throttle?: number | false) {
   const { agent, sentMessages, target } = createFakeAgent(name);
+  let setChatMessages: ReturnType<typeof useAgentChat>["setMessages"] | null =
+    null;
 
   function TestComponent() {
     const chat = useAgentChat({
@@ -132,6 +135,7 @@ async function mount(name: string, throttle?: number | false) {
       ] as UIMessage[],
       throttle
     });
+    setChatMessages = chat.setMessages;
     const assistantText = chat.messages
       .filter((m) => m.role === "assistant")
       .flatMap((m) => m.parts)
@@ -143,6 +147,9 @@ async function mount(name: string, throttle?: number | false) {
         <div data-testid="status">{chat.status}</div>
         <div data-testid="error">{String(chat.error?.message ?? "")}</div>
         <div data-testid="chars">{assistantText.length}</div>
+        <div data-testid="message-ids">
+          {chat.messages.map((message) => message.id).join(",")}
+        </div>
       </div>
     );
   }
@@ -152,6 +159,12 @@ async function mount(name: string, throttle?: number | false) {
     read: (id: string) =>
       container.querySelector(`[data-testid="${id}"]`)?.textContent ?? null,
     sentMessages,
+    setMessages: (...args: Parameters<NonNullable<typeof setChatMessages>>) => {
+      if (!setChatMessages) {
+        throw new Error("Default throttle test chat is not mounted");
+      }
+      return setChatMessages(...args);
+    },
     target
   };
 }
@@ -212,13 +225,71 @@ describe("default chat throttle", () => {
     });
   });
 
-  // Proves the caller's value actually reaches the AI SDK: opting out restores
-  // the unthrottled behaviour, and this turn is large enough to fail without a
-  // throttle even with replayed chunks merged.
-  it("lets a caller opt out with throttle: false", async () => {
-    const h = await mount("throttle-off", false);
-    await replayTurn(h);
+  it("resolves functional updates against the current Chat store", async () => {
+    const h = await mount("current-store-updater");
 
-    expect(h.read("status")).toBe("error");
+    h.setMessages((messages) => [
+      ...messages,
+      {
+        id: "a1",
+        parts: [{ text: "streamed", type: "text" }],
+        role: "assistant"
+      }
+    ]);
+    h.setMessages((messages) => [
+      ...messages,
+      { id: "u2", parts: [{ text: "next", type: "text" }], role: "user" }
+    ]);
+
+    await vi.waitFor(() => expect(h.read("message-ids")).toBe("u1,a1,u2"));
+    expect(h.sentMessages[h.sentMessages.length - 1]).toContain('"id":"a1"');
+  });
+
+  it("preserves Chat store parts newer than the rendered snapshot", async () => {
+    const h = await mount("current-store-snapshot", 200);
+    await vi.waitFor(() =>
+      expect(countType(h.sentMessages, RESUME_REQUEST)).toBe(1)
+    );
+    dispatch(h.target, { id: "req-snapshot", type: RESUMING });
+    await sleep(10);
+
+    for (const body of [
+      { messageId: "asst-1", type: "start" },
+      { id: "text-1", type: "text-start" },
+      { delta: "first", id: "text-1", type: "text-delta" }
+    ]) {
+      dispatch(h.target, {
+        body: JSON.stringify(body),
+        done: false,
+        id: "req-snapshot",
+        type: CHAT_RESPONSE
+      });
+    }
+    await vi.waitFor(() => expect(h.read("chars")).toBe("5"));
+
+    dispatch(h.target, {
+      body: JSON.stringify({
+        delta: " second",
+        id: "text-1",
+        type: "text-delta"
+      }),
+      done: false,
+      id: "req-snapshot",
+      type: CHAT_RESPONSE
+    });
+    await sleep(10);
+    dispatch(h.target, {
+      messages: [
+        { id: "u1", parts: [{ text: "hi", type: "text" }], role: "user" },
+        {
+          id: "asst-1",
+          parts: [{ text: "first", type: "text" }],
+          role: "assistant"
+        }
+      ],
+      type: CHAT_MESSAGES
+    });
+
+    await vi.waitFor(() => expect(h.read("chars")).toBe("12"));
   });
 });

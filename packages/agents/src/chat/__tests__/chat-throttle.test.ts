@@ -48,8 +48,7 @@ describe("chatThrottleOptions", () => {
     });
   });
 
-  // Both majors decide with `waitMs != null`, so omitting the option is the
-  // only spelling that reaches the SDK's own unthrottled path.
+  // `false` is represented by omitting both numeric SDK options.
   it("omits both names when throttling is off", () => {
     expect(chatThrottleOptions({ throttle: false })).toEqual({});
   });

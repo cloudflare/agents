@@ -71,10 +71,9 @@ export function resolveChatThrottleMs(
  * sending one name would silently do nothing on the other. Unknown option keys
  * are ignored by both, so sending both names is safe.
  *
- * Turning throttling off omits both names rather than sending `0`. Both majors
- * decide with `waitMs != null`, so an omitted option is the only spelling that
- * takes the SDK's own unthrottled path; `0` still wraps the callback and only
- * behaves like "off" as a side effect of how the delay is computed.
+ * Turning throttling off omits both names rather than inventing a numeric
+ * value. Both majors also treat an explicit `0` as unthrottled, so callers that
+ * pass `0` keep that value under both spellings.
  */
 export function chatThrottleOptions(
   options: ChatThrottleOptions
