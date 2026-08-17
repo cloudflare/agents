@@ -266,14 +266,24 @@ export class PostgresSessionProvider implements SessionProvider {
     compactions: StoredCompaction[]
   ): SessionMessage[] {
     const ids = messages.map((m) => m.id);
+    const messageIndexById = new Map(
+      ids.map((messageId, index) => [messageId, index])
+    );
     const result: SessionMessage[] = [];
     let i = 0;
     while (i < messages.length) {
-      const matching = compactions.filter((c) => c.fromMessageId === ids[i]);
+      // Sibling branches can have compactions with the same starting message.
+      // Consider only ranges ending on this branch, then let the latest valid
+      // compaction supersede earlier ranges on the same branch.
+      const matching = compactions.filter(
+        (compaction) =>
+          compaction.fromMessageId === ids[i] &&
+          (messageIndexById.get(compaction.toMessageId) ?? -1) >= i
+      );
       const comp =
         matching.length > 1 ? matching[matching.length - 1] : matching[0];
       if (comp) {
-        const endIdx = ids.indexOf(comp.toMessageId);
+        const endIdx = messageIndexById.get(comp.toMessageId) ?? -1;
         if (endIdx >= i) {
           result.push({
             id: `compaction_${comp.id}`,
