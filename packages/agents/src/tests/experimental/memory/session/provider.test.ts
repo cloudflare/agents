@@ -38,7 +38,8 @@ interface SessionAgentStub {
   >;
   getRecentHistory(
     maxContentBytes: number,
-    minRecentMessages?: number
+    minRecentMessages?: number,
+    leafId?: string
   ): Promise<{
     messages: UIMessage[];
     truncated: boolean;
@@ -679,6 +680,45 @@ describe("AgentSessionProvider — byte-budgeted recent history (#1710)", () => 
     expect(ids).toEqual(
       Array.from({ length: ids.length }, (_, i) => `m${10 - ids.length + i}`)
     );
+  });
+
+  it("returns a budgeted suffix ending at a selected branch leaf", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "root",
+      role: "user",
+      parts: [{ type: "text", text: "root" }]
+    });
+    await agent.appendMessage(
+      {
+        id: "selected-parent",
+        role: "assistant",
+        parts: [{ type: "text", text: "selected parent" }]
+      },
+      "root"
+    );
+    await agent.appendMessage(
+      {
+        id: "selected-leaf",
+        role: "user",
+        parts: [{ type: "text", text: "selected leaf" }]
+      },
+      "selected-parent"
+    );
+    await agent.appendMessage(
+      {
+        id: "active-leaf",
+        role: "assistant",
+        parts: [{ type: "text", text: "active leaf" }]
+      },
+      "root"
+    );
+
+    const result = await agent.getRecentHistory(1, 1, "selected-leaf");
+    expect(result.truncated).toBe(true);
+    expect(result.messages.map((message) => message.id)).toEqual([
+      "selected-leaf"
+    ]);
   });
 
   it("always includes the leaf even when it alone exceeds the budget", async () => {

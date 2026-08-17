@@ -2234,6 +2234,27 @@ describe("Session init reads are bounded (#1710)", () => {
 });
 
 describe("Session.getRecentHistory fallback (#1710)", () => {
+  it("reads the selected branch when the provider lacks budgeted reads", async () => {
+    const selected: SessionMessage = {
+      id: "selected",
+      role: "user",
+      parts: [{ type: "text", text: "selected branch" }]
+    };
+    const active: SessionMessage = {
+      id: "active",
+      role: "assistant",
+      parts: [{ type: "text", text: "active branch" }]
+    };
+    const { provider } = createCountingProvider([active], false);
+    provider.getHistory = (leafId) =>
+      leafId === selected.id ? [selected] : [active];
+    const session = Session.create(provider);
+
+    const result = await session.getRecentHistory(1, 1, selected.id);
+    expect(result.truncated).toBe(false);
+    expect(result.messages).toEqual([selected]);
+  });
+
   it("reports honest metadata when the provider lacks budgeted reads", async () => {
     const { provider } = createCountingProvider(
       [
