@@ -39,6 +39,8 @@ export interface PersistReconstructedOrphanOptions<
    * present.
    */
   fallbackId: string;
+  /** Parent for a newly reconstructed message in tree-structured stores. */
+  parentId?: string | null;
   /**
    * Finalize the reconstructed message before upsert — e.g. strip internal
    * parts or resolve the persist-target id. Return `null` to skip persistence
@@ -84,7 +86,7 @@ export async function persistReconstructedOrphan<
   if (existing) {
     await options.store.updateMessage(options.merge(existing, prepared));
   } else {
-    await options.store.appendMessage(prepared);
+    await options.store.appendMessage(prepared, options.parentId);
   }
   return true;
 }

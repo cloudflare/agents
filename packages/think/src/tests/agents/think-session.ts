@@ -109,6 +109,7 @@ type CapturedModelCallSettings = {
 
 type MockModelOptions = {
   onCall?: (settings: CapturedModelCallSettings) => void;
+  onPromptRoles?: (roles: string[]) => void;
 };
 
 function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
@@ -130,6 +131,28 @@ function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
   };
 }
 
+function captureModelPromptRoles(options: unknown): string[] {
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    !("prompt" in options)
+  ) {
+    return [];
+  }
+  const prompt = Array.isArray(options.prompt) ? options.prompt : [];
+  return prompt.flatMap((message) => {
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("role" in message) ||
+      typeof message.role !== "string"
+    ) {
+      return [];
+    }
+    return [message.role];
+  });
+}
+
 function createMockModel(
   response: string,
   options: MockModelOptions = {}
@@ -144,6 +167,7 @@ function createMockModel(
     },
     doStream(callOptions: unknown) {
       options.onCall?.(captureModelCallSettings(callOptions));
+      options.onPromptRoles?.(captureModelPromptRoles(callOptions));
       _mockCallCount++;
       const callId = _mockCallCount;
       const stream = new ReadableStream({
@@ -4854,6 +4878,7 @@ export class ThinkToolsTestAgent extends Think {
       this as unknown as {
         _chatRecoveryContinue(d: {
           targetAssistantId?: string;
+          historyLeafId?: string;
           lastBody?: Record<string, unknown> | null;
           lastClientTools?: ClientToolSchema[] | null;
         }): Promise<void>;
@@ -4861,6 +4886,7 @@ export class ThinkToolsTestAgent extends Think {
     )._chatRecoveryContinue(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
+        historyLeafId?: string;
         lastBody?: Record<string, unknown> | null;
         lastClientTools?: ClientToolSchema[] | null;
       }
@@ -6501,6 +6527,7 @@ export class ThinkRecoveryTestAgent extends Think {
   private _stashResult: { success: boolean; error?: string } | null = null;
   private _rejectPrefill = false;
   private _lastPromptRole: string | undefined;
+  private _promptRoles: string[][] = [];
   private _throwBeforeTurnMessage: string | null = null;
   // recovery × channels: capture the channel context + assembled system prompt
   // that each turn (including recovered ones) actually ran with, so a test can
@@ -6543,7 +6570,9 @@ export class ThinkRecoveryTestAgent extends Think {
         }
       });
     }
-    return createMockModel("Continued response.");
+    return createMockModel("Continued response.", {
+      onPromptRoles: (roles) => this._promptRoles.push(roles)
+    });
   }
 
   override beforeTurn(ctx: TurnContext): void {
@@ -6617,6 +6646,28 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getTurnCallCount(): Promise<number> {
     return this._turnCallCount;
+  }
+
+  /** Stored child branches for recovery integration assertions. */
+  async getBranchesForTest(messageId: string): Promise<UIMessage[]> {
+    // SAFETY: Think's Session stores sanitized UIMessage values; the provider's
+    // narrower SessionMessage type intentionally avoids depending on the AI SDK.
+    return (await this.session.getBranches(messageId)) as UIMessage[];
+  }
+
+  /** Model prompt roles recorded after a recovered turn starts. */
+  async getPromptRolesForTest(): Promise<string[][]> {
+    return this._promptRoles;
+  }
+
+  /** Re-deliver a branch-scoped retry callback to verify recovery idempotency. */
+  async retryBranchForTest(input: {
+    targetUserId: string;
+    historyLeafId: string;
+    activeLeafIdAtStart: string;
+    originalRequestId: string;
+  }): Promise<void> {
+    await this._chatRecoveryRetry(input);
   }
 
   /** The active channel id captured at each turn's `beforeTurn` (""=none). */
@@ -7623,6 +7674,7 @@ export class ThinkRecoveryTestAgent extends Think {
     await this._chatRecoveryContinue(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
+        historyLeafId?: string;
         lastBody?: Record<string, unknown> | null;
         lastClientTools?: ClientToolSchema[] | null;
       }
@@ -7812,6 +7864,65 @@ export class ThinkRecoveryTestAgent extends Think {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+  }
+
+  /** Capture a real branch snapshot after clearing only the live transcript. */
+  async captureBranchRecoverySnapshotWithEmptyCacheForTest(
+    historyLeafId: string
+  ): Promise<{ requestId: string; snapshot: unknown }> {
+    const internals = this as unknown as {
+      _replaceCachedMessages(messages: UIMessage[]): UIMessage[];
+      _runChatRecoveryFiber<T>(
+        requestId: string,
+        continuation: boolean,
+        fn: () => Promise<T>,
+        history: { leafId: string }
+      ): Promise<T>;
+    };
+    internals._replaceCachedMessages([]);
+
+    const requestId = `empty-cache-${crypto.randomUUID()}`;
+    const name = `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`;
+    const snapshot = await internals._runChatRecoveryFiber(
+      requestId,
+      false,
+      async () => {
+        const rows = this.sql<{ snapshot: string | null }>`
+          SELECT snapshot FROM cf_agents_runs WHERE name = ${name} LIMIT 1
+        `;
+        return rows[0]?.snapshot ? JSON.parse(rows[0].snapshot) : null;
+      },
+      { leafId: historyLeafId }
+    );
+    return { requestId, snapshot };
+  }
+
+  /** Recover a fiber, then execute its claimed retry callback twice. */
+  async recoverFiberWithRetryRedeliveryForTest(): Promise<void> {
+    await this.triggerFiberRecovery();
+    const rows = this.sql<{ id: string; payload: string }>`
+      SELECT id, payload FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryRetry'
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) throw new Error("No scheduled chat recovery retry to redeliver");
+    this.sql`DELETE FROM cf_agents_schedules WHERE id = ${row.id}`;
+
+    const parsed: unknown = JSON.parse(row.payload);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error("Scheduled chat recovery retry payload is not an object");
+    }
+    // SAFETY: The object shape was checked above; the recovery callback owns
+    // validation of its optional wire fields, matching real schedule delivery.
+    const data = parsed as Record<string, unknown>;
+    await this.runChatRecoveryRetryForTestWith(data);
+    await this.runChatRecoveryRetryForTestWith(data);
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
