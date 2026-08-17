@@ -6,6 +6,7 @@ import type {
   StreamingResponse
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
+import { MessageType } from "../../types.ts";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
@@ -1087,6 +1088,26 @@ export class CustomBoundSubAgentParent extends Agent {
 
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
+class DelayedForwardingSubAgentBridge extends RpcTarget {
+  constructor(
+    private readonly connectionId: string,
+    private readonly delayedMessage: string | undefined,
+    private readonly sendToConnection: (
+      connectionId: string,
+      message: string | ArrayBuffer | ArrayBufferView
+    ) => Promise<void>
+  ) {
+    super();
+  }
+
+  async send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    if (message === this.delayedMessage) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    await this.sendToConnection(this.connectionId, message);
+  }
+}
+
 export class TestSubAgentParent extends Agent {
   private _rootResolutionFailuresRemaining = 0;
   private _nextRootResolutionDelayMs = 0;
@@ -1098,6 +1119,61 @@ export class TestSubAgentParent extends Agent {
 
   delayNextRootResolution(delayMs: number): void {
     this._nextRootResolutionDelayMs = delayMs;
+  }
+
+  /** Forwards one frame through a deliberately slow live bridge. */
+  async forwardLiveThenDetachedMessages(
+    childName: string,
+    liveMessage: string,
+    detachedMessage: string
+  ): Promise<void> {
+    const [meta] = await this._cf_subAgentConnectionMetas([
+      ...this.selfPath,
+      { className: SlowReplySubAgent.name, name: childName }
+    ]);
+    if (!meta) {
+      throw new Error(
+        "TestSubAgentParent.forwardLiveThenDetachedMessages requires a child WebSocket"
+      );
+    }
+
+    const sendToConnection = (
+      connectionId: string,
+      message: string | ArrayBuffer | ArrayBufferView
+    ) => this._cf_sendToSubAgentConnection(connectionId, message);
+    const operationBridge = new DelayedForwardingSubAgentBridge(
+      meta.id,
+      liveMessage,
+      sendToConnection
+    );
+    const replyBridge = new DelayedForwardingSubAgentBridge(
+      meta.id,
+      undefined,
+      sendToConnection
+    );
+    const child = await this.subAgent(SlowReplySubAgent, childName);
+    // SAFETY: SubAgentStub omits Agent's internal forwarding method, while this
+    // fixture supplies the same message, metadata, and RpcTarget bridge shape.
+    await (
+      child as unknown as {
+        _cf_handleSubAgentWebSocketMessage(
+          message: string,
+          bridge: DelayedForwardingSubAgentBridge,
+          connectionMeta: typeof meta,
+          reply: DelayedForwardingSubAgentBridge
+        ): Promise<void>;
+      }
+    )._cf_handleSubAgentWebSocketMessage(
+      JSON.stringify({
+        args: [liveMessage, detachedMessage],
+        id: crypto.randomUUID(),
+        method: "sendLiveThenDetachedMessages",
+        type: MessageType.RPC
+      }),
+      operationBridge,
+      meta,
+      replyBridge
+    );
   }
 
   failNextSubAgentBroadcast(): void {
@@ -2337,6 +2413,28 @@ export class SlowReplySubAgent extends Agent {
 
     connection.send(message);
     return "sent";
+  }
+
+  /** Sends once in the live frame and once after that frame completes. */
+  @callable()
+  sendLiveThenDetachedMessages(
+    liveMessage: string,
+    detachedMessage: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendLiveThenDetachedMessages requires an active connection"
+      );
+    }
+
+    connection.send(liveMessage);
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(detachedMessage);
+      })
+    );
+    return "scheduled";
   }
 
   /** Sends a detached buffer to exercise live bridge failure reporting. */

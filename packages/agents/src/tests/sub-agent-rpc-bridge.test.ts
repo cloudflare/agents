@@ -243,6 +243,28 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("delivers a live-frame send before a later detached send", async () => {
+    const parentName = uniqueName();
+    const childName = uniqueName();
+    const ws = await connectWS(parentName, childName);
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const live = `live-first-${crypto.randomUUID()}`;
+      const detached = `detached-second-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessages(
+        ws,
+        new Set([live, detached]),
+        2000
+      );
+
+      await parent.forwardLiveThenDetachedMessages(childName, live, detached);
+
+      await expect(delivered).resolves.toEqual([live, detached]);
+    } finally {
+      ws.close();
+    }
+  });
+
   it("reports a failed live-frame connection operation", async () => {
     const ws = await connectWS(uniqueName(), uniqueName());
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

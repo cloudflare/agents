@@ -7238,8 +7238,8 @@ export class Agent<
   /**
    * Route a virtual sub-agent connection operation through its live frame
    * bridge, or through the durable root Agent after that frame completes.
-   * Root-routed operations are queued per connection. Facet broadcasts wait
-   * for older queued operations; failures do not block later work.
+   * All operations share one per-connection queue. Facet broadcasts wait for
+   * older queued operations; failures do not block later work.
    */
   private _cf_routeSubAgentConnectionOperation(
     connectionId: string,
@@ -7249,34 +7249,21 @@ export class Agent<
     const activeBridge = this._cf_activeSubAgentBridge(connectionId);
     const previousConnectionOperation =
       this._cf_subAgentConnectionOperationTails.get(connectionId);
+    let pending: Promise<void>;
     if (activeBridge && !previousConnectionOperation) {
       try {
-        const completion = Promise.resolve(operation(activeBridge)).catch(
-          (error: unknown) => {
-            this._cf_reportSubAgentConnectionOperationFailure(
-              connectionId,
-              operationName,
-              error
-            );
-          }
-        );
-        this.ctx.waitUntil(completion);
+        pending = Promise.resolve(operation(activeBridge)).then(() => {});
       } catch (error) {
-        this._cf_reportSubAgentConnectionOperationFailure(
-          connectionId,
-          operationName,
-          error
-        );
+        pending = Promise.reject(error);
       }
-      return;
+    } else {
+      pending = (previousConnectionOperation ?? Promise.resolve()).then(
+        async () => {
+          const root = await this._rootAlarmOwner();
+          await operation(new RootSubAgentConnectionBridge(root, connectionId));
+        }
+      );
     }
-
-    const pending = (previousConnectionOperation ?? Promise.resolve()).then(
-      async () => {
-        const root = await this._rootAlarmOwner();
-        await operation(new RootSubAgentConnectionBridge(root, connectionId));
-      }
-    );
     const completion = pending.catch((error: unknown) => {
       this._cf_reportSubAgentConnectionOperationFailure(
         connectionId,
