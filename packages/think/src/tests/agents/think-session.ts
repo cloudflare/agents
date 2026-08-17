@@ -5013,6 +5013,14 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.getMessages();
   }
 
+  async getLastMessageIdentityForTest(): Promise<{
+    id: string;
+    role: UIMessage["role"];
+  } | null> {
+    const message = (await this.getMessages()).at(-1);
+    return message ? { id: message.id, role: message.role } : null;
+  }
+
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
   }
@@ -8199,6 +8207,57 @@ export class ThinkNonRecoveryTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  /**
+   * Seed the durable state reached when a branch-scoped regeneration loses its
+   * live stream reader. Chat recovery is disabled on this agent, so only the
+   * client resume handshake can materialize the buffered partial after restart.
+   */
+  async seedInterruptedRegenerationForResumeTest(): Promise<{
+    requestId: string;
+    userId: string;
+    oldAssistantId: string;
+    partialAssistantId: string;
+  }> {
+    const requestId = "req-resume-regeneration";
+    const userId = "user-resume-regeneration";
+    const oldAssistantId = "assistant-old-resume-regeneration";
+    const partialAssistantId = "assistant-partial-resume-regeneration";
+
+    await this.session.appendMessage({
+      id: userId,
+      role: "user",
+      parts: [{ type: "text", text: "answer this differently" }]
+    });
+    await this.session.appendMessage({
+      id: oldAssistantId,
+      role: "assistant",
+      parts: [{ type: "text", text: "Old answer" }]
+    });
+
+    const streamId = this._startResumableStream(requestId, {
+      parentMessageId: userId
+    });
+    for (const body of [
+      JSON.stringify({ type: "start", messageId: partialAssistantId }),
+      JSON.stringify({ type: "text-start", id: "regenerated-text" }),
+      JSON.stringify({
+        type: "text-delta",
+        id: "regenerated-text",
+        delta: "Partial replacement"
+      })
+    ]) {
+      this._resumableStream.storeChunk(streamId, body);
+    }
+    this._resumableStream.flushBuffer();
+
+    return { requestId, userId, oldAssistantId, partialAssistantId };
+  }
+
+  /** Stored child branches for resume-handshake recovery assertions. */
+  async getBranchesForTest(messageId: string): Promise<UIMessage[]> {
+    return (await this.session.getBranches(messageId)) as UIMessage[];
   }
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {

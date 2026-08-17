@@ -1,7 +1,10 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
-import type { ThinkTestAgent } from "./agents/think-session";
+import type {
+  ThinkProgrammaticTestAgent,
+  ThinkTestAgent
+} from "./agents/think-session";
 
 // Covers the Think server's `onConnect` broadcast policy. The server must
 // not send `cf_agent_chat_messages` while a resumable stream is in flight,
@@ -21,9 +24,17 @@ async function freshAgent(name?: string) {
   );
 }
 
-async function connectWS(room: string) {
+async function programmaticAgent(name: string) {
+  // SAFETY: The test Wrangler configuration binds this namespace to
+  // ThinkProgrammaticTestAgent; Cloudflare's generated Env type is unavailable.
+  const namespace =
+    env.ThinkProgrammaticTestAgent as unknown as DurableObjectNamespace<ThinkProgrammaticTestAgent>;
+  return getAgentByName(namespace, name);
+}
+
+async function connectWS(room: string, agentName = "think-test-agent") {
   const res = await exports.default.fetch(
-    `http://example.com/agents/think-test-agent/${room}`,
+    `http://example.com/agents/${agentName}/${room}`,
     { headers: { Upgrade: "websocket" } }
   );
   expect(res.status).toBe(101);
@@ -185,6 +196,57 @@ describe("Think — onConnect broadcast policy", () => {
 
     expect(types).toContain(MSG_CHAT_MESSAGES);
     expect(types).not.toContain(MSG_STREAM_RESUMING);
+
+    await closeWS(ws);
+  });
+
+  it("replays completed Think continuations as their persisted assistant message", async () => {
+    const room = `continuation-replay-${crypto.randomUUID()}`;
+    const agent = await programmaticAgent(room);
+
+    await agent.testChat("Start conversation");
+    const continuation = await agent.testContinueLastTurn();
+    expect(continuation.status).toBe("completed");
+    const persistedContinuation = await agent.getLastMessageIdentityForTest();
+    expect(persistedContinuation?.role).toBe("assistant");
+
+    const { ws } = await connectWS(room, "think-programmatic-test-agent");
+    const messagesPromise = collectMessages(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_STREAM_RESUME_ACK,
+        id: continuation.requestId
+      })
+    );
+
+    const messages = await messagesPromise;
+    const replayFrames = messages.filter(
+      (message) =>
+        message.type === MSG_CHAT_RESPONSE &&
+        message.id === continuation.requestId &&
+        message.replay === true
+    );
+
+    expect(replayFrames.length).toBeGreaterThan(1);
+    expect(replayFrames.at(-1)).toEqual(
+      expect.objectContaining({ done: true })
+    );
+    expect(replayFrames.every((frame) => frame.continuation !== true)).toBe(
+      true
+    );
+    const startFrame = replayFrames.find((frame) => {
+      if (typeof frame.body !== "string") return false;
+      // SAFETY: replay bodies are serialized AI SDK stream chunks produced by
+      // Think, and this test narrows only the optional discriminator.
+      const body = JSON.parse(frame.body) as { type?: string };
+      return body.type === "start";
+    });
+    if (!startFrame || typeof startFrame.body !== "string") {
+      throw new Error("Expected a serialized start replay frame");
+    }
+    // SAFETY: the matching body was narrowed to Think's serialized start chunk.
+    const start = JSON.parse(startFrame.body) as { messageId?: string };
+    expect(start.messageId).toBe(persistedContinuation?.id);
 
     await closeWS(ws);
   });

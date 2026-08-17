@@ -69,7 +69,9 @@ function countType(sentMessages: string[], type: string): number {
 }
 
 const RESUMING = "cf_agent_stream_resuming";
+const RESUME_REQUEST = "cf_agent_stream_resume_request";
 const RESUME_ACK = "cf_agent_stream_resume_ack";
+const RESUME_NONE = "cf_agent_stream_resume_none";
 const CHAT_RESPONSE = "cf_agent_use_chat_response";
 const CHAT_MESSAGES = "cf_agent_chat_messages";
 
@@ -170,6 +172,224 @@ describe("Think reconnect/resume handshake (client path)", () => {
       );
     });
     expect(screen.getByTestId("assistant-count").textContent).toBe("1");
+    expect(countType(sentMessages, RESUME_ACK)).toBe(1);
+  });
+
+  it("replays a continuation into the existing assistant message", async () => {
+    const { agent, target, sentMessages } = createFakeAgent({
+      name: "continuation-replay",
+      url: "ws://localhost:3000/agents/chat/continuation-replay?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Continue" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Before continuation" }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: initialMessages
+      });
+      const assistants = chat.messages.filter(
+        (message) => message.role === "assistant"
+      );
+      const assistantText = assistants
+        .flatMap((message) => message.parts)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      return (
+        <div>
+          <div data-testid="continuation-text">{assistantText}</div>
+          <div data-testid="continuation-count">{assistants.length}</div>
+        </div>
+      );
+    };
+
+    await act(async () => {
+      render(
+        <Suspense fallback="Loading...">
+          <TestComponent />
+        </Suspense>
+      );
+      await sleep(10);
+    });
+
+    // Settle the mount-time transport handshake first so the subsequent
+    // STREAM_RESUMING offer exercises the observer/fallback replay path.
+    await waitFor(() => {
+      expect(countType(sentMessages, RESUME_REQUEST)).toBeGreaterThan(0);
+    });
+    // SAFETY: createFakeAgent records only JSON protocol messages emitted by
+    // useAgentChat, and this test reads only the optional handshake fields.
+    const resumeRequest = sentMessages
+      .map(
+        (message) => JSON.parse(message) as { type?: string; probeId?: string }
+      )
+      .find((message) => message.type === RESUME_REQUEST);
+    expect(resumeRequest?.probeId).toBeDefined();
+
+    await act(async () => {
+      dispatch(target, {
+        type: RESUME_NONE,
+        reason: "idle",
+        probeId: resumeRequest?.probeId
+      });
+      await sleep(10);
+      dispatch(target, { type: RESUMING, id: "continuation-request" });
+      await sleep(10);
+      for (const body of [
+        '{"type":"start"}',
+        '{"type":"text-start","id":"continued-text"}',
+        '{"type":"text-delta","id":"continued-text","delta":" after reconnect"}'
+      ]) {
+        dispatch(target, {
+          type: CHAT_RESPONSE,
+          id: "continuation-request",
+          body,
+          done: false,
+          replay: true,
+          continuation: true
+        });
+      }
+      dispatch(target, {
+        type: CHAT_RESPONSE,
+        id: "continuation-request",
+        body: "",
+        done: true,
+        replay: true,
+        continuation: true
+      });
+      await sleep(10);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("continuation-text").textContent).toBe(
+        "Before continuation after reconnect"
+      );
+    });
+    expect(screen.getByTestId("continuation-count").textContent).toBe("1");
+    expect(countType(sentMessages, RESUME_ACK)).toBe(1);
+  });
+
+  it("does not duplicate a completed continuation already present in hydrated history", async () => {
+    const { agent, target, sentMessages } = createFakeAgent({
+      name: "completed-continuation-replay",
+      url: "ws://localhost:3000/agents/chat/completed-continuation-replay?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Continue" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Before continuation" }]
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        parts: [{ type: "text", text: " after reconnect" }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: initialMessages
+      });
+      const assistants = chat.messages.filter(
+        (message) => message.role === "assistant"
+      );
+      const assistantText = assistants
+        .flatMap((message) => message.parts)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      return (
+        <div>
+          <div data-testid="completed-continuation-text">{assistantText}</div>
+          <div data-testid="completed-continuation-count">
+            {assistants.length}
+          </div>
+        </div>
+      );
+    };
+
+    await act(async () => {
+      render(
+        <Suspense fallback="Loading...">
+          <TestComponent />
+        </Suspense>
+      );
+      await sleep(10);
+    });
+
+    await waitFor(() => {
+      expect(countType(sentMessages, RESUME_REQUEST)).toBeGreaterThan(0);
+    });
+    // SAFETY: createFakeAgent records only JSON protocol messages emitted by
+    // useAgentChat, and this test reads only the optional handshake fields.
+    const resumeRequest = sentMessages
+      .map(
+        (message) => JSON.parse(message) as { type?: string; probeId?: string }
+      )
+      .find((message) => message.type === RESUME_REQUEST);
+    expect(resumeRequest?.probeId).toBeDefined();
+
+    await act(async () => {
+      dispatch(target, {
+        type: RESUME_NONE,
+        reason: "idle",
+        probeId: resumeRequest?.probeId
+      });
+      await sleep(10);
+      dispatch(target, {
+        type: RESUMING,
+        id: "completed-continuation-request"
+      });
+      await sleep(10);
+      for (const body of [
+        '{"type":"start","messageId":"assistant-2"}',
+        '{"type":"text-start","id":"continued-text"}',
+        '{"type":"text-delta","id":"continued-text","delta":" after reconnect"}'
+      ]) {
+        dispatch(target, {
+          type: CHAT_RESPONSE,
+          id: "completed-continuation-request",
+          body,
+          done: false,
+          replay: true
+        });
+      }
+      dispatch(target, {
+        type: CHAT_RESPONSE,
+        id: "completed-continuation-request",
+        body: "",
+        done: true,
+        replay: true
+      });
+      await sleep(10);
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("completed-continuation-text").textContent
+      ).toBe("Before continuation after reconnect");
+    });
+    expect(screen.getByTestId("completed-continuation-count").textContent).toBe(
+      "2"
+    );
     expect(countType(sentMessages, RESUME_ACK)).toBe(1);
   });
 
