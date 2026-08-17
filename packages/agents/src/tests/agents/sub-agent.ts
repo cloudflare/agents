@@ -1089,9 +1089,14 @@ export class CustomBoundSubAgentParent extends Agent {
 
 export class TestSubAgentParent extends Agent {
   private _rootResolutionFailuresRemaining = 0;
+  private _nextRootResolutionDelayMs = 0;
 
   failNextRootResolution(): void {
     this._rootResolutionFailuresRemaining += 1;
+  }
+
+  delayNextRootResolution(delayMs: number): void {
+    this._nextRootResolutionDelayMs = delayMs;
   }
 
   override async setName(
@@ -1101,6 +1106,11 @@ export class TestSubAgentParent extends Agent {
     if (this._rootResolutionFailuresRemaining > 0) {
       this._rootResolutionFailuresRemaining -= 1;
       throw new Error("TestSubAgentParent root resolution failed");
+    }
+    if (this._nextRootResolutionDelayMs > 0) {
+      const delayMs = this._nextRootResolutionDelayMs;
+      this._nextRootResolutionDelayMs = 0;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     await super.setName(name, props);
   }
@@ -2255,6 +2265,10 @@ export class SlowReplySubAgent extends Agent {
     const handleMessage = this.onMessage.bind(this);
     this.onMessage = async (connection, message) => {
       await new Promise((resolve) => setTimeout(resolve, 25));
+      if (message === "close-connection-during-live-frame") {
+        connection.close(4001, "live-frame-close");
+        return;
+      }
       await handleMessage(connection, message);
     };
   }
@@ -2294,6 +2308,20 @@ export class SlowReplySubAgent extends Agent {
     return "scheduled";
   }
 
+  /** Sends a direct connection message during the current frame. */
+  @callable()
+  sendConnectionMessageNow(message: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessageNow requires an active connection"
+      );
+    }
+
+    connection.send(message);
+    return "sent";
+  }
+
   /** Schedules consecutive messages after the current frame completes. */
   @callable()
   sendConnectionMessagesAfterDelay(messages: string[]): string {
@@ -2328,6 +2356,20 @@ export class SlowReplySubAgent extends Agent {
       })
     );
     return "scheduled";
+  }
+
+  /** Updates connection state during the current frame. */
+  @callable()
+  setConnectionMarkerNow(marker: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkerNow requires an active connection"
+      );
+    }
+
+    connection.setState({ delayedMarker: marker });
+    return "set";
   }
 
   /** Schedules consecutive state updates after the current frame completes. */

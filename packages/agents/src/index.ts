@@ -7240,8 +7240,9 @@ export class Agent<
   /**
    * Route a virtual sub-agent connection operation through its live frame
    * bridge, or through the durable root Agent after that frame completes.
-   * Root-routed operations are queued per connection to preserve call order;
-   * failures are reported without blocking later operations.
+   * Root-routed operations are queued per connection to preserve call order,
+   * including operations issued from later live frames. Failures do not block
+   * later work.
    */
   private _cf_routeSubAgentConnectionOperation(
     connectionId: string,
@@ -7249,18 +7250,19 @@ export class Agent<
     operation: (bridge: SubAgentConnectionBridgeLike) => unknown
   ): void {
     const activeBridge = this._cf_activeSubAgentBridge(connectionId);
-    if (activeBridge) {
+    const previousConnectionOperation =
+      this._cf_subAgentConnectionOperationTails.get(connectionId);
+    if (activeBridge && !previousConnectionOperation) {
       operation(activeBridge);
       return;
     }
 
-    const previous =
-      this._cf_subAgentConnectionOperationTails.get(connectionId) ??
-      Promise.resolve();
-    const pending = previous.then(async () => {
-      const root = await this._rootAlarmOwner();
-      await operation(new RootSubAgentConnectionBridge(root, connectionId));
-    });
+    const pending = (previousConnectionOperation ?? Promise.resolve()).then(
+      async () => {
+        const root = await this._rootAlarmOwner();
+        await operation(new RootSubAgentConnectionBridge(root, connectionId));
+      }
+    );
     const completion = pending.catch((error: unknown) => {
       this._cf_reportSubAgentConnectionOperationFailure(
         connectionId,

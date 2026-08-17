@@ -243,6 +243,82 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("keeps a live-frame send behind an older queued send", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.delayNextRootResolution(300);
+      const first = `queued-first-${crypto.randomUUID()}`;
+      const second = `live-second-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessages(ws, new Set([first, second]), 2000);
+
+      const scheduled = await callRPC(ws, "sendConnectionMessageAfterDelay", [
+        first
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      const sent = await callRPC(ws, "sendConnectionMessageNow", [second]);
+      expectSuccessfulResult(sent, "sent");
+
+      await expect(delivered).resolves.toEqual([first, second]);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("keeps a live-frame state update behind an older queued update", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.delayNextRootResolution(300);
+      const first = `queued-state-${crypto.randomUUID()}`;
+      const second = `live-state-${crypto.randomUUID()}`;
+
+      const scheduled = await callRPC(ws, "setConnectionMarkerAfterDelay", [
+        first
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      const set = await callRPC(ws, "setConnectionMarkerNow", [second]);
+      expectSuccessfulResult(set, "set");
+
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const read = await callRPC(ws, "getConnectionMarker");
+      expectSuccessfulResult(read, second);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("delivers an older queued send before a live-frame close", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.delayNextRootResolution(300);
+      const message = `queued-before-live-close-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessage(ws, message, 2000);
+      const closed = waitForClose(ws, 2000);
+
+      const scheduled = await callRPC(ws, "sendConnectionMessageAfterDelay", [
+        message
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      ws.send("close-connection-during-live-frame");
+
+      await expect(delivered).resolves.toBe(message);
+      await expect(closed).resolves.toEqual({
+        code: 4001,
+        reason: "live-frame-close"
+      });
+    } finally {
+      ws.close();
+    }
+  });
+
   it("preserves consecutive message order after frame completion", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());
