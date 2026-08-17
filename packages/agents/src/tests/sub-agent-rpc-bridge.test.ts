@@ -243,6 +243,57 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("reports a failed live-frame connection operation", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const sent = await callRPC(ws, "sendDetachedConnectionMessageNow");
+      expectSuccessfulResult(sent, "sent");
+
+      await vi.waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith(
+          "[Agent] Sub-agent connection operation failed:",
+          expect.objectContaining({
+            connectionId: expect.any(String),
+            operation: "send",
+            error: expect.any(Error)
+          })
+        );
+      });
+    } finally {
+      errorSpy.mockRestore();
+      ws.close();
+    }
+  });
+
+  it("reports a failed live-bridge broadcast", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.failNextSubAgentBroadcast();
+
+      const broadcast = await callRPC(ws, "broadcastMessageNow", [
+        "expected-broadcast-forwarding-failure"
+      ]);
+      expectSuccessfulResult(broadcast, "broadcast");
+
+      await vi.waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith(
+          "[Agent] Sub-agent broadcast operation failed:",
+          expect.objectContaining({
+            operation: "broadcast",
+            error: expect.any(Error)
+          })
+        );
+      });
+    } finally {
+      errorSpy.mockRestore();
+      ws.close();
+    }
+  });
+
   it("keeps a live-frame send behind an older queued send", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());

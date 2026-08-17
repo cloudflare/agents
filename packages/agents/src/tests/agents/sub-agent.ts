@@ -1090,6 +1090,7 @@ export class CustomBoundSubAgentParent extends Agent {
 export class TestSubAgentParent extends Agent {
   private _rootResolutionFailuresRemaining = 0;
   private _nextRootResolutionDelayMs = 0;
+  private _subAgentBroadcastFailuresRemaining = 0;
 
   failNextRootResolution(): void {
     this._rootResolutionFailuresRemaining += 1;
@@ -1097,6 +1098,22 @@ export class TestSubAgentParent extends Agent {
 
   delayNextRootResolution(delayMs: number): void {
     this._nextRootResolutionDelayMs = delayMs;
+  }
+
+  failNextSubAgentBroadcast(): void {
+    this._subAgentBroadcastFailuresRemaining += 1;
+  }
+
+  override async _cf_broadcastToSubAgent(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    if (this._subAgentBroadcastFailuresRemaining > 0) {
+      this._subAgentBroadcastFailuresRemaining -= 1;
+      throw new Error("TestSubAgentParent broadcast forwarding failed");
+    }
+    await super._cf_broadcastToSubAgent(ownerPath, message, without);
   }
 
   override async setName(
@@ -2320,6 +2337,29 @@ export class SlowReplySubAgent extends Agent {
 
     connection.send(message);
     return "sent";
+  }
+
+  /** Sends a detached buffer to exercise live bridge failure reporting. */
+  @callable()
+  sendDetachedConnectionMessageNow(): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendDetachedConnectionMessageNow requires an active connection"
+      );
+    }
+
+    const message = new ArrayBuffer(1);
+    structuredClone(message, { transfer: [message] });
+    connection.send(message);
+    return "sent";
+  }
+
+  /** Broadcasts during the current frame. */
+  @callable()
+  broadcastMessageNow(message: string): string {
+    this.broadcast(message);
+    return "broadcast";
   }
 
   /** Schedules consecutive messages after the current frame completes. */

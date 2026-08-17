@@ -522,7 +522,7 @@ class SubAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ) => void;
+  ) => void | Promise<void>;
 
   constructor(
     connection: Connection,
@@ -530,7 +530,7 @@ class SubAgentConnectionBridge
       ownerPath: ReadonlyArray<{ className: string; name: string }>,
       message: string | ArrayBuffer | ArrayBufferView,
       without?: string[]
-    ) => void
+    ) => void | Promise<void>
   ) {
     super();
     this.#connection = connection;
@@ -553,8 +553,8 @@ class SubAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void {
-    this.#broadcast?.(ownerPath, message, without);
+  ): void | Promise<void> {
+    return this.#broadcast?.(ownerPath, message, without);
   }
 }
 
@@ -7253,7 +7253,24 @@ export class Agent<
     const previousConnectionOperation =
       this._cf_subAgentConnectionOperationTails.get(connectionId);
     if (activeBridge && !previousConnectionOperation) {
-      operation(activeBridge);
+      try {
+        const completion = Promise.resolve(operation(activeBridge)).catch(
+          (error: unknown) => {
+            this._cf_reportSubAgentConnectionOperationFailure(
+              connectionId,
+              operationName,
+              error
+            );
+          }
+        );
+        this.ctx.waitUntil(completion);
+      } catch (error) {
+        this._cf_reportSubAgentConnectionOperationFailure(
+          connectionId,
+          operationName,
+          error
+        );
+      }
       return;
     }
 
@@ -7294,24 +7311,31 @@ export class Agent<
   private async _cf_routeSubAgentBroadcast(
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
+    without?: string[],
+    upstreamBridge?: SubAgentConnectionBridgeLike
   ): Promise<void> {
-    const activeBridge = this._cf_activeSubAgentBridge();
+    const activeBridge = upstreamBridge ?? this._cf_activeSubAgentBridge();
     const previousOperations = new Set([
       ...(this._cf_subAgentBroadcastOperationTail
         ? [this._cf_subAgentBroadcastOperationTail]
         : []),
       ...this._cf_subAgentConnectionOperationTails.values()
     ]);
+    let pending: Promise<void>;
     if (activeBridge && previousOperations.size === 0) {
-      await activeBridge.broadcast(ownerPath, message, without);
-      return;
+      try {
+        pending = Promise.resolve(
+          activeBridge.broadcast(ownerPath, message, without)
+        );
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+    } else {
+      pending = Promise.all(previousOperations).then(async () => {
+        const root = await this._rootAlarmOwner();
+        await root._cf_broadcastToSubAgent(ownerPath, message, without);
+      });
     }
-
-    const pending = Promise.all(previousOperations).then(async () => {
-      const root = await this._rootAlarmOwner();
-      await root._cf_broadcastToSubAgent(ownerPath, message, without);
-    });
     const completion = pending.catch((error: unknown) => {
       console.error("[Agent] Sub-agent broadcast operation failed:", {
         operation: "broadcast",
@@ -7566,10 +7590,14 @@ export class Agent<
       connection,
       (ownerPath, message, without) => {
         if (upstreamBroadcastBridge) {
-          upstreamBroadcastBridge.broadcast(ownerPath, message, without);
-          return;
+          return this._cf_routeSubAgentBroadcast(
+            ownerPath,
+            message,
+            without,
+            upstreamBroadcastBridge
+          );
         }
-        void this._cf_broadcastToSubAgent(ownerPath, message, without);
+        return this._cf_broadcastToSubAgent(ownerPath, message, without);
       }
     );
   }
