@@ -25,7 +25,7 @@ Built on the [AI SDK](https://ai-sdk.dev) and Cloudflare Durable Objects, you ge
 ### Install
 
 ```sh
-npm install @cloudflare/ai-chat agents ai workers-ai-provider
+npm install @cloudflare/ai-chat agents ai @ai-sdk/react workers-ai-provider
 ```
 
 ### Server

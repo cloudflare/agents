@@ -617,12 +617,18 @@ Define environments in wrangler.jsonc:
   "env": {
     "staging": {
       "name": "my-agent-staging",
+      "durable_objects": {
+        "bindings": [{ "name": "MyAgent", "class_name": "MyAgent" }]
+      },
       "vars": {
         "ENVIRONMENT": "staging"
       }
     },
     "production": {
       "name": "my-agent-production",
+      "durable_objects": {
+        "bindings": [{ "name": "MyAgent", "class_name": "MyAgent" }]
+      },
       "vars": {
         "ENVIRONMENT": "production"
       }
@@ -647,7 +653,7 @@ npx wrangler secret put OPENAI_API_KEY --env production
 
 ### Separate Durable Objects
 
-Each environment gets its own Durable Objects. Staging agents don't share state with production agents.
+Durable Object bindings are not inherited by named environments, so repeat them in every environment as shown above. Each environment gets its own Durable Objects. Staging agents do not share state with production agents.
 
 To explicitly separate:
 

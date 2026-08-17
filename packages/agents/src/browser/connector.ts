@@ -9,6 +9,7 @@ import {
 } from "@cloudflare/codemode";
 import { CdpSession, connectUrl } from "./cdp-session";
 import {
+  connectBrowser,
   connectBrowserSession,
   createBrowserSession,
   deleteBrowserSession,
@@ -48,6 +49,12 @@ export interface BrowserConnectorSessionOptions {
    * {@link BrowserConnector.liveView}/`sessionInfo()`.
    */
   recording?: boolean;
+  /**
+   * Select the browser engine. Defaults to Chromium. Kitesurf is scoped to
+   * one CDP WebSocket, so it supports only one-shot execution without
+   * pause/resume, Live View, recording, or keep-alive.
+   */
+  browser?: "kitesurf";
 }
 
 export type BrowserConnectorOptions = (
@@ -147,6 +154,12 @@ export interface BrowserLiveView {
 }
 
 const EXEC_KEY_PREFIX = "cdp:exec:";
+/**
+ * Prefix of the synthetic session id stored for a Kitesurf execution: the
+ * connection is scoped to its execution, so the entry is a marker rather than
+ * a Browser Run session that can be reconnected to or deleted.
+ */
+const KITESURF_SESSION_PREFIX = "kitesurf:";
 const REUSE_KEY_PREFIX = "cdp:reuse:";
 
 /**
@@ -276,6 +289,20 @@ export class BrowserConnector extends CodemodeConnector {
         "BrowserConnector requires 'store' when using the Browser Rendering binding"
       );
     }
+    if (options.session?.browser === "kitesurf") {
+      if (
+        options.session.mode !== undefined &&
+        options.session.mode !== "one-shot"
+      ) {
+        throw new Error('Kitesurf only supports session mode "one-shot"');
+      }
+      if (options.session.keepAliveMs) {
+        throw new Error("Kitesurf does not support keepAliveMs");
+      }
+      if (options.session.recording) {
+        throw new Error("Kitesurf does not support session recording");
+      }
+    }
     this.#options = options;
   }
 
@@ -287,12 +314,23 @@ export class BrowserConnector extends CodemodeConnector {
     const mode = this.#mode();
     const lines = [
       "Issue CDP calls sequentially — never in parallel (no Promise.all): call order is recorded for durable replay.",
-      "Browser-/Target-scoped commands (Target.createTarget, Target.getTargets) need no sessionId. Page-scoped commands (Page.navigate, Runtime.evaluate) require one: `const { sessionId } = await cdp.attachToTarget({ targetId });` then pass it to every page-scoped send.",
-      "Write large outputs (screenshots, page dumps) to a file or workspace immediately and pass around small references — large return values fail to record.",
-      "Use cdp.spec() to discover commands, events, and types when unsure.",
-      "If a command fails or times out, check cdp.getDebugLog() for recent protocol traffic.",
-      "When a step needs a human (login, MFA, CAPTCHA, sensitive input), call cdp.getLiveViewUrl() to get a link they can open to control the browser live — surface it, then make an approval-gated call so the run pauses until they're done."
+      "cdp.send returns the CDP method result directly, not the outer JSON-RPC envelope: Target.createTarget returns { targetId }, Runtime.evaluate returns { result: { value } }, and Page.captureScreenshot returns { data }.",
+      "Browser-/Target-scoped commands (Target.createTarget, Target.getTargets) need no sessionId. Page-scoped commands (Page.navigate, Runtime.evaluate) require one: `const { sessionId } = await cdp.attachToTarget({ targetId });` then pass it to every page-scoped send. Use this helper instead of sending Target.attachToTarget manually.",
+      "Write large textual outputs such as page dumps to a file or workspace and pass around small references. For screenshots, follow the host tool's documented screenshot result format.",
+      "If a command fails or times out, check cdp.getDebugLog() for recent protocol traffic."
     ];
+    if (this.#isKitesurf()) {
+      lines.push(
+        "Kitesurf implements a subset of CDP and does not expose protocol discovery.",
+        "Kitesurf is scoped to this connection. Complete the whole browser task in one execution and do not pause for approval: the browser cannot reconnect when execution resumes.",
+        "Kitesurf Page.navigate may resolve before layout and paint. Before a screenshot: call Page.enable; navigate; poll Runtime.evaluate with returnByValue: true until result.value reports document.readyState === 'complete' and non-empty body text; then wait 1000ms before Page.captureScreenshot. Do not capture if readiness fails."
+      );
+    } else {
+      lines.push(
+        "Use cdp.spec() to discover commands, events, and types when unsure.",
+        "When a step needs a human (login, MFA, CAPTCHA, sensitive input), call cdp.getLiveViewUrl() to get a link they can open to control the browser live — surface it, then make an approval-gated call so the run pauses until they're done."
+      );
+    }
     if (mode === "one-shot") {
       lines.push(
         "The browser session lasts for this execution only and is closed when it ends."
@@ -337,7 +375,7 @@ export class BrowserConnector extends CodemodeConnector {
     const tools: ConnectorTools = {
       send: {
         description:
-          "Send a CDP command and return its result. Page-scoped commands require a sessionId — pass the handle returned by attachToTarget.",
+          "Send a CDP command and return its method result directly (the outer JSON-RPC envelope is removed). Page-scoped commands require a sessionId — pass the handle returned by attachToTarget.",
         inputSchema: {
           type: "object",
           properties: {
@@ -411,8 +449,9 @@ export class BrowserConnector extends CodemodeConnector {
       },
 
       attachToTarget: {
-        description:
-          "Attach to a target (tab) and return { sessionId } — a stable session handle to pass as sessionId in page-scoped send calls. The handle stays valid across pauses/resumes.",
+        description: this.#isKitesurf()
+          ? "Attach to a target (tab) and return { sessionId } to pass to page-scoped send calls for this connection."
+          : "Attach to a target (tab) and return { sessionId } — a stable session handle to pass as sessionId in page-scoped send calls. The handle stays valid across pauses/resumes.",
         inputSchema: {
           type: "object",
           properties: {
@@ -429,8 +468,9 @@ export class BrowserConnector extends CodemodeConnector {
           properties: {
             sessionId: {
               type: "string",
-              description:
-                "Stable session handle for page-scoped send calls (valid across pauses/resumes)"
+              description: this.#isKitesurf()
+                ? "Session handle for page-scoped send calls on this connection"
+                : "Stable session handle for page-scoped send calls (valid across pauses/resumes)"
             }
           },
           required: ["sessionId"]
@@ -451,8 +491,14 @@ export class BrowserConnector extends CodemodeConnector {
           "Return the searchable Chrome DevTools Protocol spec: domains with their commands, events, and types. Use it to discover method names and capabilities.",
         replay: "reexecute",
         inputSchema: { type: "object", properties: {} },
-        execute: async (): Promise<SearchableCdpSpec> =>
-          loadCdpSpec(this.#options)
+        execute: async (): Promise<SearchableCdpSpec> => {
+          if (this.#isKitesurf()) {
+            throw new Error(
+              "Kitesurf does not expose a CDP protocol specification"
+            );
+          }
+          return loadCdpSpec(this.#options);
+        }
       },
 
       getDebugLog: {
@@ -483,9 +529,13 @@ export class BrowserConnector extends CodemodeConnector {
           socket.clearDebugLog();
           return null;
         }
-      },
+      }
+    };
 
-      getLiveViewUrl: {
+    if (this.#isKitesurf()) {
+      delete tools.spec;
+    } else {
+      tools.getLiveViewUrl = {
         description:
           "Return a Live View URL for a tab — a link a human can open in a " +
           "browser to watch and control this session in real time. Use it " +
@@ -518,8 +568,8 @@ export class BrowserConnector extends CodemodeConnector {
           };
           return this.#liveViewUrl(this.#executionId(ctx), { targetId, mode });
         }
-      }
-    };
+      };
+    }
 
     const mode = this.#mode();
     if (mode === "reuse" || mode === "dynamic") {
@@ -571,9 +621,23 @@ export class BrowserConnector extends CodemodeConnector {
    */
   override async onPassEnd(
     executionId: string,
-    _status: PassEndStatus
+    status: PassEndStatus
   ): Promise<void> {
     this.#dropSocket(executionId);
+    if (!this.#isKitesurf() || status !== "paused") return;
+
+    const key = this.#execKey(executionId);
+    const lock = await this.#store.acquireLock(key);
+    try {
+      const stored = await this.#store.get(key);
+      // Only a Kitesurf marker is gone with its connection; a session left by
+      // an earlier Chromium run is still live and must stay reclaimable.
+      if (stored?.sessionId.startsWith(KITESURF_SESSION_PREFIX)) {
+        await this.#store.set(key, { ...stored, closedAt: Date.now() });
+      }
+    } finally {
+      await lock.release();
+    }
   }
 
   /**
@@ -586,6 +650,38 @@ export class BrowserConnector extends CodemodeConnector {
   ): Promise<void> {
     this.#dropSocket(executionId);
     if (!this.#options.browser) return;
+
+    if (this.#isKitesurf()) {
+      const key = this.#execKey(executionId);
+      const lock = await this.#store.acquireLock(key);
+      // An entry written before the connector was switched to Kitesurf still
+      // holds a real Browser Run session that has to be closed.
+      let stale: StoredBrowserSession | undefined;
+      try {
+        const stored = await this.#store.get(key);
+        if (
+          stored &&
+          stored.closedAt === undefined &&
+          !stored.sessionId.startsWith(KITESURF_SESSION_PREFIX)
+        ) {
+          stale = stored;
+        }
+        await this.#store.delete(key);
+      } finally {
+        await lock.release();
+      }
+      if (stale) {
+        try {
+          await deleteBrowserSession(this.#options.browser, stale.sessionId);
+        } catch (error) {
+          console.warn(
+            `[agents/browser] Failed to delete Browser Run session ${stale.sessionId} for execution ${executionId}`,
+            error
+          );
+        }
+      }
+      return;
+    }
 
     const store = this.#options.store;
     const execKey = this.#execKey(executionId);
@@ -629,7 +725,7 @@ export class BrowserConnector extends CodemodeConnector {
 
   /** Info about the shared (reuse/promoted) session, if one exists. */
   async sessionInfo(): Promise<BrowserSessionInfo | undefined> {
-    if (!this.#options.browser) return undefined;
+    if (!this.#options.browser || this.#isKitesurf()) return undefined;
     const store = this.#options.store;
     const key = this.#reuseKey();
     const lock = await store.acquireLock(key);
@@ -689,7 +785,7 @@ export class BrowserConnector extends CodemodeConnector {
 
   /** Close the shared (reuse/promoted) session, if one exists. */
   async closeSession(): Promise<void> {
-    if (!this.#options.browser) return;
+    if (!this.#options.browser || this.#isKitesurf()) return;
     await this.#closeStoredSession(this.#reuseKey());
   }
 
@@ -705,11 +801,16 @@ export class BrowserConnector extends CodemodeConnector {
    * deleted, so a later resume fails with a clear "session expired" error
    * instead of silently continuing in a fresh browser; tombstones are
    * deleted once they age past the threshold again.
+   *
+   * Kitesurf entries are reclaimed the same way, minus the Browser Run
+   * delete: their stored id is a synthetic per-execution marker, not a
+   * session, and the connection died with the execution.
    */
   async sweep(
     options?: BrowserConnectorSweepOptions
   ): Promise<BrowserConnectorSweepResult> {
     if (!this.#options.browser) return { swept: [] };
+    const browser = this.#options.browser;
     const store = this.#options.store;
     const maxIdleMs =
       options?.maxIdleMs ??
@@ -750,13 +851,20 @@ export class BrowserConnector extends CodemodeConnector {
       } finally {
         await lock.release();
       }
-      try {
-        await deleteBrowserSession(this.#options.browser, toClose.sessionId);
-      } catch (error) {
-        console.warn(
-          `[agents/browser] Sweep failed to delete Browser Run session ${toClose.sessionId}`,
-          error
-        );
+      // Kitesurf entries hold a synthetic marker rather than a Browser Run
+      // session id: the connection died with its execution, so there is
+      // nothing remote to close. Entries written before the connector was
+      // reconfigured still need their session deleted, so this is decided per
+      // entry rather than from the current options.
+      if (!toClose.sessionId.startsWith(KITESURF_SESSION_PREFIX)) {
+        try {
+          await deleteBrowserSession(browser, toClose.sessionId);
+        } catch (error) {
+          console.warn(
+            `[agents/browser] Sweep failed to delete Browser Run session ${toClose.sessionId}`,
+            error
+          );
+        }
       }
       swept.push({ key, sessionId: toClose.sessionId });
     }
@@ -766,6 +874,10 @@ export class BrowserConnector extends CodemodeConnector {
   // ---------------------------------------------------------------------
   // Session + socket resolution
   // ---------------------------------------------------------------------
+
+  #isKitesurf(): boolean {
+    return this.#options.session?.browser === "kitesurf";
+  }
 
   #mode(): "one-shot" | "reuse" | "dynamic" {
     return this.#options.session?.mode ?? "one-shot";
@@ -834,6 +946,9 @@ export class BrowserConnector extends CodemodeConnector {
 
     const browser = this.#options.browser;
     if (!browser) throw new Error("BrowserConnector has no browser binding");
+    if (this.#isKitesurf()) {
+      throw new Error("Kitesurf does not support Browser Run Live View");
+    }
     // Ensure a session + socket exist, then read the resolved Browser Run id.
     await this.#socket(executionId);
     const sessionId = this.#sockets.get(executionId)?.browserSessionId;
@@ -886,6 +1001,7 @@ export class BrowserConnector extends CodemodeConnector {
    */
   async #isSpecEvent(method: string): Promise<boolean> {
     try {
+      if (this.#isKitesurf()) return false;
       const spec = await loadCdpSpec(this.#options);
       const domain = method.split(".")[0];
       return spec.domains.some(
@@ -937,6 +1053,43 @@ export class BrowserConnector extends CodemodeConnector {
 
     const browser = this.#options.browser;
     if (!browser) throw new Error("BrowserConnector has no browser binding");
+
+    if (this.#isKitesurf()) {
+      const cached = this.#sockets.get(executionId);
+      if (cached) return cached.session;
+
+      const key = this.#execKey(executionId);
+      const lock = await this.#store.acquireLock(key);
+      try {
+        if (await this.#store.get(key)) {
+          throw new Error(
+            "Kitesurf's connection was closed and cannot be resumed; start a new execution"
+          );
+        }
+        const now = Date.now();
+        await this.#store.set(key, {
+          sessionId: `${KITESURF_SESSION_PREFIX}${crypto.randomUUID()}`,
+          createdAt: now,
+          updatedAt: now
+        });
+      } finally {
+        await lock.release();
+      }
+
+      try {
+        const session = await connectBrowser(browser, {
+          browser: "kitesurf",
+          timeoutMs: this.#options.timeout
+        });
+        this.#sockets.set(executionId, { session, attached: new Map() });
+        return session;
+      } catch (error) {
+        const failed = await this.#readStored(key);
+        if (failed) await this.#deleteStoredEntry(key, failed.sessionId);
+        throw error;
+      }
+    }
+
     const stored = await this.#resolveSession(executionId);
     const cached = this.#sockets.get(executionId);
     if (cached?.browserSessionId === stored.sessionId) {

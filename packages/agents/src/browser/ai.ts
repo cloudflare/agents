@@ -1,4 +1,4 @@
-import { tool, type ToolSet } from "ai";
+import { tool, type JSONValue, type ToolSet } from "ai";
 import { z } from "zod";
 import {
   createCodemodeRuntime,
@@ -107,8 +107,10 @@ export interface CreateBrowserToolsOptions {
    * `browser_execute` tool.
    *
    * Enabled by default whenever a Browser Run `browser` binding is available
-   * (they share it). Pass an object to configure them, or `false` to disable.
-   * The Quick Action binding defaults to `browser`; override it via
+   * (they share it), except when `session.browser` selects Kitesurf because
+   * the binding RPC cannot select that engine. Pass `true` or an object to
+   * explicitly add Chromium Quick Actions alongside Kitesurf, or `false` to
+   * disable them. The Quick Action binding defaults to `browser`; override it via
    * `quickActions.browser`. When only `cdpUrl` is set (no binding), the
    * defaults are skipped silently — pass `quickActions: { browser }` to force
    * them.
@@ -140,6 +142,160 @@ export interface BrowserRuntime {
 
 let didWarnExperimental = false;
 let didDebugQuickActionSkip = false;
+
+interface BrowserScreenshotOutput {
+  type: "browser_screenshot";
+  mediaType: string;
+  data: string;
+}
+
+function browserScreenshotOutput(
+  value: unknown
+): BrowserScreenshotOutput | null {
+  const outer =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : null;
+  const result =
+    outer && typeof outer.result === "object" && outer.result !== null
+      ? (outer.result as Record<string, unknown>)
+      : outer;
+  if (
+    result?.type !== "browser_screenshot" ||
+    typeof result.mediaType !== "string" ||
+    typeof result.data !== "string"
+  ) {
+    return null;
+  }
+  return result as unknown as BrowserScreenshotOutput;
+}
+
+const BASE64_REDACTION_THRESHOLD = 4096;
+const MAX_REDACTION_DEPTH = 20;
+const MAX_REDACTION_NODES = 10_000;
+
+function base64Details(
+  value: string,
+  minimumLength = BASE64_REDACTION_THRESHOLD
+): {
+  mediaType?: string;
+  chars: number;
+  bytes: number;
+} | null {
+  if (value.length < minimumLength) return null;
+
+  const dataUrl =
+    /^data:([^;,]+)(?:;[^;,]*)*;base64,([A-Za-z0-9+/]*={0,2})$/i.exec(value);
+  const encoded = dataUrl?.[2] ?? value;
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+    return null;
+  }
+
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  return {
+    mediaType: dataUrl?.[1],
+    chars: encoded.length,
+    bytes: (encoded.length / 4) * 3 - padding
+  };
+}
+
+function base64Redaction(
+  value: string,
+  mediaType?: string,
+  minimumLength?: number
+): string {
+  const details = base64Details(value, minimumLength);
+  if (!details) return value;
+  const type = mediaType ?? details.mediaType;
+  return `[base64${type ? ` ${type}` : ""} data omitted: ${details.chars.toLocaleString()} chars, approximately ${details.bytes.toLocaleString()} bytes]`;
+}
+
+function redactBase64Payloads(value: unknown): unknown {
+  const ancestors = new WeakSet<object>();
+  let nodes = 0;
+
+  function visit(current: unknown, depth: number): unknown {
+    if (depth > MAX_REDACTION_DEPTH) return "[nested value omitted]";
+    if (++nodes > MAX_REDACTION_NODES) return "[remaining values omitted]";
+    if (typeof current === "string") return base64Redaction(current);
+    if (typeof current !== "object" || current === null) return current;
+    // Binary values cross the sandbox boundary as Uint8Array/ArrayBuffer —
+    // walking them would rebuild them as index-keyed plain objects. The same
+    // is true of Date/Map/Set, whose own enumerable entries are empty.
+    if (
+      current instanceof ArrayBuffer ||
+      ArrayBuffer.isView(current) ||
+      current instanceof Date ||
+      current instanceof Map ||
+      current instanceof Set
+    ) {
+      return current;
+    }
+    if (ancestors.has(current)) return "[circular reference omitted]";
+
+    ancestors.add(current);
+    try {
+      if (Array.isArray(current)) {
+        return current.map((entry) => visit(entry, depth + 1));
+      }
+
+      const record = current as Record<string, unknown>;
+      const screenshot =
+        record.type === "browser_screenshot" &&
+        typeof record.mediaType === "string";
+      return Object.fromEntries(
+        Object.entries(record).map(([key, entry]) => [
+          key,
+          screenshot && key === "data" && typeof entry === "string"
+            ? base64Redaction(entry, record.mediaType as string, 0)
+            : visit(entry, depth + 1)
+        ])
+      );
+    } finally {
+      ancestors.delete(current);
+    }
+  }
+
+  return visit(value, 0);
+}
+
+function transformBrowserResult(value: unknown): unknown {
+  // Keep canonical screenshot output intact for UIMessage persistence and the
+  // chat renderer. Other results are redacted before truncation so a nested
+  // binary payload cannot become a large serialized preview.
+  return browserScreenshotOutput(value)
+    ? value
+    : truncateResult(redactBase64Payloads(value));
+}
+
+function browserExecuteModelOutput(
+  output: unknown
+): { type: "text"; value: string } | { type: "json"; value: JSONValue } {
+  const screenshot = browserScreenshotOutput(output);
+  if (screenshot) {
+    const approximateBytes = Math.floor((screenshot.data.length * 3) / 4);
+    return {
+      type: "text",
+      value: `Screenshot captured successfully (${screenshot.mediaType}, approximately ${approximateBytes.toLocaleString()} bytes); the image is kept for the UI and omitted here.`
+    };
+  }
+
+  const redacted = redactBase64Payloads(output);
+  try {
+    const serialized = JSON.stringify(redacted);
+    return {
+      type: "json",
+      value:
+        serialized === undefined ? null : (JSON.parse(serialized) as JSONValue)
+    };
+  } catch {
+    return {
+      type: "text",
+      value:
+        "Browser execution completed, but its result could not be serialized for model context."
+    };
+  }
+}
 
 /**
  * The Durable Object state to build the runtime in: the explicit `ctx` if
@@ -231,20 +387,40 @@ export function createBrowserRuntime(
     }),
     connectors: [connector],
     name: options.name ?? "browser",
-    transformResult: truncateResult
+    transformResult: transformBrowserResult
   });
 
-  const tools: ToolSet = { browser_execute: runtime.tool() };
+  // `connectorOptions` drops `session` when a custom endpoint is used, so the
+  // connector is plain Chromium there whatever the session options say.
+  const isKitesurf = !options.cdpUrl && options.session?.browser === "kitesurf";
+  const browserExecute = runtime.tool({
+    connectorHints: {
+      cdp: isKitesurf
+        ? 'Kitesurf one-shot Browser CDP. Call codemode.describe("cdp") for connector types and Kitesurf execution rules. codemode.search indexes connector methods and snippets, not underlying CDP commands. Complete the task in one execution and do not pause. Return screenshots as { type: "browser_screenshot", mediaType: "image/png", data: screenshot.data }.'
+        : "Browser CDP. Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
+    }
+  });
+  const tools: ToolSet = {
+    browser_execute: {
+      ...browserExecute,
+      toModelOutput: ({ output }: { output: unknown }) =>
+        browserExecuteModelOutput(output)
+    }
+  };
 
-  // Quick Actions ride the same `browser` binding, so they are on by default.
+  // Quick Actions ride the same `browser` binding, so they are on by default
+  // for Chromium. The binding RPC cannot select Kitesurf, so selecting
+  // Kitesurf disables the defaults rather than silently adding Chromium tools.
+  // Callers can still request a mixed-engine toolset explicitly.
+  const enableQuickActions =
+    options.quickActions !== false &&
+    (!isKitesurf || options.quickActions !== undefined);
   // `env.BROWSER` satisfies both the CDP `BrowserBinding` (fetch) and the
   // `QuickActionBinding` (quickAction) surfaces; our narrower option type only
   // sees the former, so reuse it here unless an explicit binding wins.
-  if (options.quickActions !== false) {
+  if (enableQuickActions) {
     const qa =
-      options.quickActions == null || options.quickActions === true
-        ? {}
-        : options.quickActions;
+      typeof options.quickActions === "object" ? options.quickActions : {};
     const quickActionBrowser =
       qa.browser ??
       (options.browser as unknown as QuickActionBinding | undefined);
