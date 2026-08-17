@@ -243,37 +243,35 @@ describe("broadcast stream state machine", () => {
 
   // ── continuation response ────────────────────────────────────────
 
-  it("creates accumulator with existing parts for continuation", () => {
-    const messages = makeMessages("hi", "first response");
+  it("seeds a continuation from the current messages update", () => {
+    const currentMessages = makeMessages("hi", "current response");
+    const staleRenderedMessages = makeMessages("hi", "stale response");
 
     const result = transition(idle, {
       type: "response",
       streamId: "s1",
       messageId: "fallback-id",
-      chunkData: textChunk(" continued"),
+      chunkData: { type: "text-delta", delta: " continued" },
       continuation: true,
-      currentMessages: messages
+      currentMessages: staleRenderedMessages
     });
 
     expect(result.state.status).toBe("observing");
-    if (result.state.status === "observing") {
-      expect(result.state.accumulator.messageId).toBe("msg-1");
-      expect(result.state.accumulator.parts.length).toBeGreaterThan(0);
-    }
+    expect(result.messagesUpdate).toBeDefined();
+    const messages = result.messagesUpdate!(currentMessages);
+    expect(messages[1].id).toBe("msg-1");
+    expect(messages[1].parts).toMatchObject([
+      { text: "current response continued" }
+    ]);
   });
 
   it("uses fallback messageId when no assistant message exists for continuation", () => {
-    const messages: UIMessage[] = [
-      { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] }
-    ] as UIMessage[];
-
     const result = transition(idle, {
       type: "response",
       streamId: "s1",
       messageId: "fallback-id",
       chunkData: textChunk("hello"),
-      continuation: true,
-      currentMessages: messages
+      continuation: true
     });
 
     if (result.state.status === "observing") {
@@ -559,8 +557,7 @@ describe("broadcast stream state machine", () => {
         messageId: "tmp",
         chunkData,
         replay: true,
-        continuation: true,
-        currentMessages: current
+        continuation: true
       });
 
     let state = replay(idle, { type: "start", messageId: "msg-1" }).state;
@@ -571,20 +568,13 @@ describe("broadcast stream state machine", () => {
     }).state;
 
     expect(state.status).toBe("observing");
-    if (state.status === "observing") {
-      // Continuation picked up the trailing assistant's id + parts.
-      expect(state.accumulator.messageId).toBe("msg-1");
-      const texts = state.accumulator.parts.filter((p) => p.type === "text");
-      expect(texts.length).toBeGreaterThan(0);
-    }
 
     const done = transition(state, {
       type: "response",
       streamId: "req-c",
       messageId: "tmp",
       done: true,
-      continuation: true,
-      currentMessages: current
+      continuation: true
     });
     const messages = done.messagesUpdate!(current);
     // Continuation merged into the existing assistant, no extra message.

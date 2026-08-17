@@ -717,7 +717,7 @@ describe("StreamAccumulator", () => {
       expect((result[1].parts[0] as { text: string }).text).toBe("updated");
     });
 
-    it("continuation falls back to last assistant when messageId not found", () => {
+    it("continuation preserves the last assistant when messageId is not found", () => {
       const a = acc({ messageId: "unknown-id", continuation: true });
       a.applyChunk({ type: "text-start" } as StreamChunkData);
       a.applyChunk({
@@ -727,7 +727,10 @@ describe("StreamAccumulator", () => {
       const result = a.mergeInto([userMsg, assistantMsg]);
       expect(result).toHaveLength(2);
       expect(result[1].id).toBe("asst-1");
-      expect((result[1].parts[0] as { text: string }).text).toBe("continued");
+      expect(result[1].parts).toMatchObject([
+        { text: "hi" },
+        { text: "continued" }
+      ]);
     });
 
     it("continuation appends when no assistant exists", () => {
@@ -814,7 +817,10 @@ describe("StreamAccumulator", () => {
       } as StreamChunkData);
       const result = a.mergeInto([first, target]);
       expect(result[1].id).toBe("target-id");
-      expect((result[1].parts[0] as { text: string }).text).toBe("updated");
+      expect(result[1].parts).toMatchObject([
+        { text: "target" },
+        { text: "updated" }
+      ]);
       expect(result[0]).toBe(first);
     });
 

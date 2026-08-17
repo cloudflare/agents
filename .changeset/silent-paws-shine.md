@@ -14,4 +14,6 @@ completed it (#1913).
 of renders on a fast stream and matches the value the AI SDK documents. The
 first chunk of a stream is never delayed. Pass `throttle: false` to render
 every chunk as it arrives, or a number to change the interval. The deprecated
-`experimental_throttle` is still honoured.
+`experimental_throttle` is still honoured. Message snapshots, functional
+updates, and streamed continuations resolve against the current chat store, so
+coalescing renders cannot roll assistant content back to an older snapshot.
