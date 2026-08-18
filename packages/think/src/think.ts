@@ -2916,59 +2916,46 @@ export class Think<
     super(ctx, env);
 
     const _onStart = this.onStart.bind(this);
-    const startThink = async (
-      props: Props | undefined,
-      update: UpdateAgentSpan
-    ) => {
-      await withAgentSpan(
-        this,
-        "initialize_think_session",
-        "startup",
-        { "cloudflare.agents.component": "think" },
-        async () => {
-          // 1. Workspace initialization
-          if (!this.workspace) {
-            this.workspace = new Workspace({
-              sql: this.ctx.storage.sql,
-              name: () => this.name
-            });
-          }
+    const startThink = async (props: Props | undefined) => {
+      // 1. Workspace initialization
+      if (!this.workspace) {
+        this.workspace = new Workspace({
+          sql: this.ctx.storage.sql,
+          name: () => this.name
+        });
+      }
 
-          // 2. Session configuration (builder phase — context blocks, compaction, skills)
-          const baseSession = Session.create(this);
-          this.session = await this.configureSession(baseSession);
-          this.session.internal_onMessagesChanged(async (event) => {
-            switch (event.type) {
-              case "append":
-                if (!event.inserted || event.parentId !== undefined) {
-                  await this._syncMessages();
-                } else {
-                  this._upsertCachedMessage(event.message as UIMessage);
-                }
-                // The conversation grew — older messages may have aged out of
-                // the keep-recent window. Only schedule the maintenance scan once
-                // this session has actually observed oversized media; otherwise a
-                // normal text-only chat would pay a row-stat read after every turn.
-                this._scheduleMediaEvictionAfterAppend(
-                  event.message as UIMessage
-                );
-                break;
-              case "update":
-                this._patchCachedMessage(event.message as UIMessage);
-                break;
-              case "clear":
-                this._replaceCachedMessages([]);
-                break;
-              case "delete":
-              case "compact":
-                await this._syncMessages();
-                break;
+      // 2. Session configuration (builder phase — context blocks, compaction, skills)
+      const baseSession = Session.create(this);
+      this.session = await this.configureSession(baseSession);
+      this.session.internal_onMessagesChanged(async (event) => {
+        switch (event.type) {
+          case "append":
+            if (!event.inserted || event.parentId !== undefined) {
+              await this._syncMessages();
+            } else {
+              this._upsertCachedMessage(event.message as UIMessage);
             }
-          });
-
-          await this._initializeSkills();
+            // The conversation grew — older messages may have aged out of
+            // the keep-recent window. Only schedule the maintenance scan once
+            // this session has actually observed oversized media; otherwise a
+            // normal text-only chat would pay a row-stat read after every turn.
+            this._scheduleMediaEvictionAfterAppend(event.message as UIMessage);
+            break;
+          case "update":
+            this._patchCachedMessage(event.message as UIMessage);
+            break;
+          case "clear":
+            this._replaceCachedMessages([]);
+            break;
+          case "delete":
+          case "compact":
+            await this._syncMessages();
+            break;
         }
-      );
+      });
+
+      await this._initializeSkills();
 
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
@@ -2981,53 +2968,31 @@ export class Think<
       // history is untouched and the next safe-boundary `_syncMessages()`
       // retries.
       this._onStartDegradations = [];
-      await withAgentSpan(
-        this,
-        "hydrate_think_session",
-        "startup",
-        { "cloudflare.agents.component": "think" },
-        async () => {
-          const hydrated = await this._runBestEffortOnStartStep(
-            "transcript-hydration",
-            () => this._syncMessages(),
-            "The agent is starting with an empty in-memory message view; " +
-              "persisted history is untouched. If the error is SQLITE_NOMEM, " +
-              "the stored transcript is too large to hydrate (often inline " +
-              "base64 media in tool results) — compact or clear the session " +
-              "to recover."
-          );
-          if (!hydrated) {
-            this._replaceCachedMessages([]);
-          }
-          this._refreshMediaEvictionSignalFromCache();
-        }
+      const hydrated = await this._runBestEffortOnStartStep(
+        "transcript-hydration",
+        () => this._syncMessages(),
+        "The agent is starting with an empty in-memory message view; " +
+          "persisted history is untouched. If the error is SQLITE_NOMEM, " +
+          "the stored transcript is too large to hydrate (often inline " +
+          "base64 media in tool results) — compact or clear the session " +
+          "to recover."
       );
+      if (!hydrated) {
+        this._replaceCachedMessages([]);
+      }
+      this._refreshMediaEvictionSignalFromCache();
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
-        await withAgentSpan(
-          this,
-          "initialize_think_extensions",
-          "startup",
-          { "cloudflare.agents.component": "think" },
-          () => this._initializeExtensions()
-        );
+        await this._initializeExtensions();
       }
 
       // 7. Protocol handlers
-      await withAgentSpan(
-        this,
-        "initialize_think_chat",
-        "startup",
-        { "cloudflare.agents.component": "think" },
-        async () => {
-          this._resumableStream = new ResumableStream(this.sql.bind(this));
-          this._restoreClientTools();
-          this._restoreBody();
-          this._setupProtocolHandlers();
-          await this._initializeChannels();
-        }
-      );
+      this._resumableStream = new ResumableStream(this.sql.bind(this));
+      this._restoreClientTools();
+      this._restoreBody();
+      this._setupProtocolHandlers();
+      await this._initializeChannels();
 
       // 8. User's onStart
       await _onStart(props);
@@ -3037,46 +3002,32 @@ export class Think<
       // Best-effort: reconcile runs after the agent is otherwise functional,
       // and a failure (user getScheduledTasks() throwing, storage pressure)
       // must not brick the DO (#1710).
-      await withAgentSpan(
-        this,
-        "reconcile_think_schedules",
-        "startup",
-        { "cloudflare.agents.component": "think" },
-        () =>
-          this._runBestEffortOnStartStep(
-            "scheduled-task-reconcile",
-            () => this._reconcileDeclaredScheduledTasks(),
-            "Declared scheduled tasks were not reconciled on this wake; the " +
-              "next successful wake will reconcile them."
-          )
+      await this._runBestEffortOnStartStep(
+        "scheduled-task-reconcile",
+        () => this._reconcileDeclaredScheduledTasks(),
+        "Declared scheduled tasks were not reconciled on this wake; the " +
+          "next successful wake will reconcile them."
       );
 
       // 10. Durable submissions may run user-defined model/hooks, so start them
       // after subclass initialization has completed. Best-effort for the same
       // reason as step 9.
-      await withAgentSpan(
-        this,
-        "recover_think_durable_work",
-        "startup",
-        { "cloudflare.agents.component": "think" },
-        () =>
-          this._runBestEffortOnStartStep(
-            "durable-work-recovery",
-            async () => {
-              await this._sweepActionLedger();
-              await this._sweepActionPendingApprovals();
-              await this._recoverSubmissionsOnStart();
-              this._recoverWorkflowNotifications();
-              if (this._hasPendingSubmissions()) {
-                await this._scheduleSubmissionDrain();
-              }
-              if (this._hasPendingWorkflowNotifications()) {
-                this._startWorkflowNotificationDrain();
-              }
-            },
-            "Pending submissions / workflow notifications were not recovered on " +
-              "this wake; the next successful wake will recover them."
-          )
+      await this._runBestEffortOnStartStep(
+        "durable-work-recovery",
+        async () => {
+          await this._sweepActionLedger();
+          await this._sweepActionPendingApprovals();
+          await this._recoverSubmissionsOnStart();
+          this._recoverWorkflowNotifications();
+          if (this._hasPendingSubmissions()) {
+            await this._scheduleSubmissionDrain();
+          }
+          if (this._hasPendingWorkflowNotifications()) {
+            this._startWorkflowNotificationDrain();
+          }
+        },
+        "Pending submissions / workflow notifications were not recovered on " +
+          "this wake; the next successful wake will recover them."
       );
 
       // 11. Background bound on the persisted transcript: if hydration was
@@ -3085,23 +3036,14 @@ export class Think<
       if (this._lastHydration?.truncated) {
         this._scheduleMediaEvictionPass({ force: true });
       }
-
-      update({
-        "cloudflare.agents.hydration.messages":
-          this._lastHydration?.hydratedMessages,
-        "cloudflare.agents.hydration.content_bytes":
-          this._lastHydration?.totalContentBytes,
-        "cloudflare.agents.hydration.truncated": this._lastHydration?.truncated,
-        "cloudflare.agents.start.degradations": this._onStartDegradations.length
-      });
     };
     this.onStart = (props?: Props) =>
       withAgentSpan(
         this,
-        "think_start",
+        "start_agent_runtime",
         "startup",
         { "cloudflare.agents.component": "think" },
-        (update) => startThink(props, update)
+        () => startThink(props)
       );
   }
 
@@ -5565,26 +5507,7 @@ export class Think<
    * for interception, and calls streamText.
    */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
-    const turn = admittedTurnContext.getStore();
-    const invoke = await withAgentSpan(
-      this,
-      "prepare_agent",
-      "turn",
-      {
-        "cloudflare.agents.component": "think",
-        ...(turn?.agent === this
-          ? {
-              "cloudflare.agents.turn.request_id": turn.requestId,
-              "cloudflare.agents.turn.trigger": turn.trigger,
-              "cloudflare.agents.turn.admission": turn.admission,
-              "cloudflare.agents.turn.channel": turn.channel,
-              "cloudflare.agents.turn.continuation": turn.continuation,
-              "cloudflare.agents.turn.generation": turn.generation
-            }
-          : {})
-      },
-      () => this._prepareInferenceInvocation(input)
-    );
+    const invoke = await this._prepareInferenceInvocation(input);
     return invoke();
   }
 
@@ -7149,7 +7072,9 @@ export class Think<
       // channel context must be set here too.
       return withAgentSpan(
         this,
-        "chat_submission",
+        spec.admission === "submit"
+          ? "submit_agent_turn"
+          : "run_submitted_agent_turn",
         "submission",
         {
           "cloudflare.agents.component": "think",
@@ -7157,21 +7082,7 @@ export class Think<
           "cloudflare.agents.turn.admission": spec.admission,
           "cloudflare.agents.turn.channel": spec.channel
         },
-        () =>
-          withAgentSpan(
-            this,
-            spec.admission === "submit"
-              ? "accept_chat_submission"
-              : "execute_chat_submission",
-            "submission",
-            {
-              "cloudflare.agents.component": "think",
-              "cloudflare.agents.turn.trigger": spec.trigger,
-              "cloudflare.agents.turn.admission": spec.admission,
-              "cloudflare.agents.turn.channel": spec.channel
-            },
-            () => this._withChannelContext(spec.channel, () => spec.execute())
-          )
+        () => this._withChannelContext(spec.channel, () => spec.execute())
       );
     }
 
@@ -7211,7 +7122,7 @@ export class Think<
       () =>
         withAgentSpan(
           this,
-          "chat_turn",
+          "run_agent_turn",
           "turn",
           {
             "cloudflare.agents.component": "think",
@@ -11219,7 +11130,7 @@ export class Think<
           if (event.type === "chat-request") {
             await withAgentSpan(
               this,
-              "chat_interaction",
+              "handle_chat_request",
               "interaction",
               {
                 "cloudflare.agents.component": "think",
@@ -11409,17 +11320,7 @@ export class Think<
     // gap would surface the previous failed turn's error even though the user
     // has already moved on. Completion clears it too, but only once the turn
     // resolves — which leaves the gap open.
-    await withAgentSpan(
-      this,
-      "clear_previous_chat_state",
-      "interaction",
-      {
-        "cloudflare.agents.component": "think",
-        "cloudflare.agents.turn.request_id": requestId,
-        "cloudflare.agents.turn.trigger": "ws-chat"
-      },
-      () => this._clearChatTerminal()
-    );
+    await this._clearChatTerminal();
 
     // Mark this turn as accepted-but-not-yet-streamed (#1784) so a client that
     // reconnects/re-mounts before the stream starts is parked and told to keep
@@ -11444,28 +11345,16 @@ export class Think<
           : undefined;
       const requestBody =
         Object.keys(customBody).length > 0 ? customBody : undefined;
-      withAgentSpan(
-        this,
-        "persist_chat_request_context",
-        "interaction",
-        {
-          "cloudflare.agents.component": "think",
-          "cloudflare.agents.turn.request_id": requestId,
-          "cloudflare.agents.turn.trigger": "ws-chat"
-        },
-        () => {
-          if (requestClientTools) {
-            this._lastClientTools = requestClientTools;
-            this._persistClientTools();
-          } else if (rawClientTools !== undefined) {
-            this._lastClientTools = undefined;
-            this._persistClientTools();
-          }
+      if (requestClientTools) {
+        this._lastClientTools = requestClientTools;
+        this._persistClientTools();
+      } else if (rawClientTools !== undefined) {
+        this._lastClientTools = undefined;
+        this._persistClientTools();
+      }
 
-          this._lastBody = requestBody;
-          this._persistBody();
-        }
-      );
+      this._lastBody = requestBody;
+      this._persistBody();
 
       // ── Reconcile, persist, and broadcast user messages ──────────
       //
@@ -11479,17 +11368,7 @@ export class Think<
       const clientToolsForTurn = this._lastClientTools;
       const bodyForTurn = this._lastBody;
 
-      const serverMessages = await withAgentSpan(
-        this,
-        "load_chat_history",
-        "interaction",
-        {
-          "cloudflare.agents.component": "think",
-          "cloudflare.agents.turn.request_id": requestId,
-          "cloudflare.agents.turn.trigger": "ws-chat"
-        },
-        () => this._readMessagesFromStorage()
-      );
+      const serverMessages = await this._readMessagesFromStorage();
       const reconciled = reconcileMessages(
         incomingMessages,
         serverMessages,
@@ -11501,28 +11380,18 @@ export class Think<
         branchParentId = reconciled[reconciled.length - 1].id;
       }
 
-      const persisted = await withAgentSpan(
-        this,
-        "persist_incoming_messages",
-        "interaction",
-        {
-          "cloudflare.agents.component": "think",
-          "cloudflare.agents.turn.request_id": requestId,
-          "cloudflare.agents.turn.trigger": "ws-chat"
-        },
-        async () => {
-          if (this._turnQueue.generation !== epoch) return false;
+      const persisted = await (async () => {
+        if (this._turnQueue.generation !== epoch) return false;
 
-          for (const msg of reconciled) {
-            if (this._turnQueue.generation !== epoch) return false;
-            await this._persistIncomingMessage(msg, serverMessages);
-          }
-
+        for (const msg of reconciled) {
           if (this._turnQueue.generation !== epoch) return false;
-          await this._syncMessages();
-          return true;
+          await this._persistIncomingMessage(msg, serverMessages);
         }
-      );
+
+        if (this._turnQueue.generation !== epoch) return false;
+        await this._syncMessages();
+        return true;
+      })();
       if (!persisted) {
         this._completeSkippedRequest(connection, requestId);
         return;
@@ -11625,7 +11494,7 @@ export class Think<
 
                 await withAgentSpan(
                   this,
-                  "persist_chat_result",
+                  "stream_agent_response",
                   "turn",
                   {
                     "cloudflare.agents.component": "think",
@@ -11649,7 +11518,7 @@ export class Think<
                   ) {
                     const shortened = await withAgentSpan(
                       this,
-                      "compact_chat_history",
+                      "compact_conversation_history",
                       "turn",
                       {
                         "cloudflare.agents.component": "think",
