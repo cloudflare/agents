@@ -18,6 +18,7 @@ const KIND_STYLE: Record<
   artifacts_push: { variant: "primary" },
   artifacts_push_failed: { variant: "destructive" },
   fork: { variant: "primary" },
+  history_compacted: { variant: "primary" },
   file_write: { variant: "secondary" },
   file_delete: { variant: "secondary" },
   note: { variant: "primary" },
@@ -33,6 +34,10 @@ function summarize(entry: JournalEntry): string {
       }`;
     case "fork":
       return `→ ${String(d.child)} (${String(d.origin)}) as v${d.childVersion} from v${d.fromVersion}`;
+    case "history_compacted":
+      return d.phase === "requested"
+        ? `requested · ${String(d.summaryChars)}ch summary → ${String(d.memoryFile)}, keep last ${d.keepLast}`
+        : `applied · dropped ${d.dropped}, kept last ${d.keptLast}`;
     case "harness_upgrade":
       return `v${d.version} · ${String(d.note)}`;
     case "harness_rollback":

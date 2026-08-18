@@ -20,12 +20,15 @@ import { jsonSchema, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { KernelStore } from "./store";
 import { SEED_FILES } from "./seed";
-import type {
-  ForkOrigin,
-  ForkParent,
-  HarnessPolicy,
-  HarnessToolManifest,
-  LoadedHarness
+import {
+  CONTEXT_POLICY_BOUNDS,
+  DEFAULT_CONTEXT_POLICY,
+  type ContextPolicy,
+  type ForkOrigin,
+  type ForkParent,
+  type HarnessPolicy,
+  type HarnessToolManifest,
+  type LoadedHarness
 } from "./types";
 
 type LoaderBinding = ConstructorParameters<
@@ -65,6 +68,55 @@ async function repoRemote(repo: ArtifactsRepo): Promise<string> {
     repo as unknown as { info(): Promise<{ remote: string }> }
   ).info();
   return info.remote;
+}
+
+function clampNumber(
+  value: unknown,
+  fallback: number,
+  bounds: { min: number; max: number }
+): number {
+  const n =
+    typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.min(Math.max(Math.round(n), bounds.min), bounds.max);
+}
+
+/**
+ * Parse /harness/context.json into a clamped ContextPolicy. Missing file →
+ * defaults (older selves keep working); invalid JSON → throw (feeds the
+ * same auto-rollback path as a broken policy.json); out-of-bounds values →
+ * silently clamped into the kernel's hard bounds.
+ */
+export function parseContextPolicy(raw: string | undefined): ContextPolicy {
+  if (raw === undefined) return DEFAULT_CONTEXT_POLICY;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(
+      `/harness/context.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  return {
+    keepMessages: clampNumber(
+      parsed.keepMessages,
+      DEFAULT_CONTEXT_POLICY.keepMessages,
+      CONTEXT_POLICY_BOUNDS.keepMessages
+    ),
+    tokenTarget: clampNumber(
+      parsed.tokenTarget,
+      DEFAULT_CONTEXT_POLICY.tokenTarget,
+      CONTEXT_POLICY_BOUNDS.tokenTarget
+    ),
+    memoryFile:
+      typeof parsed.memoryFile === "string" && parsed.memoryFile.startsWith("/")
+        ? parsed.memoryFile
+        : DEFAULT_CONTEXT_POLICY.memoryFile,
+    memoryMaxChars: clampNumber(
+      parsed.memoryMaxChars,
+      DEFAULT_CONTEXT_POLICY.memoryMaxChars,
+      CONTEXT_POLICY_BOUNDS.memoryMaxChars
+    )
+  };
 }
 
 function isArtifactsNotFound(error: unknown): boolean {
@@ -218,12 +270,63 @@ export class ExoCore {
       throw new Error('/harness/policy.json must set a string "model"');
     }
 
+    const context = parseContextPolicy(files["/harness/context.json"]);
+
     const toolPaths = Object.keys(files).filter(
       (path) => path.startsWith("/harness/tools/") && path.endsWith(".js")
     );
     const tools = await this.#loadToolManifests(files, toolPaths);
 
-    return { identity, policy, tools, files };
+    return { identity, policy, context, tools, files };
+  }
+
+  /**
+   * Read the agent's working memory (clamped to the policy's injection
+   * budget; the tail wins so the most recent compactions survive).
+   */
+  async readMemory(context: ContextPolicy): Promise<string | null> {
+    if (context.memoryMaxChars === 0) return null;
+    const content = await this.workspace.readFile(context.memoryFile);
+    if (!content || content.trim().length === 0) return null;
+    if (content.length <= context.memoryMaxChars) return content;
+    return `…(older memory clipped; full file at ${context.memoryFile})\n${content.slice(-context.memoryMaxChars)}`;
+  }
+
+  /**
+   * Record a compaction: append the agent-authored summary to its memory
+   * file NOW, journal the request, and flag the transcript cut to be
+   * applied by the kernel at the start of the next chat turn (mutating the
+   * transcript mid-turn would race the streaming pipeline). The journal is
+   * never touched — nothing is truly forgotten, only demoted.
+   */
+  async requestCompaction(
+    context: ContextPolicy,
+    summary: string,
+    keepLast: number
+  ): Promise<{ memoryFile: string; keepLast: number; memoryChars: number }> {
+    const stamp = new Date().toISOString();
+    const existing = (await this.workspace.readFile(context.memoryFile)) ?? "";
+    const block = `## ${stamp} — compacted from transcript\n\n${summary.trim()}\n`;
+    const updated =
+      existing.trim().length > 0 ? `${existing.trimEnd()}\n\n${block}` : block;
+    await this.workspace.writeFile(context.memoryFile, updated);
+    this.store.setPendingCompaction({
+      keepLast,
+      memoryFile: context.memoryFile,
+      requestedTs: Date.now()
+    });
+    this.store.appendJournal("history_compacted", {
+      phase: "requested",
+      keepLast,
+      memoryFile: context.memoryFile,
+      summaryChars: summary.length
+    });
+    this.#onMutation();
+    return {
+      memoryFile: context.memoryFile,
+      keepLast,
+      memoryChars: updated.length
+    };
   }
 
   /** Module map for the dynamic Worker: "/harness/tools/x.js" → "tools/x.js". */
@@ -708,6 +811,36 @@ ${imports}
             };
           }
         })
+      }),
+      compact_history: tool({
+        description:
+          "Distill older conversation into your durable working memory. Write the summary yourself — whatever your future self needs. The kernel appends it to your memory file (injected into your system prompt every turn), then truncates the chat transcript at the start of the next turn, keeping the most recent messages. The journal is never affected.",
+        inputSchema: z.object({
+          summary: z
+            .string()
+            .min(1)
+            .max(8000)
+            .describe(
+              "Agent-authored summary of what is worth remembering from the conversation being dropped"
+            ),
+          keepLast: z
+            .number()
+            .int()
+            .min(1)
+            .max(50)
+            .optional()
+            .describe("How many recent messages to keep (default 6)")
+        }),
+        execute: this.#journaled(
+          "compact_history",
+          async ({ summary, keepLast }) => {
+            return this.requestCompaction(
+              loaded.context,
+              summary,
+              keepLast ?? 6
+            );
+          }
+        )
       }),
       fork_self: tool({
         description:

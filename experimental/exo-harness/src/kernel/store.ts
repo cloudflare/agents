@@ -13,6 +13,7 @@ import type {
   JournalEntry,
   JournalKind,
   JsonObject,
+  PendingCompaction,
   VersionInfo
 } from "./types";
 
@@ -82,6 +83,35 @@ export class KernelStore {
         data TEXT NOT NULL
       )
     `;
+    // Single-row "compaction requested" flag, applied at next chat turn start.
+    this.sql`
+      CREATE TABLE IF NOT EXISTS exo_pending_compaction (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        data TEXT NOT NULL
+      )
+    `;
+  }
+
+  setPendingCompaction(pending: PendingCompaction): void {
+    this.sql`
+      INSERT INTO exo_pending_compaction (id, data)
+      VALUES (1, ${JSON.stringify(pending)})
+      ON CONFLICT (id) DO UPDATE SET data = excluded.data
+    `;
+  }
+
+  /** Read and clear the pending compaction, if any. */
+  takePendingCompaction(): PendingCompaction | null {
+    const rows = this.sql<{ data: string }>`
+      SELECT data FROM exo_pending_compaction WHERE id = 1
+    `;
+    if (rows.length === 0) return null;
+    this.sql`DELETE FROM exo_pending_compaction WHERE id = 1`;
+    try {
+      return JSON.parse(rows[0].data) as PendingCompaction;
+    } catch {
+      return null;
+    }
   }
 
   /** Overwrite the (single) last-turn context snapshot. */

@@ -39,6 +39,19 @@ and journal. The push is best-effort: failures are journaled
 (`artifacts_push_failed`) and never fail the activation, and without the
 binding (offline dev, tests) it is skipped entirely.
 
+The agent also manages its own context. `/harness/context.json` (self-
+editable, kernel-clamped) sets its message window, a soft token target, and
+which file is injected into its system prompt as working memory
+(`/memory/core.md` by default). The `compact_history` tool distills older
+conversation into that memory file using an **agent-authored** summary —
+the kernel appends it immediately, then truncates the chat transcript at
+the next turn start, leaving a visible "⌁ compacted…" marker in the chat.
+When a turn exceeds the token target, the kernel adds a one-line pressure
+nudge to its briefing — it never compacts on its own, and compaction never
+touches the append-only journal. The Context tab shows all of it live: the
+exact system prompt (with injected memory), the message window, and the
+token estimate vs target.
+
 Agents can also reproduce: the `fork_self` tool forks the current
 **activated** self into a new agent. With Artifacts bound this is a real
 repo fork (the child clones it, and its repo records
@@ -94,6 +107,10 @@ protocol:
 5. **Fork it** — ask it to "fork yourself into an agent called pirate-jr",
    then open `/?agent=pirate-jr`: the child starts life as the parent's
    activated self and evolves independently.
+6. **Watch it remember** — after a conversation, ask it to "distill what
+   matters into memory and compact the transcript". Watch the Context tab:
+   the transcript shrinks, a "## Working memory" section appears in its
+   system prompt, and it still recalls dropped details.
 
 ## Deploy
 

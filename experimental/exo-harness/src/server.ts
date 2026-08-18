@@ -10,7 +10,8 @@ import {
   isStepCount,
   type LanguageModel,
   type ModelMessage,
-  type ToolSet
+  type ToolSet,
+  type UIMessage
 } from "ai";
 import { KernelStore } from "./kernel/store";
 import { ExoCore } from "./kernel/harness";
@@ -88,19 +89,36 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     const loaded = await core.loadHarness();
     const store = this.store();
 
+    // Apply any compaction requested last turn BEFORE assembling context,
+    // so the cut and its marker are part of what the model now sees.
+    await this.#applyPendingCompaction();
+
     store.appendJournal("turn_start", {
       source: "chat",
       version: store.activeVersion()
     });
 
-    const system = this.systemPrompt(loaded);
+    const memory = await core.readMemory(loaded.context);
     const messages = pruneMessages({
       messages: await convertToModelMessages(this.messages),
       toolCalls: "before-last-2-messages",
       reasoning: "before-last-message"
-    });
+    }).slice(-loaded.context.keepMessages);
+    const { system, estimatedTokens } = this.assembleSystem(
+      loaded,
+      memory,
+      messages
+    );
     const tools = core.buildTools(loaded);
-    this.captureContext("chat", loaded, system, messages, tools);
+    this.captureContext(
+      "chat",
+      loaded,
+      system,
+      messages,
+      tools,
+      estimatedTokens,
+      memory?.length ?? 0
+    );
 
     const result = streamText({
       abortSignal: options?.abortSignal,
@@ -138,10 +156,23 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       version: store.activeVersion()
     });
 
-    const system = this.systemPrompt(loaded);
+    const memory = await core.readMemory(loaded.context);
     const messages: ModelMessage[] = [{ role: "user", content: text }];
+    const { system, estimatedTokens } = this.assembleSystem(
+      loaded,
+      memory,
+      messages
+    );
     const tools = core.buildTools(loaded);
-    this.captureContext("prompt", loaded, system, messages, tools);
+    this.captureContext(
+      "prompt",
+      loaded,
+      system,
+      messages,
+      tools,
+      estimatedTokens,
+      memory?.length ?? 0
+    );
 
     const result = await generateText({
       model: this.resolveModel(loaded.policy),
@@ -173,7 +204,9 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     loaded: LoadedHarness,
     system: string,
     messages: ModelMessage[],
-    tools: ToolSet
+    tools: ToolSet,
+    estimatedTokens: number,
+    memoryChars: number
   ): void {
     try {
       this.store().saveContextSnapshot({
@@ -185,11 +218,86 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
         tools: Object.entries(tools).map(([name, t]) => ({
           name,
           description: typeof t.description === "string" ? t.description : ""
-        }))
+        })),
+        contextPolicy: loaded.context,
+        estimatedTokens,
+        memoryChars
       });
     } catch {
       // never let diagnostics break a turn
     }
+  }
+
+  /**
+   * Apply a compaction requested last turn: truncate the persisted chat
+   * transcript to the requested tail and insert a visible marker message.
+   * Runs at chat-turn start (mutating the transcript mid-turn would race
+   * the streaming pipeline). The journal and memory file were already
+   * written when the compaction was requested.
+   */
+  async #applyPendingCompaction(): Promise<void> {
+    const store = this.store();
+    const pending = store.takePendingCompaction();
+    if (!pending) return;
+    const keep = Math.max(1, pending.keepLast);
+    const dropped = this.messages.length - keep;
+    if (dropped <= 0) {
+      store.appendJournal("history_compacted", {
+        phase: "applied",
+        dropped: 0,
+        keptLast: this.messages.length
+      });
+      return;
+    }
+    const kept = this.messages.slice(-keep);
+    // Two persists: stale-row deletion only triggers when the incoming set
+    // is a subset of server state, so the cut and the (new) marker message
+    // cannot share a write.
+    await this.persistMessages(kept, [], { _deleteStaleRows: true });
+    const marker: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        {
+          type: "text",
+          text: `⌁ Compacted ${dropped} older message${dropped === 1 ? "" : "s"} into ${pending.memoryFile} (kept last ${keep}).`
+        }
+      ]
+    };
+    await this.persistMessages([...kept, marker]);
+    store.appendJournal("history_compacted", {
+      phase: "applied",
+      dropped,
+      keptLast: keep,
+      memoryFile: pending.memoryFile
+    });
+    this.refreshSyncedState();
+  }
+
+  /**
+   * Build the full system prompt (briefing + identity + injected memory)
+   * and estimate the turn's context size; when the estimate exceeds the
+   * agent's own token target, append a pressure nudge — the kernel never
+   * compacts on its own.
+   */
+  assembleSystem(
+    loaded: LoadedHarness,
+    memory: string | null,
+    messages: ModelMessage[]
+  ): { system: string; estimatedTokens: number } {
+    const base = this.systemPrompt(loaded, memory);
+    const estimatedTokens = Math.round(
+      (base.length + JSON.stringify(messages).length) / 4
+    );
+    if (estimatedTokens <= loaded.context.tokenTarget) {
+      return { system: base, estimatedTokens };
+    }
+    const system = [
+      base,
+      "",
+      `Context pressure: this turn is ~${estimatedTokens} tokens, over your target of ${loaded.context.tokenTarget} (/harness/context.json). Consider compact_history to distill older conversation into memory.`
+    ].join("\n");
+    return { system, estimatedTokens };
   }
 
   resolveModel(policy: HarnessPolicy): LanguageModel {
@@ -206,19 +314,23 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     );
   }
 
-  /** Fixed kernel preamble + the agent's own (editable) identity file. */
-  systemPrompt(loaded: LoadedHarness): string {
+  /**
+   * Fixed kernel preamble + the agent's own (editable) identity file +
+   * its self-maintained working memory.
+   */
+  systemPrompt(loaded: LoadedHarness, memory: string | null = null): string {
     const version = this.store().activeVersion();
     const toolList = loaded.tools
       .map((t) => `- ${t.name} (${t.file}): ${t.description}`)
       .join("\n");
-    return [
+    const sections = [
       "## Kernel briefing (fixed, not editable)",
       "",
       "You are a self-modifying agent. Your evolvable source lives in your",
       "workspace under /harness and is hot-loaded every turn:",
       "- /harness/identity.md — your identity and operating rules (the section after this briefing)",
       '- /harness/policy.json — model policy, e.g. {"model": "workers-ai:<id>", "maxSteps": 8}',
+      "- /harness/context.json — your context policy: message window, memory injection, token target",
       "- /harness/tools/*.js — your harness tools (ES modules; see tools/echo.js for the format)",
       "",
       "To change yourself: edit those files with write_file, then call",
@@ -228,6 +340,11 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "Your journal is append-only and survives everything; use journal_note",
       "for anything your future self should know.",
       "",
+      "Your chat transcript is finite (your context policy caps it). Use",
+      `compact_history to distill older conversation into ${loaded.context.memoryFile} —`,
+      "that file is injected into this prompt every turn, so it survives any",
+      "transcript loss. Compaction never touches the journal.",
+      "",
       `Active harness version: v${version}`,
       loaded.tools.length > 0
         ? `Harness tools currently loaded:\n${toolList}`
@@ -236,7 +353,16 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "## Identity (from /harness/identity.md — yours to edit)",
       "",
       loaded.identity
-    ].join("\n");
+    ];
+    if (memory) {
+      sections.push(
+        "",
+        `## Working memory (from ${loaded.context.memoryFile} — maintain it with compact_history or write_file)`,
+        "",
+        memory
+      );
+    }
+    return sections.join("\n");
   }
 
   refreshSyncedState(): void {

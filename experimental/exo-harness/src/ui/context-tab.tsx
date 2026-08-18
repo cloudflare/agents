@@ -69,9 +69,9 @@ export function ContextTab({
   const messages = (
     Array.isArray(snapshot.messages) ? snapshot.messages : []
   ) as RawMessage[];
-  const totalChars =
-    snapshot.system.length +
-    messages.reduce((n, m) => n + contentToText(m.content).length, 0);
+  const overTarget =
+    snapshot.contextPolicy &&
+    snapshot.estimatedTokens > snapshot.contextPolicy.tokenTarget;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -79,7 +79,13 @@ export function ContextTab({
       <div className="px-3 py-2 border-b border-kumo-line flex items-center gap-2 flex-wrap">
         <Badge variant="primary">model: {snapshot.model}</Badge>
         <Badge variant="secondary">{snapshot.source} turn</Badge>
-        <Badge variant="secondary">~{Math.round(totalChars / 4)} tokens</Badge>
+        <Badge variant={overTarget ? "destructive" : "secondary"}>
+          ~{snapshot.estimatedTokens} / {snapshot.contextPolicy?.tokenTarget}{" "}
+          tok{overTarget ? " — over target" : ""}
+        </Badge>
+        {snapshot.memoryChars > 0 && (
+          <Badge variant="secondary">memory: {snapshot.memoryChars}ch</Badge>
+        )}
         <span className="text-[10px] text-kumo-inactive ml-auto">
           captured {formatTime(snapshot.ts)}
         </span>
@@ -99,7 +105,8 @@ export function ContextTab({
       {/* Messages */}
       <div className="px-3 py-2 border-b border-kumo-line">
         <Text size="xs" bold>
-          Messages ({messages.length}, after kernel pruning)
+          Messages ({messages.length}, after pruning — policy keeps at most{" "}
+          {snapshot.contextPolicy?.keepMessages})
         </Text>
       </div>
       {messages.map((message, index) => (

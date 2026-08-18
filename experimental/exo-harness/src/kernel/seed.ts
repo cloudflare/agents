@@ -29,6 +29,14 @@ export const SEED_POLICY = `{
 }
 `;
 
+export const SEED_CONTEXT = `{
+  "keepMessages": 40,
+  "tokenTarget": 6000,
+  "memoryFile": "/memory/core.md",
+  "memoryMaxChars": 4000
+}
+`;
+
 export const SEED_TOOL_ECHO = `// A minimal example harness tool. Harness tools are plain ES modules that
 // export a default object with: name, description, inputSchema (JSON Schema),
 // and an async run(input, caps) handler. They execute inside an isolated
@@ -64,6 +72,7 @@ not part of the harness — editing them never changes agent behavior.
 export const SEED_FILES: Record<string, string> = {
   "/harness/identity.md": SEED_IDENTITY,
   "/harness/policy.json": SEED_POLICY,
+  "/harness/context.json": SEED_CONTEXT,
   "/harness/tools/echo.js": SEED_TOOL_ECHO,
   "/scratch/README.md": SEED_SCRATCH_README
 };

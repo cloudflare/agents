@@ -22,6 +22,7 @@ export type JournalKind =
   | "artifacts_push"
   | "artifacts_push_failed"
   | "fork"
+  | "history_compacted"
   | "file_write"
   | "file_delete"
   | "note"
@@ -76,9 +77,49 @@ export interface HarnessPolicy {
   maxSteps?: number;
 }
 
+/**
+ * The agent's context policy (/harness/context.json) — how its own model
+ * context is assembled each turn. Self-editable like everything under
+ * /harness; the kernel clamps every knob into hard bounds so the agent can
+ * neither self-lobotomize nor self-bloat.
+ */
+export interface ContextPolicy {
+  /** Max messages handed to the model per turn (after kernel pruning). */
+  keepMessages: number;
+  /** Soft token budget; exceeding it adds a pressure nudge to the briefing. */
+  tokenTarget: number;
+  /** Workspace file injected into the system prompt as working memory. */
+  memoryFile: string;
+  /** Max chars of the memory file injected (tail wins). */
+  memoryMaxChars: number;
+}
+
+export const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
+  keepMessages: 40,
+  tokenTarget: 6000,
+  memoryFile: "/memory/core.md",
+  memoryMaxChars: 4000
+};
+
+/** Hard kernel bounds for the self-editable context policy. */
+export const CONTEXT_POLICY_BOUNDS = {
+  keepMessages: { min: 4, max: 200 },
+  tokenTarget: { min: 500, max: 60000 },
+  memoryMaxChars: { min: 0, max: 16000 }
+} as const;
+
+/** A requested-but-not-yet-applied transcript compaction. */
+export interface PendingCompaction {
+  keepLast: number;
+  memoryFile: string;
+  requestedTs: number;
+}
+
 export interface LoadedHarness {
   identity: string;
   policy: HarnessPolicy;
+  /** Clamped context policy (defaults when /harness/context.json is absent). */
+  context: ContextPolicy;
   tools: HarnessToolManifest[];
   /** All /harness file contents, keyed by absolute path. */
   files: Record<string, string>;
@@ -102,6 +143,12 @@ export interface ContextSnapshot {
   /** The pruned ModelMessage[] exactly as passed to the model. */
   messages: Json;
   tools: { name: string; description: string }[];
+  /** The clamped context policy in effect this turn. */
+  contextPolicy: ContextPolicy;
+  /** Rough size estimate (chars/4) of system + messages. */
+  estimatedTokens: number;
+  /** Chars of working memory injected into the system prompt. */
+  memoryChars: number;
 }
 
 /** State synced to all connected clients via the Agents state sync. */

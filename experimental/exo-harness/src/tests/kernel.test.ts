@@ -394,6 +394,99 @@ describe("context snapshot (glass-skull Context tab)", () => {
   });
 });
 
+describe("self-managed context (context.json + memory + compact_history)", () => {
+  it("seeds context.json and applies defaults + clamps", async () => {
+    const agent = await freshAgent("ctx-defaults");
+    expect(await agent.getFileContent("/harness/context.json")).toContain(
+      '"memoryFile": "/memory/core.md"'
+    );
+
+    await agent.prompt("hello");
+    const snapshot = await agent.getContextSnapshot();
+    expect(snapshot?.contextPolicy).toEqual({
+      keepMessages: 40,
+      tokenTarget: 6000,
+      memoryFile: "/memory/core.md",
+      memoryMaxChars: 4000
+    });
+    // No memory yet — nothing injected.
+    expect(snapshot?.memoryChars).toBe(0);
+    expect(snapshot?.system).not.toContain("## Working memory");
+
+    // Out-of-bounds values are clamped, and a DELETED context.json falls
+    // back to defaults instead of failing the load.
+    await agent.prompt(
+      '!tool write_file {"path": "/harness/context.json", "content": "{\\"keepMessages\\": 1, \\"tokenTarget\\": 999999}"}'
+    );
+    await agent.prompt("clamped?");
+    const clamped = await agent.getContextSnapshot();
+    expect(clamped?.contextPolicy.keepMessages).toBe(4);
+    expect(clamped?.contextPolicy.tokenTarget).toBe(60000);
+
+    await agent.prompt('!tool delete_file {"path": "/harness/context.json"}');
+    await agent.prompt("defaults again?");
+    const defaulted = await agent.getContextSnapshot();
+    expect(defaulted?.contextPolicy.keepMessages).toBe(40);
+  });
+
+  it("compact_history writes agent-authored memory that is injected next turn", async () => {
+    const agent = await freshAgent("ctx-compact");
+    const compacted = await agent.prompt(
+      '!tool compact_history {"summary": "Ben prefers laconic pirates and forward-only history.", "keepLast": 4}'
+    );
+    expect(compacted.toolCalls[0].toolName).toBe("compact_history");
+
+    // Memory written immediately, journaled as requested.
+    const memory = await agent.getFileContent("/memory/core.md");
+    expect(memory).toContain("Ben prefers laconic pirates");
+    const journal = await agent.getJournal();
+    const requested = journal.find(
+      (e) => e.kind === "history_compacted" && e.data.phase === "requested"
+    );
+    expect(requested?.data.keepLast).toBe(4);
+    expect(requested?.data.memoryFile).toBe("/memory/core.md");
+
+    // Next turn: memory is part of the system prompt.
+    await agent.prompt("what do you remember?");
+    const snapshot = await agent.getContextSnapshot();
+    expect(snapshot?.system).toContain("## Working memory");
+    expect(snapshot?.system).toContain("Ben prefers laconic pirates");
+    expect(snapshot?.memoryChars).toBeGreaterThan(0);
+  });
+
+  it("adds a context-pressure nudge when over the agent's token target", async () => {
+    const agent = await freshAgent("ctx-pressure");
+    // Minimum-allowed target + a bloated identity → guaranteed pressure.
+    await agent.prompt(
+      '!tool write_file {"path": "/harness/context.json", "content": "{\\"tokenTarget\\": 500}"}'
+    );
+    const bigIdentity = `PERSONA: verbose.\n${"x".repeat(4000)}\n`;
+    await agent.prompt(
+      `!tool write_file ${JSON.stringify({
+        path: "/harness/identity.md",
+        content: bigIdentity
+      })}`
+    );
+    await agent.prompt("are we over budget?");
+    const snapshot = await agent.getContextSnapshot();
+    expect(snapshot?.estimatedTokens).toBeGreaterThan(500);
+    expect(snapshot?.system).toContain("Context pressure:");
+  });
+
+  it("a broken context.json triggers the auto-rollback path", async () => {
+    const agent = await freshAgent("ctx-broken");
+    await agent.prompt(
+      '!tool write_file {"path": "/harness/context.json", "content": "not json"}'
+    );
+    const reply = await agent.prompt("still alive?");
+    expect(reply.text).toContain("[precise, helpful, curious.]");
+    const journal = await agent.getJournal();
+    const k = kinds(journal);
+    expect(k).toContain("harness_load_failed");
+    expect(k).toContain("harness_rollback");
+  });
+});
+
 describe("synced UI state", () => {
   it("mirrors versions, journal tail, and harness files", async () => {
     const agent = await freshAgent("ui-state");
