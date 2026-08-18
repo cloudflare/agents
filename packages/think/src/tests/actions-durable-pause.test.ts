@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import { z } from "zod";
@@ -65,6 +66,205 @@ describe("durable-pause actions", () => {
     expect(descriptor.risk).toBe("high");
     expect(descriptor.permissions).toEqual(["pause:run"]);
     expect(descriptor.input).toEqual({ message: "hi" });
+  });
+
+  it("notifies after the approval is durably visible", async () => {
+    const agent = await freshPauseAgent(`dp-hook-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.configureActionApprovalRequestHookForTest("capture");
+
+    await agent.testChat("call pauseAction");
+    const pending = await agent.listActionPendingForTest();
+    const log = JSON.parse(
+      await agent.actionApprovalRequestLogForTest()
+    ) as Array<{
+      approval: {
+        executionId: string;
+        source: string;
+        descriptor: Record<string, unknown>;
+      };
+      visibleWhenCalled: boolean;
+    }>;
+
+    expect(log).toHaveLength(1);
+    expect(log[0].visibleWhenCalled).toBe(true);
+    expect(log[0].approval.executionId).toBe(pending[0].execution_id);
+    expect(log[0].approval.source).toBe("action");
+    expect(log[0].approval.descriptor).toMatchObject({
+      action: "pauseAction",
+      input: { message: "hello" },
+      kind: "durable-pause"
+    });
+  });
+
+  it("routes the persisted approval through its ChannelHost", async () => {
+    const agent = await freshPauseAgent(`dp-channel-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.setApprovalRequestsChannelForTest("approvalTest");
+
+    await agent.testChat("call pauseAction");
+
+    const requests = JSON.parse(
+      await agent.channelApprovalRequestLogForTest()
+    ) as Array<{
+      channelId: string;
+      interactionId: string;
+      request: { title?: string; summary: string; input: unknown };
+    }>;
+    const pending = await agent.listActionPendingForTest();
+    expect(requests).toEqual([
+      {
+        channelId: "approvalTest",
+        interactionId: pending[0].execution_id,
+        request: {
+          title: "Approval required",
+          summary: "Approve pause action",
+          input: { message: "hello" }
+        }
+      }
+    ]);
+  });
+
+  it("uses the latest dynamically selected approval Channel", async () => {
+    const agent = await freshPauseAgent(
+      `dp-channel-switch-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+    await agent.setApprovalRequestsChannelForTest("approvalTest");
+    await agent.setApprovalRequestsChannelForTest("approvalTestSecondary");
+
+    await agent.testChat("call pauseAction");
+
+    const requests = JSON.parse(
+      await agent.channelApprovalRequestLogForTest()
+    ) as Array<{ channelId: string }>;
+    expect(requests).toHaveLength(1);
+    expect(requests[0].channelId).toBe("approvalTestSecondary");
+  });
+
+  it("restores a dynamically selected approval Channel after isolate recreation", async () => {
+    const name = `dp-channel-route-recreate-${crypto.randomUUID()}`;
+    let agent = await freshPauseAgent(name);
+    await agent.setApprovalRequestsChannelForTest("approvalTestSecondary");
+
+    await evictDurableObject(agent as unknown as DurableObjectStub);
+    agent = await freshPauseAgent(name);
+
+    await expect(
+      agent.requestChannelApprovalForTest("after-recreation")
+    ).resolves.toBe(true);
+    const requests = JSON.parse(
+      await agent.channelApprovalRequestLogForTest()
+    ) as Array<{ channelId: string; interactionId: string }>;
+    expect(requests).toEqual([
+      {
+        channelId: "approvalTestSecondary",
+        interactionId: "after-recreation",
+        request: { summary: "Test approval", input: {} }
+      }
+    ]);
+  });
+
+  it("resolves Channel ingress through the existing approval ledger", async () => {
+    const agent = await freshPauseAgent(
+      `dp-channel-response-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+    await agent.setApprovalRequestsChannelForTest("approvalTest");
+
+    await agent.testChat("call pauseAction");
+    const pending = await agent.listActionPendingForTest();
+    const executionId = pending[0].execution_id;
+
+    await expect(
+      agent.respondToChannelApprovalForTest(executionId, "approve")
+    ).resolves.toBe(200);
+    expect(await agent.listActionPendingForTest()).toHaveLength(0);
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+  });
+
+  it("composes Telegram rendering and ingress with the Think approval ledger", async () => {
+    const agent = await freshPauseAgent(
+      `dp-channel-telegram-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+    await agent.setApprovalRequestsChannelForTest("telegramIntegration");
+
+    await agent.testChat("call pauseAction");
+
+    await expect(
+      agent.respondToTelegramApprovalForTest("approve")
+    ).resolves.toBe(200);
+    expect(await agent.listActionPendingForTest()).toHaveLength(0);
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+  });
+
+  it("resolves provider-recovered Channel ingress after isolate recreation", async () => {
+    const name = `dp-channel-recreate-${crypto.randomUUID()}`;
+    let agent = await freshPauseAgent(name);
+    await agent.useDurablePauseActionForTest();
+    await agent.setApprovalRequestsChannelForTest("approvalTest");
+
+    await agent.testChat("call pauseAction");
+    const pending = await agent.listActionPendingForTest();
+    const executionId = pending[0].execution_id;
+
+    await evictDurableObject(agent as unknown as DurableObjectStub);
+    agent = await freshPauseAgent(name);
+
+    await expect(
+      agent.respondToChannelApprovalForTest(executionId, "reject")
+    ).resolves.toBe(200);
+    expect(await agent.listActionPendingForTest()).toHaveLength(0);
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
+  });
+
+  it("keeps the approval pending when notification fails", async () => {
+    const agent = await freshPauseAgent(`dp-hook-fail-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.configureActionApprovalRequestHookForTest("throw");
+
+    await agent.testChat("call pauseAction");
+
+    expect(await agent.listActionPendingForTest()).toHaveLength(1);
+  });
+
+  it("can resolve immediately without leaving a stale paused transcript part", async () => {
+    const agent = await freshPauseAgent(
+      `dp-hook-reject-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+    await agent.configureActionApprovalRequestHookForTest("reject");
+
+    await agent.testChat("call pauseAction");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const pausePart = messages
+      .flatMap((message) => message.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part &&
+          (part as Record<string, unknown>).toolCallId === "dp1"
+      ) as Record<string, unknown> | undefined;
+    expect(pausePart?.output).toMatchObject({
+      status: "rejected",
+      reason: "Rejected immediately by approval hook"
+    });
+    expect(await agent.listActionPendingForTest()).toHaveLength(0);
+  });
+
+  it("does not notify when a durable-pause predicate runs inline", async () => {
+    const agent = await freshPauseAgent(
+      `dp-hook-inline-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest({ approval: "predicate-hello" });
+    await agent.configureActionApprovalRequestHookForTest("capture");
+
+    await agent.parkDurablePauseForTest("other");
+
+    expect(JSON.parse(await agent.actionApprovalRequestLogForTest())).toEqual(
+      []
+    );
   });
 
   it("runs the action exactly once on approve and clears the pending row", async () => {

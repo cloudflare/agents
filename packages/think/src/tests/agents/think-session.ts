@@ -41,6 +41,7 @@ import type {
   Action,
   ActionAuthorizationContext,
   ActionAuthorizationDecision,
+  PendingApproval,
   StepContext,
   ChunkContext
 } from "../../think";
@@ -51,6 +52,11 @@ import {
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
+import {
+  telegram,
+  type Channel,
+  type ChannelApprovalRequestOptions
+} from "@cloudflare/channels";
 import { Session } from "agents/experimental/memory/session";
 import { z } from "zod";
 
@@ -3801,9 +3807,117 @@ export class ThinkToolsTestAgent extends Think {
     previousToolResultCount: number;
   }> = [];
   private _responseLog: ChatResponseResult[] = [];
+  private _channelApprovalRequests: Array<
+    ChannelApprovalRequestOptions & { channelId: string }
+  > = [];
+  private _telegramApprovalTexts: string[] = [];
+  private _captureActionApprovalRequests = false;
+  private _actionApprovalRequestThrows = false;
+  private _actionApprovalRequestRejects = false;
+  private _actionApprovalRequestLog: Array<{
+    approval: PendingApproval;
+    visibleWhenCalled: boolean;
+  }> = [];
+
+  override configureChannelHost() {
+    const channel = (channelId: string): Channel => ({
+      deliver: async () => ({
+        status: "failed",
+        retryable: false,
+        error: { code: "NOT_USED", message: "Not used by this test Channel" }
+      }),
+      requestApproval: async ({
+        delivery: _delivery,
+        getApprovalLinks: _links,
+        ...request
+      }) => {
+        this._channelApprovalRequests.push({ channelId, ...request });
+        return {
+          status: "delivered",
+          reference: `test-${request.interactionId}`
+        };
+      }
+    });
+    const approvalTest: Channel = {
+      ...channel("approvalTest"),
+      ingress: {
+        path: "/webhooks/test-approval",
+        receive: async (request) => {
+          const payload = (await request.json()) as {
+            interactionId?: unknown;
+            decision?: unknown;
+            reference?: unknown;
+          };
+          if (
+            typeof payload.interactionId !== "string" ||
+            (payload.decision !== "approve" && payload.decision !== "reject") ||
+            typeof payload.reference !== "string"
+          ) {
+            return {
+              events: [],
+              response: new Response(null, { status: 400 })
+            };
+          }
+          return {
+            events: [
+              {
+                type: "approval-response" as const,
+                interactionId: payload.interactionId,
+                decision: payload.decision,
+                reference: payload.reference
+              }
+            ],
+            response: new Response(null, { status: 200 })
+          };
+        }
+      }
+    };
+    const telegramIntegration = telegram({
+      botToken: "test-token",
+      chatId: "123456",
+      webhook: {
+        secretToken: "test-webhook-secret",
+        path: "/webhooks/test-telegram"
+      },
+      fetch: async (_input, init) => {
+        const payload = JSON.parse(String(init?.body)) as { text?: unknown };
+        if (typeof payload.text === "string") {
+          this._telegramApprovalTexts.push(payload.text);
+        }
+        return Response.json({ ok: true, result: { message_id: 42 } });
+      }
+    });
+    return {
+      channels: {
+        approvalTest,
+        approvalTestSecondary: channel("approvalTestSecondary"),
+        telegramIntegration
+      }
+    };
+  }
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
+  }
+
+  override async onActionApprovalRequest(
+    approval: PendingApproval
+  ): Promise<void> {
+    if (!this._captureActionApprovalRequests) return;
+    const visible = await this.pendingApprovals(approval.executionId);
+    this._actionApprovalRequestLog.push({
+      approval,
+      visibleWhenCalled: visible.length === 1
+    });
+    if (this._actionApprovalRequestRejects) {
+      await this.rejectExecution(
+        approval.executionId,
+        "Rejected immediately by approval hook"
+      );
+    }
+    if (this._actionApprovalRequestThrows) {
+      throw new Error("approval notification failed");
+    }
   }
 
   override beforeStep(ctx: PrepareStepContext): StepConfig | void {
@@ -4402,6 +4516,80 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   // ── Durable-pause action test helpers ───────────────────────────
+
+  async setApprovalRequestsChannelForTest(channelId?: string): Promise<void> {
+    await this.setApprovalRequestsChannel(channelId);
+  }
+
+  async channelApprovalRequestLogForTest(): Promise<string> {
+    return JSON.stringify(this._channelApprovalRequests);
+  }
+
+  async requestChannelApprovalForTest(interactionId: string): Promise<boolean> {
+    const delivery = await this.channelHost.requestApproval({
+      interactionId,
+      request: { summary: "Test approval", input: {} }
+    });
+    return delivery !== undefined;
+  }
+
+  async respondToChannelApprovalForTest(
+    interactionId: string,
+    decision: "approve" | "reject"
+  ): Promise<number> {
+    const response = await this.onRequest(
+      new Request("https://example.com/webhooks/test-approval", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          interactionId,
+          decision,
+          reference: crypto.randomUUID()
+        })
+      })
+    );
+    return response.status;
+  }
+
+  async respondToTelegramApprovalForTest(
+    decision: "approve" | "reject"
+  ): Promise<number> {
+    const replyText = this._telegramApprovalTexts.at(-1);
+    if (!replyText) throw new Error("No Telegram approval was delivered");
+    const response = await this.onRequest(
+      new Request("https://example.com/webhooks/test-telegram", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "test-webhook-secret"
+        },
+        body: JSON.stringify({
+          update_id: 1,
+          message: {
+            message_id: 43,
+            text: decision === "approve" ? "YES" : "NO",
+            chat: { id: 123456 },
+            from: { id: 123456 },
+            reply_to_message: { message_id: 42, text: replyText }
+          }
+        })
+      })
+    );
+    return response.status;
+  }
+
+  async configureActionApprovalRequestHookForTest(
+    mode: "capture" | "throw" | "reject" | "off"
+  ): Promise<void> {
+    this._captureActionApprovalRequests = mode !== "off";
+    this._actionApprovalRequestThrows = mode === "throw";
+    this._actionApprovalRequestRejects = mode === "reject";
+    this._actionApprovalRequestLog.length = 0;
+  }
+
+  async actionApprovalRequestLogForTest(): Promise<string> {
+    return JSON.stringify(this._actionApprovalRequestLog);
+  }
 
   async useDurablePauseActionForTest(options?: {
     approval?: boolean | "predicate-hello";

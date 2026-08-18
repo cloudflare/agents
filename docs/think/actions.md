@@ -185,6 +185,38 @@ Both approval-gated and durable-pause parts carry a stable
 permissions, risk, kind }`) so your UI has everything it needs to render the
 prompt.
 
+Configure a Channel Host to project a structured summary of the approval onto
+an out-of-band surface after the durable-pause Action and its paused assistant
+output are persisted:
+
+```typescript
+import { telegram } from "@cloudflare/channels";
+
+override configureChannelHost() {
+  return {
+    channels: {
+      telegram: telegram({
+        botToken: this.env.TELEGRAM_BOT_TOKEN,
+        chatId: this.env.TELEGRAM_CHAT_ID,
+        webhook: { secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN }
+      })
+    },
+    approvalRequests: "telegram"
+  };
+}
+```
+
+Think initializes `channelHost` with its Durable Object storage and retry
+scheduler, mounts HTTP ingress internally, and resolves normalized Channel
+responses through the same `approveExecution()` / `rejectExecution()` path used
+by browser approval controls. Delivery intent, provider-reference correlation,
+and replay receipts survive isolate recreation. Call
+`await setApprovalRequestsChannel(channelId)` to persistently switch the route
+at runtime. Passing `undefined` clears the durable override; after the next
+restart, Think uses the declarative default again.
+Override `onActionApprovalRequest()` only for additional observation or custom
+side effects; hook failure leaves the authoritative pending approval intact.
+
 ## Authorization
 
 Declare the permissions an action requires with `permissions`, then grant them
@@ -279,16 +311,20 @@ into a channel notice.
 
 ### Hooks and methods on the agent
 
-| Member                                  | Description                                                                        |
-| --------------------------------------- | ---------------------------------------------------------------------------------- |
-| `getActions()`                          | Return the action descriptors to compile into tools.                               |
-| `authorizeTurn(ctx)`                    | Decide granted permissions once per turn. Defaults to full grant.                  |
-| `authorizeAction(ctx)`                  | Decide authorization per action call. Defaults to checking `authorizeTurn` grants. |
-| `pendingApprovals(executionId?)`        | List parked actions and paused Codemode executions awaiting approval.              |
-| `approveExecution(executionId)`         | Approve a parked execution; runs `execute` and auto-continues the turn.            |
-| `rejectExecution(executionId, reason?)` | Reject a parked execution without running it.                                      |
-| `replyAttachments(requestId?)`          | Read the advisory attachments recorded during a turn.                              |
-| `actionLedgerPendingRetryLeaseMs`       | Stale-pending reclaim window (default `300000`; `false` to disable).               |
+| Member                                   | Description                                                                         |
+| ---------------------------------------- | ----------------------------------------------------------------------------------- |
+| `getActions()`                           | Return the action descriptors to compile into tools.                                |
+| `authorizeTurn(ctx)`                     | Decide granted permissions once per turn. Defaults to full grant.                   |
+| `authorizeAction(ctx)`                   | Decide authorization per action call. Defaults to checking `authorizeTurn` grants.  |
+| `configureChannelHost()`                 | Register hosted Channels, ingress, durable routes, and Host approval-link settings. |
+| `setApprovalRequestsChannel(channelId?)` | Persistently select a Channel, or clear the current route and persisted override.   |
+| `onChannelMessage(event)`                | Observe an ordinary normalized message accepted through Host ingress.               |
+| `onActionApprovalRequest(approval)`      | Observe a durable-pause Action after its Host notification is attempted.            |
+| `pendingApprovals(executionId?)`         | List parked actions and paused Codemode executions awaiting approval.               |
+| `approveExecution(executionId)`          | Approve a parked execution; runs `execute` and auto-continues the turn.             |
+| `rejectExecution(executionId, reason?)`  | Reject a parked execution without running it.                                       |
+| `replyAttachments(requestId?)`           | Read the advisory attachments recorded during a turn.                               |
+| `actionLedgerPendingRetryLeaseMs`        | Stale-pending reclaim window (default `300000`; `false` to disable).                |
 
 ## Related
 
