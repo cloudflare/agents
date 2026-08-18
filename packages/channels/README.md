@@ -45,6 +45,26 @@ const everySupportRoute = fanout([supportChat, supportEmail]);
 `fanout()` sends to every route. A partial or uncertain fanout is reported as
 `uncertain`, because retrying the whole composition could duplicate a delivery.
 
+### Deliver synthesized speech to a browser
+
+The Voice adapter lives with the other Channel adapters and builds on
+`@cloudflare/voice` without making the Voice package depend on Channels:
+
+```typescript
+import { browserVoice } from "@cloudflare/channels/voice";
+import { WorkersAITTS } from "@cloudflare/voice";
+
+const spokenUpdates = browserVoice({
+  tts: new WorkersAITTS(env.AI),
+  getConnection: () => [...agent.getConnections("browser-voice")][0]
+});
+```
+
+Connect the tagged browser surface with `VoiceClient` or `useVoiceAgent()`. The
+adapter uses the Voice client protocol for playback and does not require
+`withVoice()`, a microphone, or a speech-to-text provider. The default audio
+format is MP3; configure `audioFormat` and `sampleRate` for raw PCM providers.
+
 ## 1. Deliver directly
 
 All Channels use the same interface:
