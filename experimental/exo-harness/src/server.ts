@@ -19,6 +19,7 @@ import {
   type ExoState,
   type HarnessPolicy,
   type JournalEntry,
+  type Json,
   type LoadedHarness,
   type VersionInfo
 } from "./kernel/types";
@@ -44,8 +45,8 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
   #core: ExoCore | undefined;
 
   store(): KernelStore {
-    this.#store ??= new KernelStore(
-      (strings, ...values) => this.sql(strings, ...values)
+    this.#store ??= new KernelStore((strings, ...values) =>
+      this.sql(strings, ...values)
     );
     return this.#store;
   }
@@ -101,7 +102,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
   @callable()
   async prompt(text: string): Promise<{
     text: string;
-    toolCalls: { toolName: string; input: unknown }[];
+    toolCalls: { toolName: string; input: Json }[];
   }> {
     const core = this.core();
     await core.ensureGenesis();
@@ -127,7 +128,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     const toolCalls = result.steps.flatMap((step) =>
       step.toolCalls.map((call) => ({
         toolName: call.toolName,
-        input: call.input as unknown
+        input: call.input as Json
       }))
     );
     return { text: result.text, toolCalls };

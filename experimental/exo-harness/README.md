@@ -1,0 +1,90 @@
+# Exo Harness — a self-modifying agent with its skull open
+
+An [exo](https://github.com/exoharness/exo)-style recursive self-improvement
+harness built on the Agents SDK. **Experimental — exploration only.**
+
+The architecture splits the agent into two layers:
+
+- **Stable kernel** (`src/server.ts`, `src/kernel/`) — an `ExoKernel` Durable
+  Object owning the things the agent must never rewrite: an **append-only
+  journal** (SQLite), a **version ledger** with full file snapshots, the
+  durable `Workspace`, and the turn loop.
+- **Evolvable harness** — everything the agent _is_ lives as files in its own
+  workspace under `/harness`, versioned with real git commits (isomorphic-git
+  over the virtual filesystem):
+  - `/harness/identity.md` — its identity prompt
+  - `/harness/policy.json` — model + turn policy
+  - `/harness/tools/*.js` — its tools, hot-loaded ES modules
+
+Every turn, the kernel re-loads the live harness files, validates the tool
+modules inside an isolated dynamic Worker (Worker Loader — same machinery as
+`@cloudflare/codemode`), and builds the turn's prompt and ToolSet from them.
+The agent edits itself with ordinary file tools, then calls
+`activate_harness` to validate + git-commit a new version. Rollback is
+forward-only: restoring v1 creates a new version recording that fact, and the
+journal is never rewritten. If the agent breaks its own harness so badly it
+cannot load, the kernel auto-restores the last activated version and journals
+the failure.
+
+Harness tools execute inside isolates with no network access and two
+capabilities: `state.*` (the workspace filesystem, via `@cloudflare/shell`)
+and `journal.note()` (append-only).
+
+The UI is a chat pane plus a "glass skull": live views of the agent's own
+source (with version timeline + restore), the append-only journal, and the
+workspace.
+
+## Run it
+
+```bash
+pnpm install
+pnpm run start
+```
+
+By default the model comes from `/harness/policy.json`
+(`workers-ai:@cf/moonshotai/kimi-k2.7-code`), which needs Workers AI access in
+dev. Without credentials, use the deterministic offline driver:
+
+```bash
+echo 'MODEL_OVERRIDE=mock' > .dev.vars
+pnpm run start
+```
+
+The mock driver is not a canned transcript — replies are derived from the
+live system prompt, so self-modification is genuinely observable. Its
+protocol:
+
+- `!tool <name> <json>` — call one tool, e.g.
+  `!tool write_file {"path": "/harness/identity.md", "content": "PERSONA: pirate.\n"}`
+- `!tools [{"name": …, "input": …}, …]` — several tools in one multi-step turn
+- anything else — echo, prefixed with the live `PERSONA:` line from
+  `/harness/identity.md`
+
+## Things to try
+
+1. **Rewrite your own identity** — ask the agent to edit
+   `/harness/identity.md` and `activate_harness`. Watch the Self tab: the
+   diff lands, the version badge ticks, and the next reply speaks differently.
+2. **Grow a new tool** — ask for something it can't do (roll dice); it writes
+   `/harness/tools/dice.js`, activates, and the tool exists next turn.
+3. **Break it** — have it write a syntax error into a tool module. The next
+   turn journals `harness_load_failed` + `harness_rollback` and keeps working.
+4. **Restore an old self** — the Self tab's version timeline has one-click
+   restore; history only moves forward.
+
+## Tests
+
+```bash
+pnpm test
+```
+
+Runs in the Workers runtime (`@cloudflare/vitest-pool-workers`) with the mock
+driver: genesis, persona hot-reload, isolate tool execution, auto-rollback,
+the activation gate, forward-only rollback, and journal ordering.
+
+## Where this is going
+
+This is M1 of a larger sketch (kernel/harness split on one DO): next steps
+are swapping the filesystem/execution backend to `@cloudflare/computer`
+(container shell, snapshots), pushing harness versions to Cloudflare
+Artifacts (fork = clone/lineage), and `this.schedule()`-backed task tools.

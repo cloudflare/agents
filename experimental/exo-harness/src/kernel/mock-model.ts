@@ -122,7 +122,10 @@ function planTurn(options: LanguageModelV4CallOptions): TurnPlan {
     try {
       calls = JSON.parse(multiMatch[1]) as { name: string; input?: unknown }[];
     } catch {
-      return { kind: "text", text: `[${persona}] Could not parse !tools JSON.` };
+      return {
+        kind: "text",
+        text: `[${persona}] Could not parse !tools JSON.`
+      };
     }
     if (results.length < calls.length) {
       const next = calls[results.length];
@@ -137,7 +140,10 @@ function planTurn(options: LanguageModelV4CallOptions): TurnPlan {
     const summary = results
       .map((r) => `\`${r.toolName}\` → ${describeOutput(r.output)}`)
       .join("; ");
-    return { kind: "text", text: `[${persona}] Ran ${results.length} tools: ${summary}` };
+    return {
+      kind: "text",
+      text: `[${persona}] Ran ${results.length} tools: ${summary}`
+    };
   }
 
   // A tool already ran this turn — report its result and stop.

@@ -8,7 +8,12 @@
  *   (rollback) or inspected (UI diffs) without touching git history.
  */
 
-import type { JournalEntry, JournalKind, VersionInfo } from "./types";
+import type {
+  JournalEntry,
+  JournalKind,
+  JsonObject,
+  VersionInfo
+} from "./types";
 
 export type SqlTag = <T = Record<string, unknown>>(
   strings: TemplateStringsArray,
@@ -31,11 +36,11 @@ interface VersionRow {
 }
 
 export class KernelStore {
-  #sql: SqlTag;
+  private readonly sql: SqlTag;
 
   constructor(sql: SqlTag) {
-    this.#sql = sql;
-    this.#sql`
+    this.sql = sql;
+    this.sql`
       CREATE TABLE IF NOT EXISTS exo_journal (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts INTEGER NOT NULL,
@@ -43,7 +48,7 @@ export class KernelStore {
         data TEXT NOT NULL
       )
     `;
-    this.#sql`
+    this.sql`
       CREATE TABLE IF NOT EXISTS exo_versions (
         version INTEGER PRIMARY KEY,
         sha TEXT NOT NULL,
@@ -54,12 +59,12 @@ export class KernelStore {
     `;
   }
 
-  appendJournal(kind: JournalKind, data: Record<string, unknown>): number {
-    this.#sql`
+  appendJournal(kind: JournalKind, data: JsonObject): number {
+    this.sql`
       INSERT INTO exo_journal (ts, kind, data)
       VALUES (${Date.now()}, ${kind}, ${JSON.stringify(data)})
     `;
-    const rows = this.#sql<{ id: number }>`
+    const rows = this.sql<{ id: number }>`
       SELECT last_insert_rowid() AS id
     `;
     return rows[0]?.id ?? 0;
@@ -67,7 +72,7 @@ export class KernelStore {
 
   /** Most recent entries first-to-last (ascending id), capped at `limit`. */
   journalTail(limit: number): JournalEntry[] {
-    const rows = this.#sql<JournalRow>`
+    const rows = this.sql<JournalRow>`
       SELECT id, ts, kind, data FROM exo_journal
       ORDER BY id DESC LIMIT ${limit}
     `;
@@ -76,7 +81,7 @@ export class KernelStore {
 
   /** Page backwards through history: entries with id < beforeId. */
   journalBefore(beforeId: number, limit: number): JournalEntry[] {
-    const rows = this.#sql<JournalRow>`
+    const rows = this.sql<JournalRow>`
       SELECT id, ts, kind, data FROM exo_journal
       WHERE id < ${beforeId}
       ORDER BY id DESC LIMIT ${limit}
@@ -85,7 +90,7 @@ export class KernelStore {
   }
 
   journalCount(): number {
-    const rows = this.#sql<{ n: number }>`
+    const rows = this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM exo_journal
     `;
     return rows[0]?.n ?? 0;
@@ -98,7 +103,7 @@ export class KernelStore {
   ): VersionInfo {
     const next = this.activeVersion() + 1;
     const ts = Date.now();
-    this.#sql`
+    this.sql`
       INSERT INTO exo_versions (version, sha, note, ts, files)
       VALUES (${next}, ${sha}, ${note}, ${ts}, ${JSON.stringify(files)})
     `;
@@ -106,14 +111,14 @@ export class KernelStore {
   }
 
   activeVersion(): number {
-    const rows = this.#sql<{ v: number | null }>`
+    const rows = this.sql<{ v: number | null }>`
       SELECT MAX(version) AS v FROM exo_versions
     `;
     return rows[0]?.v ?? 0;
   }
 
   listVersions(): VersionInfo[] {
-    const rows = this.#sql<Omit<VersionRow, "files">>`
+    const rows = this.sql<Omit<VersionRow, "files">>`
       SELECT version, sha, note, ts FROM exo_versions ORDER BY version ASC
     `;
     return rows.map((r) => ({
@@ -125,7 +130,7 @@ export class KernelStore {
   }
 
   versionFiles(version: number): Record<string, string> | null {
-    const rows = this.#sql<{ files: string }>`
+    const rows = this.sql<{ files: string }>`
       SELECT files FROM exo_versions WHERE version = ${version}
     `;
     if (rows.length === 0) return null;
@@ -133,7 +138,7 @@ export class KernelStore {
   }
 
   versionInfo(version: number): VersionInfo | null {
-    const rows = this.#sql<Omit<VersionRow, "files">>`
+    const rows = this.sql<Omit<VersionRow, "files">>`
       SELECT version, sha, note, ts FROM exo_versions
       WHERE version = ${version}
     `;
@@ -144,9 +149,9 @@ export class KernelStore {
 }
 
 function parseJournalRow(row: JournalRow): JournalEntry {
-  let data: Record<string, unknown>;
+  let data: JsonObject;
   try {
-    data = JSON.parse(row.data) as Record<string, unknown>;
+    data = JSON.parse(row.data) as JsonObject;
   } catch {
     data = { raw: row.data };
   }

@@ -11,7 +11,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^4.0.2",
+    "@ai-sdk/provider": "^4.0.0",
     "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^2.6.0",

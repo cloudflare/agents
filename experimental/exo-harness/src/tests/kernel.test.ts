@@ -8,10 +8,33 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
-import type { JournalEntry } from "../kernel/types";
+import type {
+  ExoState,
+  JournalEntry,
+  Json,
+  VersionInfo
+} from "../kernel/types";
 
-async function freshAgent(name: string) {
-  const agent = await getAgentByName(env.ExoKernel, name);
+/**
+ * Explicit RPC stub surface. The recursive `Json` type in the real method
+ * signatures exceeds TS's instantiation depth inside the DurableObjectStub
+ * serializability mapping, so we assert the (runtime-identical) shape here.
+ */
+interface KernelStub {
+  boot(): Promise<ExoState>;
+  prompt(
+    text: string
+  ): Promise<{ text: string; toolCalls: { toolName: string; input: Json }[] }>;
+  getFileContent(path: string): Promise<string | null>;
+  getVersions(): Promise<VersionInfo[]>;
+  getJournal(beforeId?: number, limit?: number): Promise<JournalEntry[]>;
+}
+
+async function freshAgent(name: string): Promise<KernelStub> {
+  const agent = (await getAgentByName(
+    env.ExoKernel,
+    name
+  )) as unknown as KernelStub;
   await agent.boot();
   return agent;
 }

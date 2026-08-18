@@ -113,8 +113,7 @@ export class ExoCore {
       const message = error instanceof Error ? error.message : String(error);
       this.store.appendJournal("harness_load_failed", { error: message });
       const active = this.store.activeVersion();
-      const snapshot =
-        active > 0 ? this.store.versionFiles(active) : null;
+      const snapshot = active > 0 ? this.store.versionFiles(active) : null;
       if (!snapshot) {
         this.#onMutation();
         throw error;
@@ -350,7 +349,9 @@ ${imports}
         }),
         execute: this.#journaled("read_file", async ({ path }) => {
           const content = await this.workspace.readFile(path);
-          return content === null ? { error: `not found: ${path}` } : { path, content };
+          return content === null
+            ? { error: `not found: ${path}` }
+            : { path, content };
         })
       }),
       write_file: tool({
@@ -471,8 +472,7 @@ ${imports}
         continue;
       }
       tools[manifest.name] = tool({
-        description:
-          `${manifest.description} (harness tool from ${manifest.file})`,
+        description: `${manifest.description} (harness tool from ${manifest.file})`,
         inputSchema: jsonSchema<Record<string, unknown>>(
           manifest.inputSchema as Parameters<typeof jsonSchema>[0]
         ),
@@ -527,7 +527,7 @@ ${imports}
 function preview(value: unknown): string {
   let json: string;
   try {
-    json = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+    json = typeof value === "string" ? value : (JSON.stringify(value) ?? "");
   } catch {
     json = String(value);
   }

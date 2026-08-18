@@ -1,5 +1,15 @@
 /** Shared types between the kernel (server) and the UI (client). */
 
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | Json[]
+  | { [key: string]: Json };
+
+export type JsonObject = { [key: string]: Json };
+
 export type JournalKind =
   | "genesis"
   | "turn_start"
@@ -18,7 +28,7 @@ export interface JournalEntry {
   id: number;
   ts: number;
   kind: JournalKind;
-  data: Record<string, unknown>;
+  data: JsonObject;
 }
 
 export interface VersionInfo {
