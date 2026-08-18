@@ -13,7 +13,11 @@
   "vars": {
     // "" = use the model from /harness/policy.json; "mock" = offline dev
     // driver (see src/kernel/mock-model.ts); or "workers-ai:<model-id>".
-    "MODEL_OVERRIDE": ""
+    "MODEL_OVERRIDE": "",
+    // Environment prefix for per-agent Artifacts repo names, so prod and
+    // local dev agents with the same name never share (and force-push
+    // over) the same mirror.
+    "ARTIFACTS_REPO_PREFIX": "exo-prod"
   },
   "worker_loaders": [{ "binding": "LOADER" }],
   // The production workers.dev route sits behind Cloudflare Access; keep

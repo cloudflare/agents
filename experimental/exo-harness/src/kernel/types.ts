@@ -23,6 +23,12 @@ export type JournalKind =
   | "artifacts_push_failed"
   | "fork"
   | "history_compacted"
+  | "task_scheduled"
+  | "task_run"
+  | "task_failed"
+  | "task_skipped"
+  | "task_cancelled"
+  | "task_disabled"
   | "file_write"
   | "file_delete"
   | "note"
@@ -115,6 +121,37 @@ export interface PendingCompaction {
   requestedTs: number;
 }
 
+export type TaskState = "active" | "done" | "cancelled" | "disabled";
+
+/** A self-scheduled task in the kernel's registry (backed by this.schedule). */
+export interface TaskInfo {
+  /** Same id as the underlying SDK schedule. */
+  id: string;
+  instruction: string;
+  kind: "delay" | "at" | "cron";
+  /** Human-readable spec: seconds, ISO time, or cron expression. */
+  spec: string;
+  state: TaskState;
+  createdTs: number;
+  lastRunTs: number | null;
+  runs: number;
+  consecutiveFailures: number;
+  /** Next scheduled firing (epoch ms), when known and active. */
+  nextRunTs: number | null;
+}
+
+/**
+ * Kernel-fixed rails for self-scheduled tasks (the agent cannot edit
+ * these). Deliberately loose — the goal is preventing runaway loops, not
+ * constraining use.
+ */
+export const TASK_BOUNDS = {
+  maxActiveTasks: 10,
+  maxRunsPerDay: 48,
+  minMsBetweenRuns: 5 * 60_000,
+  disableAfterConsecutiveFailures: 5
+} as const;
+
 export interface LoadedHarness {
   identity: string;
   policy: HarnessPolicy;
@@ -137,7 +174,7 @@ export interface HarnessFileInfo {
  */
 export interface ContextSnapshot {
   ts: number;
-  source: "chat" | "prompt";
+  source: "chat" | "prompt" | "task";
   model: string;
   system: string;
   /** The pruned ModelMessage[] exactly as passed to the model. */
@@ -158,6 +195,7 @@ export interface ExoState {
   versions: VersionInfo[];
   journalTail: JournalEntry[];
   harnessFiles: HarnessFileInfo[];
+  tasks: TaskInfo[];
 }
 
 export const INITIAL_STATE: ExoState = {
@@ -165,7 +203,8 @@ export const INITIAL_STATE: ExoState = {
   activeSha: "",
   versions: [],
   journalTail: [],
-  harnessFiles: []
+  harnessFiles: [],
+  tasks: []
 };
 
 /** Number of journal entries mirrored into synced state for the live UI. */

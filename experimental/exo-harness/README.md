@@ -33,9 +33,10 @@ and `journal.note()` (append-only).
 When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), genesis and
 every successful activation push the workspace git history to a per-agent
 [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) repo
-(`exo-<agent-name>` in the `exo-harness` namespace) over standard
-git-over-HTTP, and record the remote + pushed SHA in the version ledger
-and journal. The push is best-effort: failures are journaled
+(`<ARTIFACTS_REPO_PREFIX>-<agent-name>` in the `exo-harness` namespace —
+`exo-prod-*` deployed, `exo-dev-*` in local dev, so the two environments
+never share a mirror) over standard git-over-HTTP, and record the remote +
+pushed SHA in the version ledger and journal. The push is best-effort: failures are journaled
 (`artifacts_push_failed`) and never fail the activation, and without the
 binding (offline dev, tests) it is skipped entirely.
 
@@ -51,6 +52,17 @@ nudge to its briefing — it never compacts on its own, and compaction never
 touches the append-only journal. The Context tab shows all of it live: the
 exact system prompt (with injected memory), the message window, and the
 token estimate vs target.
+
+Agents can give their future selves work: `schedule_task` creates
+persistent tasks (once after a delay, at a time, or on a cron) backed by
+the SDK scheduler, surviving hibernation and restarts. A fired task runs a
+full autonomous turn outside the chat — same harness, memory, and tools —
+and everything it does is journaled and visible in the Tasks tab. Kernel
+rails, not agent-editable: max 10 active tasks, 48 runs/day, one firing
+per 5 minutes, and a task that fails 5 times in a row is disabled with a
+loud `task_disabled` journal entry (otherwise failures never cancel a
+cron — least surprise). New tasks can only be created in human-initiated
+turns: a scheduled turn's tool surface has no `schedule_task`.
 
 Agents can also reproduce: the `fork_self` tool forks the current
 **activated** self into a new agent. With Artifacts bound this is a real
@@ -111,6 +123,9 @@ protocol:
    matters into memory and compact the transcript". Watch the Context tab:
    the transcript shrinks, a "## Working memory" section appears in its
    system prompt, and it still recalls dropped details.
+7. **Let it work alone** — "in two minutes, review your working memory and
+   journal one insight about yourself". Watch the Tasks tab count down and
+   the journal record the autonomous turn when it fires.
 
 ## Deploy
 

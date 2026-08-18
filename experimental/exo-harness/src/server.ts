@@ -19,6 +19,7 @@ import { createMockModel } from "./kernel/mock-model";
 import {
   INITIAL_STATE,
   JOURNAL_TAIL_LIMIT,
+  TASK_BOUNDS,
   type ContextSnapshot,
   type ExoState,
   type ForkOrigin,
@@ -26,6 +27,7 @@ import {
   type JournalEntry,
   type Json,
   type LoadedHarness,
+  type TaskInfo,
   type VersionInfo
 } from "./kernel/types";
 
@@ -72,10 +74,14 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       name: () => this.name,
       // Absent in offline dev and tests — the core then skips pushing.
       artifacts: this.env.ARTIFACTS,
+      // Environment split: prod and local dev agents get separate mirrors.
+      repoPrefix: this.env.ARTIFACTS_REPO_PREFIX || "exo",
       adoptChild: async (childName, origin) => {
         const child = await getAgentByName(this.env.ExoKernel, childName);
         return (child as unknown as AdoptableKernel).adoptGenesis(origin);
       },
+      scheduleTask: (input) => this.scheduleTaskImpl(input),
+      cancelTask: (id) => this.cancelTaskById(id),
       onMutation: () => this.refreshSyncedState()
     });
     return this.#core;
@@ -146,13 +152,24 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     text: string;
     toolCalls: { toolName: string; input: Json }[];
   }> {
+    return this.#runOneShotTurn("prompt", text);
+  }
+
+  /**
+   * Shared out-of-band turn runner for prompt() and scheduled tasks.
+   * Scheduled turns cannot create further tasks (human-initiated only).
+   */
+  async #runOneShotTurn(
+    source: "prompt" | "task",
+    text: string
+  ): Promise<{ text: string; toolCalls: { toolName: string; input: Json }[] }> {
     const core = this.core();
     await core.ensureGenesis();
     const loaded = await core.loadHarness();
     const store = this.store();
 
     store.appendJournal("turn_start", {
-      source: "prompt",
+      source,
       version: store.activeVersion()
     });
 
@@ -163,9 +180,11 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       memory,
       messages
     );
-    const tools = core.buildTools(loaded);
+    const tools = core.buildTools(loaded, {
+      allowScheduling: source !== "task"
+    });
     this.captureContext(
-      "prompt",
+      source,
       loaded,
       system,
       messages,
@@ -182,7 +201,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       stopWhen: isStepCount(loaded.policy.maxSteps ?? 8)
     });
 
-    store.appendJournal("turn_end", { source: "prompt" });
+    store.appendJournal("turn_end", { source });
     this.refreshSyncedState();
 
     const toolCalls = result.steps.flatMap((step) =>
@@ -192,6 +211,154 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       }))
     );
     return { text: result.text, toolCalls };
+  }
+
+  /** Create a persistent self-scheduled task (kernel rails enforced). */
+  async scheduleTaskImpl(input: {
+    instruction: string;
+    when:
+      | { kind: "delay"; seconds: number }
+      | { kind: "at"; time: Date }
+      | { kind: "cron"; cron: string };
+  }): Promise<{ id: string; kind: TaskInfo["kind"]; spec: string }> {
+    const store = this.store();
+    if (store.countActiveTasks() >= TASK_BOUNDS.maxActiveTasks) {
+      throw new Error(
+        `task limit reached (${TASK_BOUNDS.maxActiveTasks} active) — cancel one first`
+      );
+    }
+    const payload = { instruction: input.instruction };
+    let kind: TaskInfo["kind"];
+    let spec: string;
+    let scheduled: { id: string };
+    switch (input.when.kind) {
+      case "delay":
+        kind = "delay";
+        spec = `${input.when.seconds}s`;
+        scheduled = await this.schedule(
+          input.when.seconds,
+          "runScheduledTask",
+          payload
+        );
+        break;
+      case "at":
+        kind = "at";
+        spec = input.when.time.toISOString();
+        scheduled = await this.schedule(
+          input.when.time,
+          "runScheduledTask",
+          payload
+        );
+        break;
+      case "cron":
+        kind = "cron";
+        spec = input.when.cron;
+        scheduled = await this.schedule(
+          input.when.cron,
+          "runScheduledTask",
+          payload,
+          { idempotent: false }
+        );
+        break;
+      default: {
+        const _exhaustive: never = input.when;
+        throw new Error(`unknown schedule kind ${JSON.stringify(_exhaustive)}`);
+      }
+    }
+    store.insertTask({
+      id: scheduled.id,
+      instruction: input.instruction,
+      kind,
+      spec
+    });
+    store.appendJournal("task_scheduled", {
+      taskId: scheduled.id,
+      kind,
+      spec,
+      instruction: input.instruction.slice(0, 300)
+    });
+    this.refreshSyncedState();
+    return { id: scheduled.id, kind, spec };
+  }
+
+  /** Cancel an active task: SDK schedule + registry + journal. */
+  @callable()
+  async cancelTaskById(id: string): Promise<boolean> {
+    const store = this.store();
+    const task = store.taskById(id);
+    if (!task || task.state !== "active") return false;
+    await this.cancelSchedule(id);
+    store.setTaskState(id, "cancelled");
+    store.appendJournal("task_cancelled", { taskId: id });
+    this.refreshSyncedState();
+    return true;
+  }
+
+  /**
+   * Schedule callback: run one autonomous turn with the stored
+   * instruction. Kernel rails: global min interval between firings, a
+   * daily run budget, and auto-disable (loudly journaled) after
+   * consecutive failures — otherwise cron semantics: failures never
+   * cancel the schedule.
+   */
+  async runScheduledTask(
+    payload: { instruction: string },
+    schedule?: { id: string }
+  ): Promise<void> {
+    const store = this.store();
+    const taskId = schedule?.id ?? "";
+    const task = store.taskById(taskId);
+    if (!task || task.state !== "active") {
+      store.appendJournal("task_skipped", { taskId, reason: "not_active" });
+      this.refreshSyncedState();
+      return;
+    }
+    const lastRun = store.lastTaskRunTs();
+    if (
+      lastRun !== null &&
+      Date.now() - lastRun < TASK_BOUNDS.minMsBetweenRuns
+    ) {
+      store.appendJournal("task_skipped", { taskId, reason: "rate_limited" });
+      this.refreshSyncedState();
+      return;
+    }
+    if (
+      store.journalCountSince("task_run", Date.now() - 86_400_000) >=
+      TASK_BOUNDS.maxRunsPerDay
+    ) {
+      store.appendJournal("task_skipped", { taskId, reason: "daily_budget" });
+      this.refreshSyncedState();
+      return;
+    }
+
+    store.appendJournal("task_run", {
+      taskId,
+      instruction: payload.instruction.slice(0, 300)
+    });
+    try {
+      await this.#runOneShotTurn("task", payload.instruction);
+      store.recordTaskRun(taskId, true);
+      if (task.kind !== "cron") {
+        store.setTaskState(taskId, "done");
+      }
+    } catch (error) {
+      store.recordTaskRun(taskId, false);
+      const message = error instanceof Error ? error.message : String(error);
+      store.appendJournal("task_failed", { taskId, error: message });
+      const updated = store.taskById(taskId);
+      if (
+        (updated?.consecutiveFailures ?? 0) >=
+        TASK_BOUNDS.disableAfterConsecutiveFailures
+      ) {
+        await this.cancelSchedule(taskId);
+        store.setTaskState(taskId, "disabled");
+        store.appendJournal("task_disabled", {
+          taskId,
+          afterConsecutiveFailures: updated?.consecutiveFailures ?? 0
+        });
+      }
+    }
+    this.refreshSyncedState();
   }
 
   /**
@@ -346,6 +513,11 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "append-only record of events — durable forever, but NOT injected;",
       "use it for what happened, not for what you must remember.",
       "",
+      "You can give your future self work with schedule_task (once or on a",
+      "cron); scheduled turns run autonomously outside the chat with your",
+      "full harness, and everything they do is journaled. New tasks can",
+      "only be created in human-initiated turns.",
+      "",
       `Active harness version: v${version}`,
       loaded.tools.length > 0
         ? `Harness tools currently loaded:\n${toolList}`
@@ -376,6 +548,20 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     const files = await this.workspace.glob("/harness/**");
     const versions = store.listVersions();
     const active = versions[versions.length - 1];
+
+    // Join task registry with the live SDK schedules for next-run times.
+    const nextRuns = new Map<string, number>();
+    for (const schedule of this.getSchedules()) {
+      // Schedule rows store epoch seconds; normalize to ms defensively.
+      const time = schedule.time < 1e12 ? schedule.time * 1000 : schedule.time;
+      nextRuns.set(schedule.id, time);
+    }
+    const tasks = store.listTasks().map((task) => ({
+      ...task,
+      nextRunTs:
+        task.state === "active" ? (nextRuns.get(task.id) ?? null) : null
+    }));
+
     this.setState({
       activeVersion: active?.version ?? 0,
       activeSha: active?.sha ?? "",
@@ -383,7 +569,8 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       journalTail: store.journalTail(JOURNAL_TAIL_LIMIT),
       harnessFiles: files
         .filter((f) => f.type === "file")
-        .map((f) => ({ path: f.path, size: f.size }))
+        .map((f) => ({ path: f.path, size: f.size })),
+      tasks
     });
   }
 

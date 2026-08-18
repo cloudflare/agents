@@ -12,6 +12,7 @@ import {
   Text
 } from "@cloudflare/kumo";
 import {
+  AlarmIcon,
   BrainIcon,
   FolderIcon,
   InfoIcon,
@@ -34,9 +35,10 @@ import { SelfTab } from "./ui/self-tab";
 import { JournalTab } from "./ui/journal-tab";
 import { WorkspaceTab } from "./ui/workspace-tab";
 import { ContextTab } from "./ui/context-tab";
+import { TasksTab } from "./ui/tasks-tab";
 import "./styles.css";
 
-type Tab = "self" | "context" | "journal" | "workspace";
+type Tab = "self" | "context" | "tasks" | "journal" | "workspace";
 
 // Which self to open: /?agent=<name>. Forked agents link here; the default
 // is the one shared long-lived agent.
@@ -46,6 +48,7 @@ const AGENT_NAME =
 const TABS: { id: Tab; label: string; icon: typeof BrainIcon }[] = [
   { id: "self", label: "Self", icon: BrainIcon },
   { id: "context", label: "Context", icon: StackIcon },
+  { id: "tasks", label: "Tasks", icon: AlarmIcon },
   { id: "journal", label: "Journal", icon: ScrollIcon },
   { id: "workspace", label: "Workspace", icon: FolderIcon }
 ];
@@ -341,6 +344,7 @@ function App() {
                 isConnected={isConnected}
               />
             )}
+            {tab === "tasks" && <TasksTab agent={caller} state={exoState} />}
             {tab === "journal" && <JournalTab state={exoState} />}
             {tab === "workspace" && (
               <WorkspaceTab

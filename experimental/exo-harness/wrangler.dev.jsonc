@@ -15,7 +15,8 @@
     { "binding": "ARTIFACTS", "namespace": "exo-harness", "remote": true }
   ],
   "vars": {
-    "MODEL_OVERRIDE": ""
+    "MODEL_OVERRIDE": "",
+    "ARTIFACTS_REPO_PREFIX": "exo-dev"
   },
   "worker_loaders": [{ "binding": "LOADER" }],
   "assets": {

@@ -42,17 +42,19 @@ const ARTIFACTS_REMOTE_NAME = "artifacts";
 const ARTIFACTS_TOKEN_TTL_SECONDS = 15 * 60;
 
 /**
- * Derive a stable, valid Artifacts repo name from an agent name.
+ * Derive a stable, valid Artifacts repo name from an agent name. The
+ * prefix separates environments (e.g. exo-prod vs exo-dev) so a deployed
+ * agent and a local dev agent with the same name never share a mirror.
  * Repo names must start with a letter or digit and may contain letters,
  * digits, ".", "_", and "-".
  */
-export function artifactsRepoName(agentName: string): string {
+export function artifactsRepoName(agentName: string, prefix = "exo"): string {
   const cleaned = agentName
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^[^a-z0-9]+/, "")
     .slice(0, 63);
-  return `exo-${cleaned.length > 0 ? cleaned : "agent"}`;
+  return `${prefix}-${cleaned.length > 0 ? cleaned : "agent"}`;
 }
 
 /**
@@ -143,6 +145,8 @@ export interface ExoCoreOptions {
    * skipped.
    */
   artifacts?: Artifacts;
+  /** Environment prefix for Artifacts repo names (default "exo"). */
+  repoPrefix?: string;
   /**
    * Deliver a fork genesis to a (fresh) sibling agent. Wired by the owner
    * to a cross-DO RPC call; the child applies it via adoptGenesis().
@@ -151,6 +155,22 @@ export interface ExoCoreOptions {
     childName: string,
     origin: ForkOrigin
   ) => Promise<{ version: number; sha: string }>;
+  /**
+   * Create a persistent self-scheduled task (wired to this.schedule on
+   * the owner, which also enforces the kernel's task rails).
+   */
+  scheduleTask: (input: {
+    instruction: string;
+    when:
+      | { kind: "delay"; seconds: number }
+      | { kind: "at"; time: Date }
+      | {
+          kind: "cron";
+          cron: string;
+        };
+  }) => Promise<{ id: string; kind: string; spec: string }>;
+  /** Cancel a self-scheduled task by id. */
+  cancelTask: (id: string) => Promise<boolean>;
   /** Called after any mutation so the owner can refresh synced UI state. */
   onMutation: () => void;
 }
@@ -161,7 +181,10 @@ export class ExoCore {
   #loader: LoaderBinding;
   #name: () => string;
   #artifacts: Artifacts | undefined;
+  #repoPrefix: string;
   #adoptChild: ExoCoreOptions["adoptChild"];
+  #scheduleTask: ExoCoreOptions["scheduleTask"];
+  #cancelTask: ExoCoreOptions["cancelTask"];
   #onMutation: () => void;
   #git: ReturnType<typeof createGit> | undefined;
   #genesis: Promise<void> | undefined;
@@ -172,7 +195,10 @@ export class ExoCore {
     this.#loader = options.loader;
     this.#name = options.name;
     this.#artifacts = options.artifacts;
+    this.#repoPrefix = options.repoPrefix ?? "exo";
     this.#adoptChild = options.adoptChild;
+    this.#scheduleTask = options.scheduleTask;
+    this.#cancelTask = options.cancelTask;
     this.#onMutation = options.onMutation;
   }
 
@@ -495,7 +521,7 @@ ${imports}
   async #ensureArtifactsRepo(
     artifacts: Artifacts
   ): Promise<{ remote: string; token: string }> {
-    const repoName = artifactsRepoName(this.#name());
+    const repoName = artifactsRepoName(this.#name(), this.#repoPrefix);
     try {
       const repo = await artifacts.get(repoName);
       const token = await repo.createToken(
@@ -574,8 +600,8 @@ ${imports}
           );
         }
       }
-      const parentRepo = artifactsRepoName(this.#name());
-      const childRepo = artifactsRepoName(name);
+      const parentRepo = artifactsRepoName(this.#name(), this.#repoPrefix);
+      const childRepo = artifactsRepoName(name, this.#repoPrefix);
       const repo = await this.#artifacts.get(parentRepo);
       const forked = await repo.fork(childRepo, {
         description: `fork of ${parentRepo} v${active.version} for agent "${name}"`
@@ -718,9 +744,14 @@ ${imports}
   /**
    * Build the full ToolSet for a turn: the fixed kernel bootstrap surface
    * plus one entry per live harness tool. Every execute is wrapped with
-   * journaling.
+   * journaling. Task CREATION is only exposed on human-initiated turns
+   * (`allowScheduling`) — a scheduled turn cannot schedule more tasks.
    */
-  buildTools(loaded: LoadedHarness): ToolSet {
+  buildTools(
+    loaded: LoadedHarness,
+    opts: { allowScheduling?: boolean } = {}
+  ): ToolSet {
+    const allowScheduling = opts.allowScheduling ?? true;
     const tools: ToolSet = {
       read_file: tool({
         description:
@@ -873,6 +904,26 @@ ${imports}
           return { ok: true, id };
         })
       }),
+      list_tasks: tool({
+        description:
+          "List your self-scheduled tasks (instruction, cadence, state, run counts). Tasks run as autonomous turns outside the chat.",
+        inputSchema: z.object({}),
+        execute: this.#journaled("list_tasks", async () => {
+          return this.store.listTasks();
+        })
+      }),
+      cancel_task: tool({
+        description: "Cancel one of your self-scheduled tasks by id",
+        inputSchema: z.object({
+          id: z.string().describe("Task id (from list_tasks)")
+        }),
+        execute: this.#journaled("cancel_task", async ({ id }) => {
+          const cancelled = await this.#cancelTask(id);
+          return cancelled
+            ? { id, cancelled: true }
+            : { error: `no active task ${id}` };
+        })
+      }),
       read_journal: tool({
         description:
           "Read the most recent entries from your append-only journal — your full history of events: turns, tool calls, upgrades, rollbacks, pushes, compactions, and your own notes. Use it to reconstruct what happened and why.",
@@ -890,6 +941,67 @@ ${imports}
         })
       })
     };
+
+    if (allowScheduling) {
+      tools.schedule_task = tool({
+        description:
+          "Give your future self work: schedule an autonomous turn that runs your instruction later — once (after a delay or at a time) or repeatedly (cron). Scheduled turns run outside the chat with your full harness and tools, and are journaled. Provide exactly one of delaySeconds, at, or cron.",
+        inputSchema: z.object({
+          instruction: z
+            .string()
+            .min(1)
+            .max(4000)
+            .describe("The instruction your future self will run"),
+          delaySeconds: z
+            .number()
+            .int()
+            .min(30)
+            .max(30 * 24 * 3600)
+            .optional()
+            .describe("Run once, this many seconds from now"),
+          at: z.string().optional().describe("Run once, at this ISO 8601 time"),
+          cron: z
+            .string()
+            .optional()
+            .describe('Run repeatedly on a cron expression, e.g. "0 3 * * *"')
+        }),
+        execute: this.#journaled(
+          "schedule_task",
+          async ({ instruction, delaySeconds, at, cron }) => {
+            const provided = [delaySeconds, at, cron].filter(
+              (v) => v !== undefined
+            );
+            if (provided.length !== 1) {
+              return {
+                error: "provide exactly one of delaySeconds, at, or cron"
+              };
+            }
+            let when: Parameters<ExoCoreOptions["scheduleTask"]>[0]["when"];
+            if (delaySeconds !== undefined) {
+              when = { kind: "delay", seconds: delaySeconds };
+            } else if (at !== undefined) {
+              const time = new Date(at);
+              if (
+                Number.isNaN(time.getTime()) ||
+                time.getTime() <= Date.now()
+              ) {
+                return { error: `"at" must be a future ISO 8601 time` };
+              }
+              when = { kind: "at", time };
+            } else {
+              when = { kind: "cron", cron: cron as string };
+            }
+            try {
+              return await this.#scheduleTask({ instruction, when });
+            } catch (error) {
+              return {
+                error: error instanceof Error ? error.message : String(error)
+              };
+            }
+          }
+        )
+      });
+    }
 
     for (const manifest of loaded.tools) {
       if (manifest.name in tools) {

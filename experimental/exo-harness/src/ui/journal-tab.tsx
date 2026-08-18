@@ -19,6 +19,12 @@ const KIND_STYLE: Record<
   artifacts_push_failed: { variant: "destructive" },
   fork: { variant: "primary" },
   history_compacted: { variant: "primary" },
+  task_scheduled: { variant: "primary" },
+  task_run: { variant: "secondary" },
+  task_failed: { variant: "destructive" },
+  task_skipped: { variant: "secondary" },
+  task_cancelled: { variant: "secondary" },
+  task_disabled: { variant: "destructive" },
   file_write: { variant: "secondary" },
   file_delete: { variant: "secondary" },
   note: { variant: "primary" },
@@ -38,6 +44,18 @@ function summarize(entry: JournalEntry): string {
       return d.phase === "requested"
         ? `requested · ${String(d.summaryChars)}ch summary → ${String(d.memoryFile)}, keep last ${d.keepLast}`
         : `applied · dropped ${d.dropped}, kept last ${d.keptLast}`;
+    case "task_scheduled":
+      return `${String(d.kind)} ${String(d.spec)} · ${String(d.instruction)}`;
+    case "task_run":
+      return `${String(d.taskId).slice(0, 8)} · ${String(d.instruction)}`;
+    case "task_failed":
+      return `${String(d.taskId).slice(0, 8)} · ${String(d.error)}`;
+    case "task_skipped":
+      return `${String(d.taskId).slice(0, 8)} · ${String(d.reason)}`;
+    case "task_cancelled":
+      return String(d.taskId).slice(0, 8);
+    case "task_disabled":
+      return `${String(d.taskId).slice(0, 8)} · after ${d.afterConsecutiveFailures} consecutive failures`;
     case "harness_upgrade":
       return `v${d.version} · ${String(d.note)}`;
     case "harness_rollback":

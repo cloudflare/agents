@@ -31,6 +31,11 @@ interface KernelStub {
   getVersions(): Promise<VersionInfo[]>;
   getJournal(beforeId?: number, limit?: number): Promise<JournalEntry[]>;
   getContextSnapshot(): Promise<ContextSnapshot | null>;
+  cancelTaskById(id: string): Promise<boolean>;
+  runScheduledTask(
+    payload: { instruction: string },
+    schedule?: { id: string }
+  ): Promise<void>;
 }
 
 async function freshAgent(name: string): Promise<KernelStub> {
@@ -351,10 +356,12 @@ describe("artifacts mirror", () => {
     expect(kinds(journal)).not.toContain("artifacts_push_failed");
   });
 
-  it("derives valid per-agent repo names", () => {
+  it("derives valid per-agent repo names, split by environment prefix", () => {
     expect(artifactsRepoName("main")).toBe("exo-main");
     expect(artifactsRepoName("My Agent/42")).toBe("exo-my-agent-42");
     expect(artifactsRepoName("---")).toBe("exo-agent");
+    expect(artifactsRepoName("main", "exo-prod")).toBe("exo-prod-main");
+    expect(artifactsRepoName("main", "exo-dev")).toBe("exo-dev-main");
   });
 });
 
@@ -484,6 +491,107 @@ describe("self-managed context (context.json + memory + compact_history)", () =>
     const k = kinds(journal);
     expect(k).toContain("harness_load_failed");
     expect(k).toContain("harness_rollback");
+  });
+});
+
+describe("self-scheduled tasks", () => {
+  it("schedule_task registers a task; cancel_task is forward-only history", async () => {
+    const agent = await freshAgent("task-basic");
+    const scheduled = await agent.prompt(
+      '!tool schedule_task {"instruction": "write a heartbeat note in the journal", "delaySeconds": 3600}'
+    );
+    expect(scheduled.text).toContain('"kind":"delay"');
+
+    const state = await agent.boot();
+    expect(state.tasks).toHaveLength(1);
+    expect(state.tasks[0].state).toBe("active");
+    expect(state.tasks[0].instruction).toContain("heartbeat");
+    expect(state.tasks[0].nextRunTs).not.toBeNull();
+
+    const journal = await agent.getJournal();
+    expect(kinds(journal)).toContain("task_scheduled");
+
+    const cancel = await agent.prompt(
+      `!tool cancel_task {"id": ${JSON.stringify(state.tasks[0].id)}}`
+    );
+    expect(cancel.text).toContain('"cancelled":true');
+    const after = await agent.boot();
+    expect(after.tasks[0].state).toBe("cancelled");
+    expect(kinds(await agent.getJournal())).toContain("task_cancelled");
+  });
+
+  it("rejects malformed schedules and enforces the active-task cap", async () => {
+    const agent = await freshAgent("task-caps");
+    const both = await agent.prompt(
+      '!tool schedule_task {"instruction": "x", "delaySeconds": 60, "cron": "0 3 * * *"}'
+    );
+    expect(both.text).toContain("exactly one");
+
+    for (let i = 0; i < 10; i++) {
+      await agent.prompt(
+        `!tool schedule_task {"instruction": "task ${i}", "delaySeconds": 3600}`
+      );
+    }
+    expect((await agent.boot()).tasks).toHaveLength(10);
+    const eleventh = await agent.prompt(
+      '!tool schedule_task {"instruction": "one too many", "delaySeconds": 3600}'
+    );
+    expect(eleventh.text).toContain("task limit reached");
+  });
+
+  it("a fired task runs an autonomous turn that cannot schedule new tasks", async () => {
+    const agent = await freshAgent("task-fire");
+    await agent.prompt(
+      '!tool schedule_task {"instruction": "task A", "delaySeconds": 3600}'
+    );
+    await agent.prompt(
+      '!tool schedule_task {"instruction": "task B", "delaySeconds": 7200}'
+    );
+    const [taskB, taskA] = (await agent.boot()).tasks; // newest first
+
+    // Fire A manually (same code path as the alarm) with an instruction
+    // that tries to schedule another task. The tool is absent from the
+    // task-turn surface, so no nested task can be created.
+    await agent.runScheduledTask(
+      {
+        instruction:
+          '!tool schedule_task {"instruction": "nested", "delaySeconds": 3600}'
+      },
+      { id: taskA.id }
+    );
+    const journal = await agent.getJournal();
+    expect(kinds(journal)).toContain("task_run");
+    const turnStarts = journal.filter((e) => e.kind === "turn_start");
+    expect(turnStarts.some((e) => e.data.source === "task")).toBe(true);
+
+    // The captured task-turn context proves the gate: cancel_task is
+    // available, schedule_task is not.
+    const snapshot = await agent.getContextSnapshot();
+    expect(snapshot?.source).toBe("task");
+    const toolNames = snapshot?.tools.map((t) => t.name) ?? [];
+    expect(toolNames).toContain("cancel_task");
+    expect(toolNames).not.toContain("schedule_task");
+
+    // No nested task; the one-shot completed and was recorded.
+    const state = await agent.boot();
+    expect(state.tasks).toHaveLength(2);
+    const doneA = state.tasks.find((t) => t.id === taskA.id);
+    expect(doneA?.state).toBe("done");
+    expect(doneA?.runs).toBe(1);
+
+    // A back-to-back firing of task B hits the global rate limit.
+    await agent.runScheduledTask(
+      { instruction: "say hello" },
+      { id: taskB.id }
+    );
+    const skipped = (await agent.getJournal()).find(
+      (e) => e.kind === "task_skipped"
+    );
+    expect(skipped?.data.reason).toBe("rate_limited");
+    const stillActive = (await agent.boot()).tasks.find(
+      (t) => t.id === taskB.id
+    );
+    expect(stillActive?.state).toBe("active");
   });
 });
 

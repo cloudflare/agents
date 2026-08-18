@@ -14,6 +14,8 @@ import type {
   JournalKind,
   JsonObject,
   PendingCompaction,
+  TaskInfo,
+  TaskState,
   VersionInfo
 } from "./types";
 
@@ -27,6 +29,18 @@ interface JournalRow {
   ts: number;
   kind: string;
   data: string;
+}
+
+interface TaskRow {
+  id: string;
+  instruction: string;
+  kind: string;
+  spec: string;
+  state: string;
+  created_ts: number;
+  last_run_ts: number | null;
+  runs: number;
+  consecutive_failures: number;
 }
 
 interface VersionRow {
@@ -90,6 +104,93 @@ export class KernelStore {
         data TEXT NOT NULL
       )
     `;
+    // Registry for self-scheduled tasks (id matches the SDK schedule id).
+    this.sql`
+      CREATE TABLE IF NOT EXISTS exo_tasks (
+        id TEXT PRIMARY KEY,
+        instruction TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        spec TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_ts INTEGER NOT NULL,
+        last_run_ts INTEGER,
+        runs INTEGER NOT NULL DEFAULT 0,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0
+      )
+    `;
+  }
+
+  insertTask(task: {
+    id: string;
+    instruction: string;
+    kind: TaskInfo["kind"];
+    spec: string;
+  }): void {
+    this.sql`
+      INSERT INTO exo_tasks (id, instruction, kind, spec, state, created_ts)
+      VALUES (${task.id}, ${task.instruction}, ${task.kind}, ${task.spec}, 'active', ${Date.now()})
+    `;
+  }
+
+  taskById(id: string): TaskInfo | null {
+    const rows = this.sql<TaskRow>`
+      SELECT * FROM exo_tasks WHERE id = ${id}
+    `;
+    return rows.length > 0 ? toTaskInfo(rows[0]) : null;
+  }
+
+  listTasks(): TaskInfo[] {
+    const rows = this.sql<TaskRow>`
+      SELECT * FROM exo_tasks ORDER BY created_ts DESC
+    `;
+    return rows.map(toTaskInfo);
+  }
+
+  countActiveTasks(): number {
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM exo_tasks WHERE state = 'active'
+    `;
+    return rows[0]?.n ?? 0;
+  }
+
+  setTaskState(id: string, state: TaskState): void {
+    this.sql`UPDATE exo_tasks SET state = ${state} WHERE id = ${id}`;
+  }
+
+  /** Record a firing; resets or increments the consecutive-failure count. */
+  recordTaskRun(id: string, ok: boolean): void {
+    if (ok) {
+      this.sql`
+        UPDATE exo_tasks
+        SET last_run_ts = ${Date.now()}, runs = runs + 1,
+            consecutive_failures = 0
+        WHERE id = ${id}
+      `;
+    } else {
+      this.sql`
+        UPDATE exo_tasks
+        SET last_run_ts = ${Date.now()}, runs = runs + 1,
+            consecutive_failures = consecutive_failures + 1
+        WHERE id = ${id}
+      `;
+    }
+  }
+
+  /** Most recent firing across ALL tasks (global rate limit). */
+  lastTaskRunTs(): number | null {
+    const rows = this.sql<{ ts: number | null }>`
+      SELECT MAX(last_run_ts) AS ts FROM exo_tasks
+    `;
+    return rows[0]?.ts ?? null;
+  }
+
+  /** Journal entries of one kind since a timestamp (daily budget check). */
+  journalCountSince(kind: JournalKind, sinceTs: number): number {
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM exo_journal
+      WHERE kind = ${kind} AND ts >= ${sinceTs}
+    `;
+    return rows[0]?.n ?? 0;
   }
 
   setPendingCompaction(pending: PendingCompaction): void {
@@ -226,6 +327,21 @@ export class KernelStore {
     if (rows.length === 0) return null;
     return toVersionInfo(rows[0]);
   }
+}
+
+function toTaskInfo(row: TaskRow): TaskInfo {
+  return {
+    id: row.id,
+    instruction: row.instruction,
+    kind: row.kind as TaskInfo["kind"],
+    spec: row.spec,
+    state: row.state as TaskState,
+    createdTs: row.created_ts,
+    lastRunTs: row.last_run_ts ?? null,
+    runs: row.runs,
+    consecutiveFailures: row.consecutive_failures,
+    nextRunTs: null
+  };
 }
 
 function toVersionInfo(row: Omit<VersionRow, "files">): VersionInfo {
