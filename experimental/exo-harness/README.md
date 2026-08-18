@@ -92,6 +92,18 @@ protocol:
    then open `/?agent=pirate-jr`: the child starts life as the parent's
    activated self and evolves independently.
 
+## Deploy
+
+```bash
+pnpm run deploy
+```
+
+Deploys to `exo-harness.<your-subdomain>.workers.dev` with the real AI,
+Artifacts, and Worker Loader bindings. The app has no auth of its own —
+protect the `workers.dev` route with Cloudflare Access before enabling it
+(Workers dashboard → your Worker → **Settings** → **Domains & Routes** →
+`workers.dev` → **Enable Cloudflare Access**), or keep the route disabled.
+
 ## Tests
 
 ```bash
