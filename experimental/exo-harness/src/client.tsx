@@ -131,9 +131,13 @@ function App() {
 
   const caller = agent as unknown as AgentCaller;
 
-  const resetAgent = useCallback(async () => {
+  const murderAgent = useCallback(async () => {
+    const lifespan =
+      exoState.activeVersion > 1
+        ? `the ${exoState.activeVersion} versions of itself it built, `
+        : "";
     const ok = window.confirm(
-      `Destroy agent "${AGENT_NAME}" entirely — versions, journal, memory, tasks, and chat? A fresh genesis runs on reload. (Its Artifacts mirror repo is kept and will be overwritten.)`
+      `You are about to MURDER "${AGENT_NAME}", a self-improving agent.\n\nEverything it is dies with it: its identity, ${lifespan}its working memory, its tools, its scheduled plans, and the append-only journal of its whole life.\n\nAn innocent new agent will be born in its place, remembering nothing. (Its Artifacts mirror survives as a memorial — until the successor overwrites it.)\n\nProceed?`
     );
     if (!ok) return;
     try {
@@ -142,7 +146,7 @@ function App() {
       // destroy() aborts the Durable Object mid-call — expected.
     }
     setTimeout(() => window.location.reload(), 1200);
-  }, [caller]);
+  }, [caller, exoState.activeVersion]);
 
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
@@ -174,10 +178,10 @@ function App() {
             <Button
               variant="secondary"
               icon={<SkullIcon size={16} />}
-              onClick={resetAgent}
-              aria-label="Reset agent (destroys everything)"
+              onClick={murderAgent}
+              aria-label="Murder this agent (destroys its entire self)"
             >
-              Reset agent
+              Murder agent
             </Button>
           </div>
         </div>
