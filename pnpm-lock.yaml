@@ -4136,6 +4136,9 @@ importers:
       '@ai-sdk/openai':
         specifier: ^4.0.0
         version: 4.0.9(zod@4.4.3)
+      '@cloudflare/channels':
+        specifier: workspace:*
+        version: link:../channels
       '@cloudflare/codemode':
         specifier: '>=0.5.0'
         version: link:../codemode
