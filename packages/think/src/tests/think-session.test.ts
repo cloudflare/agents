@@ -901,6 +901,31 @@ describe("Think — Session integration", () => {
     expect(JSON.stringify(publicMessages)).toContain("compacted-summary");
   });
 
+  it("does not persist a synthetic compaction overlay echoed back at intake (#1984)", async () => {
+    const agent = await freshAgent("session-compaction-echo");
+    await agent.enableCompactionForTest();
+
+    // Drive a turn that compacts, so getHistory() now substitutes a synthetic
+    // compaction_<id> overlay on read.
+    await agent.testChat("Trigger compaction");
+
+    const history = (await agent.getSessionHistoryForTest()) as UIMessage[];
+    const overlay = history.find((m) => m.id.startsWith("compaction_"));
+    expect(overlay).toBeDefined();
+
+    // A browser transport echoes the whole transcript back on the next turn,
+    // so the overlay arrives as an incoming message. It must NOT be filed as
+    // a real row.
+    await agent.persistIncomingMessageForTest(overlay!);
+
+    // No raw row exists for the reserved id...
+    expect(await agent.getSessionMessageForTest(overlay!.id)).toBeNull();
+
+    // ...and the overlay still appears exactly once in the projection.
+    const after = (await agent.getSessionHistoryForTest()) as UIMessage[];
+    expect(after.filter((m) => m.id.startsWith("compaction_"))).toHaveLength(1);
+  });
+
   it("returns a copy from getMessages", async () => {
     const agent = await freshAgent("session-get-messages-copy");
     await agent.testChat("Hello!");

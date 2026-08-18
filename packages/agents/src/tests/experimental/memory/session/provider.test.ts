@@ -299,6 +299,69 @@ describe("AgentSessionProvider — tree-structured messages", () => {
     expect(compactions).toHaveLength(1);
   });
 
+  it("does not persist synthetic compaction overlays echoed back by a client (#1984)", async () => {
+    const agent = await getAgent(name);
+    for (let i = 0; i < 6; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    await agent.addCompaction("Summary of m1-m3", "m1", "m3");
+
+    // getHistory substitutes a synthetic compaction_<id> overlay on read.
+    const first = await agent.getHistory();
+    const overlay = first.find((m) => m.id.startsWith("compaction_"));
+    expect(overlay).toBeDefined();
+
+    // A browser transport echoes the full transcript back on the next turn,
+    // so the synthetic overlay arrives as an incoming message and the host
+    // tries to persist it. It must NOT become a real row.
+    await agent.appendMessage(overlay!, "m0");
+
+    // No compaction-prefixed row should exist in storage.
+    expect(await agent.getMessage(overlay!.id)).toBeNull();
+
+    // And the overlay must appear exactly once in the projection.
+    const after = await agent.getHistory();
+    const overlayCount = after.filter((m) =>
+      m.id.startsWith("compaction_")
+    ).length;
+    expect(overlayCount).toBe(1);
+    expect(after.map((m) => m.id)).toEqual(["m0", overlay!.id, "m4", "m5"]);
+  });
+
+  it("filters a pre-filed compaction row out of getHistory (existing sessions, #1984)", async () => {
+    const agent = await getAgent(name);
+    for (let i = 0; i < 6; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+    await agent.addCompaction("Summary of m1-m3", "m1", "m3");
+
+    const overlay = (await agent.getHistory()).find((m) =>
+      m.id.startsWith("compaction_")
+    );
+    expect(overlay).toBeDefined();
+
+    // Simulate an already-corrupted session: a synthetic overlay was filed as
+    // a real row on a prior turn (before the intake guard existed), parented
+    // into the live chain via the raw insert seam.
+    await agent.rawInsertChildForTest("m5", overlay!.id);
+
+    // The read projection must still show the overlay exactly once.
+    const history = await agent.getHistory();
+    const overlayCount = history.filter((m) =>
+      m.id.startsWith("compaction_")
+    ).length;
+    expect(overlayCount).toBe(1);
+  });
+
   it("iterative compaction — new overlay supersedes old one at same fromId", async () => {
     const agent = await getAgent(name);
 

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { SessionMessage } from "../../../../experimental/memory/session/types";
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { getAgentByName } from "../../../..";
 import { Session } from "../../../../experimental/memory/session/session";
 import {
@@ -685,6 +685,49 @@ function createCompactableSession(
     }
   };
 }
+
+describe("Session — reserved compaction id guard (#1984)", () => {
+  it("refuses to persist a message with the reserved compaction_ prefix", async () => {
+    const appended: SessionMessage[] = [];
+    const storage: SessionProvider = {
+      ...stubProvider,
+      appendMessage: (msg) => {
+        appended.push(msg);
+      }
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const session = new Session(storage);
+
+    await session.appendMessage({
+      id: `${COMPACTION_PREFIX}abc`,
+      role: "assistant",
+      parts: [{ type: "text", text: "synthetic overlay" }]
+    });
+
+    expect(appended).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it("still persists ordinary messages", async () => {
+    const appended: SessionMessage[] = [];
+    const storage: SessionProvider = {
+      ...stubProvider,
+      appendMessage: (msg) => {
+        appended.push(msg);
+      }
+    };
+    const session = new Session(storage);
+
+    await session.appendMessage({
+      id: "normal-1",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    });
+
+    expect(appended.map((m) => m.id)).toEqual(["normal-1"]);
+  });
+});
 
 describe("Session.compact()", () => {
   it("throws if no compaction function registered", async () => {
