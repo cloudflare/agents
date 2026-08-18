@@ -18,6 +18,13 @@ export {
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
 export { normalizeCode } from "./normalize";
+export {
+  type CodemodeValidationIssue,
+  type CodemodeValidationResult,
+  type CodeValidationContext,
+  type ToolCallValidationContext,
+  type CodemodeValidator
+} from "./validation";
 export { resolveProvider } from "./resolve";
 export {
   truncateResponse,
