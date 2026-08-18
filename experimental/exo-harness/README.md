@@ -43,11 +43,11 @@ pnpm run start
 
 By default the model comes from `/harness/policy.json`
 (`workers-ai:@cf/moonshotai/kimi-k2.7-code`), which needs Workers AI access in
-dev. Without credentials, use the deterministic offline driver:
+dev. Without any Cloudflare credentials, run fully offline with the
+deterministic dev driver instead:
 
 ```bash
-echo 'MODEL_OVERRIDE=mock' > .dev.vars
-pnpm run start
+pnpm run start:offline
 ```
 
 The mock driver is not a canned transcript — replies are derived from the

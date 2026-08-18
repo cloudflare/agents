@@ -1,0 +1,32 @@
+// Offline dev config: identical to wrangler.jsonc minus the Workers AI
+// binding, so `pnpm run start:offline` runs with zero Cloudflare credentials
+// (the deterministic mock model driver). Keep the two configs in sync.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "exo-harness",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "vars": {
+    "MODEL_OVERRIDE": "mock"
+  },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ExoKernel",
+        "name": "ExoKernel"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v1"
+    }
+  ]
+}

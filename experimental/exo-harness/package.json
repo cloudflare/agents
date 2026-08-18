@@ -6,6 +6,7 @@
   "version": "0.0.0",
   "scripts": {
     "start": "vite dev",
+    "start:offline": "EXO_OFFLINE=1 vite dev",
     "deploy": "vite build && wrangler deploy",
     "test": "vitest run",
     "types": "wrangler types env.d.ts --include-runtime false"
