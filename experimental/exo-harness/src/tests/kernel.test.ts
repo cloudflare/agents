@@ -32,6 +32,7 @@ interface KernelStub {
   getJournal(beforeId?: number, limit?: number): Promise<JournalEntry[]>;
   getContextSnapshot(): Promise<ContextSnapshot | null>;
   cancelTaskById(id: string): Promise<boolean>;
+  resetAgent(): Promise<void>;
   runScheduledTask(
     payload: { instruction: string },
     schedule?: { id: string }
@@ -657,6 +658,44 @@ describe("self-scheduled tasks", () => {
       (t) => t.id === taskB.id
     );
     expect(stillActive?.state).toBe("active");
+  });
+});
+
+describe("reset", () => {
+  it("resetAgent destroys everything; the next contact is a fresh genesis", async () => {
+    const agent = await freshAgent("reset-me");
+    await agent.prompt(
+      '!tool write_file {"path": "/harness/identity.md", "content": "PERSONA: doomed.\\n"}'
+    );
+    await agent.prompt('!tool activate_harness {"note": "doomed persona"}');
+    expect(await agent.getVersions()).toHaveLength(2);
+
+    try {
+      await agent.resetAgent();
+    } catch {
+      // destroy() aborts the instance mid-RPC — expected.
+    }
+
+    // The destroyed instance takes a beat to fully die before the name
+    // can be reborn.
+    let reborn: KernelStub | undefined;
+    for (let attempt = 0; attempt < 20 && !reborn; attempt++) {
+      try {
+        reborn = await freshAgent("reset-me");
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    if (!reborn) throw new Error("agent did not come back after reset");
+    const versions = await reborn.getVersions();
+    expect(versions).toHaveLength(1);
+    expect(versions[0].note).toBe("genesis");
+    // The journal is fresh too — no trace of the doomed persona's turns.
+    const journal = await reborn.getJournal();
+    expect(journal.filter((e) => e.kind === "harness_upgrade")).toHaveLength(0);
+    expect(await reborn.getFileContent("/harness/identity.md")).toContain(
+      "precise, helpful, curious"
+    );
   });
 });
 

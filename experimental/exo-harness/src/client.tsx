@@ -18,6 +18,7 @@ import {
   InfoIcon,
   PaperPlaneRightIcon,
   ScrollIcon,
+  SkullIcon,
   StackIcon,
   StopIcon,
   TrashIcon
@@ -130,6 +131,19 @@ function App() {
 
   const caller = agent as unknown as AgentCaller;
 
+  const resetAgent = useCallback(async () => {
+    const ok = window.confirm(
+      `Destroy agent "${AGENT_NAME}" entirely — versions, journal, memory, tasks, and chat? A fresh genesis runs on reload. (Its Artifacts mirror repo is kept and will be overwritten.)`
+    );
+    if (!ok) return;
+    try {
+      await caller.call("resetAgent");
+    } catch {
+      // destroy() aborts the Durable Object mid-call — expected.
+    }
+    setTimeout(() => window.location.reload(), 1200);
+  }, [caller]);
+
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
       {/* Header */}
@@ -156,6 +170,14 @@ function App() {
               onClick={clearHistory}
             >
               Clear chat
+            </Button>
+            <Button
+              variant="secondary"
+              icon={<SkullIcon size={16} />}
+              onClick={resetAgent}
+              aria-label="Reset agent (destroys everything)"
+            >
+              Reset agent
             </Button>
           </div>
         </div>

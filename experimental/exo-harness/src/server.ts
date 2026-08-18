@@ -736,6 +736,18 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     return this.store().contextSnapshot();
   }
 
+  /**
+   * Destroy this agent entirely — journal, versions, memory, tasks, chat,
+   * workspace. The next contact runs a fresh genesis. The Artifacts mirror
+   * repo is NOT deleted; the reborn agent force-pushes over it. The
+   * underlying destroy() aborts this instance, so the RPC may not return
+   * cleanly — callers should treat it as fire-and-forget.
+   */
+  @callable()
+  async resetAgent(): Promise<void> {
+    await this.destroy();
+  }
+
   /** Receive a fork genesis from a parent agent (cross-DO RPC). */
   @callable()
   async adoptGenesis(
