@@ -51,11 +51,13 @@ export function artifactsRepoName(agentName: string): string {
 }
 
 function isArtifactsNotFound(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  if (code === "NOT_FOUND") return true;
+  // In local dev the remote binding proxy flattens ArtifactsError into a
+  // plain Error, dropping the structured code — fall back to the message.
   return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === "NOT_FOUND"
+    typeof message === "string" && message.includes("Repository not found")
   );
 }
 
