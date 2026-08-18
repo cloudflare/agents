@@ -1,0 +1,25 @@
+{
+  "name": "exo-harness-tests",
+  "main": "../server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "vars": {
+    // Tests always run the deterministic offline driver.
+    "MODEL_OVERRIDE": "mock"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ExoKernel",
+        "name": "ExoKernel"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v1"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "exo-harness",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  "vars": {
+    // "" = use the model from /harness/policy.json; "mock" = offline dev
+    // driver (see src/kernel/mock-model.ts); or "workers-ai:<model-id>".
+    "MODEL_OVERRIDE": ""
+  },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ExoKernel",
+        "name": "ExoKernel"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v1"
+    }
+  ]
+}
