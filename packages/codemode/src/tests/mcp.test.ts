@@ -224,6 +224,57 @@ describe("codeMcpServer", () => {
     await client.close();
   });
 
+  it("transforms large structured results before response formatting", async () => {
+    const upstream = createUpstreamServer();
+    const largeResult = {
+      schema: "fixture_v1",
+      rows: [{ detail: "x".repeat(70_000) }]
+    };
+    const originalChars = JSON.stringify(largeResult, null, 2).length;
+    const executor = {
+      async execute() {
+        return { result: largeResult };
+      }
+    };
+    let callbackRequestId: string | number | undefined;
+    let callbackHasSignal = false;
+    const wrapped = await codeMcpServer({
+      server: upstream,
+      executor,
+      transformResult: async (result, context) => {
+        expect(result).toBe(largeResult);
+        callbackRequestId = context.requestId;
+        callbackHasSignal = context.signal instanceof AbortSignal;
+        return {
+          schema: "fixture_v1",
+          partial: true,
+          reason: "response-too-large",
+          originalChars,
+          refinement: { maxRows: 10 }
+        };
+      }
+    });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: { code: "async () => ({ ignored: true })" }
+    });
+
+    expect(JSON.parse(callText(result))).toEqual({
+      schema: "fixture_v1",
+      partial: true,
+      reason: "response-too-large",
+      originalChars,
+      refinement: { maxRows: 10 }
+    });
+    expect(callText(result)).not.toContain("--- TRUNCATED ---");
+    expect(callbackRequestId).toBeDefined();
+    expect(callbackHasSignal).toBe(true);
+
+    await client.close();
+  });
+
   it("code tool should unwrap JSON array from single text content", async () => {
     const upstream = createUpstreamServer();
     upstream.registerTool(
