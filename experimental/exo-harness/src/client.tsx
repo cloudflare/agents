@@ -17,6 +17,7 @@ import {
   InfoIcon,
   PaperPlaneRightIcon,
   ScrollIcon,
+  StackIcon,
   StopIcon,
   TrashIcon
 } from "@phosphor-icons/react";
@@ -32,9 +33,10 @@ import {
 import { SelfTab } from "./ui/self-tab";
 import { JournalTab } from "./ui/journal-tab";
 import { WorkspaceTab } from "./ui/workspace-tab";
+import { ContextTab } from "./ui/context-tab";
 import "./styles.css";
 
-type Tab = "self" | "journal" | "workspace";
+type Tab = "self" | "context" | "journal" | "workspace";
 
 // Which self to open: /?agent=<name>. Forked agents link here; the default
 // is the one shared long-lived agent.
@@ -43,9 +45,23 @@ const AGENT_NAME =
 
 const TABS: { id: Tab; label: string; icon: typeof BrainIcon }[] = [
   { id: "self", label: "Self", icon: BrainIcon },
+  { id: "context", label: "Context", icon: StackIcon },
   { id: "journal", label: "Journal", icon: ScrollIcon },
   { id: "workspace", label: "Workspace", icon: FolderIcon }
 ];
+
+const PANEL_MIN_WIDTH = 320;
+const PANEL_MAX_WIDTH = 960;
+const PANEL_DEFAULT_WIDTH = 440;
+const PANEL_WIDTH_KEY = "exo-panel-width";
+
+function clampPanelWidth(width: number): number {
+  const max = Math.min(PANEL_MAX_WIDTH, window.innerWidth - 420);
+  return Math.min(
+    Math.max(width, PANEL_MIN_WIDTH),
+    Math.max(max, PANEL_MIN_WIDTH)
+  );
+}
 
 function App() {
   const [connectionStatus, setConnectionStatus] =
@@ -55,6 +71,19 @@ function App() {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const bootedRef = useRef(false);
+
+  // Resizable glass-skull panel: drag the divider (or use arrow keys on it).
+  const [panelWidth, setPanelWidth] = useState<number>(() => {
+    const stored = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    return Number.isFinite(stored) && stored > 0
+      ? clampPanelWidth(stored)
+      : PANEL_DEFAULT_WIDTH;
+  });
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth));
+  }, [panelWidth]);
 
   const agent = useAgent<ExoState>({
     agent: "ExoKernel",
@@ -188,53 +217,93 @@ function App() {
           </div>
 
           <div className="px-5 pb-3 shrink-0">
-            <div className="max-w-3xl mx-auto">
-              <div className="flex items-end gap-2">
-                <div className="flex-1">
-                  <InputArea
-                    value={input}
-                    onValueChange={(value: string) => setInput(value)}
-                    onKeyDown={(event: React.KeyboardEvent) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        send();
-                      }
-                    }}
-                    placeholder={
-                      isConnected ? "Message your agent…" : "Connecting…"
+            <form
+              className="max-w-3xl mx-auto"
+              onSubmit={(event) => {
+                event.preventDefault();
+                send();
+              }}
+            >
+              <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm focus-within:ring-2 focus-within:ring-kumo-ring focus-within:border-transparent transition-shadow">
+                <InputArea
+                  value={input}
+                  onValueChange={(value: string) => setInput(value)}
+                  onKeyDown={(event: React.KeyboardEvent) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      send();
                     }
-                    disabled={!isConnected}
-                    rows={2}
-                  />
-                </div>
+                  }}
+                  placeholder={
+                    isConnected ? "Message your agent…" : "Connecting…"
+                  }
+                  disabled={!isConnected}
+                  rows={2}
+                  className="flex-1 !resize-none !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
+                />
                 {isStreaming ? (
                   <Button
+                    type="button"
                     variant="secondary"
                     shape="square"
                     aria-label="Stop"
                     onClick={() => stop()}
-                    icon={<StopIcon size={16} />}
+                    icon={<StopIcon size={16} weight="fill" />}
+                    className="mb-0.5"
                   />
                 ) : (
                   <Button
+                    type="submit"
                     variant="primary"
                     shape="square"
                     aria-label="Send"
-                    onClick={send}
                     disabled={!input.trim() || !isConnected}
                     icon={<PaperPlaneRightIcon size={16} />}
+                    className="mb-0.5"
                   />
                 )}
               </div>
               <div className="mt-2 flex justify-center">
                 <PoweredByCloudflare />
               </div>
-            </div>
+            </form>
           </div>
         </div>
 
+        {/* Divider: drag (or arrow keys) to resize the glass skull */}
+        <button
+          type="button"
+          aria-label="Resize side panel (drag, or use arrow keys)"
+          onPointerDown={(event) => {
+            dragRef.current = { startX: event.clientX, startWidth: panelWidth };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            if (!dragRef.current) return;
+            const delta = dragRef.current.startX - event.clientX;
+            setPanelWidth(clampPanelWidth(dragRef.current.startWidth + delta));
+          }}
+          onPointerUp={(event) => {
+            dragRef.current = null;
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft") {
+              event.preventDefault();
+              setPanelWidth((width) => clampPanelWidth(width + 32));
+            } else if (event.key === "ArrowRight") {
+              event.preventDefault();
+              setPanelWidth((width) => clampPanelWidth(width - 32));
+            }
+          }}
+          className="self-stretch w-1.5 p-0 m-0 border-0 shrink-0 cursor-col-resize bg-kumo-elevated hover:bg-kumo-accent/40 focus-visible:bg-kumo-accent/60 focus-visible:outline-none transition-colors touch-none"
+        />
+
         {/* Glass skull */}
-        <div className="w-[440px] border-l border-kumo-line bg-kumo-base flex flex-col shrink-0 min-h-0">
+        <div
+          style={{ width: panelWidth }}
+          className="border-l border-kumo-line bg-kumo-base flex flex-col shrink-0 min-h-0"
+        >
           <div className="px-2 pt-2 flex gap-1 border-b border-kumo-line shrink-0">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button
@@ -260,6 +329,13 @@ function App() {
           <div className="flex-1 min-h-0">
             {tab === "self" && (
               <SelfTab
+                agent={caller}
+                state={exoState}
+                isConnected={isConnected}
+              />
+            )}
+            {tab === "context" && (
+              <ContextTab
                 agent={caller}
                 state={exoState}
                 isConnected={isConnected}

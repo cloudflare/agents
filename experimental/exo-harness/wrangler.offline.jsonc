@@ -1,6 +1,7 @@
-// Offline dev config: identical to wrangler.jsonc minus the Workers AI
-// binding, so `pnpm run start:offline` runs with zero Cloudflare credentials
-// (the deterministic mock model driver). Keep the two configs in sync.
+// Offline dev config: identical to wrangler.jsonc minus the Workers AI and
+// Artifacts bindings, so `pnpm run start:offline` runs with zero Cloudflare
+// credentials (the deterministic mock model driver). Keep the three configs
+// (wrangler.jsonc / wrangler.dev.jsonc / this one) in sync.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "exo-harness",

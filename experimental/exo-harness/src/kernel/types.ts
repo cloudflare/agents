@@ -89,6 +89,21 @@ export interface HarnessFileInfo {
   size: number;
 }
 
+/**
+ * The exact raw model context assembled at the start of the most recent
+ * turn: system prompt, pruned message array, and the tool surface. Stored
+ * (overwritten each turn) for the glass-skull Context tab.
+ */
+export interface ContextSnapshot {
+  ts: number;
+  source: "chat" | "prompt";
+  model: string;
+  system: string;
+  /** The pruned ModelMessage[] exactly as passed to the model. */
+  messages: Json;
+  tools: { name: string; description: string }[];
+}
+
 /** State synced to all connected clients via the Agents state sync. */
 export interface ExoState {
   activeVersion: number;

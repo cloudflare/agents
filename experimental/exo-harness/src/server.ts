@@ -8,7 +8,9 @@ import {
   convertToModelMessages,
   pruneMessages,
   isStepCount,
-  type LanguageModel
+  type LanguageModel,
+  type ModelMessage,
+  type ToolSet
 } from "ai";
 import { KernelStore } from "./kernel/store";
 import { ExoCore } from "./kernel/harness";
@@ -16,6 +18,7 @@ import { createMockModel } from "./kernel/mock-model";
 import {
   INITIAL_STATE,
   JOURNAL_TAIL_LIMIT,
+  type ContextSnapshot,
   type ExoState,
   type ForkOrigin,
   type HarnessPolicy,
@@ -90,16 +93,21 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       version: store.activeVersion()
     });
 
+    const system = this.systemPrompt(loaded);
+    const messages = pruneMessages({
+      messages: await convertToModelMessages(this.messages),
+      toolCalls: "before-last-2-messages",
+      reasoning: "before-last-message"
+    });
+    const tools = core.buildTools(loaded);
+    this.captureContext("chat", loaded, system, messages, tools);
+
     const result = streamText({
       abortSignal: options?.abortSignal,
       model: this.resolveModel(loaded.policy),
-      system: this.systemPrompt(loaded),
-      messages: pruneMessages({
-        messages: await convertToModelMessages(this.messages),
-        toolCalls: "before-last-2-messages",
-        reasoning: "before-last-message"
-      }),
-      tools: core.buildTools(loaded),
+      system,
+      messages,
+      tools,
       stopWhen: isStepCount(loaded.policy.maxSteps ?? 8),
       onFinish: () => {
         store.appendJournal("turn_end", { source: "chat" });
@@ -130,11 +138,16 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       version: store.activeVersion()
     });
 
+    const system = this.systemPrompt(loaded);
+    const messages: ModelMessage[] = [{ role: "user", content: text }];
+    const tools = core.buildTools(loaded);
+    this.captureContext("prompt", loaded, system, messages, tools);
+
     const result = await generateText({
       model: this.resolveModel(loaded.policy),
-      system: this.systemPrompt(loaded),
-      messages: [{ role: "user", content: text }],
-      tools: core.buildTools(loaded),
+      system,
+      messages,
+      tools,
       stopWhen: isStepCount(loaded.policy.maxSteps ?? 8)
     });
 
@@ -148,6 +161,35 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       }))
     );
     return { text: result.text, toolCalls };
+  }
+
+  /**
+   * Record the exact context assembled for the model this turn — the
+   * glass-skull Context tab reads it back. Diagnostic only: never fails
+   * the turn.
+   */
+  captureContext(
+    source: ContextSnapshot["source"],
+    loaded: LoadedHarness,
+    system: string,
+    messages: ModelMessage[],
+    tools: ToolSet
+  ): void {
+    try {
+      this.store().saveContextSnapshot({
+        ts: Date.now(),
+        source,
+        model: this.env.MODEL_OVERRIDE || loaded.policy.model,
+        system,
+        messages: messages as unknown as Json,
+        tools: Object.entries(tools).map(([name, t]) => ({
+          name,
+          description: typeof t.description === "string" ? t.description : ""
+        }))
+      });
+    } catch {
+      // never let diagnostics break a turn
+    }
   }
 
   resolveModel(policy: HarnessPolicy): LanguageModel {
@@ -263,6 +305,12 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     return beforeId
       ? store.journalBefore(beforeId, limit)
       : store.journalTail(limit);
+  }
+
+  /** Raw model context assembled at the start of the most recent turn. */
+  @callable()
+  async getContextSnapshot(): Promise<ContextSnapshot | null> {
+    return this.store().contextSnapshot();
   }
 
   /** Receive a fork genesis from a parent agent (cross-DO RPC). */

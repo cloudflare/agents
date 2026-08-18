@@ -4,17 +4,21 @@ import react from "@vitejs/plugin-react";
 import agents from "agents/vite";
 import { defineConfig } from "vite";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
     agents(),
     react(),
     cloudflare(
-      // EXO_OFFLINE=1 uses the config without the Workers AI binding, so dev
-      // runs fully offline with the mock model (no Cloudflare credentials).
+      // EXO_OFFLINE=1 → no Cloudflare bindings, deterministic mock model.
+      // Otherwise `vite dev` uses wrangler.dev.jsonc (different worker name
+      // so the remote-bindings tunnel avoids the Access-protected prod
+      // host), while `vite build` (deploy) uses the real wrangler.jsonc.
       process.env.EXO_OFFLINE
         ? { configPath: "./wrangler.offline.jsonc" }
-        : undefined
+        : command === "serve"
+          ? { configPath: "./wrangler.dev.jsonc" }
+          : undefined
     ),
     tailwindcss()
   ]
-});
+}));

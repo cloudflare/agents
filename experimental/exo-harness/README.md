@@ -60,8 +60,11 @@ pnpm run start
 
 By default the model comes from `/harness/policy.json`
 (`workers-ai:@cf/moonshotai/kimi-k2.7-code`), which needs Workers AI access in
-dev. Without any Cloudflare credentials, run fully offline with the
-deterministic dev driver instead:
+dev. Local dev runs under a separate worker name (`wrangler.dev.jsonc`,
+`exo-harness-dev`): the remote-bindings tunnel uses the worker's own
+`workers.dev` host, and the production host is behind Cloudflare Access,
+which would otherwise 302 every binding call. Without any Cloudflare
+credentials, run fully offline with the deterministic dev driver instead:
 
 ```bash
 pnpm run start:offline

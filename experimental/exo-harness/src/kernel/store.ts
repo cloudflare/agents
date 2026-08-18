@@ -9,6 +9,7 @@
  */
 
 import type {
+  ContextSnapshot,
   JournalEntry,
   JournalKind,
   JsonObject,
@@ -72,6 +73,35 @@ export class KernelStore {
     }
     if (!columns.has("pushed_sha")) {
       this.sql`ALTER TABLE exo_versions ADD COLUMN pushed_sha TEXT`;
+    }
+    // Single-row diagnostic snapshot of the last assembled model context.
+    this.sql`
+      CREATE TABLE IF NOT EXISTS exo_context (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        ts INTEGER NOT NULL,
+        data TEXT NOT NULL
+      )
+    `;
+  }
+
+  /** Overwrite the (single) last-turn context snapshot. */
+  saveContextSnapshot(snapshot: ContextSnapshot): void {
+    this.sql`
+      INSERT INTO exo_context (id, ts, data)
+      VALUES (1, ${snapshot.ts}, ${JSON.stringify(snapshot)})
+      ON CONFLICT (id) DO UPDATE SET ts = excluded.ts, data = excluded.data
+    `;
+  }
+
+  contextSnapshot(): ContextSnapshot | null {
+    const rows = this.sql<{ data: string }>`
+      SELECT data FROM exo_context WHERE id = 1
+    `;
+    if (rows.length === 0) return null;
+    try {
+      return JSON.parse(rows[0].data) as ContextSnapshot;
+    } catch {
+      return null;
     }
   }
 

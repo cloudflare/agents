@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import { artifactsRepoName } from "../kernel/harness";
 import type {
+  ContextSnapshot,
   ExoState,
   JournalEntry,
   Json,
@@ -29,6 +30,7 @@ interface KernelStub {
   getFileContent(path: string): Promise<string | null>;
   getVersions(): Promise<VersionInfo[]>;
   getJournal(beforeId?: number, limit?: number): Promise<JournalEntry[]>;
+  getContextSnapshot(): Promise<ContextSnapshot | null>;
 }
 
 async function freshAgent(name: string): Promise<KernelStub> {
@@ -353,6 +355,42 @@ describe("artifacts mirror", () => {
     expect(artifactsRepoName("main")).toBe("exo-main");
     expect(artifactsRepoName("My Agent/42")).toBe("exo-my-agent-42");
     expect(artifactsRepoName("---")).toBe("exo-agent");
+  });
+});
+
+describe("context snapshot (glass-skull Context tab)", () => {
+  it("captures the exact system prompt, messages, and tool surface per turn", async () => {
+    const agent = await freshAgent("context-snapshot");
+    expect(await agent.getContextSnapshot()).toBeNull();
+
+    await agent.prompt("hello context");
+
+    const snapshot = await agent.getContextSnapshot();
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.source).toBe("prompt");
+    expect(snapshot?.model).toBe("mock");
+    // The kernel briefing and the LIVE identity file are both in there.
+    expect(snapshot?.system).toContain("Kernel briefing");
+    expect(snapshot?.system).toContain("PERSONA:");
+    expect(JSON.stringify(snapshot?.messages)).toContain("hello context");
+    const toolNames = snapshot?.tools.map((t) => t.name) ?? [];
+    expect(toolNames).toEqual(
+      expect.arrayContaining([
+        "read_file",
+        "write_file",
+        "activate_harness",
+        "fork_self",
+        "echo"
+      ])
+    );
+
+    // Self-modification changes what the next snapshot contains.
+    await agent.prompt(
+      '!tool write_file {"path": "/harness/identity.md", "content": "PERSONA: minimalist.\\n"}'
+    );
+    await agent.prompt("hello again");
+    const after = await agent.getContextSnapshot();
+    expect(after?.system).toContain("PERSONA: minimalist.");
   });
 });
 

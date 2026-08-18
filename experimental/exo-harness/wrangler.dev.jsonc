@@ -1,0 +1,39 @@
+// Local dev config with REAL remote bindings (AI + Artifacts). Identical to
+// wrangler.jsonc except for the worker name: the remote-bindings tunnel
+// rides the worker's own workers.dev host, and the production host
+// (exo-harness.<subdomain>.workers.dev) is protected by Cloudflare Access —
+// which would 302 every binding call. A separate dev name keeps the tunnel
+// on an unprotected host. Keep the three configs in sync.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "exo-harness-dev",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  "artifacts": [
+    { "binding": "ARTIFACTS", "namespace": "exo-harness", "remote": true }
+  ],
+  "vars": {
+    "MODEL_OVERRIDE": ""
+  },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ExoKernel",
+        "name": "ExoKernel"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v1"
+    }
+  ]
+}
