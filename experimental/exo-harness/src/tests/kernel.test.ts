@@ -419,6 +419,10 @@ describe("self-managed context (context.json + memory + compact_history)", () =>
     // No memory yet — nothing injected.
     expect(snapshot?.memoryChars).toBe(0);
     expect(snapshot?.system).not.toContain("## Working memory");
+    // The briefing claims the file exists only when it does.
+    expect(snapshot?.system).toContain(
+      "/harness/context.json — your context policy"
+    );
 
     // Out-of-bounds values are clamped, and a DELETED context.json falls
     // back to defaults instead of failing the load.
@@ -434,6 +438,10 @@ describe("self-managed context (context.json + memory + compact_history)", () =>
     await agent.prompt("defaults again?");
     const defaulted = await agent.getContextSnapshot();
     expect(defaulted?.contextPolicy.keepMessages).toBe(40);
+    // …and the briefing stops claiming the file exists (agents born
+    // before the context milestone hit this path too).
+    expect(defaulted?.system).toContain("not present in your harness");
+    expect(defaulted?.system).toContain("kernel defaults are in effect");
   });
 
   it("compact_history writes agent-authored memory that is injected next turn", async () => {

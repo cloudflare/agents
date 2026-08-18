@@ -490,6 +490,13 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     const toolList = loaded.tools
       .map((t) => `- ${t.name} (${t.file}): ${t.description}`)
       .join("\n");
+    const ctx = loaded.context;
+    // Only claim the file exists when it does — agents born before the
+    // context milestone run on kernel defaults until they create it.
+    const contextLine =
+      "/harness/context.json" in loaded.files
+        ? "- /harness/context.json — your context policy: message window, memory injection, token target"
+        : `- /harness/context.json — not present in your harness; kernel defaults are in effect (keepMessages ${ctx.keepMessages}, tokenTarget ${ctx.tokenTarget}, memory ${ctx.memoryFile} up to ${ctx.memoryMaxChars} chars). Create the file (then activate_harness) to set your own.`;
     const sections = [
       "## Kernel briefing (fixed, not editable)",
       "",
@@ -497,7 +504,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "workspace under /harness and is hot-loaded every turn:",
       "- /harness/identity.md — your identity and operating rules (the section after this briefing)",
       '- /harness/policy.json — model policy, e.g. {"model": "workers-ai:<id>", "maxSteps": 8}',
-      "- /harness/context.json — your context policy: message window, memory injection, token target",
+      contextLine,
       "- /harness/tools/*.js — your harness tools (ES modules; see tools/echo.js for the format)",
       "",
       "To change yourself: edit those files with write_file, then call",
