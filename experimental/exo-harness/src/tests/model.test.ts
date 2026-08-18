@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseModelSpec } from "../kernel/model";
+import {
+  openaiResponsesModelId,
+  parseModelSpec,
+  publicModelError
+} from "../kernel/model";
 
 describe("parseModelSpec", () => {
   it("accepts the offline mock driver", () => {
@@ -42,5 +46,22 @@ describe("parseModelSpec", () => {
     expect(() => parseModelSpec("")).toThrow(/empty/);
     expect(() => parseModelSpec("workers-ai:")).toThrow(/empty/);
     expect(() => parseModelSpec("gpt-5.4")).toThrow(/Unknown model/);
+  });
+});
+
+describe("openaiResponsesModelId", () => {
+  it("strips the openai/ prefix for Responses-API catalog slugs", () => {
+    expect(openaiResponsesModelId("openai/gpt-5.6-luna")).toBe("gpt-5.6-luna");
+    expect(openaiResponsesModelId("anthropic/claude-sonnet-4-5")).toBeNull();
+    expect(openaiResponsesModelId("openai/")).toBeNull();
+  });
+});
+
+describe("publicModelError", () => {
+  it("returns a one-line message without stacking", () => {
+    expect(publicModelError(new Error("Invalid input\n    at foo"))).toBe(
+      "Invalid input"
+    );
+    expect(publicModelError("plain")).toBe("plain");
   });
 });

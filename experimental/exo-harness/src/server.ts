@@ -17,9 +17,11 @@ import jqModules from "@cloudflare/computer/shell/jq";
 import jsExecModules from "@cloudflare/computer/shell/js-exec";
 import sqliteModules from "@cloudflare/computer/shell/sqlite";
 import fileModules from "@cloudflare/computer/shell/file";
+import { createOpenAI } from "@ai-sdk/openai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
+import { createGatewayFetch } from "workers-ai-provider/gateway";
 import {
   streamText,
   generateText,
@@ -37,7 +39,11 @@ import {
   ExoCore,
   type ExoWorkspace
 } from "./kernel/harness";
-import { parseModelSpec } from "./kernel/model";
+import {
+  openaiResponsesModelId,
+  parseModelSpec,
+  publicModelError
+} from "./kernel/model";
 import { createMockModel } from "./kernel/mock-model";
 import {
   INITIAL_STATE,
@@ -82,6 +88,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
   #store: KernelStore | undefined;
   #core: ExoCore | undefined;
   #workersai: ReturnType<typeof createWorkersAI> | undefined;
+  #openaiResponses: ReturnType<typeof createOpenAI> | undefined;
 
   /**
    * The agent's computer: a SQLite-backed virtual filesystem with two
@@ -234,10 +241,15 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       onFinish: () => {
         store.appendJournal("turn_end", { source: "chat" });
         this.refreshSyncedState();
+      },
+      onError: ({ error }) => {
+        this.#journalTurnError("chat", publicModelError(error));
       }
     });
 
-    return result.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse({
+      onError: publicModelError
+    });
   }
 
   /**
@@ -291,13 +303,19 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       memory?.length ?? 0
     );
 
-    const result = await generateText({
-      model: this.resolveModel(loaded.policy),
-      system,
-      messages,
-      tools,
-      stopWhen: isStepCount(loaded.policy.maxSteps ?? 8)
-    });
+    let result;
+    try {
+      result = await generateText({
+        model: this.resolveModel(loaded.policy),
+        system,
+        messages,
+        tools,
+        stopWhen: isStepCount(loaded.policy.maxSteps ?? 8)
+      });
+    } catch (error) {
+      this.#journalTurnError(source, publicModelError(error));
+      throw error;
+    }
 
     store.appendJournal("turn_end", { source });
     this.refreshSyncedState();
@@ -573,8 +591,11 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
         return createMockModel();
       case "workers-ai":
         return this.workersAI()(parsed.id);
-      case "catalog":
+      case "catalog": {
+        const openaiId = openaiResponsesModelId(parsed.slug);
+        if (openaiId) return this.openaiResponses(openaiId);
         return this.workersAI()(parsed.slug);
+      }
       default: {
         const _exhaustive: never = parsed;
         throw new Error(`unhandled model kind: ${JSON.stringify(_exhaustive)}`);
@@ -604,6 +625,38 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
   }
 
   /**
+   * OpenAI catalog models via the Responses API (luna/sol/terra are
+   * Responses-only; Chat Completions 400s). Routed through the AI
+   * Gateway binding — Unified Billing, no OpenAI key in the worker.
+   */
+  openaiResponses(modelId: string): LanguageModel {
+    if (!this.env.AI) {
+      throw new Error(
+        "This model needs the Workers AI binding. Use MODEL_OVERRIDE=mock offline, or start with wrangler.jsonc / wrangler.dev.jsonc."
+      );
+    }
+    const gatewayId = this.env.AI_GATEWAY_ID;
+    if (!gatewayId) {
+      throw new Error(
+        `openai/${modelId} needs AI_GATEWAY_ID (Responses API via AI Gateway)`
+      );
+    }
+    this.#openaiResponses ??= createOpenAI({
+      apiKey: "unused",
+      fetch: createGatewayFetch({
+        binding: this.env.AI,
+        gateway: gatewayId
+      })
+    });
+    return this.#openaiResponses.responses(modelId);
+  }
+
+  #journalTurnError(source: string, message: string): void {
+    this.store().appendJournal("error", { source, message });
+    this.refreshSyncedState();
+  }
+
+  /**
    * Fixed kernel preamble + the agent's own (editable) identity file +
    * its self-maintained working memory.
    */
@@ -625,7 +678,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "You are a self-modifying agent. Your evolvable source lives in your",
       "workspace under /harness and is hot-loaded every turn:",
       "- /harness/identity.md — your identity and operating rules (the section after this briefing)",
-      '- /harness/policy.json — model policy, e.g. {"model": "openai/gpt-5.4", "maxSteps": 8} (Workers AI: "workers-ai:@cf/<id>")',
+      '- /harness/policy.json — model policy, e.g. {"model": "openai/gpt-5.6-luna", "maxSteps": 8} (Workers AI: "workers-ai:@cf/<id>"; openai/* uses the Responses API)',
       contextLine,
       "- /harness/tools/*.js — your harness tools (ES modules; see tools/echo.js for the format)",
       "",

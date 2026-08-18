@@ -98,10 +98,11 @@ function App() {
     onStateUpdate: useCallback((state: ExoState) => setExoState(state), [])
   });
 
-  const { messages, sendMessage, clearHistory, stop, status } = useAgentChat({
-    agent,
-    experimental_throttle: 100
-  });
+  const { messages, sendMessage, clearHistory, stop, status, error } =
+    useAgentChat({
+      agent,
+      experimental_throttle: 100
+    });
 
   const isStreaming = status === "streaming";
   const isConnected = connectionStatus === "connected";
@@ -246,6 +247,18 @@ function App() {
           </div>
 
           <div className="px-5 pb-3 shrink-0">
+            {error && (
+              <div className="max-w-3xl mx-auto mb-3 px-4 py-3 rounded-xl border border-red-500/40 bg-red-500/10">
+                <Text size="sm" bold>
+                  Turn failed
+                </Text>
+                <span className="mt-1 block">
+                  <Text size="xs" variant="secondary">
+                    {error.message}
+                  </Text>
+                </span>
+              </div>
+            )}
             <form
               className="max-w-3xl mx-auto"
               onSubmit={(event) => {

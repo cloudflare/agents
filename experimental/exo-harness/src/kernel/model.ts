@@ -54,3 +54,27 @@ export function parseModelSpec(spec: string): ParsedModelSpec {
     `Unknown model "${spec}" — use "mock", "workers-ai:<id>", or a catalog slug like "openai/gpt-5.4"`
   );
 }
+
+/**
+ * OpenAI catalog slugs (`openai/gpt-5.6-luna`, …) must use the Responses
+ * API. The workers-ai-provider run path speaks Chat Completions only —
+ * luna/sol/terra reject that with a 400. Returns the bare model id, or
+ * null if this slug is not an OpenAI catalog model.
+ */
+export function openaiResponsesModelId(slug: string): string | null {
+  if (!slug.startsWith("openai/")) return null;
+  const id = slug.slice("openai/".length).trim();
+  return id.length > 0 ? id : null;
+}
+
+/** One-line, client-safe model/turn error (no stacks). */
+export function publicModelError(error: unknown): string {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : JSON.stringify(error);
+  const oneLine = raw.split("\n")[0]?.trim() || "model call failed";
+  return oneLine.slice(0, 400);
+}
