@@ -18,6 +18,8 @@ import jsExecModules from "@cloudflare/computer/shell/js-exec";
 import sqliteModules from "@cloudflare/computer/shell/sqlite";
 import fileModules from "@cloudflare/computer/shell/file";
 import { createWorkersAI } from "workers-ai-provider";
+import { anthropic } from "workers-ai-provider/anthropic";
+import { openai } from "workers-ai-provider/openai";
 import {
   streamText,
   generateText,
@@ -35,6 +37,7 @@ import {
   ExoCore,
   type ExoWorkspace
 } from "./kernel/harness";
+import { parseModelSpec } from "./kernel/model";
 import { createMockModel } from "./kernel/mock-model";
 import {
   INITIAL_STATE,
@@ -78,6 +81,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
   #workspace: ExoWorkspace | undefined;
   #store: KernelStore | undefined;
   #core: ExoCore | undefined;
+  #workersai: ReturnType<typeof createWorkersAI> | undefined;
 
   /**
    * The agent's computer: a SQLite-backed virtual filesystem with two
@@ -563,16 +567,40 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
 
   resolveModel(policy: HarnessPolicy): LanguageModel {
     const spec = this.env.MODEL_OVERRIDE || policy.model;
-    if (spec === "mock") {
-      return createMockModel();
+    const parsed = parseModelSpec(spec);
+    switch (parsed.kind) {
+      case "mock":
+        return createMockModel();
+      case "workers-ai":
+        return this.workersAI()(parsed.id);
+      case "catalog":
+        return this.workersAI()(parsed.slug);
+      default: {
+        const _exhaustive: never = parsed;
+        throw new Error(`unhandled model kind: ${JSON.stringify(_exhaustive)}`);
+      }
     }
-    if (spec.startsWith("workers-ai:")) {
-      const workersai = createWorkersAI({ binding: this.env.AI });
-      return workersai(spec.slice("workers-ai:".length));
+  }
+
+  /**
+   * Shared Workers AI + AI Gateway provider. `@cf/...` stays on Workers AI;
+   * `"<provider>/<model>"` catalog slugs (openai/gpt-5.4, …) go through the
+   * AI binding's gateway delegate and Unified Billing — no provider keys.
+   */
+  workersAI(): ReturnType<typeof createWorkersAI> {
+    if (!this.env.AI) {
+      throw new Error(
+        "This model needs the Workers AI binding. Use MODEL_OVERRIDE=mock offline, or start with wrangler.jsonc / wrangler.dev.jsonc."
+      );
     }
-    throw new Error(
-      `Unknown model "${spec}" — use "mock" or "workers-ai:<model-id>"`
-    );
+    this.#workersai ??= createWorkersAI({
+      binding: this.env.AI,
+      providers: [openai, anthropic],
+      gateway: this.env.AI_GATEWAY_ID
+        ? { id: this.env.AI_GATEWAY_ID }
+        : undefined
+    });
+    return this.#workersai;
   }
 
   /**
@@ -597,7 +625,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "You are a self-modifying agent. Your evolvable source lives in your",
       "workspace under /harness and is hot-loaded every turn:",
       "- /harness/identity.md — your identity and operating rules (the section after this briefing)",
-      '- /harness/policy.json — model policy, e.g. {"model": "workers-ai:<id>", "maxSteps": 8}',
+      '- /harness/policy.json — model policy, e.g. {"model": "openai/gpt-5.4", "maxSteps": 8} (Workers AI: "workers-ai:@cf/<id>")',
       contextLine,
       "- /harness/tools/*.js — your harness tools (ES modules; see tools/echo.js for the format)",
       "",

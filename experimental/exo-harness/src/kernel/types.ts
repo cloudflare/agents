@@ -78,7 +78,10 @@ export type ForkOrigin =
   | { kind: "files"; files: Record<string, string>; parent: ForkParent };
 
 export interface HarnessPolicy {
-  /** "mock" or "workers-ai:<model-id>". */
+  /**
+   * "mock", "workers-ai:<model-id>", a bare "@cf/<id>", or an AI Gateway
+   * catalog slug ("openai/gpt-5.4", "anthropic/claude-sonnet-4-5", …).
+   */
   model: string;
   maxSteps?: number;
 }

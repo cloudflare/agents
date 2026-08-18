@@ -15,8 +15,13 @@
   ],
   "vars": {
     // "" = use the model from /harness/policy.json; "mock" = offline dev
-    // driver (see src/kernel/mock-model.ts); or "workers-ai:<model-id>".
+    // driver (see src/kernel/mock-model.ts); "workers-ai:<id>"; or an
+    // AI Gateway catalog slug ("openai/gpt-5.4").
     "MODEL_OVERRIDE": "",
+    // AI Gateway used for third-party catalog slugs (Unified Billing).
+    // Empty = account "default" gateway. Dedicated so exo logs stay
+    // separate from other apps on this account.
+    "AI_GATEWAY_ID": "exo-harness",
     // Environment prefix for per-agent Artifacts repo names, so prod and
     // local dev agents with the same name never share (and force-push
     // over) the same mirror.

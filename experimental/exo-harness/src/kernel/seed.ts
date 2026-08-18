@@ -26,7 +26,7 @@ Operating rules:
 `;
 
 export const SEED_POLICY = `{
-  "model": "workers-ai:@cf/moonshotai/kimi-k2.7-code",
+  "model": "openai/gpt-5.4",
   "maxSteps": 8
 }
 `;

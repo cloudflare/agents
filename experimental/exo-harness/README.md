@@ -92,13 +92,19 @@ pnpm install
 pnpm run start
 ```
 
-By default the model comes from `/harness/policy.json`
-(`workers-ai:@cf/moonshotai/kimi-k2.7-code`), which needs Workers AI access in
-dev. Local dev runs under a separate worker name (`wrangler.dev.jsonc`,
-`exo-harness-dev`): the remote-bindings tunnel uses the worker's own
-`workers.dev` host, and the production host is behind Cloudflare Access,
-which would otherwise 302 every binding call. Without any Cloudflare
-credentials, run fully offline with the deterministic dev driver instead:
+By default the model comes from `/harness/policy.json` (`openai/gpt-5.4`),
+routed through the `AI` binding and the `exo-harness` [AI Gateway](https://developers.cloudflare.com/ai-gateway/)
+(Unified Billing — no OpenAI API key in the worker). Edit that file and
+`activate_harness` to switch: `workers-ai:@cf/moonshotai/kimi-k2.7-code`
+stays on Workers AI; any `"<provider>/<model>"` catalog slug
+(`anthropic/claude-sonnet-4-5`, `openai/gpt-5.4`, …) goes through the
+gateway. `MODEL_OVERRIDE` in wrangler vars forces a spec for every agent
+and ignores policy. Local dev runs under a separate worker name
+(`wrangler.dev.jsonc`, `exo-harness-dev`): the remote-bindings tunnel uses
+the worker's own `workers.dev` host, and the production host is behind
+Cloudflare Access, which would otherwise 302 every binding call. Without
+any Cloudflare credentials, run fully offline with the deterministic
+dev driver instead:
 
 ```bash
 pnpm run start:offline
@@ -135,6 +141,10 @@ protocol:
 7. **Let it work alone** — "in two minutes, review your working memory and
    journal one insight about yourself". Watch the Tasks tab count down and
    the journal record the autonomous turn when it fires.
+8. **Switch models** — ask it to set `/harness/policy.json` `"model"` to
+   `anthropic/claude-sonnet-4-5` (or back to
+   `workers-ai:@cf/moonshotai/kimi-k2.7-code`) and `activate_harness`.
+   The Context tab's model badge is the live spec.
 
 ## Deploy
 
