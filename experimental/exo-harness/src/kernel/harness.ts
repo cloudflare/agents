@@ -458,7 +458,9 @@ ${imports}
    * Throws (with a useful message) if the live harness fails validation —
    * activation is the safety gate, so a broken self never becomes a version.
    */
-  async activate(note: string): Promise<{ version: number; sha: string }> {
+  async activate(
+    note: string
+  ): Promise<{ version: number; sha: string; liveTools: string[] }> {
     const loaded = await this.#loadOnce();
     const git = this.workspace.git;
     await git.add({ paths: [], all: true });
@@ -478,7 +480,11 @@ ${imports}
     });
     await this.#pushToArtifacts(version.version, oid);
     this.#onMutation();
-    return { version: version.version, sha: oid };
+    return {
+      version: version.version,
+      sha: oid,
+      liveTools: loaded.tools.map((t) => t.name)
+    };
   }
 
   /**
@@ -839,7 +845,7 @@ export default async function main(input) {
       }),
       exec: tool({
         description:
-          "Run a shell command in your workspace (just-bash in an isolated Dynamic Worker — fast, no container). Built-ins include cat, grep, sed, awk, jq, curl, python, sqlite, plus `git` and `artifacts` commands that run host-side against your workspace and mirror. Your files live at / (e.g. /harness, /memory, /scratch).",
+          "Run a shell command in your workspace (just-bash in an isolated Dynamic Worker — fast, no container). Built-ins include cat, grep, sed, awk, jq, curl, sqlite3, file, and a `js` command for quick JavaScript, plus `git` and `artifacts` commands that run host-side against your workspace and mirror. No node or python. Your files live at / (e.g. /harness, /memory, /scratch).",
         inputSchema: z.object({
           command: z.string().describe("The shell command to run")
         }),
@@ -857,7 +863,11 @@ export default async function main(input) {
         }),
         execute: this.#journaled("activate_harness", async ({ note }) => {
           try {
-            return await this.activate(note);
+            const result = await this.activate(note);
+            return {
+              ...result,
+              hint: "Tools added or changed this turn are callable NOW via run_harness_tool; they appear as first-class functions from the next turn."
+            };
           } catch (error) {
             return {
               error: `activation failed: ${error instanceof Error ? error.message : String(error)}`
@@ -926,6 +936,32 @@ export default async function main(input) {
             };
           }
         })
+      }),
+      run_harness_tool: tool({
+        description:
+          "Run one of YOUR harness tools by name against the LIVE /harness — including a tool you created or changed this very turn (first-class functions only refresh at turn start; this bridge always reloads). Input is passed to the tool's run().",
+        inputSchema: z.object({
+          name: z
+            .string()
+            .describe("The tool's name (from its default export)"),
+          input: z
+            .record(z.string(), z.unknown())
+            .optional()
+            .describe("Input object for the tool, matching its inputSchema")
+        }),
+        execute: this.#journaled(
+          "run_harness_tool",
+          async ({ name, input }) => {
+            const live = await this.#loadOnce();
+            const manifest = live.tools.find((t) => t.name === name);
+            if (!manifest) {
+              return {
+                error: `no harness tool named "${name}" in the live harness (have: ${live.tools.map((t) => t.name).join(", ") || "none"})`
+              };
+            }
+            return this.runHarnessTool(manifest, input);
+          }
+        )
       }),
       journal_note: tool({
         description:

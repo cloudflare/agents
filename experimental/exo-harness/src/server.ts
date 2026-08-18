@@ -12,7 +12,9 @@ import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-ja
 import { createGitClient } from "@cloudflare/computer/git";
 import curlModules from "@cloudflare/computer/shell/curl";
 import jqModules from "@cloudflare/computer/shell/jq";
-import pythonModules from "@cloudflare/computer/shell/python";
+// NOT the python group: it is a stub that errors in the Workers runtime
+// ("not available in browser environments").
+import jsExecModules from "@cloudflare/computer/shell/js-exec";
 import sqliteModules from "@cloudflare/computer/shell/sqlite";
 import fileModules from "@cloudflare/computer/shell/file";
 import { createWorkersAI } from "workers-ai-provider";
@@ -108,7 +110,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
           commands: [
             curlModules,
             jqModules,
-            pythonModules,
+            jsExecModules,
             sqliteModules,
             fileModules
           ]
@@ -603,6 +605,9 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "activate_harness to validate and commit a new version. If a broken edit",
       "stops the harness from loading, the kernel auto-restores the last",
       "activated version. rollback_harness restores any earlier version.",
+      "Your first-class tool functions refresh at turn start, so a tool you",
+      "add or change mid-turn is not yet a function — call it immediately",
+      "with run_harness_tool (it always runs against the live /harness).",
       "",
       "Remembering: facts you must carry into future turns belong in",
       `${loaded.context.memoryFile} — it is injected into this prompt every`,

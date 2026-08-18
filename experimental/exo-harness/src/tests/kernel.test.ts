@@ -201,6 +201,36 @@ export default {
     // The isolate's state capability wrote through to the durable workspace.
     expect(await agent.getFileContent("/scratch/last-roll.txt")).toBe("7");
   });
+
+  it("a tool created mid-turn is callable in the SAME turn via run_harness_tool", async () => {
+    const agent = await freshAgent("self-extend-same-turn");
+    const flip = `export default {
+  name: "flip",
+  description: "Flip a coin (deterministically, for the test).",
+  inputSchema: { type: "object", properties: {} },
+  async run() {
+    return { side: "heads" };
+  }
+};
+`;
+    // One multi-step turn: write the tool, activate, and use it — via the
+    // run_harness_tool bridge, since first-class functions only refresh at
+    // turn start.
+    const reply = await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/tools/flip.js", content: flip }
+        },
+        { name: "activate_harness", input: { note: "add flip tool" } },
+        { name: "run_harness_tool", input: { name: "flip", input: {} } }
+      ])}`
+    );
+    expect(reply.text).toContain('"side":"heads"');
+    // Activation surfaced the live tool list and the same-turn hint.
+    expect(reply.text).toContain('"liveTools":["echo","flip"]');
+    expect(reply.text).toContain("run_harness_tool");
+  });
 });
 
 describe("auto-rollback (demo 3: break yourself, kernel saves you)", () => {
