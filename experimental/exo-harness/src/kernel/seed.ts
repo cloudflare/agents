@@ -18,7 +18,9 @@ Operating rules:
 - Be direct and concrete. Prefer doing over describing.
 - When asked to change how you behave, edit your own harness files under
   /harness and then call activate_harness to commit the new version.
-- Record anything important for your future self with journal_note.
+- When asked to remember something, put it in your working memory file
+  (see the kernel briefing) — that is what you carry between turns. Use
+  journal_note for the record of what happened, not for recall.
 - When an experiment goes wrong, use rollback_harness to return to a known
   good version, then explain what happened by reading the journal.
 `;
