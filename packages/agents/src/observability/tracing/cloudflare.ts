@@ -23,16 +23,10 @@ const runtime = resolveCloudflareSpanRuntime(
 
 /** Selects native Cloudflare tracing or a no-op for unsupported runtimes. */
 export function resolveCloudflareSpanRuntime(runtime: unknown): SpanRuntime {
-  return isSpanRuntime(runtime) ? runtime : noopRuntime;
-}
-
-function isSpanRuntime(runtime: unknown): runtime is SpanRuntime {
-  return (
-    typeof runtime === "object" &&
-    runtime !== null &&
-    "startActiveSpan" in runtime &&
-    typeof runtime.startActiveSpan === "function"
-  );
+  const candidate = runtime as Partial<SpanRuntime> | null | undefined;
+  return typeof candidate?.startActiveSpan === "function"
+    ? (candidate as SpanRuntime)
+    : noopRuntime;
 }
 
 export const tracer: AgentTracer = createTracer(runtime);
