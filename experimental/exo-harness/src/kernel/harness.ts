@@ -21,6 +21,8 @@ import { z } from "zod";
 import type { KernelStore } from "./store";
 import { SEED_FILES } from "./seed";
 import type {
+  ForkOrigin,
+  ForkParent,
   HarnessPolicy,
   HarnessToolManifest,
   LoadedHarness
@@ -83,11 +85,20 @@ export interface ExoCoreOptions {
   /** Stable agent name; used to derive the per-agent Artifacts repo name. */
   name: () => string;
   /**
-   * Optional Artifacts binding. When present, every successful activation
-   * pushes the workspace git history to a per-agent Artifacts repo
-   * (best-effort). When absent (offline dev, tests) pushes are skipped.
+   * Optional Artifacts binding. When present, genesis and every successful
+   * activation push the workspace git history to a per-agent Artifacts
+   * repo (best-effort). When absent (offline dev, tests) pushes are
+   * skipped.
    */
   artifacts?: Artifacts;
+  /**
+   * Deliver a fork genesis to a (fresh) sibling agent. Wired by the owner
+   * to a cross-DO RPC call; the child applies it via adoptGenesis().
+   */
+  adoptChild: (
+    childName: string,
+    origin: ForkOrigin
+  ) => Promise<{ version: number; sha: string }>;
   /** Called after any mutation so the owner can refresh synced UI state. */
   onMutation: () => void;
 }
@@ -98,6 +109,7 @@ export class ExoCore {
   #loader: LoaderBinding;
   #name: () => string;
   #artifacts: Artifacts | undefined;
+  #adoptChild: ExoCoreOptions["adoptChild"];
   #onMutation: () => void;
   #git: ReturnType<typeof createGit> | undefined;
   #genesis: Promise<void> | undefined;
@@ -108,6 +120,7 @@ export class ExoCore {
     this.#loader = options.loader;
     this.#name = options.name;
     this.#artifacts = options.artifacts;
+    this.#adoptChild = options.adoptChild;
     this.#onMutation = options.onMutation;
   }
 
@@ -141,6 +154,8 @@ export class ExoCore {
       sha: oid,
       files: Object.keys(files)
     });
+    // Every agent gets a repo from birth, so a fork source always exists.
+    await this.#pushToArtifacts(version.version, oid);
     this.#onMutation();
   }
 
@@ -417,6 +432,145 @@ ${imports}
     return result;
   }
 
+  /**
+   * Fork the current ACTIVATED self into a new agent. With Artifacts
+   * bound, this forks the agent's repo (real git lineage — the child's
+   * repo records `source: artifacts:<ns>/<parent-repo>`); without it, the
+   * activated file snapshot is handed over directly. Only activated
+   * selves are forkable: the live working tree is not part of history.
+   */
+  async forkSelf(childName: string): Promise<{
+    child: string;
+    version: number;
+    sha: string;
+    origin: ForkOrigin["kind"];
+    url: string;
+  }> {
+    const name = childName.trim();
+    if (!name) throw new Error("fork needs a non-empty agent name");
+    if (name === this.#name()) throw new Error("cannot fork onto yourself");
+
+    const active = this.store.versionInfo(this.store.activeVersion());
+    if (!active) throw new Error("nothing to fork: no activated version yet");
+    const parent: ForkParent = {
+      name: this.#name(),
+      version: active.version,
+      sha: active.sha
+    };
+
+    let origin: ForkOrigin;
+    if (this.#artifacts) {
+      // Make sure the mirror is current before forking it (retries a
+      // previously failed push; normally genesis/activate already pushed).
+      if (active.pushedSha !== active.sha) {
+        await this.#pushToArtifacts(active.version, active.sha);
+        const refreshed = this.store.versionInfo(active.version);
+        if (refreshed?.pushedSha !== active.sha) {
+          throw new Error(
+            "could not push the current self to Artifacts before forking (see journal)"
+          );
+        }
+      }
+      const parentRepo = artifactsRepoName(this.#name());
+      const childRepo = artifactsRepoName(name);
+      const repo = await this.#artifacts.get(parentRepo);
+      const forked = await repo.fork(childRepo, {
+        description: `fork of ${parentRepo} v${active.version} for agent "${name}"`
+      });
+      origin = {
+        kind: "artifacts",
+        repoName: childRepo,
+        remote: forked.remote,
+        parent
+      };
+    } else {
+      const files = this.store.versionFiles(active.version);
+      if (!files) throw new Error(`version ${active.version} has no snapshot`);
+      origin = { kind: "files", files, parent };
+    }
+
+    const child = await this.#adoptChild(name, origin);
+    this.store.appendJournal("fork", {
+      child: name,
+      origin: origin.kind,
+      fromVersion: active.version,
+      fromSha: active.sha,
+      childVersion: child.version,
+      childSha: child.sha,
+      ...(origin.kind === "artifacts"
+        ? { repo: origin.repoName, remote: origin.remote }
+        : {})
+    });
+    this.#onMutation();
+    return {
+      child: name,
+      version: child.version,
+      sha: child.sha,
+      origin: origin.kind,
+      url: `/?agent=${encodeURIComponent(name)}`
+    };
+  }
+
+  /**
+   * Receive a fork genesis (runs in the CHILD agent). Clones the forked
+   * Artifacts repo (full history) or commits the handed-over snapshot,
+   * then records v1 with the lineage in both the ledger and the journal.
+   */
+  async adoptGenesis(
+    origin: ForkOrigin
+  ): Promise<{ version: number; sha: string }> {
+    if (this.store.activeVersion() > 0) {
+      throw new Error(
+        `agent "${this.#name()}" already has a history; fork onto a fresh name`
+      );
+    }
+    const note = `fork of ${origin.parent.name} v${origin.parent.version}`;
+    const git = this.git();
+    let sha: string;
+    if (origin.kind === "artifacts") {
+      const artifacts = this.#artifacts;
+      if (!artifacts) {
+        throw new Error("artifacts binding required to adopt a repo fork");
+      }
+      const repo = await artifacts.get(origin.repoName);
+      const token = await repo.createToken("read", ARTIFACTS_TOKEN_TTL_SECONDS);
+      await git.clone({
+        url: origin.remote,
+        username: "x",
+        password: token.plaintext
+      });
+      const head = await git.log({ depth: 1 });
+      if (!head[0]) throw new Error("forked repo has no commits");
+      sha = head[0].oid;
+    } else {
+      await this.restoreFiles(origin.files);
+      await git.init({ defaultBranch: "main" });
+      await git.add({ filepath: "." });
+      const committed = await git.commit({
+        message: `genesis: ${note}`,
+        author: GIT_AUTHOR
+      });
+      sha = committed.oid;
+    }
+    const files = await this.readHarnessFiles();
+    const version = this.store.insertVersion(sha, note, files);
+    if (origin.kind === "artifacts") {
+      // The forked repo already contains exactly this history.
+      this.store.setVersionPush(version.version, origin.remote, sha);
+    }
+    this.store.appendJournal("genesis", {
+      version: version.version,
+      sha,
+      origin: origin.kind,
+      parent: origin.parent.name,
+      parentVersion: origin.parent.version,
+      parentSha: origin.parent.sha,
+      files: Object.keys(files)
+    });
+    this.#onMutation();
+    return { version: version.version, sha };
+  }
+
   /** Execute one harness tool inside an isolated dynamic Worker. */
   async runHarnessTool(
     loaded: LoadedHarness,
@@ -548,6 +702,22 @@ ${imports}
         execute: this.#journaled("rollback_harness", async ({ version }) => {
           try {
             return await this.rollbackTo(version);
+          } catch (error) {
+            return {
+              error: error instanceof Error ? error.message : String(error)
+            };
+          }
+        })
+      }),
+      fork_self: tool({
+        description:
+          "Fork your current ACTIVATED self into a new, independent agent. The child starts life exactly as you are now (identity, policy, tools) and evolves on its own; your journal records the fork. Unactivated edits are not inherited.",
+        inputSchema: z.object({
+          name: z.string().describe('Name for the new agent, e.g. "pirate-jr"')
+        }),
+        execute: this.#journaled("fork_self", async ({ name }) => {
+          try {
+            return await this.forkSelf(name);
           } catch (error) {
             return {
               error: error instanceof Error ? error.message : String(error)

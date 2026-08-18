@@ -30,14 +30,22 @@ Harness tools execute inside isolates with no network access and two
 capabilities: `state.*` (the workspace filesystem, via `@cloudflare/shell`)
 and `journal.note()` (append-only).
 
-When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), every
-successful activation also pushes the workspace git history to a per-agent
+When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), genesis and
+every successful activation push the workspace git history to a per-agent
 [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) repo
 (`exo-<agent-name>` in the `exo-harness` namespace) over standard
-git-over-HTTP, and records the remote + pushed SHA in the version ledger
+git-over-HTTP, and record the remote + pushed SHA in the version ledger
 and journal. The push is best-effort: failures are journaled
 (`artifacts_push_failed`) and never fail the activation, and without the
 binding (offline dev, tests) it is skipped entirely.
+
+Agents can also reproduce: the `fork_self` tool forks the current
+**activated** self into a new agent. With Artifacts bound this is a real
+repo fork (the child clones it, and its repo records
+`source: artifacts:exo-harness/exo-<parent>` — durable lineage); offline
+it degrades to handing over the activated file snapshot. The child's v1 is
+`fork of <parent> v<N>`, both journals record the event, and each agent is
+addressable in the UI at `/?agent=<name>` (default `main`).
 
 The UI is a chat pane plus a "glass skull": live views of the agent's own
 source (with version timeline + restore), the append-only journal, and the
@@ -80,6 +88,9 @@ protocol:
    turn journals `harness_load_failed` + `harness_rollback` and keeps working.
 4. **Restore an old self** — the Self tab's version timeline has one-click
    restore; history only moves forward.
+5. **Fork it** — ask it to "fork yourself into an agent called pirate-jr",
+   then open `/?agent=pirate-jr`: the child starts life as the parent's
+   activated self and evolves independently.
 
 ## Tests
 
@@ -93,8 +104,8 @@ the activation gate, forward-only rollback, and journal ordering.
 
 ## Where this is going
 
-This is M1+ of a larger sketch (kernel/harness split on one DO, harness
-versions mirrored to Cloudflare Artifacts): next steps are swapping the
-filesystem/execution backend to `@cloudflare/computer` (container shell,
-snapshots), Artifacts forks as agent clone/lineage, and
+This is M2 of a larger sketch (kernel/harness split on one DO, harness
+versions mirrored to Cloudflare Artifacts, forks as agent clone/lineage):
+next steps are swapping the filesystem/execution backend to
+`@cloudflare/computer` (container shell, snapshots) and
 `this.schedule()`-backed task tools.

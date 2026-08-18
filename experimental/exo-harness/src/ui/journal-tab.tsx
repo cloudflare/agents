@@ -17,6 +17,7 @@ const KIND_STYLE: Record<
   harness_load_failed: { variant: "destructive" },
   artifacts_push: { variant: "primary" },
   artifacts_push_failed: { variant: "destructive" },
+  fork: { variant: "primary" },
   file_write: { variant: "secondary" },
   file_delete: { variant: "secondary" },
   note: { variant: "primary" },
@@ -27,7 +28,11 @@ function summarize(entry: JournalEntry): string {
   const d = entry.data;
   switch (entry.kind) {
     case "genesis":
-      return `v${d.version} · ${String(d.sha).slice(0, 7)}`;
+      return `v${d.version} · ${String(d.sha).slice(0, 7)}${
+        d.parent ? ` · fork of ${String(d.parent)} v${d.parentVersion}` : ""
+      }`;
+    case "fork":
+      return `→ ${String(d.child)} (${String(d.origin)}) as v${d.childVersion} from v${d.fromVersion}`;
     case "harness_upgrade":
       return `v${d.version} · ${String(d.note)}`;
     case "harness_rollback":

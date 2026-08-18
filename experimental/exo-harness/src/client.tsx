@@ -36,6 +36,11 @@ import "./styles.css";
 
 type Tab = "self" | "journal" | "workspace";
 
+// Which self to open: /?agent=<name>. Forked agents link here; the default
+// is the one shared long-lived agent.
+const AGENT_NAME =
+  new URLSearchParams(window.location.search).get("agent")?.trim() || "main";
+
 const TABS: { id: Tab; label: string; icon: typeof BrainIcon }[] = [
   { id: "self", label: "Self", icon: BrainIcon },
   { id: "journal", label: "Journal", icon: ScrollIcon },
@@ -53,8 +58,8 @@ function App() {
 
   const agent = useAgent<ExoState>({
     agent: "ExoKernel",
-    // One shared long-lived agent: the whole point is a persistent self.
-    name: "main",
+    // A persistent self per name; fork_self spawns siblings under new names.
+    name: AGENT_NAME,
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onStateUpdate: useCallback((state: ExoState) => setExoState(state), [])
@@ -103,6 +108,7 @@ function App() {
             <h1 className="text-lg font-semibold text-kumo-default">
               Exo Harness
             </h1>
+            <Badge variant="secondary">{AGENT_NAME}</Badge>
             <Badge variant="primary">
               v{exoState.activeVersion}
               {exoState.activeSha ? ` · ${shortSha(exoState.activeSha)}` : ""}

@@ -21,6 +21,7 @@ export type JournalKind =
   | "harness_load_failed"
   | "artifacts_push"
   | "artifacts_push_failed"
+  | "fork"
   | "file_write"
   | "file_delete"
   | "note"
@@ -52,6 +53,22 @@ export interface HarnessToolManifest {
   description: string;
   inputSchema: Record<string, unknown>;
 }
+
+/** The activated self a fork was taken from. */
+export interface ForkParent {
+  name: string;
+  version: number;
+  sha: string;
+}
+
+/**
+ * How a forked child receives its genesis: a clone of the parent's
+ * Artifacts repo fork (full git lineage) or a direct file snapshot
+ * (offline fallback when no Artifacts binding is bound).
+ */
+export type ForkOrigin =
+  | { kind: "artifacts"; repoName: string; remote: string; parent: ForkParent }
+  | { kind: "files"; files: Record<string, string>; parent: ForkParent };
 
 export interface HarnessPolicy {
   /** "mock" or "workers-ai:<model-id>". */

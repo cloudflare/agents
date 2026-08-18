@@ -1,4 +1,4 @@
-import { routeAgentRequest, callable } from "agents";
+import { routeAgentRequest, callable, getAgentByName } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkersAI } from "workers-ai-provider";
@@ -17,12 +17,21 @@ import {
   INITIAL_STATE,
   JOURNAL_TAIL_LIMIT,
   type ExoState,
+  type ForkOrigin,
   type HarnessPolicy,
   type JournalEntry,
   type Json,
   type LoadedHarness,
   type VersionInfo
 } from "./kernel/types";
+
+/**
+ * Narrow RPC surface for parent → child fork delivery. The full stub type
+ * trips TS instantiation-depth limits (see src/tests/kernel.test.ts).
+ */
+interface AdoptableKernel {
+  adoptGenesis(origin: ForkOrigin): Promise<{ version: number; sha: string }>;
+}
 
 /**
  * ExoKernel — the stable, non-self-modifiable layer of an exo-style agent.
@@ -59,6 +68,10 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       name: () => this.name,
       // Absent in offline dev and tests — the core then skips pushing.
       artifacts: this.env.ARTIFACTS,
+      adoptChild: async (childName, origin) => {
+        const child = await getAgentByName(this.env.ExoKernel, childName);
+        return (child as unknown as AdoptableKernel).adoptGenesis(origin);
+      },
       onMutation: () => this.refreshSyncedState()
     });
     return this.#core;
@@ -250,6 +263,14 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     return beforeId
       ? store.journalBefore(beforeId, limit)
       : store.journalTail(limit);
+  }
+
+  /** Receive a fork genesis from a parent agent (cross-DO RPC). */
+  @callable()
+  async adoptGenesis(
+    origin: ForkOrigin
+  ): Promise<{ version: number; sha: string }> {
+    return this.core().adoptGenesis(origin);
   }
 
   @callable()
