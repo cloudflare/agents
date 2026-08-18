@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "channels-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true
+    }
+  ],
+  "vars": {
+    "EMAIL_FROM": "agent@example.com",
+    "SUPPORT_EMAIL": "support@example.com",
+    "TELEGRAM_SUPPORT_CHAT_ID": "123456789",
+    "PUBLIC_BASE_URL": "http://localhost:8787",
+    "OPERATIONS_WEBHOOK_URL": "http://localhost:8787/operations-webhook"
+  },
+  "secrets": {
+    "required": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHANNELS_EXAMPLE",
+        "class_name": "ChannelsExample"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChannelsExample"]
+    }
+  ]
+}

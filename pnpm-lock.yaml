@@ -760,6 +760,37 @@ importers:
         specifier: ^4.115.0
         version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
 
+  examples/channels:
+    dependencies:
+      '@cloudflare/channels':
+        specifier: '*'
+        version: link:../../packages/channels
+      '@cloudflare/tanstack-ai':
+        specifier: ^0.2.0
+        version: 0.2.0(@aws-sdk/credential-provider-node@3.972.57)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@smithy/signature-v4@5.6.12)(@tanstack/ai@0.38.0(@opentelemetry/api@1.9.1))(ws@8.21.3)(zod@4.4.3)
+      '@tanstack/ai':
+        specifier: 0.38.0
+        version: 0.38.0(@opentelemetry/api@1.9.1)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
+      workers-ai-provider:
+        specifier: ^4.0.0
+        version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260729.1
+        version: 5.20260729.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.115.0
+        version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
+
   examples/chat-sdk-messenger:
     dependencies:
       '@chat-adapter/telegram':
@@ -2202,7 +2233,7 @@ importers:
         version: 19.2.7(react@19.2.7)
       web-push:
         specifier: ^3.6.7
-        version: 3.6.7(supports-color@7.2.0)
+        version: 3.6.7
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.48.0
@@ -4027,6 +4058,22 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+
+  packages/channels:
+    dependencies:
+      postal-mime:
+        specifier: ^2.7.5
+        version: 2.7.5
+    devDependencies:
+      '@tanstack/ai':
+        specifier: 0.38.0
+        version: 0.38.0(@opentelemetry/api@1.9.1)
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.2.0)(@vitest/browser-playwright@4.1.10)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.2.0)(typescript@6.0.3))(vite@8.1.0(@types/node@26.2.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
   packages/codemode:
     dependencies:
@@ -13554,7 +13601,7 @@ snapshots:
       '@opentelemetry/api': 1.9.0
       '@smithy/node-http-handler': 4.7.3
       http-proxy-agent: 7.0.2
-      https-proxy-agent: 7.0.6(supports-color@7.2.0)
+      https-proxy-agent: 7.0.6
       openai: 6.26.0(ws@8.21.3)(zod@4.4.3)
       partial-json: 0.1.7
       typebox: 1.1.38
@@ -13782,7 +13829,7 @@ snapshots:
       google-auth-library: 10.7.0
       p-retry: 4.6.2
       protobufjs: 7.6.4
-      ws: 8.21.0
+      ws: 8.21.3
     optionalDependencies:
       '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
     transitivePeerDependencies:
@@ -17290,7 +17337,7 @@ snapshots:
   gaxios@7.1.5:
     dependencies:
       extend: 3.0.2
-      https-proxy-agent: 7.0.6(supports-color@7.2.0)
+      https-proxy-agent: 7.0.6
       node-fetch: 3.3.2
     transitivePeerDependencies:
       - supports-color
@@ -17585,7 +17632,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  https-proxy-agent@7.0.6(supports-color@7.2.0):
+  https-proxy-agent@7.0.6:
     dependencies:
       agent-base: 7.1.4
       debug: 4.4.3(supports-color@7.2.0)
@@ -20637,11 +20684,11 @@ snapshots:
 
   web-namespaces@2.0.1: {}
 
-  web-push@3.6.7(supports-color@7.2.0):
+  web-push@3.6.7:
     dependencies:
       asn1.js: 5.4.1
       http_ece: 1.2.0
-      https-proxy-agent: 7.0.6(supports-color@7.2.0)
+      https-proxy-agent: 7.0.6
       jws: 4.0.1
       minimist: 1.2.8
     transitivePeerDependencies:

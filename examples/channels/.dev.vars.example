@@ -1,0 +1,3 @@
+# Copy this file to .dev.vars and replace each value.
+TELEGRAM_BOT_TOKEN=123456:telegram-bot-token
+TELEGRAM_WEBHOOK_SECRET=change-me-to-a-long-random-string

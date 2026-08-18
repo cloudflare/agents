@@ -1,0 +1,94 @@
+{
+  "name": "@cloudflare/channels",
+  "version": "0.0.0",
+  "description": "Transport-neutral messaging channels for Cloudflare Agents",
+  "repository": {
+    "directory": "packages/channels",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "type": "module",
+  "license": "MIT",
+  "author": "Cloudflare Inc.",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "channels",
+    "messaging",
+    "telegram",
+    "email"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./ai-sdk": {
+      "types": "./dist/ai-sdk.d.ts",
+      "import": "./dist/ai-sdk.js",
+      "require": "./dist/ai-sdk.js"
+    },
+    "./alarm-coordinator": {
+      "types": "./dist/alarm-coordinator.d.ts",
+      "import": "./dist/alarm-coordinator.js",
+      "require": "./dist/alarm-coordinator.js"
+    },
+    "./tanstack-ai": {
+      "types": "./dist/tanstack-ai.d.ts",
+      "import": "./dist/tanstack-ai.js",
+      "require": "./dist/tanstack-ai.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest --run"
+  },
+  "dependencies": {
+    "postal-mime": "^2.7.5"
+  },
+  "peerDependencies": {
+    "@tanstack/ai": ">=0.8.0 <1.0.0",
+    "ai": "^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@tanstack/ai": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@tanstack/ai": "0.38.0",
+    "ai": "^7.0.0",
+    "vitest": "4.1.10"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "nx": {
+    "targets": {
+      "build": {
+        "inputs": [
+          "production",
+          "^production",
+          "{workspaceRoot}/docs/channels/**/*",
+          "{workspaceRoot}/scripts/copy-package-docs.ts"
+        ],
+        "outputs": [
+          "{projectRoot}/dist",
+          "{projectRoot}/docs"
+        ]
+      }
+    }
+  }
+}

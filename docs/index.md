@@ -3,6 +3,7 @@
 Documentation is grouped by the package that owns it:
 
 - [`agents`](./agents/index.md) — Durable Object agents, state, routing, scheduling, sessions, MCP, and shared primitives
+- [`@cloudflare/channels`](./channels/index.md) — transport-neutral delivery, webhook ingress, and approval routing
 - [`@cloudflare/think`](./think/index.md) — opinionated agent harness built on Agents, Codemode, and Shell
 - [`@cloudflare/codemode`](./codemode/index.md) — sandboxed code execution, tool providers, connectors, approvals, and snippets
 - [`@cloudflare/shell`](./shell/index.md) — durable workspaces and filesystem tools
