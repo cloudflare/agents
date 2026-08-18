@@ -1559,14 +1559,54 @@ export function getCurrentAgent<
  * @returns A wrapped method that runs within the agent context
  */
 
+// Native RPC initialization applies to the public application RPC surface.
+// PartyServer methods initialize themselves or belong to its synchronous
+// lifecycle/control plane, so derive that boundary from the installed Server
+// prototype chain instead of duplicating upstream method names here.
+const RPC_INITIALIZATION_CONTROL_METHODS = new Set<string>();
+let serverPrototype: object | null = Server.prototype;
+while (serverPrototype && serverPrototype !== Object.prototype) {
+  for (const methodName of Object.getOwnPropertyNames(serverPrototype)) {
+    RPC_INITIALIZATION_CONTROL_METHODS.add(methodName);
+  }
+  serverPrototype = Object.getPrototypeOf(serverPrototype);
+}
+
+for (const methodName of [
+  // Destruction deliberately bypasses startup when alarm() resumes teardown of
+  // a condemned Agent. Initializing here would recreate state immediately
+  // before destroy() erases it.
+  "destroy",
+  // Connection policy hooks make synchronous decisions inside framework entry
+  // points and must never return an initialization Promise.
+  "shouldConnectionBeReadonly",
+  "shouldSendProtocolMessages",
+  "isConnectionProtocolEnabled",
+  // Agent state hooks are local lifecycle callbacks, not application RPC.
+  "onStateChanged",
+  "onStateUpdate",
+  "validateStateChange"
+]) {
+  RPC_INITIALIZATION_CONTROL_METHODS.add(methodName);
+}
+
+const RPC_INITIALIZATION_WRAPPERS = new WeakSet<object>();
+
+type AgentContextMethodReturn<T extends (...args: never[]) => unknown> =
+  | ReturnType<T>
+  | Promise<Awaited<ReturnType<T>>>;
+
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
 function withAgentContext<T extends (...args: any[]) => any>(
   method: T
 ): (
   this: Agent<Cloudflare.Env, unknown>,
   ...args: Parameters<T>
-) => ReturnType<T> {
-  return function (...args: Parameters<T>): ReturnType<T> {
+) => AgentContextMethodReturn<T> {
+  const wrappedMethod = function (
+    this: Agent<Cloudflare.Env, unknown>,
+    ...args: Parameters<T>
+  ): AgentContextMethodReturn<T> {
     const { agent } = getCurrentAgent();
 
     if (agent === this) {
@@ -1583,10 +1623,23 @@ function withAgentContext<T extends (...args: any[]) => any>(
         email: undefined
       },
       () => {
-        return method.apply(this, args);
+        if (this._rpcInitializationState !== "pending") {
+          return method.apply(this, args);
+        }
+
+        // A native Durable Object RPC invokes the method directly, bypassing
+        // PartyServer.fetch() and the other entry points that normally run
+        // onStart(). Initialize inside the invocation context so methods called
+        // by onStart take the synchronous branch above rather than recursively
+        // trying to initialize the same Agent.
+        return this.__unsafe_ensureInitialized().then(() =>
+          method.apply(this, args)
+        );
       }
     );
   };
+  RPC_INITIALIZATION_WRAPPERS.add(wrappedMethod);
+  return wrappedMethod;
 }
 
 /**
@@ -1614,6 +1667,19 @@ export class Agent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Server<Env, Props> {
+  /** @internal Native RPC lifecycle state; armed after derived construction. */
+  protected _rpcInitializationState:
+    | "constructing"
+    | "pending"
+    | "starting"
+    | "started" = "constructing";
+
+  /** @internal Initialize cold RPC entrypoints without re-entering startup. */
+  override async __unsafe_ensureInitialized(): Promise<void> {
+    if (this._rpcInitializationState !== "pending") return;
+    await super.__unsafe_ensureInitialized();
+  }
+
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
@@ -2340,6 +2406,19 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    // Base constructors run before derived class fields and constructor bodies.
+    // Keep local calls synchronous during that phase, then arm native-RPC
+    // initialization in a microtask protected by blockConcurrencyWhile(). The
+    // runtime cannot dispatch an external event/RPC until this callback settles,
+    // while JavaScript guarantees the derived constructor finishes before the
+    // current stack reaches the awaited continuation.
+    this.ctx.blockConcurrencyWhile(async () => {
+      await Promise.resolve();
+      if (this._rpcInitializationState === "constructing") {
+        this._rpcInitializationState = "pending";
+      }
+    });
+
     this.mcp = this._withAgentSpan(
       "agent_initialization",
       "initialization",
@@ -2347,7 +2426,7 @@ export class Agent<
       (update) => {
         if (!wrappedClasses.has(this.constructor)) {
           // Auto-wrap custom methods with agent context
-          this._autoWrapCustomMethods();
+          this._autoWrapRpcMethods();
           wrappedClasses.add(this.constructor);
         }
 
@@ -2863,10 +2942,23 @@ export class Agent<
         }
       );
     };
-    this.onStart = (props?: Props) =>
-      this._withAgentSpan("agent_start", "startup", {}, (update) =>
-        startAgent(props, update)
-      );
+    this.onStart = async (props?: Props) => {
+      const previousInitialization = this._rpcInitializationState;
+      this._rpcInitializationState = "starting";
+      try {
+        const result = await this._withAgentSpan(
+          "agent_start",
+          "startup",
+          {},
+          (update) => startAgent(props, update)
+        );
+        this._rpcInitializationState = "started";
+        return result;
+      } catch (error) {
+        this._rpcInitializationState = previousInitialization;
+        throw error;
+      }
+    };
   }
 
   /**
@@ -3570,64 +3662,57 @@ export class Agent<
   }
 
   /**
-   * Automatically wrap custom methods with agent context
-   * This ensures getCurrentAgent() works in all custom methods without decorators
+   * Wraps the public application RPC methods exposed by an Agent subclass with
+   * invocation context and cold-start initialization. Explicit PartyServer
+   * lifecycle/control-plane methods retain their dispatch semantics, while
+   * underscore-prefixed methods are reserved for framework internals.
    */
-  private _autoWrapCustomMethods() {
-    // Collect all methods from base prototypes (Agent and Server)
-    const basePrototypes = [Agent.prototype, Server.prototype];
-    const baseMethods = new Set<string>();
-    for (const baseProto of basePrototypes) {
-      let proto = baseProto;
-      while (proto && proto !== Object.prototype) {
-        const methodNames = Object.getOwnPropertyNames(proto);
-        for (const methodName of methodNames) {
-          baseMethods.add(methodName);
-        }
-        proto = Object.getPrototypeOf(proto);
-      }
-    }
-    // Get all methods from the current instance's prototype chain
+  private _autoWrapRpcMethods() {
+    // The nearest descriptor is authoritative. Record every name before
+    // classifying its descriptor so an inherited method can never replace a
+    // subclass getter or non-function property with the same name.
+    const discoveredNames = new Set<string>();
     let proto = Object.getPrototypeOf(this);
-    let depth = 0;
-    while (proto && proto !== Object.prototype && depth < 10) {
-      const methodNames = Object.getOwnPropertyNames(proto);
-      for (const methodName of methodNames) {
-        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
+    while (proto && proto !== Object.prototype) {
+      for (const methodName of Object.getOwnPropertyNames(proto)) {
+        if (discoveredNames.has(methodName)) continue;
+        discoveredNames.add(methodName);
 
-        // Skip if it's a private method, a base method, a getter, or not a function,
+        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
         if (
-          baseMethods.has(methodName) ||
+          RPC_INITIALIZATION_CONTROL_METHODS.has(methodName) ||
           methodName.startsWith("_") ||
           !descriptor ||
           !!descriptor.get ||
+          !!descriptor.set ||
           typeof descriptor.value !== "function"
         ) {
           continue;
         }
 
-        // Now, methodName is confirmed to be a custom method/function
-        // Wrap the custom method with context
+        const originalMethod = descriptor.value;
+        if (RPC_INITIALIZATION_WRAPPERS.has(originalMethod)) {
+          continue;
+        }
+
         /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
         const wrappedFunction = withAgentContext(
-          this[methodName as keyof this] as (...args: any[]) => any
+          originalMethod as (...args: any[]) => any
         ) as any;
         /* oxlint-enable @typescript-eslint/no-explicit-any */
 
-        // if the method is callable, copy the metadata from the original method
-        if (this._isCallable(methodName)) {
-          callableMetadata.set(
-            wrappedFunction,
-            callableMetadata.get(this[methodName as keyof this] as Function)!
-          );
+        const metadata = callableMetadata.get(originalMethod);
+        if (metadata) {
+          callableMetadata.set(wrappedFunction, metadata);
         }
 
-        // set the wrapped function on the prototype
-        this.constructor.prototype[methodName as keyof this] = wrappedFunction;
+        Object.defineProperty(this.constructor.prototype, methodName, {
+          ...descriptor,
+          value: wrappedFunction
+        });
       }
 
       proto = Object.getPrototypeOf(proto);
-      depth++;
     }
   }
 
@@ -4329,6 +4414,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<{ ok: boolean; callback?: string }> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     const result = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
@@ -4358,6 +4444,7 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const rows = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
       WHERE owner_path IS NOT NULL
@@ -4482,6 +4569,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<Schedule<unknown> | undefined> {
+    await this.__unsafe_ensureInitialized();
     return this._getScheduleForOwner(ownerPath, id);
   }
 
@@ -4494,6 +4582,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     criteria: ScheduleCriteria = {}
   ): Promise<Schedule<unknown>[]> {
+    await this.__unsafe_ensureInitialized();
     return this._listSchedulesForOwner(ownerPath, criteria);
   }
 
@@ -4506,6 +4595,7 @@ export class Agent<
   async _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
     this._facetKeepAliveTokens.add(token);
@@ -4522,6 +4612,7 @@ export class Agent<
    * @internal
    */
   async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     if (!this._facetKeepAliveTokens.delete(token)) return;
     this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
     await this._scheduleNextAlarm();
@@ -4537,6 +4628,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathJson = JSON.stringify(ownerPath);
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     if (!ownerPathKey) {
@@ -4559,6 +4651,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
     this.sql`
       DELETE FROM cf_agents_facet_runs
@@ -6086,6 +6179,7 @@ export class Agent<
   async _cf_checkRunFibersForFacet(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<number> {
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
     if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -6133,6 +6227,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     row: ScheduleStorageRow
   ): Promise<boolean> {
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
     if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -6250,6 +6345,7 @@ export class Agent<
   async _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const selfPath = this.selfPath;
 
     if (targetPath.length === 0) {
@@ -7124,6 +7220,7 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     if (this._isFacet && this._cf_currentSubAgentBridge) {
       this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
       return;
@@ -7141,6 +7238,7 @@ export class Agent<
   async _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
+    await this.__unsafe_ensureInitialized();
     const metas: SubAgentConnectionMeta[] = [];
     for (const connection of super.getConnections()) {
       const meta = this._cf_subAgentConnectionMetaForPath(
@@ -7156,6 +7254,7 @@ export class Agent<
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
@@ -7168,6 +7267,7 @@ export class Agent<
     code?: number,
     reason?: string
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
@@ -7179,6 +7279,7 @@ export class Agent<
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     const connection = super.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return null;
@@ -7447,6 +7548,7 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this._cf_runWithSubAgentBridge(bridge, async () => {
       const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
       const request = new Request(meta.uri ?? "http://placeholder/", {
@@ -7483,6 +7585,7 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
@@ -7497,6 +7600,7 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
@@ -7760,6 +7864,7 @@ export class Agent<
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     const stub = await this._cf_resolveSubAgent(className, name);
     return await this._cf_invokeStubMethod(stub, className, method, args);
   }
@@ -7777,6 +7882,7 @@ export class Agent<
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     const [self, next, ...rest] = path;
     if (!self) {
       throw new Error(`Sub-agent path invocation requires a non-empty path.`);

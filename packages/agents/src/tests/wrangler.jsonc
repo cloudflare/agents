@@ -187,6 +187,10 @@
         "name": "TestWaitConnectionsAgent"
       },
       {
+        "class_name": "TestNativeRpcAgent",
+        "name": "TestNativeRpcAgent"
+      },
+      {
         "class_name": "TestSubAgentParent",
         "name": "TestSubAgentParent"
       },
@@ -372,6 +376,7 @@
         "TestSearchAgent",
         "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
+        "TestNativeRpcAgent",
         "TestSubAgentParent",
         "CustomBoundSubAgentParent",
         "TestWorkflowSubAgent",

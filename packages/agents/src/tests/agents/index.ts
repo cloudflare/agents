@@ -55,6 +55,7 @@ export {
 } from "./session";
 export { TestMultiSessionAgent } from "./multi-session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
+export { TestNativeRpcAgent } from "./native-rpc";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
 export {
   TestSubAgentParent,

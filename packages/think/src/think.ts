@@ -3095,14 +3095,27 @@ export class Think<
         "cloudflare.agents.start.degradations": this._onStartDegradations.length
       });
     };
-    this.onStart = (props?: Props) =>
-      withAgentSpan(
-        this,
-        "think_start",
-        "startup",
-        { "cloudflare.agents.component": "think" },
-        (update) => startThink(props, update)
-      );
+    this.onStart = async (props?: Props) => {
+      // PartyServer's normal fetch/setName/alarm initialization enters onStart
+      // without going through an application-RPC wrapper. Suppress its native
+      // RPC guard while startup itself calls public Think extension points.
+      const previousInitialization = this._rpcInitializationState;
+      this._rpcInitializationState = "starting";
+      try {
+        const result = await withAgentSpan(
+          this,
+          "think_start",
+          "startup",
+          { "cloudflare.agents.component": "think" },
+          (update) => startThink(props, update)
+        );
+        this._rpcInitializationState = "started";
+        return result;
+      } catch (error) {
+        this._rpcInitializationState = previousInitialization;
+        throw error;
+      }
+    };
   }
 
   /**
@@ -7055,14 +7068,17 @@ export class Think<
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
 
   async _hostReadFile(path: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     return (await this.workspace.readFile(path)) ?? null;
   }
 
   async _hostWriteFile(path: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.workspace.writeFile(path, content);
   }
 
   async _hostDeleteFile(path: string): Promise<boolean> {
+    await this.__unsafe_ensureInitialized();
     try {
       await this.workspace.rm(path);
       return true;
@@ -7076,6 +7092,7 @@ export class Think<
   ): Promise<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
+    await this.__unsafe_ensureInitialized();
     const entries = await this.workspace.readDir(dir);
     return entries.map((e) => ({
       name: e.name,
@@ -7086,17 +7103,20 @@ export class Think<
   }
 
   async _hostGetContext(label: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     const block = this.session.getContextBlock(label);
     return block?.content ?? null;
   }
 
   async _hostSetContext(label: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.session.replaceContextBlock(label, content);
   }
 
   async _hostGetMessages(
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
+    await this.__unsafe_ensureInitialized();
     const history = this.messages;
     const sliced =
       limit !== undefined && limit !== null
@@ -7115,6 +7135,7 @@ export class Think<
   }
 
   async _hostSendMessage(content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const msg = {
       id: crypto.randomUUID(),
       role: "user" as const,
@@ -7131,6 +7152,7 @@ export class Think<
   async _hostGetSessionInfo(): Promise<{
     messageCount: number;
   }> {
+    await this.__unsafe_ensureInitialized();
     return {
       messageCount: this.messages.length
     };
