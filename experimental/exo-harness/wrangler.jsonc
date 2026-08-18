@@ -16,6 +16,9 @@
     "MODEL_OVERRIDE": ""
   },
   "worker_loaders": [{ "binding": "LOADER" }],
+  // The production workers.dev route sits behind Cloudflare Access; keep
+  // version preview URLs off so deploys never open an unprotected side door.
+  "preview_urls": false,
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/agents/*"]
