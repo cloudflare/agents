@@ -860,7 +860,7 @@ ${imports}
       }),
       journal_note: tool({
         description:
-          "Append a durable note to your journal for your future self",
+          "Annotate your permanent event journal — the append-only record of what happened and why (decisions, experiment outcomes, reasoning at the time). It survives rollbacks, compaction, and memory edits, but is NOT injected into your context: future turns only see it via read_journal. For facts you need to actively carry between turns, write to your memory file instead.",
         inputSchema: z.object({
           text: z.string().describe("The note to record")
         }),
@@ -875,7 +875,7 @@ ${imports}
       }),
       read_journal: tool({
         description:
-          "Read the most recent entries from your append-only journal",
+          "Read the most recent entries from your append-only journal — your full history of events: turns, tool calls, upgrades, rollbacks, pushes, compactions, and your own notes. Use it to reconstruct what happened and why.",
         inputSchema: z.object({
           limit: z
             .number()
