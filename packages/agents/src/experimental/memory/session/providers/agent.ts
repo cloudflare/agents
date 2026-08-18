@@ -354,8 +354,11 @@ export class AgentSessionProvider implements SessionProvider {
       to_message_id: string;
       created_at: string;
     };
+    // SQLite CURRENT_TIMESTAMP has one-second resolution. Iterative overlays
+    // created in the same second must still retain insertion order so the last
+    // matching overlay is the newest one.
     return this.agent.sql<Row>`
-      SELECT * FROM assistant_compactions WHERE session_id = ${this.sessionId} ORDER BY created_at ASC
+      SELECT * FROM assistant_compactions WHERE session_id = ${this.sessionId} ORDER BY created_at ASC, rowid ASC
     `.map((r) => ({
       id: r.id,
       summary: r.summary,
@@ -530,16 +533,24 @@ export class AgentSessionProvider implements SessionProvider {
     compactions: StoredCompaction[]
   ): SessionMessage[] {
     const ids = messages.map((m) => m.id);
+    const messageIndexById = new Map(
+      ids.map((messageId, index) => [messageId, index])
+    );
     const result: SessionMessage[] = [];
     let i = 0;
     while (i < messages.length) {
-      // Find all compactions starting at this message, pick the latest
-      // (widest range) so newer compactions supersede older ones
-      const matching = compactions.filter((c) => c.fromMessageId === ids[i]);
+      // Sibling branches can have compactions with the same starting message.
+      // Consider only ranges ending on this branch, then let the latest valid
+      // compaction supersede earlier ranges on the same branch.
+      const matching = compactions.filter(
+        (compaction) =>
+          compaction.fromMessageId === ids[i] &&
+          (messageIndexById.get(compaction.toMessageId) ?? -1) >= i
+      );
       const comp =
         matching.length > 1 ? matching[matching.length - 1] : matching[0];
       if (comp) {
-        const endIdx = ids.indexOf(comp.toMessageId);
+        const endIdx = messageIndexById.get(comp.toMessageId) ?? -1;
         if (endIdx >= i) {
           result.push({
             id: `${COMPACTION_PREFIX}${comp.id}`,

@@ -1912,6 +1912,24 @@ const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
  */
 const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
 
+/** Stable id prefix for fallback notes that preserve orphaned execution outcomes. */
+const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
+
+/**
+ * Present framework-authored execution outcome notes to providers as user
+ * context. Think persists these notes as system messages so clients and
+ * recovery do not mistake them for human input, but AI SDK v7 and strict
+ * providers reject system messages in arbitrary transcript
+ * positions. The provider-only projection leaves current and legacy session
+ * history unchanged.
+ */
+function toProviderSafeExecutionOutcomeMessage(message: UIMessage): UIMessage {
+  return message.role === "system" &&
+    message.id.startsWith(EXECUTION_OUTCOME_MESSAGE_PREFIX)
+    ? { ...message, role: "user" }
+    : message;
+}
+
 /**
  * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
  * deliver its structured final answer. The agent runs a full multi-step,
@@ -5316,7 +5334,10 @@ export class Think<
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
     const history = await this._repairTranscriptForProvider(this.messages);
-    const truncated = truncateOlderMessages(history) as UIMessage[];
+    const providerSafeHistory = history.map(
+      toProviderSafeExecutionOutcomeMessage
+    );
+    const truncated = truncateOlderMessages(providerSafeHistory) as UIMessage[];
     // `_repairTranscriptForProvider` above already heals orphan tool calls
     // (flipping them to errored results, preserving the record). This is the
     // last-line backstop: if any incomplete tool call still slips through
@@ -13470,15 +13491,17 @@ export class Think<
   }
 
   /**
-   * Replace a paused execute-tool output in the transcript with the
-   * execution's new outcome and kick the auto-continuation so the model sees
-   * it.
+   * Replace a paused execute-tool or durable-action output in the transcript
+   * with the execution's new outcome and kick the auto-continuation so the
+   * model sees it.
    *
    * When no paused part carries `executionId` — the output was already
    * replaced from another tab, or compaction summarized the part away — the
    * runtime has still durably applied the approval/rejection, so the outcome
-   * must not be dropped: it is appended as a system note instead, and the
-   * continuation still fires so the model can act on it.
+   * must not be dropped: it is appended as a framework-authored system note,
+   * and the continuation still fires so the model can act on it. Provider
+   * assembly projects this narrowly identified note to ordinary user context
+   * without changing its durable authorship.
    */
   private async _applyExecutionOutcome(
     executionId: string,
@@ -13495,14 +13518,17 @@ export class Think<
       } catch {
         summary = String(output);
       }
+      const outcomeSource = executionId.startsWith(ACTION_PAUSE_ID_PREFIX)
+        ? "durable action"
+        : "execute tool";
       await this._appendMessageToHistory({
-        id: `exec-outcome-${executionId}-${crypto.randomUUID()}`,
+        id: `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${crypto.randomUUID()}`,
         role: "system",
         parts: [
           {
             type: "text",
             text:
-              `[execute tool] The paused execution "${executionId}" was ` +
+              `[${outcomeSource}] The paused execution "${executionId}" was ` +
               `resolved, but its tool call is no longer in the transcript ` +
               `(it may have been compacted). Outcome: ${summary}`
           }

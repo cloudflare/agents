@@ -24,7 +24,11 @@
  */
 
 import { getAgentByName, routeAgentRequest } from "agents";
-import { type AgentThinkEnv, ThinkAgent } from "./agent";
+import {
+  type AgentThinkEnv,
+  type AgentThinkSubmissionStatus,
+  ThinkAgent
+} from "./agent";
 import {
   WorkspaceAgent,
   WorkspaceProxy,
@@ -91,6 +95,13 @@ export interface DispatchResult {
   submissionId: string;
 }
 
+export interface SubmissionStatusInput {
+  session: string;
+  submissionId: string;
+}
+
+export type { AgentThinkSubmissionStatus } from "./agent";
+
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 export class AgentThink extends WorkerEntrypoint<AgentThinkEnv> {
@@ -102,6 +113,20 @@ export class AgentThink extends WorkerEntrypoint<AgentThinkEnv> {
    */
   async dispatch(input: DispatchInput): Promise<DispatchResult> {
     return runDispatch(this.env, input);
+  }
+
+  /**
+   * Read the durable state of one submission. A continuation creates a new
+   * submission id and does not change the original submission's result.
+   */
+  async getSubmissionStatus(
+    input: SubmissionStatusInput
+  ): Promise<AgentThinkSubmissionStatus | null> {
+    const agent = await getAgentByName<AgentThinkEnv, ThinkAgent>(
+      this.env.ThinkAgent,
+      input.session
+    );
+    return agent.getSubmissionStatus(input.submissionId);
   }
 
   /**

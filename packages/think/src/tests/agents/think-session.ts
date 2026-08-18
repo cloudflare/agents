@@ -3670,14 +3670,28 @@ function createDurablePauseMockModel(): LanguageModel {
           (m as Record<string, unknown>).role === "tool"
       );
       // Only park when a user explicitly asked for it on this turn — so a
-      // post-resolution continuation (driven by a system note, no fresh user
-      // ask) responds with text instead of re-parking.
-      const userAskedToPause = messages.some((m: unknown) => {
+      // post-resolution continuation (driven by provider-projected framework
+      // context, not a fresh user ask) responds with text instead of re-parking.
+      const hasExecutionOutcomeContext = messages.some((m: unknown) => {
         if (typeof m !== "object" || m === null) return false;
         const mm = m as Record<string, unknown>;
         if (mm.role !== "user") return false;
-        return JSON.stringify(mm.content ?? "").includes("pauseAction");
+        const content = JSON.stringify(mm.content ?? "");
+        return (
+          content.includes("[execute tool]") ||
+          content.includes("[durable action]")
+        );
       });
+      const userAskedToPause =
+        !hasExecutionOutcomeContext &&
+        messages.some((m: unknown) => {
+          if (typeof m !== "object" || m === null) return false;
+          const mm = m as Record<string, unknown>;
+          return (
+            mm.role === "user" &&
+            JSON.stringify(mm.content ?? "").includes("pauseAction")
+          );
+        });
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -4423,6 +4437,22 @@ export class ThinkToolsTestAgent extends Think {
 
   async getDurablePauseExecCount(): Promise<number> {
     return this._durablePauseExecCount;
+  }
+
+  /** Simulate compaction removing a durable-pause action's tool part. */
+  async stripDurablePausePartsForTest(): Promise<void> {
+    for (const message of this.messages) {
+      if (message.role !== "assistant") continue;
+      const remaining = message.parts.filter(
+        (part) => part.type !== "tool-pauseAction"
+      );
+      if (remaining.length === message.parts.length) continue;
+      const parts: UIMessage["parts"] =
+        remaining.length > 0
+          ? remaining
+          : [{ type: "text", text: "(summarized)" }];
+      await this.updateMessageInHistory({ ...message, parts });
+    }
   }
 
   /** Compile tools and directly invoke the durable-pause action to park it. */
