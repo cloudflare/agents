@@ -15,6 +15,8 @@ const KIND_STYLE: Record<
   harness_upgrade: { variant: "primary" },
   harness_rollback: { variant: "destructive" },
   harness_load_failed: { variant: "destructive" },
+  artifacts_push: { variant: "primary" },
+  artifacts_push_failed: { variant: "destructive" },
   file_write: { variant: "secondary" },
   file_delete: { variant: "secondary" },
   note: { variant: "primary" },
@@ -32,6 +34,10 @@ function summarize(entry: JournalEntry): string {
       return `to v${d.toVersion}${d.asVersion ? ` as v${d.asVersion}` : ""} (${String(d.reason)})`;
     case "harness_load_failed":
       return String(d.error);
+    case "artifacts_push":
+      return `v${d.version} · ${String(d.sha).slice(0, 7)} → ${String(d.remote)}`;
+    case "artifacts_push_failed":
+      return `v${d.version}: ${String(d.error)}`;
     case "tool_call":
       return `${String(d.tool)} ${String(d.input ?? "")}`;
     case "tool_result":

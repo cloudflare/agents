@@ -33,11 +33,44 @@ type LoaderBinding = ConstructorParameters<
 const GIT_AUTHOR = { name: "Exo Kernel", email: "exo@cloudflare.dev" };
 const HARNESS_PREFIX = "/harness/";
 const TOOL_TIMEOUT_MS = 20_000;
+const ARTIFACTS_REMOTE_NAME = "artifacts";
+const ARTIFACTS_TOKEN_TTL_SECONDS = 15 * 60;
+
+/**
+ * Derive a stable, valid Artifacts repo name from an agent name.
+ * Repo names must start with a letter or digit and may contain letters,
+ * digits, ".", "_", and "-".
+ */
+export function artifactsRepoName(agentName: string): string {
+  const cleaned = agentName
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .slice(0, 63);
+  return `exo-${cleaned.length > 0 ? cleaned : "agent"}`;
+}
+
+function isArtifactsNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code: unknown }).code === "NOT_FOUND"
+  );
+}
 
 export interface ExoCoreOptions {
   workspace: Workspace;
   store: KernelStore;
   loader: LoaderBinding;
+  /** Stable agent name; used to derive the per-agent Artifacts repo name. */
+  name: () => string;
+  /**
+   * Optional Artifacts binding. When present, every successful activation
+   * pushes the workspace git history to a per-agent Artifacts repo
+   * (best-effort). When absent (offline dev, tests) pushes are skipped.
+   */
+  artifacts?: Artifacts;
   /** Called after any mutation so the owner can refresh synced UI state. */
   onMutation: () => void;
 }
@@ -46,6 +79,8 @@ export class ExoCore {
   readonly workspace: Workspace;
   readonly store: KernelStore;
   #loader: LoaderBinding;
+  #name: () => string;
+  #artifacts: Artifacts | undefined;
   #onMutation: () => void;
   #git: ReturnType<typeof createGit> | undefined;
   #genesis: Promise<void> | undefined;
@@ -54,6 +89,8 @@ export class ExoCore {
     this.workspace = options.workspace;
     this.store = options.store;
     this.#loader = options.loader;
+    this.#name = options.name;
+    this.#artifacts = options.artifacts;
     this.#onMutation = options.onMutation;
   }
 
@@ -266,8 +303,78 @@ ${imports}
       sha: oid,
       note
     });
+    await this.#pushToArtifacts(version.version, oid);
     this.#onMutation();
     return { version: version.version, sha: oid };
+  }
+
+  /**
+   * Best-effort mirror of the workspace git history to a per-agent
+   * Cloudflare Artifacts repo. Skipped silently when no binding is bound
+   * (offline dev, tests); any failure is journaled and never fails the
+   * activation itself.
+   */
+  async #pushToArtifacts(version: number, sha: string): Promise<void> {
+    const artifacts = this.#artifacts;
+    if (!artifacts) return;
+    try {
+      const { remote, token } = await this.#ensureArtifactsRepo(artifacts);
+      const git = this.git();
+      const remotes = await git.remote({ list: true });
+      const existing = Array.isArray(remotes)
+        ? remotes.find((r) => r.remote === ARTIFACTS_REMOTE_NAME)
+        : undefined;
+      if (existing && existing.url !== remote) {
+        await git.remote({ remove: ARTIFACTS_REMOTE_NAME });
+      }
+      if (!existing || existing.url !== remote) {
+        await git.remote({
+          add: { name: ARTIFACTS_REMOTE_NAME, url: remote }
+        });
+      }
+      // Force: the Artifacts repo is a mirror of this agent's current
+      // history. A rebuilt local state (fresh genesis against a surviving
+      // remote repo) must still be able to publish.
+      const result = await git.push({
+        remote: ARTIFACTS_REMOTE_NAME,
+        ref: "main",
+        force: true,
+        username: "x",
+        password: token
+      });
+      if (!result.ok) {
+        throw new Error(`push rejected: ${JSON.stringify(result.refs)}`);
+      }
+      this.store.setVersionPush(version, remote, sha);
+      this.store.appendJournal("artifacts_push", { version, sha, remote });
+    } catch (error) {
+      this.store.appendJournal("artifacts_push_failed", {
+        version,
+        sha,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  /** Get (or create) this agent's Artifacts repo and a short-lived write token. */
+  async #ensureArtifactsRepo(
+    artifacts: Artifacts
+  ): Promise<{ remote: string; token: string }> {
+    const repoName = artifactsRepoName(this.#name());
+    try {
+      const repo = await artifacts.get(repoName);
+      const token = await repo.createToken(
+        "write",
+        ARTIFACTS_TOKEN_TTL_SECONDS
+      );
+      return { remote: repo.remote, token: token.plaintext };
+    } catch (error) {
+      if (!isArtifactsNotFound(error)) throw error;
+      const created = await artifacts.create(repoName, {
+        description: `exo-harness agent "${this.#name()}" harness history`
+      });
+      return { remote: created.remote, token: created.token };
+    }
   }
 
   /**

@@ -56,6 +56,9 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       workspace: this.workspace,
       store: this.store(),
       loader: this.env.LOADER,
+      name: () => this.name,
+      // Absent in offline dev and tests — the core then skips pushing.
+      artifacts: this.env.ARTIFACTS,
       onMutation: () => this.refreshSyncedState()
     });
     return this.#core;

@@ -8,6 +8,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
+import { artifactsRepoName } from "../kernel/harness";
 import type {
   ExoState,
   JournalEntry,
@@ -273,6 +274,34 @@ describe("journal", () => {
     const page = await agent.getJournal(lastId, 2);
     expect(page).toHaveLength(2);
     expect(page.every((e) => e.id < lastId)).toBe(true);
+  });
+});
+
+describe("artifacts mirror", () => {
+  it("activation cleanly skips the push when no binding is bound", async () => {
+    // The test worker (src/tests/wrangler.jsonc) deliberately has no
+    // ARTIFACTS binding — exactly like offline dev. Activation must
+    // succeed with no push attempted and no push journal noise.
+    const agent = await freshAgent("artifacts-skip");
+    await agent.prompt(
+      '!tool write_file {"path": "/harness/identity.md", "content": "PERSONA: quiet.\\n"}'
+    );
+    await agent.prompt('!tool activate_harness {"note": "quiet persona"}');
+
+    const versions = await agent.getVersions();
+    expect(versions).toHaveLength(2);
+    expect(versions[1].remote).toBeNull();
+    expect(versions[1].pushedSha).toBeNull();
+
+    const journal = await agent.getJournal();
+    expect(kinds(journal)).not.toContain("artifacts_push");
+    expect(kinds(journal)).not.toContain("artifacts_push_failed");
+  });
+
+  it("derives valid per-agent repo names", () => {
+    expect(artifactsRepoName("main")).toBe("exo-main");
+    expect(artifactsRepoName("My Agent/42")).toBe("exo-my-agent-42");
+    expect(artifactsRepoName("---")).toBe("exo-agent");
   });
 });
 

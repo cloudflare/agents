@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Text } from "@cloudflare/kumo";
 import {
   ArrowCounterClockwiseIcon,
+  CloudArrowUpIcon,
   FileIcon,
   GitCommitIcon
 } from "@phosphor-icons/react";
@@ -102,6 +103,11 @@ export function SelfTab({
     ? state.harnessFiles.map((f) => f.path)
     : Object.keys(versionFiles ?? {}).sort();
 
+  // The agent's Artifacts mirror, from the most recent pushed version.
+  const artifactsRemote = [...state.versions]
+    .reverse()
+    .find((v) => v.remote)?.remote;
+
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Version timeline */}
@@ -111,6 +117,20 @@ export function SelfTab({
           <Text size="xs" bold>
             Version timeline
           </Text>
+          {artifactsRemote && (
+            <span
+              className="flex items-center gap-1 min-w-0 ml-auto"
+              title={`Mirrored to Cloudflare Artifacts: ${artifactsRemote}`}
+            >
+              <CloudArrowUpIcon
+                size={13}
+                className="text-kumo-accent shrink-0"
+              />
+              <span className="text-[10px] font-mono text-kumo-inactive truncate">
+                {artifactsRemote.replace(/^https:\/\//, "")}
+              </span>
+            </span>
+          )}
         </div>
         {[...state.versions].reverse().map((v) => {
           const isActive = v.version === state.activeVersion;
@@ -137,6 +157,14 @@ export function SelfTab({
                 <span className="text-[10px] font-mono text-kumo-inactive shrink-0">
                   {shortSha(v.sha)}
                 </span>
+                {v.remote && (
+                  <span
+                    className="shrink-0 flex"
+                    title={`Pushed ${shortSha(v.pushedSha ?? v.sha)} to ${v.remote}`}
+                  >
+                    <CloudArrowUpIcon size={13} className="text-kumo-accent" />
+                  </span>
+                )}
                 <span className="text-[10px] text-kumo-inactive shrink-0">
                   {formatTime(v.ts)}
                 </span>

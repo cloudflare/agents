@@ -30,6 +30,15 @@ Harness tools execute inside isolates with no network access and two
 capabilities: `state.*` (the workspace filesystem, via `@cloudflare/shell`)
 and `journal.note()` (append-only).
 
+When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), every
+successful activation also pushes the workspace git history to a per-agent
+[Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) repo
+(`exo-<agent-name>` in the `exo-harness` namespace) over standard
+git-over-HTTP, and records the remote + pushed SHA in the version ledger
+and journal. The push is best-effort: failures are journaled
+(`artifacts_push_failed`) and never fail the activation, and without the
+binding (offline dev, tests) it is skipped entirely.
+
 The UI is a chat pane plus a "glass skull": live views of the agent's own
 source (with version timeline + restore), the append-only journal, and the
 workspace.
@@ -84,7 +93,8 @@ the activation gate, forward-only rollback, and journal ordering.
 
 ## Where this is going
 
-This is M1 of a larger sketch (kernel/harness split on one DO): next steps
-are swapping the filesystem/execution backend to `@cloudflare/computer`
-(container shell, snapshots), pushing harness versions to Cloudflare
-Artifacts (fork = clone/lineage), and `this.schedule()`-backed task tools.
+This is M1+ of a larger sketch (kernel/harness split on one DO, harness
+versions mirrored to Cloudflare Artifacts): next steps are swapping the
+filesystem/execution backend to `@cloudflare/computer` (container shell,
+snapshots), Artifacts forks as agent clone/lineage, and
+`this.schedule()`-backed task tools.

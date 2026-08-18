@@ -5,6 +5,11 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI", "remote": true },
+  // Per-agent harness git mirror. Absent from wrangler.offline.jsonc and the
+  // test config: the kernel skips pushing when the binding is missing.
+  "artifacts": [
+    { "binding": "ARTIFACTS", "namespace": "exo-harness", "remote": true }
+  ],
   "vars": {
     // "" = use the model from /harness/policy.json; "mock" = offline dev
     // driver (see src/kernel/mock-model.ts); or "workers-ai:<model-id>".

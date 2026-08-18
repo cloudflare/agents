@@ -33,6 +33,8 @@ interface VersionRow {
   note: string;
   ts: number;
   files: string;
+  remote: string | null;
+  pushed_sha: string | null;
 }
 
 export class KernelStore {
@@ -54,9 +56,23 @@ export class KernelStore {
         sha TEXT NOT NULL,
         note TEXT NOT NULL,
         ts INTEGER NOT NULL,
-        files TEXT NOT NULL
+        files TEXT NOT NULL,
+        remote TEXT,
+        pushed_sha TEXT
       )
     `;
+    // Ledgers created before the Artifacts integration lack the push columns.
+    const columns = new Set(
+      this.sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('exo_versions')
+      `.map((c) => c.name)
+    );
+    if (!columns.has("remote")) {
+      this.sql`ALTER TABLE exo_versions ADD COLUMN remote TEXT`;
+    }
+    if (!columns.has("pushed_sha")) {
+      this.sql`ALTER TABLE exo_versions ADD COLUMN pushed_sha TEXT`;
+    }
   }
 
   appendJournal(kind: JournalKind, data: JsonObject): number {
@@ -107,7 +123,16 @@ export class KernelStore {
       INSERT INTO exo_versions (version, sha, note, ts, files)
       VALUES (${next}, ${sha}, ${note}, ${ts}, ${JSON.stringify(files)})
     `;
-    return { version: next, sha, note, ts };
+    return { version: next, sha, note, ts, remote: null, pushedSha: null };
+  }
+
+  /** Record a confirmed Artifacts push against an existing version. */
+  setVersionPush(version: number, remote: string, pushedSha: string): void {
+    this.sql`
+      UPDATE exo_versions
+      SET remote = ${remote}, pushed_sha = ${pushedSha}
+      WHERE version = ${version}
+    `;
   }
 
   activeVersion(): number {
@@ -119,14 +144,10 @@ export class KernelStore {
 
   listVersions(): VersionInfo[] {
     const rows = this.sql<Omit<VersionRow, "files">>`
-      SELECT version, sha, note, ts FROM exo_versions ORDER BY version ASC
+      SELECT version, sha, note, ts, remote, pushed_sha
+      FROM exo_versions ORDER BY version ASC
     `;
-    return rows.map((r) => ({
-      version: r.version,
-      sha: r.sha,
-      note: r.note,
-      ts: r.ts
-    }));
+    return rows.map(toVersionInfo);
   }
 
   versionFiles(version: number): Record<string, string> | null {
@@ -139,13 +160,23 @@ export class KernelStore {
 
   versionInfo(version: number): VersionInfo | null {
     const rows = this.sql<Omit<VersionRow, "files">>`
-      SELECT version, sha, note, ts FROM exo_versions
+      SELECT version, sha, note, ts, remote, pushed_sha FROM exo_versions
       WHERE version = ${version}
     `;
     if (rows.length === 0) return null;
-    const r = rows[0];
-    return { version: r.version, sha: r.sha, note: r.note, ts: r.ts };
+    return toVersionInfo(rows[0]);
   }
+}
+
+function toVersionInfo(row: Omit<VersionRow, "files">): VersionInfo {
+  return {
+    version: row.version,
+    sha: row.sha,
+    note: row.note,
+    ts: row.ts,
+    remote: row.remote ?? null,
+    pushedSha: row.pushed_sha ?? null
+  };
 }
 
 function parseJournalRow(row: JournalRow): JournalEntry {

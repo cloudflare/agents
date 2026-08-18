@@ -19,6 +19,8 @@ export type JournalKind =
   | "harness_upgrade"
   | "harness_rollback"
   | "harness_load_failed"
+  | "artifacts_push"
+  | "artifacts_push_failed"
   | "file_write"
   | "file_delete"
   | "note"
@@ -36,6 +38,10 @@ export interface VersionInfo {
   sha: string;
   note: string;
   ts: number;
+  /** Artifacts git remote this version was pushed to, or null if not pushed. */
+  remote: string | null;
+  /** Commit SHA confirmed pushed to the remote, or null if not pushed. */
+  pushedSha: string | null;
 }
 
 /** A harness tool manifest, extracted from its module inside the isolate. */
