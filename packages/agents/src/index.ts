@@ -11258,7 +11258,8 @@ export class Agent<
     // Create the workflow instance
     const instance = await workflow.create({
       id: workflowId,
-      params: augmentedParams
+      params: augmentedParams,
+      retention: options?.retention
     });
 
     // Track the workflow in our database

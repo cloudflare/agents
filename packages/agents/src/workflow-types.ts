@@ -231,6 +231,8 @@ export type RunWorkflowOptions = {
   metadata?: Record<string, unknown>;
   /** Agent binding name (auto-detected from class name if not provided) */
   agentBinding?: string;
+  /** Retention policy for the underlying Workflow instance */
+  retention?: WorkflowInstanceCreateOptions["retention"];
 };
 
 /**
