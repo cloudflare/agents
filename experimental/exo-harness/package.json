@@ -14,9 +14,8 @@
   "dependencies": {
     "@ai-sdk/provider": "^4.0.0",
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/codemode": "*",
+    "@cloudflare/computer": "^0.2.1",
     "@cloudflare/kumo": "^2.6.0",
-    "@cloudflare/shell": "*",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "agents": "*",

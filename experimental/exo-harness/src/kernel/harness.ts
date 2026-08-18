@@ -2,20 +2,19 @@
  * ExoCore — the stable kernel's harness machinery.
  *
  * The kernel owns: the append-only journal, the version ledger, and this
- * loader. The agent owns everything under /harness in its Workspace and can
- * rewrite it freely; the kernel re-loads that "self" from the live files on
- * every turn (hot reload), validates it in an isolated dynamic Worker, and
- * auto-restores the last activated version if the live files fail to load.
+ * loader. The agent owns everything under /harness in its Workspace
+ * (@cloudflare/computer — a SQLite-backed virtual filesystem in the DO)
+ * and can rewrite it freely; the kernel re-loads that "self" from the
+ * live files on every turn (hot reload), validates it in an isolated
+ * dynamic Worker, and auto-restores the last activated version if the
+ * live files fail to load.
  */
 
-import {
-  DynamicWorkerExecutor,
-  resolveProvider,
-  type ResolvedProvider
-} from "@cloudflare/codemode";
-import { Workspace, WorkspaceFileSystem } from "@cloudflare/shell";
-import { stateTools } from "@cloudflare/shell/workers";
-import { createGit } from "@cloudflare/shell/git";
+import type {
+  ThinkWorkspaceCompatibility,
+  Workspace
+} from "@cloudflare/computer";
+import { createArtifact } from "@cloudflare/computer/artifacts";
 import { jsonSchema, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { KernelStore } from "./store";
@@ -31,45 +30,39 @@ import {
   type LoadedHarness
 } from "./types";
 
-type LoaderBinding = ConstructorParameters<
-  typeof DynamicWorkerExecutor
->[0]["loader"];
+/**
+ * The computer Workspace with its Think-compatibility filesystem surface
+ * (readFile → string|null, writeFile, readDir, glob, rm, mkdir, stat) —
+ * enabled with `useThink: true` at construction.
+ */
+export type ExoWorkspace = Workspace & Required<ThinkWorkspaceCompatibility>;
 
 const GIT_AUTHOR = { name: "Exo Kernel", email: "exo@cloudflare.dev" };
 const HARNESS_PREFIX = "/harness/";
 const TOOL_TIMEOUT_MS = 20_000;
+const EXEC_TIMEOUT_MS = 30_000;
+const EXEC_OUTPUT_CLAMP = 8_000;
 const ARTIFACTS_REMOTE_NAME = "artifacts";
 const ARTIFACTS_TOKEN_TTL_SECONDS = 15 * 60;
+/** The agent's mirror repo, locally named within its Artifacts session. */
+const SELF_REPO = "self";
 
 /**
- * Derive a stable, valid Artifacts repo name from an agent name. The
- * prefix separates environments (e.g. exo-prod vs exo-dev) so a deployed
- * agent and a local dev agent with the same name never share a mirror.
- * Repo names must start with a letter or digit and may contain letters,
- * digits, ".", "_", and "-".
+ * Derive a stable, valid Artifacts session id from an agent name. The
+ * prefix separates environments (exo-prod vs exo-dev) so a deployed agent
+ * and a local dev agent with the same name never share a mirror. Session
+ * ids may contain letters, digits, ".", "_", and "-", but never "__"
+ * (the facade's scope separator) — the mirror repo is stored in the
+ * namespace as `<sessionId>__self`.
  */
-export function artifactsRepoName(agentName: string, prefix = "exo"): string {
+export function artifactsSessionId(agentName: string, prefix = "exo"): string {
   const cleaned = agentName
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/_{2,}/g, "-")
     .replace(/^[^a-z0-9]+/, "")
     .slice(0, 63);
   return `${prefix}-${cleaned.length > 0 ? cleaned : "agent"}`;
-}
-
-/**
- * Read the git remote URL from a repo handle. The type declares `remote`
- * as a plain property, but over the RPC proxy (remote bindings in local
- * dev) only methods survive — fall back to the runtime-implemented (but
- * currently undeclared) info() method.
- */
-async function repoRemote(repo: ArtifactsRepo): Promise<string> {
-  const direct = (repo as { remote?: unknown }).remote;
-  if (typeof direct === "string") return direct;
-  const info = await (
-    repo as unknown as { info(): Promise<{ remote: string }> }
-  ).info();
-  return info.remote;
 }
 
 function clampNumber(
@@ -80,6 +73,10 @@ function clampNumber(
   const n =
     typeof value === "number" && Number.isFinite(value) ? value : fallback;
   return Math.min(Math.max(Math.round(n), bounds.min), bounds.max);
+}
+
+function clampText(text: string, max = EXEC_OUTPUT_CLAMP): string {
+  return text.length > max ? `${text.slice(0, max)}…(truncated)` : text;
 }
 
 /**
@@ -128,24 +125,25 @@ function isArtifactsNotFound(error: unknown): boolean {
   // In local dev the remote binding proxy flattens ArtifactsError into a
   // plain Error, dropping the structured code — fall back to the message.
   return (
-    typeof message === "string" && message.includes("Repository not found")
+    typeof message === "string" &&
+    (message.includes("Repository not found") || message.includes("not found"))
   );
 }
 
 export interface ExoCoreOptions {
-  workspace: Workspace;
+  workspace: ExoWorkspace;
   store: KernelStore;
-  loader: LoaderBinding;
-  /** Stable agent name; used to derive the per-agent Artifacts repo name. */
+  /** Stable agent name; used to derive the per-agent Artifacts session. */
   name: () => string;
   /**
-   * Optional Artifacts binding. When present, genesis and every successful
-   * activation push the workspace git history to a per-agent Artifacts
-   * repo (best-effort). When absent (offline dev, tests) pushes are
-   * skipped.
+   * Optional raw Artifacts binding. When present, genesis and every
+   * successful activation push the workspace git history to the agent's
+   * session-scoped mirror repo (best-effort). When absent (offline dev,
+   * tests) pushes are skipped. The raw binding is also used for fork —
+   * the session facade deliberately excludes cross-session operations.
    */
   artifacts?: Artifacts;
-  /** Environment prefix for Artifacts repo names (default "exo"). */
+  /** Environment prefix for Artifacts session ids (default "exo"). */
   repoPrefix?: string;
   /**
    * Deliver a fork genesis to a (fresh) sibling agent. Wired by the owner
@@ -176,25 +174,22 @@ export interface ExoCoreOptions {
 }
 
 export class ExoCore {
-  readonly workspace: Workspace;
+  readonly workspace: ExoWorkspace;
   readonly store: KernelStore;
-  #loader: LoaderBinding;
   #name: () => string;
-  #artifacts: Artifacts | undefined;
+  #artifactsBinding: Artifacts | undefined;
   #repoPrefix: string;
   #adoptChild: ExoCoreOptions["adoptChild"];
   #scheduleTask: ExoCoreOptions["scheduleTask"];
   #cancelTask: ExoCoreOptions["cancelTask"];
   #onMutation: () => void;
-  #git: ReturnType<typeof createGit> | undefined;
   #genesis: Promise<void> | undefined;
 
   constructor(options: ExoCoreOptions) {
     this.workspace = options.workspace;
     this.store = options.store;
-    this.#loader = options.loader;
     this.#name = options.name;
-    this.#artifacts = options.artifacts;
+    this.#artifactsBinding = options.artifacts;
     this.#repoPrefix = options.repoPrefix ?? "exo";
     this.#adoptChild = options.adoptChild;
     this.#scheduleTask = options.scheduleTask;
@@ -202,9 +197,23 @@ export class ExoCore {
     this.#onMutation = options.onMutation;
   }
 
-  git() {
-    this.#git ??= createGit(new WorkspaceFileSystem(this.workspace));
-    return this.#git;
+  sessionId(): string {
+    return artifactsSessionId(this.#name(), this.#repoPrefix);
+  }
+
+  /** Session-scoped Artifacts facade (repo + token lifecycle). */
+  #artifactsFacade() {
+    if (!this.#artifactsBinding) return undefined;
+    return createArtifact(this.#artifactsBinding, this.sessionId());
+  }
+
+  /** Write a file, creating parent directories as needed. */
+  async #write(path: string, content: string): Promise<void> {
+    const dir = path.slice(0, path.lastIndexOf("/"));
+    if (dir.length > 0) {
+      await this.workspace.mkdir(dir, { recursive: true });
+    }
+    await this.workspace.writeFile(path, content);
   }
 
   /** Idempotent: seed the workspace and commit version 1 on first contact. */
@@ -216,11 +225,11 @@ export class ExoCore {
   async #runGenesis(): Promise<void> {
     if (this.store.activeVersion() > 0) return;
     for (const [path, content] of Object.entries(SEED_FILES)) {
-      await this.workspace.writeFile(path, content);
+      await this.#write(path, content);
     }
-    const git = this.git();
+    const git = this.workspace.git;
     await git.init({ defaultBranch: "main" });
-    await git.add({ filepath: "." });
+    await git.add({ paths: [], all: true });
     const { oid } = await git.commit({
       message: "genesis: seed harness v1",
       author: GIT_AUTHOR
@@ -237,8 +246,19 @@ export class ExoCore {
     this.#onMutation();
   }
 
+  /** Glob that tolerates a not-yet-created base directory. */
+  async globHarness(): Promise<
+    { path: string; type: "file" | "directory"; size: number }[]
+  > {
+    try {
+      return await this.workspace.glob("/harness/**");
+    } catch {
+      return [];
+    }
+  }
+
   async readHarnessFiles(): Promise<Record<string, string>> {
-    const entries = await this.workspace.glob("/harness/**");
+    const entries = await this.globHarness();
     const files: Record<string, string> = {};
     for (const entry of entries) {
       if (entry.type !== "file") continue;
@@ -301,7 +321,7 @@ export class ExoCore {
     const toolPaths = Object.keys(files).filter(
       (path) => path.startsWith("/harness/tools/") && path.endsWith(".js")
     );
-    const tools = await this.#loadToolManifests(files, toolPaths);
+    const tools = await this.#loadToolManifests(toolPaths);
 
     return { identity, policy, context, tools, files };
   }
@@ -335,7 +355,7 @@ export class ExoCore {
     const block = `## ${stamp} — compacted from transcript\n\n${summary.trim()}\n`;
     const updated =
       existing.trim().length > 0 ? `${existing.trimEnd()}\n\n${block}` : block;
-    await this.workspace.writeFile(context.memoryFile, updated);
+    await this.#write(context.memoryFile, updated);
     this.store.setPendingCompaction({
       keepLast,
       memoryFile: context.memoryFile,
@@ -355,39 +375,23 @@ export class ExoCore {
     };
   }
 
-  /** Module map for the dynamic Worker: "/harness/tools/x.js" → "tools/x.js". */
-  #toolModules(files: Record<string, string>): Record<string, string> {
-    const modules: Record<string, string> = {};
-    for (const [path, content] of Object.entries(files)) {
-      if (!path.startsWith("/harness/tools/") || !path.endsWith(".js")) {
-        continue;
-      }
-      modules[path.slice(HARNESS_PREFIX.length)] = content;
-    }
-    return modules;
-  }
-
   /**
-   * Import every tool module inside an isolated dynamic Worker and return
-   * validated manifests. A single broken module fails the whole load — that
-   * is deliberate: it is the signal for the auto-rollback path.
+   * Import every tool module inside an isolated dynamic Worker (the
+   * worker-javascript backend resolves the imports straight from the
+   * durable filesystem) and return validated manifests. A single broken
+   * module fails the whole load — deliberately: it is the signal for the
+   * auto-rollback path.
    */
   async #loadToolManifests(
-    files: Record<string, string>,
     toolPaths: string[]
   ): Promise<HarnessToolManifest[]> {
     if (toolPaths.length === 0) return [];
-    const executor = new DynamicWorkerExecutor({
-      loader: this.#loader,
-      timeout: TOOL_TIMEOUT_MS,
-      modules: this.#toolModules(files)
-    });
     const imports = toolPaths
       .map((path) => {
         const rel = path.slice(HARNESS_PREFIX.length);
         return `
   {
-    const mod = await import(${JSON.stringify(`./${rel}`)});
+    const mod = await import(${JSON.stringify(`.${path}`)});
     const def = mod.default;
     if (!def || typeof def !== "object") {
       throw new Error(${JSON.stringify(rel)} + ": missing default export object");
@@ -407,16 +411,24 @@ export class ExoCore {
   }`;
       })
       .join("\n");
-    const snippet = `async () => {
+    const source = `export default async function main() {
   const manifests = [];
 ${imports}
   return manifests;
 }`;
-    const result = await executor.execute(snippet, []);
-    if (result.error) {
-      throw new Error(`harness tools failed to load: ${result.error}`);
+    using handle = await this.workspace.runtime.exec(source, {
+      backend: "worker-javascript",
+      cwd: "/",
+      encoding: "utf8",
+      timeoutMs: TOOL_TIMEOUT_MS
+    });
+    const result = await handle.result();
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `harness tools failed to load: ${clampText(result.stderr || result.stdout || "unknown error", 1000)}`
+      );
     }
-    const manifests = result.result as HarnessToolManifest[];
+    const manifests = (result.value ?? []) as unknown as HarnessToolManifest[];
     const seen = new Set<string>();
     for (const manifest of manifests) {
       if (seen.has(manifest.name)) {
@@ -429,15 +441,15 @@ ${imports}
 
   /** Overwrite /harness with the given snapshot (deleting extra files). */
   async restoreFiles(snapshot: Record<string, string>): Promise<void> {
-    const current = await this.workspace.glob("/harness/**");
+    const current = await this.globHarness();
     for (const entry of current) {
       if (entry.type !== "file") continue;
       if (!(entry.path in snapshot)) {
-        await this.workspace.deleteFile(entry.path);
+        await this.workspace.rm(entry.path);
       }
     }
     for (const [path, content] of Object.entries(snapshot)) {
-      await this.workspace.writeFile(path, content);
+      await this.#write(path, content);
     }
   }
 
@@ -448,8 +460,8 @@ ${imports}
    */
   async activate(note: string): Promise<{ version: number; sha: string }> {
     const loaded = await this.#loadOnce();
-    const git = this.git();
-    await git.add({ filepath: "." });
+    const git = this.workspace.git;
+    await git.add({ paths: [], all: true });
     const { oid } = await git.commit({
       message: `activate: ${note}`,
       author: GIT_AUTHOR
@@ -470,29 +482,22 @@ ${imports}
   }
 
   /**
-   * Best-effort mirror of the workspace git history to a per-agent
-   * Cloudflare Artifacts repo. Skipped silently when no binding is bound
-   * (offline dev, tests); any failure is journaled and never fails the
-   * activation itself.
+   * Best-effort mirror of the workspace git history to the agent's
+   * session-scoped Artifacts repo. Skipped silently when no binding is
+   * bound (offline dev, tests); any failure is journaled and never fails
+   * the activation itself.
    */
   async #pushToArtifacts(version: number, sha: string): Promise<void> {
-    const artifacts = this.#artifacts;
-    if (!artifacts) return;
+    const facade = this.#artifactsFacade();
+    if (!facade) return;
     try {
-      const { remote, token } = await this.#ensureArtifactsRepo(artifacts);
-      const git = this.git();
-      const remotes = await git.remote({ list: true });
-      const existing = Array.isArray(remotes)
-        ? remotes.find((r) => r.remote === ARTIFACTS_REMOTE_NAME)
-        : undefined;
-      if (existing && existing.url !== remote) {
-        await git.remote({ remove: ARTIFACTS_REMOTE_NAME });
-      }
-      if (!existing || existing.url !== remote) {
-        await git.remote({
-          add: { name: ARTIFACTS_REMOTE_NAME, url: remote }
-        });
-      }
+      const { remote, token } = await this.#ensureArtifactsRepo(facade);
+      const git = this.workspace.git;
+      await git.remoteAdd({
+        name: ARTIFACTS_REMOTE_NAME,
+        url: remote,
+        force: true
+      });
       // Force: the Artifacts repo is a mirror of this agent's current
       // history. A rebuilt local state (fresh genesis against a surviving
       // remote repo) must still be able to publish.
@@ -500,11 +505,12 @@ ${imports}
         remote: ARTIFACTS_REMOTE_NAME,
         ref: "main",
         force: true,
-        username: "x",
-        password: token
+        onAuth: () => ({ username: "x", password: token })
       });
       if (!result.ok) {
-        throw new Error(`push rejected: ${JSON.stringify(result.refs)}`);
+        throw new Error(
+          `push rejected: ${result.error ?? JSON.stringify(result.refs)}`
+        );
       }
       this.store.setVersionPush(version, remote, sha);
       this.store.appendJournal("artifacts_push", { version, sha, remote });
@@ -517,21 +523,24 @@ ${imports}
     }
   }
 
-  /** Get (or create) this agent's Artifacts repo and a short-lived write token. */
+  /**
+   * Get (or create) the agent's session-scoped mirror repo ("self") and a
+   * short-lived write token, via the createArtifact facade.
+   */
   async #ensureArtifactsRepo(
-    artifacts: Artifacts
+    facade: ReturnType<typeof createArtifact>
   ): Promise<{ remote: string; token: string }> {
-    const repoName = artifactsRepoName(this.#name(), this.#repoPrefix);
     try {
-      const repo = await artifacts.get(repoName);
-      const token = await repo.createToken(
+      const info = await facade.get(SELF_REPO);
+      const token = await facade.createToken(
+        SELF_REPO,
         "write",
         ARTIFACTS_TOKEN_TTL_SECONDS
       );
-      return { remote: await repoRemote(repo), token: token.plaintext };
+      return { remote: info.remote, token: token.plaintext };
     } catch (error) {
       if (!isArtifactsNotFound(error)) throw error;
-      const created = await artifacts.create(repoName, {
+      const created = await facade.create(SELF_REPO, {
         description: `exo-harness agent "${this.#name()}" harness history`
       });
       return { remote: created.remote, token: created.token };
@@ -563,10 +572,13 @@ ${imports}
 
   /**
    * Fork the current ACTIVATED self into a new agent. With Artifacts
-   * bound, this forks the agent's repo (real git lineage — the child's
-   * repo records `source: artifacts:<ns>/<parent-repo>`); without it, the
+   * bound, this forks the agent's mirror repo (real git lineage — the
+   * child's repo records `source: artifacts:…`); without it, the
    * activated file snapshot is handed over directly. Only activated
    * selves are forkable: the live working tree is not part of history.
+   *
+   * Fork is cross-session, which the facade deliberately excludes, so it
+   * uses the raw binding with explicit `<session>__self` names.
    */
   async forkSelf(childName: string): Promise<{
     child: string;
@@ -588,7 +600,7 @@ ${imports}
     };
 
     let origin: ForkOrigin;
-    if (this.#artifacts) {
+    if (this.#artifactsBinding) {
       // Make sure the mirror is current before forking it (retries a
       // previously failed push; normally genesis/activate already pushed).
       if (active.pushedSha !== active.sha) {
@@ -600,15 +612,17 @@ ${imports}
           );
         }
       }
-      const parentRepo = artifactsRepoName(this.#name(), this.#repoPrefix);
-      const childRepo = artifactsRepoName(name, this.#repoPrefix);
-      const repo = await this.#artifacts.get(parentRepo);
+      const parentSession = this.sessionId();
+      const childSession = artifactsSessionId(name, this.#repoPrefix);
+      const parentRepo = `${parentSession}__${SELF_REPO}`;
+      const childRepo = `${childSession}__${SELF_REPO}`;
+      const repo = await this.#artifactsBinding.get(parentRepo);
       const forked = await repo.fork(childRepo, {
-        description: `fork of ${parentRepo} v${active.version} for agent "${name}"`
+        description: `fork of ${parentSession} v${active.version} for agent "${name}"`
       });
       origin = {
         kind: "artifacts",
-        repoName: childRepo,
+        repoName: SELF_REPO,
         remote: forked.remote,
         parent
       };
@@ -626,9 +640,7 @@ ${imports}
       fromSha: active.sha,
       childVersion: child.version,
       childSha: child.sha,
-      ...(origin.kind === "artifacts"
-        ? { repo: origin.repoName, remote: origin.remote }
-        : {})
+      ...(origin.kind === "artifacts" ? { remote: origin.remote } : {})
     });
     this.#onMutation();
     return {
@@ -654,19 +666,26 @@ ${imports}
       );
     }
     const note = `fork of ${origin.parent.name} v${origin.parent.version}`;
-    const git = this.git();
+    const git = this.workspace.git;
     let sha: string;
     if (origin.kind === "artifacts") {
-      const artifacts = this.#artifacts;
-      if (!artifacts) {
+      const facade = this.#artifactsFacade();
+      if (!facade) {
         throw new Error("artifacts binding required to adopt a repo fork");
       }
-      const repo = await artifacts.get(origin.repoName);
-      const token = await repo.createToken("read", ARTIFACTS_TOKEN_TTL_SECONDS);
+      // The fork already created this child's session repo; mint our own
+      // read token rather than carrying one across the RPC boundary.
+      const token = await facade.createToken(
+        SELF_REPO,
+        "read",
+        ARTIFACTS_TOKEN_TTL_SECONDS
+      );
       await git.clone({
         url: origin.remote,
-        username: "x",
-        password: token.plaintext
+        dir: "/",
+        headers: {
+          Authorization: `Basic ${btoa(`x:${token.plaintext}`)}`
+        }
       });
       const head = await git.log({ depth: 1 });
       if (!head[0]) throw new Error("forked repo has no commits");
@@ -674,7 +693,7 @@ ${imports}
     } else {
       await this.restoreFiles(origin.files);
       await git.init({ defaultBranch: "main" });
-      await git.add({ filepath: "." });
+      await git.add({ paths: [], all: true });
       const committed = await git.commit({
         message: `genesis: ${note}`,
         author: GIT_AUTHOR
@@ -700,45 +719,54 @@ ${imports}
     return { version: version.version, sha };
   }
 
-  /** Execute one harness tool inside an isolated dynamic Worker. */
+  /**
+   * Execute one harness tool inside an isolated dynamic Worker. The tool
+   * module is imported straight from the durable filesystem; it gets
+   * Workspace-backed node:fs/promises and the ws:journal capability.
+   */
   async runHarnessTool(
-    loaded: LoadedHarness,
     manifest: HarnessToolManifest,
     input: unknown
   ): Promise<unknown> {
-    const executor = new DynamicWorkerExecutor({
-      loader: this.#loader,
-      timeout: TOOL_TIMEOUT_MS,
-      modules: this.#toolModules(loaded.files)
-    });
-    const snippet = `async () => {
-  const mod = await import(${JSON.stringify(`./${manifest.file}`)});
-  const input = JSON.parse(${JSON.stringify(JSON.stringify(input ?? {}))});
-  return await mod.default.run(input, { state, journal });
+    const source = `import def from ${JSON.stringify(`./${HARNESS_PREFIX.slice(1)}${manifest.file}`)};
+export default async function main(input) {
+  return await def.run(input);
 }`;
-    const journalProvider: ResolvedProvider = {
-      name: "journal",
-      fns: {
-        note: async (text: unknown) => {
-          this.store.appendJournal("note", {
-            text: String(text),
-            source: `tool:${manifest.name}`
-          });
-          this.#onMutation();
-          return { ok: true };
-        }
-      }
-    };
-    const result = await executor.execute(snippet, [
-      resolveProvider(stateTools(this.workspace)),
-      journalProvider
-    ]);
-    if (result.error) {
-      return { error: result.error, logs: result.logs };
+    using handle = await this.workspace.runtime.exec(source, {
+      backend: "worker-javascript",
+      cwd: "/",
+      encoding: "utf8",
+      input: (input ?? {}) as never,
+      timeoutMs: TOOL_TIMEOUT_MS
+    });
+    const result = await handle.result();
+    if (result.exitCode !== 0) {
+      return {
+        error: clampText(result.stderr || result.stdout || "tool failed", 1000)
+      };
     }
-    return result.logs && result.logs.length > 0
-      ? { result: result.result, logs: result.logs }
-      : { result: result.result };
+    return result.stdout.trim().length > 0
+      ? { result: result.value ?? null, logs: clampText(result.stdout, 1000) }
+      : { result: result.value ?? null };
+  }
+
+  /** Run a shell command on the worker-shell backend. */
+  async execShell(
+    command: string,
+    timeoutMs = EXEC_TIMEOUT_MS
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    using handle = await this.workspace.runtime.exec(command, {
+      backend: "worker-shell",
+      cwd: "/",
+      encoding: "utf8",
+      timeoutMs
+    });
+    const result = await handle.result();
+    return {
+      exitCode: result.exitCode,
+      stdout: clampText(result.stdout),
+      stderr: clampText(result.stderr)
+    };
   }
 
   /**
@@ -774,7 +802,7 @@ ${imports}
           content: z.string().describe("Full new file content")
         }),
         execute: this.#journaled("write_file", async ({ path, content }) => {
-          await this.workspace.writeFile(path, content);
+          await this.#write(path, content);
           this.store.appendJournal("file_write", {
             path,
             bytes: content.length
@@ -803,10 +831,20 @@ ${imports}
           path: z.string().describe("Absolute path to delete")
         }),
         execute: this.#journaled("delete_file", async ({ path }) => {
-          const deleted = await this.workspace.deleteFile(path);
+          await this.workspace.rm(path);
           this.store.appendJournal("file_delete", { path });
           this.#onMutation();
-          return { path, deleted };
+          return { path, deleted: true };
+        })
+      }),
+      exec: tool({
+        description:
+          "Run a shell command in your workspace (just-bash in an isolated Dynamic Worker — fast, no container). Built-ins include cat, grep, sed, awk, jq, curl, python, sqlite, plus `git` and `artifacts` commands that run host-side against your workspace and mirror. Your files live at / (e.g. /harness, /memory, /scratch).",
+        inputSchema: z.object({
+          command: z.string().describe("The shell command to run")
+        }),
+        execute: this.#journaled("exec", async ({ command }) => {
+          return this.execShell(command);
         })
       }),
       activate_harness: tool({
@@ -1016,7 +1054,7 @@ ${imports}
           manifest.inputSchema as Parameters<typeof jsonSchema>[0]
         ),
         execute: this.#journaled(manifest.name, (input) =>
-          this.runHarnessTool(loaded, manifest, input)
+          this.runHarnessTool(manifest, input)
         )
       });
     }

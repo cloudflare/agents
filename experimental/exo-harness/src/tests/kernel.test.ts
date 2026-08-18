@@ -8,7 +8,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
-import { artifactsRepoName } from "../kernel/harness";
+import { artifactsSessionId } from "../kernel/harness";
 import type {
   ContextSnapshot,
   ExoState,
@@ -99,13 +99,37 @@ describe("turn loop with live harness", () => {
     // The tool's journal capability wrote a durable note from the isolate.
     const journal = await agent.getJournal();
     const note = journal.find(
-      (e) => e.kind === "note" && e.data.source === "tool:echo"
+      (e) => e.kind === "note" && e.data.source === "tool"
     );
     expect(note?.data.text).toBe("echo tool ran: SELF");
 
     // And its call/result were journaled by the kernel wrapper.
     expect(kinds(journal)).toContain("tool_call");
     expect(kinds(journal)).toContain("tool_result");
+  });
+});
+
+describe("exec (worker-shell backend)", () => {
+  it("runs shell commands against the agent's own filesystem", async () => {
+    const agent = await freshAgent("exec-shell");
+    const reply = await agent.prompt(
+      '!tool exec {"command": "grep -c PERSONA /harness/identity.md && echo shell-ok"}'
+    );
+    expect(reply.toolCalls[0].toolName).toBe("exec");
+    expect(reply.text).toContain("shell-ok");
+    expect(reply.text).toContain('"exitCode":0');
+
+    // The shell writes through to the same durable filesystem.
+    await agent.prompt(
+      '!tool exec {"command": "echo from-the-shell > /scratch/shell.txt"}'
+    );
+    expect(await agent.getFileContent("/scratch/shell.txt")).toContain(
+      "from-the-shell"
+    );
+
+    // git runs host-side against the workspace repo.
+    const log = await agent.prompt('!tool exec {"command": "git log"}');
+    expect(log.text).toContain("genesis: seed harness v1");
   });
 });
 
@@ -146,7 +170,8 @@ describe("self-extension (demo 2: agent creates a new tool)", () => {
   it("writes a new tool module, activates, and can call it next turn", async () => {
     const agent = await freshAgent("self-extend");
 
-    const dice = `export default {
+    const dice = `import fs from "node:fs/promises";
+export default {
   name: "dice",
   description: "Roll dice and record the result in scratch space.",
   inputSchema: {
@@ -154,9 +179,9 @@ describe("self-extension (demo 2: agent creates a new tool)", () => {
     properties: { sides: { type: "number" } },
     required: ["sides"]
   },
-  async run(input, caps) {
+  async run(input) {
     const roll = (input.sides % 7) + 1; // deterministic for the test
-    await caps.state.writeFile("/scratch/last-roll.txt", String(roll));
+    await fs.writeFile("/scratch/last-roll.txt", String(roll));
     return { roll };
   }
 };
@@ -356,12 +381,14 @@ describe("artifacts mirror", () => {
     expect(kinds(journal)).not.toContain("artifacts_push_failed");
   });
 
-  it("derives valid per-agent repo names, split by environment prefix", () => {
-    expect(artifactsRepoName("main")).toBe("exo-main");
-    expect(artifactsRepoName("My Agent/42")).toBe("exo-my-agent-42");
-    expect(artifactsRepoName("---")).toBe("exo-agent");
-    expect(artifactsRepoName("main", "exo-prod")).toBe("exo-prod-main");
-    expect(artifactsRepoName("main", "exo-dev")).toBe("exo-dev-main");
+  it("derives valid per-agent session ids, split by environment prefix", () => {
+    expect(artifactsSessionId("main")).toBe("exo-main");
+    expect(artifactsSessionId("My Agent/42")).toBe("exo-my-agent-42");
+    expect(artifactsSessionId("---")).toBe("exo-agent");
+    expect(artifactsSessionId("main", "exo-prod")).toBe("exo-prod-main");
+    expect(artifactsSessionId("main", "exo-dev")).toBe("exo-dev-main");
+    // "__" is the facade's scope separator and must never appear.
+    expect(artifactsSessionId("a__b")).toBe("exo-a-b");
   });
 });
 

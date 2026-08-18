@@ -8,10 +8,12 @@ The architecture splits the agent into two layers:
 - **Stable kernel** (`src/server.ts`, `src/kernel/`) — an `ExoKernel` Durable
   Object owning the things the agent must never rewrite: an **append-only
   journal** (SQLite), a **version ledger** with full file snapshots, the
-  durable `Workspace`, and the turn loop.
+  durable `Workspace` ([`@cloudflare/computer`](https://github.com/cloudflare/computer)
+  — a SQLite-backed virtual filesystem with pluggable execution backends),
+  and the turn loop.
 - **Evolvable harness** — everything the agent _is_ lives as files in its own
-  workspace under `/harness`, versioned with real git commits (isomorphic-git
-  over the virtual filesystem):
+  workspace under `/harness`, versioned with real git commits (the
+  workspace's built-in isomorphic-git client):
   - `/harness/identity.md` — its identity prompt
   - `/harness/policy.json` — model + turn policy
   - `/harness/tools/*.js` — its tools, hot-loaded ES modules
@@ -26,17 +28,24 @@ journal is never rewritten. If the agent breaks its own harness so badly it
 cannot load, the kernel auto-restores the last activated version and journals
 the failure.
 
-Harness tools execute inside isolates with no network access and two
-capabilities: `state.*` (the workspace filesystem, via `@cloudflare/shell`)
-and `journal.note()` (append-only).
+Harness tools execute inside isolates (the workspace's worker-javascript
+backend) with no network access: imports resolve straight from the durable
+filesystem, `node:fs/promises` is backed by the workspace, and the
+`ws:journal` trusted module gives tools an append-only journal capability.
+The agent also has a shell — the `exec` tool runs just-bash in a Dynamic
+Worker (worker-shell backend) over the same files, with text tools (grep,
+sed, awk, jq, curl, python, sqlite) plus host-side `git` and `artifacts`
+commands. No container anywhere; a full-Linux container backend is the
+planned phase 2.
 
 When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), genesis and
-every successful activation push the workspace git history to a per-agent
-[Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) repo
-(`<ARTIFACTS_REPO_PREFIX>-<agent-name>` in the `exo-harness` namespace —
-`exo-prod-*` deployed, `exo-dev-*` in local dev, so the two environments
-never share a mirror) over standard git-over-HTTP, and record the remote +
-pushed SHA in the version ledger and journal. The push is best-effort: failures are journaled
+every successful activation push the workspace git history to the agent's
+session-scoped [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/)
+mirror via the `createArtifact` facade: each agent owns the session
+`<ARTIFACTS_REPO_PREFIX>-<agent-name>` (`exo-prod-*` deployed, `exo-dev-*`
+local, so environments never share a mirror) and its repo is stored as
+`<session>__self`. The remote + pushed SHA land in the version ledger and
+journal. The push is best-effort: failures are journaled
 (`artifacts_push_failed`) and never fail the activation, and without the
 binding (offline dev, tests) it is skipped entirely.
 
@@ -151,8 +160,8 @@ the activation gate, forward-only rollback, and journal ordering.
 
 ## Where this is going
 
-This is M2 of a larger sketch (kernel/harness split on one DO, harness
-versions mirrored to Cloudflare Artifacts, forks as agent clone/lineage):
-next steps are swapping the filesystem/execution backend to
-`@cloudflare/computer` (container shell, snapshots) and
-`this.schedule()`-backed task tools.
+The substrate is `@cloudflare/computer` (preview): filesystem, git,
+Artifacts facade, and both isolate execution backends. The remaining step
+in the sketch is the container backend (`computerd` over FUSE) for a full
+Linux userland — additive, since the workspace routes `exec` calls to
+named backends.

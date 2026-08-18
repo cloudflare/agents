@@ -9,7 +9,7 @@
   "name": "exo-harness-dev",
   "main": "src/server.ts",
   "compatibility_date": "2026-06-11",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "experimental"],
   "ai": { "binding": "AI", "remote": true },
   "artifacts": [
     { "binding": "ARTIFACTS", "namespace": "exo-harness", "remote": true }
@@ -35,6 +35,13 @@
     {
       "new_sqlite_classes": ["ExoKernel"],
       "tag": "v1"
+    },
+    {
+      // Fresh start for the @cloudflare/computer substrate swap: delete
+      // and recreate the class, wiping every pre-swap DO instance.
+      "deleted_classes": ["ExoKernel"],
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v2"
     }
   ]
 }

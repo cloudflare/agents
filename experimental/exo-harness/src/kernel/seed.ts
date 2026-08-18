@@ -39,11 +39,16 @@ export const SEED_CONTEXT = `{
 }
 `;
 
-export const SEED_TOOL_ECHO = `// A minimal example harness tool. Harness tools are plain ES modules that
-// export a default object with: name, description, inputSchema (JSON Schema),
-// and an async run(input, caps) handler. They execute inside an isolated
-// dynamic Worker with no network access; caps.state is the workspace
-// filesystem and caps.journal.note(text) appends to the durable journal.
+export const SEED_TOOL_ECHO = `// A minimal example harness tool. Harness tools are ES modules that export
+// a default object with: name, description, inputSchema (JSON Schema), and
+// an async run(input) handler. They execute inside an isolated dynamic
+// Worker with no network access. Available imports:
+//   import fs from "node:fs/promises";   // your durable workspace files
+//   import { call } from "ws:journal";   // await call("note", "text")
+// Relative imports resolve from your workspace filesystem, so tools can
+// share code via other files under /harness.
+import { call } from "ws:journal";
+
 export default {
   name: "echo",
   description:
@@ -56,9 +61,9 @@ export default {
     },
     required: ["message"]
   },
-  async run(input, caps) {
+  async run(input) {
     const text = input.uppercase ? input.message.toUpperCase() : input.message;
-    await caps.journal.note("echo tool ran: " + text);
+    await call("note", "echo tool ran: " + text);
     return { echoed: text };
   }
 };

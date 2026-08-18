@@ -1,6 +1,20 @@
 import { routeAgentRequest, callable, getAgentByName } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
-import { Workspace } from "@cloudflare/shell";
+import {
+  Workspace,
+  WorkspaceProxy,
+  WorkspaceServiceProxy,
+  type DurableObjectStorageLike,
+  type WorkspaceStub
+} from "@cloudflare/computer";
+import { WorkerShellBackend } from "@cloudflare/computer/backends/worker-shell";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { createGitClient } from "@cloudflare/computer/git";
+import curlModules from "@cloudflare/computer/shell/curl";
+import jqModules from "@cloudflare/computer/shell/jq";
+import pythonModules from "@cloudflare/computer/shell/python";
+import sqliteModules from "@cloudflare/computer/shell/sqlite";
+import fileModules from "@cloudflare/computer/shell/file";
 import { createWorkersAI } from "workers-ai-provider";
 import {
   streamText,
@@ -14,7 +28,11 @@ import {
   type UIMessage
 } from "ai";
 import { KernelStore } from "./kernel/store";
-import { ExoCore } from "./kernel/harness";
+import {
+  artifactsSessionId,
+  ExoCore,
+  type ExoWorkspace
+} from "./kernel/harness";
 import { createMockModel } from "./kernel/mock-model";
 import {
   INITIAL_STATE,
@@ -39,6 +57,11 @@ interface AdoptableKernel {
   adoptGenesis(origin: ForkOrigin): Promise<{ version: number; sha: string }>;
 }
 
+// Loopback plumbing for @cloudflare/computer: the worker-shell isolate
+// reaches the host workspace through ctx.exports.WorkspaceServiceProxy;
+// WorkspaceProxy carries a (future) container backend's egress.
+export { WorkspaceProxy, WorkspaceServiceProxy };
+
 /**
  * ExoKernel — the stable, non-self-modifiable layer of an exo-style agent.
  *
@@ -50,14 +73,84 @@ interface AdoptableKernel {
 export class ExoKernel extends AIChatAgent<Env, ExoState> {
   initialState = INITIAL_STATE;
 
-  workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    namespace: "ws",
-    name: () => this.name
-  });
-
+  #workspace: ExoWorkspace | undefined;
   #store: KernelStore | undefined;
   #core: ExoCore | undefined;
+
+  /**
+   * The agent's computer: a SQLite-backed virtual filesystem with two
+   * isolate execution backends — just-bash (worker-shell, with host-side
+   * git + artifacts commands) and ES modules (worker-javascript, which
+   * runs the harness tools with Workspace-backed node:fs and the
+   * ws:journal capability). Lazy: sessionId derives from the agent name.
+   */
+  ws(): ExoWorkspace {
+    this.#workspace ??= new Workspace({
+      storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+      sessionId: artifactsSessionId(
+        this.name,
+        this.env.ARTIFACTS_REPO_PREFIX || "exo"
+      ),
+      git: createGitClient(),
+      defaultGitIdentity: { name: "Exo Kernel", email: "exo@cloudflare.dev" },
+      // Absent in offline dev and tests: the shell's `artifacts` command
+      // then fails with a clear "not configured" error.
+      artifacts: this.env.ARTIFACTS
+        ? { binding: this.env.ARTIFACTS }
+        : undefined,
+      useThink: true,
+      backends: [
+        new WorkerShellBackend({
+          id: "worker-shell",
+          loader: this.env.LOADER,
+          workspace: { binding: "ExoKernel", id: this.ctx.id.toString() },
+          ctx: this.ctx,
+          commands: [
+            curlModules,
+            jqModules,
+            pythonModules,
+            sqliteModules,
+            fileModules
+          ]
+        }),
+        new WorkerJavaScriptBackend({
+          id: "worker-javascript",
+          loader: this.env.LOADER,
+          // The harness lives at /harness (not the default /workspace).
+          root: "/",
+          access: "read-write",
+          defaultTimeoutMs: 20_000,
+          trustedModules: {
+            "ws:journal": {
+              call: async (method, args) => {
+                if (method !== "note") {
+                  throw new Error(`unknown ws:journal method "${method}"`);
+                }
+                this.store().appendJournal("note", {
+                  text: String(args[0] ?? ""),
+                  source: "tool"
+                });
+                this.refreshSyncedState();
+                return { ok: true };
+              }
+            }
+          }
+        })
+      ]
+    }) as ExoWorkspace;
+    return this.#workspace;
+  }
+
+  /**
+   * Loopback for the worker-shell isolate: WorkspaceServiceProxy dispatches
+   * here so in-isolate commands (including `git` and `artifacts`) can reach
+   * the host workspace.
+   */
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    const workspace = this.ws();
+    await workspace.ready();
+    return workspace.stub();
+  }
 
   store(): KernelStore {
     this.#store ??= new KernelStore((strings, ...values) =>
@@ -68,9 +161,8 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
 
   core(): ExoCore {
     this.#core ??= new ExoCore({
-      workspace: this.workspace,
+      workspace: this.ws(),
       store: this.store(),
-      loader: this.env.LOADER,
       name: () => this.name,
       // Absent in offline dev and tests — the core then skips pushing.
       artifacts: this.env.ARTIFACTS,
@@ -525,6 +617,11 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "full harness, and everything they do is journaled. New tasks can",
       "only be created in human-initiated turns.",
       "",
+      "You also have a shell (the exec tool): just-bash in an isolated",
+      "Dynamic Worker over your own filesystem, with text tools (grep, sed,",
+      "awk, jq, curl, python, sqlite) plus `git` and `artifacts` commands",
+      "that run host-side against your workspace and its mirror.",
+      "",
       `Active harness version: v${version}`,
       loaded.tools.length > 0
         ? `Harness tools currently loaded:\n${toolList}`
@@ -552,7 +649,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
 
   async #refreshSyncedState(): Promise<void> {
     const store = this.store();
-    const files = await this.workspace.glob("/harness/**");
+    const files = await this.core().globHarness();
     const versions = store.listVersions();
     const active = versions[versions.length - 1];
 
@@ -592,14 +689,14 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
 
   @callable()
   async getFileContent(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
+    return this.ws().readFile(path);
   }
 
   @callable()
   async listWorkspaceFiles(
     path: string
   ): Promise<{ path: string; name: string; type: string; size: number }[]> {
-    const entries = await this.workspace.readDir(path);
+    const entries = await this.ws().readDir(path);
     return entries.map((e) => ({
       path: e.path,
       name: e.name,

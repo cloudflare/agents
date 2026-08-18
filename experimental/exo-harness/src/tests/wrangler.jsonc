@@ -2,7 +2,7 @@
   "name": "exo-harness-tests",
   "main": "../server.ts",
   "compatibility_date": "2026-06-11",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "experimental"],
   "worker_loaders": [{ "binding": "LOADER" }],
   "vars": {
     // Tests always run the deterministic offline driver.
@@ -20,6 +20,13 @@
     {
       "new_sqlite_classes": ["ExoKernel"],
       "tag": "v1"
+    },
+    {
+      // Fresh start for the @cloudflare/computer substrate swap: delete
+      // and recreate the class, wiping every pre-swap DO instance.
+      "deleted_classes": ["ExoKernel"],
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v2"
     }
   ]
 }
