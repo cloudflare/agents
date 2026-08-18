@@ -11,7 +11,8 @@ async function main() {
       "src/index.ts",
       "src/ai-sdk.ts",
       "src/alarm-coordinator.ts",
-      "src/tanstack-ai.ts"
+      "src/tanstack-ai.ts",
+      "src/voice.ts"
     ],
     deps: {
       skipNodeModulesBundle: true

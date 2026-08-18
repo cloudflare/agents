@@ -41,6 +41,11 @@
       "types": "./dist/tanstack-ai.d.ts",
       "import": "./dist/tanstack-ai.js",
       "require": "./dist/tanstack-ai.js"
+    },
+    "./voice": {
+      "types": "./dist/voice.d.ts",
+      "import": "./dist/voice.js",
+      "require": "./dist/voice.js"
     }
   },
   "files": [
@@ -53,6 +58,7 @@
     "test": "vitest --run"
   },
   "dependencies": {
+    "@cloudflare/voice": "workspace:*",
     "postal-mime": "^2.7.5"
   },
   "peerDependencies": {

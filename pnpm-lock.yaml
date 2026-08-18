@@ -4061,6 +4061,9 @@ importers:
 
   packages/channels:
     dependencies:
+      '@cloudflare/voice':
+        specifier: workspace:*
+        version: link:../voice
       postal-mime:
         specifier: ^2.7.5
         version: 2.7.5
