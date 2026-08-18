@@ -50,6 +50,21 @@ export function artifactsRepoName(agentName: string): string {
   return `exo-${cleaned.length > 0 ? cleaned : "agent"}`;
 }
 
+/**
+ * Read the git remote URL from a repo handle. The type declares `remote`
+ * as a plain property, but over the RPC proxy (remote bindings in local
+ * dev) only methods survive — fall back to the runtime-implemented (but
+ * currently undeclared) info() method.
+ */
+async function repoRemote(repo: ArtifactsRepo): Promise<string> {
+  const direct = (repo as { remote?: unknown }).remote;
+  if (typeof direct === "string") return direct;
+  const info = await (
+    repo as unknown as { info(): Promise<{ remote: string }> }
+  ).info();
+  return info.remote;
+}
+
 function isArtifactsNotFound(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const { code, message } = error as { code?: unknown; message?: unknown };
@@ -369,7 +384,7 @@ ${imports}
         "write",
         ARTIFACTS_TOKEN_TTL_SECONDS
       );
-      return { remote: repo.remote, token: token.plaintext };
+      return { remote: await repoRemote(repo), token: token.plaintext };
     } catch (error) {
       if (!isArtifactsNotFound(error)) throw error;
       const created = await artifacts.create(repoName, {
