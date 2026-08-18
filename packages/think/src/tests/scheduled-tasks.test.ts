@@ -44,6 +44,7 @@ type ThinkScheduledTasksTestStub = {
     config: Record<string, ScheduledTaskConfigForTest>
   ): Promise<void>;
   setDefaultTimezoneForTest(timezone?: string): Promise<void>;
+  setScheduledTasksScopeForTest(scope: "root" | "all"): Promise<void>;
   reconcileScheduledTasksForTest(): Promise<void>;
   reconcileScheduledTasksErrorForTest(): Promise<string>;
   validateScheduleForTest(
@@ -87,6 +88,10 @@ type ThinkScheduledTasksTestStub = {
     name: string,
     timezone?: string
   ): Promise<void>;
+  setChildScheduledTasksScopeForTest(
+    name: string,
+    scope: "root" | "all"
+  ): Promise<void>;
   reconcileChildScheduledTasksForTest(name: string): Promise<void>;
   listChildDeclaredScheduledTaskRowsForTest(
     name: string
@@ -94,6 +99,16 @@ type ThinkScheduledTasksTestStub = {
   listChildSchedulesForTest(
     name: string
   ): Promise<Array<{ id: string; payload: unknown }>>;
+  getChildFirstDeclaredPayloadForTest(
+    name: string
+  ): Promise<DeclaredScheduledTaskPayloadForTest>;
+  runChildDeclaredPayloadForTest(
+    name: string,
+    payload: DeclaredScheduledTaskPayloadForTest
+  ): Promise<void>;
+  listChildScheduledTaskHandlerEventsForTest(
+    name: string
+  ): Promise<ScheduledTaskHandlerEventForTest[]>;
   getKeepAliveRefsForTest(): Promise<number>;
   runAlarmForTest(): Promise<{
     keepAliveRefs: number;
@@ -411,6 +426,7 @@ describe("Think scheduled tasks", () => {
 
   it("supports declared scheduled tasks in sub-agents", async () => {
     const parent = await freshAgent();
+    await parent.setChildScheduledTasksScopeForTest("child", "all");
     await parent.setChildDefaultTimezoneForTest("child", "UTC");
     await parent.setChildScheduledTasksForTest("child", {
       childTask: {
@@ -431,6 +447,7 @@ describe("Think scheduled tasks", () => {
 
   it("supports scheduled task handlers in sub-agents", async () => {
     const parent = await freshAgent();
+    await parent.setChildScheduledTasksScopeForTest("child", "all");
     await parent.setChildScheduledTasksForTest("child", {
       childHandler: {
         schedule: "every 1 minute",
@@ -478,6 +495,8 @@ describe("Think scheduled tasks", () => {
         prompt: "Parent task"
       }
     });
+    await parent.setChildScheduledTasksScopeForTest("alpha", "all");
+    await parent.setChildScheduledTasksScopeForTest("beta", "all");
     await parent.setChildScheduledTasksForTest("alpha", {
       shared: {
         schedule: "every 1 minute",
@@ -524,6 +543,106 @@ describe("Think scheduled tasks", () => {
     expect(
       await parent.listChildDeclaredScheduledTaskRowsForTest("beta")
     ).toHaveLength(1);
+  });
+
+  // ── #1877: a static getScheduledTasks() returns the same tasks on every
+  // instance, so without a scope the declared schedule was armed once per live
+  // facet on top of the root and each occurrence fired N+1 times.
+  it("arms a statically declared task on the root only, not on each sub-agent (#1877)", async () => {
+    const parent = await freshAgent();
+    // Same task set on the root and both children — the shape a static
+    // `getScheduledTasks()` override produces in real code.
+    const tasks = {
+      digest: {
+        schedule: "every 1 minute",
+        prompt: "Daily digest"
+      }
+    };
+    await parent.setScheduledTasksForTest(tasks);
+    await parent.setChildScheduledTasksForTest("alpha", tasks);
+    await parent.setChildScheduledTasksForTest("beta", tasks);
+
+    await parent.reconcileScheduledTasksForTest();
+    await parent.reconcileChildScheduledTasksForTest("alpha");
+    await parent.reconcileChildScheduledTasksForTest("beta");
+
+    expect(await parent.listDeclaredScheduledTaskRowsForTest()).toHaveLength(1);
+    expect(
+      await parent.listChildDeclaredScheduledTaskRowsForTest("alpha")
+    ).toHaveLength(0);
+    expect(
+      await parent.listChildDeclaredScheduledTaskRowsForTest("beta")
+    ).toHaveLength(0);
+
+    // One armed occurrence in total, not one per facet.
+    expect(
+      declaredTaskScheduleIds(await parent.listSchedulesForTest())
+    ).toHaveLength(1);
+    expect(
+      declaredTaskScheduleIds(await parent.listChildSchedulesForTest("alpha"))
+    ).toHaveLength(0);
+    expect(
+      declaredTaskScheduleIds(await parent.listChildSchedulesForTest("beta"))
+    ).toHaveLength(0);
+  });
+
+  it("prunes and cancels declared tasks a sub-agent armed before the root scope default (#1877)", async () => {
+    const parent = await freshAgent();
+    // Arm under the old behaviour, then upgrade to the root-only default.
+    await parent.setChildScheduledTasksScopeForTest("child", "all");
+    await parent.setChildScheduledTasksForTest("child", {
+      digest: {
+        schedule: "every 1 minute",
+        prompt: "Daily digest"
+      }
+    });
+    await parent.reconcileChildScheduledTasksForTest("child");
+    expect(
+      await parent.listChildDeclaredScheduledTaskRowsForTest("child")
+    ).toHaveLength(1);
+    expect(
+      declaredTaskScheduleIds(await parent.listChildSchedulesForTest("child"))
+    ).toHaveLength(1);
+
+    await parent.setChildScheduledTasksScopeForTest("child", "root");
+    await parent.reconcileChildScheduledTasksForTest("child");
+
+    // The ledger row is gone AND the underlying Agent schedule was cancelled —
+    // deleting the row alone would leave the alarm firing forever.
+    expect(
+      await parent.listChildDeclaredScheduledTaskRowsForTest("child")
+    ).toHaveLength(0);
+    expect(
+      declaredTaskScheduleIds(await parent.listChildSchedulesForTest("child"))
+    ).toHaveLength(0);
+  });
+
+  it("ignores a declared task dispatch that reaches a root-scoped sub-agent (#1877)", async () => {
+    const parent = await freshAgent();
+    await parent.setChildScheduledTasksScopeForTest("child", "all");
+    await parent.setChildScheduledTasksForTest("child", {
+      recorded: {
+        schedule: "every 1 minute",
+        handler: "record"
+      }
+    });
+    await parent.reconcileChildScheduledTasksForTest("child");
+    const payload = await parent.getChildFirstDeclaredPayloadForTest("child");
+
+    // Flip to root scope without reconciling, so the ledger row survives and
+    // only the runner guard can stop the dispatch. This is the race where a
+    // root alarm fires into a facet that no longer arms.
+    await parent.setChildScheduledTasksScopeForTest("child", "root");
+    await parent.runChildDeclaredPayloadForTest("child", payload);
+
+    // The handler never ran, and the finally-block re-arm never happened.
+    expect(
+      await parent.listChildScheduledTaskHandlerEventsForTest("child")
+    ).toHaveLength(0);
+    const rows =
+      await parent.listChildDeclaredScheduledTaskRowsForTest("child");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].next_run_at).toBe(payload.scheduledFor);
   });
 
   it("does not arm a keepAlive heartbeat on alarm() when no workflow notifications are pending (#1703)", async () => {

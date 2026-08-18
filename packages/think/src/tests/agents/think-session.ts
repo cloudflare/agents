@@ -6128,6 +6128,13 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     return this.ctx.storage.get<string>("scheduledTasksDefaultTimezone");
   }
 
+  override async getScheduledTasksScope(): Promise<"root" | "all"> {
+    return (
+      (await this.ctx.storage.get<"root" | "all">("scheduledTasksScope")) ??
+      "root"
+    );
+  }
+
   override async getScheduledTasks(): Promise<ThinkScheduledTasks> {
     const config =
       (await this.ctx.storage.get<Record<string, ScheduledTaskConfigForTest>>(
@@ -6200,6 +6207,10 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
       return;
     }
     await this.ctx.storage.put("scheduledTasksDefaultTimezone", timezone);
+  }
+
+  async setScheduledTasksScopeForTest(scope: "root" | "all"): Promise<void> {
+    await this.ctx.storage.put("scheduledTasksScope", scope);
   }
 
   async reconcileScheduledTasksForTest(): Promise<void> {
@@ -6362,6 +6373,45 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   ): Promise<void> {
     const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
     await child.setDefaultTimezoneForTest(timezone);
+  }
+
+  async setChildScheduledTasksScopeForTest(
+    name: string,
+    scope: "root" | "all"
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.setScheduledTasksScopeForTest(scope);
+  }
+
+  /**
+   * Force the child facet to restart, so the next `subAgent()` call replays
+   * its `onStart` — including the declared-task reconcile step. Storage is
+   * left intact, unlike `deleteSubAgent`.
+   */
+  async restartChildForTest(name: string): Promise<void> {
+    this.abortSubAgent(ThinkScheduledTasksTestAgent, name, "restart-for-test");
+  }
+
+  async runChildDeclaredPayloadForTest(
+    name: string,
+    payload: DeclaredScheduledTaskPayloadForTest
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.runDeclaredPayloadForTest(payload);
+  }
+
+  async getChildFirstDeclaredPayloadForTest(
+    name: string
+  ): Promise<DeclaredScheduledTaskPayloadForTest> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.getFirstDeclaredPayloadForTest();
+  }
+
+  async listChildScheduledTaskHandlerEventsForTest(
+    name: string
+  ): Promise<ScheduledTaskHandlerEventForTest[]> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.listScheduledTaskHandlerEventsForTest();
   }
 
   async reconcileChildScheduledTasksForTest(name: string): Promise<void> {
