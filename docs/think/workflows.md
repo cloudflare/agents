@@ -178,6 +178,43 @@ and throws `ThinkPromptTimeoutError`.
 Set `cancelOnTimeout: false` when you intentionally want the Think submission to
 continue after the Workflow stops waiting.
 
+## Retries
+
+Pass `retries` to retry a failed `step.prompt()` attempt:
+
+```typescript
+await step.prompt("summarize-file", {
+  prompt: "Summarize the file",
+  output: summarySchema,
+  timeout: "5 minutes",
+  retries: {
+    maxAttempts: 3,
+    baseDelayMs: 500,
+    maxDelayMs: 5000,
+    retryOnTimeout: true
+  }
+});
+```
+
+| Option           | Default | Description                                      |
+| ---------------- | ------- | ------------------------------------------------ |
+| `maxAttempts`    | `1`     | Total attempts, including the first attempt.     |
+| `baseDelayMs`    | `500`   | Base delay for deterministic exponential jitter. |
+| `maxDelayMs`     | `5000`  | Maximum retry delay.                             |
+| `retryOnTimeout` | `true`  | Whether timeout errors should be retried.        |
+
+When retries are enabled and a wait times out, `step.prompt()` first gives the
+Think Durable Object a chance to recover the in-flight submission. This is useful
+when the Durable Object is restarting after a deploy: the Workflow waits for the
+original completion event instead of immediately discarding the turn and
+submitting a duplicate prompt. If recovery cannot complete within its bounded
+retry window, the Workflow cancels the abandoned submission and submits a fresh
+attempt.
+
+Set `retryOnTimeout: false` to fail fast on `ThinkPromptTimeoutError`. With
+multiple attempts enabled, `cancelOnTimeout` only applies to the final timed-out
+attempt; abandoned attempts are cancelled before a fresh retry starts.
+
 ## Boundary With Other Primitives
 
 Use `getScheduledTasks()` for recurring prompt submissions or deterministic
