@@ -5,7 +5,8 @@ import { getAgentByName } from "..";
 /**
  * ResumableStream lazy metadata-column migration (#1691, #1733).
  *
- * New tables are created with `message_id` / `is_continuation` up front, so
+ * New tables are created with `message_id` / `parent_message_id` /
+ * `is_continuation` up front, so
  * most wakes never migrate. Tables created by an older release lack those
  * columns and must migrate lazily — on the first stream write that needs
  * them — instead of paying a schema-introspection read on every construction.
@@ -17,12 +18,19 @@ import { getAgentByName } from "..";
 
 interface LegacyMigrationStub {
   setupLegacyStreamTableForTest(): Promise<void>;
+  setupPreBranchParentStreamTableForTest(): Promise<void>;
+  resumableLinearStartWithoutParentForTest(): Promise<{
+    startThrew: boolean;
+    columnsAfter: string[];
+  }>;
   resumableLegacyMigrationForTest(): Promise<{
     columnsBefore: string[];
     legacyMessageId: string | null;
+    legacyParentMessageId: string | null;
     startThrew: boolean;
     columnsAfter: string[];
     newStreamMessageId: string | null;
+    newStreamParentMessageId: string | null;
   }>;
 }
 
@@ -39,7 +47,17 @@ describe("ResumableStream — legacy metadata-column migration", () => {
     name = `rs-migrate-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   });
 
-  it("migrates a legacy table on first stream write instead of throwing", async () => {
+  it("does not migrate the branch parent column for a linear stream", async () => {
+    const agent = await getAgent(name);
+    await agent.setupPreBranchParentStreamTableForTest();
+
+    const result = await agent.resumableLinearStartWithoutParentForTest();
+
+    expect(result.startThrew).toBe(false);
+    expect(result.columnsAfter).not.toContain("parent_message_id");
+  });
+
+  it("migrates a legacy table on first branch stream write instead of throwing", async () => {
     const agent = await getAgent(name);
     await agent.setupLegacyStreamTableForTest();
 
@@ -47,17 +65,21 @@ describe("ResumableStream — legacy metadata-column migration", () => {
 
     // Precondition: the seeded table really is the old schema.
     expect(result.columnsBefore).not.toContain("message_id");
+    expect(result.columnsBefore).not.toContain("parent_message_id");
     expect(result.columnsBefore).not.toContain("is_continuation");
 
-    // Reading the new column off a legacy row is guarded → null, no throw.
+    // Reading the new columns off a legacy row is guarded → null, no throw.
     expect(result.legacyMessageId).toBeNull();
+    expect(result.legacyParentMessageId).toBeNull();
 
     // start() hit the missing columns, migrated, and retried successfully.
     expect(result.startThrew).toBe(false);
     expect(result.columnsAfter).toContain("message_id");
+    expect(result.columnsAfter).toContain("parent_message_id");
     expect(result.columnsAfter).toContain("is_continuation");
 
-    // The migrated row round-trips the value start() wrote.
+    // The migrated row round-trips the values start() wrote.
     expect(result.newStreamMessageId).toBe("msg-1");
+    expect(result.newStreamParentMessageId).toBe("parent-1");
   });
 });

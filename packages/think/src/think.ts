@@ -12019,10 +12019,11 @@ export class Think<
    * otherwise leave the client to generate its own id; the live stream and the
    * persisted message broadcast then can't reconcile by id, and the originating
    * tab briefly renders the turn twice before collapsing. Mirrors the fix in
-   * `@cloudflare/ai-chat`. Continuations are skipped — they reuse the existing
-   * assistant message via the `continuation` frame flag, so the id must not
-   * change mid-message. The orphan-recovery path inherits the id from the
-   * stored chunk, so it needs no separate stamping.
+   * `@cloudflare/ai-chat`. Live and active continuation frames still append via
+   * the top-level `continuation` flag; their stamped id identifies the separate
+   * persisted assistant row if the completed stream is replayed after hydration.
+   * The orphan-recovery path inherits the id from the stored chunk, so it needs
+   * no separate stamping.
    */
   private _alignStreamStartId(
     chunk: StreamChunkData,
@@ -12030,7 +12031,10 @@ export class Think<
     accumulator: StreamAccumulator,
     continuation: boolean
   ): void {
-    if (action?.type === "start" && action.messageId == null && !continuation) {
+    if (
+      action?.type === "start" &&
+      (action.messageId == null || continuation)
+    ) {
       (chunk as { messageId?: string }).messageId = accumulator.messageId;
     }
   }
@@ -12703,9 +12707,19 @@ export class Think<
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
-    const streamId = this._startResumableStream(requestId);
-    const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
+    const continuation = options?.continuation ?? false;
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID()
+    });
+    // Persist continuation semantics with the chunk buffer so active reconnect
+    // replay extends the existing assistant message exactly like live frames.
+    // The allocated id targets the standalone persisted row on terminal replay.
+    const streamId = this._startResumableStream(requestId, {
+      messageId: continuation ? accumulator.messageId : undefined,
+      parentMessageId: parentId,
+      continuation
+    });
 
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
@@ -12714,9 +12728,6 @@ export class Think<
       );
     }
 
-    const accumulator = new StreamAccumulator({
-      messageId: crypto.randomUUID()
-    });
     // Expose the in-flight message so a client tool result arriving before the
     // end-of-stream persist lands on the accumulator instead of being dropped
     // (#1649). Cleared before every return path below.
@@ -15999,7 +16010,7 @@ export class Think<
       persistOrphanedStream: async (streamId) => {
         await this._persistOrphanedStream(
           streamId,
-          this._activeTurnHistory?.leafId
+          this._resumableStream.getStreamParentMessageId(streamId) ?? undefined
         );
       },
       isConnectionPresent: (connectionId) =>
@@ -16033,7 +16044,11 @@ export class Think<
    */
   protected _startResumableStream(
     requestId: string,
-    options?: { messageId?: string }
+    options?: {
+      messageId?: string;
+      parentMessageId?: string;
+      continuation?: boolean;
+    }
   ): string {
     const streamId = this._resumableStream.start(requestId, options);
     // Flush connections parked during this turn's pre-stream window (#1784)

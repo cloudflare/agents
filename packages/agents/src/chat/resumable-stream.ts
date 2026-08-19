@@ -90,7 +90,9 @@ function unpackSegmentBody(rowBody: string): string[] {
 function isMissingMetadataColumnError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    (message.includes("message_id") || message.includes("is_continuation")) &&
+    (message.includes("message_id") ||
+      message.includes("is_continuation") ||
+      message.includes("parent_message_id")) &&
     (message.toLowerCase().includes("no such column") ||
       message.toLowerCase().includes("has no column named"))
   );
@@ -124,6 +126,11 @@ type StreamMetadata = {
    * legacy rows written before this column existed.
    */
   message_id: string | null;
+  /**
+   * Parent message for a newly reconstructed assistant message. Null for flat
+   * histories, linear appends, and rows written before branch-aware recovery.
+   */
+  parent_message_id: string | null;
   /**
    * Whether this stream is a continuation (appends to the last assistant
    * message rather than starting a new one). Live broadcast frames carry
@@ -190,6 +197,7 @@ export class ResumableStream {
       created_at integer not null,
       completed_at integer,
       message_id text,
+      parent_message_id text,
       is_continuation integer
     )`;
 
@@ -216,6 +224,13 @@ export class ResumableStream {
     if (!hasMessageId) {
       this
         .sql`alter table cf_ai_chat_stream_metadata add column message_id text`;
+    }
+    const hasParentMessageId = columns.some(
+      (column) => column.name === "parent_message_id"
+    );
+    if (!hasParentMessageId) {
+      this
+        .sql`alter table cf_ai_chat_stream_metadata add column parent_message_id text`;
     }
     const hasIsContinuation = columns.some(
       (column) => column.name === "is_continuation"
@@ -258,7 +273,11 @@ export class ResumableStream {
    */
   start(
     requestId: string,
-    options: { messageId?: string; continuation?: boolean } = {}
+    options: {
+      messageId?: string;
+      parentMessageId?: string;
+      continuation?: boolean;
+    } = {}
   ): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this.flushBuffer();
@@ -271,19 +290,30 @@ export class ResumableStream {
     this._activeIsContinuation = options.continuation ?? false;
 
     const messageId = options.messageId ?? null;
+    const parentMessageId = options.parentMessageId ?? null;
+
+    const insertMetadata = () => {
+      if (parentMessageId === null) {
+        // Flat histories and linear Think turns do not need the new column, so
+        // existing databases migrate only when a branch-scoped stream needs it.
+        this.sql`
+          insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
+          values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
+        `;
+        return;
+      }
+      this.sql`
+        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, parent_message_id, is_continuation)
+        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${parentMessageId}, ${this._activeIsContinuation ? 1 : 0})
+      `;
+    };
 
     try {
-      this.sql`
-        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
-        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
-      `;
+      insertMetadata();
     } catch (error) {
       if (!isMissingMetadataColumnError(error)) throw error;
       this._migrateMetadataColumns();
-      this.sql`
-        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
-        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
-      `;
+      insertMetadata();
     }
 
     return streamId;
@@ -308,6 +338,25 @@ export class ResumableStream {
     }
     if (!rows || rows.length === 0) return null;
     return rows[0].message_id ?? null;
+  }
+
+  /**
+   * Parent message captured when the stream started. Orphan persistence uses
+   * this after restart to attach a reconstructed branch response correctly.
+   */
+  getStreamParentMessageId(streamId: string): string | null {
+    let rows: Array<{ parent_message_id: string | null }>;
+    try {
+      rows = this.sql<{ parent_message_id: string | null }>`
+        select parent_message_id from cf_ai_chat_stream_metadata
+        where id = ${streamId}
+      `;
+    } catch (error) {
+      if (!isMissingMetadataColumnError(error)) throw error;
+      return null;
+    }
+    if (!rows || rows.length === 0) return null;
+    return rows[0].parent_message_id ?? null;
   }
 
   /**
@@ -569,10 +618,10 @@ export class ResumableStream {
     const stream = this._latestStreamForRequest(requestId, "completed");
     if (!stream) return false;
 
-    const continuation = stream.is_continuation === 1;
-    if (
-      !this._replayStoredChunks(connection, stream.id, requestId, continuation)
-    ) {
+    // A terminal stream has already been persisted as its own assistant row.
+    // Replay it as that standalone message so a hydrated client resets the row
+    // by id instead of appending the continuation content a second time.
+    if (!this._replayStoredChunks(connection, stream.id, requestId, false)) {
       return false;
     }
 
@@ -583,8 +632,7 @@ export class ResumableStream {
         done: true,
         id: requestId,
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-        replay: true,
-        ...(continuation && { continuation: true })
+        replay: true
       })
     );
   }
@@ -612,12 +660,8 @@ export class ResumableStream {
     const stream = this._latestStreamForRequest(requestId, "error");
     if (!stream) return true;
 
-    return this._replayStoredChunks(
-      connection,
-      stream.id,
-      requestId,
-      stream.is_continuation === 1
-    );
+    // Errored terminal streams also persist their partial as a standalone row.
+    return this._replayStoredChunks(connection, stream.id, requestId, false);
   }
 
   /** Latest stream row for a request with the given terminal status. */

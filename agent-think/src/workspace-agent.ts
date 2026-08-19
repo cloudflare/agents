@@ -16,6 +16,19 @@ export { WorkspaceProxy, WorkspaceServiceProxy };
 const RESET_ABORT_DELAY_MS = 100;
 const SYNC_RETRY_KEY_PREFIX = "workspace:sync-retry:";
 
+type WorkspaceWorkerBackendConstructor = new (options: {
+  id: string;
+  loader: unknown;
+  workspace: { binding: string; id: string };
+  ctx: DurableObjectState;
+}) => WorkspaceBackend;
+
+// SAFETY: this narrows only the constructor surface used at the composition
+// root. WorkerBackend's full loader declaration exceeds TypeScript's generic
+// instantiation depth once the Agents chat API is extended.
+const WorkspaceWorkerBackend =
+  WorkerBackend as unknown as WorkspaceWorkerBackendConstructor;
+
 type WorkspaceSyncRetryIntent = {
   backend: string;
   attempt: number;
@@ -74,7 +87,7 @@ export class WorkspaceAgent extends DurableObject<Env> {
     const backends: WorkspaceBackend[] = [];
     if (env.LOADER) {
       backends.push(
-        new WorkerBackend({
+        new WorkspaceWorkerBackend({
           id: "shell",
           loader: env.LOADER,
           workspace: workspaceRef,
