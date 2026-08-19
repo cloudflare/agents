@@ -1,0 +1,191 @@
+{
+  "main": "./worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // Test-specific flags required by the Vitest runner.
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "Stateful",
+        "class_name": "Stateful"
+      },
+      {
+        "name": "OnStartServer",
+        "class_name": "OnStartServer"
+      },
+      {
+        "name": "Mixed",
+        "class_name": "Mixed"
+      },
+      {
+        "name": "ConfigurableState",
+        "class_name": "ConfigurableState"
+      },
+      {
+        "name": "ConfigurableStateInMemory",
+        "class_name": "ConfigurableStateInMemory"
+      },
+      {
+        "name": "StateRoundTrip",
+        "class_name": "StateRoundTrip"
+      },
+      {
+        "name": "CorsServer",
+        "class_name": "CorsServer"
+      },
+      {
+        "name": "CustomCorsServer",
+        "class_name": "CustomCorsServer"
+      },
+      {
+        "name": "HibernatingOnStartServer",
+        "class_name": "HibernatingOnStartServer"
+      },
+      {
+        "name": "AlarmServer",
+        "class_name": "AlarmServer"
+      },
+      {
+        "name": "AlarmNameServer",
+        "class_name": "AlarmNameServer"
+      },
+      {
+        "name": "NoNameServer",
+        "class_name": "NoNameServer"
+      },
+      {
+        "name": "FailingOnStartServer",
+        "class_name": "FailingOnStartServer"
+      },
+      {
+        "name": "HibernatingNameInMessage",
+        "class_name": "HibernatingNameInMessage"
+      },
+      {
+        "name": "TagsServer",
+        "class_name": "TagsServer"
+      },
+      {
+        "name": "TagsServerInMemory",
+        "class_name": "TagsServerInMemory"
+      },
+      {
+        "name": "UriServer",
+        "class_name": "UriServer"
+      },
+      {
+        "name": "UriServerInMemory",
+        "class_name": "UriServerInMemory"
+      },
+      {
+        "name": "PropsServer",
+        "class_name": "PropsServer"
+      },
+      {
+        "name": "HeaderOnlyOnStartServer",
+        "class_name": "HeaderOnlyOnStartServer"
+      },
+      {
+        "name": "SetNameBootstrapServer",
+        "class_name": "SetNameBootstrapServer"
+      },
+      {
+        "name": "FacetLikeBootstrapServer",
+        "class_name": "FacetLikeBootstrapServer"
+      },
+      {
+        "name": "NameInConstructorServer",
+        "class_name": "NameInConstructorServer"
+      },
+      {
+        "name": "FacetParent",
+        "class_name": "FacetParent"
+      },
+      {
+        "name": "RawAlarmDO",
+        "class_name": "RawAlarmDO"
+      },
+      {
+        "name": "CloseHandshakeHibernating",
+        "class_name": "CloseHandshakeHibernating"
+      },
+      {
+        "name": "CloseHandshakeInMemory",
+        "class_name": "CloseHandshakeInMemory"
+      },
+      {
+        "name": "ThrowingCloseHibernating",
+        "class_name": "ThrowingCloseHibernating"
+      },
+      {
+        "name": "ThrowingCloseInMemory",
+        "class_name": "ThrowingCloseInMemory"
+      },
+      {
+        "name": "UserClosesInOnCloseHibernating",
+        "class_name": "UserClosesInOnCloseHibernating"
+      },
+      {
+        "name": "UserClosesInOnCloseInMemory",
+        "class_name": "UserClosesInOnCloseInMemory"
+      },
+      {
+        "name": "BinaryTypeProbe",
+        "class_name": "BinaryTypeProbe"
+      },
+      {
+        "name": "LifecycleProbe",
+        "class_name": "LifecycleProbe"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Stateful",
+        "OnStartServer",
+        "Mixed",
+        "ConfigurableState",
+        "ConfigurableStateInMemory",
+        "StateRoundTrip",
+        "CorsServer",
+        "CustomCorsServer",
+        "HibernatingOnStartServer",
+        "AlarmServer",
+        "AlarmNameServer",
+        "NoNameServer",
+        "FailingOnStartServer",
+        "HibernatingNameInMessage",
+        "TagsServer",
+        "TagsServerInMemory",
+        "UriServer",
+        "UriServerInMemory",
+        "PropsServer",
+        "HeaderOnlyOnStartServer",
+        "SetNameBootstrapServer",
+        "FacetLikeBootstrapServer",
+        "NameInConstructorServer",
+        "FacetParent",
+        "FacetChild",
+        "RawAlarmDO",
+        "CloseHandshakeHibernating",
+        "CloseHandshakeInMemory",
+        "ThrowingCloseHibernating",
+        "ThrowingCloseInMemory",
+        "UserClosesInOnCloseHibernating",
+        "UserClosesInOnCloseInMemory",
+        "BinaryTypeProbe",
+        "LifecycleProbe"
+      ]
+    }
+  ]
+}

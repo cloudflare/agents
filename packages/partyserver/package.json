@@ -1,0 +1,50 @@
+{
+  "name": "partyserver",
+  "version": "0.5.10",
+  "description": "Durable Object server and component lifecycle primitives",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git",
+    "directory": "packages/partyserver"
+  },
+  "homepage": "https://github.com/cloudflare/agents/tree/main/packages/partyserver",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsx scripts/build.ts",
+    "test": "vitest --run -r src/tests",
+    "test:compat": "vitest run --config src/tests/vitest.compat.config.ts",
+    "test:compat-matrix": "node scripts/compat-matrix.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "UPSTREAM.md"
+  ],
+  "keywords": [
+    "stateful",
+    "serverless",
+    "durable objects",
+    "partykit",
+    "cloudflare",
+    "workerd",
+    "real-time",
+    "websockets",
+    "collaboration",
+    "pubsub",
+    "multiplayer",
+    "ai agents",
+    "game server"
+  ],
+  "author": "Sunil Pai <spai@cloudflare.com>",
+  "license": "ISC",
+  "dependencies": {
+    "nanoid": "^5.1.16"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.20260424.1 || ^5.20260703.1"
+  }
+}

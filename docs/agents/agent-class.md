@@ -7,7 +7,7 @@ This document tries to bridge that gap, empowering any developer aiming to get s
 # What is the Agent?
 
 The `Agent` class is an extension of `DurableObject`. That is to say, they _are_ **Durable Objects**. If you're not familiar with Durable Objects, it is highly recommended that you read ["What are Durable Objects"](https://developers.cloudflare.com/durable-objects/) but at their core, Durable Objects are globally addressable (each instance has a unique ID) single-threaded compute instances with long term storage (KV/SQLite).  
-That being said, `Agent` does **not** extend `DurableObject` directly but instead `Server`. `Server` is a class provided by [PartyKit](https://github.com/cloudflare/partykit/tree/main/packages/partyserver).
+That being said, `Agent` does **not** extend `DurableObject` directly but instead `Server`. The Agents SDK vendors this PartyServer-compatible class and exports it from `agents/lifecycle`.
 
 You can visualize the logic as a Matryoshka doll: **DurableObject** -> **Server** -> **Agent**.
 
@@ -102,15 +102,15 @@ const token = kv.get("someToken");
 
 Lastly, it's worth mentioning that the DO also has the Worker `Env` in `this.env`. Read more [here](https://developers.cloudflare.com/workers/runtime-apis/bindings).
 
-## Layer 1: Partykit `Server`
+## Layer 1: lifecycle `Server`
 
-Now that you've seen what Durable Objects come with out-of-the-box, what [PartyKit](https://github.com/cloudflare/partykit)'s `Server` (package `partyserver`) implements will be clearer. It's an **opinionated `DurableObject` wrapper that improves DX by hiding away DO primitives in favor of more developer friendly callbacks**.
+Now that you have seen what Durable Objects provide, the `Server` exported from `agents/lifecycle` will be clearer. It is an **opinionated `DurableObject` wrapper that improves developer experience by hiding Durable Object primitives behind friendlier callbacks**. Its implementation is vendored from [PartyServer](https://github.com/cloudflare/partykit/tree/main/packages/partyserver).
 
-An important note is that `Server` **does NOT persist to the DO storage** so you will not see extra storage operations by using it.
+For named Durable Objects, `Server` does not persist its own copy of the instance name. Legacy storage reads remain compatible with objects created by older PartyServer versions.
 
 ### Addressing
 
-`partyserver` exposes helper to address your DOs instead of manually through your bindings. This allows `partyserver` to implement several improvements, including a unique URL routing scheme for your DOs (e.g. `<your-worker>/servers/:durableClass/:durableName`).
+`agents/lifecycle` exposes helpers for addressing Durable Objects instead of working with bindings manually. These helpers provide a URL routing scheme such as `<your-worker>/parties/:durableClass/:durableName`.
 
 Compare this to the DO addressing [example above](#rpc).
 
@@ -136,11 +136,11 @@ Since we have a URL addressing scheme, we also get access to `routePartykitReque
   }
 ```
 
-You can have a look at [the implementation](https://github.com/cloudflare/partykit/blob/main/packages/partyserver/src/index.ts#L122) if you're interested.
+You can inspect the [vendored implementation](https://github.com/cloudflare/agents/tree/main/packages/partyserver) and its linked upstream provenance.
 
 ### `onStart`
 
-The extra plumbing that `Server` includes on addressing allows it to expose an `onStart` callback that is **executed every time the DO starts up** (the DO was evicted, hibernated or never created at all) and **before any `fetch` or RPC**.
+The extra plumbing in `Server` exposes an `onStart` callback that is **executed every time the Durable Object starts up** (the object was evicted, hibernated, or never created) and before `fetch`, WebSocket, and alarm callbacks. `getServerByName()` also synchronizes startup before returning its RPC stub. A stub obtained directly from a namespace can invoke native RPC without passing through these entry points, so frameworks must guard those RPC methods separately.
 
 ```ts
 class MyServer extends Server {
@@ -191,7 +191,7 @@ Since [2026-03-15](https://developers.cloudflare.com/changelog/post/2026-03-15-d
 - the name is longer than 1,024 bytes;
 - the alarm firing was scheduled before 2026-03-15, or was scheduled from a context that itself had no name (reschedule it from a `fetch()` or RPC handler where the name is available).
 
-For those cases `partyserver` falls back to a legacy name record in storage (written automatically during named-access initialization, or by the `setName()` bootstrap for raw-id DOs), and `this.name` throws if no name can be resolved at all.
+For those cases, `Server` can read a legacy name record written by an older PartyServer version or by the `setName()` bootstrap for a raw-ID object. New named objects do not write this redundant record. `this.name` throws if no name can be resolved.
 
 ## Layer 2: Agent
 

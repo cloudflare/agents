@@ -12,6 +12,7 @@ packages/          # Published npm packages (need changesets for changes)
   ai-chat/         # @cloudflare/ai-chat — higher-level AI chat agent
   hono-agents/     # Hono framework integration
   codemode/        # @cloudflare/codemode — experimental code generation
+  partyserver/     # Vendored Durable Object server + lifecycle substrate
 
 examples/          # Self-contained demo apps (see examples/AGENTS.md)
   playground/      # Main showcase app — all SDK features in one UI (uses Kumo design system)
@@ -41,13 +42,14 @@ scripts/           # Repo-wide tooling (typecheck, export checks, update checks)
 
 Some directories have their own AGENTS.md with deeper guidance:
 
-| File                        | Scope                                                                     |
-| --------------------------- | ------------------------------------------------------------------------- |
-| `packages/agents/AGENTS.md` | Core SDK internals — exports, source layout, build, testing, architecture |
-| `examples/AGENTS.md`        | Example conventions — required structure, consistency rules, known issues |
-| `guides/AGENTS.md`          | Guide conventions — how guides differ from examples, README expectations  |
-| `docs/AGENTS.md`            | Writing user-facing docs — Diátaxis framework, upstream sync, style       |
-| `design/AGENTS.md`          | Design records and RFCs — format, workflow, relationship to docs          |
+| File                             | Scope                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------- |
+| `packages/agents/AGENTS.md`      | Core SDK internals — exports, source layout, build, testing, architecture |
+| `packages/partyserver/AGENTS.md` | Durable Object server lifecycle, provenance, compatibility, testing       |
+| `examples/AGENTS.md`             | Example conventions — required structure, consistency rules, known issues |
+| `guides/AGENTS.md`               | Guide conventions — how guides differ from examples, README expectations  |
+| `docs/AGENTS.md`                 | Writing user-facing docs — Diátaxis framework, upstream sync, style       |
+| `design/AGENTS.md`               | Design records and RFCs — format, workflow, relationship to docs          |
 
 ## Setup
 

@@ -563,6 +563,7 @@ The published package includes the complete documentation tree at
 [State Management](../../docs/agents/state.md) ·
 [Scheduling](../../docs/agents/scheduling.md) ·
 [Callable Methods](../../docs/agents/callable-methods.md) ·
+[Durable Object Lifecycle](../../docs/agents/lifecycle.md) ·
 [MCP Integration](../../docs/agents/mcp-client.md) ·
 [Full Documentation](../../docs/agents/index.md)
 
