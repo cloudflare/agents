@@ -3914,9 +3914,6 @@ importers:
       cron-schedule:
         specifier: ^6.0.0
         version: 6.0.0
-      esbuild:
-        specifier: ^0.28.1
-        version: 0.28.1
       mimetext:
         specifier: ^3.0.28
         version: 3.0.28
@@ -3984,12 +3981,12 @@ importers:
       chat:
         specifier: ^4.31.0
         version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
       glob:
         specifier: ^13.0.6
         version: 13.0.6
-      just-bash:
-        specifier: ^3.0.2
-        version: 3.0.2
       react:
         specifier: ^19.2.7
         version: 19.2.7

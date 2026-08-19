@@ -124,7 +124,7 @@ import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
 import * as skills from "agents/skills";
 import { SkillRegistry } from "agents/skills";
-import type { SkillScriptRunner, SkillSource } from "agents/skills";
+import type { SkillSource } from "agents/skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -138,7 +138,7 @@ export type {
   TypedToolResult
 } from "ai";
 export { skills };
-export type { SkillRunContext, SkillSource } from "agents/skills";
+export type { SkillSource } from "agents/skills";
 import {
   Agent,
   callable,
@@ -277,11 +277,22 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
-import { Workspace } from "@cloudflare/shell";
+import { LegacyWorkspace as Workspace } from "./workspace/workspace-legacy";
 import { createWorkspaceTools } from "./tools/workspace";
+import {
+  hasWorkspaceLegacyBashProvider,
+  hasWorkspaceToolProvider,
+  normalizeWorkspacePath,
+  readWorkspaceText,
+  workspaceFilesystem,
+  writeWorkspaceFile,
+  workspaceToolProvider,
+  type LegacyWorkspaceBashOptions,
+  type WorkspaceLike
+} from "./workspace/types";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
-import { truncatePausedExecutionOutput } from "./tools/execute";
+import { truncatePausedExecutionOutput } from "./tools/execute-output";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
@@ -313,10 +324,30 @@ export type {
 export type { DeliveryKind, DeliveryTag } from "./messengers";
 export { Session } from "agents/experimental/memory/session";
 export type { SessionMessage } from "agents/experimental/memory/session";
-export { Workspace } from "@cloudflare/shell";
+export { LegacyWorkspace as Workspace } from "./workspace/workspace-legacy";
 export type { FiberContext, FiberRecoveryContext } from "agents";
-export type { WorkspaceLike } from "./tools/workspace";
-import type { WorkspaceLike } from "./tools/workspace";
+export {
+  hasWorkspaceLegacyBashProvider,
+  hasWorkspaceToolProvider,
+  normalizeWorkspacePath,
+  readWorkspaceText,
+  workspaceFilesystem,
+  workspaceLegacyBashProvider,
+  workspaceToolProvider,
+  writeWorkspaceFile
+} from "./workspace/types";
+export type {
+  LegacyWorkspaceBashOptions,
+  ThinkWorkspace,
+  ThinkWorkspaceFilesystem,
+  ThinkWorkspaceRuntime,
+  ThinkWorkspaceRuntimeHandle,
+  ThinkWorkspaceRuntimeValue,
+  WorkspaceLegacyBashProvider,
+  WorkspaceLike,
+  WorkspaceToolProvider,
+  WorkspaceToolProviderOptions
+} from "./workspace/types";
 export type {
   CreateFetchToolsOptions,
   FetchBindingTarget,
@@ -2873,24 +2904,9 @@ export class Think<
 
   /**
    * Workspace filesystem available in `getTools()` and lifecycle hooks.
-   * Defaults to a full `Workspace` backed by the DO's SQLite storage.
-   *
-   * Typed as `WorkspaceLike` rather than `Workspace` so subclasses can
-   * replace it with anything that satisfies the interface — e.g. a proxy
-   * that forwards to a shared workspace owned by a parent DO. Override as
-   * a class field to skip the default init entirely:
-   *
-   * ```typescript
-   * // Default init with R2 spillover for large files.
-   * override workspace = new Workspace({
-   *   sql: this.ctx.storage.sql,
-   *   r2: this.env.R2,
-   *   name: () => this.name
-   * });
-   *
-   * // Or a custom WorkspaceLike — e.g. a parent-owned shared workspace.
-   * override workspace: WorkspaceLike = new SharedWorkspace(this);
-   * ```
+   * Defaults to the legacy Shell workspace backed by the Durable Object's
+   * SQLite storage. Override this field with another `ThinkWorkspace`
+   * implementation to use a different filesystem or runtime.
    */
   workspace!: WorkspaceLike;
 
@@ -2904,13 +2920,13 @@ export class Think<
   codemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
 
   /**
-   * Include the default workspace Bash tool. Enabled by default so models can
-   * run shell-style multi-file workflows against the workspace. Set to `false`
-   * to omit it from the built-in workspace tools.
+   * Configure the snapshot-based `bash` tool supplied by
+   * `workspace-legacy`. Other workspaces reject an options object; their
+   * execution tools are configured on the workspace itself.
+   *
+   * @deprecated Configure execution through the selected workspace.
    */
-  workspaceBash:
-    | boolean
-    | NonNullable<Parameters<typeof createWorkspaceTools>[1]>["bash"] = true;
+  workspaceBash: boolean | LegacyWorkspaceBashOptions = true;
 
   /**
    * Opt-in HTTP fetch tools. Disabled by default — set to a config object to
@@ -3460,7 +3476,7 @@ export class Think<
         if (!result.changed) continue;
 
         for (const blob of result.blobs) {
-          await this.workspace.writeFile(blob.path, blob.data);
+          await writeWorkspaceFile(this.workspace, blob.path, blob.data);
           totals.externalizedBytes += blob.data.length;
         }
         await this.session.internal_rewriteMessage(
@@ -4790,7 +4806,7 @@ export class Think<
         }
       }
 
-      const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
+      const registry = new SkillRegistry(sources);
       await registry.load();
       this._logSkillWarnings(registry);
       this._skillRegistry = registry;
@@ -4825,16 +4841,6 @@ export class Think<
       this._loggedSkillWarnings.add(warning);
       console.warn(`[think] ${warning}`);
     }
-  }
-
-  /**
-   * Return an optional runner that enables the `run_skill_script` tool.
-   *
-   * @experimental Skill script execution is experimental and may change
-   * before stabilizing.
-   */
-  getSkillScriptRunner(): SkillScriptRunner | null {
-    return null;
   }
 
   private async _refreshSkillsIfChanged(): Promise<void> {
@@ -5631,13 +5637,23 @@ export class Think<
       await this.mcp.waitForConnections({ timeout });
     }
 
-    const workspaceTools = createWorkspaceTools(this.workspace, {
-      bash: this.workspaceBash
-    });
+    const workspaceTools = createWorkspaceTools(this.workspace);
+    const isLegacyWorkspace = hasWorkspaceLegacyBashProvider(this.workspace);
+    if (typeof this.workspaceBash === "object" && !isLegacyWorkspace) {
+      throw new Error(
+        "workspaceBash options require a workspace from " +
+          '"@cloudflare/think/workspace-legacy".'
+      );
+    }
+    const workspaceExecutionTools = hasWorkspaceToolProvider(this.workspace)
+      ? this.workspace[workspaceToolProvider]({
+          legacyBash: isLegacyWorkspace ? this.workspaceBash : undefined
+        })
+      : {};
     const fetchToolSet: ToolSet = this.fetchTools
       ? createFetchTools({
           ...this.fetchTools,
-          workspace: this.workspace,
+          workspace: { fs: workspaceFilesystem(this.workspace) },
           onEvent: (event: FetchToolEvent) => {
             (
               this._emit as unknown as (
@@ -5662,6 +5678,7 @@ export class Think<
     );
     let tools: ToolSet = {
       ...workspaceTools,
+      ...workspaceExecutionTools,
       ...fetchToolSet,
       ...baseTools,
       ...actionTools,
@@ -7076,16 +7093,18 @@ export class Think<
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
 
   async _hostReadFile(path: string): Promise<string | null> {
-    return (await this.workspace.readFile(path)) ?? null;
+    return readWorkspaceText(this.workspace, path);
   }
 
   async _hostWriteFile(path: string, content: string): Promise<void> {
-    await this.workspace.writeFile(path, content);
+    await writeWorkspaceFile(this.workspace, path, content);
   }
 
   async _hostDeleteFile(path: string): Promise<boolean> {
     try {
-      await this.workspace.rm(path);
+      await workspaceFilesystem(this.workspace).rm(
+        normalizeWorkspacePath(path)
+      );
       return true;
     } catch {
       return false;
@@ -7097,13 +7116,29 @@ export class Think<
   ): Promise<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
-    const entries = await this.workspace.readDir(dir);
-    return entries.map((e) => ({
-      name: e.name,
-      type: e.type,
-      size: e.size ?? 0,
-      path: e.path ?? `${dir}/${e.name}`
-    }));
+    const normalizedDir = normalizeWorkspacePath(dir);
+    const entries = await workspaceFilesystem(this.workspace).readdir(
+      normalizedDir
+    );
+    return Promise.all(
+      entries.map(async (entry) => {
+        const path =
+          normalizedDir === "/"
+            ? `/${entry.name}`
+            : `${normalizedDir}/${entry.name}`;
+        const stat = await workspaceFilesystem(this.workspace).stat(path);
+        return {
+          name: entry.name,
+          type: entry.isDirectory
+            ? "directory"
+            : entry.isSymbolicLink
+              ? "symlink"
+              : "file",
+          size: stat.size,
+          path
+        };
+      })
+    );
   }
 
   async _hostGetContext(label: string): Promise<string | null> {

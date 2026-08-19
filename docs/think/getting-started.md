@@ -271,7 +271,7 @@ Think merges tools from multiple sources automatically. On every turn, the model
 1. **Workspace tools** — read, write, edit, list, find, grep, delete (built-in)
 2. **Session tools** — set_context, load_context, search_context (from `configureSession`)
 3. **Your tools** — from `getTools()`
-4. **Skill tools** — activate_skill, read_skill_resource, and optional run_skill_script (from `getSkills()`)
+4. **Skill tools** — activate_skill and read_skill_resource (from `getSkills()`)
 5. **MCP tools** — from connected MCP servers (if any)
 6. **Client tools** — from the browser (if any)
 
