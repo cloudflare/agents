@@ -2791,8 +2791,9 @@ export class Think<
   mediaEviction: MediaEvictionConfig | boolean = true;
 
   /**
-   * When true, chat turns are wrapped in `runFiber` for durable execution.
-   * Enables `onChatRecovery` hook and `this.stash()` during streaming.
+   * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
+   * enabling `onChatRecovery` and `this.stash()` during streaming. Assign an
+   * object to tune recovery budgets and terminal behavior.
    *
    * Assign this as a class field or in the constructor — NOT in `onStart()`.
    * On every wake the SDK evaluates recovery budgets (and may seal an
@@ -7472,11 +7473,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, false, chatBody);
-          } else {
-            await chatBody();
-          }
+          await this._runChatRecoveryFiber(requestId, false, chatBody);
         }
       });
     } finally {
@@ -10920,15 +10917,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(
-              requestId,
-              false,
-              programmaticBody
-            );
-          } else {
-            await programmaticBody();
-          }
+          await this._runChatRecoveryFiber(requestId, false, programmaticBody);
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -11047,11 +11036,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
-          } else {
-            await continueTurnBody();
-          }
+          await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -11146,11 +11131,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
-          } else {
-            await retryTurnBody();
-          }
+          await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -11709,11 +11690,7 @@ export class Think<
               }
             };
 
-            if (this.chatRecovery) {
-              await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
-            } else {
-              await chatTurnBody();
-            }
+            await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
           }
         });
 
@@ -12373,8 +12350,6 @@ export class Think<
           await callback.onInterrupted?.();
           return { status: "aborted" };
         }
-        // outcome === "disabled" (chat recovery off): fall through to the
-        // generic terminal path below (unchanged watchdog behavior).
       }
       if (!streamFinalized) {
         this._errorResumableStream(streamId);
@@ -12831,9 +12806,6 @@ export class Think<
           this._streamingAssistant = null;
           return { status: "aborted" };
         }
-        // outcome === "disabled" (chat recovery off): fall through to the
-        // generic terminal path (the watchdog's original "kill the spinner"
-        // guarantee, unchanged).
       }
       streamError = error instanceof Error ? error.message : "Stream error";
       if (options?.captureProgrammaticStreamError) {
@@ -14144,20 +14116,13 @@ export class Think<
    *   emits `chat:recovery:exhausted`, marks the submission interrupted, and
    *   delivers the configured `terminalMessage`). The caller must NOT run the
    *   generic terminal path — the terminal UX is already delivered.
-   * - `"disabled"` — chat recovery is off; the caller falls through to the
-   *   generic terminal error (the watchdog's original "kill the spinner"
-   *   behavior, unchanged).
    */
   private async _routeStallToBoundedRecovery(input: {
     requestId: string;
     streamId: string;
     partialParts: MessagePart[];
     targetAssistantId?: string;
-  }): Promise<"scheduled" | "exhausted" | "disabled"> {
-    // Stall-recovery is automatic only when chat recovery is enabled (the
-    // default for Think). With recovery off, a stall stays terminal — there is
-    // no budget/continuation machinery to route into.
-    if (!this._resolveChatRecoveryConfig().enabled) return "disabled";
+  }): Promise<"scheduled" | "exhausted"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const latestUserMessageId =
@@ -14434,27 +14399,27 @@ export class Think<
         "skipped",
         "continue_disabled"
       );
-      const disabledMessage =
-        "Submission was interrupted and chat recovery was disabled.";
+      const declinedMessage =
+        "Submission was interrupted and automatic continuation was declined.";
       // Key off the recovery ROOT, not this continuation's `requestId` — a
       // chained submission's row still carries the root id, so passing the
       // per-continuation id would miss it and leave it stuck `running`.
       await this._markRecoveredSubmissionInterrupted(
         recoveryRootRequestId,
-        disabledMessage
+        declinedMessage
       );
       // Unlike `conversation_changed` (a newer turn owns the UI, so silence is
-      // correct), disabling recovery abandons the turn with no superseding turn.
-      // Surface it like exhaustion so a reconnecting client isn't frozen.
+      // correct), declining continuation abandons the turn with no superseding
+      // turn. Surface it like exhaustion so a reconnecting client isn't frozen.
       await this._recordTerminalChatStatus(
         "interrupted",
         requestId,
-        disabledMessage
+        declinedMessage
       );
       this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
-        body: disabledMessage,
+        body: declinedMessage,
         done: true,
         error: true
       });
@@ -15432,11 +15397,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, true, continuationBody);
-          } else {
-            await continuationBody();
-          }
+          await this._runChatRecoveryFiber(requestId, true, continuationBody);
         } finally {
           this._aborts.remove(requestId);
           if (!streamed) {
@@ -15505,15 +15466,7 @@ export class Think<
               }
             };
 
-            if (this.chatRecovery) {
-              await this._runChatRecoveryFiber(
-                requestId,
-                true,
-                continuationBody
-              );
-            } else {
-              await continuationBody();
-            }
+            await this._runChatRecoveryFiber(requestId, true, continuationBody);
           }
         });
       } catch (error) {

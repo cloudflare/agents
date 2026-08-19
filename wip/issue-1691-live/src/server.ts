@@ -1,7 +1,7 @@
 /**
  * Live #1691 repro worker.
  *
- * A real-LLM `AIChatAgent` (chatRecovery on) that streams its response through
+ * A real-LLM `AIChatAgent` using durable recovery that streams its response through
  * `streamText(...).toUIMessageStreamResponse()` — the standard pattern, which
  * does NOT inject a `start.messageId`. That is exactly the condition that
  * triggers #1691: when a stream is interrupted before its assistant message is
@@ -68,7 +68,6 @@ function textOf(message: UIMessage): string {
 
 export class LiveChatAgent extends AIChatAgent<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
 
   private _resolveModel(): { provider: string; model: LanguageModel } {
     const provider = (this.env.LLM_PROVIDER ?? "workers-ai").toLowerCase();
@@ -152,7 +151,6 @@ export class LiveChatAgent extends AIChatAgent<Env> {
  */
 export class LiveThinkAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   override maxSteps = 4;
 
   override getModel(): LanguageModel {

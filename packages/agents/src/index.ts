@@ -2833,16 +2833,13 @@ export class Agent<
 
             const chatRecoveryAfter = (this as { chatRecovery?: unknown })
               .chatRecovery;
-            // Warn when onStart swaps in a recovery config that would have
-            // mattered: a custom config object OR `chatRecovery = true`
-            // (enabling recovery / its defaults too late). Setting `false`
-            // (disabling) is intentionally NOT warned — recovery already ran
-            // with the pre-onStart value, so disabling here is a benign no-op
-            // for the wake that just happened, not the silent-misconfig bug.
+            // Warn when onStart swaps in any recognized recovery config. A
+            // custom config is applied too late for this wake, while a legacy
+            // `false` value no longer disables durable recovery.
             const chatRecoveryAfterMatters =
+              typeof chatRecoveryAfter === "boolean" ||
               (typeof chatRecoveryAfter === "object" &&
-                chatRecoveryAfter !== null) ||
-              chatRecoveryAfter === true;
+                chatRecoveryAfter !== null);
             if (
               !this._warnedChatRecoveryInOnStart &&
               chatRecoveryBefore !== chatRecoveryAfter &&

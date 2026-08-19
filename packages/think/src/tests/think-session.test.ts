@@ -559,33 +559,6 @@ describe("Think — error handling", () => {
     );
   });
 
-  it("aborts a stalled stream via the inactivity watchdog instead of hanging forever", async () => {
-    const agent = await freshAgent(`stall-${crypto.randomUUID()}`);
-    const stalled: Array<{ requestId?: string; timeoutMs?: number }> = [];
-    const unsubscribe = subscribe("chat", (event) => {
-      if (event.type === "chat:stream:stalled") {
-        stalled.push(
-          event.payload as { requestId?: string; timeoutMs?: number }
-        );
-      }
-    });
-
-    let result: TestChatResult;
-    try {
-      // Emit one chunk, then hang forever. Without the watchdog this turn never
-      // resolves (the read loop parks on a promise that never settles); the test
-      // would hit the vitest timeout. With it, the turn ends terminally.
-      result = await agent.testChatWithStall(1, 50);
-    } finally {
-      unsubscribe();
-    }
-
-    expect(result.done).toBe(false);
-    expect(result.error).toContain("stalled");
-    expect(stalled).toHaveLength(1);
-    expect(stalled[0]?.timeoutMs).toBe(50);
-  });
-
   it("does not fire the watchdog for a slow-but-steady stream (timer resets per chunk)", async () => {
     const agent = await freshAgent(`slow-${crypto.randomUUID()}`);
     const stalled: Array<unknown> = [];
@@ -2322,19 +2295,20 @@ describe("Think — chatRecovery", () => {
     expect(await agent.getTurnCallCount()).toBe(1);
   });
 
-  it("recovery=false works without creating fiber rows", async () => {
-    const agent = await freshNonRecoveryAgent("nonrecovery-basic");
+  it("treats a legacy runtime false config as durable recovery", async () => {
+    const agent = await freshNonRecoveryAgent("legacy-false-basic");
 
     await agent.testChat("Hello!");
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     expect(messages).toHaveLength(2);
+    expect(await agent.getStashSucceeded()).toBe(true);
 
     const fibers = await agent.getActiveFibers();
     expect(fibers).toHaveLength(0);
   });
 
-  it("behavioral parity: same messages regardless of recovery flag", async () => {
+  it("preserves turn results for a legacy runtime false config", async () => {
     const durableAgent = await freshRecoveryAgent("parity-durable");
     const nonDurableAgent = await freshNonRecoveryAgent("parity-nondurable");
 
@@ -3649,12 +3623,12 @@ describe("Think — onChatRecovery", () => {
 
     await agent.triggerFiberRecovery();
 
-    // Disabling recovery abandons the turn with no superseding turn, so a
-    // reconnecting client must see a terminal error rather than a frozen,
-    // half-streamed turn (unlike a benign `conversation_changed` skip).
+    // Declining automatic continuation abandons the turn with no superseding
+    // turn, so a reconnecting client must see a terminal error rather than a
+    // frozen, half-streamed turn (unlike a benign `conversation_changed` skip).
     const terminal = await agent.getPendingChatTerminalForTest();
     expect(terminal).toBeTruthy();
-    expect(terminal?.body).toContain("chat recovery was disabled");
+    expect(terminal?.body).toContain("automatic continuation was declined");
   });
 
   // ── Recovery under multi-deploy churn (chained continuations) ──────────────

@@ -30,7 +30,7 @@ Two layers, both built into the `Agent` base class:
 | 1     | `keepAlive()` | Prevents idle eviction via alarm heartbeats                           |
 | 2     | `runFiber()`  | Durable execution — registered in SQLite, checkpointable, recoverable |
 
-`AIChatAgent` builds on Layer 2 to provide chat-specific recovery when `chatRecovery` is enabled: it wraps each chat turn in a fiber, detects interruptions, tracks bounded recovery incidents, and exposes `onChatRecovery` for provider-specific continuation strategies. Think enables this by default.
+`AIChatAgent` and Think build on Layer 2 with always-on chat recovery: each chat turn runs in a fiber, interrupted turns are detected, recovery incidents are bounded, and `onChatRecovery` supports provider-specific continuation strategies.
 
 ## Layer 1: `keepAlive()`
 
@@ -289,7 +289,7 @@ class ResearchAgent extends Agent {
 
 ## Layer 3: Chat recovery in `AIChatAgent`
 
-`AIChatAgent` wraps each chat turn in a fiber when `chatRecovery` is enabled. This provides automatic keepAlive during LLM streaming and a recovery path when the DO is evicted mid-stream.
+`AIChatAgent` wraps every chat turn in a fiber. This provides automatic keepAlive during LLM streaming and a recovery path when the DO is evicted mid-stream.
 
 ### How it works
 
@@ -303,9 +303,6 @@ class ResearchAgent extends Agent {
 
 ```typescript
 class AIChatAgent {
-  /** Enable fiber wrapping for chat turns. */
-  protected chatRecovery = false;
-
   /**
    * Called when an interrupted chat stream is detected.
    * Return options to control recovery:
@@ -357,8 +354,6 @@ The `requestId` is encoded in the fiber name (`__cf_internal_chat_turn:{requestI
 
 ```typescript
 class MyChat extends AIChatAgent<Env> {
-  protected override chatRecovery = true;
-
   override async onChatRecovery(ctx: ChatRecoveryContext) {
     const provider = this.state?.lastProvider;
 
