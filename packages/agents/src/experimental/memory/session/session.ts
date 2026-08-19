@@ -453,25 +453,26 @@ export class Session {
   private _warnedNoRecentHistorySupport = false;
 
   /**
-   * Byte-budgeted read of the most recent messages on the active branch
-   * path (always at least the leaf message, and at least
+   * Byte-budgeted read of the most recent messages on the active or selected
+   * branch path (always at least the leaf message, and at least
    * `minRecentMessages` when the path is long enough). Lets hosts hydrate
    * a bounded window instead of the full transcript so wake-time memory
    * scales with the budget rather than total session history (#1710).
    *
-   * Falls back to a full (untruncated) read when the provider doesn't
-   * implement `getRecentHistory`. The fallback reports honest metadata
-   * (`truncated: false` and the real serialized size) and warns once so a
-   * host relying on the budget knows it is not being enforced.
+   * Falls back to a full (untruncated) read of the same branch when the
+   * provider doesn't implement `getRecentHistory`. The fallback reports
+   * honest metadata (`truncated: false` and the real serialized size) and
+   * warns once so a host relying on the budget knows it is not being enforced.
    */
   async getRecentHistory(
     maxContentBytes: number,
-    minRecentMessages = 1
+    minRecentMessages = 1,
+    leafId: string | null = null
   ): Promise<RecentHistoryResult> {
     await this._ensureRestored();
     if (this.storage.getRecentHistory) {
       return this.storage.getRecentHistory(
-        null,
+        leafId,
         maxContentBytes,
         minRecentMessages
       );
@@ -485,7 +486,7 @@ export class Session {
           "(and getHistoryRowStats) on the provider to bound hydration."
       );
     }
-    const messages = await this.storage.getHistory();
+    const messages = await this.storage.getHistory(leafId);
     let totalContentBytes = 0;
     for (const message of messages) {
       totalContentBytes += JSON.stringify(message).length;
