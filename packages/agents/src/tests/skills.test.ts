@@ -150,9 +150,10 @@ Review carefully.
     await registry.load();
 
     const tools = registry.tools();
-    expect(tools).toHaveProperty("activate_skill");
-    expect(tools).not.toHaveProperty("unload_skill");
-    expect(tools).toHaveProperty("read_skill_resource");
+    expect(Object.keys(tools)).toEqual([
+      "activate_skill",
+      "read_skill_resource"
+    ]);
 
     const activated = await executable(tools.activate_skill).execute({
       name: "code-review"
@@ -179,138 +180,6 @@ Review carefully.
     expect(binary).toContain('encoding="base64"');
     expect(binary).toContain('mimeType="image/png"');
     expect(binary).toContain("aGVsbG8=");
-  });
-
-  it("exposes run_skill_script only when a runner is configured", async () => {
-    const withoutRunner = new SkillRegistry([skills.fromManifest(manifest)]);
-    await withoutRunner.load();
-    expect(withoutRunner.tools()).not.toHaveProperty("run_skill_script");
-
-    const registry = new SkillRegistry([skills.fromManifest(manifest)], {
-      async run(request) {
-        return {
-          skill: request.skill.name,
-          path: request.path,
-          source: request.source,
-          input: request.input
-        };
-      }
-    });
-    await registry.load();
-
-    const tools = registry.tools();
-    expect(tools).toHaveProperty("run_skill_script");
-
-    const result = await executable(tools.run_skill_script).execute({
-      name: "code-review",
-      path: "scripts/review.ts",
-      input: { diff: "test" }
-    });
-
-    expect(result).toMatchObject({
-      skill: "code-review",
-      path: "scripts/review.ts",
-      source: "export default function review() {}",
-      input: { diff: "test" }
-    });
-
-    const defaultInput = await executable(tools.run_skill_script).execute({
-      name: "code-review",
-      path: "scripts/review.ts"
-    });
-
-    expect(defaultInput).toMatchObject({
-      input: {}
-    });
-  });
-
-  it("rejects non-script resources for run_skill_script", async () => {
-    const registry = new SkillRegistry([skills.fromManifest(manifest)], {
-      async run() {
-        return "should not run";
-      }
-    });
-    await registry.load();
-
-    const result = await executable(registry.tools().run_skill_script).execute({
-      name: "always-on",
-      path: "references/rules.md",
-      input: {}
-    });
-
-    expect(result).toContain('must start with "scripts/"');
-  });
-
-  it("rejects missing script resources for run_skill_script", async () => {
-    const registry = new SkillRegistry([skills.fromManifest(manifest)], {
-      async run() {
-        return "should not run";
-      }
-    });
-    await registry.load();
-
-    const result = await executable(registry.tools().run_skill_script).execute({
-      name: "code-review",
-      path: "scripts/missing.ts",
-      input: {}
-    });
-
-    expect(result).toContain(
-      "Script not found: code-review/scripts/missing.ts"
-    );
-  });
-
-  it("rejects unsupported script extensions for run_skill_script", async () => {
-    const registry = new SkillRegistry([skills.fromManifest(manifest)], {
-      async run() {
-        return "should not run";
-      }
-    });
-    await registry.load();
-
-    const result = await executable(registry.tools().run_skill_script).execute({
-      name: "code-review",
-      path: "scripts/not-a-script.txt",
-      input: {}
-    });
-
-    expect(result).toContain('Unsupported skill script extension ".txt"');
-  });
-
-  it("rejects non-normalized script paths for run_skill_script", async () => {
-    const registry = new SkillRegistry([skills.fromManifest(manifest)], {
-      async run() {
-        return "should not run";
-      }
-    });
-    await registry.load();
-
-    const result = await executable(registry.tools().run_skill_script).execute({
-      name: "code-review",
-      path: "scripts/../references/rules.md",
-      input: {}
-    });
-
-    expect(result).toContain("normalized relative path");
-  });
-
-  it("rejects resources under scripts that are not script resources", async () => {
-    const registry = new SkillRegistry([skills.fromManifest(manifest)], {
-      async run() {
-        return "should not run";
-      }
-    });
-    await registry.load();
-
-    const result = await executable(registry.tools().run_skill_script).execute({
-      name: "code-review",
-      path: "scripts/not-a-script.js",
-      input: {}
-    });
-
-    expect(result).toContain(
-      "Resource is not a script: code-review/scripts/not-a-script.js"
-    );
   });
 
   it("keeps the first source on duplicate skill names and records a warning", async () => {

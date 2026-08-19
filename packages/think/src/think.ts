@@ -124,7 +124,7 @@ import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
 import * as skills from "agents/skills";
 import { SkillRegistry } from "agents/skills";
-import type { SkillScriptRunner, SkillSource } from "agents/skills";
+import type { SkillSource } from "agents/skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -138,7 +138,7 @@ export type {
   TypedToolResult
 } from "ai";
 export { skills };
-export type { SkillRunContext, SkillSource } from "agents/skills";
+export type { SkillSource } from "agents/skills";
 import {
   Agent,
   callable,
@@ -4790,7 +4790,7 @@ export class Think<
         }
       }
 
-      const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
+      const registry = new SkillRegistry(sources);
       await registry.load();
       this._logSkillWarnings(registry);
       this._skillRegistry = registry;
@@ -4825,16 +4825,6 @@ export class Think<
       this._loggedSkillWarnings.add(warning);
       console.warn(`[think] ${warning}`);
     }
-  }
-
-  /**
-   * Return an optional runner that enables the `run_skill_script` tool.
-   *
-   * @experimental Skill script execution is experimental and may change
-   * before stabilizing.
-   */
-  getSkillScriptRunner(): SkillScriptRunner | null {
-    return null;
   }
 
   private async _refreshSkillsIfChanged(): Promise<void> {

@@ -24,7 +24,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
 | `agents/tsconfig`            | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo                        |
 | `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and the `agents:skills` import transform  |
-| `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
+| `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources and `SkillRegistry`         |
 | `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
 | `agents/browser`             | `src/browser/index.ts`       | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
 | `agents/browser/ai`          | `src/browser/ai.ts`          | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
@@ -91,13 +91,12 @@ src/
     ai.ts
 
   skills/               # Framework-agnostic Agent Skills engine
-    index.ts            # Barrel — sources, registry, runner, types
-    types.ts            # SkillSource, SkillRegistrySnapshot, SkillRunContext, etc.
+    index.ts            # Barrel — sources, registry, types
+    types.ts            # SkillSource, SkillRegistrySnapshot, resources, etc.
     frontmatter.ts      # SKILL.md YAML frontmatter parser
     registry.ts         # SkillRegistry — catalog prompt + activation tools
     manifest.ts         # fromManifest() source (bundled skills)
     r2.ts               # r2() source (read-only R2-backed skills)
-    runner.ts           # Experimental script runner + single capability bridge
 
   experimental/         # Experimental features (published but unstable)
     webmcp.ts           # WebMCP adapter (browser-side, uses MCP SDK client)

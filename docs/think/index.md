@@ -405,7 +405,6 @@ path.
 | `sendReasoning`            | `true`                           | Send reasoning chunks to chat clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `configureSession()`       | identity                         | Add context blocks, compaction, search, skills — see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md)                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `workspaceBash`            | `true`                           | Include or configure the default workspace `bash` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `fetchTools`               | `false`                          | Opt-in allowlisted, read-only HTTP fetch tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `messageConcurrency`       | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -463,13 +462,6 @@ export class MyAgent extends Think<Env> {
       skills.r2(this.env.SKILLS_BUCKET, { prefix: "skills/" })
     ];
   }
-
-  getSkillScriptRunner() {
-    return skills.runner({
-      loader: this.env.LOADER,
-      workspaceInstance: this.workspace
-    });
-  }
 }
 ```
 
@@ -494,61 +486,24 @@ The imported directory should contain one child directory per skill:
 
 ```text
 agents/my-agent/skills/release-notes/SKILL.md
-agents/my-agent/skills/release-notes/scripts/format-release-notes.ts
 agents/my-agent/skills/release-notes/references/style-guide.md
 ```
 
 When skills are available, Think exposes:
 
-| Tool                  | Purpose                                                             |
-| --------------------- | ------------------------------------------------------------------- |
-| `activate_skill`      | Load a matching skill's instructions and bundled resource list      |
-| `read_skill_resource` | Read a bundled resource by `{ name, path }` or `skill-name/path`    |
-| `run_skill_script`    | Run a bundled script when `getSkillScriptRunner()` returns a runner |
+| Tool                  | Purpose                                                          |
+| --------------------- | ---------------------------------------------------------------- |
+| `activate_skill`      | Load a matching skill's instructions and bundled resource list   |
+| `read_skill_resource` | Read a bundled resource by `{ name, path }` or `skill-name/path` |
 
 Skills are not always-on system prompt text. Use `getSystemPrompt()` or a
 Session context block for behavior that should apply to every turn. Use skills
 for task-specific procedures, references, scripts, templates, and assets that
 should be loaded only when relevant.
 
-Script execution is opt-in and requires a Worker Loader binding:
-
-```jsonc
-{
-  "worker_loaders": [{ "binding": "LOADER" }]
-}
-```
-
-`skills.runner()` is experimental and runs JavaScript, TypeScript, Python, and
-Bash scripts under `scripts/`. TypeScript is compiled with
-`@cloudflare/worker-bundler`; Python runs as Python Dynamic Workers; Bash runs
-through `just-bash`.
-
-JavaScript and TypeScript scripts are function-style:
-
-```typescript
-import type { SkillRunContext } from "@cloudflare/think";
-
-export default async function run(input: unknown, ctx: SkillRunContext) {
-  const guide = ctx.files["references/style-guide.md"]; // bundled text resources
-  const docs = await ctx.workspace.readFile("README.md"); // gated by permission
-  const summary = await ctx.tools.call("summarize", { input }); // explicit tools
-  await ctx.output.writeFile("notes.md", summary); // scratch artifact
-  return { ok: true };
-}
-```
-
-`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
-text resources by relative path, `ctx.workspace` is gated by the workspace
-permission, `ctx.tools` only exposes tools the runner was given, and
-`ctx.output.writeFile(name, content)` returns scratch artifacts to the model
-(it does not mutate the workspace). Python and Bash use the path-based contract
-instead: `/input.json`, `/context.json`, bundled resources under `/skill`, and
-`/output` for artifacts.
-
-Passing `workspaceInstance` gives scripts read-only workspace access by default.
-Network access, tools, and workspace writes are opt-in. The default timeout is
-30 seconds.
+Skill files are resources, not executable extensions. The model can read them
+with `read_skill_resource`; expose any execution capability as an explicit
+application tool.
 
 ### Chat Recovery
 
@@ -878,9 +833,8 @@ Bundled with `@cloudflare/think`:
 | `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
 | `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
 
-The Agent Skills engine and its script runner live in
-[`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so skill scripts pull
-`@cloudflare/worker-bundler` and `just-bash` through `agents`, not Think).
+The Agent Skills engine lives in
+[`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md).
 
 ## Docs
 

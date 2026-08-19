@@ -29,14 +29,10 @@ type SkillSummary = {
   description: string;
 };
 
-// Human-readable label for a skill tool call (activate_skill,
-// run_skill_script, read_skill_resource) shown inline in the transcript.
+// Human-readable label for a skill tool call shown inline in the transcript.
 function toolActivityLabel(toolName: string, input: unknown): string {
   const args = (input ?? {}) as { name?: string; path?: string };
   if (toolName === "activate_skill") return `Activated skill: ${args.name}`;
-  if (toolName === "run_skill_script") {
-    return `Ran script: ${args.name}/${args.path}`;
-  }
   if (toolName === "read_skill_resource") {
     return `Read resource: ${args.path ?? args.name}`;
   }
@@ -128,7 +124,7 @@ function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState(
-    "Write release notes for these changes: added bundled Think skills, added the agents:skills import, added a skill activation tool. Use the release notes script."
+    "Write release notes for these changes: added bundled Think skills, added the agents:skills import, added a skill activation tool. Follow the bundled style guide."
   );
   const [skills, setSkills] = useState<SkillSummary[]>([]);
 
@@ -222,8 +218,8 @@ function App() {
                   `SKILL.md`, Think registers them through `getSkills()`, and
                   the model can call `activate_skill` when a task matches a
                   skill — activated skills light up on the right. The
-                  release-notes skill also demonstrates `run_skill_script` with
-                  a TypeScript script.
+                  release-notes skill also demonstrates reading a bundled style
+                  guide with `read_skill_resource`.
                 </Text>
               </span>
             </div>
@@ -374,7 +370,7 @@ function App() {
               </Text>
               <div className="mt-3 space-y-2">
                 {[
-                  "Write release notes for these changes: added Think skills, the agents:skills import, and skill tools. Use the release notes script.",
+                  "Write release notes for these changes: added Think skills, the agents:skills import, and skill tools. Follow the bundled style guide.",
                   "Make a debug plan for an intermittent WebSocket disconnect.",
                   "Draft a test plan for a new password reset flow.",
                   "What skills are available in this demo?"

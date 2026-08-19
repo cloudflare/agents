@@ -10,7 +10,7 @@ On every turn, Think merges tools from multiple sources. Later sources override 
 2. **`getTools()`** — your custom server-side tools
 3. **Extension tools** — tools from loaded extensions (prefixed by extension name)
 4. **Session tools** — `set_context`, `load_context`, `search_context` (from `configureSession`)
-5. **Skill tools** — `activate_skill`, `read_skill_resource`, `run_skill_script` (from `getSkills()`)
+5. **Skill tools** — `activate_skill`, `read_skill_resource` (from `getSkills()`)
 6. **MCP tools** — from connected MCP servers (when `includeMcpTools` is enabled)
 7. **Client tools** — from the browser (see [Client Tools](./client-tools.md))
 

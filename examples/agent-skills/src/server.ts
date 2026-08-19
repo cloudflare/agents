@@ -1,5 +1,5 @@
 import { callable, routeAgentRequest } from "agents";
-import { Think, skills } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
 
 export class SkillsAgent extends Think<Env> {
@@ -17,13 +17,6 @@ export class SkillsAgent extends Think<Env> {
 
   getSkills() {
     return [bundledSkills];
-  }
-
-  getSkillScriptRunner() {
-    return skills.runner({
-      loader: this.env.LOADER,
-      workspaceInstance: this.workspace
-    });
   }
 
   @callable()

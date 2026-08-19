@@ -218,13 +218,6 @@ export class MyAgent extends Think<Env> {
       skills.r2(this.env.SKILLS_BUCKET, { prefix: "skills/" })
     ];
   }
-
-  getSkillScriptRunner() {
-    return skills.runner({
-      loader: this.env.LOADER,
-      workspaceInstance: this.workspace
-    });
-  }
 }
 ```
 
@@ -265,7 +258,6 @@ The imported directory should contain one child directory per skill:
 
 ```text
 src/skills/release-notes/SKILL.md
-src/skills/release-notes/scripts/format-release-notes.ts
 src/skills/release-notes/references/style-guide.md
 ```
 
@@ -281,44 +273,10 @@ skill description. Use a Session context block for behavior that should apply to
 every turn, especially when the agent also uses skills. `getSystemPrompt()` is a
 legacy fallback and is ignored once Session context blocks are configured.
 
-Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
-enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
-Bash scripts under `scripts/`.
-
-JavaScript and TypeScript scripts are function-style:
-
-```ts
-import type { SkillRunContext } from "@cloudflare/think";
-
-export default async function run(input: unknown, ctx: SkillRunContext) {
-  const guide = ctx.files["references/style-guide.md"]; // bundled text resources
-  const summary = await ctx.tools.call("summarize", { input }); // explicit tools
-  await ctx.output.writeFile("notes.md", summary); // scratch artifact
-  return { ok: true };
-}
-```
-
-`ctx` is `{ skill, files, workspace, tools, output }`: `ctx.files` holds bundled
-text resources by relative path, `ctx.workspace` is gated by the workspace
-permission, `ctx.tools` exposes only the tools the runner was given, and
-`ctx.output.writeFile(name, content)` returns scratch artifacts without mutating
-the workspace. Python and Bash scripts instead use the path-based contract:
-`/input.json`, `/context.json`, bundled resources under `/skill`, and `/output`
-for artifacts (Python supports both `def run(input, ctx)` and CLI-style scripts).
-
-If `workspaceInstance` is provided, scripts get read-only workspace access by
-default. Workspace writes, tools, and network access are opt-in. Scripts default
-to a 30 second timeout, which can be overridden with `timeout`. TypeScript
-scripts are compiled with `@cloudflare/worker-bundler`; Python scripts run as
-Python Dynamic Workers; Bash scripts run through `just-bash`.
-
-Script execution requires a Worker Loader binding:
-
-```jsonc
-{
-  "worker_loaders": [{ "binding": "LOADER" }]
-}
-```
+Skills can include references, templates, scripts, and assets. These files are
+resources, not executable extensions. The model can read them with
+`read_skill_resource`; expose any execution capability as an explicit
+application tool.
 
 ## Exports
 
@@ -349,7 +307,6 @@ Script execution requires a Worker Loader binding:
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
 | `configureSession()`       | identity                           | Add context blocks, compaction, search, skills                                                                                                                                                                               |
 | `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
-| `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
 | `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
@@ -1006,16 +963,15 @@ getTools() {
 
 ## Runtime dependencies
 
-| Package                      | Notes                                                     |
-| ---------------------------- | --------------------------------------------------------- |
-| `agents`                     | Cloudflare Agents SDK peer dependency                     |
-| `ai`                         | Vercel AI SDK v6 peer dependency                          |
-| `zod`                        | Schema validation peer dependency                         |
-| `@cloudflare/shell`          | Workspace filesystem                                      |
-| `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |
-| `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
-| `just-bash`                  | Bash skill script execution                               |
-| `@chat-adapter/telegram`     | Required for Telegram messengers                          |
+| Package                  | Notes                                  |
+| ------------------------ | -------------------------------------- |
+| `agents`                 | Cloudflare Agents SDK peer dependency  |
+| `ai`                     | Vercel AI SDK v6 peer dependency       |
+| `zod`                    | Schema validation peer dependency      |
+| `@cloudflare/shell`      | Workspace filesystem                   |
+| `@cloudflare/codemode`   | Code execution and `createExecuteTool` |
+| `just-bash`              | Default workspace `bash` tool          |
+| `@chat-adapter/telegram` | Required for Telegram messengers       |
 
 ## Acknowledgments
 
