@@ -1,0 +1,19 @@
+agent-think/test/submission-status.test.ts
+  s_fa99c3bea94522::t_65cf5dde03857e 1-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "993f7833b50dd9dfab35fef806d4a844cc466539",
+  "prompts": {},
+  "sessions": {
+    "s_fa99c3bea94522": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019febc3-d8c4-767a-a92e-32d16d2fe47c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}

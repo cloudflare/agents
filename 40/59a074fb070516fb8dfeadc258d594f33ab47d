@@ -1,0 +1,25 @@
+packages/agents/package.json
+  s_334a9720165218::t_66548249506462 32
+packages/agents/src/tests/workflow.test.ts
+  s_334a9720165218::t_a874e1fecc1558 166-177
+packages/agents/src/workflow-retention.ts
+  s_334a9720165218::t_ae8703ca34f920 1,3,13-14,17
+pnpm-lock.yaml
+  s_334a9720165218::t_fb9309e5de8f89 3853-3855,9412-9414,17516-17517
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4059a074fb070516fb8dfeadc258d594f33ab47d",
+  "prompts": {},
+  "sessions": {
+    "s_334a9720165218": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff785-6e3a-74a3-8075-1e70c27f4c27",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}

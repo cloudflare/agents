@@ -1,0 +1,21 @@
+.changeset/workflow-retention-passthrough.md
+  s_334a9720165218::t_48b6d6d18907b7 5
+docs/agents/workflows.md
+  s_334a9720165218::t_3c19de770f427d 265-266
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "45eeb850af77444d6c451ecb336f51fad40aed2a",
+  "prompts": {},
+  "sessions": {
+    "s_334a9720165218": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff785-6e3a-74a3-8075-1e70c27f4c27",
+        "model": "unknown"
+      },
+      "human_author": "Eric Clemmons <eclemmons@cloudflare.com>"
+    }
+  }
+}
