@@ -2,28 +2,5 @@
 "agents": patch
 ---
 
-fix(chat): batch replayed chunks on resume so long turns don't trip React's update depth guard
-
-Resuming a stream replayed every stored chunk as its own frame, and the
-transport forwarded each one into the UI-message stream individually. A long
-turn's replay updated chat state once per chunk, which exceeded React's
-nested-update limit and threw "Maximum update depth exceeded" — reported as a
-false terminal `status: "error"` for a turn the server had completed, with the
-replayed text visibly re-typing beforehand.
-
-Both transport-owned resume paths now collect `replay: true` chunks in a short
-coalescing window and merge consecutive deltas of the same part. The window
-closes on a `setTimeout(0)`, or earlier at a replay boundary (`replayComplete`,
-`done`, or the first live chunk). Applying a replayed prefix is now proportional
-to the number of message parts rather than the number of chunks.
-
-The window is short on purpose: only a burst delivered inside one task can
-exceed React's limit, so coalescing anything wider buys nothing and delays
-content. Correctness does not depend on the flush timer: a burst boundary
-flushes synchronously, the transport flushes before it closes or detaches a
-stream, and a second replay of the same turn supersedes the buffered pass rather
-than being appended to it (#1733).
-
-Cross-part ordering is unchanged, deltas carrying `providerMetadata` are kept
-whole, and an errored resumed turn still delivers its replayed content before
-the terminal error.
+Batch replayed chunks during stream resume so long turns do not exceed React's
+update limit and report a false error.
