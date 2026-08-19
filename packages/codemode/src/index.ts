@@ -43,6 +43,7 @@ export {
   type CodemodeRuntimeHandle,
   type CodemodeRuntimeToolOptions,
   type CodemodeApproveOptions,
+  type CodemodeResolveOptions,
   type CodemodeRejectOptions,
   type CodemodeRollbackOptions,
   type CodemodeExpireOptions

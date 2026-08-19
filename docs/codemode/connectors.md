@@ -67,6 +67,7 @@ type ConnectorTool = {
   inputSchema?: JSONSchema7; // defaults to an open object
   outputSchema?: JSONSchema7;
   requiresApproval?: boolean; // omit to execute immediately
+  resolution?: "approval" | "client"; // how a paused call is satisfied
   execute: (
     args: unknown,
     ctx?: ToolExecuteContext
@@ -81,7 +82,7 @@ type ConnectorTool = {
 
 `execute`/`revert` receive an optional `ctx` carrying the `executionId` of the run they belong to. The id is stable across a run's pause/resume passes, so it's the key to use for any resource scoped to the whole execution (see [Per-execution resources](#per-execution-resources)).
 
-`requiresApproval: true` pauses the run for [approval](./approvals.md). `revert` enables [rollback](./runtime.md#rollback). Everything else executes immediately and is recorded in the durable log.
+`requiresApproval: true` pauses the run for [approval](./approvals.md). `resolution: "client"` marks a [client-resolved tool](./approvals.md#client-resolved-tools) — it never executes server-side; the run pauses until the host supplies the result via `resolve()`. `revert` enables [rollback](./runtime.md#rollback). Everything else executes immediately and is recorded in the durable log.
 
 AI SDK tools are shape-compatible — an existing `ToolSet` can be returned from `tools()` directly:
 
