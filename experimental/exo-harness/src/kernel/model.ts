@@ -104,9 +104,7 @@ export function parseJsonRequestBody(
       unknown
     >;
   }
-  throw new Error(
-    "openai Responses fetch: request body must be JSON text"
-  );
+  throw new Error("openai Responses fetch: request body must be JSON text");
 }
 
 /**

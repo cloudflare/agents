@@ -71,9 +71,9 @@ describe("publicModelError", () => {
 describe("parseJsonRequestBody", () => {
   it("parses string and byte bodies", () => {
     expect(parseJsonRequestBody('{"input":"hi"}')).toEqual({ input: "hi" });
-    expect(
-      parseJsonRequestBody(new TextEncoder().encode('{"n":1}'))
-    ).toEqual({ n: 1 });
+    expect(parseJsonRequestBody(new TextEncoder().encode('{"n":1}'))).toEqual({
+      n: 1
+    });
     expect(parseJsonRequestBody(undefined)).toEqual({});
   });
 });
