@@ -1,3 +1,4 @@
+import { workspaceFilesystem } from "../../workspace/types";
 /**
  * Test agent that loads a hooks-only extension subscribing to all four
  * observation hooks (`beforeToolCall`, `afterToolCall`, `onStepFinish`,
@@ -182,7 +183,9 @@ export class ThinkExtensionHookAgent extends Think {
 
   async listExtLogFiles(): Promise<string[]> {
     try {
-      const entries = await this.workspace.readDir("ext-log");
+      const entries = await workspaceFilesystem(this.workspace).readdir(
+        "/ext-log"
+      );
       return entries.map((e: { name: string }) => e.name);
     } catch {
       return [];
@@ -191,7 +194,10 @@ export class ThinkExtensionHookAgent extends Think {
 
   async readExtLogFile(name: string): Promise<unknown | null> {
     try {
-      const content = await this.workspace.readFile(`ext-log/${name}`);
+      const content = await workspaceFilesystem(this.workspace).readFile(
+        `/ext-log/${name}`,
+        "utf8"
+      );
       if (content == null) return null;
       return JSON.parse(content);
     } catch {

@@ -1,4 +1,5 @@
 import type { JSONValue, ToolSet } from "ai";
+import type { ThinkWorkspaceFilesystem } from "../workspace/types";
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -58,15 +59,9 @@ export interface FetchToolEvent {
   code?: FetchErrorCode;
 }
 
-/**
- * Minimal workspace surface the fetch tool needs to spill large/binary
- * responses to a file. A concrete `Workspace` from `@cloudflare/shell`
- * satisfies this.
- */
+/** Minimal Computer-shaped workspace used for response spillover. */
 export interface FetchWorkspace {
-  writeFile(path: string, content: string): Promise<void> | void;
-  writeFileBytes?(path: string, content: Uint8Array): Promise<void> | void;
-  mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> | void;
+  fs: Pick<ThinkWorkspaceFilesystem, "writeFile" | "mkdir">;
 }
 
 export interface FetchBindingTarget {
@@ -731,20 +726,11 @@ async function spillToWorkspace(args: SpillArgs): Promise<FetchResult> {
   const isTextual = isTextualContentType(contentType);
   const path = `/fetched/${Date.now()}-${randomToken()}.${extensionFor(contentType)}`;
   try {
-    await ws.mkdir("/fetched", { recursive: true });
-    if (isTextual) {
-      await ws.writeFile(path, new TextDecoder().decode(bytes));
-    } else if (ws.writeFileBytes) {
-      await ws.writeFileBytes(path, bytes);
-    } else {
-      return {
-        ok: false,
-        code: "unsupported_content_type",
-        finalUrl,
-        message:
-          "Binary response cannot be stored: workspace does not support writeFileBytes."
-      };
-    }
+    await ws.fs.mkdir("/fetched", { recursive: true });
+    await ws.fs.writeFile(
+      path,
+      isTextual ? new TextDecoder().decode(bytes) : bytes
+    );
   } catch (error) {
     return {
       ok: false,
