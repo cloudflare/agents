@@ -1,0 +1,16 @@
+{
+  "name": "think-stale-message-cache-repro-2132",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-08-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "ReproThink", "class_name": "ReproThink" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ReproThink"] }
+  ]
+}

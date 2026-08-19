@@ -1,0 +1,35 @@
+{
+  "name": "think-stale-message-cache-repro-2132",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy --temporary",
+    "verify": "node verify.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/think": "0.16.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.21.0",
+    "agents-session-without-change-events": "npm:agents@0.12.4",
+    "ai": "^7.0.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.40.2",
+    "@cloudflare/workers-types": "^5.20260815.1",
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "wrangler": "^4.102.0",
+    "ws": "^8.18.3"
+  }
+}
