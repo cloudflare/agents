@@ -21,7 +21,6 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
-import { createGatewayFetch } from "workers-ai-provider/gateway";
 import {
   streamText,
   generateText,
@@ -40,6 +39,7 @@ import {
   type ExoWorkspace
 } from "./kernel/harness";
 import {
+  createBindingRunFetch,
   openaiResponsesModelId,
   parseModelSpec,
   publicModelError
@@ -88,7 +88,6 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
   #store: KernelStore | undefined;
   #core: ExoCore | undefined;
   #workersai: ReturnType<typeof createWorkersAI> | undefined;
-  #openaiResponses: ReturnType<typeof createOpenAI> | undefined;
 
   /**
    * The agent's computer: a SQLite-backed virtual filesystem with two
@@ -626,8 +625,9 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
 
   /**
    * OpenAI catalog models via the Responses API (luna/sol/terra are
-   * Responses-only; Chat Completions 400s). Routed through the AI
-   * Gateway binding — Unified Billing, no OpenAI key in the worker.
+   * Responses-only; Chat Completions 400s). The @ai-sdk/openai client
+   * shapes the Responses body; `createBindingRunFetch` sends it through
+   * `env.AI.run` so Unified Billing authenticates — no OpenAI key.
    */
   openaiResponses(modelId: string): LanguageModel {
     if (!this.env.AI) {
@@ -641,14 +641,14 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
         `openai/${modelId} needs AI_GATEWAY_ID (Responses API via AI Gateway)`
       );
     }
-    this.#openaiResponses ??= createOpenAI({
+    return createOpenAI({
       apiKey: "unused",
-      fetch: createGatewayFetch({
+      fetch: createBindingRunFetch({
         binding: this.env.AI,
+        slug: `openai/${modelId}`,
         gateway: gatewayId
       })
-    });
-    return this.#openaiResponses.responses(modelId);
+    }).responses(modelId);
   }
 
   #journalTurnError(source: string, message: string): void {

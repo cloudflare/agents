@@ -97,7 +97,9 @@ routed through the `AI` binding and the `exo-harness` [AI Gateway](https://devel
 (Unified Billing — no OpenAI API key in the worker). Edit that file and
 `activate_harness` to switch: `workers-ai:@cf/moonshotai/kimi-k2.7-code`
 stays on Workers AI; `openai/<id>` slugs (including Responses-only models
-like `openai/gpt-5.6-luna`) use the OpenAI Responses API via the gateway;
+like `openai/gpt-5.6-luna`) use the OpenAI Responses API through
+`env.AI.run` (Unified Billing — not the OpenAI-native gateway passthrough,
+which 401s without a provider key);
 other catalog slugs (`anthropic/claude-sonnet-4-5`, …) use the Workers AI
 run path. `MODEL_OVERRIDE` in wrangler vars forces a spec for every agent
 and ignores policy. A failed model call is journaled and shown in the

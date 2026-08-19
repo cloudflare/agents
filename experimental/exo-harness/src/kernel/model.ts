@@ -57,14 +57,81 @@ export function parseModelSpec(spec: string): ParsedModelSpec {
 
 /**
  * OpenAI catalog slugs (`openai/gpt-5.6-luna`, …) must use the Responses
- * API. The workers-ai-provider run path speaks Chat Completions only —
- * luna/sol/terra reject that with a 400. Returns the bare model id, or
+ * API. The workers-ai-provider openai plugin speaks Chat Completions only
+ * — luna/sol/terra reject that with a 400. Returns the bare model id, or
  * null if this slug is not an OpenAI catalog model.
  */
 export function openaiResponsesModelId(slug: string): string | null {
   if (!slug.startsWith("openai/")) return null;
   const id = slug.slice("openai/".length).trim();
   return id.length > 0 ? id : null;
+}
+
+/**
+ * Minimal `env.AI` surface used to forward an @ai-sdk/openai Responses
+ * body onto the Unified Billing run path.
+ *
+ * Do not use `createGatewayFetch` here. That helper is the provider-native
+ * gateway passthrough (`env.AI.gateway(id).run([{ provider: "openai" }])`).
+ * It strips Authorization so Unified Billing can apply — but that path is
+ * BYOK, so OpenAI then 401s with "Missing bearer or basic authentication
+ * in header". `env.AI.run(slug, body)` is the documented no-key path.
+ */
+export interface AiRunBinding {
+  run(
+    model: string,
+    inputs: Record<string, unknown>,
+    options?: Record<string, unknown>
+  ): Promise<Response>;
+}
+
+export function parseJsonRequestBody(
+  body: BodyInit | null | undefined
+): Record<string, unknown> {
+  if (body == null) return {};
+  if (typeof body === "string") {
+    return JSON.parse(body) as Record<string, unknown>;
+  }
+  if (body instanceof Uint8Array) {
+    return JSON.parse(new TextDecoder().decode(body)) as Record<
+      string,
+      unknown
+    >;
+  }
+  if (body instanceof ArrayBuffer) {
+    return JSON.parse(new TextDecoder().decode(body)) as Record<
+      string,
+      unknown
+    >;
+  }
+  throw new Error(
+    "openai Responses fetch: request body must be JSON text"
+  );
+}
+
+/**
+ * Hijack @ai-sdk/openai's outbound `/v1/responses` call and send the same
+ * body through `env.AI.run(slug, …, { returnRawResponse: true })`.
+ */
+export function createBindingRunFetch(options: {
+  binding: AiRunBinding;
+  slug: string;
+  gateway: string;
+}): typeof globalThis.fetch {
+  const { binding, slug, gateway } = options;
+  return (async (
+    _input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> => {
+    const body = parseJsonRequestBody(init?.body);
+    // The slug carries the model; extras can trip input validators.
+    delete body.model;
+    return binding.run(slug, body, {
+      gateway: { id: gateway },
+      returnRawResponse: true,
+      ...(init?.signal ? { signal: init.signal } : {})
+    });
+  }) as typeof globalThis.fetch;
 }
 
 /** One-line, client-safe model/turn error (no stacks). */

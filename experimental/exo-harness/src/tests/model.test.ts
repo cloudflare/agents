@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  createBindingRunFetch,
   openaiResponsesModelId,
+  parseJsonRequestBody,
   parseModelSpec,
   publicModelError
 } from "../kernel/model";
@@ -63,5 +65,61 @@ describe("publicModelError", () => {
       "Invalid input"
     );
     expect(publicModelError("plain")).toBe("plain");
+  });
+});
+
+describe("parseJsonRequestBody", () => {
+  it("parses string and byte bodies", () => {
+    expect(parseJsonRequestBody('{"input":"hi"}')).toEqual({ input: "hi" });
+    expect(
+      parseJsonRequestBody(new TextEncoder().encode('{"n":1}'))
+    ).toEqual({ n: 1 });
+    expect(parseJsonRequestBody(undefined)).toEqual({});
+  });
+});
+
+describe("createBindingRunFetch", () => {
+  it("forwards the Responses body to env.AI.run on the Unified Billing path", async () => {
+    const calls: {
+      model: string;
+      inputs: Record<string, unknown>;
+      options: Record<string, unknown> | undefined;
+    }[] = [];
+    const fetchImpl = createBindingRunFetch({
+      slug: "openai/gpt-5.6-luna",
+      gateway: "exo-harness",
+      binding: {
+        async run(model, inputs, options) {
+          calls.push({ model, inputs, options });
+          return new Response(JSON.stringify({ id: "resp_test" }), {
+            status: 200
+          });
+        }
+      }
+    });
+
+    const resp = await fetchImpl("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5.6-luna",
+        input: "pong",
+        max_output_tokens: 16,
+        stream: true
+      })
+    });
+
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ id: "resp_test" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].model).toBe("openai/gpt-5.6-luna");
+    expect(calls[0].inputs).toEqual({
+      input: "pong",
+      max_output_tokens: 16,
+      stream: true
+    });
+    expect(calls[0].options).toEqual({
+      gateway: { id: "exo-harness" },
+      returnRawResponse: true
+    });
   });
 });
