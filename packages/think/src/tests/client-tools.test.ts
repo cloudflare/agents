@@ -3020,6 +3020,7 @@ describe("Think — regeneration", () => {
     expect(firstAssistant.role).toBe("assistant");
 
     // Regenerate: send truncated list (just the user message) with trigger
+    await agent.resetSelectedHistoryReadCount();
     const donePromise2 = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await donePromise2;
@@ -3045,6 +3046,9 @@ describe("Think — regeneration", () => {
       ["system", "user"],
       ["system", "user"]
     ]);
+    // The recovery snapshot and inference preparation share one durable read
+    // of the selected branch.
+    expect(await agent.getSelectedHistoryReadCount()).toBe(1);
 
     await closeWS(ws);
   });
@@ -3308,6 +3312,10 @@ describe("Think — regeneration", () => {
 
     expect(await agent.getCompactionHistoryMessageIds()).toEqual([
       [user1.id, assistant1.id, user2.id]
+    ]);
+    expect((await agent.getTextOnlyPromptRoles()).slice(-2)).toEqual([
+      ["system", "user", "assistant", "user"],
+      ["system", "assistant", "assistant", "user"]
     ]);
     expect(await agent.getBranches(user2.id)).toHaveLength(2);
 

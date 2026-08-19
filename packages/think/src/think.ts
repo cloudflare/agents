@@ -1017,6 +1017,8 @@ type ProgrammaticMessagesResult = SaveMessagesResult & {
 
 type ChatRecoveryRetryData = {
   targetUserId?: string;
+  historyLeafId?: string;
+  activeLeafIdAtStart?: string;
   originalRequestId?: string;
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
@@ -1026,6 +1028,7 @@ type ChatRecoveryRetryData = {
 
 type ChatRecoveryContinueData = {
   targetAssistantId?: string;
+  historyLeafId?: string;
   originalRequestId?: string;
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
@@ -1040,6 +1043,10 @@ type ChatRecoveryContinueData = {
  * `streamStatus` rather than carrying it here.
  */
 type ThinkRecoveryClassification = { retryTargetUserId: string | null };
+
+type ThinkRecoveredTurnTarget =
+  | { recoveryKind: "retry"; messageId: string }
+  | { recoveryKind: "continue"; messageId?: string };
 
 // `ChatRecoveryIncident` / `ChatRecoveryKind` / `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`
 // are the canonical shared symbols from `agents/chat` (imported above); the
@@ -2061,6 +2068,11 @@ import type {
 /** Branch endpoint whose root-to-message path supplies model context. */
 type InferenceHistorySelection = {
   readonly leafId: string;
+};
+
+/** Branch selection resolved once after turn admission. */
+type ResolvedInferenceHistorySelection = InferenceHistorySelection & {
+  readonly resolvedMessages: UIMessage[];
 };
 
 /**
@@ -4349,11 +4361,6 @@ export class Think<
       : undefined;
   }
 
-  /** Re-resolve the channel for a continuation from the latest user message. */
-  private _channelFromLatestUserMessage(): string | undefined {
-    return this._channelFromMessages(this.messages);
-  }
-
   /**
    * Deliver a no-turn, channel-routed message — a deterministic status, fallback,
    * or notice — straight to the channel's delivery surface WITHOUT invoking the
@@ -4502,21 +4509,33 @@ export class Think<
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
-    fn: () => Promise<T>
+    fn: (history?: ResolvedInferenceHistorySelection) => Promise<T>,
+    history?: InferenceHistorySelection
   ): Promise<T> {
+    const resolvedHistory = history
+      ? {
+          leafId: history.leafId,
+          resolvedMessages: await this._readRecentInferenceMessages(history)
+        }
+      : undefined;
+    const activeLeafIdAtStart = resolvedHistory
+      ? (await this.session.getLatestLeaf())?.id
+      : undefined;
     const snapshot = createChatFiberSnapshot({
       kind: "think-chat-turn",
       requestId,
       recoveryRootRequestId: this._activeChatRecoveryRootRequestId ?? requestId,
       continuation,
-      messages: this.messages,
+      messages: resolvedHistory?.resolvedMessages ?? this.messages,
+      historyLeafId: resolvedHistory?.leafId,
+      activeLeafIdAtStart,
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
 
     return this._runFiberWithStashWrapper(
       `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-      async () => fn(),
+      async () => fn(resolvedHistory),
       {
         initialSnapshot: wrapChatFiberSnapshot(
           "__cfThinkChatFiberSnapshot",
@@ -5639,7 +5658,7 @@ export class Think<
    */
   private async _runInferenceLoop(
     input: TurnInput,
-    history?: InferenceHistorySelection
+    history?: InferenceHistorySelection | ResolvedInferenceHistorySelection
   ): Promise<StreamableResult> {
     const turn = admittedTurnContext.getStore();
     const invoke = await withAgentSpan(
@@ -5666,7 +5685,9 @@ export class Think<
 
   private async _prepareInferenceInvocation(
     input: TurnInput,
-    historySelection?: InferenceHistorySelection
+    historySelection?:
+      | InferenceHistorySelection
+      | ResolvedInferenceHistorySelection
   ): Promise<() => StreamableResult> {
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
@@ -5675,10 +5696,17 @@ export class Think<
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
     this._activeTurnAuthorization = { allowed: true };
-    this._activeTurnHistory = historySelection;
-    const inferenceHistory = historySelection
-      ? await this._readRecentInferenceMessages(historySelection)
-      : this.messages;
+    // Keep only the durable selector beyond preparation. Retaining resolved
+    // messages here would pin a full branch in memory after the turn settles.
+    this._activeTurnHistory = historySelection
+      ? { leafId: historySelection.leafId }
+      : undefined;
+    const inferenceHistory =
+      historySelection && "resolvedMessages" in historySelection
+        ? historySelection.resolvedMessages
+        : historySelection
+          ? await this._readRecentInferenceMessages(historySelection)
+          : this.messages;
     this._activeTurnApprovedActionInputs =
       this._approvedActionInputsFromTranscript(inferenceHistory);
     // Reset the proactive-compaction cap for this streamText run.
@@ -11035,11 +11063,20 @@ export class Think<
    */
   protected async continueLastTurn(
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
+    options?: SaveMessagesOptions & {
+      trigger?: TurnTrigger;
+      channel?: string;
+      history?: InferenceHistorySelection;
+    }
   ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "programmatic";
     this._assertNotInsideAdmittedTurn(trigger);
-    const lastLeaf = await this.session.getLatestLeaf();
+    const continuationHistory = options?.history
+      ? await this._readRecentInferenceMessages(options.history)
+      : this.messages;
+    const lastLeaf = options?.history
+      ? await this.session.getMessage(options.history.leafId)
+      : await this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "assistant") {
       return { requestId: "", status: "skipped" };
     }
@@ -11054,7 +11091,8 @@ export class Think<
     const epoch = this._turnQueue.generation;
     // Re-resolve the channel from durable history so a continued/recovered turn
     // re-applies per-channel policy.
-    const channel = options?.channel ?? this._channelFromLatestUserMessage();
+    const channel =
+      options?.channel ?? this._channelFromMessages(continuationHistory);
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -11078,7 +11116,9 @@ export class Think<
           options?.signal
         );
         try {
-          const continueTurnBody = async () => {
+          const continueTurnBody = async (
+            inferenceHistory = options?.history
+          ) => {
             const result = await agentContext.run(
               {
                 agent: this,
@@ -11087,12 +11127,15 @@ export class Think<
                 email: undefined
               },
               () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body: resolvedBody,
-                  continuation: true
-                })
+                this._runInferenceLoop(
+                  {
+                    signal: abortSignal,
+                    clientTools,
+                    body: resolvedBody,
+                    continuation: true
+                  },
+                  inferenceHistory
+                )
             );
 
             if (result) {
@@ -11101,7 +11144,8 @@ export class Think<
                 result,
                 abortSignal,
                 {
-                  continuation: true
+                  continuation: true,
+                  parentId: inferenceHistory?.leafId
                 }
               );
               status = streamResult.status;
@@ -11110,9 +11154,14 @@ export class Think<
           };
 
           if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
+            await this._runChatRecoveryFiber(
+              requestId,
+              true,
+              continueTurnBody,
+              options?.history
+            );
           } else {
-            await continueTurnBody();
+            await continueTurnBody(options?.history);
           }
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
@@ -11137,11 +11186,20 @@ export class Think<
   private async _retryLastUserTurn(
     clientTools?: ClientToolSchema[],
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
+    options?: SaveMessagesOptions & {
+      trigger?: TurnTrigger;
+      channel?: string;
+      history?: InferenceHistorySelection;
+    }
   ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "recovery-retry";
     this._assertNotInsideAdmittedTurn(trigger);
-    const lastLeaf = await this.session.getLatestLeaf();
+    const retryHistory = options?.history
+      ? await this._readRecentInferenceMessages(options.history)
+      : this.messages;
+    const lastLeaf = options?.history
+      ? await this.session.getMessage(options.history.leafId)
+      : await this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "user") {
       return { requestId: "", status: "skipped" };
     }
@@ -11156,7 +11214,7 @@ export class Think<
     // retry re-applies per-channel policy, exactly like `continueLastTurn`. The
     // `metadata.channel` stamp survives the interruption; without this the
     // retried turn would silently fall back to the default policy.
-    const channel = options?.channel ?? this._channelFromLatestUserMessage();
+    const channel = options?.channel ?? this._channelFromMessages(retryHistory);
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -11180,7 +11238,7 @@ export class Think<
           options?.signal
         );
         try {
-          const retryTurnBody = async () => {
+          const retryTurnBody = async (inferenceHistory = options?.history) => {
             const result = await agentContext.run(
               {
                 agent: this,
@@ -11189,19 +11247,23 @@ export class Think<
                 email: undefined
               },
               () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body,
-                  continuation: false
-                })
+                this._runInferenceLoop(
+                  {
+                    signal: abortSignal,
+                    clientTools,
+                    body,
+                    continuation: false
+                  },
+                  inferenceHistory
+                )
             );
 
             if (result) {
               const streamResult = await this._streamResult(
                 requestId,
                 result,
-                abortSignal
+                abortSignal,
+                { parentId: inferenceHistory?.leafId }
               );
               status = streamResult.status;
               error = streamResult.error;
@@ -11209,9 +11271,14 @@ export class Think<
           };
 
           if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
+            await this._runChatRecoveryFiber(
+              requestId,
+              false,
+              retryTurnBody,
+              options?.history
+            );
           } else {
-            await retryTurnBody();
+            await retryTurnBody(options?.history);
           }
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
@@ -11659,7 +11726,9 @@ export class Think<
               }
             }
 
-            const chatTurnBody = async () => {
+            const chatTurnBody = async (
+              inferenceHistory = regenerationHistory
+            ) => {
               // Bounded compact-and-retry loop (opt-in via
               // `contextOverflow.reactive`). A turn that overflows the
               // context window mid-flight is compacted and re-run from the
@@ -11682,7 +11751,7 @@ export class Think<
                         body: bodyForTurn,
                         continuation: false
                       },
-                      regenerationHistory
+                      inferenceHistory
                     )
                 );
 
@@ -11755,7 +11824,10 @@ export class Think<
                     );
                     // Compaction shortened history → retry. A no-op compaction
                     // can't fix the overflow, so fall through to terminal.
-                    if (shortened) continue;
+                    if (shortened) {
+                      inferenceHistory = regenerationHistory;
+                      continue;
+                    }
                   }
                   // Budget spent, aborted, or compaction no-op: deliver
                   // terminally (through onChatError, classified) so the turn
@@ -11777,9 +11849,14 @@ export class Think<
             };
 
             if (this.chatRecovery) {
-              await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
+              await this._runChatRecoveryFiber(
+                requestId,
+                false,
+                chatTurnBody,
+                regenerationHistory
+              );
             } else {
-              await chatTurnBody();
+              await chatTurnBody(regenerationHistory);
             }
           }
         });
@@ -14331,8 +14408,8 @@ export class Think<
             input.streamStatus === "error",
           snapshot: input.snapshot
         }),
-      persistOrphanedStream: (streamId) =>
-        this._persistOrphanedStream(streamId),
+      persistOrphanedStream: (streamId, snapshot) =>
+        this._persistOrphanedStream(streamId, snapshot?.historyLeafId),
       completeRecoveredStream: (streamId) =>
         this._completeResumableStream(streamId),
       dispatchRecoveredTurn: (input) => this._dispatchRecoveredThinkTurn(input)
@@ -14423,21 +14500,12 @@ export class Think<
       recoveryRootRequestId,
       streamStatus
     } = input;
-    const { retryTargetUserId } = input.detail;
     const streamIsTerminal =
       streamStatus === "completed" || streamStatus === "error";
-
-    const shouldRetry =
-      retryTargetUserId !== null &&
-      options.continue !== false &&
-      !streamIsTerminal;
-    const lastLeaf = shouldRetry ? null : await this.session.getLatestLeaf();
-    const targetId =
-      lastLeaf?.role === "assistant" && !streamIsTerminal
-        ? lastLeaf.id
-        : undefined;
-    const canContinue =
-      !shouldRetry && options.continue !== false && !streamIsTerminal;
+    const target =
+      options.continue !== false && !streamIsTerminal
+        ? await this._resolveThinkRecoveredTurnTarget(input)
+        : null;
     // The durable submission is keyed by the recovery ROOT request id (stable
     // across the whole continuation chain), not this turn's per-continuation
     // requestId. Keying off `requestId` loses the link on every chained
@@ -14459,17 +14527,21 @@ export class Think<
     }
 
     const recoveredRequestId =
-      (canContinue || shouldRetry) && hasRunningSubmission
-        ? recoveryRootRequestId
-        : undefined;
+      target && hasRunningSubmission ? recoveryRootRequestId : undefined;
 
-    if (shouldRetry) {
+    if (target?.recoveryKind === "retry") {
+      const activeLeafIdAtStart = this._recoveryActiveLeafIdAtStart(snapshot);
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
-        recoveryKind: input.recoveryKind,
+        // A recovered stream may classify as `continue` before persistence but
+        // produce no assistant anchor (zero chunks or `persist: false`). In
+        // that case the selected user leaf must be retried instead.
+        recoveryKind: "retry",
         callback: "_chatRecoveryRetry",
         data: {
-          targetUserId: retryTargetUserId,
+          targetUserId: target.messageId,
+          historyLeafId: target.messageId,
+          ...(activeLeafIdAtStart !== undefined ? { activeLeafIdAtStart } : {}),
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
@@ -14477,13 +14549,18 @@ export class Think<
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
-    } else if (canContinue) {
+    } else if (target?.recoveryKind === "continue") {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
-        recoveryKind: input.recoveryKind,
+        recoveryKind: "continue",
         callback: "_chatRecoveryContinue",
         data: {
-          ...(targetId ? { targetAssistantId: targetId } : {}),
+          ...(target.messageId
+            ? {
+                targetAssistantId: target.messageId,
+                historyLeafId: target.messageId
+              }
+            : {}),
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           ...(snapshot
@@ -14534,6 +14611,57 @@ export class Think<
     }
   }
 
+  /**
+   * Resolve the exact durable leaf a recovered turn should run from. A newly
+   * materialized orphan assistant takes precedence. Without one, an explicit
+   * branch snapshot retries a user leaf or continues an assistant leaf. Only
+   * legacy snapshots without branch context fall back to the global latest
+   * leaf.
+   */
+  private async _resolveThinkRecoveredTurnTarget(
+    input: DispatchRecoveredTurnInput<ThinkRecoveryClassification>
+  ): Promise<ThinkRecoveredTurnTarget | null> {
+    if (input.persistedOrphanMessageId) {
+      const persistedAssistant = await this.session.getMessage(
+        input.persistedOrphanMessageId
+      );
+      if (persistedAssistant?.role === "assistant") {
+        return {
+          recoveryKind: "continue",
+          messageId: persistedAssistant.id
+        };
+      }
+    }
+
+    if (input.snapshot?.historyLeafId) {
+      const selectedLeaf = await this.session.getMessage(
+        input.snapshot.historyLeafId
+      );
+      if (selectedLeaf?.role === "user") {
+        return { recoveryKind: "retry", messageId: selectedLeaf.id };
+      }
+      if (selectedLeaf?.role === "assistant") {
+        return { recoveryKind: "continue", messageId: selectedLeaf.id };
+      }
+      return null;
+    }
+
+    if (input.detail.retryTargetUserId) {
+      return {
+        recoveryKind: "retry",
+        messageId: input.detail.retryTargetUserId
+      };
+    }
+
+    const legacyLatestLeaf = await this.session.getLatestLeaf();
+    return {
+      recoveryKind: "continue",
+      ...(legacyLatestLeaf?.role === "assistant"
+        ? { messageId: legacyLatestLeaf.id }
+        : {})
+    };
+  }
+
   private async _recoverablePreStreamUserId(
     snapshot: ChatFiberSnapshot | null,
     streamId: string,
@@ -14550,6 +14678,16 @@ export class Think<
       return null;
     }
 
+    if (snapshot.historyLeafId) {
+      const selectedLeaf = await this.session.getMessage(
+        snapshot.historyLeafId
+      );
+      return selectedLeaf?.role === "user" &&
+        selectedLeaf.id === snapshot.latestUserMessageId
+        ? selectedLeaf.id
+        : null;
+    }
+
     const lastLeaf = await this.session.getLatestLeaf();
     return lastLeaf?.role === "user" &&
       lastLeaf.id === snapshot.latestUserMessageId
@@ -14557,13 +14695,33 @@ export class Think<
       : null;
   }
 
+  /**
+   * Resolve the active endpoint captured by a recovery snapshot.
+   *
+   * Modern branch snapshots carry `activeLeafIdAtStart` explicitly. Legacy
+   * linear snapshots predate both branch fields, so their `latestMessageId`
+   * was the active endpoint. Never apply that fallback to a partial modern
+   * branch snapshot: there `latestMessageId` can be a selected historical user.
+   */
+  private _recoveryActiveLeafIdAtStart(
+    snapshot: ChatFiberSnapshot | null
+  ): string | undefined {
+    if (!snapshot) return undefined;
+    if (snapshot.activeLeafIdAtStart !== undefined) {
+      return snapshot.activeLeafIdAtStart;
+    }
+    return snapshot.historyLeafId === undefined
+      ? snapshot.latestMessageId
+      : undefined;
+  }
+
   private async _hasPersistedRecoveredAssistant(
     snapshot: ChatFiberSnapshot | null
   ): Promise<boolean> {
     const lastLeaf = await this.session.getLatestLeaf();
+    const activeLeafIdAtStart = this._recoveryActiveLeafIdAtStart(snapshot);
     return (
-      lastLeaf?.role === "assistant" &&
-      lastLeaf.id !== snapshot?.latestMessageId
+      lastLeaf?.role === "assistant" && lastLeaf.id !== activeLeafIdAtStart
     );
   }
 
@@ -14967,11 +15125,14 @@ export class Think<
         return;
       }
 
-      const lastLeaf = await this.session.getLatestLeaf();
-      if (!lastLeaf || lastLeaf.role !== "user") {
-        // The user turn is no longer the leaf — it was already answered (an
-        // assistant message now follows) or the conversation moved on. This is
-        // a benign skip, not an error: a completing turn marks the submission
+      const activeLeaf = await this.session.getLatestLeaf();
+      const retryLeaf = data?.historyLeafId
+        ? await this.session.getMessage(data.historyLeafId)
+        : activeLeaf;
+      if (!retryLeaf || retryLeaf.role !== "user") {
+        // The default active endpoint is no longer an unanswered user, or a
+        // branch-scoped retry target disappeared. This is a benign skip, not
+        // an error: a completing turn marks the submission
         // `completed`; otherwise it is terminally `skipped`, never `error`.
         await this._updateChatRecoveryIncident(
           data?.incidentId,
@@ -14989,9 +15150,16 @@ export class Think<
         return;
       }
 
-      if (data?.targetUserId && lastLeaf.id !== data.targetUserId) {
-        // Superseded by a genuinely newer user turn — terminal `skipped`, not an
-        // error (recovery being superseded is benign).
+      const branchMovedSinceStart =
+        data?.historyLeafId !== undefined &&
+        data.activeLeafIdAtStart !== undefined &&
+        activeLeaf?.id !== data.activeLeafIdAtStart;
+      if (
+        (data?.targetUserId && retryLeaf.id !== data.targetUserId) ||
+        branchMovedSinceStart
+      ) {
+        // Superseded by a newer turn or already completed by an earlier delivery
+        // of this branch-scoped retry — terminal `skipped`, not an error.
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "skipped",
@@ -15009,12 +15177,19 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      const history = data?.historyLeafId
+        ? { leafId: data.historyLeafId }
+        : undefined;
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody,
         controller
-          ? { signal: controller.signal, trigger: "recovery-retry" }
-          : { trigger: "recovery-retry" }
+          ? {
+              signal: controller.signal,
+              trigger: "recovery-retry",
+              history
+            }
+          : { trigger: "recovery-retry", history }
       );
       await this._updateChatRecoveryIncident(
         data?.incidentId,
@@ -15249,12 +15424,14 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
-      const result = await this.continueLastTurn(
-        undefined,
-        controller
-          ? { signal: controller.signal, trigger: "recovery-continue" }
-          : { trigger: "recovery-continue" }
-      );
+      const history = data?.historyLeafId
+        ? { leafId: data.historyLeafId }
+        : undefined;
+      const result = await this.continueLastTurn(undefined, {
+        signal: controller?.signal,
+        trigger: "recovery-continue",
+        history
+      });
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -15819,8 +15996,12 @@ export class Think<
       preStream: this._preStream,
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => this._pendingChatTerminal(),
-      persistOrphanedStream: (streamId) =>
-        this._persistOrphanedStream(streamId),
+      persistOrphanedStream: async (streamId) => {
+        await this._persistOrphanedStream(
+          streamId,
+          this._activeTurnHistory?.leafId
+        );
+      },
       isConnectionPresent: (connectionId) =>
         this.getConnection(connectionId) !== undefined
     }));
@@ -15914,10 +16095,13 @@ export class Think<
     );
   }
 
-  private async _persistOrphanedStream(streamId: string): Promise<void> {
+  private async _persistOrphanedStream(
+    streamId: string,
+    parentId?: string
+  ): Promise<string | null> {
     this._resumableStream.flushBuffer();
     const chunks = this._resumableStream.getStreamChunks(streamId);
-    if (chunks.length === 0) return;
+    if (chunks.length === 0) return null;
 
     // The accumulate loop and the `getMessage → update(merge) XOR append` upsert
     // are the shared `persistReconstructedOrphan` core. Think supplies the two
@@ -15929,13 +16113,21 @@ export class Think<
     // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
     // (#1637), NOT here — persisting on recovery or a client reconnect must not
     // be miscounted as new forward progress.
+    let persistedMessageId: string | null = null;
     const wrote = await persistReconstructedOrphan(chunks, {
       store: this._orphanStore(),
       fallbackId: crypto.randomUUID(),
-      prepare: (message) => this._strippedForPersist(message),
+      parentId,
+      prepare: (message) => {
+        const prepared = this._strippedForPersist(message);
+        persistedMessageId = prepared?.id ?? null;
+        return prepared;
+      },
       merge: (_existing, incoming) => incoming
     });
-    if (wrote) this._broadcastMessages();
+    if (!wrote) return null;
+    this._broadcastMessages();
+    return persistedMessageId;
   }
 
   private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {

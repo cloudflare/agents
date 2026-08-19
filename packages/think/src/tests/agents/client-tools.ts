@@ -715,10 +715,22 @@ export class ThinkClientToolsAgent extends Think {
   private _textOnlyOverflowAttemptsRemaining = 0;
   private _compactionHistoryMessageIds: string[][] = [];
   private _failNextTurnBeforeStream = false;
+  private _selectedHistoryReadCount = 0;
 
   override classifyChatError = defaultContextOverflowClassifier;
 
   override configureSession(session: Session): Session {
+    const getRecentHistory = session.getRecentHistory.bind(session);
+    session.getRecentHistory = async (
+      maxContentBytes,
+      minRecentMessages,
+      leafId
+    ) => {
+      if (leafId !== undefined && leafId !== null) {
+        this._selectedHistoryReadCount++;
+      }
+      return getRecentHistory(maxContentBytes, minRecentMessages, leafId);
+    };
     return session.onCompaction(async (messages) => {
       this._compactionHistoryMessageIds.push(
         messages.map((message) => message.id)
@@ -829,6 +841,16 @@ export class ThinkClientToolsAgent extends Think {
   /** Set the maximum stored content hydrated for each model-facing history. */
   async setHydrationByteBudgetForTest(bytes: number): Promise<void> {
     this.hydrationByteBudget = bytes;
+  }
+
+  /** Reset selected-branch history reads before a branch-scoped turn. */
+  async resetSelectedHistoryReadCount(): Promise<void> {
+    this._selectedHistoryReadCount = 0;
+  }
+
+  /** Selected-branch history reads performed since the last counter reset. */
+  async getSelectedHistoryReadCount(): Promise<number> {
+    return this._selectedHistoryReadCount;
   }
 
   /** Active transcript IDs observed when each inference turn starts. */

@@ -3423,6 +3423,69 @@ describe("Think — onChatRecovery", () => {
     expect(await agent.getTurnBodies()).toEqual([{ mode: "snapshot" }]);
   });
 
+  it("deduplicates branch retry redelivery when snapshot creation starts with an empty cache", async () => {
+    const agent = await freshRecoveryAgent(
+      `empty-cache-retry-redelivery-${crypto.randomUUID()}`
+    );
+    const userId = "user-empty-cache-retry";
+    const oldAssistantId = "assistant-before-empty-cache-retry";
+
+    await agent.persistTestMessage({
+      id: userId,
+      role: "user",
+      parts: [{ type: "text", text: "retry this branch" }]
+    });
+    await agent.persistTestMessage({
+      id: oldAssistantId,
+      role: "assistant",
+      parts: [{ type: "text", text: "previous answer" }]
+    });
+
+    const { requestId, snapshot } =
+      await agent.captureBranchRecoverySnapshotWithEmptyCacheForTest(userId);
+    await agent.insertInterruptedFiber(
+      `__cf_internal_chat_turn:${requestId}`,
+      snapshot
+    );
+    await agent.recoverFiberWithRetryRedeliveryForTest();
+
+    expect(await agent.getBranchesForTest(userId)).toHaveLength(2);
+    expect(await agent.getTurnCallCount()).toBe(1);
+  });
+
+  it("deduplicates retry redelivery from a legacy fiber snapshot", async () => {
+    const agent = await freshRecoveryAgent(
+      `legacy-retry-redelivery-${crypto.randomUUID()}`
+    );
+    const requestId = "req-legacy-pre-stream-retry";
+    const userId = "user-legacy-pre-stream-retry";
+
+    await agent.persistTestMessage({
+      id: userId,
+      role: "user",
+      parts: [{ type: "text", text: "retry after upgrading" }]
+    });
+    await agent.insertInterruptedFiber(`__cf_internal_chat_turn:${requestId}`, {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId,
+        continuation: false,
+        latestMessageId: userId,
+        latestMessageRole: "user",
+        latestUserMessageId: userId,
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.recoverFiberWithRetryRedeliveryForTest();
+
+    const branches = (await agent.getBranchesForTest(userId)) as UIMessage[];
+    expect(branches).toHaveLength(1);
+    expect(await agent.getTurnCallCount()).toBe(1);
+  });
+
   it("continues a partial stream with request context from the recovered snapshot", async () => {
     const agent = await freshRecoveryAgent(
       `partial-continue-context-${crypto.randomUUID()}`
@@ -4405,6 +4468,71 @@ describe("Think — onChatRecovery", () => {
         .map((part) => part.text)
         .join("")
     ).toBe("Already persisted");
+  });
+
+  it("{ persist: false, continue: true } retries the selected user branch", async () => {
+    const agent = await freshRecoveryAgent(
+      `skip-partial-retry-selected-branch-${crypto.randomUUID()}`
+    );
+    const requestId = "req-skip-partial-retry";
+    const userId = "user-skip-partial-retry";
+    const oldAssistantId = "assistant-old-skip-partial-retry";
+
+    await agent.setRecoveryOverride({ persist: false, continue: true });
+    await agent.persistTestMessage({
+      id: userId,
+      role: "user",
+      parts: [{ type: "text", text: "answer differently" }]
+    });
+    await agent.persistTestMessage({
+      id: oldAssistantId,
+      role: "assistant",
+      parts: [{ type: "text", text: "Old answer" }]
+    });
+    await agent.insertInterruptedStream(`stream-${requestId}`, requestId, [
+      {
+        body: JSON.stringify({
+          type: "start",
+          messageId: "assistant-dropped-partial"
+        }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Dropped partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber(`__cf_internal_chat_turn:${requestId}`, {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId,
+        continuation: false,
+        latestMessageId: userId,
+        latestMessageRole: "user",
+        latestUserMessageId: userId,
+        historyLeafId: userId,
+        activeLeafIdAtStart: oldAssistantId,
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
+    ).toBe(1);
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(0);
+    expect(await agent.getTurnCallCount()).toBe(1);
+
+    const branches = (await agent.getBranchesForTest(userId)) as UIMessage[];
+    expect(branches).toHaveLength(2);
+    expect(branches.map((message) => message.id)).toContain(oldAssistantId);
+    expect(await agent.getPromptRolesForTest()).toEqual([["system", "user"]]);
   });
 
   it("{ persist: false, continue: false } skips both", async () => {

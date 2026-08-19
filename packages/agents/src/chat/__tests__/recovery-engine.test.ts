@@ -1697,6 +1697,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     detail?: TestDetail;
     onChatRecovery?: ChatRecoveryOptions | void;
     basePersist?: boolean;
+    persistedOrphanMessageId?: string | null;
     dispatchThrows?: boolean;
     seedExhausted?: boolean;
     /**
@@ -1811,7 +1812,11 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       persistOrphanedStream: (streamId) => {
         calls.push("persist");
         persisted.push(streamId);
-        return Promise.resolve();
+        return Promise.resolve(
+          options.persistedOrphanMessageId === undefined
+            ? "assistant-persisted"
+            : options.persistedOrphanMessageId
+        );
       },
       completeRecoveredStream: (streamId) => {
         calls.push("complete");
@@ -1922,6 +1927,9 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     expect(h.dispatched[0].detail).toBe(detail);
     expect(h.dispatched[0].recoveryKind).toBe("retry");
     expect(h.dispatched[0].requestId).toBe("req-1");
+    expect(h.dispatched[0].persistedOrphanMessageId).toBe(
+      "assistant-persisted"
+    );
   });
 
   it("persists with the default clause (persist undefined) when the base gate is open", async () => {
@@ -1942,6 +1950,17 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     });
     await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
     expect(h.persisted).toEqual([]);
+    expect(h.dispatched[0].persistedOrphanMessageId).toBeNull();
+  });
+
+  it("forwards a null outcome when persistence produces no assistant message", async () => {
+    const h = makeHarness({
+      basePersist: true,
+      persistedOrphanMessageId: null
+    });
+    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    expect(h.persisted).toEqual(["s1"]);
+    expect(h.dispatched[0].persistedOrphanMessageId).toBeNull();
   });
 
   it("ALWAYS persists settled tool results even when the hook returns persist:false (#1631)", async () => {
