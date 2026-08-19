@@ -37,12 +37,12 @@ type ConnectionAttachments = {
   __user?: unknown;
 };
 
-function tryGetPartyServerMeta(
+function tryGetManagedWebSocketMeta(
   ws: WebSocket
 ): ConnectionAttachments["__pk"] | null {
   try {
-    // Avoid AttachmentCache.get() here: hibernated sockets accepted outside
-    // PartyServer can have an attachment without a __pk namespace.
+    // Avoid AttachmentCache.get() here: externally accepted sockets
+    // can have an attachment without the managed __pk namespace.
     const attachment = WebSocket.prototype.deserializeAttachment.call(
       ws
     ) as unknown;
@@ -74,8 +74,8 @@ function tryGetPartyServerMeta(
   }
 }
 
-export function isPartyServerWebSocket(ws: WebSocket): boolean {
-  return tryGetPartyServerMeta(ws) !== null;
+export function isManagedWebSocket(ws: WebSocket): boolean {
+  return tryGetManagedWebSocketMeta(ws) !== null;
 }
 
 /**
@@ -93,9 +93,7 @@ class AttachmentCache {
       if (attachment !== undefined) {
         this.#cache.set(ws, attachment);
       } else {
-        throw new Error(
-          "Missing websocket attachment. This is most likely an issue in PartyServer, please open an issue at https://github.com/cloudflare/partykit/issues"
-        );
+        throw new Error("Missing managed WebSocket lifecycle attachment");
       }
     }
 
@@ -153,50 +151,25 @@ export const createLazyConnection = (
         return attachments.get(ws).__pk.tags ?? [];
       }
     },
-    socket: {
-      configurable: true,
-      get() {
-        return ws;
-      }
-    },
     state: {
       configurable: true,
       get() {
-        return ws.deserializeAttachment() as ConnectionState<unknown>;
+        const attachment = attachments.get(ws);
+        return (attachment.__user ?? null) as ConnectionState<unknown>;
       }
     },
     setState: {
       configurable: true,
       value: function setState<T>(setState: T | ConnectionSetStateFn<T>) {
-        let state: T;
-        if (setState instanceof Function) {
-          state = setState((this as Connection<T>).state);
-        } else {
-          state = setState;
-        }
-
-        ws.serializeAttachment(state);
-        return state as ConnectionState<T>;
-      }
-    },
-
-    deserializeAttachment: {
-      configurable: true,
-      value: function deserializeAttachment<T = unknown>() {
-        const attachment = attachments.get(ws);
-        return (attachment.__user ?? null) as T;
-      }
-    },
-
-    serializeAttachment: {
-      configurable: true,
-      value: function serializeAttachment<T = unknown>(attachment: T) {
-        const setting = {
+        const state =
+          setState instanceof Function
+            ? setState((this as Connection<T>).state)
+            : setState;
+        attachments.set(ws, {
           ...attachments.get(ws),
-          __user: attachment ?? null
-        };
-
-        attachments.set(ws, setting);
+          __user: state ?? null
+        });
+        return state as ConnectionState<T>;
       }
     }
   }) as Connection;
@@ -229,12 +202,11 @@ class HibernatingConnectionIterator<T> implements IterableIterator<
 
     let socket: WebSocket;
     while ((socket = sockets[this.index++])) {
-      // only yield open sockets to match non-hibernating behaviour
+      // Only yield open sockets.
       if (socket.readyState === WebSocket.OPEN) {
         // Durable Objects hibernation APIs allow storing arbitrary sockets via
-        // `state.acceptWebSocket()`. Those sockets won't have PartyServer's
-        // `__pk` attachment namespace and must be ignored.
-        if (!isPartyServerWebSocket(socket)) {
+        // `state.acceptWebSocket()`. Ignore sockets without our attachment.
+        if (!isManagedWebSocket(socket)) {
           continue;
         }
         const value = createLazyConnection(socket) as Connection<T>;
@@ -277,132 +249,15 @@ function prepareTags(connectionId: string, userTags: string[]): string[] {
   return tags;
 }
 
-export interface ConnectionManager {
-  getCount(): number;
-  getConnection<TState>(id: string): Connection<TState> | undefined;
-  getConnections<TState>(tag?: string): IterableIterator<Connection<TState>>;
-  accept(connection: Connection, options: { tags: string[] }): Connection;
-}
-
-/**
- * When not using hibernation, we track active connections manually.
- */
-export class InMemoryConnectionManager<TState> implements ConnectionManager {
-  #connections: Map<string, Connection> = new Map();
-  tags: WeakMap<Connection, string[]> = new WeakMap();
-
-  getCount() {
-    return this.#connections.size;
-  }
-
-  getConnection<T = TState>(id: string) {
-    return this.#connections.get(id) as Connection<T> | undefined;
-  }
-
-  *getConnections<T = TState>(tag?: string): IterableIterator<Connection<T>> {
-    if (!tag) {
-      for (const connection of this.#connections.values()) {
-        if (connection.readyState === WebSocket.OPEN) {
-          // SAFETY: Connection state is caller-defined metadata. This mirrors
-          // getConnection<T>() and does not alter the underlying WebSocket.
-          yield connection as Connection<T>;
-        }
-      }
-      return;
-    }
-
-    // simulate DurableObjectState.getWebSockets(tag) behaviour
-    for (const connection of this.#connections.values()) {
-      const connectionTags = this.tags.get(connection) ?? [];
-      if (connectionTags.includes(tag)) {
-        yield connection as Connection<T>;
-      }
-    }
-  }
-
-  accept(connection: Connection, options: { tags: string[] }) {
-    // Accept in half-open mode so PartyServer stays in control of the close
-    // handshake. On compat dates >= 2026-04-07 the `web_socket_auto_reply_to_close`
-    // flag otherwise makes the runtime send a reciprocal Close frame and tear
-    // the socket down automatically — behind the back of our own close handling
-    // (`handleCloseFromClient` already reciprocates via `closeQuietly`). That
-    // auto-teardown is the WebSocket-proxying hazard called out in the flag
-    // docs: because a PartyServer Durable Object sits on the server end of a
-    // connection that the runtime tunnels back to the client, the auto-close
-    // can fire through an already-severed tunnel and surface as a spurious
-    // retryable "Network connection lost." rejection (e.g. when a Durable
-    // Object is reset while a connection is still open). Half-open mode
-    // restores the historical behavior our close handlers were written for;
-    // `closeQuietly` still sends the reciprocal frame on every compat date.
-    try {
-      connection.accept({ allowHalfOpen: true });
-    } catch {
-      // Older runtime/shim builds may not accept the options argument. Falling
-      // back to a bare accept() matches the pre-2026-04-07 behavior (no runtime
-      // auto-reply), which PartyServer's manual close handling already covers.
-      connection.accept();
-    }
-
-    // Preserve PartyServer's historical binary delivery contract. On compat
-    // dates >= 2026-03-17 the `websocket_standard_binary_type` flag flips the
-    // default server-side `binaryType` from "arraybuffer" to "blob", so binary
-    // frames arrive as `Blob` instead of `ArrayBuffer` on this in-memory path.
-    // Every PartyServer consumer (and the frameworks built on it, e.g.
-    // Cloudflare Agents) has always received `ArrayBuffer`, so pin it back.
-    // This is a no-op on older dates (already the default) and is corrective on
-    // newer ones. Guarded because some runtime/shim builds may not expose a
-    // settable `binaryType`. The hibernation path is unaffected (the
-    // Hibernation API always delivers `ArrayBuffer`).
-    try {
-      connection.binaryType = "arraybuffer";
-    } catch {
-      // older runtimes may not allow setting binaryType here
-    }
-
-    const tags = prepareTags(connection.id, options.tags);
-
-    this.#connections.set(connection.id, connection);
-    this.tags.set(connection, tags);
-
-    // Expose tags on the connection object itself
-    Object.defineProperty(connection, "tags", {
-      get: () => tags,
-      configurable: true
-    });
-
-    const removeConnection = () => {
-      this.#connections.delete(connection.id);
-      connection.removeEventListener("close", removeConnection);
-      connection.removeEventListener("error", removeConnection);
-    };
-    connection.addEventListener("close", removeConnection);
-    connection.addEventListener("error", removeConnection);
-
-    return connection;
-  }
-}
-
-/**
- * When opting into hibernation, the platform tracks connections for us.
- */
-export class HibernatingConnectionManager<TState> implements ConnectionManager {
+/** The platform-backed manager for hibernating WebSockets. */
+export class HibernatingConnectionManager<TState = unknown> {
   constructor(private controller: DurableObjectState) {}
-
-  getCount() {
-    // Only count sockets managed by PartyServer. Other hibernated sockets may
-    // exist on the same Durable Object via `state.acceptWebSocket()`.
-    let count = 0;
-    for (const ws of this.controller.getWebSockets()) {
-      if (isPartyServerWebSocket(ws)) count++;
-    }
-    return count;
-  }
 
   getConnection<T = TState>(id: string) {
     // TODO: Should we cache the connections?
     const sockets = this.controller.getWebSockets(id);
     const matching = sockets.filter((ws) => {
-      return tryGetPartyServerMeta(ws)?.id === id;
+      return tryGetManagedWebSocketMeta(ws)?.id === id;
     });
 
     if (matching.length === 0) return undefined;
@@ -422,7 +277,7 @@ export class HibernatingConnectionManager<TState> implements ConnectionManager {
     const tags = prepareTags(connection.id, options.tags);
 
     this.controller.acceptWebSocket(connection, tags);
-    connection.serializeAttachment({
+    attachments.set(connection, {
       __pk: {
         id: connection.id,
         tags,

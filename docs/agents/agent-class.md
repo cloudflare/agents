@@ -6,10 +6,15 @@ This document tries to bridge that gap, empowering any developer aiming to get s
 
 # What is the Agent?
 
-The `Agent` class is an extension of `DurableObject`. That is to say, they _are_ **Durable Objects**. If you're not familiar with Durable Objects, it is highly recommended that you read ["What are Durable Objects"](https://developers.cloudflare.com/durable-objects/) but at their core, Durable Objects are globally addressable (each instance has a unique ID) single-threaded compute instances with long term storage (KV/SQLite).  
-That being said, `Agent` does **not** extend `DurableObject` directly but instead `Server`. The Agents SDK vendors this PartyServer-compatible class and exports it from `agents/lifecycle`.
+`Agent` directly extends Cloudflare's `DurableObject`, so every Agent is a globally addressable, single-threaded compute instance with durable KV/SQLite storage. If you are unfamiliar with the platform primitive, start with [What are Durable Objects](https://developers.cloudflare.com/durable-objects/).
 
-You can visualize the logic as a Matryoshka doll: **DurableObject** -> **Server** -> **Agent**.
+Each Agent composes a `DurableObjectLifecycle` instance. The lifecycle installs request, alarm, and hibernating WebSocket entry points while the Agent supplies semantic callbacks and higher-level features:
+
+```text
+DurableObject
+└── Agent
+    └── owns DurableObjectLifecycle
+```
 
 ## Layer 0: Durable Object
 
@@ -102,104 +107,43 @@ const token = kv.get("someToken");
 
 Lastly, it's worth mentioning that the DO also has the Worker `Env` in `this.env`. Read more [here](https://developers.cloudflare.com/workers/runtime-apis/bindings).
 
-## Layer 1: lifecycle `Server`
+## Layer 1: lifecycle composition
 
-Now that you have seen what Durable Objects provide, the `Server` exported from `agents/lifecycle` will be clearer. It is an **opinionated `DurableObject` wrapper that improves developer experience by hiding Durable Object primitives behind friendlier callbacks**. Its implementation is vendored from [PartyServer](https://github.com/cloudflare/partykit/tree/main/packages/partyserver).
-
-For named Durable Objects, `Server` does not persist its own copy of the instance name. Legacy storage reads remain compatible with objects created by older PartyServer versions.
-
-### Addressing
-
-`agents/lifecycle` exposes helpers for addressing Durable Objects instead of working with bindings manually. These helpers provide a URL routing scheme such as `<your-worker>/parties/:durableClass/:durableName`.
-
-Compare this to the DO addressing [example above](#rpc).
+`Agent` constructs `new DurableObjectLifecycle(this)`. The lifecycle installs the platform-facing `fetch`, `alarm`, `webSocketMessage`, `webSocketClose`, and `webSocketError` handlers on the Agent instance. `Agent` and user subclasses implement semantic callbacks instead of a second base class:
 
 ```ts
-// Note the await here!
-const stub = await getServerByName(env.MY_DO, "foo");
-
-// We can still call RPC methods.
-await stub.bar();
-```
-
-Since we have a URL addressing scheme, we also get access to `routePartykitRequest()`.
-
-```ts
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    // Behind the scenes, PartyKit normalizes your DO binding names
-    // and tries to do some pattern matching.
-    const res = await routePartykitRequest(request, env);
-
-    if (res) return res;
-
-    return Response("Not found", { status: 404 });
-  }
-```
-
-You can inspect the [vendored implementation](https://github.com/cloudflare/agents/tree/main/packages/partyserver) and its linked upstream provenance.
-
-### `onStart`
-
-The extra plumbing in `Server` exposes an `onStart` callback that is **executed every time the Durable Object starts up** (the object was evicted, hibernated, or never created) and before `fetch`, WebSocket, and alarm callbacks. `getServerByName()` also synchronizes startup before returning its RPC stub. A stub obtained directly from a namespace can invoke native RPC without passing through these entry points, so frameworks must guard those RPC methods separately.
-
-```ts
-class MyServer extends Server {
+class MyAgent extends Agent {
   onStart() {
-    // Some initialization logic that you wish
-    // to run every time the DO is started up.
-    const sql = this.ctx.storage.sql;
-    sql.exec(`...`);
+    // Runs once per in-memory lifetime before work is handled.
+  }
+
+  onRequest(request: Request) {
+    return new Response(`Hello from ${request.url}`);
+  }
+
+  onConnect(connection: Connection) {
+    connection.send("connected");
   }
 }
 ```
 
-### `onRequest` and `onConnect`
+Lifecycle WebSockets always use Cloudflare's Hibernation API. Idle clients stay connected while the Durable Object can leave memory; constructor fields and `onStart` run again when a message wakes it. Persist anything needed across wakes in storage or `connection.state`.
 
-`Server` already implements `fetch` for the underlying Durable Object and exposes 2 different callbacks that developers can make use of, `onRequest` and `onConnect` for HTTP requests and incoming WS connections, respectively (**WebSocket connections are accepted by default**).
+Reusable capabilities can be installed through `this.lifecycle.use(component)`. Components start before Agent startup, can intercept requests before `onRequest`, and process alarms before `onAlarm`. See [Durable Object lifecycle](./lifecycle.md).
 
-```ts
-class MyServer extends Server {
-  async onRequest(request: Request) {
-    const url = new URL(request.url);
+### Identity
 
-    return new Response(`Hello from ${url.origin}!`);
-  }
+Since [2026-03-15](https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/), Workers exposes the name used by `idFromName()` or `getByName()` as `ctx.id.name`, including in alarm handlers. Agents and Agent facets use named IDs, and `this.name` projects that native identity.
 
-  async onConnect(conn, ctx) {
-    const { request } = ctx;
-    const url = new URL(request.url);
-
-    // Connections are a WebSocket wrapper
-    conn.send(`Hello from ${url.origin}!`);
-  }
-}
-```
-
-### WebSockets
-
-Just as `onConnect` is the callback for every new connection, `Server` also provides wrappers on top of the default callbacks from the `DurableObject` class: `onMessage`, `onClose` and `onError`.
-
-There's also `this.broadcast` that sends a WS message to all connected clients (no magic, just a loop over `this.getConnections()`!).
-
-### `this.name`
-
-Since [2026-03-15](https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/), the Workers runtime populates `ctx.id.name` inside a Durable Object addressed via `idFromName()` or `getByName()`, including in alarm handlers. Constructor-time availability isn't spelled out in the docs, but workerd's own tests pin it ([workerd#6421](https://github.com/cloudflare/workerd/pull/6421)), as do `partyserver`'s runtime-contract tests. `partyserver` reads `ctx.id.name` first, so for named access `this.name` resolves natively with no extra machinery.
-
-`ctx.id.name` is still `undefined` in these cases (see [the DO id docs](https://developers.cloudflare.com/durable-objects/api/id/#name)):
-
-- the object is addressed via `idFromString()` (even if the id was originally created with `idFromName()`) or `newUniqueId()` — deliberate design, not a gap;
-- the name is longer than 1,024 bytes;
-- the alarm firing was scheduled before 2026-03-15, or was scheduled from a context that itself had no name (reschedule it from a `fetch()` or RPC handler where the name is available).
-
-For those cases, `Server` can read a legacy name record written by an older PartyServer version or by the `setName()` bootstrap for a raw-ID object. New named objects do not write this redundant record. `this.name` throws if no name can be resolved.
+For migration, lifecycle can read an existing `__ps_name` value written by an older release. It never writes a duplicate name. Raw IDs, `idFromString()`, and names over 1,024 bytes do not provide native identity. Alarms created before 2026-03-15 must be rescheduled from a named fetch or RPC handler.
 
 ## Layer 2: Agent
 
-Now finally, the `Agent` class. `Agent` extends `Server` and provides opinionated primitives for stateful, schedulable, and observable agents that can communicate via RPC, WebSockets, and (even!) email.
+The `Agent` class directly extends `DurableObject`, composes the lifecycle above, and provides opinionated primitives for stateful, schedulable, and observable agents that can communicate via RPC, WebSockets, and (even!) email.
 
 ### `this.state` and `this.setState()`
 
-One of the core features of `Agent` is **automatic state persistence**. Developers define the shape of their state via the generic parameter and `initialState` (which is only used if no state exists in storage), and the Agent handles loading, saving, and broadcasting state changes (check `Server`'s `this.broadcast()` above).
+One of the core features of `Agent` is **automatic state persistence**. Developers define the shape of their state via the generic parameter and `initialState` (which is only used if no state exists in storage), and the Agent handles loading, saving, and broadcasting state changes (using its lifecycle-managed WebSocket connections).
 
 `this.state` is a getter that lazily loads state from storage (SQL). **State is persisted across DO evictions** when it's updated with `this.setState()`, which automatically serializes the state and writes it back to storage.  
 There's also `this.onStateChanged` that you can override to react to state changes.
@@ -419,7 +363,7 @@ function someUtilityFunction() {
 
 ### `this.onError`
 
-`Agent` extends `Server`'s `onError` so it can be used to handle errors that are not necessarily WebSocket errors. It is called with a `Connection` or `unknown` error.
+`Agent.onError` handles both WebSocket errors and other Agent errors. It is called with a `Connection` or `unknown` error.
 
 ```ts
 class MyAgent extends Agent {
@@ -495,14 +439,12 @@ application; return a recovery result to update the retained status record.
 
 ### Routing
 
-The `Agent` class re-exports PartyKit's [addressing helpers](#addressing) as `getAgentByName` and `routeAgentRequest`.
+Use `getAgentByName` for named RPC stubs and `routeAgentRequest` for `/agents/:class/:name` HTTP and WebSocket routing.
 
 ```ts
-// Same API as getServerByName
 const stub = await getAgentByName(env.MY_DO, "foo");
 // ...
 
-// Same API as routeServerRequest
 const res = await routeAgentRequest(request, env);
 
 if (res) return res;

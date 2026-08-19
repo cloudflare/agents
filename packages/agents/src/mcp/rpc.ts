@@ -20,7 +20,7 @@ import {
 
 type JSONRPCMessage = V1JSONRPCMessage;
 type MessageExtraInfo = V1MessageExtraInfo;
-import { getServerByName } from "partyserver";
+import { getLifecycleStubByName } from "../lifecycle/durable-object-lifecycle";
 import type { McpAgent } from ".";
 import { raceWithSignal } from "./abort";
 
@@ -82,7 +82,7 @@ export class RPCClientTransport implements V2Transport {
     }
 
     const doName = `${RPC_DO_PREFIX}${this._name}`;
-    this._stub = await getServerByName<Cloudflare.Env, McpAgent>(
+    this._stub = await getLifecycleStubByName<Cloudflare.Env, McpAgent>(
       this._namespace,
       doName,
       { props: this._props }

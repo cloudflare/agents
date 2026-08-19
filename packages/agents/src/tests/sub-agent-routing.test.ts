@@ -225,7 +225,7 @@ describe("onBeforeSubAgent hook — allow / reject / mutate", () => {
       `http://x/custom-sub/${parent}/sub/counter-sub-agent/${child}/anything`
     );
     // The child (CounterSubAgent) doesn't implement `onRequest` — it
-    // would return the default partyserver 404/500 shape. What we
+    // returns the default lifecycle 404/500 shape. What we
     // care about here is that the hook fired and the framework
     // dispatched, not that the child served the path.
     expect(await parentStub.hookCount("called")).toBe(1);
@@ -286,7 +286,7 @@ describe("onBeforeSubAgent hook — allow / reject / mutate", () => {
       `http://x/custom-sub/${parent}/sub/counter-sub-agent/${knownChild}/anything`
     );
     // The hook allowed, the framework dispatched. The response text
-    // didn't come from our deny path — the child (or partyserver's
+    // didn't come from our deny path — the child (or lifecycle's
     // default onRequest) produced whatever it produced.
     expect(await resKnown.text()).not.toBe("child not pre-registered");
   });
@@ -342,7 +342,7 @@ describe("buildAgentPath", () => {
     expect(buildAgentPath(path, { leafPath: "/" })).toBe(expected);
   });
 
-  it("preserves PartyServer's literal-percent root name semantics", () => {
+  it("preserves literal-percent root name semantics", () => {
     expect(buildAgentPath([{ className: "Inbox", name: "user%2F123" }])).toBe(
       "/agents/inbox/user%2F123"
     );

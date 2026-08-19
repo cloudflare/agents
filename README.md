@@ -131,7 +131,6 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 | [`@cloudflare/ai-chat`](packages/ai-chat)               | Higher-level AI chat — persistent messages, resumable streaming, tool execution                   |
 | [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base — agentic loop, stream resumption, client tools, workspace tools      |
 | [`@cloudflare/codemode`](packages/codemode)             | LLMs write executable code that calls your tools, instead of one tool call at a time              |
-| [`partyserver`](packages/partyserver)                   | Durable Object server, routing, WebSocket, and component lifecycle substrate                      |
 | [`@cloudflare/shell`](packages/shell)                   | Sandboxed JS execution + virtual filesystem (`Workspace`) for agents                              |
 | [`@cloudflare/voice`](packages/voice)                   | Voice pipeline — STT, TTS, VAD, streaming, SFU utilities                                          |
 | [`@cloudflare/worker-bundler`](packages/worker-bundler) | Build and bundle Workers at runtime, for use with the Worker Loader binding                       |
@@ -177,7 +176,6 @@ npm start
 | [`packages/ai-chat/`](packages/ai-chat)               | AI chat layer                                            |
 | [`packages/think/`](packages/think)                   | Opinionated chat agent base                              |
 | [`packages/codemode/`](packages/codemode)             | Code Mode                                                |
-| [`packages/partyserver/`](packages/partyserver)       | Durable Object server + lifecycle substrate              |
 | [`packages/shell/`](packages/shell)                   | Sandboxed execution + filesystem                         |
 | [`packages/voice/`](packages/voice)                   | Voice pipeline                                           |
 | [`packages/worker-bundler/`](packages/worker-bundler) | Runtime Workers bundler                                  |

@@ -13,7 +13,6 @@ export default defineConfig({
   test: {
     name: "lifecycle",
     include: [path.join(import.meta.dirname, "**/*.test.ts")],
-    setupFiles: [path.join(import.meta.dirname, "setup.ts")],
     testTimeout: 10_000,
     teardownTimeout: 60_000
   }

@@ -1,7 +1,17 @@
-/**
- * Durable Object lifecycle primitives used by the Agents SDK.
- *
- * The `Server`, routing helpers, connection types, and component lifecycle are
- * provided by the PartyServer package vendored in this repository.
- */
-export * from "partyserver";
+/** Durable Object lifecycle composition for Agents and standalone objects. */
+export {
+  DurableObjectLifecycle,
+  routeDurableObjectRequest,
+  type Connection,
+  type ConnectionContext,
+  type ConnectionSetStateFn,
+  type ConnectionState,
+  type DurableObjectLifecycleComponent,
+  type DurableObjectRequestContext,
+  type DurableObjectRoute,
+  type DurableObjectRoutingOptions,
+  type DurableObjectStartContext,
+  type RoutingRetryEvent,
+  type RoutingRetryOptions,
+  type WSMessage
+} from "./durable-object-lifecycle";

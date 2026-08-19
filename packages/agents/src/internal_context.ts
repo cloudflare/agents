@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Connection } from "partyserver";
+import type { Connection } from "./lifecycle/types";
 
 export type AgentEmail = {
   from: string;

@@ -76,7 +76,7 @@ async function restoreOAuthConnection(
     INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
     VALUES (${serverId}, ${"test-oauth-server"}, ${serverUrl}, ${"test-client-id"}, ${authUrl}, ${callbackUrl}, ${null})
   `;
-  await agentStub.setName(agentName);
+  await agentStub.__unsafe_ensureInitialized();
 }
 
 async function clearPersistedAuthUrl(
@@ -116,7 +116,7 @@ describe("OAuth2 MCP Client - Hibernation", () => {
       VALUES (${serverId}, ${"test-oauth-server"}, ${"http://example.com/mcp"}, ${"test-client-id"}, ${authUrl}, ${callbackUrl}, ${null})
     `;
 
-    await agentStub.setName(agentName);
+    await agentStub.__unsafe_ensureInitialized();
 
     expect(await agentStub.hasMcpConnection(serverId)).toBe(true);
   });
@@ -145,7 +145,7 @@ describe("OAuth2 MCP Client - Hibernation", () => {
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
 
-    await agentStub.setName(agentName);
+    await agentStub.__unsafe_ensureInitialized();
 
     // Verify callback URL with valid state is recognized after restoration
     const callbackWithState = `${callbackUrl}?code=test&state=${nanoid()}.${serverId}`;
@@ -187,13 +187,13 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
   });
 
   it("prefers the live authUrl during an in-flight OAuth flow", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const serverUrl = "http://example.com/mcp";
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     await agentStub.setupMockMcpConnection(
       serverId,
       "live-oauth-server",
@@ -413,12 +413,12 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
 
 describe("OAuth2 MCP Client - Callback Handling", () => {
   it("should process OAuth callback with valid connection", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -443,13 +443,13 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
   });
 
   it("should clear auth_url after successful OAuth", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const authUrl = "http://example.com/oauth/authorize";
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -477,12 +477,12 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
 
 describe("OAuth2 MCP Client - Error Handling", () => {
   it("should redirect to origin on callback without code parameter", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -500,12 +500,12 @@ describe("OAuth2 MCP Client - Error Handling", () => {
   });
 
   it("should not recognize callback without state parameter", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -521,12 +521,12 @@ describe("OAuth2 MCP Client - Error Handling", () => {
 
 describe("OAuth2 MCP Client - Error Surfacing", () => {
   it("should redirect to origin when no callback config and auth fails", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     // No configureOAuthForTest — default behavior
 
     await agentStub.sql`
@@ -557,12 +557,12 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
   });
 
   it("should redirect to origin when only successRedirect is configured and auth fails", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     await agentStub.configureOAuthForTest({ successRedirect: "/dashboard" });
 
     await agentStub.sql`
@@ -593,12 +593,12 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
   });
 
   it("should redirect to origin when connection is not in memory (not a raw 500)", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     // Insert server in DB but do NOT create in-memory connection
     await agentStub.sql`
@@ -619,12 +619,12 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
   });
 
   it("should return proper error via customHandler when connection is not in memory", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
     // Insert server in DB but do NOT create in-memory connection
@@ -652,12 +652,12 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
   });
 
   it("should redirect to errorRedirect when both redirects configured and auth fails", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     await agentStub.configureOAuthForTest({
       successRedirect: "/dashboard",
       errorRedirect: "/error"
@@ -691,12 +691,12 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
   });
 
   it("should redirect to successRedirect when both redirects configured and auth succeeds", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     await agentStub.configureOAuthForTest({
       successRedirect: "/dashboard",
       errorRedirect: "/error"
@@ -730,12 +730,12 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
   });
 
   it("should redirect to origin on success when no callback config", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     // No configureOAuthForTest — default behavior
 
     await agentStub.sql`
@@ -767,12 +767,12 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
 
 describe("OAuth2 MCP Client - Redirect Behavior", () => {
   it("should redirect to success URL after OAuth", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     await agentStub.configureOAuthForTest({ successRedirect: "/dashboard" });
 
     await agentStub.sql`
@@ -803,12 +803,12 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
   });
 
   it("should redirect to error URL on OAuth failure", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
     await agentStub.configureOAuthForTest({ errorRedirect: "/error" });
 
     await agentStub.sql`
@@ -842,10 +842,10 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
 describe("OAuth2 MCP Client - Basic Functionality", () => {
   it("should handle non-callback requests normally", async () => {
     const ctx = createExecutionContext();
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     const response = await worker.fetch(
       new Request(
@@ -862,14 +862,14 @@ describe("OAuth2 MCP Client - Basic Functionality", () => {
 
 describe("OAuth2 MCP Client - Multiple Servers", () => {
   it("should route callbacks to correct server via state parameter", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
 
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
     const serverIdA = nanoid(8);
     const serverIdB = nanoid(8);
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -921,14 +921,14 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
   });
 
   it("should correctly identify callback requests by serverId in state", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
 
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
     const serverIdA = nanoid(8);
     const nonExistentServerId = nanoid(8);
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -962,12 +962,12 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
 
 describe("OAuth2 MCP Client - State Security", () => {
   it("should treat reused state as stale success after auth is already complete", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     // Configure JSON handler to verify error responses
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
@@ -1002,13 +1002,13 @@ describe("OAuth2 MCP Client - State Security", () => {
   });
 
   it("should reject state with mismatched serverId", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverIdA = nanoid(8);
     const serverIdB = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     // Configure JSON handler to verify error responses
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
@@ -1056,12 +1056,12 @@ describe("OAuth2 MCP Client - State Security", () => {
 
 describe("OAuth2 MCP Client - Custom Handler", () => {
   it("should use custom handler for OAuth callback response", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     // Configure custom JSON handler (functions can't cross DO boundary, so use flag)
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
@@ -1099,12 +1099,12 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
   });
 
   it("should use custom handler for OAuth error response", async () => {
-    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    await agentStub.setName("default");
+    await agentStub.__unsafe_ensureInitialized();
 
     // Configure custom JSON handler
     await agentStub.configureOAuthForTest({ useJsonHandler: true });

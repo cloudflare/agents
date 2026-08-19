@@ -48,7 +48,7 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
       return Response.json({ method: request.method, body, path });
     }
     if (path === "connections") {
-      // Count active connections using PartyServer's getConnections()
+      // Count active lifecycle-managed connections.
       let count = 0;
       for (const _ of this.getConnections()) {
         count++;

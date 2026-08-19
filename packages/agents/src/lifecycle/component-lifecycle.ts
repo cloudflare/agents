@@ -36,23 +36,16 @@ export interface DurableObjectLifecycleComponent<
 
   /** Run work assigned to the component when the host's alarm fires. */
   onAlarm?(): MaybePromise<void>;
-
-  /**
-   * Release resources during explicit host disposal.
-   *
-   * Workers do not invoke this hook on ordinary Durable Object eviction.
-   */
-  onDispose?(): MaybePromise<void>;
 }
 
 /**
  * Runs ordered lifecycle phases for components installed in a Durable Object.
  *
  * Components are resolved lazily on the first phase and retained for the
- * lifetime of this runner. Startup and alarms run in declaration order,
- * requests stop at the first response, and disposal runs in reverse order.
+ * lifetime of this runner. Startup and alarms run in declaration order, and
+ * requests stop at the first response.
  */
-export class DurableObjectLifecycle<Props extends object = object> {
+export class LifecycleComponentRunner<Props extends object = object> {
   readonly #resolveComponents: () => Iterable<
     DurableObjectLifecycleComponent<Props>
   >;
@@ -62,8 +55,6 @@ export class DurableObjectLifecycle<Props extends object = object> {
     | undefined;
   #startPromise: Promise<void> | undefined;
   #started = false;
-  #disposePromise: Promise<void> | undefined;
-  #disposed = false;
 
   /**
    * Create a lifecycle whose components are resolved immediately before the
@@ -86,9 +77,6 @@ export class DurableObjectLifecycle<Props extends object = object> {
    * @param context - Properties supplied while resolving the Durable Object.
    */
   async start(context: DurableObjectStartContext<Props>): Promise<void> {
-    if (this.#disposed) {
-      throw new Error("Cannot start a disposed Durable Object lifecycle");
-    }
     if (this.#started) return;
 
     const pending = this.#startPromise;
@@ -134,21 +122,6 @@ export class DurableObjectLifecycle<Props extends object = object> {
     }
   }
 
-  /**
-   * Dispose every component in reverse order.
-   *
-   * Disposal is idempotent and best-effort. All hooks run even when one fails;
-   * one failure is rethrown directly and multiple failures are reported as an
-   * `AggregateError`.
-   */
-  dispose(): Promise<void> {
-    if (this.#disposePromise) return this.#disposePromise;
-
-    this.#disposed = true;
-    this.#disposePromise = this.#dispose();
-    return this.#disposePromise;
-  }
-
   async #runStart(context: DurableObjectStartContext<Props>): Promise<void> {
     for (const component of this.#getComponents()) {
       await component.onStart?.(context);
@@ -157,52 +130,11 @@ export class DurableObjectLifecycle<Props extends object = object> {
   }
 
   async #ensureReady(operation: string): Promise<void> {
-    if (this.#disposed) {
-      throw new Error(
-        `Cannot ${operation} with a disposed Durable Object lifecycle`
-      );
-    }
-
     const pending = this.#startPromise;
     if (pending) await pending;
-
-    if (this.#disposed) {
-      throw new Error(
-        `Cannot ${operation} with a disposed Durable Object lifecycle`
-      );
-    }
     if (!this.#started) {
       throw new Error(
         `Cannot ${operation} before the Durable Object lifecycle has started`
-      );
-    }
-  }
-
-  async #dispose(): Promise<void> {
-    try {
-      await this.#startPromise;
-    } catch {
-      // Startup already surfaced its own failure. Components that started
-      // before it failed still receive best-effort disposal below.
-    }
-
-    const errors: unknown[] = [];
-    const components = this.#getComponents();
-    for (let index = components.length - 1; index >= 0; index--) {
-      const component = components[index];
-      if (!component) continue;
-      try {
-        await component.onDispose?.();
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) {
-      throw new AggregateError(
-        errors,
-        "Durable Object component disposal failed"
       );
     }
   }

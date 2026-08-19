@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 import { expectTypeOf } from "vitest";
 import type {
   Connection as AgentConnection,
@@ -7,49 +8,36 @@ import type {
 } from "../index";
 import {
   DurableObjectLifecycle,
-  Server,
   type Connection,
   type ConnectionContext,
   type DurableObjectLifecycleComponent,
   type RoutingRetryOptions,
   type WSMessage
 } from "../lifecycle";
-import type {
-  Connection as UpstreamConnection,
-  ConnectionContext as UpstreamConnectionContext,
-  RoutingRetryOptions as UpstreamRoutingRetryOptions,
-  Server as DirectPartyServer,
-  WSMessage as UpstreamWSMessage
-} from "partyserver";
-
-expectTypeOf<Server>().toEqualTypeOf<DirectPartyServer>();
-expectTypeOf<Connection>().toEqualTypeOf<UpstreamConnection>();
-expectTypeOf<ConnectionContext>().toEqualTypeOf<UpstreamConnectionContext>();
-expectTypeOf<RoutingRetryOptions>().toEqualTypeOf<UpstreamRoutingRetryOptions>();
-expectTypeOf<WSMessage>().toEqualTypeOf<UpstreamWSMessage>();
 
 expectTypeOf<AgentConnection>().toEqualTypeOf<Connection>();
 expectTypeOf<AgentConnectionContext>().toEqualTypeOf<ConnectionContext>();
 expectTypeOf<AgentRoutingRetryOptions>().toEqualTypeOf<RoutingRetryOptions>();
 expectTypeOf<AgentWSMessage>().toEqualTypeOf<WSMessage>();
 
-class LifecycleTypeProbe extends Server {
-  readonly #component: DurableObjectLifecycleComponent = {
-    onRequest: ({ request }) => new Response(request.url)
-  };
+class LifecycleTypeProbe extends DurableObject {
+  readonly lifecycle = new DurableObjectLifecycle(this);
 
-  protected override get lifecycleComponents() {
-    return [this.#component];
+  onRequest(request: Request): Response {
+    return new Response(request.url);
   }
 }
 
-expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<Server>();
-expectTypeOf(
-  new DurableObjectLifecycle(() => [
-    {
-      onStart: ({ props }) => {
-        expectTypeOf(props).toEqualTypeOf<object | undefined>();
-      }
-    }
-  ])
-).toEqualTypeOf<DurableObjectLifecycle<object>>();
+expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<DurableObject>();
+expectTypeOf<
+  LifecycleTypeProbe["lifecycle"]
+>().toEqualTypeOf<DurableObjectLifecycle>();
+
+const component: DurableObjectLifecycleComponent = {
+  onStart: ({ props }) => {
+    expectTypeOf(props).toEqualTypeOf<object | undefined>();
+  },
+  onRequest: ({ request }) => new Response(request.url)
+};
+
+expectTypeOf(component).toMatchTypeOf<DurableObjectLifecycleComponent>();

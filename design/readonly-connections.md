@@ -93,7 +93,7 @@ The `state` getter also calls `_setStateInternal` for initialization (persisting
 The readonly flag storage went through three designs:
 
 1. **SQL table** (original PR) — `CREATE TABLE cf_agents_readonly_connections`. Worked but added schema, queries, and cleanup logic for a single boolean.
-2. **`connection.setState({ _readonly: true })`** (first refactor) — leveraged partyserver's built-in per-connection state, which survives hibernation. Much simpler. But had a fatal flaw: any call to `connection.setState({ ... })` without the callback form would overwrite `_readonly`.
+2. **`connection.setState({ _readonly: true })`** (first refactor) — leveraged lifecycle-managed per-connection state, which survives hibernation. Much simpler. But had a fatal flaw: any call to `connection.setState({ ... })` without the callback form would overwrite `_readonly`.
 3. **Namespaced connection attachment** (current) — wraps `connection.state` and `connection.setState()` on each connection to hide the `_cf_readonly` key from user code.
 
 ### How the wrapping works
@@ -106,7 +106,7 @@ When the Agent first encounters a connection (in `onConnect` or `onMessage`), `_
 4. **Overrides** `connection.state` (getter) to strip `_cf_readonly` from the returned value
 5. **Overrides** `connection.setState` to preserve `_cf_readonly` when user code sets new state
 
-The accessor vs. data property distinction matters because partyserver defines `state` as a getter (via `Object.defineProperties`), but we also need to handle non-partyserver connections or future implementations where `state` might be a plain data property. Without this, the fallback `() => connection.state` would call our overridden getter after the property is replaced, creating an infinite loop.
+The accessor vs. data property distinction matters because the lifecycle defines `state` as a getter (via `Object.defineProperties`), but virtual facet connections may expose `state` as a plain data property. Without this, the fallback `() => connection.state` would call our overridden getter after the property is replaced, creating an infinite loop.
 
 After wrapping:
 
@@ -115,11 +115,11 @@ After wrapping:
 - `connection.setState((prev) => ({ ...prev, count: 1 }))` receives `prev` without `_cf_readonly`, but the flag is merged back in
 - `setConnectionReadonly` / `isConnectionReadonly` use `_rawStateAccessors` to read/write the flag directly
 
-### Why this required a partyserver change
+### Lifecycle connection requirement
 
 Partyserver defines `state` and `setState` on connection objects via `Object.defineProperties` — and prior to our patch, both properties had `configurable: false` (the default). This prevented us from redefining them with `Object.defineProperty`.
 
-The fix was a two-line change in partyserver: add `configurable: true` to both the `state` and `setState` descriptors in `createLazyConnection`. The default behavior is unchanged — `configurable` only means the property _can_ be redefined, not that it behaves differently.
+The lifecycle connection wrapper marks both the `state` and `setState` descriptors as `configurable`. The default behavior is unchanged — `configurable` only means the property _can_ be redefined, not that it behaves differently.
 
 ### Why `_cf_readonly` and not `_readonly`?
 
@@ -133,7 +133,7 @@ The single-key approach (`_cf_readonly` alongside user keys) is simpler, handles
 
 ### What about `getConnections()`?
 
-Connections returned by `getConnections()` are the same JavaScript objects that were wrapped in `onConnect`/`onMessage` (partyserver's `createLazyConnection` checks `isWrapped(ws)` and returns the existing wrapper). So our `Object.defineProperty` overrides persist.
+Connections returned by `getConnections()` are the same JavaScript objects that were wrapped in `onConnect`/`onMessage` (the lifecycle connection wrapper returns an already-wrapped socket unchanged). So our `Object.defineProperty` overrides persist.
 
 After hibernation, the Durable Object creates new wrapper objects for rehydrated WebSockets. The first `onMessage` call re-wraps them via `_ensureConnectionWrapped`.
 

@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
@@ -25,14 +25,14 @@ const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 
 async function freshAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
     name
   );
 }
 
 async function freshPropsAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkPropsTestAgent as unknown as DurableObjectNamespace<ThinkPropsTestAgent>,
     name
   );
@@ -95,63 +95,63 @@ function closeWS(ws: WebSocket): Promise<void> {
 }
 
 async function freshSessionAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkSessionTestAgent as unknown as DurableObjectNamespace<ThinkSessionTestAgent>,
     name
   );
 }
 
 async function freshAsyncSessionAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkAsyncConfigSessionAgent as unknown as DurableObjectNamespace<ThinkAsyncConfigSessionAgent>,
     name
   );
 }
 
 async function freshAsyncHookAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkAsyncHookTestAgent as unknown as DurableObjectNamespace<ThinkAsyncHookTestAgent>,
     name
   );
 }
 
 async function freshProgrammaticAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkProgrammaticTestAgent as unknown as DurableObjectNamespace<ThinkProgrammaticTestAgent>,
     name
   );
 }
 
 async function freshRecoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
     name
   );
 }
 
 async function freshNonRecoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkNonRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkNonRecoveryTestAgent>,
     name
   );
 }
 
 async function freshConfigAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkConfigTestAgent as unknown as DurableObjectNamespace<ThinkConfigTestAgent>,
     name
   );
 }
 
 async function freshConfigInSessionAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkConfigInSessionAgent as unknown as DurableObjectNamespace<ThinkConfigInSessionAgent>,
     name
   );
 }
 
 async function freshLegacyConfigMigrationAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkLegacyConfigMigrationAgent as unknown as DurableObjectNamespace<ThinkLegacyConfigMigrationAgent>,
     name
   );
@@ -1005,7 +1005,7 @@ describe("Think — context blocks", () => {
 
   it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const agent = await getServerByName(
+    const agent = await getAgentByName(
       env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
       "skills-system-prompt-warning"
     );

@@ -14,14 +14,19 @@ type ImmutableMap<K, V> = ReadonlyMap<Immutable<K>, Immutable<V>>;
 type ImmutableSet<T> = ReadonlySet<Immutable<T>>;
 type ImmutableObject<T> = { readonly [K in keyof T]: Immutable<T[K]> };
 
+/** Immutable state persisted in a hibernating WebSocket attachment. */
 export type ConnectionState<T> = ImmutableObject<T> | null;
+
+/** Functional update applied to a connection's current state. */
 export type ConnectionSetStateFn<T> = (prevState: ConnectionState<T>) => T;
 
+/** Context supplied when a lifecycle accepts a WebSocket connection. */
 export type ConnectionContext = {
+  /** Original WebSocket upgrade request. */
   request: Request;
 };
 
-/** A WebSocket connected to the Server */
+/** A WebSocket managed by a Durable Object lifecycle. */
 export type Connection<TState = unknown> = WebSocket & {
   /** Connection identifier */
   id: string;
@@ -49,42 +54,16 @@ export type Connection<TState = unknown> = WebSocket & {
    * the previous state and returns the next state.
    *
    * This property is configurable, meaning it can be redefined via
-   * `Object.defineProperty` by downstream consumers. If you redefine
-   * `state` and `setState`, you are responsible for calling
-   * `serializeAttachment` / `deserializeAttachment` yourself if you need
-   * the state to survive hibernation.
+   * `Object.defineProperty` by downstream consumers that provide their own
+   * state projection.
    */
   setState(
     state: TState | ConnectionSetStateFn<TState> | null
   ): ConnectionState<TState>;
 
   /**
-   * @deprecated use {@link Connection.setState} instead.
-   *
-   * Low-level method to persist data in the connection's attachment storage.
-   * This property is configurable and can be redefined by downstream
-   * consumers that need to wrap or namespace the underlying storage.
-   */
-  serializeAttachment<T = unknown>(attachment: T): void;
-
-  /**
-   * @deprecated use {@link Connection.state} instead.
-   *
-   * Low-level method to read data from the connection's attachment storage.
-   * This property is configurable and can be redefined by downstream
-   * consumers that need to wrap or namespace the underlying storage.
-   */
-  deserializeAttachment<T = unknown>(): T | null;
-
-  /**
-   * Tags assigned to this connection via {@link Server.getConnectionTags}.
+   * Tags returned by the owning Durable Object's `getConnectionTags` callback.
    * Always includes the connection id as the first tag.
    */
   tags: readonly string[];
-
-  /**
-   * @deprecated Use `this.name` on the Server instead.
-   * The server name. Populated from `Server.name` after initialization.
-   */
-  server: string;
 };

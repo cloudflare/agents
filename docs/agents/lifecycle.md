@@ -1,132 +1,169 @@
 # Durable Object lifecycle
 
-The `agents/lifecycle` entry point provides the Durable Object substrate used by
-`Agent`. It includes:
+`agents/lifecycle` lets reusable durable capabilities work in both `Agent` and a
+plain Cloudflare Durable Object. It uses composition: your class extends the
+platform `DurableObject`, then constructs a lifecycle with `this`.
 
-- `Server`, a PartyServer-compatible Durable Object base class;
-- `getServerByName()` and `routePartykitRequest()` routing helpers;
-- WebSocket connection types and helpers;
-- `DurableObjectLifecycle`, which composes reusable durable components.
-
-Existing `Agent` applications do not need to construct this lifecycle. Use it
-when building a capability that should work in an `Agent` and in another
-Durable Object class.
-
-## Lifecycle components
-
-A component can participate in startup, HTTP request handling, alarms, and
-explicit disposal:
-
-```ts
-import { Server, type DurableObjectLifecycleComponent } from "agents/lifecycle";
-
-class AuditLog implements DurableObjectLifecycleComponent {
-  constructor(private readonly storage: DurableObjectStorage) {}
-
-  onStart() {
-    this.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS audit_log (
-        message TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    `);
-  }
-
-  onRequest({ request }: { request: Request }) {
-    const url = new URL(request.url);
-    if (url.pathname.endsWith("/audit-health")) {
-      return new Response("ok");
-    }
-  }
-
-  onAlarm() {
-    this.storage.sql.exec(
-      "DELETE FROM audit_log WHERE created_at < ?",
-      Date.now() - 30 * 24 * 60 * 60 * 1000
-    );
-  }
-}
-
-export class MyDurableObject extends Server<Env> {
-  private readonly audit = new AuditLog(this.ctx.storage);
-
-  protected override get lifecycleComponents() {
-    return [this.audit];
-  }
-
-  override onRequest() {
-    return new Response("application response");
-  }
-}
-```
-
-The component collection is resolved before the first startup phase, after
-derived class fields have initialized. It then remains fixed for that in-memory
-Durable Object instance.
-
-Hooks run with these policies:
-
-| Phase       | Behavior                                                        |
-| ----------- | --------------------------------------------------------------- |
-| `onStart`   | Components run sequentially in declaration order.               |
-| `onRequest` | The first returned `Response` handles the request.              |
-| `onAlarm`   | Every component runs sequentially in declaration order.         |
-| `onDispose` | Every component runs in reverse order; failures are aggregated. |
-
-A failure stops startup, request, or alarm processing and is propagated to the
-host. Startup can be retried. Disposal is idempotent and attempts every cleanup
-hook.
-
-## Explicit dependencies
-
-Lifecycle contexts contain only data for that phase. Pass storage, bindings,
-configuration, observability, and protocol adapters to a component when you
-construct it. Do not pass the complete host object merely so the component can
-reach unrelated methods.
-
-This keeps the same component usable in different composition roots:
-
-```ts
-const component = new AuditLog(ctx.storage);
-```
-
-## Native Durable Object classes
-
-`DurableObjectLifecycle` can also be used without `Server`. In that case, the
-host delegates each applicable entry point explicitly:
+## Plain Durable Object
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
 import { DurableObjectLifecycle } from "agents/lifecycle";
 
-export class MyDurableObject extends DurableObject<Env> {
-  private readonly audit = new AuditLog(this.ctx.storage);
-  private readonly lifecycle = new DurableObjectLifecycle(() => [this.audit]);
+export class MyObject extends DurableObject<Env> {
+  readonly lifecycle = new DurableObjectLifecycle(this);
 
-  async fetch(request: Request): Promise<Response> {
-    await this.lifecycle.start({ props: undefined });
-    const handled = await this.lifecycle.request({ request });
-    return handled ?? new Response("application response");
+  onStart(): void {
+    // Runs once per in-memory object lifetime, before work is handled.
   }
 
-  async alarm(): Promise<void> {
-    await this.lifecycle.start({ props: undefined });
-    await this.lifecycle.alarm();
+  onRequest(request: Request): Response {
+    return new Response(`Hello from ${this.lifecycle.name}: ${request.url}`);
+  }
+
+  onAlarm(): void {
+    // Runs after lifecycle components process the alarm.
   }
 }
 ```
 
-`onDispose` is not an eviction callback. The Workers runtime does not notify a
-Durable Object before ordinary isolate eviction. Call `lifecycle.dispose()`
-only from an explicit deletion or shutdown path owned by your application.
+Constructing `DurableObjectLifecycle` installs the runtime-facing `fetch`,
+`alarm`, `webSocketMessage`, `webSocketClose`, and `webSocketError` handlers on
+the object. Do not define forwarding versions of those methods. Implement the
+semantic callbacks instead.
 
-Native Durable Object RPC methods also bypass `fetch()`. An RPC method that
-requires initialized components must call `lifecycle.start()` or use a host
-base class that guards RPC entry points.
+Route named objects from the outer Worker when you want URL routing:
 
-## Alarm ownership
+```ts
+import { routeDurableObjectRequest } from "agents/lifecycle";
 
-Lifecycle components can react to an alarm, but they do not independently own
-the physical Durable Object alarm. A Durable Object has one next alarm
-timestamp. The host remains responsible for arbitrating that timestamp when
-multiple components, such as schedules and managed fibers, need wakeups.
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return (
+      (await routeDurableObjectRequest(request, env)) ??
+      new Response("Not found", { status: 404 })
+    );
+  }
+};
+```
+
+The default URL shape is `/objects/:binding/:name`. Direct
+`env.MY_OBJECT.getByName(name).fetch(request)` calls work as well.
+
+`Agent` already constructs this lifecycle. Existing Agent classes continue to
+override `onStart`, `onRequest`, `onConnect`, `onMessage`, `onClose`, and
+`onError` normally.
+
+## Request call path
+
+```text
+routeAgentRequest(request)
+└─ named Durable Object stub.fetch(request)
+   └─ lifecycle-installed fetch
+      ├─ lifecycle startup components
+      ├─ host onStart
+      ├─ lifecycle request components
+      │  └─ first Response wins
+      └─ host onRequest
+```
+
+A warm object skips startup but still offers every request to its components.
+
+## Reusable components
+
+A capability implements only the phases it needs:
+
+```ts
+import type { DurableObjectLifecycleComponent } from "agents/lifecycle";
+
+class AuditLog implements DurableObjectLifecycleComponent {
+  constructor(private readonly storage: DurableObjectStorage) {}
+
+  onStart(): void {
+    this.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS audit_log (
+        message TEXT NOT NULL
+      )
+    `);
+  }
+
+  onRequest({ request }: { request: Request }): Response | undefined {
+    if (new URL(request.url).pathname.endsWith("/health")) {
+      return new Response("ok");
+    }
+  }
+
+  onAlarm(): void {
+    this.storage.sql.exec("DELETE FROM audit_log");
+  }
+}
+```
+
+Install it before startup:
+
+```ts
+export class MyObject extends DurableObject<Env> {
+  private readonly audit = new AuditLog(this.ctx.storage);
+  readonly lifecycle = new DurableObjectLifecycle(this).use(this.audit);
+
+  onRequest(): Response {
+    return new Response("application response");
+  }
+}
+```
+
+Components run in registration order. Startup and alarms run every hook
+sequentially. Request handling stops at the first returned `Response`. A phase
+failure propagates, and failed startup can be retried.
+
+Pass dependencies to a component explicitly. A component should not receive an
+entire Agent merely to reach storage, bindings, authentication, observability,
+or protocol methods.
+
+## WebSockets always hibernate
+
+The lifecycle always uses Cloudflare's WebSocket Hibernation API. Idle clients
+remain connected while the Durable Object can leave memory. When a message
+wakes the object, its constructor and lifecycle startup run again before
+`onMessage`.
+
+State needed after a wake must be stored durably or through connection state:
+
+```ts
+onConnect(connection: Connection): void {
+  connection.setState({ authenticated: true });
+}
+
+onMessage(connection: Connection<{ authenticated: boolean }>): void {
+  console.log(connection.state?.authenticated);
+}
+```
+
+There is no non-hibernating mode.
+
+## Native RPC
+
+Native Durable Object RPC does not pass through `fetch`. An RPC method that
+requires initialized components starts the lifecycle explicitly:
+
+```ts
+async runTask(): Promise<void> {
+  await this.lifecycle.start();
+  // initialized work
+}
+```
+
+Agent's internal RPC entry points already enforce this boundary.
+
+## Object names
+
+Use `idFromName()` or `getByName()`. The lifecycle reads the authoritative name
+from `ctx.id.name` and exposes it as `lifecycle.name`.
+
+For migration only, the lifecycle can read an existing `__ps_name` record
+written by an older PartyServer release. It never writes that key. Deprecated
+name headers and bootstrap methods are not supported.
+
+If a name cannot be resolved, the error covers named addressing, updating local
+Wrangler/workerd and the compatibility date, unsupported raw IDs and oversized
+names, and rescheduling alarms created before 2026-03-15.

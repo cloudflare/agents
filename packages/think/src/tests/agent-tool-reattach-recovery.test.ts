@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { ThinkRecoveryTestAgent } from "./agents/think-session";
 
 async function freshRecoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
     name
   );

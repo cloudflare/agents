@@ -1,8 +1,7 @@
 ---
 "agents": minor
-"partyserver": minor
 ---
 
-Vendor PartyServer into the Agents repository and add a generic Durable Object component lifecycle for startup, request interception, alarms, and explicit disposal. Re-export the substrate from `agents/lifecycle` while preserving existing `Agent` and `partyserver` exports and package identity.
+Vendor the required PartyServer runtime into `agents/lifecycle` and add a reusable Durable Object lifecycle for startup, request interception, alarms, and WebSockets. `Agent` now directly extends Cloudflare's `DurableObject` and composes the same lifecycle used by standalone objects.
 
-Named Durable Objects now use native `ctx.id.name` without writing a redundant `__ps_name` copy. Legacy reads, raw-ID bootstrap, and mixed-version wire paths remain supported.
+Lifecycle WebSockets always use Cloudflare's Hibernation API; the `static options.hibernate` switch and in-memory connection mode are removed. Named Durable Objects use native `ctx.id.name`, while a read-only `__ps_name` fallback migrates objects created by older releases without writing new compatibility state.
