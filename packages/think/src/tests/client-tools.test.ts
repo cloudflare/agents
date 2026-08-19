@@ -3313,6 +3313,10 @@ describe("Think — regeneration", () => {
     expect(await agent.getCompactionHistoryMessageIds()).toEqual([
       [user1.id, assistant1.id, user2.id]
     ]);
+    expect((await agent.getTextOnlyPromptRoles()).slice(-2)).toEqual([
+      ["system", "user", "assistant", "user"],
+      ["system", "assistant", "assistant", "user"]
+    ]);
     expect(await agent.getBranches(user2.id)).toHaveLength(2);
 
     await closeWS(ws);

@@ -11824,7 +11824,10 @@ export class Think<
                     );
                     // Compaction shortened history → retry. A no-op compaction
                     // can't fix the overflow, so fall through to terminal.
-                    if (shortened) continue;
+                    if (shortened) {
+                      inferenceHistory = regenerationHistory;
+                      continue;
+                    }
                   }
                   // Budget spent, aborted, or compaction no-op: deliver
                   // terminally (through onChatError, classified) so the turn
