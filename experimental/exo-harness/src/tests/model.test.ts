@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createBindingRunFetch,
+  gatewayErrorMessage,
   openaiResponsesModelId,
   parseJsonRequestBody,
   parseModelSpec,
@@ -121,5 +122,40 @@ describe("createBindingRunFetch", () => {
       gateway: { id: "exo-harness" },
       returnRawResponse: true
     });
+  });
+
+  it("throws the gateway JSON error instead of HTTP status text", async () => {
+    const fetchImpl = createBindingRunFetch({
+      slug: "openai/gpt-5.6-luna",
+      gateway: "exo-harness",
+      binding: {
+        async run() {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Gateway authentication is required to use unified billing. Enable authentication on your gateway or provide your own API key (BYOK)."
+            }),
+            { status: 402, statusText: "Payment Required" }
+          );
+        }
+      }
+    });
+
+    await expect(
+      fetchImpl("https://api.openai.com/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ input: "hi" })
+      })
+    ).rejects.toThrow(/Gateway authentication is required/);
+  });
+});
+
+describe("gatewayErrorMessage", () => {
+  it("reads error from a JSON body", async () => {
+    const resp = new Response(JSON.stringify({ error: "credits empty" }), {
+      status: 402,
+      statusText: "Payment Required"
+    });
+    expect(await gatewayErrorMessage(resp)).toBe("credits empty");
   });
 });

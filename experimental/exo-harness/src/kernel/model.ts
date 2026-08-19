@@ -124,12 +124,45 @@ export function createBindingRunFetch(options: {
     const body = parseJsonRequestBody(init?.body);
     // The slug carries the model; extras can trip input validators.
     delete body.model;
-    return binding.run(slug, body, {
+    const resp = await binding.run(slug, body, {
       gateway: { id: gateway },
       returnRawResponse: true,
       ...(init?.signal ? { signal: init.signal } : {})
     });
+    if (!resp.ok) {
+      throw new Error(await gatewayErrorMessage(resp));
+    }
+    return resp;
   }) as typeof globalThis.fetch;
+}
+
+/**
+ * Prefer the gateway/provider JSON body over HTTP status text.
+ * A 402 arrives as "Payment required" even when the body says
+ * "Gateway authentication is required to use unified billing."
+ */
+export async function gatewayErrorMessage(resp: Response): Promise<string> {
+  const text = await resp.text();
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return parsed.error.trim().slice(0, 400);
+    }
+    if (parsed.error && typeof parsed.error === "object") {
+      const msg = (parsed.error as { message?: unknown }).message;
+      if (typeof msg === "string" && msg.trim()) {
+        return msg.trim().slice(0, 400);
+      }
+    }
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim().slice(0, 400);
+    }
+  } catch {
+    // not JSON
+  }
+  const trimmed = text.trim();
+  if (trimmed) return trimmed.slice(0, 400);
+  return resp.statusText.trim() || `model call failed (${resp.status})`;
 }
 
 /** One-line, client-safe model/turn error (no stacks). */
