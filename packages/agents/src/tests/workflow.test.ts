@@ -39,7 +39,8 @@ describe("workflow operations", () => {
           binding: "TestWorkflowAgent"
         }),
         sql: () => [],
-        _emit: vi.fn()
+        _emit: vi.fn(),
+        _rearmWorkflowCleanup: vi.fn()
       } as unknown as Agent<Cloudflare.Env>;
 
       await Agent.prototype.runWorkflow.call(
@@ -113,6 +114,119 @@ describe("workflow operations", () => {
 
       const workflow = await agentStub.getWorkflowById("non-existent-id");
       expect(workflow).toBeNull();
+    });
+
+    it("arms bounded cleanup with 30-day default retention", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-defaults");
+      await agentStub.insertTestWorkflow(
+        "wf-cleanup-defaults",
+        "TEST_WORKFLOW",
+        "queued"
+      );
+
+      const state = await agentStub.getWorkflowCleanupState(
+        "wf-cleanup-defaults"
+      );
+      expect(state?.successRetentionSeconds).toBe(30 * 24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(30 * 24 * 60 * 60);
+      expect(state?.expiresAt).toBeNull();
+      expect(state?.alarm).not.toBeNull();
+    });
+
+    it("stores normalized retention for local outcome cleanup", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-retention");
+      const workflowId = "wf-cleanup-retention";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: "1 day",
+        errorRetention: "2 weeks"
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(2 * 7 * 24 * 60 * 60);
+      expect(state?.expiresAt).toBeNull();
+      expect(state?.alarm).not.toBeNull();
+    });
+
+    it("rounds numeric retention up from milliseconds", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-numeric");
+      const workflowId = "wf-cleanup-numeric";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: 60_001,
+        errorRetention: 120_000
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(61);
+      expect(state?.errorRetentionSeconds).toBe(120);
+    });
+
+    it("uses the 30-day fallback for an omitted outcome", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-partial");
+      const workflowId = "wf-cleanup-partial";
+
+      await agentStub.runSimpleWorkflowWithRetentionTest(workflowId, {
+        successRetention: "1 day"
+      });
+
+      const state = await agentStub.getWorkflowCleanupState(workflowId);
+      expect(state?.successRetentionSeconds).toBe(24 * 60 * 60);
+      expect(state?.errorRetentionSeconds).toBe(30 * 24 * 60 * 60);
+    });
+
+    it.each([
+      ["complete", "successRetentionSeconds"],
+      ["errored", "errorRetentionSeconds"],
+      ["terminated", "errorRetentionSeconds"]
+    ] as const)(
+      "uses the terminal-outcome retention for %s workflows",
+      async (status, retentionKey) => {
+        const agentStub = await getTestAgent(`workflow-cleanup-${status}`);
+        const workflowId = `wf-cleanup-${status}`;
+        await agentStub.insertTestWorkflow(
+          workflowId,
+          "TEST_WORKFLOW",
+          "queued"
+        );
+
+        await agentStub.setWorkflowTerminal(workflowId, status);
+        const state = await agentStub.getWorkflowCleanupState(workflowId);
+        expect(state?.completedAt).not.toBeNull();
+        expect(state?.expiresAt).toBe(
+          (state?.completedAt ?? 0) + (state?.[retentionKey] ?? 0)
+        );
+      }
+    );
+
+    it("deletes only expired local tracking rows and stops cleanup", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-expired");
+      await agentStub.insertTestWorkflow(
+        "wf-cleanup-expired",
+        "TEST_WORKFLOW",
+        "complete"
+      );
+      await agentStub.expireWorkflow("wf-cleanup-expired");
+
+      await agentStub.runWorkflowCleanup();
+
+      expect(await agentStub.getWorkflowById("wf-cleanup-expired")).toBeNull();
+    });
+
+    it("deletes stale tracking when the Workflow instance no longer exists", async () => {
+      const agentStub = await getTestAgent("workflow-cleanup-missing");
+      const workflowId = "wf-cleanup-missing";
+      await agentStub.insertTestWorkflow(
+        workflowId,
+        "TEST_WORKFLOW",
+        "running"
+      );
+      await agentStub.makeWorkflowDueForReconciliation(workflowId);
+
+      await agentStub.runWorkflowCleanup();
+
+      expect(await agentStub.getWorkflowById(workflowId)).toBeNull();
     });
 
     it("should query workflows by status", async () => {

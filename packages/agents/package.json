@@ -29,6 +29,7 @@
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
+    "itty-time": "2.0.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.16",
     "partyserver": "^0.5.9",

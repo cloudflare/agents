@@ -102,11 +102,14 @@ const EXPECTED_SCHEMA_DDL = [
           error_message TEXT,
           created_at INTEGER NOT NULL DEFAULT (unixepoch()),
           updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-          completed_at INTEGER
+          completed_at INTEGER,
+          expires_at INTEGER,
+          success_retention_seconds INTEGER NOT NULL DEFAULT (30 * 24 * 60 * 60),
+          error_retention_seconds INTEGER NOT NULL DEFAULT (30 * 24 * 60 * 60)
         )`
 ];
 
-const EXPECTED_SCHEMA_VERSION = 11;
+const EXPECTED_SCHEMA_VERSION = 12;
 
 describe("schema DDL snapshot", () => {
   it("should match the expected DDL for the current schema version", async () => {
