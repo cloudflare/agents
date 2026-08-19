@@ -201,7 +201,6 @@ import {
   toolPartHasSettledResult,
   persistReconstructedOrphan,
   reconcileMessages,
-  resolveToolMergeId,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
   wrapChatFiberSnapshot,
@@ -11536,7 +11535,7 @@ export class Think<
 
           for (const msg of reconciled) {
             if (this._turnQueue.generation !== epoch) return false;
-            await this._persistIncomingMessage(msg, serverMessages);
+            await this._persistIncomingMessage(msg);
           }
 
           if (this._turnQueue.generation !== epoch) return false;
@@ -12983,21 +12982,12 @@ export class Think<
   }
 
   /**
-   * Persist an incoming message after reconciliation. For assistant
-   * messages, also resolve their ID against any server-side row that
-   * already owns the same `toolCallId` so we update the existing row
-   * instead of inserting an orphan duplicate.
+   * Persist an incoming message after batch reconciliation has resolved
+   * assistant IDs and merged any server-owned tool outputs.
    */
-  private async _persistIncomingMessage(
-    msg: UIMessage,
-    serverMessages: readonly UIMessage[]
-  ): Promise<void> {
+  private async _persistIncomingMessage(msg: UIMessage): Promise<void> {
     const sanitized = this._stripReservedMessageMetadata(msg);
-    const resolved =
-      sanitized.role === "assistant"
-        ? resolveToolMergeId(sanitized, serverMessages)
-        : sanitized;
-    await this._upsertMessageInHistory(resolved);
+    await this._upsertMessageInHistory(sanitized);
   }
 
   /**

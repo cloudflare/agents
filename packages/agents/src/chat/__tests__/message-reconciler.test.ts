@@ -253,7 +253,7 @@ describe("reconcileMessages — ID reconciliation", () => {
     expect(result[3].id).toBe("srv-a2");
   });
 
-  it("skips content matching for tool-bearing assistant messages", () => {
+  it("adopts server ID for a toolCallId match", () => {
     const server = [
       toolAssistantMsg("srv-a1", "tc1", "output-available", { output: 1 })
     ];
@@ -261,7 +261,141 @@ describe("reconcileMessages — ID reconciliation", () => {
       toolAssistantMsg("cli-a1", "tc1", "output-available", { output: 1 })
     ];
     const result = reconcileMessages(client, server);
-    expect(result[0].id).toBe("cli-a1");
+    expect(result[0].id).toBe("srv-a1");
+  });
+
+  it("claims reused toolCallIds one-to-one across turns", () => {
+    const server = [
+      userMsg("u1", "first"),
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        output: "old result"
+      })
+    ];
+    const client = [
+      userMsg("u1", "first"),
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        output: "old result"
+      }),
+      userMsg("u2", "second"),
+      toolAssistantMsg("cli-a2", "tc1", "input-available", {
+        input: { turn: 2 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result[1].id).toBe("srv-a1");
+    expect(result[3].id).toBe("cli-a2");
+    expect((result[3].parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+    expect(
+      (result[3].parts[0] as Record<string, unknown>).output
+    ).toBeUndefined();
+  });
+
+  it("still merges a terminal result into an unclaimed same-input duplicate", () => {
+    // The server row is claimed by an exact-ID match, so the stale duplicate
+    // can claim nothing. It carries the SAME input, so it is the same call and
+    // must still pick up the server's terminal state — otherwise it persists
+    // as a dangling `input-available` orphan (#1381) and the server's
+    // output-error is lost from that row (#1623).
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-error", {
+        input: { q: "same" },
+        output: undefined
+      })
+    ];
+    const client = [
+      toolAssistantMsg("srv-a1", "tc1", "output-error", {
+        input: { q: "same" }
+      }),
+      toolAssistantMsg("cli-a9", "tc1", "input-available", {
+        input: { q: "same" }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result).toHaveLength(2);
+    expect((result[1].parts[0] as Record<string, unknown>).state).toBe(
+      "output-error"
+    );
+  });
+
+  it("merges a result stored on a different server row than the one matched", () => {
+    // The incoming message resolves to srv-a1, which carries tc1 but not tc2.
+    // tc2's result was persisted on a separate row, so a per-message-only
+    // lookup would write tc2 back as still pending.
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "one" },
+        output: "one done"
+      }),
+      toolAssistantMsg("srv-a2", "tc2", "output-available", {
+        input: { q: "two" },
+        output: "two done"
+      })
+    ];
+    const client = [
+      {
+        id: "srv-a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            state: "input-available",
+            input: { q: "one" }
+          },
+          {
+            type: "tool-calc",
+            toolCallId: "tc2",
+            state: "input-available",
+            input: { q: "two" }
+          }
+        ]
+      } as unknown as ChatMessage
+    ];
+
+    const result = reconcileMessages(client, server);
+    const parts = result[0].parts as unknown as Record<string, unknown>[];
+
+    expect(parts[0].state).toBe("output-available");
+    expect(parts[0].output).toBe("one done");
+    expect(parts[1].state).toBe("output-available");
+    expect(parts[1].output).toBe("two done");
+  });
+
+  it("does not merge a terminal result into a reused-ID call with different input", () => {
+    // Same toolCallId but a DIFFERENT input means the provider reused the ID
+    // for a genuinely new call, which must not inherit the old result.
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "first" },
+        output: "old result"
+      })
+    ];
+    const client = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "first" },
+        output: "old result"
+      }),
+      toolAssistantMsg("cli-a9", "tc1", "input-available", {
+        input: { q: "second" }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result).toHaveLength(2);
+    expect(result[1].id).toBe("cli-a9");
+    expect((result[1].parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+    expect(
+      (result[1].parts[0] as Record<string, unknown>).output
+    ).toBeUndefined();
   });
 
   it("passes through when server state is empty", () => {
@@ -327,6 +461,7 @@ describe("reconcileMessages — composed stages", () => {
     expect((result[0].parts[0] as Record<string, unknown>).state).toBe(
       "output-available"
     );
+    expect(result[0].id).toBe("srv-a1");
     expect(result[1].id).toBe("srv-a2");
   });
 
@@ -355,7 +490,7 @@ describe("reconcileMessages — composed stages", () => {
       }
     ];
     const result = reconcileMessages([msg], server);
-    expect(result[0].id).toBe("cli-a1");
+    expect(result[0].id).toBe("srv-a1");
   });
 });
 
