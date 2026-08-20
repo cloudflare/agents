@@ -11,7 +11,7 @@ import { DurableObject } from "cloudflare:workers";
 import { DurableObjectLifecycle } from "agents/lifecycle";
 
 export class MyObject extends DurableObject<Env> {
-  readonly lifecycle = new DurableObjectLifecycle(this);
+  readonly lifecycle = DurableObjectLifecycle.install(this);
 
   onStart(): void {
     // Runs once per in-memory object lifetime, before work is handled.
@@ -27,10 +27,21 @@ export class MyObject extends DurableObject<Env> {
 }
 ```
 
-Constructing `DurableObjectLifecycle` installs the runtime-facing `fetch`,
-`alarm`, `webSocketMessage`, `webSocketClose`, and `webSocketError` handlers on
-the object. Do not define forwarding versions of those methods. Implement the
-semantic callbacks instead.
+The side-effect-named static factory constructs the lifecycle and installs the
+runtime-facing `fetch`, `alarm`, `webSocketMessage`, `webSocketClose`, and
+`webSocketError` handlers. Do not define forwarding versions of those methods.
+Implement the semantic callbacks instead.
+
+The expanded equivalent is available when useful:
+
+```ts
+readonly lifecycle = new DurableObjectLifecycle(this);
+
+constructor(ctx: DurableObjectState, env: Env) {
+  super(ctx, env);
+  this.lifecycle.installHandlers();
+}
+```
 
 Route named objects from the outer Worker when you want URL routing:
 
@@ -104,7 +115,7 @@ Install it before startup:
 ```ts
 export class MyObject extends DurableObject<Env> {
   private readonly audit = new AuditLog(this.ctx.storage);
-  readonly lifecycle = new DurableObjectLifecycle(this).use(this.audit);
+  readonly lifecycle = DurableObjectLifecycle.install(this).use(this.audit);
 
   onRequest(): Response {
     return new Response("application response");

@@ -21,7 +21,7 @@ expectTypeOf<AgentRoutingRetryOptions>().toEqualTypeOf<RoutingRetryOptions>();
 expectTypeOf<AgentWSMessage>().toEqualTypeOf<WSMessage>();
 
 class LifecycleTypeProbe extends DurableObject {
-  readonly lifecycle = new DurableObjectLifecycle(this);
+  readonly lifecycle = DurableObjectLifecycle.install(this);
 
   onRequest(request: Request): Response {
     return new Response(request.url);

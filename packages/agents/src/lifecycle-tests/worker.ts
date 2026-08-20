@@ -16,7 +16,9 @@ type StartupProps = { label: string };
 export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #events: string[] = [];
 
-  readonly lifecycle = new DurableObjectLifecycle<Env, StartupProps>(this).use({
+  readonly lifecycle = DurableObjectLifecycle.install<Env, StartupProps>(
+    this
+  ).use({
     onStart: ({ props }) => {
       this.#events.push(`component:start:${props?.label ?? "none"}`);
     },
@@ -54,6 +56,15 @@ export class PlainLifecycleObject extends DurableObject<Env> {
 
   onMessage(connection: Connection, message: WSMessage): void {
     connection.send(`echo:${String(message)}`);
+  }
+
+  installHandlersAgainForTest(): string {
+    try {
+      this.lifecycle.installHandlers();
+      return "installed";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   async seedLegacyNameForTest(name: string): Promise<void> {

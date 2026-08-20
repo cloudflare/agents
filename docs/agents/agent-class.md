@@ -109,7 +109,7 @@ Lastly, it's worth mentioning that the DO also has the Worker `Env` in `this.env
 
 ## Layer 1: lifecycle composition
 
-`Agent` constructs `new DurableObjectLifecycle(this)`. The lifecycle installs the platform-facing `fetch`, `alarm`, `webSocketMessage`, `webSocketClose`, and `webSocketError` handlers on the Agent instance. `Agent` and user subclasses implement semantic callbacks instead of a second base class:
+`Agent` uses `DurableObjectLifecycle.install(this)`, an explicit side-effect-named factory that constructs the lifecycle and installs the platform-facing `fetch`, `alarm`, `webSocketMessage`, `webSocketClose`, and `webSocketError` handlers. Agent subclasses implement semantic callbacks instead of a second base class:
 
 ```ts
 class MyAgent extends Agent {

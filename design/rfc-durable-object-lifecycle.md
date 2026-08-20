@@ -28,7 +28,7 @@ import { DurableObject } from "cloudflare:workers";
 import { DurableObjectLifecycle } from "agents/lifecycle";
 
 export class MyObject extends DurableObject<Env> {
-  readonly lifecycle = new DurableObjectLifecycle(this);
+  readonly lifecycle = DurableObjectLifecycle.install(this);
 
   onStart() {}
 
@@ -40,10 +40,11 @@ export class MyObject extends DurableObject<Env> {
 }
 ```
 
-Constructing the lifecycle installs the platform `fetch`, `alarm`,
-`webSocketMessage`, `webSocketClose`, and `webSocketError` handlers on that
-instance. The owning class implements semantic callbacks rather than forwarding
-runtime handlers manually.
+The side-effect-named `install(this)` factory constructs the lifecycle and
+explicitly installs platform `fetch`, `alarm`, `webSocketMessage`,
+`webSocketClose`, and `webSocketError`. The expanded `new ...` plus
+`installHandlers()` form remains available. The class implements semantic
+callbacks rather than forwarding runtime handlers manually.
 
 `Agent` follows the same composition:
 
@@ -69,10 +70,10 @@ interface DurableObjectLifecycleComponent<Props> {
 }
 ```
 
-A host adds a component before startup:
+A host can install and add a component in one field initializer:
 
 ```ts
-readonly lifecycle = new DurableObjectLifecycle(this).use(this.mcp);
+readonly lifecycle = DurableObjectLifecycle.install(this).use(this.mcp);
 ```
 
 Dependencies such as storage, bindings, clocks, authentication, observability,

@@ -606,8 +606,8 @@ type LifecycleHost<Props extends object> = {
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
  * Construct this as an instance field on a class that directly extends
- * `DurableObject`. Construction installs fetch, alarm, and hibernating
- * WebSocket handlers on that object.
+ * `DurableObject`, then call {@link DurableObjectLifecycle.installHandlers}
+ * from that class's constructor.
  */
 export class DurableObjectLifecycle<
   Env extends object = Cloudflare.Env,
@@ -624,11 +624,27 @@ export class DurableObjectLifecycle<
 
   #status: "zero" | "starting" | "started" = "zero";
   #componentsLocked = false;
+  #handlersInstalled = false;
 
   /**
-   * Install lifecycle dispatch on a Durable Object instance.
+   * Construct and install a lifecycle in one explicit operation.
    *
-   * @param host - The Durable Object whose runtime handlers this lifecycle owns.
+   * @param host - The Durable Object whose runtime handlers the lifecycle owns.
+   * @returns The installed lifecycle.
+   */
+  static install<
+    Env extends object,
+    Props extends Record<string, unknown> = Record<string, unknown>
+  >(host: DurableObject<Env>): DurableObjectLifecycle<Env, Props> {
+    const lifecycle = new DurableObjectLifecycle<Env, Props>(host);
+    lifecycle.installHandlers();
+    return lifecycle;
+  }
+
+  /**
+   * Bind a lifecycle to a Durable Object instance without mutating its handlers.
+   *
+   * @param host - The Durable Object whose runtime lifecycle this object owns.
    */
   constructor(host: DurableObject<Env>) {
     // SAFETY: DurableObject exposes ctx as protected to subclasses. The
@@ -638,6 +654,22 @@ export class DurableObjectLifecycle<
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
     this.#connectionManager = new HibernatingConnectionManager(this.#ctx);
+  }
+
+  /**
+   * Install platform fetch, alarm, and hibernating WebSocket handlers.
+   *
+   * Existing handlers are preserved for framework-owned dispatch such as the
+   * Agent's sub-agent router and alarm circuit breaker. Calling this method
+   * more than once is an error.
+   */
+  installHandlers(): void {
+    if (this.#handlersInstalled) {
+      throw new Error(
+        "Durable Object lifecycle handlers are already installed"
+      );
+    }
+    this.#handlersInstalled = true;
 
     const handlers = {
       fetch: this.fetch.bind(this),
@@ -647,8 +679,8 @@ export class DurableObjectLifecycle<
       webSocketError: this.webSocketError.bind(this)
     };
     for (const [name, handler] of Object.entries(handlers)) {
-      if (name in host) continue;
-      Object.defineProperty(host, name, {
+      if (name in this.#host) continue;
+      Object.defineProperty(this.#host, name, {
         value: handler,
         configurable: true
       });

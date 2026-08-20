@@ -30,6 +30,14 @@ describe("DurableObjectLifecycle", () => {
     });
   });
 
+  it("rejects installing runtime handlers twice", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+
+    expect(await stub.installHandlersAgainForTest()).toBe(
+      "Durable Object lifecycle handlers are already installed"
+    );
+  });
+
   it("lets the first component response intercept a request", async () => {
     const name = crypto.randomUUID();
     const response = await worker.fetch(
