@@ -11,7 +11,7 @@ function requireWebSocket(response: Response): WebSocket {
 }
 
 describe("DurableObjectLifecycle", () => {
-  it("installs fetch and dispatches startup, components, then the host", async () => {
+  it("installs fetch and dispatches startup, capabilities, then the host", async () => {
     const name = crypto.randomUUID();
     const response = await exports.default.fetch(
       `https://example.com/objects/plain-lifecycle-object/${name}`
@@ -22,9 +22,9 @@ describe("DurableObjectLifecycle", () => {
       name,
       hasInternalPropsHeader: false,
       events: [
-        "component:start:routed",
+        "capability:start:routed",
         "host:start:routed",
-        "component:request",
+        "capability:request",
         "host:request"
       ]
     });
@@ -38,23 +38,23 @@ describe("DurableObjectLifecycle", () => {
     );
   });
 
-  it("lets the first component response intercept a request", async () => {
+  it("lets the first capability response intercept a request", async () => {
     const name = crypto.randomUUID();
     const response = await worker.fetch(
       new Request(
-        `https://example.com/objects/plain-lifecycle-object/${name}?component`
+        `https://example.com/objects/plain-lifecycle-object/${name}?capability`
       ),
       env
     );
 
     expect(await response.json()).toEqual([
-      "component:start:routed",
+      "capability:start:routed",
       "host:start:routed",
-      "component:request"
+      "capability:request"
     ]);
   });
 
-  it("installs alarm and dispatches components before the host", async () => {
+  it("installs alarm and dispatches capabilities before the host", async () => {
     const name = crypto.randomUUID();
     const stub = env.PlainLifecycleObject.getByName(name);
     await stub.startFromRpc({ label: "rpc" });
@@ -62,9 +62,9 @@ describe("DurableObjectLifecycle", () => {
 
     expect(await runDurableObjectAlarm(stub)).toBe(true);
     expect(await stub.getEvents()).toEqual([
-      "component:start:rpc",
+      "capability:start:rpc",
       "host:start:rpc",
-      "component:alarm",
+      "capability:alarm",
       "host:alarm"
     ]);
   });

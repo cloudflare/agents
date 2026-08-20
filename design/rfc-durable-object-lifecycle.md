@@ -56,12 +56,12 @@ DurableObject
 
 There is one lifecycle implementation and no nominally distinct server class.
 
-## Components
+## Capabilities
 
 Reusable capabilities implement only phases they need:
 
 ```ts
-interface DurableObjectLifecycleComponent<Props> {
+interface DurableObjectCapability<Props> {
   onStart?(context: { props: Props | undefined }): void | Promise<void>;
   onRequest?(context: {
     request: Request;
@@ -70,7 +70,7 @@ interface DurableObjectLifecycleComponent<Props> {
 }
 ```
 
-A host can install and add a component in one field initializer:
+A host can install and add a capability in one field initializer:
 
 ```ts
 readonly lifecycle = DurableObjectLifecycle.install(this).use(this.mcp);
@@ -78,16 +78,16 @@ readonly lifecycle = DurableObjectLifecycle.install(this).use(this.mcp);
 
 Dependencies such as storage, bindings, clocks, authentication, observability,
 and protocol publication are supplied explicitly when constructing the
-component. Components do not receive the whole Agent through an implicit host
+capability. Capabilities do not receive the whole Agent through an implicit host
 registry.
 
 Phase policy is fixed:
 
-- component startup runs sequentially in registration order, followed by the
+- capability startup runs sequentially in registration order, followed by the
   host's `onStart`;
-- requests stop at the first component `Response`, otherwise the host's
+- requests stop at the first capability `Response`, otherwise the host's
   `onRequest` runs;
-- component alarms run sequentially in registration order, followed by the
+- capability alarms run sequentially in registration order, followed by the
   host's `onAlarm`;
 - a failure stops the phase and propagates;
 - failed startup can be retried.
@@ -143,6 +143,6 @@ Agent's internal RPC wrappers already enforce this boundary.
 ## Non-goals
 
 - AI turns are not generic Durable Object lifecycle phases.
-- Components do not independently own the single physical alarm timestamp.
+- Capabilities do not independently own the single physical alarm timestamp.
 - The lifecycle does not offer alternate dispatch policies, middleware `next()`
   semantics, an in-memory WebSocket mode, or speculative teardown hooks.

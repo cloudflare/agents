@@ -49,11 +49,12 @@ import {
   type Connection,
   type ConnectionContext,
   DurableObjectLifecycle,
-  type DurableObjectRoutingOptions,
+  type DurableObjectRouteOptions,
   type WSMessage,
-  getLifecycleStubByName,
   routeDurableObjectRequest
 } from "./lifecycle/durable-object-lifecycle";
+import { getAgentByName } from "./agent-routing";
+export { getAgentByName, type AgentGetOptions } from "./agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
 import {
@@ -3956,7 +3957,7 @@ export class Agent<
       );
     }
 
-    return (await getLifecycleStubByName<Cloudflare.Env, Agent>(
+    return (await getAgentByName<Cloudflare.Env, Agent>(
       binding as unknown as DurableObjectNamespace<Agent>,
       root.name
     )) as unknown as RootFacetRpcSurface;
@@ -8013,10 +8014,7 @@ export class Agent<
           `exported under that class name and registered as a Durable Object binding.`
       );
     }
-    return await getLifecycleStubByName<Cloudflare.Env, T>(
-      binding,
-      parent.name
-    );
+    return await getAgentByName<Cloudflare.Env, T>(binding, parent.name);
   }
 
   private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
@@ -8062,7 +8060,7 @@ export class Agent<
       );
     }
 
-    const rootStubPromise = getLifecycleStubByName<Cloudflare.Env, Agent>(
+    const rootStubPromise = getAgentByName<Cloudflare.Env, Agent>(
       rootBinding,
       root.name
     );
@@ -12944,15 +12942,7 @@ export type AgentContext = DurableObjectState;
 /**
  * Configuration options for Agent routing
  */
-export type AgentOptions<Env> = DurableObjectRoutingOptions<Env>;
-
-export type AgentGetOptions<
-  Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
-> = Pick<
-  DurableObjectRoutingOptions<Env, Props>,
-  "jurisdiction" | "locationHint" | "props" | "routingRetry"
->;
+export type AgentOptions<Env> = DurableObjectRouteOptions<Env>;
 
 /**
  * Route a request to the appropriate Agent
@@ -12969,7 +12959,7 @@ export async function routeAgentRequest<Env>(
   // oxlint-disable-next-line typescript/no-explicit-any
   return routeDurableObjectRequest(request, env as any, {
     prefix: "agents",
-    ...(options as DurableObjectRoutingOptions<Record<string, unknown>>)
+    ...(options as DurableObjectRouteOptions<Record<string, unknown>>)
   });
 }
 
@@ -13133,27 +13123,6 @@ export async function routeAgentEmail<
     _secureRouted: routingInfo._secureRouted,
     _bridge: bridge
   });
-}
-
-/**
- * Get or create an Agent by name
- * @template Env Environment type containing bindings
- * @template T Type of the Agent class
- * @param namespace Agent namespace
- * @param name Name of the Agent instance
- * @param options Options for Agent creation
- * @returns Promise resolving to an Agent instance stub
- */
-export async function getAgentByName<
-  Env extends Cloudflare.Env = Cloudflare.Env,
-  T extends Agent<Env> = Agent<Env>,
-  Props extends Record<string, unknown> = Record<string, unknown>
->(
-  namespace: DurableObjectNamespace<T>,
-  name: string,
-  options?: AgentGetOptions<Env, Props>
-) {
-  return getLifecycleStubByName<Env, T>(namespace, name, options);
 }
 
 /**

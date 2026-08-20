@@ -2,12 +2,12 @@ import { DurableObject, env as defaultEnv } from "cloudflare:workers";
 import { nanoid } from "nanoid";
 
 import {
-  LifecycleComponentRunner,
-  type DurableObjectLifecycleComponent
-} from "./component-lifecycle";
+  CapabilityRunner,
+  type DurableObjectCapability
+} from "./capability-runner";
 import {
-  createLazyConnection,
-  HibernatingConnectionManager,
+  createConnection,
+  ConnectionManager,
   isManagedWebSocket
 } from "./connection";
 
@@ -21,10 +21,10 @@ import type {
 } from "./types";
 
 export {
-  type DurableObjectLifecycleComponent,
-  type DurableObjectRequestContext,
-  type DurableObjectStartContext
-} from "./component-lifecycle";
+  type DurableObjectCapability,
+  type CapabilityRequestContext,
+  type CapabilityStartContext
+} from "./capability-runner";
 export * from "./types";
 
 /** Payload delivered to a lifecycle-managed WebSocket callback. */
@@ -143,7 +143,8 @@ interface RoutingRetryContext {
   className?: string;
 }
 
-function durableObjectGetOptions(
+/** @internal Convert public placement options for namespace.get(). */
+export function durableObjectGetOptions(
   options: { locationHint?: DurableObjectLocationHint } | undefined
 ) {
   return options?.locationHint
@@ -207,7 +208,8 @@ function routingRetryDelayMs(
   return Math.floor(Math.random() * upperBoundMs);
 }
 
-async function retryDurableObjectOperation<T>(
+/** @internal Retry a transient Durable Object routing operation. */
+export async function retryDurableObjectOperation<T>(
   operation: () => Promise<T>,
   context: RoutingRetryContext,
   retryOptions: false | RoutingRetryOptions | undefined
@@ -299,43 +301,6 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-/** @internal Resolve a named Agent and await lifecycle startup. */
-export async function getLifecycleStubByName<
-  Env extends object,
-  T extends DurableObject<Env>,
-  Props extends Record<string, unknown> = Record<string, unknown>
->(
-  namespace: DurableObjectNamespace<T>,
-  name: string,
-  options?: {
-    jurisdiction?: DurableObjectJurisdiction;
-    locationHint?: DurableObjectLocationHint;
-    props?: Props;
-    routingRetry?: false | RoutingRetryOptions;
-  }
-): Promise<DurableObjectStub<T>> {
-  if (options?.jurisdiction) {
-    namespace = namespace.jurisdiction(options.jurisdiction);
-  }
-
-  const id = namespace.idFromName(name);
-  const getOptions = durableObjectGetOptions(options);
-  const stub = namespace.get(id, getOptions);
-
-  // SAFETY: This helper is only used for Agent classes, which expose the
-  // internal lifecycle initializer for native RPC calls that bypass fetch.
-  const lifecycleStub = stub as unknown as {
-    __unsafe_ensureInitialized(props?: Props): Promise<void>;
-  };
-  await retryDurableObjectOperation(
-    () => lifecycleStub.__unsafe_ensureInitialized(options?.props),
-    { name },
-    options?.routingRetry
-  );
-
-  return stub;
-}
-
 function camelCaseToKebabCase(str: string): string {
   // If string is all uppercase, convert to lowercase
   if (str === str.toUpperCase() && str !== str.toLowerCase()) {
@@ -352,7 +317,7 @@ function camelCaseToKebabCase(str: string): string {
   return kebabified.replace(/_/g, "-").replace(/-$/, "");
 }
 /** Named Durable Object route matched in the outer Worker. */
-export interface DurableObjectRoute<Env = Cloudflare.Env> {
+export interface DurableObjectRouteMatch<Env = Cloudflare.Env> {
   /** The Durable Object class name / environment binding name. */
   className: Extract<keyof Env, string>;
   /** The named Durable Object instance extracted from the URL. */
@@ -360,7 +325,7 @@ export interface DurableObjectRoute<Env = Cloudflare.Env> {
 }
 
 /** Options supported by `routeDurableObjectRequest`. */
-export interface DurableObjectRoutingOptions<
+export interface DurableObjectRouteOptions<
   Env = Cloudflare.Env,
   Props = Record<string, unknown>
 > {
@@ -402,11 +367,11 @@ export interface DurableObjectRoutingOptions<
   routingRetry?: false | RoutingRetryOptions;
   onBeforeConnect?: (
     req: Request,
-    route: DurableObjectRoute<Env>
+    route: DurableObjectRouteMatch<Env>
   ) => Response | Request | void | Promise<Response | Request | void>;
   onBeforeRequest?: (
     req: Request,
-    route: DurableObjectRoute<Env>
+    route: DurableObjectRouteMatch<Env>
   ) =>
     | Response
     | Request
@@ -454,7 +419,7 @@ export async function routeDurableObjectRequest<
 >(
   req: Request,
   env: Env = defaultEnv as Env,
-  options?: DurableObjectRoutingOptions<Env, Props>
+  options?: DurableObjectRouteOptions<Env, Props>
 ): Promise<Response | null> {
   if (!namespaceMapCache.has(env)) {
     const namespaceMap: Record<string, DurableObjectNamespace> = {};
@@ -537,7 +502,7 @@ export async function routeDurableObjectRequest<
     req = mutableRequest(req);
 
     const className = bindingNames[namespace] as Extract<keyof Env, string>;
-    const route: DurableObjectRoute<Env> = { className, name };
+    const route: DurableObjectRouteMatch<Env> = { className, name };
 
     if (isWebSocket) {
       if (options?.onBeforeConnect) {
@@ -616,14 +581,14 @@ export class DurableObjectLifecycle<
   readonly #host: LifecycleHost<Props>;
   readonly #ctx: DurableObjectState;
   readonly #parentClassName: string;
-  readonly #components: DurableObjectLifecycleComponent<Props>[] = [];
-  readonly #componentRunner = new LifecycleComponentRunner<Props>(
-    () => this.#components
+  readonly #capabilities: DurableObjectCapability<Props>[] = [];
+  readonly #capabilityRunner = new CapabilityRunner<Props>(
+    () => this.#capabilities
   );
-  readonly #connectionManager: HibernatingConnectionManager;
+  readonly #connectionManager: ConnectionManager;
 
   #status: "zero" | "starting" | "started" = "zero";
-  #componentsLocked = false;
+  #capabilitiesLocked = false;
   #handlersInstalled = false;
 
   /**
@@ -653,7 +618,7 @@ export class DurableObjectLifecycle<
     this.#host = host as unknown as LifecycleHost<Props>;
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
-    this.#connectionManager = new HibernatingConnectionManager(this.#ctx);
+    this.#connectionManager = new ConnectionManager(this.#ctx);
   }
 
   /**
@@ -690,14 +655,14 @@ export class DurableObjectLifecycle<
   /**
    * Add a reusable capability before this lifecycle starts.
    *
-   * @param component - The component to add in dispatch order.
+   * @param capability - The capability to add in dispatch order.
    * @returns This lifecycle.
    */
-  use(component: DurableObjectLifecycleComponent<Props>): this {
-    if (this.#componentsLocked) {
-      throw new Error("Lifecycle components must be added before startup");
+  use(capability: DurableObjectCapability<Props>): this {
+    if (this.#capabilitiesLocked) {
+      throw new Error("Lifecycle capabilities must be added before startup");
     }
-    this.#components.push(component);
+    this.#capabilities.push(capability);
     return this;
   }
 
@@ -745,10 +710,10 @@ export class DurableObjectLifecycle<
       const url = new URL(request.url);
 
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-        const componentResponse = await this.#componentRunner.request({
+        const capabilityResponse = await this.#capabilityRunner.request({
           request
         });
-        if (componentResponse !== undefined) return componentResponse;
+        if (capabilityResponse !== undefined) return capabilityResponse;
         if (this.#host.onRequest) return await this.#host.onRequest(request);
         return new Response("Not implemented", { status: 404 });
       } else {
@@ -821,7 +786,7 @@ export class DurableObjectLifecycle<
     }
 
     try {
-      const connection = createLazyConnection(ws);
+      const connection = createConnection(ws);
 
       await this.#ensureInitialized();
       return this.#host.onMessage?.(connection, message);
@@ -845,7 +810,7 @@ export class DurableObjectLifecycle<
     }
 
     try {
-      const connection = createLazyConnection(ws);
+      const connection = createConnection(ws);
 
       await this.#ensureInitialized();
       await this.#host.onClose?.(connection, code, reason, wasClean);
@@ -884,7 +849,7 @@ export class DurableObjectLifecycle<
     }
 
     try {
-      const connection = createLazyConnection(ws);
+      const connection = createConnection(ws);
 
       await this.#ensureInitialized();
       return this.#host.onError?.(connection, error);
@@ -897,12 +862,12 @@ export class DurableObjectLifecycle<
   }
 
   /**
-   * Start lifecycle components and the owning Durable Object.
+   * Start lifecycle capabilities and the owning Durable Object.
    *
    * Runtime fetch, alarm, and WebSocket entry points call this automatically.
    * RPC methods may call it explicitly because native RPC bypasses fetch.
    *
-   * @param props - Optional properties supplied to component and host startup.
+   * @param props - Optional properties supplied to capability and host startup.
    */
   async start(props?: Props): Promise<void> {
     if (props !== undefined) this.#props = props;
@@ -920,12 +885,12 @@ export class DurableObjectLifecycle<
     // Fail before host startup if neither native nor migrated identity exists.
     void this.name;
 
-    this.#componentsLocked = true;
+    this.#capabilitiesLocked = true;
     let error: unknown;
     await this.#ctx.blockConcurrencyWhile(async () => {
       this.#status = "starting";
       try {
-        await this.#componentRunner.start({ props: this.#props });
+        await this.#capabilityRunner.start({ props: this.#props });
         await this.#host.onStart?.(this.#props);
         this.#status = "started";
       } catch (cause) {
@@ -996,7 +961,7 @@ export class DurableObjectLifecycle<
   /** Dispatch lifecycle and host alarm callbacks after startup. */
   async alarm(): Promise<void> {
     await this.#ensureInitialized();
-    await this.#componentRunner.alarm();
+    await this.#capabilityRunner.alarm();
     await this.#host.onAlarm?.();
   }
 }

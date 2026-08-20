@@ -22,7 +22,7 @@ export class MyObject extends DurableObject<Env> {
   }
 
   onAlarm(): void {
-    // Runs after lifecycle components process the alarm.
+    // Runs after lifecycle capabilities process the alarm.
   }
 }
 ```
@@ -71,23 +71,23 @@ override `onStart`, `onRequest`, `onConnect`, `onMessage`, `onClose`, and
 routeAgentRequest(request)
 └─ named Durable Object stub.fetch(request)
    └─ lifecycle-installed fetch
-      ├─ lifecycle startup components
+      ├─ lifecycle startup capabilities
       ├─ host onStart
-      ├─ lifecycle request components
+      ├─ lifecycle request capabilities
       │  └─ first Response wins
       └─ host onRequest
 ```
 
-A warm object skips startup but still offers every request to its components.
+A warm object skips startup but still offers every request to its capabilities.
 
-## Reusable components
+## Reusable capabilities
 
 A capability implements only the phases it needs:
 
 ```ts
-import type { DurableObjectLifecycleComponent } from "agents/lifecycle";
+import type { DurableObjectCapability } from "agents/lifecycle";
 
-class AuditLog implements DurableObjectLifecycleComponent {
+class AuditLog implements DurableObjectCapability {
   constructor(private readonly storage: DurableObjectStorage) {}
 
   onStart(): void {
@@ -123,11 +123,11 @@ export class MyObject extends DurableObject<Env> {
 }
 ```
 
-Components run in registration order. Startup and alarms run every hook
+Capabilities run in registration order. Startup and alarms run every hook
 sequentially. Request handling stops at the first returned `Response`. A phase
 failure propagates, and failed startup can be retried.
 
-Pass dependencies to a component explicitly. A component should not receive an
+Pass dependencies to a capability explicitly. A capability should not receive an
 entire Agent merely to reach storage, bindings, authentication, observability,
 or protocol methods.
 
@@ -155,7 +155,7 @@ There is no non-hibernating mode.
 ## Native RPC
 
 Native Durable Object RPC does not pass through `fetch`. An RPC method that
-requires initialized components starts the lifecycle explicitly:
+requires initialized capabilities starts the lifecycle explicitly:
 
 ```ts
 async runTask(): Promise<void> {

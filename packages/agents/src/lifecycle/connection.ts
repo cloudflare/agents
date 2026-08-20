@@ -116,9 +116,7 @@ const isWrapped = (ws: WebSocket): ws is Connection => {
  * Wraps a WebSocket with Connection fields that rehydrate the
  * socket attachments lazily only when requested.
  */
-export const createLazyConnection = (
-  ws: WebSocket | Connection
-): Connection => {
+export const createConnection = (ws: WebSocket | Connection): Connection => {
   if (isWrapped(ws)) {
     return ws;
   }
@@ -182,9 +180,7 @@ export const createLazyConnection = (
   return connection;
 };
 
-class HibernatingConnectionIterator<T> implements IterableIterator<
-  Connection<T>
-> {
+class ConnectionIterator<T> implements IterableIterator<Connection<T>> {
   private index = 0;
   private sockets: WebSocket[] | undefined;
   constructor(
@@ -209,7 +205,7 @@ class HibernatingConnectionIterator<T> implements IterableIterator<
         if (!isManagedWebSocket(socket)) {
           continue;
         }
-        const value = createLazyConnection(socket) as Connection<T>;
+        const value = createConnection(socket) as Connection<T>;
         return { done: false, value };
       }
     }
@@ -250,7 +246,7 @@ function prepareTags(connectionId: string, userTags: string[]): string[] {
 }
 
 /** The platform-backed manager for hibernating WebSockets. */
-export class HibernatingConnectionManager<TState = unknown> {
+export class ConnectionManager<TState = unknown> {
   constructor(private controller: DurableObjectState) {}
 
   getConnection<T = TState>(id: string) {
@@ -262,7 +258,7 @@ export class HibernatingConnectionManager<TState = unknown> {
 
     if (matching.length === 0) return undefined;
     if (matching.length === 1)
-      return createLazyConnection(matching[0]) as Connection<T>;
+      return createConnection(matching[0]) as Connection<T>;
 
     throw new Error(
       `More than one connection found for id ${id}. Did you mean to use getConnections(tag) instead?`
@@ -270,7 +266,7 @@ export class HibernatingConnectionManager<TState = unknown> {
   }
 
   getConnections<T = TState>(tag?: string | undefined) {
-    return new HibernatingConnectionIterator<T>(this.controller, tag);
+    return new ConnectionIterator<T>(this.controller, tag);
   }
 
   accept(connection: Connection, options: { tags: string[] }) {
@@ -286,6 +282,6 @@ export class HibernatingConnectionManager<TState = unknown> {
       __user: null
     });
 
-    return createLazyConnection(connection);
+    return createConnection(connection);
   }
 }

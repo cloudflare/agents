@@ -3,7 +3,7 @@ import {
   DurableObjectLifecycle,
   routeDurableObjectRequest,
   type Connection,
-  type DurableObjectLifecycleComponent,
+  type DurableObjectCapability,
   type WSMessage
 } from "../lifecycle";
 
@@ -20,18 +20,18 @@ export class PlainLifecycleObject extends DurableObject<Env> {
     this
   ).use({
     onStart: ({ props }) => {
-      this.#events.push(`component:start:${props?.label ?? "none"}`);
+      this.#events.push(`capability:start:${props?.label ?? "none"}`);
     },
     onRequest: ({ request }) => {
-      this.#events.push("component:request");
-      if (new URL(request.url).searchParams.has("component")) {
+      this.#events.push("capability:request");
+      if (new URL(request.url).searchParams.has("capability")) {
         return Response.json(this.#events);
       }
     },
     onAlarm: () => {
-      this.#events.push("component:alarm");
+      this.#events.push("capability:alarm");
     }
-  } satisfies DurableObjectLifecycleComponent<StartupProps>);
+  } satisfies DurableObjectCapability<StartupProps>);
 
   onStart(props?: StartupProps): void {
     this.#events.push(`host:start:${props?.label ?? "none"}`);

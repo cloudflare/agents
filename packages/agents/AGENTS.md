@@ -51,7 +51,7 @@ src/
 
   lifecycle/            # Public Durable Object lifecycle composition
     index.ts            # Intentionally small public lifecycle surface
-    durable-object-lifecycle.ts # Runtime handlers, routing, components
+    durable-object-lifecycle.ts # Runtime handlers, routing, capabilities
     connection.ts       # Hibernating WebSocket connection management
 
   chat/                 # Shared chat toolkit (mostly for sibling packages)
@@ -156,7 +156,7 @@ Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `w
 pnpm exec vitest --project lifecycle --run
 ```
 
-Proves constructor composition on a plain `DurableObject`, ordered components,
+Proves constructor composition on a plain `DurableObject`, ordered capabilities,
 routing, native and migrated identity, alarms, and hibernating WebSockets.
 
 ### React tests (`src/react-tests/`)

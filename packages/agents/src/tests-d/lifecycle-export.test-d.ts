@@ -10,7 +10,7 @@ import {
   DurableObjectLifecycle,
   type Connection,
   type ConnectionContext,
-  type DurableObjectLifecycleComponent,
+  type DurableObjectCapability,
   type RoutingRetryOptions,
   type WSMessage
 } from "../lifecycle";
@@ -33,11 +33,11 @@ expectTypeOf<
   LifecycleTypeProbe["lifecycle"]
 >().toEqualTypeOf<DurableObjectLifecycle>();
 
-const component: DurableObjectLifecycleComponent = {
+const capability: DurableObjectCapability = {
   onStart: ({ props }) => {
     expectTypeOf(props).toEqualTypeOf<object | undefined>();
   },
   onRequest: ({ request }) => new Response(request.url)
 };
 
-expectTypeOf(component).toMatchTypeOf<DurableObjectLifecycleComponent>();
+expectTypeOf(capability).toMatchTypeOf<DurableObjectCapability>();

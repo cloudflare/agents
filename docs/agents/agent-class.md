@@ -129,7 +129,7 @@ class MyAgent extends Agent {
 
 Lifecycle WebSockets always use Cloudflare's Hibernation API. Idle clients stay connected while the Durable Object can leave memory; constructor fields and `onStart` run again when a message wakes it. Persist anything needed across wakes in storage or `connection.state`.
 
-Reusable capabilities can be installed through `this.lifecycle.use(component)`. Components start before Agent startup, can intercept requests before `onRequest`, and process alarms before `onAlarm`. See [Durable Object lifecycle](./lifecycle.md).
+Reusable capabilities can be installed through `this.lifecycle.use(capability)`. Capabilities start before Agent startup, can intercept requests before `onRequest`, and process alarms before `onAlarm`. See [Durable Object lifecycle](./lifecycle.md).
 
 ### Identity
 
