@@ -6211,6 +6211,13 @@ export class AIChatAgent<
             // already has when the replay matches, so it's
             // semantically a no-op on the client too.
             if (isReplayChunk(message.parts, data as StreamChunkData)) {
+              // Keep the server-side reconstruction convergent even when the
+              // chunk must not reach the client. In particular, an
+              // input-available chunk can follow approval-requested: applying
+              // it fills the persisted input while preserving approval state,
+              // whereas broadcasting it would regress the AI SDK client back
+              // to input-available.
+              applyChunkToParts(message.parts, data);
               continue;
             }
 
