@@ -1,0 +1,66 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "exo-harness",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  // "experimental" is local-only (miniflare gates the worker backends'
+  // loopback behind it); production has the same features enabled by
+  // compatibility date — verified with a live probe worker.
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  // Per-agent harness git mirror. Absent from wrangler.offline.jsonc and the
+  // test config: the kernel skips pushing when the binding is missing.
+  "artifacts": [
+    { "binding": "ARTIFACTS", "namespace": "exo-harness", "remote": true }
+  ],
+  "vars": {
+    // "" = use the model from /harness/policy.json; "mock" = offline dev
+    // driver (see src/kernel/mock-model.ts); "workers-ai:<id>"; or an
+    // AI Gateway catalog slug ("openai/gpt-5.4").
+    "MODEL_OVERRIDE": "",
+    // AI Gateway used for third-party catalog slugs (Unified Billing).
+    // That gateway must have authentication enabled — Unified Billing
+    // 402s third-party /run calls on an open gateway. Empty = account
+    // "default" gateway. Dedicated so exo logs stay separate from
+    // other apps on this account.
+    "AI_GATEWAY_ID": "exo-harness",
+    // Environment prefix for per-agent Artifacts repo names, so prod and
+    // local dev agents with the same name never share (and force-push
+    // over) the same mirror.
+    "ARTIFACTS_REPO_PREFIX": "exo-prod"
+  },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  // The production workers.dev route sits behind Cloudflare Access; keep
+  // version preview URLs off so deploys never open an unprotected side door.
+  "preview_urls": false,
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ExoKernel",
+        "name": "ExoKernel"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v1"
+    },
+    {
+      // Fresh start for the @cloudflare/computer substrate swap: v2
+      // deleted the class (applied via an intermediate deploy with the
+      // binding removed — the API refuses a delete while a binding
+      // references the class) and v3 recreated it empty.
+      "deleted_classes": ["ExoKernel"],
+      "tag": "v2"
+    },
+    {
+      "new_sqlite_classes": ["ExoKernel"],
+      "tag": "v3"
+    }
+  ]
+}
