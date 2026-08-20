@@ -4,4 +4,8 @@
 
 Define `VoiceTurnContext.messages` as completed history before the current transcript for both text and audio turns, preventing duplicate user messages when following the documented prompt construction.
 
-`onTurn()` implementations that previously passed `context.messages` directly as complete LLM input must now append `transcript` exactly once. The transcript is still persisted before `onTurn()` runs, so direct `getConversationHistory()` calls continue to include it.
+Existing `onTurn()` implementations:
+
+- If you pass `context.messages` directly as the complete LLM input, append `transcript` exactly once.
+- If you already append `transcript` to `context.messages`, no change is required.
+- Direct `getConversationHistory()` calls inside `onTurn()` continue to include the current transcript.
