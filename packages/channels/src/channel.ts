@@ -1,4 +1,15 @@
-import type { ChannelEmailIngress, ChannelIngress } from "./ingress";
+import type {
+  ChannelEmailIngress,
+  ChannelIngress,
+  ChannelIngressEvent
+} from "./ingress";
+import type { ChannelIdentity, UserIdentity } from "./identity";
+import type {
+  ChannelMessageSurface,
+  ChannelMessageSurfaceInput
+} from "./surface";
+
+export type Awaitable<T> = T | Promise<T>;
 
 /** A transport-neutral outbound message whose canonical content is Markdown. */
 export type ChannelMessage = {
@@ -37,13 +48,12 @@ export type DeliveryResult =
       error: DeliveryFailure;
     };
 
-/** A stable Host identity supplied to one provider delivery attempt. */
+/** A caller-owned identity supplied to one provider delivery attempt. */
 export type ChannelDeliveryContext = {
   deliveryId: string;
-  attempt: number;
 };
 
-/** Host-owned approval links a Channel may include in its rendering. */
+/** Caller-supplied approval links a Channel may include in its rendering. */
 export type ChannelApprovalLinks = {
   approve: string;
   reject: string;
@@ -59,29 +69,64 @@ export type ChannelApprovalRequest = {
 export type ChannelApprovalRequestOptions = {
   interactionId: string;
   request: ChannelApprovalRequest;
-  /** Stable identity for provider idempotency and delivery observability. */
+  /** Caller-owned identity for provider idempotency and observability. */
   delivery?: ChannelDeliveryContext;
-  /** Lazily creates one durable pair of Host-owned approval links. */
+  /** Lazily obtains approval links supplied and settled by the caller. */
   getApprovalLinks?: () => Promise<ChannelApprovalLinks>;
 };
 
+export type ChannelRouteContext = {
+  /** Lazily resolve the application user explicitly linked to the event actor. */
+  findUser(): Promise<UserIdentity | null>;
+};
+
+export type ChannelRoute<TRaw = unknown> = (
+  event: ChannelIngressEvent,
+  raw: TRaw,
+  context: ChannelRouteContext
+) => Awaitable<string | null>;
+
+/** Recursive outbound capability injected into a composite Channel. */
+export type OutboundResolver = {
+  deliver(
+    surface: ChannelMessageSurface,
+    message: ChannelMessage,
+    context?: ChannelDeliveryContext
+  ): Promise<DeliveryResult>;
+  requestApproval(
+    surface: ChannelMessageSurface,
+    options: ChannelApprovalRequestOptions
+  ): Promise<DeliveryResult>;
+  isAvailable(surface: ChannelMessageSurface): Promise<boolean>;
+};
+
 /** A configured delivery route with optional approval and ingress support. */
-export interface Channel {
+export interface Channel<TRaw = unknown> {
+  /** Select an opaque application route, or return null to ignore the event. */
+  route?(
+    event: ChannelIngressEvent,
+    raw: TRaw,
+    context: ChannelRouteContext
+  ): Awaitable<string | null>;
+  /** Derive a direct destination from this configured Channel's identity. */
+  contactSurface?(identity: ChannelIdentity): ChannelMessageSurfaceInput | null;
   /**
    * Whether this route can currently be selected without attempting delivery.
    * Absence means the channel should be attempted.
    */
-  isAvailable?(): boolean | Promise<boolean>;
-  deliver(
+  isAvailable?(surface: ChannelMessageSurface): Awaitable<boolean>;
+  /**
+   * Perform one outbound delivery. Absent for inbound-only Channels.
+   */
+  deliver?(
+    surface: ChannelMessageSurface,
     message: ChannelMessage,
     context?: ChannelDeliveryContext
   ): Promise<DeliveryResult>;
   requestApproval?(
+    surface: ChannelMessageSurface,
     options: ChannelApprovalRequestOptions
   ): Promise<DeliveryResult>;
-  readonly ingress?: ChannelIngress;
-  readonly emailIngress?: ChannelEmailIngress;
+  readonly ingress?: ChannelIngress<TRaw>;
+  readonly emailIngress?: ChannelEmailIngress<TRaw>;
 }
-
-/** The ordinary delivery surface accepted by model tool adapters. */
-export type ChannelDelivery = Pick<Channel, "deliver">;

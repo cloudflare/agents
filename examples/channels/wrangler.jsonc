@@ -1,31 +1,41 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "channels-example",
-  "main": "src/index.ts",
+  "main": "src/server.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
-  "ai": { "binding": "AI", "remote": true },
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/webhooks/*", "/ingress/*"]
+  },
   "send_email": [
     {
       "name": "EMAIL",
       "remote": true
     }
   ],
-  "vars": {
-    "EMAIL_FROM": "agent@example.com",
-    "SUPPORT_EMAIL": "support@example.com",
-    "TELEGRAM_SUPPORT_CHAT_ID": "123456789",
-    "PUBLIC_BASE_URL": "http://localhost:8787",
-    "OPERATIONS_WEBHOOK_URL": "http://localhost:8787/operations-webhook"
-  },
+  // Every value this Worker needs is deployment-specific, so all of them are
+  // secrets rather than committed vars. See .dev.vars.example.
   "secrets": {
-    "required": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET"]
+    "required": [
+      "EMAIL_FROM",
+      "SLACK_BOT_TOKEN",
+      "SLACK_BOT_USER_ID",
+      "SLACK_SIGNING_SECRET",
+      "TELEGRAM_BOT_TOKEN",
+      "TELEGRAM_WEBHOOK_SECRET"
+    ]
   },
   "durable_objects": {
     "bindings": [
       {
-        "name": "CHANNELS_EXAMPLE",
-        "class_name": "ChannelsExample"
+        "name": "Directory",
+        "class_name": "Directory"
+      },
+      {
+        "name": "Conversation",
+        "class_name": "Conversation"
       }
     ]
   },
@@ -33,6 +43,28 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ChannelsExample"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ChannelsDashboard", "ConversationLedger"],
+      "deleted_classes": ["ChannelsExample"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["Inbox", "Conversation"],
+      "deleted_classes": ["ChannelsDashboard", "ConversationLedger"]
+    },
+    {
+      "tag": "v4",
+      "renamed_classes": [{ "from": "Inbox", "to": "Directory" }]
+    },
+    {
+      "tag": "v5",
+      "deleted_classes": ["Conversation", "Directory"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["Conversation", "Directory"]
     }
   ]
 }

@@ -6,8 +6,8 @@ tool, or register it with a durable `ChannelHost` that owns routing and delivery
 recovery.
 
 > [!NOTE]
-> Channels is experimental. Its interface _will_ change before the package reaches
-> a stable release.
+> Channels is experimental. Its interface _will_ change before the package
+> reaches a stable release.
 
 ## Install
 
@@ -17,213 +17,206 @@ npm install @cloudflare/channels
 
 ## Create channels
 
-Each adapter turns provider configuration into the same `Channel` interface.
-The rest of your application does not need to know which transport it uses.
+Each adapter turns provider configuration into the same `Channel` interface. A
+`ChannelHost` holds them, keyed by names you choose:
 
 ```typescript
-import { email, fallback, fanout, telegram } from "@cloudflare/channels";
+import { ChannelHost, email, routes, telegram } from "@cloudflare/channels";
+import { slack } from "@cloudflare/channels/slack";
 
-const supportChat = telegram({
-  botToken: env.TELEGRAM_BOT_TOKEN,
-  chatId: env.TELEGRAM_SUPPORT_CHAT_ID,
-  webhook: {
-    secretToken: env.TELEGRAM_WEBHOOK_SECRET
+const host = new ChannelHost({
+  channels: {
+    slack: slack({
+      botToken: env.SLACK_BOT_TOKEN,
+      webhook: {
+        signingSecret: env.SLACK_SIGNING_SECRET,
+        botUserId: env.SLACK_BOT_USER_ID
+      },
+      route: routes.perThread
+    }),
+    telegram: telegram({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      webhook: { secretToken: env.TELEGRAM_WEBHOOK_SECRET },
+      route: routes.perThread
+    }),
+    email: email({
+      binding: env.EMAIL,
+      from: "agent@example.com",
+      route: routes.perThread
+    })
+  },
+
+  async onMessage({ route, dispatchId, message }) {
+    await conversationFor(route).receive(dispatchId, message);
   }
 });
-
-const supportEmail = email({
-  binding: env.EMAIL,
-  from: "agent@example.com",
-  to: "support@example.com"
-});
-
-const resilientSupport = fallback([supportChat, supportEmail]);
-const everySupportRoute = fanout([supportChat, supportEmail]);
 ```
 
-`fallback()` tries routes in order, advancing after a confirmed failure.
-`fanout()` sends to every route. A partial or uncertain fanout is reported as
-`uncertain`, because retrying the whole composition could duplicate a delivery.
+## 1. Send a message
 
-### Deliver synthesized speech to a browser
-
-The Voice adapter lives with the other Channel adapters and builds on
-`@cloudflare/voice` without making the Voice package depend on Channels:
+A **surface** is a destination for an outbound message.
+You get one from an inbound message's reply field, or by constructing one from a raw channel identifier through the host.
 
 ```typescript
-import { browserVoice } from "@cloudflare/channels/voice";
-import { WorkersAITTS } from "@cloudflare/voice";
+const surface = host.contactSurface({
+  channelKey: "slack",
+  scope: "T123",
+  subject: "U456"
+});
 
-const spokenUpdates = browserVoice({
-  tts: new WorkersAITTS(env.AI),
-  getConnection: () => [...agent.getConnections("browser-voice")][0]
+await host.deliver(surface, {
+  title: "Import needs attention",
+  markdown: "The customer import stopped after **1,240 records**."
 });
 ```
 
-Connect the tagged browser surface with `VoiceClient` or `useVoiceAgent()`. The
-adapter uses the Voice client protocol for playback and does not require
-`withVoice()`, a microphone, or a speech-to-text provider. The default audio
-format is MP3; configure `audioFormat` and `sampleRate` for raw PCM providers.
+An identity's `channelKey` names the configured Channel that observed it. Its
+optional `scope` names a tenant within that Channel and defaults to `"default"`;
+for example, one configured Slack app can observe the same user ID in several
+workspaces. The Host stamps `channelKey` on inbound identities because an adapter
+does not know the key it was configured under.
 
-## 1. Deliver directly
+The same human observed through two configured Channels on one platform is two
+Channel identities, just as the same human on Slack and email is. Applications
+that know they are the same person link those identities explicitly.
 
-All Channels use the same interface:
+Compose destinations with `fallback()` and `fanout()`:
 
 ```typescript
-await supportChat.deliver({
-  title: "Import needs attention",
-  markdown: "The customer import stopped after **1,240 records**."
-});
+import { fallback, fanout } from "@cloudflare/channels";
 
-await resilientSupport.deliver({
-  title: "Import needs attention",
-  markdown: "The customer import stopped after **1,240 records**."
-});
-
-await everySupportRoute.deliver({
-  title: "Import needs attention",
-  markdown: "The customer import stopped after **1,240 records**."
-});
+await host.deliver(fallback([slackSurface, emailSurface]), message);
+await host.deliver(fanout([slackSurface, emailSurface]), message);
 ```
 
-<!-- TODO: add screenshots of rendered messages on various platforms -->
+`fallback()` tries destinations in order, advancing only after a _confirmed_
+failure, so it can never duplicate a delivery. `fanout()` sends to all of them;
+a partial or uncertain result is reported as `uncertain` for the same reason.
+The Host installs both policies as ordinary Channels under reserved keys. You
+can register another composite policy as an ordinary Channel under your own key
+and pair it with a surface constructor that writes that key; inject only the
+outbound resolution capability the policy needs, as the exported built-in
+policy Channels do.
 
-## 2. Give a Channel to a model
-
-Channels expose tool adapters for the AI SDK and TanStack AI:
-
-### AI SDK
+## 2. Give a destination to a model
 
 ```typescript
 import { generateText, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { createChannelTool } from "@cloudflare/channels/ai-sdk";
+import { createSendMessageTool } from "@cloudflare/channels/ai-sdk";
 
 const workersai = createWorkersAI({ binding: env.AI });
 
-const result = await generateText({
+await generateText({
   model: workersai("@cf/moonshotai/kimi-k2.7-code"),
-  prompt:
-    "An import stopped after 1,240 records. Notify support and summarize what you did.",
+  prompt: "An import stopped after 1,240 records. Notify support.",
   tools: {
-    contactSupport: createChannelTool(resilientSupport, {
-      description: "Contact support when a person needs to intervene"
-    })
+    contactSupport: createSendMessageTool(
+      host,
+      fallback([slackSurface, emailSurface]),
+      { description: "Contact support when a person needs to intervene" }
+    )
   },
   stopWhen: stepCountIs(2)
 });
 ```
 
-### TanStack AI
+The model writes the message; you chose the destination. TanStack AI exports the
+same `createSendMessageTool(host, surface, options)` from
+`@cloudflare/channels/tanstack-ai`.
 
-```typescript
-import { chat } from "@tanstack/ai";
-import { createWorkersAiChat } from "@cloudflare/tanstack-ai";
-import { createChannelTool } from "@cloudflare/channels/tanstack-ai";
+## 3. Receive messages
 
-const stream = chat({
-  adapter: createWorkersAiChat("@cf/meta/llama-4-scout-17b-16e-instruct", {
-    binding: env.AI
-  }),
-  messages: [
-    {
-      role: "user",
-      content: "The import failed. Notify support and tell me what you did."
-    }
-  ],
-  tools: [
-    createChannelTool(resilientSupport, {
-      name: "contact_support",
-      description: "Contact support when a person needs to intervene"
-    })
-  ]
-});
-```
-
-## 3. Use a durable Host
-
-`ChannelHost` is the durable boundary around a set of Channels. It remembers
-where messages should go, records delivery attempts before contacting a provider, and
-recovers confirmed failures after an isolate restarts. It also connects replies
-to the interaction that caused them.
-
-```typescript
-import { ChannelHost } from "@cloudflare/channels";
-
-const host = new ChannelHost({
-  storage: ctx.storage,
-  channels: {
-    supportChat,
-    supportEmail,
-    resilientSupport
-  },
-
-  async onMessage({ channelId, message }) {
-    // Recovery can replay this message, so make the handler idempotent
-    await myApp.runTurn(channelId, message);
-  },
-
-  async onApprovalResponse({ interactionId, decision }) {
-    await myApp.approveInteraction(interactionId, decision);
-  }
-});
-
-await host.init();
-
-async function alarm() {
-  await host.handleAlarm();
-}
-```
-
-### Handle HTTP and Email ingress
-
-One HTTP entry point covers every registered Channel webhook:
-
-```typescript
-export class SupportChannels extends DurableObject<Env> {
-  async fetch(request: Request): Promise<Response> {
-    const response = await this.host.handleRequest(request);
-    if (response) return response;
-    // your handlers can go here
-    return new Response("Not found", { status: 404 });
-  }
-
-  async handleEmail(input: {
-    from: string;
-    to: string;
-    headers: [string, string][];
-    raw: ArrayBuffer;
-  }): Promise<boolean> {
-    return this.host.handleEmail({
-      from: input.from,
-      to: input.to,
-      headers: new Headers(input.headers),
-      getRaw: async () => new Uint8Array(input.raw)
-    });
-  }
-}
-```
-
-The top-level Worker forwards HTTP requests and Workers Email events to the
-same Durable Object instance:
+One entry point covers every configured Channel's webhook, and Workers Email
+arrives the same way:
 
 ```typescript
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return env.SUPPORT_CHANNELS.getByName("default").fetch(request);
+  async fetch(request: Request): Promise<Response> {
+    const response = await host.handleRequest(request);
+    if (response) return response;
+    return new Response("Not found", { status: 404 });
   },
 
-  async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
-    const raw = await new Response(message.raw).arrayBuffer();
-    await env.SUPPORT_CHANNELS.getByName("default").handleEmail({
-      from: message.from,
-      to: message.to,
-      headers: [...message.headers],
-      raw
-    });
+  async email(message: ForwardableEmailMessage): Promise<void> {
+    await host.handleEmail(message);
   }
 } satisfies ExportedHandler<Env>;
 ```
+
+Each Channel authenticates its own input and declines what isn't its business,
+so the Host asks them in configuration order and the first to claim it wins.
+
+### Routing
+
+A Channel's `route` turns one normalized event into an opaque application
+string — a Durable Object name, a queue key, a database id — or `null` to ignore
+the event entirely. The key is used to identify a common destination for
+messages -- i.e. typically a single conversation:
+
+```typescript
+telegram({
+  // …credentials…
+  route(event) {
+    return event.thread.isDirectMessage === true ? event.thread.id : null;
+  }
+});
+```
+
+Channels exposes builtin helpers for the common mappings — `routes.perThread`
+and `routes.perEvent`, which namespace their routes as `thread:…` and
+`event:…`.
+
+Deciding whether an event is relevant at all is a different question, and one
+only your application can answer, because the answer usually depends on state
+you hold. Write that in your own `route` and return `null` to ignore the event:
+
+```typescript
+route(event) {
+  // Slack shows a bot every message in every channel it belongs to. Answer
+  // when addressed, and otherwise only join threads we are already in.
+  const thread = routes.perThread(event);
+  const addressed =
+    event.thread.isDirectMessage === true || event.message.isMention === true;
+  if (addressed) return thread;
+  return (await myConversations.knows(thread)) ? thread : null;
+}
+```
+
+A lookup like that runs for every event reaching it, so put it behind a cheaper
+check, keep it read-only, and do not let it create the state it is testing for —
+otherwise the first stray message conjures the thing the check is looking for.
+
+### Link identities
+
+Personal agents often wwant to resolve users regardless of the channel they messaged on. Your application can explicitly record connections between channel identities and expose them to the Host for messages to be routed on:
+
+```typescript
+const host = new ChannelHost({
+  channels,
+  findUser: (identity) => users.findUser(identity),
+  onMessage,
+  onApprovalResponse
+});
+
+// ...
+// route to a user's central conversaion if one exists, else start a new
+// conversation for each thread:
+route: routes.byUser(routes.perThread);
+
+// or prefer the linked person, then the sender we recognise, then a new
+// conversation per event:
+route: routes.byUser(routes.byIdentity(routes.perEvent));
+```
+
+`byIdentity` groups events carrying the _same_ identity. It never infers that
+two different identities belong to one person — that stays an explicit
+application decision, which `byUser` then exposes to routing. Omit its fallback
+to ignore events that carry no identity at all.
+
+If your application does not already store user identities, `createUserIdentityStore(storage)` creates a Durable Object SQL store of the right shape. Your application can call `store.link` to connect multiple identities together.
+
+### Ask for approval
 
 ### Request approval
 
@@ -241,195 +234,81 @@ await host.requestApproval({
     }
   }
 });
+await host.requestApproval(surface, {
+  interactionId: crypto.randomUUID(),
+  request: {
+    title: "Production deployment",
+    summary: "Deploy version 2026.08.17 to production?",
+    input: { version: "2026.08.17" }
+  }
+});
 ```
 
 Users can respond to approval requests through native surfaces (e.g. Telegram
-buttons) or HTTP inbound URLs, resolved by the Channel Host itself.
-
-### Deliver durably
-
-Messages can be delivered through the Host to avoid manual channel selection
-(for example, after applying a user's saved preference). A stable delivery ID
-makes repeated Host calls idempotent: a terminal result is returned rather than
-sent again. Confirmed retryable failures may produce another provider attempt;
-an uncertain outcome is never retried automatically.
-
-```typescript
-await host.deliver({
-  deliveryId: "import-alert-2026-08-17",
-  message: {
-    title: "Import needs attention",
-    markdown: "The customer import stopped after **1,240 records**."
-  }
-});
-```
-
-On recovery, a confirmed retryable failure is scheduled with the same stable delivery ID.
-The Host exposes the Channel delivery surface directly, so the same durable
-route can be used as an agent tool:
-
-```typescript
-const durableSupportTool = createChannelTool(host);
-```
-
-### Share a Durable Object alarm
-
-Durable Objects only support a single alarm at once. When your application also
-uses alarms, you can multiplex it with `sharedAlarm`:
-
-```typescript
-import { ChannelHost, sharedAlarm } from "@cloudflare/channels";
-
-const alarms = sharedAlarm(ctx.storage);
-const applicationAlarms = alarms.source("application");
-const host = new ChannelHost({
-  storage: ctx.storage,
-  scheduler: alarms.source("channels"),
-  channels,
-  onMessage,
-  onApprovalResponse
-});
-
-await host.init();
-
-await applicationAlarms.schedule(
-  "some-alarm-id",
-  Date.now() + 24 * 60 * 60 * 1000
-);
-
-async function alarm() {
-  await alarms.handleAlarm({
-    channels: () => host.handleAlarm(),
-    application: (alarmIds) => {
-      /* your alarm logic here */
-    }
-  });
-}
-```
-
-### Use with Think
-
-Channels can be used as a tool and action approval provider with a Think agent:
-
-```typescript
-import { email, fallback, telegram } from "@cloudflare/channels";
-import { Think } from "@cloudflare/think";
-
-export class SupportAgent extends Think<Env> {
-  override configureChannelHost() {
-    const teamChat = telegram({
-      botToken: this.env.TELEGRAM_BOT_TOKEN,
-      chatId: this.env.TELEGRAM_SUPPORT_CHAT_ID,
-      webhook: {
-        secretToken: this.env.TELEGRAM_WEBHOOK_SECRET
-      }
-    });
-    const supportEmail = email({
-      binding: this.env.EMAIL,
-      from: "agent@example.com",
-      to: "support@example.com"
-    });
-
-    return {
-      channels: {
-        teamChat,
-        supportEmail
-      },
-      publicBaseUrl: this.env.PUBLIC_AGENT_URL
-    };
-  }
-}
-```
+buttons) or HTTP inbound URLs, resolved by the Channel Host itself for your application to settle.
 
 ## Custom channels
 
-A custom Channel implements one provider attempt. This webhook example supports
-ordinary delivery and Host approval links while distinguishing confirmed
-failure from an unknown network outcome:
+Any transport can become a Channel:
 
 ```typescript
-import type {
-  Channel,
-  ChannelMessage,
-  DeliveryResult
-} from "@cloudflare/channels";
+import { matchesPath, routes, type Channel } from "@cloudflare/channels";
 
-async function sendWebhook(message: ChannelMessage): Promise<DeliveryResult> {
-  let response: Response;
+const supportForm: Channel = {
+  route: routes.perEvent,
+  ingress: {
+    async receive(request) {
+      if (!matchesPath(request, "/support")) return null;
 
-  try {
-    response = await fetch(env.OPERATIONS_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(message)
-    });
-  } catch {
-    return {
-      status: "uncertain",
-      error: {
-        code: "network_error",
-        message: "The webhook may have received the message"
-      }
-    };
-  }
-
-  if (!response.ok) {
-    return {
-      status: "failed",
-      retryable: response.status === 429 || response.status >= 500,
-      error: {
-        code: "webhook_rejected",
-        message: `The webhook returned HTTP ${response.status}`
-      }
-    };
-  }
-
-  return {
-    status: "delivered",
-    reference: response.headers.get("x-message-id") ?? undefined
-  };
-}
-
-const operationsWebhook: Channel = {
-  // send ordinary messages through this Channel
-  deliver: sendWebhook,
-
-  // send approval requests through this Channel
-  async requestApproval({ request, getApprovalLinks }) {
-    const links = await getApprovalLinks();
-    return sendWebhook({
-      title: request.title,
-      markdown: [
-        request.summary,
-        `Approve: ${links.approve}`,
-        `Reject: ${links.reject}`
-      ].join("\n\n")
-    });
+      const raw = await request.json<{ message: string; email: string }>();
+      const eventId = crypto.randomUUID();
+      return {
+        events: [
+          {
+            raw,
+            event: {
+              type: "message",
+              eventId,
+              thread: { id: eventId, isDirectMessage: true },
+              actor: {
+                id: raw.email,
+                // The Host stamps the configured `channelKey`.
+                identity: { subject: raw.email }
+              },
+              message: { id: eventId, text: raw.message }
+            }
+          }
+        ],
+        response: Response.json({ accepted: true }, { status: 202 })
+      };
+    }
   }
 };
 ```
 
-Register and use it like a built-in adapter:
+Returning `null` declines the request so another Channel can claim it.
 
-```typescript
-const host = new ChannelHost({
-  storage: ctx.storage,
-  channels: { operationsWebhook },
-  publicBaseUrl: env.PUBLIC_AGENT_URL,
-  scheduler: channelAlarms,
-  onApprovalResponse: resolveApprovalInApplicationLedger
-});
-```
+## Durability contract
 
-## Future Work
+Channels holds no state: no outbox, no retries, no deduplication, no scheduler.
+Durability is a property of how your application uses it.
 
-- [ ] Streaming output delivery
-- [ ] Native agent output to Channel
-- [ ] ? Automatic Webhook registration
-- [ ] Clarify Identity -- one Channel/ChannelHost per what?
+| Channels guarantees                                                     | Your application must                                                       |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| A `dispatchId` stable across redelivery and unaffected by routing       | Deduplicate on it before starting any side effect                           |
+| The Host awaits your callback before the provider is acknowledged       | Hand off durably before returning — a DO RPC, queue send, or workflow start |
+| One provider attempt per `deliver()`, reported honestly                 | Decide whether to retry; `uncertain` may duplicate a real delivery          |
+| Surfaces are plain JSON you can persist                                 | Keep configured channel keys stable                                         |
+| Decisions arrive as normalized events carrying your own `interactionId` | Own settlement; an interaction id is not an authorization credential        |
+
+## Future work
+
+- [ ] Approval-link ingress: signing, verification, and a confirmation page, so
+      link approvals return through the same normalized path as Slack buttons
+- [ ] Streaming output delivery — see
+      [`design/rfc-channel-streaming.md`](../../design/rfc-channel-streaming.md)
 - [ ] More built-in channels
-- [ ] Stress testing
-- [ ] Security review of approval flows
-- [ ] Multiplayer Channels
 - [ ] Rendering templates (pretty emails)
-- [ ] Tool description overrides
+- [ ] Automatic webhook registration
+- [ ] Security review of approval flows
+- [ ] Conformance tests of adapters

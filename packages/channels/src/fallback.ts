@@ -1,41 +1,96 @@
-import type { Channel } from "./channel";
+import type {
+  Channel,
+  ChannelApprovalRequestOptions,
+  ChannelDeliveryContext,
+  ChannelMessage,
+  DeliveryResult,
+  OutboundResolver
+} from "./channel";
+import { compositeDestinations, unsupported } from "./internal";
+import type { ChannelMessageSurface } from "./surface";
 
-/** A non-empty sequence of channels ordered from preferred to final fallback. */
-export type FallbackChannelOptions = readonly [Channel, ...Channel[]];
+export type FallbackSurface = ChannelMessageSurface<
+  "fallback",
+  { surfaces: readonly ChannelMessageSurface[] }
+>;
 
-async function isAvailable(channel: Channel): Promise<boolean> {
-  return channel.isAvailable?.() ?? true;
-}
+/** A non-empty sequence of destinations ordered from preferred to final. */
+export type FallbackSurfaceOptions = readonly [
+  ChannelMessageSurface,
+  ...ChannelMessageSurface[]
+];
+
+type FallbackOperation = (
+  surface: ChannelMessageSurface
+) => Promise<DeliveryResult>;
 
 /**
- * Compose channels in preference order, selecting the first available route.
+ * Build an inert fallback destination for a `ChannelHost` to resolve.
  *
- * A definitive `failed` result advances to the next channel because the
- * transport confirmed that no delivery occurred. A `delivered` or `uncertain`
- * result is final so fallback cannot duplicate a delivery. The final channel is
- * always attempted so the composition produces a delivery result even when
- * every route reports unavailable.
+ * The Host skips unavailable destinations, advances after confirmed failures,
+ * and stops after a delivered or uncertain result to avoid duplicates.
  */
-export function fallback(channels: FallbackChannelOptions): Channel {
+export function fallback(surfaces: FallbackSurfaceOptions): FallbackSurface {
   return {
-    async isAvailable() {
-      for (const channel of channels) {
-        if (await isAvailable(channel)) return true;
+    channelKey: "fallback",
+    version: 1,
+    address: { surfaces },
+    label: surfaces.map((surface) => surface.label).join(", then ")
+  };
+}
+
+/** Build the ordinary Channel installed under the reserved fallback key. */
+export function fallbackChannel(resolve: OutboundResolver): Channel {
+  async function run(
+    surface: ChannelMessageSurface,
+    operation: FallbackOperation
+  ): Promise<DeliveryResult> {
+    const destinations = compositeDestinations(surface);
+    if (!destinations) {
+      return unsupported(
+        "FALLBACK_SURFACE_INVALID",
+        "Fallback surface must contain at least one valid destination"
+      );
+    }
+
+    for (let index = 0; index < destinations.length - 1; index += 1) {
+      const destination = destinations[index]!;
+      if (await resolve.isAvailable(destination)) {
+        const result = await operation(destination);
+        if (result.status !== "failed") return result;
       }
-      return false;
+    }
+    // try the last one if we haven't returned yet
+    return operation(destinations.at(-1)!);
+  }
+
+  return {
+    deliver(
+      surface: ChannelMessageSurface,
+      message: ChannelMessage,
+      context?: ChannelDeliveryContext
+    ) {
+      return run(surface, (destination) =>
+        resolve.deliver(destination, message, context)
+      );
     },
 
-    async deliver(message, context) {
-      for (let index = 0; index < channels.length - 1; index += 1) {
-        const channel = channels[index];
-        if (channel && (await isAvailable(channel))) {
-          const result = await channel.deliver(message, context);
-          if (result.status !== "failed") return result;
-        }
-      }
+    requestApproval(
+      surface: ChannelMessageSurface,
+      options: ChannelApprovalRequestOptions
+    ) {
+      return run(surface, (destination) =>
+        resolve.requestApproval(destination, options)
+      );
+    },
 
-      const finalChannel = channels[channels.length - 1];
-      return finalChannel.deliver(message, context);
+    async isAvailable(surface) {
+      const destinations = compositeDestinations(surface);
+      if (!destinations) return true;
+      for (const destination of destinations) {
+        if (await resolve.isAvailable(destination)) return true;
+      }
+      return false;
     }
   };
 }

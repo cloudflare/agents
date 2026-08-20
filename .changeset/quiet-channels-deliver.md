@@ -2,4 +2,6 @@
 "@cloudflare/channels": minor
 ---
 
-Add the experimental `@cloudflare/channels` package with canonical Markdown messages, structured approval requests, explicit delivery outcomes, separate AI SDK and TanStack AI tool adapters, outbound and inbound Email support, Telegram Bot API delivery and ingress, ordered fallback, all-destination fanout, and an output-only browser voice Channel backed by `@cloudflare/voice`. Add a durable Channel Host that persists configured routing, delivery attempts, provider correlation, replay receipts, and scanner-safe approval links across isolate recreation, plus a named-source coordinator that safely multiplexes logical schedules through one Durable Object alarm.
+Add the experimental `@cloudflare/channels` package: one transport-neutral way to receive and send messages over Slack, Telegram, email, and channels of your own.
+
+A stateless `ChannelHost` authenticates and normalizes provider input, and your application decides where each event belongs and how to store it. Outbound delivery reports honest per-attempt outcomes, approvals can be rendered natively by each provider, and channel identities can be linked to your own users.

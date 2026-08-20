@@ -1,5 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-import { fallback, type Channel, type DeliveryResult } from "..";
+import {
+  ChannelHost,
+  fallback,
+  fallbackChannel,
+  type Channel,
+  type DeliveryResult,
+  type OutboundResolver
+} from "..";
+
+function surface(channelKey: string) {
+  return {
+    channelKey,
+    version: 1,
+    address: null,
+    label: channelKey
+  } as const;
+}
 
 function channel(
   result: DeliveryResult,
@@ -11,118 +27,159 @@ function channel(
   };
 }
 
-describe("experimental fallback channel", () => {
-  it("uses the first channel when it is available", async () => {
+function host(channels: Record<string, Channel>) {
+  return new ChannelHost({ channels, onMessage() {} });
+}
+
+describe("fallback surfaces", () => {
+  it("uses the first available destination", async () => {
     const first = channel({ status: "delivered", reference: "voice-1" }, true);
     const second = channel({ status: "delivered", reference: "email-1" });
-    const compound = fallback([first, second]);
+    const channelHost = host({ first, second });
 
-    await expect(compound.deliver({ markdown: "Hello" })).resolves.toEqual({
-      status: "delivered",
-      reference: "voice-1"
-    });
+    await expect(
+      channelHost.deliver(fallback([surface("first"), surface("second")]), {
+        markdown: "Hello"
+      })
+    ).resolves.toEqual({ status: "delivered", reference: "voice-1" });
     expect(second.deliver).not.toHaveBeenCalled();
   });
 
-  it("uses the next channel when earlier channels are unavailable", async () => {
-    const first = channel(
-      {
-        status: "failed",
-        retryable: true,
-        error: { code: "BROWSER_VOICE_UNAVAILABLE", message: "Disconnected" }
-      },
-      false
-    );
-    const second = channel({ status: "delivered", reference: "email-1" });
-    const compound = fallback([first, second]);
+  it("skips unavailable destinations but always attempts the final one", async () => {
+    const first = channel({ status: "delivered" }, false);
+    const final = channel({ status: "delivered", reference: "email-1" }, false);
+    const channelHost = host({ first, final });
     const message = { title: "Update", markdown: "Hello" };
 
-    await expect(compound.deliver(message)).resolves.toEqual({
-      status: "delivered",
-      reference: "email-1"
-    });
+    await expect(
+      channelHost.deliver(
+        fallback([surface("first"), surface("final")]),
+        message
+      )
+    ).resolves.toEqual({ status: "delivered", reference: "email-1" });
     expect(first.deliver).not.toHaveBeenCalled();
-    expect(second.deliver).toHaveBeenCalledWith(message, undefined);
-  });
-
-  it("selects the first available channel from a longer sequence", async () => {
-    const first = channel({ status: "delivered" }, false);
-    const second = channel({ status: "delivered", reference: "push-1" }, true);
-    const third = channel({ status: "delivered", reference: "email-1" });
-    const compound = fallback([first, second, third]);
-
-    await expect(compound.deliver({ markdown: "Hello" })).resolves.toEqual({
-      status: "delivered",
-      reference: "push-1"
-    });
-    expect(first.deliver).not.toHaveBeenCalled();
-    expect(third.deliver).not.toHaveBeenCalled();
+    expect(final.deliver).toHaveBeenCalledWith(
+      surface("final"),
+      message,
+      undefined
+    );
   });
 
   it.each([true, false])(
-    "uses the next channel after a definitive failure (retryable: %s)",
+    "advances after a definitive failure (retryable: %s)",
     async (retryable) => {
-      const first = channel(
-        {
-          status: "failed",
-          retryable,
-          error: { code: "DELIVERY_FAILED", message: "Not delivered" }
-        },
-        true
-      );
-      const second = channel({ status: "delivered", reference: "email-1" });
-      const compound = fallback([first, second]);
-      const message = { markdown: "Hello" };
-
-      await expect(compound.deliver(message)).resolves.toEqual({
-        status: "delivered",
-        reference: "email-1"
+      const first = channel({
+        status: "failed",
+        retryable,
+        error: { code: "DELIVERY_FAILED", message: "Not delivered" }
       });
-      expect(first.deliver).toHaveBeenCalledWith(message, undefined);
-      expect(second.deliver).toHaveBeenCalledWith(message, undefined);
+      const second = channel({ status: "delivered", reference: "email-1" });
+      const channelHost = host({ first, second });
+
+      await expect(
+        channelHost.deliver(fallback([surface("first"), surface("second")]), {
+          markdown: "Hello"
+        })
+      ).resolves.toEqual({ status: "delivered", reference: "email-1" });
     }
   );
 
-  it("forwards the Host delivery context to the selected Channel", async () => {
-    const first = channel({ status: "delivered" });
-    const compound = fallback([first]);
-    const message = { markdown: "Hello" };
-    const context = { deliveryId: "notice-1", attempt: 2 };
-
-    await compound.deliver(message, context);
-
-    expect(first.deliver).toHaveBeenCalledWith(message, context);
-  });
-
-  it("does not inspect later channels when an earlier one is available", async () => {
-    const first = channel({ status: "delivered", reference: "voice-1" }, true);
-    const second: Channel = {
-      isAvailable() {
-        throw new Error("Secondary availability failed");
-      },
-      deliver: vi.fn(
-        async (): Promise<DeliveryResult> => ({
-          status: "delivered",
-          reference: "email-1"
-        })
-      )
-    };
-    const compound = fallback([first, second]);
-
-    await expect(compound.isAvailable?.()).resolves.toBe(true);
-  });
-
-  it("stops after an uncertain delivery outcome", async () => {
+  it("stops after an uncertain outcome", async () => {
     const first = channel({
       status: "uncertain",
       error: { code: "DELIVERY_ERROR", message: "Unknown outcome" }
     });
-    const second = channel({ status: "delivered", reference: "email-1" });
-    const compound = fallback([first, second]);
+    const second = channel({ status: "delivered" });
+    const channelHost = host({ first, second });
 
-    await compound.deliver({ markdown: "Hello" });
+    await channelHost.deliver(fallback([surface("first"), surface("second")]), {
+      markdown: "Hello"
+    });
 
     expect(first.deliver).toHaveBeenCalledOnce();
     expect(second.deliver).not.toHaveBeenCalled();
+  });
+
+  it("forwards delivery context to the resolved Channel", async () => {
+    const first = channel({ status: "delivered" });
+    const channelHost = host({ first });
+    const message = { markdown: "Hello" };
+    const context = { deliveryId: "notice-1" };
+
+    await channelHost.deliver(fallback([surface("first")]), message, context);
+
+    expect(first.deliver).toHaveBeenCalledWith(
+      surface("first"),
+      message,
+      context
+    );
+  });
+
+  it("applies the same fallback policy to approval requests", async () => {
+    const first = vi.fn(async () => ({
+      status: "failed" as const,
+      retryable: false,
+      error: { code: "NOT_SENT", message: "Not sent" }
+    }));
+    const second = vi.fn(async () => ({
+      status: "delivered" as const,
+      reference: "approval-1"
+    }));
+    const channelHost = host({
+      first: { requestApproval: first },
+      second: { requestApproval: second }
+    });
+    const options = {
+      interactionId: "approval-1",
+      request: { summary: "Proceed?", input: {} }
+    };
+
+    await expect(
+      channelHost.requestApproval(
+        fallback([surface("first"), surface("second")]),
+        options
+      )
+    ).resolves.toEqual({ status: "delivered", reference: "approval-1" });
+    expect(second).toHaveBeenCalledWith(surface("second"), options);
+  });
+
+  it("treats a configured inbound-only Channel as a confirmed failure", async () => {
+    const second = channel({ status: "delivered", reference: "email-1" });
+    const channelHost = host({ inbound: {}, second });
+
+    await expect(
+      channelHost.deliver(fallback([surface("inbound"), surface("second")]), {
+        markdown: "Hello"
+      })
+    ).resolves.toEqual({ status: "delivered", reference: "email-1" });
+  });
+
+  it("runs as an ordinary Channel against an injected outbound resolver", async () => {
+    const resolver = {
+      deliver: vi.fn(async () => ({ status: "delivered" as const })),
+      requestApproval: vi.fn(async () => ({ status: "delivered" as const })),
+      isAvailable: vi.fn(async () => true)
+    } satisfies OutboundResolver;
+    const policy = fallbackChannel(resolver);
+    const destination = fallback([surface("first")]);
+    const message = { markdown: "Hello" };
+
+    await expect(policy.deliver?.(destination, message)).resolves.toEqual({
+      status: "delivered"
+    });
+    expect(resolver.deliver).toHaveBeenCalledWith(
+      surface("first"),
+      message,
+      undefined
+    );
+  });
+
+  it("constructs labelled inert data without consulting configured Channels", () => {
+    expect(fallback([surface("Slack"), surface("email")])).toEqual({
+      channelKey: "fallback",
+      version: 1,
+      address: { surfaces: [surface("Slack"), surface("email")] },
+      label: "Slack, then email"
+    });
   });
 });

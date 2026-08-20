@@ -9,7 +9,16 @@ import type {
   ChannelMessage,
   DeliveryFailure,
   DeliveryResult
-} from "./channel";
+} from "../channel";
+import {
+  isChannelMessageSurface,
+  type ChannelMessageSurface
+} from "../surface";
+
+export type BrowserVoiceSurface = ChannelMessageSurface<
+  string,
+  { connection: "current" }
+>;
 
 /** The subset of an Agent WebSocket connection needed for audio delivery. */
 export type BrowserVoiceConnection = {
@@ -32,6 +41,19 @@ export type BrowserVoiceChannelOptions = {
 };
 
 const DEFAULT_SAMPLE_RATE = 16_000;
+
+function validSurface(surface: ChannelMessageSurface): boolean {
+  if (
+    !isChannelMessageSurface(surface) ||
+    surface.version !== 1 ||
+    surface.address === null ||
+    typeof surface.address !== "object" ||
+    Array.isArray(surface.address)
+  ) {
+    return false;
+  }
+  return (surface.address as Record<string, unknown>).connection === "current";
+}
 
 function unavailable(): DeliveryResult {
   return {
@@ -115,7 +137,17 @@ export function browserVoice(options: BrowserVoiceChannelOptions): Channel {
       return options.getConnection() !== undefined;
     },
 
-    async deliver(message) {
+    async deliver(surface, message) {
+      if (!validSurface(surface)) {
+        return {
+          status: "failed",
+          retryable: false,
+          error: {
+            code: "BROWSER_VOICE_SURFACE_INVALID",
+            message: `Browser voice cannot parse the address for Channel "${surface.channelKey}"`
+          }
+        };
+      }
       const connection = options.getConnection();
       if (!connection) return unavailable();
 

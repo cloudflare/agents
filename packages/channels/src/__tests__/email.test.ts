@@ -1,5 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
-import { email, type EmailSendBinding } from "..";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { email, type EmailSendBinding, type InboundEmailRaw } from "..";
+
+const EMAIL_SURFACE = {
+  channelKey: "email",
+  version: 1,
+  address: { from: "agent@example.com", to: "support@example.com" },
+  label: "Email · support@example.com"
+} as const;
 
 function channelThatRejects(error: unknown) {
   const send = vi.fn(
@@ -11,9 +18,13 @@ function channelThatRejects(error: unknown) {
   return email({
     binding: { send: send as EmailSendBinding["send"] },
     from: "agent@example.com",
-    to: "support@example.com",
     defaultTitle: "Agent escalation"
   });
+}
+
+function deliverRejected(error: unknown) {
+  const channel = channelThatRejects(error);
+  return channel.deliver(EMAIL_SURFACE, { markdown: "Help" });
 }
 
 describe("experimental email channel", () => {
@@ -23,11 +34,12 @@ describe("experimental email channel", () => {
     }));
     const channel = email({
       binding: { send: send as EmailSendBinding["send"] },
-      from: "agent@example.com",
-      to: "support@example.com"
+      from: "agent@example.com"
     });
 
-    await expect(channel.deliver({ markdown: "**Help**" })).resolves.toEqual({
+    await expect(
+      channel.deliver(EMAIL_SURFACE, { markdown: "**Help**" })
+    ).resolves.toEqual({
       status: "delivered",
       reference: "email-1"
     });
@@ -40,8 +52,89 @@ describe("experimental email channel", () => {
       replyTo: undefined,
       cc: undefined,
       bcc: undefined,
-      headers: undefined
+      headers: {}
     });
+  });
+
+  it("derives contact surfaces and preserves reply threading on delivery", async () => {
+    const send = vi.fn(async (_message: unknown) => ({ messageId: "email-2" }));
+    const channel = email({
+      binding: { send: send as EmailSendBinding["send"] },
+      from: "agent@example.com"
+    });
+    expect(
+      channel.contactSurface?.({
+        channelKey: "email",
+        subject: "ada@example.com"
+      })
+    ).toEqual({
+      version: 1,
+      address: { from: "agent@example.com", to: "ada@example.com" },
+      label: "Email · ada@example.com"
+    });
+
+    const replySurface = {
+      channelKey: "email",
+      version: 1,
+      address: {
+        from: "agent@example.com",
+        to: "ada@example.com",
+        subject: "Need help",
+        inReplyTo: "message-1",
+        references: ["root-1", "message-1"]
+      },
+      label: "Email · ada@example.com"
+    } as const;
+    await channel.deliver(JSON.parse(JSON.stringify(replySurface)), {
+      markdown: "Following up"
+    });
+
+    expect(send).toHaveBeenCalledWith({
+      from: "agent@example.com",
+      to: "ada@example.com",
+      subject: "Re: Need help",
+      text: "Following up",
+      headers: {
+        "In-Reply-To": "<message-1>",
+        References: "<root-1> <message-1>"
+      }
+    });
+  });
+
+  it("bounds persisted References headers while preserving root and recent ancestry", async () => {
+    const send = vi.fn(async (_message: unknown) => ({ messageId: "email-3" }));
+    const channel = email({
+      binding: { send: send as EmailSendBinding["send"] },
+      from: "agent@example.com"
+    });
+    const references = [
+      "root@example.com",
+      ...Array.from(
+        { length: 300 },
+        (_, index) => `message-${index}-${"x".repeat(20)}@example.com`
+      )
+    ];
+
+    await channel.deliver(
+      {
+        channelKey: "email",
+        version: 1,
+        address: {
+          from: "agent@example.com",
+          to: "ada@example.com",
+          references
+        },
+        label: "Email · ada@example.com"
+      },
+      { markdown: "Following up" }
+    );
+
+    const header = send.mock.calls[0]?.[0].headers?.References ?? "";
+    expect(new TextEncoder().encode(header).byteLength).toBeLessThanOrEqual(
+      2048
+    );
+    expect(header).toContain("<root@example.com>");
+    expect(header).toContain("<message-299-");
   });
 
   it("allows a message title to override the configured email title", async () => {
@@ -49,11 +142,13 @@ describe("experimental email channel", () => {
     const channel = email({
       binding: { send: send as EmailSendBinding["send"] },
       from: "agent@example.com",
-      to: "support@example.com",
       defaultTitle: "Default"
     });
 
-    await channel.deliver({ title: "Incident", markdown: "Details" });
+    await channel.deliver(EMAIL_SURFACE, {
+      title: "Incident",
+      markdown: "Details"
+    });
 
     expect(send.mock.calls[0]?.[0]).toMatchObject({
       subject: "Incident",
@@ -61,33 +156,83 @@ describe("experimental email channel", () => {
     });
   });
 
-  it("carries Workers Email ingress on the same Channel by default", () => {
+  it("exposes its typed route without evaluating it and selects email inside receive", async () => {
+    const route = vi.fn((_event, raw: InboundEmailRaw) => {
+      expectTypeOf(raw).toEqualTypeOf<InboundEmailRaw>();
+      return raw.subject ?? null;
+    });
     const channel = email({
       binding: { send: vi.fn() as EmailSendBinding["send"] },
       from: "agent@example.com",
-      to: "support@example.com"
+      inbound: { from: "support@example.com" },
+      route
     });
+    const raw = new TextEncoder().encode(
+      [
+        "From: support@example.com",
+        "To: agent@example.com",
+        "Message-ID: <message-1>",
+        "",
+        "Hello"
+      ].join("\r\n")
+    );
 
-    expect(
-      channel.emailIngress?.accepts?.({
+    expect(channel.route).toBe(route);
+    expect(route).not.toHaveBeenCalled();
+    await expect(
+      channel.emailIngress?.receive({
+        from: "other@example.com",
+        to: "agent@example.com",
+        headers: new Headers(),
+        getRaw: async () => raw
+      })
+    ).resolves.toBeNull();
+    await expect(
+      channel.emailIngress?.receive({
         from: "support@example.com",
         to: "agent@example.com",
         headers: new Headers(),
-        getRaw: async () => new Uint8Array()
+        getRaw: async () => raw
       })
-    ).toBe(true);
+    ).resolves.toMatchObject({
+      events: [{ raw: { messageId: "<message-1>" } }]
+    });
   });
 
-  it("renders Host-owned approval links into an approval email", async () => {
+  it("does not infer inbound recipient or sender filters from outbound configuration", async () => {
+    const channel = email({
+      binding: { send: vi.fn() as EmailSendBinding["send"] },
+      from: "agent@example.com"
+    });
+    const raw = new TextEncoder().encode(
+      [
+        "From: anyone@example.com",
+        "To: another-mailbox@example.com",
+        "Message-ID: <message-anyone>",
+        "",
+        "Hello"
+      ].join("\r\n")
+    );
+
+    await expect(
+      channel.emailIngress?.receive({
+        from: "anyone@example.com",
+        to: "another-mailbox@example.com",
+        headers: new Headers(),
+        getRaw: async () => raw
+      })
+    ).resolves.toMatchObject({ events: [{ event: { type: "message" } }] });
+  });
+
+  it("renders caller-supplied approval links into an approval email", async () => {
     const send = vi.fn(async (_message: unknown) => ({ messageId: "email-3" }));
     const channel = email({
       binding: { send: send as EmailSendBinding["send"] },
-      from: "agent@example.com",
-      to: "support@example.com"
+      from: "agent@example.com"
     });
 
     await expect(
-      channel.requestApproval?.({
+      channel.requestApproval?.(EMAIL_SURFACE, {
         interactionId: "deploy-42",
         request: {
           title: "Production deployment",
@@ -112,12 +257,11 @@ describe("experimental email channel", () => {
   it("fails plainly when approval links are unavailable", async () => {
     const channel = email({
       binding: { send: vi.fn() as EmailSendBinding["send"] },
-      from: "agent@example.com",
-      to: "support@example.com"
+      from: "agent@example.com"
     });
 
     await expect(
-      channel.requestApproval?.({
+      channel.requestApproval?.(EMAIL_SURFACE, {
         interactionId: "deploy-42",
         request: { summary: "Deploy?", input: {} }
       })
@@ -128,17 +272,67 @@ describe("experimental email channel", () => {
     });
   });
 
+  it("reports approval-link lookup failures as safe to retry", async () => {
+    const send = vi.fn(async (_message: unknown) => ({ messageId: "email-4" }));
+    const channel = email({
+      binding: { send: send as EmailSendBinding["send"] },
+      from: "agent@example.com"
+    });
+
+    await expect(
+      channel.requestApproval?.(EMAIL_SURFACE, {
+        interactionId: "deploy-42",
+        request: { summary: "Deploy?", input: {} },
+        getApprovalLinks: async () => {
+          throw new Error("approval storage unavailable");
+        }
+      })
+    ).resolves.toEqual({
+      status: "failed",
+      retryable: true,
+      error: {
+        code: "APPROVAL_LINKS_UNAVAILABLE",
+        message:
+          "Email approval requests require caller-supplied approval links"
+      }
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("marks rate limits as safe to retry", async () => {
     const error = Object.assign(new Error("Slow down"), {
       code: "E_RATE_LIMIT_EXCEEDED"
     });
 
-    await expect(
-      channelThatRejects(error).deliver({ markdown: "Help" })
-    ).resolves.toEqual({
+    await expect(deliverRejected(error)).resolves.toEqual({
       status: "failed",
       retryable: true,
       error: { code: "E_RATE_LIMIT_EXCEEDED", message: "Slow down" }
+    });
+  });
+
+  it("marks daily quota exhaustion as safe to retry later", async () => {
+    const error = Object.assign(new Error("Daily limit reached"), {
+      code: "E_DAILY_LIMIT_EXCEEDED"
+    });
+
+    await expect(deliverRejected(error)).resolves.toMatchObject({
+      status: "failed",
+      retryable: true
+    });
+  });
+
+  it("treats an internal Email Service failure as uncertain", async () => {
+    const error = Object.assign(new Error("Internal Server Error"), {
+      code: "E_INTERNAL_SERVER_ERROR"
+    });
+
+    await expect(deliverRejected(error)).resolves.toEqual({
+      status: "uncertain",
+      error: {
+        code: "E_INTERNAL_SERVER_ERROR",
+        message: "Internal Server Error"
+      }
     });
   });
 
@@ -147,9 +341,7 @@ describe("experimental email channel", () => {
       code: "E_SENDER_NOT_VERIFIED"
     });
 
-    await expect(
-      channelThatRejects(error).deliver({ markdown: "Help" })
-    ).resolves.toEqual({
+    await expect(deliverRejected(error)).resolves.toEqual({
       status: "failed",
       retryable: false,
       error: {
@@ -161,11 +353,11 @@ describe("experimental email channel", () => {
 
   it("recognizes recipient validation errors without an error code", async () => {
     await expect(
-      channelThatRejects(
+      deliverRejected(
         new Error(
           'Email must have at least one recipient in "to", "cc", or "bcc".'
         )
-      ).deliver({ markdown: "Help" })
+      )
     ).resolves.toEqual({
       status: "failed",
       retryable: false,
@@ -179,9 +371,7 @@ describe("experimental email channel", () => {
 
   it("treats unknown delivery errors as uncertain to avoid duplicates", async () => {
     await expect(
-      channelThatRejects(new Error("Connection closed")).deliver({
-        markdown: "Help"
-      })
+      deliverRejected(new Error("Connection closed"))
     ).resolves.toEqual({
       status: "uncertain",
       error: {

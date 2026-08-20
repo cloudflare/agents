@@ -1,5 +1,4 @@
 import { build } from "tsdown";
-import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 async function main() {
@@ -7,13 +6,13 @@ async function main() {
     clean: true,
     dts: true,
     target: "es2021",
-    entry: [
-      "src/index.ts",
-      "src/ai-sdk.ts",
-      "src/alarm-coordinator.ts",
-      "src/tanstack-ai.ts",
-      "src/voice.ts"
-    ],
+    entry: {
+      index: "src/index.ts",
+      "ai-sdk": "src/ai-sdk.ts",
+      slack: "src/adapters/slack.ts",
+      "tanstack-ai": "src/tanstack-ai.ts",
+      voice: "src/adapters/voice.ts"
+    },
     deps: {
       skipNodeModulesBundle: true
     },
@@ -23,7 +22,6 @@ async function main() {
   });
 
   formatDeclarationFiles();
-  copyPackageDocs(import.meta.url, "channels");
 
   process.exit(0);
 }

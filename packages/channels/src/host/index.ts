@@ -1,252 +1,351 @@
-import {
-  sharedAlarm,
-  type DurableObjectAlarmCoordinator
-} from "../alarm-coordinator";
 import type {
   Channel,
-  ChannelApprovalRequest,
+  ChannelApprovalRequestOptions,
   ChannelDeliveryContext,
   ChannelMessage,
+  ChannelRoute,
+  ChannelRouteContext,
   DeliveryResult
 } from "../channel";
-import type { ChannelApprovalResponse, ChannelEmailInput } from "../ingress";
-import {
-  createApprovalLinkController,
-  type ApprovalLinkController
-} from "./approval-links";
-import { createDeliveryController, type DeliveryController } from "./delivery";
-import {
-  createIngressDispatcher,
-  type IngressDispatcher
-} from "./ingress-dispatch";
+import { fallbackChannel } from "../fallback";
+import { fanoutChannel } from "../fanout";
 import type {
-  ChannelHostOptions,
-  ChannelHostScheduler,
-  HostedDeliveryResult,
-  HostedMessageOptions
-} from "./types";
+  ChannelIdentity,
+  ChannelIdentityInput,
+  UserIdentity
+} from "../identity";
+import { unsupported } from "../internal";
+import type {
+  ChannelApprovalResponse,
+  ChannelEmailInput,
+  ChannelInboundMessage,
+  ChannelIngressEnvelope,
+  ChannelIngressEvent,
+  ChannelIngressEventInput
+} from "../ingress";
+import {
+  isChannelMessageSurface,
+  type ChannelMessageSurface,
+  type ChannelMessageSurfaceInput
+} from "../surface";
 
-export { ChannelApprovalConflictError } from "./types";
-export type {
-  ChannelApprovalResponseEvent,
-  ChannelHostOptions,
-  ChannelHostScheduler,
-  ChannelHostStorage,
-  HostedDeliveryResult,
-  HostedMessageOptions
-} from "./types";
+export type ChannelMessageEvent = {
+  channelKey: string;
+  route: string;
+  /** Stable identity derived only from the configured Channel and eventId. */
+  dispatchId: string;
+  message: ChannelInboundMessage;
+};
+
+export type ChannelApprovalResponseEvent = {
+  channelKey: string;
+  route: string;
+  /** Stable identity derived only from the configured Channel and eventId. */
+  dispatchId: string;
+  response: ChannelApprovalResponse;
+};
+
+export type ChannelRouteEvent = {
+  channelKey: string;
+  event: ChannelIngressEvent;
+  route: string | null;
+  /** Stable identity derived only from the configured Channel and eventId. */
+  dispatchId: string;
+};
+
+export type ChannelHostOptions = {
+  channels: Record<string, Channel>;
+  /** Used when a Channel does not provide a route. Default: event thread id. */
+  defaultRoute?: ChannelRoute;
+  /** Resolve an existing, explicitly linked application user. */
+  findUser?(identity: ChannelIdentity): Promise<UserIdentity | null>;
+  /** Observes every valid route outcome before application dispatch. */
+  onRoute?(event: ChannelRouteEvent): void | Promise<void>;
+  onMessage?(event: ChannelMessageEvent): void | Promise<void>;
+  onApprovalResponse?(
+    event: ChannelApprovalResponseEvent
+  ): void | Promise<void>;
+};
+
+type OutboundOperation = (
+  channel: Channel,
+  surface: ChannelMessageSurface
+) => Promise<DeliveryResult>;
+
+const POLICY_KEYS = new Set(["fallback", "fanout"]);
 
 /**
- * Owns configured routing, durable delivery attempts, interaction correlation,
- * approval links, and normalized ingress dispatch for a set of Channels.
+ * Authenticates and normalizes ingress through configured Channel adapters,
+ * resolves outbound surfaces, and awaits the application's durable handoff.
  */
 export class ChannelHost {
   readonly #channels: Record<string, Channel>;
-  readonly #delivery: DeliveryController;
-  readonly #ingress: IngressDispatcher;
-  readonly #approvalLinks: ApprovalLinkController;
-  readonly #ownedAlarms: DurableObjectAlarmCoordinator | undefined;
-  #started: Promise<void> | undefined;
+  readonly #defaultRoute: ChannelRoute | undefined;
+  readonly #findUser: ChannelHostOptions["findUser"];
+  readonly #onRoute: ChannelHostOptions["onRoute"];
+  readonly #onMessage: ChannelHostOptions["onMessage"];
+  readonly #onApprovalResponse: ChannelHostOptions["onApprovalResponse"];
 
   constructor(options: ChannelHostOptions) {
-    this.#channels = { ...options.channels };
-
-    const maxAttempts = options.maxAttempts ?? 3;
-    const retryBaseDelayMs = options.retryBaseDelayMs ?? 1_000;
-    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-      throw new Error("maxAttempts must be a positive integer");
-    }
-    if (!Number.isFinite(retryBaseDelayMs) || retryBaseDelayMs < 0) {
-      throw new Error("retryBaseDelayMs must be a non-negative number");
-    }
-
-    const defaultChannelId = Object.keys(this.#channels)[0];
-    const configuredApprovalChannelId =
-      "approvalRequests" in options
-        ? options.approvalRequests
-        : defaultChannelId;
-    const configuredDeliveryChannelId =
-      "delivery" in options ? options.delivery : defaultChannelId;
-    this.#validateChannelId(configuredApprovalChannelId);
-    this.#validateChannelId(configuredDeliveryChannelId);
-    this.#validateIngressPaths();
-
-    let scheduler: ChannelHostScheduler;
-    if (options.scheduler) {
-      scheduler = options.scheduler;
-      this.#ownedAlarms = undefined;
-    } else {
-      this.#ownedAlarms = sharedAlarm(options.storage);
-      scheduler = this.#ownedAlarms.source("channels");
-    }
-
-    this.#ingress = createIngressDispatcher({
-      channels: this.#channels,
-      storage: options.storage,
-      onApprovalResponse: options.onApprovalResponse,
-      onMessage: options.onMessage
-    });
-    this.#approvalLinks = createApprovalLinkController({
-      storage: options.storage,
-      publicBaseUrl: options.publicBaseUrl,
-      approvalLinkPath: options.approvalLinkPath,
-      handleResponse: (event) =>
-        this.#ingress.handleEvent("approval-link", event)
-    });
-    this.#delivery = createDeliveryController({
-      channels: this.#channels,
-      storage: options.storage,
-      scheduler,
-      configuredApprovalChannelId,
-      configuredDeliveryChannelId,
-      maxAttempts,
-      retryBaseDelayMs,
-      approvalLinksAvailable: options.publicBaseUrl !== undefined,
-      getApprovalLinks: (deliveryId) => this.#approvalLinks.get(deliveryId)
-    });
-  }
-
-  /** Initialize durable routes and recover interrupted or scheduled delivery. */
-  async init(): Promise<void> {
-    await this.#ensureInitialized(true);
-  }
-
-  async #ensureInitialized(reconcileRetrySchedules: boolean): Promise<void> {
-    this.#started ??= this.#delivery.initialize(reconcileRetrySchedules);
-    await this.#started;
-  }
-
-  async setApprovalRequestsChannel(channelId?: string): Promise<void> {
-    await this.init();
-    await this.#delivery.setApprovalRequestsChannel(channelId);
-  }
-
-  async setDeliveryChannel(channelId?: string): Promise<void> {
-    await this.init();
-    await this.#delivery.setDeliveryChannel(channelId);
-  }
-
-  async deliver(
-    message: ChannelMessage,
-    context?: ChannelDeliveryContext
-  ): Promise<DeliveryResult>;
-  async deliver(
-    options: HostedMessageOptions
-  ): Promise<HostedDeliveryResult | undefined>;
-  async deliver(
-    input: ChannelMessage | HostedMessageOptions,
-    context?: ChannelDeliveryContext
-  ): Promise<DeliveryResult | HostedDeliveryResult | undefined> {
-    await this.init();
-    if ("message" in input) {
-      return this.#delivery.deliver(input);
-    }
-
-    const hosted = await this.#delivery.deliver({
-      deliveryId: context?.deliveryId,
-      message: input
-    });
-    return (
-      hosted?.result ?? {
-        status: "failed",
-        retryable: false,
-        error: {
-          code: "DELIVERY_ROUTE_NOT_CONFIGURED",
-          message: "ChannelHost has no delivery route configured"
-        }
+    for (const channelKey of Object.keys(options.channels)) {
+      if (POLICY_KEYS.has(channelKey)) {
+        throw new Error(
+          `Channel key "${channelKey}" is reserved for a delivery policy`
+        );
       }
-    );
-  }
-
-  async requestApproval(options: {
-    interactionId: string;
-    request: ChannelApprovalRequest;
-  }): Promise<HostedDeliveryResult | undefined> {
-    await this.init();
-    return this.#delivery.requestApproval(options);
-  }
-
-  async retryDelivery(deliveryId: string): Promise<HostedDeliveryResult> {
-    await this.init();
-    return this.#delivery.retryDelivery(deliveryId);
-  }
-
-  /**
-   * Retry confirmed failures whose durable backoff has elapsed. When supplied,
-   * delivery IDs bound the scan but are still validated against durable state.
-   */
-  async handleAlarm(deliveryIds?: readonly string[]): Promise<void> {
-    if (this.#ownedAlarms) {
-      await this.#ownedAlarms.handleAlarm({
-        channels: (dueIds) => this.#handleDueDeliveries(dueIds)
-      });
-      return;
     }
-    await this.#handleDueDeliveries(deliveryIds);
-  }
-
-  async #handleDueDeliveries(deliveryIds?: readonly string[]): Promise<void> {
-    // Do not reschedule due records during initialization: a coordinator uses
-    // generation-safe cleanup after this handler returns. Replacing a due
-    // generation before attempting it would preserve a stale logical alarm.
-    await this.#ensureInitialized(false);
-    await this.#delivery.handleDueDeliveries(deliveryIds);
-  }
-
-  /** Mark an approval settled by the owning application or another surface. */
-  async settleApproval(
-    interactionId: string,
-    decision: ChannelApprovalResponse["decision"],
-    channelId = "application"
-  ): Promise<void> {
-    await this.init();
-    await this.#delivery.settleApproval(interactionId, decision, channelId);
-  }
-
-  async getDelivery(
-    deliveryId: string
-  ): Promise<HostedDeliveryResult | undefined> {
-    await this.init();
-    return this.#delivery.getHostedDelivery(deliveryId);
+    const channels = { ...options.channels };
+    this.#channels = channels;
+    channels.fallback = fallbackChannel(this);
+    channels.fanout = fanoutChannel(this);
+    this.#defaultRoute = options.defaultRoute;
+    this.#findUser = options.findUser;
+    this.#onRoute = options.onRoute;
+    this.#onMessage = options.onMessage;
+    this.#onApprovalResponse = options.onApprovalResponse;
   }
 
   async handleRequest(request: Request): Promise<Response | undefined> {
-    await this.init();
-    const approvalLinkResponse =
-      await this.#approvalLinks.handleRequest(request);
-    return approvalLinkResponse ?? this.#ingress.handleRequest(request);
+    for (const [channelKey, channel] of Object.entries(this.#channels)) {
+      const ingress = channel.ingress;
+      if (!ingress) continue;
+
+      try {
+        const result = await ingress.receive(request);
+        if (!result) continue;
+        for (const envelope of result.events) {
+          await this.#dispatch(channelKey, channel, envelope);
+        }
+        return result.response;
+      } catch {
+        return new Response("Failed to handle Channel event", { status: 500 });
+      }
+    }
+    return undefined;
   }
 
   async handleEmail(email: ChannelEmailInput): Promise<boolean> {
-    await this.init();
-    return this.#ingress.handleEmail(email);
-  }
+    for (const [channelKey, channel] of Object.entries(this.#channels)) {
+      const ingress = channel.emailIngress;
+      if (!ingress) continue;
 
-  /** Resolve one registered HTTP ingress path against the Host's public URL. */
-  ingressUrl(channelId: string): string {
-    this.#validateChannelId(channelId);
-    const path = this.#channels[channelId]?.ingress?.path;
-    if (!path) {
-      throw new Error(`Channel "${channelId}" does not have HTTP ingress`);
-    }
-    return this.#approvalLinks.publicUrl(path);
-  }
-
-  #validateChannelId(channelId: string | undefined): void {
-    if (channelId !== undefined && !this.#channels[channelId]) {
-      throw new Error(`Unknown channel "${channelId}"`);
-    }
-  }
-
-  #validateIngressPaths(): void {
-    const ingressPaths = new Set<string>();
-    for (const channel of Object.values(this.#channels)) {
-      const path = channel.ingress?.path;
-      if (!path) continue;
-      if (ingressPaths.has(path)) {
-        throw new Error(`Duplicate Channel ingress path "${path}"`);
+      const result = await ingress.receive(email);
+      if (!result) continue;
+      for (const envelope of result.events) {
+        await this.#dispatch(channelKey, channel, envelope);
       }
-      ingressPaths.add(path);
+      return true;
     }
+    return false;
   }
+
+  /** Deliver through the configured Channel or composite named by the surface. */
+  deliver(
+    surface: ChannelMessageSurface,
+    message: ChannelMessage,
+    context?: ChannelDeliveryContext
+  ): Promise<DeliveryResult> {
+    return this.#outbound(surface, (channel, destination) => {
+      if (!channel.deliver) {
+        return Promise.resolve(
+          unsupported(
+            "CHANNEL_DELIVERY_UNSUPPORTED",
+            `Channel "${destination.channelKey}" does not support delivery`
+          )
+        );
+      }
+      return channel.deliver(destination, message, context);
+    });
+  }
+
+  /** Request approval through the Channel or composite named by the surface. */
+  requestApproval(
+    surface: ChannelMessageSurface,
+    options: ChannelApprovalRequestOptions
+  ): Promise<DeliveryResult> {
+    return this.#outbound(surface, (channel, destination) => {
+      if (!channel.requestApproval) {
+        return Promise.resolve(
+          unsupported(
+            "CHANNEL_APPROVAL_UNSUPPORTED",
+            `Channel "${destination.channelKey}" does not support approval requests`
+          )
+        );
+      }
+      return channel.requestApproval(destination, options);
+    });
+  }
+
+  /** Return the identity's configured Channel destination, when supported. */
+  contactSurface(identity: ChannelIdentity): ChannelMessageSurface | null {
+    const channel = Object.prototype.hasOwnProperty.call(
+      this.#channels,
+      identity.channelKey
+    )
+      ? this.#channels[identity.channelKey]
+      : undefined;
+    const surface = channel?.contactSurface?.(identity);
+    return surface ? stampSurface(identity.channelKey, surface) : null;
+  }
+
+  /** Resolve whether a surface can currently be selected without delivery. */
+  async isAvailable(surface: ChannelMessageSurface): Promise<boolean> {
+    if (!isChannelMessageSurface(surface)) return true;
+    const channel = this.#configuredChannel(surface.channelKey);
+    return channel.isAvailable?.(surface) ?? true;
+  }
+
+  async #outbound(
+    surface: ChannelMessageSurface,
+    operation: OutboundOperation
+  ): Promise<DeliveryResult> {
+    if (!isChannelMessageSurface(surface)) {
+      return unsupported(
+        "CHANNEL_SURFACE_INVALID",
+        "Cannot resolve an invalid Channel message surface"
+      );
+    }
+    const channel = this.#configuredChannel(surface.channelKey);
+    return operation(channel, surface);
+  }
+
+  #configuredChannel(channelKey: string): Channel {
+    const channel = Object.prototype.hasOwnProperty.call(
+      this.#channels,
+      channelKey
+    )
+      ? this.#channels[channelKey]
+      : undefined;
+    if (!channel) {
+      throw new Error(
+        `Channel message surface names unknown configured Channel key "${channelKey}"`
+      );
+    }
+    return channel;
+  }
+
+  async #dispatch(
+    channelKey: string,
+    channel: Channel,
+    envelope: ChannelIngressEnvelope
+  ): Promise<void> {
+    const rawEvent = envelope.event;
+    const event = stampEvent(channelKey, rawEvent);
+    const route = await this.#route(channelKey, channel, event, envelope.raw);
+    const dispatchId = await createDispatchId(channelKey, event.eventId);
+    await this.#onRoute?.({ channelKey, event, route, dispatchId });
+    if (route === null) return;
+
+    if (event.type === "message") {
+      if (!this.#onMessage) {
+        throw new Error(
+          `Channel "${channelKey}" received a message without an onMessage callback`
+        );
+      }
+      await this.#onMessage({ channelKey, route, dispatchId, message: event });
+      return;
+    }
+    if (!this.#onApprovalResponse) {
+      throw new Error(
+        `Channel "${channelKey}" received an approval response without an onApprovalResponse callback`
+      );
+    }
+    await this.#onApprovalResponse({
+      channelKey,
+      route,
+      dispatchId,
+      response: event
+    });
+  }
+
+  async #route(
+    channelKey: string,
+    channel: Channel,
+    event: ChannelIngressEvent,
+    raw: unknown
+  ): Promise<string | null> {
+    const context = this.#routeContext(event);
+    const route = channel.route
+      ? await channel.route(event, raw, context)
+      : this.#defaultRoute
+        ? await this.#defaultRoute(event, raw, context)
+        : event.thread.id;
+
+    if (route === undefined) {
+      throw new Error(
+        `Channel route for "${channelKey}" returned undefined; return null to ignore an event`
+      );
+    }
+    if (route !== null && typeof route !== "string") {
+      throw new Error(
+        `Channel route for "${channelKey}" must return a string or null`
+      );
+    }
+    return route;
+  }
+
+  #routeContext(event: ChannelIngressEvent): ChannelRouteContext {
+    let linkedUser: Promise<UserIdentity | null> | undefined;
+    return {
+      findUser: () => {
+        if (!linkedUser) {
+          const identity = event.actor?.identity;
+          const findUser = this.#findUser;
+          linkedUser =
+            identity && findUser
+              ? Promise.resolve().then(() => findUser(identity))
+              : Promise.resolve(null);
+        }
+        return linkedUser;
+      }
+    };
+  }
+}
+
+function stampSurface<TAddress extends ChannelMessageSurfaceInput["address"]>(
+  channelKey: string,
+  surface: ChannelMessageSurfaceInput<TAddress>
+): ChannelMessageSurface<string, TAddress> {
+  return { ...surface, channelKey };
+}
+
+function stampIdentity(
+  channelKey: string,
+  identity: ChannelIdentityInput
+): ChannelIdentity {
+  return { ...identity, channelKey };
+}
+
+function stampEvent(
+  channelKey: string,
+  event: ChannelIngressEventInput
+): ChannelIngressEvent {
+  return {
+    ...event,
+    ...(event.replySurface && {
+      replySurface: stampSurface(channelKey, event.replySurface)
+    }),
+    ...(event.actor && {
+      actor: {
+        ...event.actor,
+        ...(event.actor.identity && {
+          identity: stampIdentity(channelKey, event.actor.identity)
+        })
+      }
+    })
+  } as ChannelIngressEvent;
+}
+
+/** Hash an unambiguous tuple so dispatch identities remain safe to carry. */
+async function createDispatchId(
+  channelKey: string,
+  eventId: string
+): Promise<string> {
+  const identity = new TextEncoder().encode(
+    JSON.stringify([channelKey, eventId])
+  );
+  const digest = await crypto.subtle.digest("SHA-256", identity);
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("")}`;
 }

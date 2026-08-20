@@ -1,870 +1,736 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  ChannelApprovalConflictError,
   ChannelHost,
+  matchesPath,
   type Channel,
-  type ChannelHostScheduler,
+  type ChannelApprovalResponse,
+  type ChannelEmailIngress,
+  type ChannelEmailInput,
+  type ChannelIdentityInput,
+  type ChannelInboundMessage,
+  type ChannelInboundMessageInput,
   type ChannelIngress,
-  type ChannelIngressEvent,
-  type DurableObjectAlarmSourceTransaction
+  type ChannelIngressEnvelope,
+  type ChannelRouteContext,
+  type ChannelRouteEvent
 } from "..";
-import { memoryAlarmStorage, memoryStorage } from "./storage";
 
-function ingress(
+const delivered = async () => ({ status: "delivered" as const });
+const surface = {
+  channelKey: "test",
+  version: 1,
+  address: null,
+  label: "Test destination"
+} as const;
+
+function message(
+  eventId = "event-1",
+  threadId = "provider-thread-1"
+): ChannelInboundMessage {
+  return {
+    type: "message",
+    eventId,
+    thread: {
+      id: threadId,
+      isDirectMessage: true
+    },
+    actor: { id: "actor-1", username: "operator" },
+    message: {
+      id: "message-1",
+      text: "Hello",
+      attachments: []
+    }
+  };
+}
+
+function approval(eventId = "event-2"): ChannelApprovalResponse {
+  return {
+    type: "approval-response",
+    eventId,
+    thread: {
+      id: "provider-thread-2",
+      isDirectMessage: "unknown"
+    },
+    actor: { id: "actor-2" },
+    interactionId: "interaction-1",
+    decision: "approve",
+    reference: "approval-1"
+  };
+}
+
+function httpIngress<TRaw>(
   path: string,
-  events: readonly ChannelIngressEvent[]
-): ChannelIngress {
+  events: readonly ChannelIngressEnvelope<TRaw>[],
+  response = new Response("acknowledged", { status: 202 })
+): ChannelIngress<TRaw> {
   return {
-    path,
-    receive: vi.fn(async () => ({
-      events,
-      response: new Response("accepted", { status: 200 })
-    }))
+    receive: vi.fn(async (request) =>
+      matchesPath(request, path) ? { events, response } : null
+    )
   };
 }
 
-function approvalChannel(options?: {
-  reference?: string;
-  ingress?: ChannelIngress;
-  results?: Array<Awaited<ReturnType<Channel["deliver"]>>>;
-}): Channel {
-  const results = [...(options?.results ?? [])];
+function emailInput(): ChannelEmailInput {
   return {
-    ...(options?.ingress && { ingress: options.ingress }),
-    deliver: vi.fn(async () => ({ status: "delivered" as const })),
-    requestApproval: vi.fn(async () => {
-      const result = results.shift();
-      return (
-        result ?? {
-          status: "delivered" as const,
-          reference: options?.reference ?? "42"
-        }
-      );
-    })
+    from: "operator@example.com",
+    to: "agent@example.com",
+    headers: new Headers()
   };
 }
 
-function hostOptions(
+function host(
   channels: Record<string, Channel>,
   overrides: Partial<ConstructorParameters<typeof ChannelHost>[0]> = {}
-): ConstructorParameters<typeof ChannelHost>[0] {
-  return {
+) {
+  return new ChannelHost({
     channels,
-    storage: memoryStorage(),
-    scheduler: { schedule: vi.fn() },
-    onApprovalResponse: vi.fn(),
+    onMessage: vi.fn(),
     ...overrides
-  };
+  });
 }
 
-const approvalRequest = {
-  title: "Approval required",
-  summary: "Deploy release?",
-  input: { environment: "production" }
-};
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-describe("ChannelHost", () => {
-  it("defaults approval requests to the first configured Channel", async () => {
-    const channel = approvalChannel();
-    const host = new ChannelHost(hostOptions({ telegram: channel }));
+describe("stateless ChannelHost", () => {
+  it("allows an outbound-only Host without ingress callbacks", async () => {
+    const deliver = vi.fn(delivered);
+    const channelHost = new ChannelHost({
+      channels: { outbound: { deliver } }
+    });
+    const destination = { ...surface, channelKey: "outbound" };
 
     await expect(
-      host.requestApproval({
-        interactionId: "actpause_123",
-        request: approvalRequest
-      })
-    ).resolves.toEqual({
-      deliveryId: "approval:actpause_123",
-      channelId: "telegram",
-      result: { status: "delivered", reference: "42" }
-    });
-    expect(channel.requestApproval).toHaveBeenCalledWith(
-      expect.objectContaining({
-        interactionId: "actpause_123",
-        request: approvalRequest,
-        delivery: {
-          deliveryId: "approval:actpause_123",
-          attempt: 1
+      channelHost.deliver(destination, { markdown: "Hello" })
+    ).resolves.toEqual({ status: "delivered" });
+  });
+
+  it("accepts an inbound-only Channel without deliver", async () => {
+    const onMessage = vi.fn();
+    const channelHost = host(
+      {
+        inbound: {
+          ingress: httpIngress("/inbound", [{ event: message(), raw: null }])
         }
-      })
+      },
+      { onMessage }
+    );
+
+    await channelHost.handleRequest(
+      new Request("https://example.com/inbound", { method: "POST" })
+    );
+
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ route: "provider-thread-1" })
     );
   });
 
-  it("allows an explicit undefined route to disable approval delivery", async () => {
-    const channel = approvalChannel();
-    const host = new ChannelHost(
-      hostOptions({ telegram: channel }, { approvalRequests: undefined })
-    );
+  it("tries HTTP ingresses in configuration order and uses the first non-null result", async () => {
+    const declines = httpIngress("/other", []);
+    const first = httpIngress("/webhook", []);
+    const duplicate = httpIngress("/webhook", []);
+    const channelHost = host({
+      declines: { deliver: delivered, ingress: declines },
+      first: { deliver: delivered, ingress: first },
+      duplicate: { deliver: delivered, ingress: duplicate }
+    });
 
     await expect(
-      host.requestApproval({
-        interactionId: "browser-only",
-        request: approvalRequest
-      })
+      channelHost.handleRequest(
+        new Request("https://example.com/webhook", { method: "POST" })
+      )
+    ).resolves.toMatchObject({ status: 202 });
+
+    expect(declines.receive).toHaveBeenCalledOnce();
+    expect(first.receive).toHaveBeenCalledOnce();
+    expect(duplicate.receive).not.toHaveBeenCalled();
+  });
+
+  it("returns undefined when every HTTP ingress declines an exact pathname", async () => {
+    const ingress = httpIngress("/webhooks/telegram", []);
+    const channelHost = host({
+      telegram: { deliver: delivered, ingress }
+    });
+
+    await expect(
+      channelHost.handleRequest(
+        new Request("https://example.com/anything/webhooks/telegram", {
+          method: "POST"
+        })
+      )
     ).resolves.toBeUndefined();
-    expect(channel.requestApproval).not.toHaveBeenCalled();
+    expect(ingress.receive).toHaveBeenCalledOnce();
   });
 
-  it("persists a runtime approval route across Host recreation", async () => {
-    const storage = memoryStorage();
-    const channels = {
-      telegram: approvalChannel(),
-      backup: approvalChannel({ reference: "backup-1" })
+  it("does not fall through when an HTTP ingress claims and rejects a request", async () => {
+    const rejection: ChannelIngress = {
+      receive: vi.fn(async () => ({
+        events: [],
+        response: new Response(null, { status: 401 })
+      }))
     };
-    const first = new ChannelHost(
-      hostOptions(channels, {
-        storage,
-        approvalRequests: "telegram"
-      })
-    );
-    await first.setApprovalRequestsChannel("backup");
+    const later = httpIngress("/webhook", []);
+    const channelHost = host({
+      rejection: { deliver: delivered, ingress: rejection },
+      later: { deliver: delivered, ingress: later }
+    });
 
-    const recreated = new ChannelHost(
-      hostOptions(channels, {
-        storage,
-        approvalRequests: "telegram"
-      })
-    );
     await expect(
-      recreated.requestApproval({
-        interactionId: "actpause_456",
-        request: approvalRequest
-      })
-    ).resolves.toMatchObject({ channelId: "backup" });
+      channelHost.handleRequest(
+        new Request("https://example.com/webhook", { method: "POST" })
+      )
+    ).resolves.toMatchObject({ status: 401 });
+    expect(later.receive).not.toHaveBeenCalled();
   });
 
-  it("clears an override and immediately restores the configured default", async () => {
-    const storage = memoryStorage();
-    const channels = { telegram: approvalChannel() };
-    const host = new ChannelHost(
-      hostOptions(channels, {
-        storage,
-        approvalRequests: "telegram"
-      })
-    );
-    await host.setApprovalRequestsChannel();
+  it("uses Channel route before Host default route and passes the exact raw value only to routing", async () => {
+    const raw = { authenticatedUpdate: 42 };
+    const onMessage = vi.fn();
+    const defaultRoute = vi.fn(() => "host-default");
+    const route = vi.fn((_event, receivedRaw: typeof raw) => {
+      expect(receivedRaw).toBe(raw);
+      return "channel-route";
+    });
+    const channel: Channel<typeof raw> = {
+      route,
+      deliver: delivered,
+      ingress: httpIngress("/webhook", [{ event: message(), raw }])
+    };
+    const channels: Record<string, Channel> = {
+      webhook: channel,
+      outputOnly: { deliver: delivered }
+    };
+    const findUser = vi.fn();
+    const channelHost = host(channels, {
+      defaultRoute,
+      findUser,
+      onMessage
+    });
 
-    await expect(
-      host.requestApproval({
-        interactionId: "cleared",
-        request: approvalRequest
-      })
-    ).resolves.toMatchObject({ channelId: "telegram" });
-
-    const recreated = new ChannelHost(
-      hostOptions(channels, {
-        storage,
-        approvalRequests: "telegram"
-      })
+    const response = await channelHost.handleRequest(
+      new Request("https://example.com/webhook", { method: "POST" })
     );
-    await expect(
-      recreated.requestApproval({
-        interactionId: "restored",
-        request: approvalRequest
-      })
-    ).resolves.toMatchObject({ channelId: "telegram" });
+
+    expect(response?.status).toBe(202);
+    expect(await response?.text()).toBe("acknowledged");
+    expect(defaultRoute).not.toHaveBeenCalled();
+    expect(findUser).not.toHaveBeenCalled();
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ channelKey: "webhook", route: "channel-route" })
+    );
+    expect(onMessage.mock.calls[0]?.[0]).not.toHaveProperty("raw");
   });
 
-  it("does not redeliver an existing interaction", async () => {
-    const channel = approvalChannel();
-    const host = new ChannelHost(
-      hostOptions({ telegram: channel }, { approvalRequests: "telegram" })
+  it("uses the Host default route before falling back to the provider thread id", async () => {
+    const event = message();
+    const defaultMessage = vi.fn();
+    const threadMessage = vi.fn();
+    const withDefault = host(
+      {
+        inbound: {
+          deliver: delivered,
+          ingress: httpIngress("/default", [{ event, raw: null }])
+        }
+      },
+      { defaultRoute: () => "host-default", onMessage: defaultMessage }
     );
-    const options = {
-      interactionId: "actpause_123",
-      request: approvalRequest
+    const withThreadFallback = host(
+      {
+        inbound: {
+          deliver: delivered,
+          ingress: httpIngress("/thread", [{ event, raw: null }])
+        }
+      },
+      { onMessage: threadMessage }
+    );
+
+    await withDefault.handleRequest(
+      new Request("https://example.com/default", { method: "POST" })
+    );
+    await withThreadFallback.handleRequest(
+      new Request("https://example.com/thread", { method: "POST" })
+    );
+
+    expect(defaultMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ route: "host-default" })
+    );
+    expect(threadMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ route: "provider-thread-1" })
+    );
+  });
+
+  it("stamps an identity before lazily resolving and memoizing its user", async () => {
+    const identity = {
+      subject: "actor-1"
+    } satisfies ChannelIdentityInput;
+    const stampedIdentity = {
+      channelKey: "inbound",
+      ...identity
+    } as const;
+    const event: ChannelInboundMessageInput = {
+      ...message(),
+      actor: { id: "actor-1", identity }
+    };
+    const user = { id: "user-1", channelIdentities: [stampedIdentity] };
+    const findUser = vi.fn(async () => user);
+    const route = vi.fn(
+      async (_event: unknown, _raw: unknown, context: ChannelRouteContext) => {
+        const first = await context.findUser();
+        const second = await context.findUser();
+        expect(second).toBe(first);
+        return first ? `user:${first.id}` : null;
+      }
+    );
+    const onMessage = vi.fn();
+    const channelHost = host(
+      {
+        inbound: {
+          route,
+          deliver: delivered,
+          ingress: httpIngress("/identity", [{ event, raw: null }])
+        }
+      },
+      { findUser, onMessage }
+    );
+
+    await channelHost.handleRequest(
+      new Request("https://example.com/identity", { method: "POST" })
+    );
+
+    expect(findUser).toHaveBeenCalledOnce();
+    expect(findUser).toHaveBeenCalledWith(stampedIdentity);
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        route: "user:user-1",
+        message: expect.objectContaining({
+          actor: expect.objectContaining({ identity: stampedIdentity })
+        })
+      })
+    );
+  });
+
+  it("returns null from route context without a lookup or actor identity", async () => {
+    const findUser = vi.fn();
+    const withoutIdentity = vi.fn(
+      async (_event: unknown, _raw: unknown, context: ChannelRouteContext) => {
+        expect(await context.findUser()).toBeNull();
+        return "without-identity";
+      }
+    );
+    const withoutLookup = vi.fn(
+      async (_event: unknown, _raw: unknown, context: ChannelRouteContext) => {
+        expect(await context.findUser()).toBeNull();
+        return "without-lookup";
+      }
+    );
+    const withIdentity: ChannelInboundMessageInput = {
+      ...message("event-with-identity"),
+      actor: {
+        id: "actor-1",
+        identity: { subject: "actor-1" }
+      }
     };
 
-    await host.requestApproval(options);
-    await host.requestApproval(options);
-
-    expect(channel.requestApproval).toHaveBeenCalledOnce();
-  });
-
-  it("rejects reuse of an interaction id with different content", async () => {
-    const host = new ChannelHost(
-      hostOptions(
-        { telegram: approvalChannel() },
-        { approvalRequests: "telegram" }
-      )
-    );
-    await host.requestApproval({
-      interactionId: "actpause_123",
-      request: approvalRequest
-    });
-
-    await expect(
-      host.requestApproval({
-        interactionId: "actpause_123",
-        request: { ...approvalRequest, summary: "Delete production?" }
-      })
-    ).rejects.toThrow(
-      'Interaction "actpause_123" was already requested differently'
-    );
-  });
-
-  it("durably correlates provider reply references after recreation", async () => {
-    const storage = memoryStorage();
-    const sender = approvalChannel({ reference: "42" });
-    const first = new ChannelHost(
-      hostOptions(
-        { telegram: sender },
-        { storage, approvalRequests: "telegram" }
-      )
-    );
-    await first.requestApproval({
-      interactionId: "actpause_123",
-      request: approvalRequest
-    });
-    await storage.delete("cf_channels:reference:telegram%3A42");
-
-    const onApprovalResponse = vi.fn(async () => undefined);
-    const receiver = approvalChannel({
-      ingress: ingress("/webhooks/telegram", [
-        {
-          type: "approval-response",
-          decision: "approve",
-          reference: "43",
-          replyToReference: "42"
+    await host(
+      {
+        inbound: {
+          route: withoutIdentity,
+          deliver: delivered,
+          ingress: httpIngress("/without-identity", [
+            { event: message(), raw: null }
+          ])
         }
-      ])
-    });
-    const recreated = new ChannelHost(
-      hostOptions(
-        { telegram: receiver },
-        { storage, approvalRequests: "telegram", onApprovalResponse }
-      )
+      },
+      { findUser }
+    ).handleRequest(
+      new Request("https://example.com/without-identity", { method: "POST" })
+    );
+    await host({
+      inbound: {
+        route: withoutLookup,
+        deliver: delivered,
+        ingress: httpIngress("/without-lookup", [
+          { event: withIdentity, raw: null }
+        ])
+      }
+    }).handleRequest(
+      new Request("https://example.com/without-lookup", { method: "POST" })
     );
 
-    await recreated.handleRequest(
-      new Request("https://example.com/webhooks/telegram", { method: "POST" })
-    );
-
-    expect(onApprovalResponse).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channelId: "telegram",
-        interactionId: "actpause_123",
-        decision: "approve"
-      })
-    );
+    expect(findUser).not.toHaveBeenCalled();
   });
 
-  it("accepts an explicit interaction response through another Channel", async () => {
-    const onApprovalResponse = vi.fn(async () => undefined);
-    const host = new ChannelHost(
-      hostOptions(
-        {
-          email: approvalChannel(),
-          telegram: approvalChannel({
-            ingress: ingress("/webhooks/telegram", [
-              {
-                type: "approval-response",
-                decision: "reject",
-                reference: "99",
-                interactionId: "actpause_123"
-              }
-            ])
-          })
-        },
-        { approvalRequests: "email", onApprovalResponse }
-      )
-    );
-    await host.requestApproval({
-      interactionId: "actpause_123",
-      request: approvalRequest
+  it("awaits onRoute before dispatching an identical routed outcome", async () => {
+    const event = message();
+    let finishRoute: () => void = () => undefined;
+    const routeFinished = new Promise<void>((resolve) => {
+      finishRoute = resolve;
     });
-
-    await host.handleRequest(
-      new Request("https://example.com/webhooks/telegram", { method: "POST" })
-    );
-
-    expect(onApprovalResponse).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channelId: "telegram",
-        interactionId: "actpause_123",
-        decision: "reject"
-      })
-    );
-  });
-
-  it("suppresses ingress replays after Host recreation", async () => {
-    const storage = memoryStorage();
-    const onApprovalResponse = vi.fn(async () => undefined);
-    const channel = approvalChannel({
-      ingress: ingress("/webhooks/telegram", [
-        {
-          type: "approval-response",
-          decision: "approve",
-          reference: "43",
-          interactionId: "actpause_123"
+    const onRoute = vi.fn(async (_event: ChannelRouteEvent) => routeFinished);
+    const onMessage = vi.fn();
+    const channelHost = host(
+      {
+        inbound: {
+          route() {
+            return "application-route";
+          },
+          deliver: delivered,
+          ingress: httpIngress("/routed", [
+            { event, raw: { authenticated: true } }
+          ])
         }
-      ])
-    });
-    const options = hostOptions(
-      { telegram: channel },
-      { storage, approvalRequests: "telegram", onApprovalResponse }
+      },
+      { onRoute, onMessage }
     );
 
-    const first = new ChannelHost(options);
-    await first.requestApproval({
-      interactionId: "actpause_123",
-      request: approvalRequest
-    });
-    await first.handleRequest(
-      new Request("https://example.com/webhooks/telegram", { method: "POST" })
+    const handling = channelHost.handleRequest(
+      new Request("https://example.com/routed", { method: "POST" })
     );
-    await new ChannelHost(options).handleRequest(
-      new Request("https://example.com/webhooks/telegram", { method: "POST" })
-    );
+    await vi.waitFor(() => expect(onRoute).toHaveBeenCalledOnce());
+    expect(onMessage).not.toHaveBeenCalled();
 
-    expect(onApprovalResponse).toHaveBeenCalledOnce();
+    finishRoute();
+    await handling;
+
+    const routeEvent = onRoute.mock.calls[0]?.[0];
+    const messageEvent = onMessage.mock.calls[0]?.[0];
+    expect(routeEvent).toEqual({
+      channelKey: "inbound",
+      event,
+      route: "application-route",
+      dispatchId: expect.stringMatching(/^sha256:[\da-f]{64}$/)
+    });
+    expect(messageEvent).toMatchObject({
+      channelKey: routeEvent?.channelKey,
+      route: routeEvent?.route,
+      dispatchId: routeEvent?.dispatchId,
+      message: event
+    });
   });
 
-  it("retries a confirmed retryable failure with the same delivery id", async () => {
-    const requestApproval = vi
-      .fn<Channel["requestApproval"]>()
-      .mockResolvedValueOnce({
-        status: "failed",
-        retryable: true,
-        error: { code: "RATE_LIMIT", message: "Slow down" }
-      })
-      .mockResolvedValueOnce({
-        status: "failed",
-        retryable: true,
-        error: { code: "RATE_LIMIT", message: "Still slow" }
-      })
-      .mockResolvedValueOnce({
-        status: "delivered",
-        reference: "42"
+  it("awaits and observes a null route without dispatching", async () => {
+    const event = message();
+    let finishRoute: () => void = () => undefined;
+    const routeFinished = new Promise<void>((resolve) => {
+      finishRoute = resolve;
+    });
+    const onRoute = vi.fn(async (_event: ChannelRouteEvent) => routeFinished);
+    const onMessage = vi.fn();
+    const defaultRoute = vi.fn(() => "host-default");
+    const channelHost = host(
+      {
+        inbound: {
+          route() {
+            return null;
+          },
+          deliver: delivered,
+          ingress: httpIngress("/ignored", [{ event, raw: { ignored: true } }])
+        }
+      },
+      { defaultRoute, onRoute, onMessage }
+    );
+
+    let responded = false;
+    const handling = channelHost
+      .handleRequest(
+        new Request("https://example.com/ignored", { method: "POST" })
+      )
+      .then((response) => {
+        responded = true;
+        return response;
       });
-    const channel: Channel = {
-      deliver: vi.fn(),
-      requestApproval
-    };
-    const scheduleRetry = vi.fn(async () => undefined);
-    const host = new ChannelHost(
-      hostOptions(
-        { telegram: channel },
-        {
-          approvalRequests: "telegram",
-          retryBaseDelayMs: 0,
-          scheduler: { schedule: scheduleRetry }
+    await vi.waitFor(() => expect(onRoute).toHaveBeenCalledOnce());
+    expect(responded).toBe(false);
+    finishRoute();
+    const response = await handling;
+
+    expect(response?.status).toBe(202);
+    expect(onRoute).toHaveBeenCalledWith({
+      channelKey: "inbound",
+      event,
+      route: null,
+      dispatchId: expect.stringMatching(/^sha256:[\da-f]{64}$/)
+    });
+    expect(onRoute.mock.calls[0]?.[0]).not.toHaveProperty("raw");
+    expect(defaultRoute).not.toHaveBeenCalled();
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it("turns an accidental undefined route into an HTTP 500", async () => {
+    const onMessage = vi.fn();
+    const channelHost = host(
+      {
+        inbound: {
+          route() {
+            return undefined as never;
+          },
+          deliver: delivered,
+          ingress: httpIngress("/invalid", [{ event: message(), raw: null }])
         }
-      )
+      },
+      { defaultRoute: () => "host-default", onMessage }
     );
 
-    await host.requestApproval({
-      interactionId: "actpause_123",
-      request: approvalRequest
-    });
-    expect(scheduleRetry).toHaveBeenCalledWith(
-      "approval:actpause_123",
-      expect.any(Number)
+    const response = await channelHost.handleRequest(
+      new Request("https://example.com/invalid", { method: "POST" })
     );
 
-    await host.retryDelivery("approval:actpause_123");
-    expect(scheduleRetry).toHaveBeenCalledTimes(2);
-
-    await expect(
-      host.retryDelivery("approval:actpause_123")
-    ).resolves.toMatchObject({
-      result: { status: "delivered", reference: "42" }
-    });
-    expect(requestApproval.mock.calls[2]?.[0].delivery).toEqual({
-      deliveryId: "approval:actpause_123",
-      attempt: 3
-    });
+    expect(response?.status).toBe(500);
+    expect(onMessage).not.toHaveBeenCalled();
   });
 
-  it("owns the native alarm when no scheduler is configured", async () => {
-    vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const deliver = vi
-      .fn<Channel["deliver"]>()
-      .mockResolvedValueOnce({
-        status: "failed",
-        retryable: true,
-        error: { code: "RATE_LIMIT", message: "Slow down" }
-      })
-      .mockResolvedValueOnce({ status: "delivered", reference: "message-1" });
-    const host = new ChannelHost({
-      channels: { support: { deliver } },
-      storage: memoryAlarmStorage(),
-      retryBaseDelayMs: 0,
-      onApprovalResponse: vi.fn()
-    });
-
-    await host.deliver({
-      deliveryId: "notice-1",
-      message: { markdown: "Hello" }
-    });
-    await host.handleAlarm();
-
-    expect(deliver).toHaveBeenCalledTimes(2);
-  });
-
-  it("polls only due confirmed failures and makes extra alarm calls harmless", async () => {
-    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const deliver = vi
-      .fn<Channel["deliver"]>()
-      .mockResolvedValueOnce({
-        status: "failed",
-        retryable: true,
-        error: { code: "RATE_LIMIT", message: "Slow down" }
-      })
-      .mockResolvedValueOnce({ status: "delivered", reference: "message-1" });
-    const host = new ChannelHost(
-      hostOptions(
-        { support: { deliver } },
-        { retryBaseDelayMs: 100, scheduler: { schedule: vi.fn() } }
-      )
-    );
-    await host.deliver({
-      deliveryId: "notice-1",
-      message: { markdown: "Hello" }
-    });
-
-    now.mockReturnValue(1_099);
-    await host.handleAlarm();
-    expect(deliver).toHaveBeenCalledOnce();
-
-    now.mockReturnValue(1_100);
-    await host.handleAlarm();
-    await host.handleAlarm();
-    expect(deliver).toHaveBeenCalledTimes(2);
-  });
-
-  it("uses supplied alarm IDs to bound due delivery polling", async () => {
-    const attempts = new Map<string, number>();
-    const deliver = vi.fn<Channel["deliver"]>(async (_message, context) => {
-      if (!context) throw new Error("Expected durable delivery context");
-      const attempt = (attempts.get(context.deliveryId) ?? 0) + 1;
-      attempts.set(context.deliveryId, attempt);
-      return attempt === 1
-        ? {
-            status: "failed",
-            retryable: true,
-            error: { code: "RATE_LIMIT", message: "Slow down" }
-          }
-        : { status: "delivered", reference: context.deliveryId };
-    });
-    const host = new ChannelHost(
-      hostOptions(
-        { support: { deliver } },
-        { retryBaseDelayMs: 0, scheduler: { schedule: vi.fn() } }
-      )
-    );
-    await host.deliver({
-      deliveryId: "notice-1",
-      message: { markdown: "First" }
-    });
-    await host.deliver({
-      deliveryId: "notice-2",
-      message: { markdown: "Second" }
-    });
-
-    await host.handleAlarm(["notice-2", "unknown"]);
-
-    expect(deliver).toHaveBeenCalledTimes(3);
-    await expect(host.getDelivery("notice-1")).resolves.toMatchObject({
-      result: { status: "failed", retryable: true }
-    });
-    await expect(host.getDelivery("notice-2")).resolves.toMatchObject({
-      result: { status: "delivered" }
-    });
-  });
-
-  it("resumes a pending delivery during initialization", async () => {
-    const storage = memoryStorage();
-    await storage.put("cf_channels:delivery:notice-1", {
-      id: "notice-1",
-      kind: "message",
-      channelId: "support",
-      message: { markdown: "Hello" },
-      status: "pending",
-      attempt: 0,
-      createdAt: 100,
-      updatedAt: 100
-    });
-    const deliver = vi.fn(async () => ({ status: "delivered" as const }));
-    const host = new ChannelHost(
-      hostOptions({ support: { deliver } }, { storage })
-    );
-
-    await host.init();
-    await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
-    await vi.waitFor(async () =>
-      expect(host.getDelivery("notice-1")).resolves.toMatchObject({
-        result: { status: "delivered" }
-      })
-    );
-  });
-
-  it("reconciles persisted retry state after a non-transactional scheduler failure", async () => {
-    const storage = memoryStorage();
-    const deliver = vi.fn(async () => ({
-      status: "failed" as const,
-      retryable: true,
-      error: { code: "RATE_LIMIT", message: "Slow down" }
-    }));
-    const first = new ChannelHost(
-      hostOptions(
-        { support: { deliver } },
-        {
-          storage,
-          scheduler: {
-            schedule: vi.fn(async () => {
-              throw new Error("scheduler unavailable");
-            })
-          }
+  it("keeps dispatch identity stable when application routing changes", async () => {
+    let route = "first-route";
+    const onMessage = vi.fn();
+    const event = message("immutable-event");
+    const channelHost = host(
+      {
+        inbound: {
+          route() {
+            return route;
+          },
+          deliver: delivered,
+          ingress: httpIngress("/rerouted", [{ event, raw: null }])
         }
-      )
+      },
+      { onMessage }
     );
 
-    await expect(
-      first.deliver({
-        deliveryId: "notice-1",
-        message: { markdown: "Hello" }
-      })
-    ).rejects.toThrow("scheduler unavailable");
-    await expect(first.getDelivery("notice-1")).resolves.toMatchObject({
-      result: { status: "failed", retryable: true }
-    });
-
-    const schedule = vi.fn();
-    const recreated = new ChannelHost(
-      hostOptions(
-        { support: { deliver } },
-        { storage, scheduler: { schedule } }
-      )
+    await channelHost.handleRequest(
+      new Request("https://example.com/rerouted", { method: "POST" })
     );
-    await recreated.init();
+    route = "second-route";
+    await channelHost.handleRequest(
+      new Request("https://example.com/rerouted", { method: "POST" })
+    );
 
-    expect(schedule).toHaveBeenCalledWith("notice-1", expect.any(Number));
-    expect(deliver).toHaveBeenCalledOnce();
+    expect(onMessage.mock.calls.map(([value]) => value.route)).toEqual([
+      "first-route",
+      "second-route"
+    ]);
+    expect(onMessage.mock.calls[0]?.[0].dispatchId).toBe(
+      onMessage.mock.calls[1]?.[0].dispatchId
+    );
   });
 
-  it("does not replace a due scheduler generation when alarm handling initializes a recreated Host", async () => {
-    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const storage = memoryStorage();
-    const deliver = vi
-      .fn<Channel["deliver"]>()
-      .mockResolvedValueOnce({
-        status: "failed",
-        retryable: true,
-        error: { code: "RATE_LIMIT", message: "Slow down" }
-      })
-      .mockResolvedValueOnce({ status: "delivered", reference: "message-1" });
-    const first = new ChannelHost(
-      hostOptions({ support: { deliver } }, { storage, retryBaseDelayMs: 100 })
-    );
-    await first.deliver({
-      deliveryId: "notice-1",
-      message: { markdown: "Hello" }
-    });
-
-    now.mockReturnValue(1_100);
-    const schedule = vi.fn();
-    const recreated = new ChannelHost(
-      hostOptions(
-        { support: { deliver } },
-        { storage, scheduler: { schedule } }
-      )
-    );
-    await recreated.handleAlarm();
-
-    expect(deliver).toHaveBeenCalledTimes(2);
-    expect(schedule).not.toHaveBeenCalled();
-  });
-
-  it("never retries an uncertain provider attempt", async () => {
-    const deliver = vi.fn(async () => {
-      throw new Error("The request outcome is unknown");
-    });
-    const host = new ChannelHost(
-      hostOptions({ support: { deliver } }, { retryBaseDelayMs: 0 })
-    );
-
-    await host.deliver({
-      deliveryId: "notice-1",
-      message: { markdown: "Hello" }
-    });
-    await host.handleAlarm();
-
-    expect(deliver).toHaveBeenCalledOnce();
-    await expect(host.getDelivery("notice-1")).resolves.toMatchObject({
-      result: { status: "uncertain" }
-    });
-  });
-
-  it("marks an interrupted attempting record uncertain without retrying it", async () => {
-    const storage = memoryStorage();
-    await storage.put("cf_channels:delivery:notice-1", {
-      id: "notice-1",
-      kind: "message",
-      channelId: "support",
-      message: { markdown: "Hello" },
-      status: "attempting",
-      attempt: 1,
-      createdAt: 100,
-      updatedAt: 100
-    });
-    const deliver = vi.fn<Channel["deliver"]>();
-    const host = new ChannelHost(
-      hostOptions({ support: { deliver } }, { storage })
-    );
-
-    await host.handleAlarm();
-
-    expect(deliver).not.toHaveBeenCalled();
-    await expect(host.getDelivery("notice-1")).resolves.toMatchObject({
-      result: { status: "uncertain" }
-    });
-  });
-
-  it("atomically records retry state when the scheduler supports transactions", async () => {
-    const storage = memoryStorage();
-    const schedule = vi.fn(async () => undefined);
-    const scheduleInTransaction = vi.fn(async () => undefined);
-    const scheduler: ChannelHostScheduler = {
-      schedule,
-      async transaction<T>(
-        callback: (
-          transaction: DurableObjectAlarmSourceTransaction
-        ) => Promise<T>
-      ): Promise<T> {
-        return callback({
-          get: storage.get.bind(storage),
-          list: storage.list.bind(storage),
-          put: storage.put.bind(storage),
-          delete: storage.delete.bind(storage),
-          schedule: scheduleInTransaction,
-          cancel: vi.fn(async () => undefined)
-        } as DurableObjectAlarmSourceTransaction);
-      }
+  it("tries Email ingresses in configuration order and uses the first non-null result", async () => {
+    const declines: ChannelEmailIngress = {
+      receive: vi.fn(async () => null)
     };
-    const host = new ChannelHost(
-      hostOptions(
-        {
-          support: {
-            deliver: vi.fn(async () => ({
-              status: "failed" as const,
-              retryable: true,
-              error: { code: "RATE_LIMIT", message: "Slow down" }
-            }))
-          }
+    const first: ChannelEmailIngress = {
+      receive: vi.fn(async () => ({ events: [] }))
+    };
+    const later: ChannelEmailIngress = {
+      receive: vi.fn(async () => ({ events: [] }))
+    };
+    const channelHost = host({
+      declines: { deliver: delivered, emailIngress: declines },
+      first: { deliver: delivered, emailIngress: first },
+      later: { deliver: delivered, emailIngress: later }
+    });
+
+    await expect(channelHost.handleEmail(emailInput())).resolves.toBe(true);
+    expect(declines.receive).toHaveBeenCalledOnce();
+    expect(first.receive).toHaveBeenCalledOnce();
+    expect(later.receive).not.toHaveBeenCalled();
+
+    const allDecline = host({
+      first: { deliver: delivered, emailIngress: declines },
+      outputOnly: { deliver: delivered }
+    });
+    await expect(allDecline.handleEmail(emailInput())).resolves.toBe(false);
+  });
+
+  it("dispatches HTTP messages and Email approval responses through one callback shape", async () => {
+    const onMessage = vi.fn();
+    const onApprovalResponse = vi.fn();
+    const emailRaw = { authenticatedEmail: true };
+    const emailIngress: ChannelEmailIngress<typeof emailRaw> = {
+      receive: vi.fn(async () => ({
+        events: [{ event: approval(), raw: emailRaw }]
+      }))
+    };
+    const emailRoute = vi.fn((_event, raw: typeof emailRaw) => {
+      expect(raw).toBe(emailRaw);
+      return "approval-route";
+    });
+    const channelHost = host(
+      {
+        http: {
+          deliver: delivered,
+          ingress: httpIngress("/message", [
+            { event: message(), raw: { update: 1 } }
+          ])
         },
-        { storage, scheduler }
-      )
+        email: {
+          route: emailRoute,
+          deliver: delivered,
+          emailIngress
+        }
+      },
+      { onMessage, onApprovalResponse }
     );
 
-    await host.deliver({
-      deliveryId: "notice-1",
-      message: { markdown: "Hello" }
-    });
-
-    expect(schedule).not.toHaveBeenCalled();
-    expect(scheduleInTransaction).toHaveBeenCalledWith(
-      "notice-1",
-      expect.any(Number)
+    await channelHost.handleRequest(
+      new Request("https://example.com/message", { method: "POST" })
     );
-    await expect(host.getDelivery("notice-1")).resolves.toMatchObject({
-      result: { status: "failed", retryable: true }
-    });
-  });
+    await expect(channelHost.handleEmail(emailInput())).resolves.toBe(true);
 
-  it("does not send an approval that settled before its delivery intent was created", async () => {
-    const channel = approvalChannel();
-    const host = new ChannelHost(
-      hostOptions({ email: channel }, { approvalRequests: "email" })
-    );
-
-    await host.settleApproval("actpause_123", "approve");
-
-    await expect(
-      host.requestApproval({
-        interactionId: "actpause_123",
-        request: approvalRequest
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelKey: "http",
+        route: "provider-thread-1",
+        message: expect.objectContaining({ type: "message" })
       })
-    ).resolves.toMatchObject({
-      result: {
-        status: "failed",
-        error: { code: "INTERACTION_ALREADY_SETTLED" }
-      }
-    });
-    expect(channel.requestApproval).not.toHaveBeenCalled();
-  });
-
-  it("cancels a pending notification retry when the application settles the approval", async () => {
-    const requestApproval = vi.fn(async () => ({
-      status: "failed" as const,
-      retryable: true,
-      error: { code: "RATE_LIMIT", message: "Slow down" }
-    }));
-    const host = new ChannelHost(
-      hostOptions(
-        { email: { deliver: vi.fn(), requestApproval } },
-        {
-          approvalRequests: "email",
-          retryBaseDelayMs: 0,
-          scheduler: { schedule: vi.fn() }
-        }
-      )
     );
-    await host.requestApproval({
-      interactionId: "actpause_123",
-      request: approvalRequest
-    });
-
-    await host.settleApproval("actpause_123", "approve");
-    await host.retryDelivery("approval:actpause_123");
-
-    expect(requestApproval).toHaveBeenCalledOnce();
-  });
-
-  it("generates stable Host-owned links and requires POST to settle", async () => {
-    const onApprovalResponse = vi.fn(async () => undefined);
-    let deliveredText = "";
-    const channel: Channel = {
-      deliver: vi.fn(),
-      async requestApproval({ getApprovalLinks }) {
-        const first = await getApprovalLinks?.();
-        const second = await getApprovalLinks?.();
-        expect(second).toEqual(first);
-        deliveredText = `${first?.approve}\n${first?.reject}`;
-        return { status: "delivered", reference: "email-1" };
-      }
-    };
-    const host = new ChannelHost(
-      hostOptions(
-        { email: channel },
-        {
-          approvalRequests: "email",
-          publicBaseUrl: "https://example.com/agents/support/123/",
-          approvalLinkPath: "approvals",
-          onApprovalResponse
-        }
-      )
-    );
-    await host.requestApproval({
-      interactionId: "actpause_123",
-      request: approvalRequest
-    });
-    const approve = deliveredText.split("\n")[0];
-    expect(approve).toMatch(
-      /^https:\/\/example\.com\/agents\/support\/123\/approvals\//
-    );
-
-    const confirmation = await host.handleRequest(new Request(approve));
-    expect(confirmation?.status).toBe(200);
-    expect(await confirmation?.text()).toContain("Confirm approve");
-    expect(onApprovalResponse).not.toHaveBeenCalled();
-
-    const resolved = await host.handleRequest(
-      new Request(approve, { method: "POST" })
-    );
-    expect(resolved?.status).toBe(200);
     expect(onApprovalResponse).toHaveBeenCalledWith(
       expect.objectContaining({
-        channelId: "approval-link",
-        interactionId: "actpause_123",
-        decision: "approve"
+        channelKey: "email",
+        route: "approval-route",
+        response: expect.objectContaining({
+          type: "approval-response",
+          interactionId: "interaction-1"
+        })
       })
     );
+    expect(onApprovalResponse.mock.calls[0]?.[0]).not.toHaveProperty("raw");
   });
 
-  it("returns a conflict when the application ledger already settled a link", async () => {
-    let approve = "";
-    const host = new ChannelHost(
-      hostOptions(
-        {
-          email: {
-            deliver: vi.fn(),
-            requestApproval: vi.fn(async ({ getApprovalLinks }) => {
-              approve = (await getApprovalLinks?.())?.approve ?? "";
-              return { status: "delivered", reference: "email-1" };
-            })
-          }
-        },
-        {
-          approvalRequests: "email",
-          publicBaseUrl: "https://example.com",
-          onApprovalResponse: vi.fn(async () => {
-            throw new ChannelApprovalConflictError();
-          })
+  it("stamps inbound reply surfaces with the configured Channel key", async () => {
+    const onMessage = vi.fn();
+    const route = vi.fn(() => "support-route");
+    const event = {
+      ...message(),
+      replySurface: {
+        version: 1,
+        address: { destination: "thread-1" },
+        label: "Support thread"
+      }
+    } as const;
+    const channelHost = host(
+      {
+        support: {
+          route,
+          ingress: httpIngress("/support", [{ event, raw: null }])
         }
-      )
+      },
+      { onMessage }
     );
-    await host.requestApproval({
-      interactionId: "actpause_conflict",
-      request: approvalRequest
+
+    await channelHost.handleRequest(
+      new Request("https://example.com/support", { method: "POST" })
+    );
+
+    expect(route.mock.calls[0]?.[0].replySurface).toEqual({
+      channelKey: "support",
+      version: 1,
+      address: { destination: "thread-1" },
+      label: "Support thread"
     });
-
-    const response = await host.handleRequest(
-      new Request(approve, { method: "POST" })
-    );
-
-    expect(response?.status).toBe(409);
+    expect(onMessage.mock.calls[0]?.[0].message.replySurface).toEqual({
+      channelKey: "support",
+      version: 1,
+      address: { destination: "thread-1" },
+      label: "Support thread"
+    });
   });
 
-  it("durably delivers ordinary messages through the configured route", async () => {
-    const deliver = vi.fn(async () => ({
-      status: "delivered" as const,
-      reference: "message-1"
-    }));
-    const host = new ChannelHost(hostOptions({ support: { deliver } }));
-    const options = {
-      deliveryId: "notice-1",
-      message: { markdown: "Hello" }
+  it("resolves direct and approval delivery through the surface key", async () => {
+    const deliver = vi.fn(delivered);
+    const requestApproval = vi.fn(delivered);
+    const channelHost = host({ outbound: { deliver, requestApproval } });
+    const destination = { ...surface, channelKey: "outbound" };
+    const message = { markdown: "Hello" };
+    const approval = {
+      interactionId: "approval-1",
+      request: { summary: "Proceed?", input: {} }
     };
 
-    await host.deliver(options);
-    await host.deliver(options);
-
-    expect(deliver).toHaveBeenCalledOnce();
-    expect(deliver).toHaveBeenCalledWith(
-      { markdown: "Hello" },
-      { deliveryId: "notice-1", attempt: 1 }
-    );
+    await expect(channelHost.deliver(destination, message)).resolves.toEqual({
+      status: "delivered"
+    });
+    await expect(
+      channelHost.requestApproval(destination, approval)
+    ).resolves.toEqual({ status: "delivered" });
+    expect(deliver).toHaveBeenCalledWith(destination, message, undefined);
+    expect(requestApproval).toHaveBeenCalledWith(destination, approval);
   });
 
-  it("resolves registered ingress against the top-level public URL", () => {
-    const host = new ChannelHost(
-      hostOptions(
-        {
-          telegram: approvalChannel({
-            ingress: ingress("/webhooks/telegram", [])
-          })
-        },
-        {
-          publicBaseUrl: "https://example.com/agents/support/123"
-        }
+  it("resolves a contact surface directly through the identity Channel key", () => {
+    const first = vi.fn(() => {
+      throw new Error("must not inspect a different configured Channel");
+    });
+    const second = vi.fn(() => ({
+      version: 1 as const,
+      address: { userId: "actor-1" },
+      label: "Test user actor-1"
+    }));
+    const identity = {
+      channelKey: "second",
+      subject: "actor-1"
+    } as const;
+    const channelHost = host({
+      first: { contactSurface: first },
+      second: { contactSurface: second }
+    });
+
+    expect(channelHost.contactSurface(identity)).toEqual({
+      channelKey: "second",
+      version: 1,
+      address: { userId: "actor-1" },
+      label: "Test user actor-1"
+    });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledWith(identity);
+  });
+
+  it.each(["fallback", "fanout"])(
+    "rejects the reserved %s Channel key",
+    (channelKey) => {
+      expect(() => host({ [channelKey]: {} })).toThrow(
+        `Channel key "${channelKey}" is reserved for a delivery policy`
+      );
+    }
+  );
+
+  it("fails loudly when a surface names an unknown configured Channel", async () => {
+    const channelHost = host({});
+
+    await expect(
+      channelHost.deliver(
+        { ...surface, channelKey: "renamed-or-missing" },
+        { markdown: "Hello" }
       )
-    );
-
-    expect(host.ingressUrl("telegram")).toBe(
-      "https://example.com/agents/support/123/webhooks/telegram"
+    ).rejects.toThrow(
+      'Channel message surface names unknown configured Channel key "renamed-or-missing"'
     );
   });
 
-  it("chooses the longest matching ingress path", async () => {
-    const short = ingress("/telegram", []);
-    const specific = ingress("/webhooks/telegram", []);
-    const host = new ChannelHost(
-      hostOptions({
-        short: approvalChannel({ ingress: short }),
-        specific: approvalChannel({ ingress: specific })
-      })
+  it("returns HTTP 500 but throws Email callback failures", async () => {
+    const failure = new Error("durable handoff failed");
+    const onMessage = vi.fn(async () => {
+      throw failure;
+    });
+    const emailIngress: ChannelEmailIngress<null> = {
+      receive: vi.fn(async () => ({
+        events: [{ event: message(), raw: null }]
+      }))
+    };
+    const channelHost = host(
+      {
+        http: {
+          deliver: delivered,
+          ingress: httpIngress("/failing", [{ event: message(), raw: null }])
+        },
+        email: { deliver: delivered, emailIngress }
+      },
+      { onMessage }
     );
 
-    await host.handleRequest(
-      new Request("https://example.com/webhooks/telegram", { method: "POST" })
+    const response = await channelHost.handleRequest(
+      new Request("https://example.com/failing", { method: "POST" })
     );
 
-    expect(specific.receive).toHaveBeenCalledOnce();
-    expect(short.receive).not.toHaveBeenCalled();
+    expect(response?.status).toBe(500);
+    await expect(channelHost.handleEmail(emailInput())).rejects.toThrow(
+      "durable handoff failed"
+    );
   });
 });

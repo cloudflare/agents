@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { browserVoice, type BrowserVoiceConnection } from "../voice";
+import { browserVoice, type BrowserVoiceConnection } from "../adapters/voice";
+
+const VOICE_SURFACE = {
+  channelKey: "voice",
+  version: 1,
+  address: { connection: "current" },
+  label: "Browser voice"
+} as const;
 
 function parseFrame(value: string | ArrayBuffer | ArrayBufferView) {
   if (typeof value !== "string") return value;
@@ -7,6 +14,27 @@ function parseFrame(value: string | ArrayBuffer | ArrayBufferView) {
 }
 
 describe("browserVoice", () => {
+  it("reports its configured key when a persisted address is invalid", async () => {
+    const channel = browserVoice({
+      tts: { synthesize: vi.fn() },
+      getConnection: () => undefined
+    });
+
+    await expect(
+      channel.deliver(
+        { ...VOICE_SURFACE, address: null },
+        { markdown: "Hello" }
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      retryable: false,
+      error: {
+        code: "BROWSER_VOICE_SURFACE_INVALID",
+        message: 'Browser voice cannot parse the address for Channel "voice"'
+      }
+    });
+  });
+
   it("synthesizes and sends one utterance through the Voice protocol", async () => {
     const audio = new Uint8Array([1, 2, 3]).buffer;
     const tts = { synthesize: vi.fn(async () => audio) };
@@ -17,7 +45,7 @@ describe("browserVoice", () => {
       toSpeechText: (message) => message.markdown.replaceAll("**", "")
     });
 
-    const result = await channel.deliver({
+    const result = await channel.deliver(VOICE_SURFACE, {
       title: "Update",
       markdown: "It **works**"
     });
@@ -46,7 +74,9 @@ describe("browserVoice", () => {
     });
 
     expect(await channel.isAvailable?.()).toBe(false);
-    await expect(channel.deliver({ markdown: "First" })).resolves.toEqual({
+    await expect(
+      channel.deliver(VOICE_SURFACE, { markdown: "First" })
+    ).resolves.toEqual({
       status: "failed",
       retryable: true,
       error: {
@@ -58,7 +88,7 @@ describe("browserVoice", () => {
     available = connection;
     expect(await channel.isAvailable?.()).toBe(true);
     await expect(
-      channel.deliver({ markdown: "Second" })
+      channel.deliver(VOICE_SURFACE, { markdown: "Second" })
     ).resolves.toMatchObject({ status: "delivered" });
   });
 
@@ -82,7 +112,9 @@ describe("browserVoice", () => {
         getConnection: () => connection
       });
 
-      await expect(channel.deliver({ markdown: "Hello" })).resolves.toEqual({
+      await expect(
+        channel.deliver(VOICE_SURFACE, { markdown: "Hello" })
+      ).resolves.toEqual({
         status: "failed",
         retryable: true,
         error: { code: "BROWSER_VOICE_TTS_FAILED", message }
@@ -103,7 +135,9 @@ describe("browserVoice", () => {
       getConnection: () => connection
     });
 
-    await expect(channel.deliver({ markdown: "Hello" })).resolves.toEqual({
+    await expect(
+      channel.deliver(VOICE_SURFACE, { markdown: "Hello" })
+    ).resolves.toEqual({
       status: "failed",
       retryable: true,
       error: {
@@ -127,7 +161,9 @@ describe("browserVoice", () => {
       getConnection: () => connection
     });
 
-    await expect(channel.deliver({ markdown: "Hello" })).resolves.toEqual({
+    await expect(
+      channel.deliver(VOICE_SURFACE, { markdown: "Hello" })
+    ).resolves.toEqual({
       status: "failed",
       retryable: true,
       error: {
@@ -151,7 +187,9 @@ describe("browserVoice", () => {
       getConnection: () => connection
     });
 
-    await expect(channel.deliver({ markdown: "Hello" })).resolves.toEqual({
+    await expect(
+      channel.deliver(VOICE_SURFACE, { markdown: "Hello" })
+    ).resolves.toEqual({
       status: "uncertain",
       error: {
         code: "BROWSER_VOICE_DELIVERY_ERROR",
@@ -169,7 +207,7 @@ describe("browserVoice", () => {
       sampleRate: 24_000
     });
 
-    await channel.deliver({ markdown: "Hello" });
+    await channel.deliver(VOICE_SURFACE, { markdown: "Hello" });
 
     expect(parseFrame(connection.send.mock.calls[1]?.[0])).toEqual({
       type: "audio_config",

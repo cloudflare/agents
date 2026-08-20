@@ -1,3 +1,13 @@
 # Copy this file to .dev.vars and replace each value.
+# These are also the Worker's deployed secrets: `wrangler secret bulk`.
+
+# The address Workers Email routes to this Worker, and the From address it sends.
+EMAIL_FROM=channels@4g3nts.com
+
+SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
+SLACK_SIGNING_SECRET=replace-with-your-slack-signing-secret
+# Your Slack app's bot user id, used to detect mentions and its own messages.
+SLACK_BOT_USER_ID=U0123456789
+
 TELEGRAM_BOT_TOKEN=123456:telegram-bot-token
-TELEGRAM_WEBHOOK_SECRET=change-me-to-a-long-random-string
+TELEGRAM_WEBHOOK_SECRET=replace-with-a-long-random-string

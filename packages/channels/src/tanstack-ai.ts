@@ -1,8 +1,9 @@
 import { toolDefinition } from "@tanstack/ai";
-import type { ChannelDelivery } from "./channel";
+import type { ChannelHost } from "./host";
+import type { ChannelMessageSurface } from "./surface";
 import { channelMessageJsonSchema, parseChannelMessage } from "./tool-schema";
 
-export type CreateChannelToolOptions = {
+export type CreateSendMessageToolOptions = {
   /** TanStack AI tools carry their name in the definition. */
   name: string;
   description?: string;
@@ -10,10 +11,11 @@ export type CreateChannelToolOptions = {
   metadata?: Record<string, unknown>;
 };
 
-/** Adapt a configured Channel to a TanStack AI server tool. */
-export function createChannelTool(
-  channel: ChannelDelivery,
-  options: CreateChannelToolOptions
+/** Adapt one Host-resolved surface to a TanStack AI server tool. */
+export function createSendMessageTool(
+  host: ChannelHost,
+  surface: ChannelMessageSurface,
+  options: CreateSendMessageToolOptions
 ) {
   const definition = toolDefinition({
     name: options.name,
@@ -25,6 +27,6 @@ export function createChannelTool(
   });
 
   return definition.server(async (value) =>
-    channel.deliver(parseChannelMessage(value))
+    host.deliver(surface, parseChannelMessage(value))
   );
 }

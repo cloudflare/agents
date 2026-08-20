@@ -32,10 +32,10 @@
       "import": "./dist/ai-sdk.js",
       "require": "./dist/ai-sdk.js"
     },
-    "./alarm-coordinator": {
-      "types": "./dist/alarm-coordinator.d.ts",
-      "import": "./dist/alarm-coordinator.js",
-      "require": "./dist/alarm-coordinator.js"
+    "./slack": {
+      "types": "./dist/slack.d.ts",
+      "import": "./dist/slack.js",
+      "require": "./dist/slack.js"
     },
     "./tanstack-ai": {
       "types": "./dist/tanstack-ai.d.ts",
@@ -50,7 +50,6 @@
   },
   "files": [
     "dist",
-    "docs",
     "README.md"
   ],
   "scripts": {
@@ -86,13 +85,10 @@
       "build": {
         "inputs": [
           "production",
-          "^production",
-          "{workspaceRoot}/docs/channels/**/*",
-          "{workspaceRoot}/scripts/copy-package-docs.ts"
+          "^production"
         ],
         "outputs": [
-          "{projectRoot}/dist",
-          "{projectRoot}/docs"
+          "{projectRoot}/dist"
         ]
       }
     }
