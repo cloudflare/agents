@@ -48,7 +48,7 @@ import {
 import {
   type Connection,
   type ConnectionContext,
-  DurableObjectLifecycle,
+  Lifecycle,
   type DurableObjectRouteOptions,
   type WSMessage,
   routeDurableObjectRequest
@@ -1616,7 +1616,7 @@ export class Agent<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
   /** Runtime lifecycle and reusable durable capabilities for this Agent. */
-  readonly lifecycle = DurableObjectLifecycle.install<Env, Props>(this);
+  readonly lifecycle = Lifecycle.install<Env, Props>(this);
 
   /** Run user initialization after lifecycle components have started. */
   onStart(_props?: Props): void | Promise<void> {}

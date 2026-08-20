@@ -13,8 +13,8 @@ the repository `NOTICE`, and `THIRD_PARTY_LICENSES.md`.
 
 - The code is part of `agents/lifecycle`; there is no separate `partyserver`
   package or second `Server` class.
-- `DurableObjectLifecycle` is composed with a class that directly extends the
-  platform `DurableObject`. `DurableObjectLifecycle.install(this)` constructs
+- `Lifecycle` is composed with a class that directly extends the
+  platform `DurableObject`. `Lifecycle.install(this)` constructs
   and installs fetch, alarm, and hibernating WebSocket entry points; an expanded
   `new ...` plus `installHandlers()` form is also available.
 - WebSocket hibernation is mandatory. The in-memory connection-manager branch

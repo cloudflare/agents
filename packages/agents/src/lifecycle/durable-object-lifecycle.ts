@@ -571,10 +571,10 @@ type LifecycleHost<Props extends object> = {
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
  * Construct this as an instance field on a class that directly extends
- * `DurableObject`, then call {@link DurableObjectLifecycle.installHandlers}
+ * `DurableObject`, then call {@link Lifecycle.installHandlers}
  * from that class's constructor.
  */
-export class DurableObjectLifecycle<
+export class Lifecycle<
   Env extends object = Cloudflare.Env,
   Props extends Record<string, unknown> = Record<string, unknown>
 > {
@@ -600,8 +600,8 @@ export class DurableObjectLifecycle<
   static install<
     Env extends object,
     Props extends Record<string, unknown> = Record<string, unknown>
-  >(host: DurableObject<Env>): DurableObjectLifecycle<Env, Props> {
-    const lifecycle = new DurableObjectLifecycle<Env, Props>(host);
+  >(host: DurableObject<Env>): Lifecycle<Env, Props> {
+    const lifecycle = new Lifecycle<Env, Props>(host);
     lifecycle.installHandlers();
     return lifecycle;
   }

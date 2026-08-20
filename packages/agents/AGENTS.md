@@ -237,7 +237,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 
 ## Key architecture notes
 
-- **Agent directly extends `DurableObject` and composes `DurableObjectLifecycle`** — the lifecycle installs request, alarm, and always-hibernating WebSocket entry points. Agent adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows.
+- **Agent directly extends `DurableObject` and composes `Lifecycle`** — the lifecycle installs request, alarm, and always-hibernating WebSocket entry points. Agent adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows.
 - **State sync is bidirectional** — `this.setState()` on the server broadcasts to all connected clients; `agent.setState()` from the client sends to the server. Both directions use the same message format (`MessageType.CF_AGENT_STATE`).
 - **Client RPC is decorator-gated** — methods on Agent subclasses must use `@callable()` before clients can invoke them through `agent.call("methodName", args)` or `agent.stub.methodName(...)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.

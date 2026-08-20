@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  DurableObjectLifecycle,
+  Lifecycle,
   routeDurableObjectRequest,
   type Connection,
   type DurableObjectCapability,
@@ -16,9 +16,7 @@ type StartupProps = { label: string };
 export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #events: string[] = [];
 
-  readonly lifecycle = DurableObjectLifecycle.install<Env, StartupProps>(
-    this
-  ).use({
+  readonly lifecycle = Lifecycle.install<Env, StartupProps>(this).use({
     onStart: ({ props }) => {
       this.#events.push(`capability:start:${props?.label ?? "none"}`);
     },

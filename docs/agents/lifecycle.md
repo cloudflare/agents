@@ -8,10 +8,10 @@ platform `DurableObject`, then constructs a lifecycle with `this`.
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
-import { DurableObjectLifecycle } from "agents/lifecycle";
+import { Lifecycle } from "agents/lifecycle";
 
 export class MyObject extends DurableObject<Env> {
-  readonly lifecycle = DurableObjectLifecycle.install(this);
+  readonly lifecycle = Lifecycle.install(this);
 
   onStart(): void {
     // Runs once per in-memory object lifetime, before work is handled.
@@ -35,7 +35,7 @@ Implement the semantic callbacks instead.
 The expanded equivalent is available when useful:
 
 ```ts
-readonly lifecycle = new DurableObjectLifecycle(this);
+readonly lifecycle = new Lifecycle(this);
 
 constructor(ctx: DurableObjectState, env: Env) {
   super(ctx, env);
@@ -115,7 +115,7 @@ Install it before startup:
 ```ts
 export class MyObject extends DurableObject<Env> {
   private readonly audit = new AuditLog(this.ctx.storage);
-  readonly lifecycle = DurableObjectLifecycle.install(this).use(this.audit);
+  readonly lifecycle = Lifecycle.install(this).use(this.audit);
 
   onRequest(): Response {
     return new Response("application response");

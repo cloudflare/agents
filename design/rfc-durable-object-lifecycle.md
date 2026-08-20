@@ -21,14 +21,14 @@ directly into `packages/agents/src/lifecycle` under its ISC license. Do not
 publish a separate PartyServer package and do not retain a `Server` base class.
 
 A class extends the platform `DurableObject` directly and constructs one
-`DurableObjectLifecycle`:
+`Lifecycle`:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
-import { DurableObjectLifecycle } from "agents/lifecycle";
+import { Lifecycle } from "agents/lifecycle";
 
 export class MyObject extends DurableObject<Env> {
-  readonly lifecycle = DurableObjectLifecycle.install(this);
+  readonly lifecycle = Lifecycle.install(this);
 
   onStart() {}
 
@@ -51,7 +51,7 @@ callbacks rather than forwarding runtime handlers manually.
 ```text
 DurableObject
 └── Agent
-    └── owns DurableObjectLifecycle
+    └── owns Lifecycle
 ```
 
 There is one lifecycle implementation and no nominally distinct server class.
@@ -73,7 +73,7 @@ interface DurableObjectCapability<Props> {
 A host can install and add a capability in one field initializer:
 
 ```ts
-readonly lifecycle = DurableObjectLifecycle.install(this).use(this.mcp);
+readonly lifecycle = Lifecycle.install(this).use(this.mcp);
 ```
 
 Dependencies such as storage, bindings, clocks, authentication, observability,

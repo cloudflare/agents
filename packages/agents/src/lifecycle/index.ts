@@ -1,6 +1,6 @@
 /** Durable Object lifecycle composition for Agents and standalone objects. */
 export {
-  DurableObjectLifecycle,
+  Lifecycle,
   routeDurableObjectRequest,
   type Connection,
   type ConnectionContext,

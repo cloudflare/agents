@@ -7,7 +7,7 @@ import type {
   WSMessage as AgentWSMessage
 } from "../index";
 import {
-  DurableObjectLifecycle,
+  Lifecycle,
   type Connection,
   type ConnectionContext,
   type DurableObjectCapability,
@@ -21,7 +21,7 @@ expectTypeOf<AgentRoutingRetryOptions>().toEqualTypeOf<RoutingRetryOptions>();
 expectTypeOf<AgentWSMessage>().toEqualTypeOf<WSMessage>();
 
 class LifecycleTypeProbe extends DurableObject {
-  readonly lifecycle = DurableObjectLifecycle.install(this);
+  readonly lifecycle = Lifecycle.install(this);
 
   onRequest(request: Request): Response {
     return new Response(request.url);
@@ -29,9 +29,7 @@ class LifecycleTypeProbe extends DurableObject {
 }
 
 expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<DurableObject>();
-expectTypeOf<
-  LifecycleTypeProbe["lifecycle"]
->().toEqualTypeOf<DurableObjectLifecycle>();
+expectTypeOf<LifecycleTypeProbe["lifecycle"]>().toEqualTypeOf<Lifecycle>();
 
 const capability: DurableObjectCapability = {
   onStart: ({ props }) => {

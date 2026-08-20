@@ -8,12 +8,12 @@ This document tries to bridge that gap, empowering any developer aiming to get s
 
 `Agent` directly extends Cloudflare's `DurableObject`, so every Agent is a globally addressable, single-threaded compute instance with durable KV/SQLite storage. If you are unfamiliar with the platform primitive, start with [What are Durable Objects](https://developers.cloudflare.com/durable-objects/).
 
-Each Agent composes a `DurableObjectLifecycle` instance. The lifecycle installs request, alarm, and hibernating WebSocket entry points while the Agent supplies semantic callbacks and higher-level features:
+Each Agent composes a `Lifecycle` instance. The lifecycle installs request, alarm, and hibernating WebSocket entry points while the Agent supplies semantic callbacks and higher-level features:
 
 ```text
 DurableObject
 └── Agent
-    └── owns DurableObjectLifecycle
+    └── owns Lifecycle
 ```
 
 ## Layer 0: Durable Object
@@ -109,7 +109,7 @@ Lastly, it's worth mentioning that the DO also has the Worker `Env` in `this.env
 
 ## Layer 1: lifecycle composition
 
-`Agent` uses `DurableObjectLifecycle.install(this)`, an explicit side-effect-named factory that constructs the lifecycle and installs the platform-facing `fetch`, `alarm`, `webSocketMessage`, `webSocketClose`, and `webSocketError` handlers. Agent subclasses implement semantic callbacks instead of a second base class:
+`Agent` uses `Lifecycle.install(this)`, an explicit side-effect-named factory that constructs the lifecycle and installs the platform-facing `fetch`, `alarm`, `webSocketMessage`, `webSocketClose`, and `webSocketError` handlers. Agent subclasses implement semantic callbacks instead of a second base class:
 
 ```ts
 class MyAgent extends Agent {

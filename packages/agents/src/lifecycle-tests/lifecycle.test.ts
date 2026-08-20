@@ -10,7 +10,7 @@ function requireWebSocket(response: Response): WebSocket {
   return response.webSocket;
 }
 
-describe("DurableObjectLifecycle", () => {
+describe("Lifecycle", () => {
   it("installs fetch and dispatches startup, capabilities, then the host", async () => {
     const name = crypto.randomUUID();
     const response = await exports.default.fetch(
