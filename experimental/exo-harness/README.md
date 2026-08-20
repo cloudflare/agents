@@ -34,9 +34,9 @@ filesystem, `node:fs/promises` is backed by the workspace, and the
 `ws:journal` trusted module gives tools an append-only journal capability.
 The agent also has a shell — the `exec` tool runs just-bash in a Dynamic
 Worker (worker-shell backend) over the same files, with text tools (grep,
-sed, awk, jq, curl, python, sqlite) plus host-side `git` and `artifacts`
-commands. No container anywhere; a full-Linux container backend is the
-planned phase 2.
+sed, awk, jq, curl, sqlite) plus a `js` command and host-side `git`
+and `artifacts` commands. No container anywhere; a full-Linux container
+backend is the planned phase 2.
 
 When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), genesis and
 every successful activation push the workspace git history to the agent's

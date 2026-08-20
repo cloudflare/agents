@@ -705,7 +705,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "",
       "You also have a shell (the exec tool): just-bash in an isolated",
       "Dynamic Worker over your own filesystem, with text tools (grep, sed,",
-      "awk, jq, curl, python, sqlite) plus `git` and `artifacts` commands",
+      "awk, jq, curl, sqlite) plus a `js` command, and `git` and `artifacts`",
       "that run host-side against your workspace and its mirror.",
       "",
       `Active harness version: v${version}`,
