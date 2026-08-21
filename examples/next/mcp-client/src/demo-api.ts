@@ -7,6 +7,7 @@ export type McpCatalog = {
     readonly name: string;
     readonly url: string;
     readonly state: string;
+    readonly authUrl?: string;
   }>;
   readonly tools: ReturnType<MCPClientManager["listTools"]>;
   readonly prompts: ReturnType<MCPClientManager["listPrompts"]>;
@@ -84,7 +85,8 @@ export function getMcpCatalog(mcp: MCPClientManager): McpCatalog {
       id: server.id,
       name: server.name,
       url: server.server_url,
-      state: mcp.mcpConnections[server.id]?.connectionState ?? "not-connected"
+      state: mcp.mcpConnections[server.id]?.connectionState ?? "not-connected",
+      authUrl: server.auth_url ?? undefined
     })),
     tools: mcp.listTools(),
     prompts: mcp.listPrompts(),

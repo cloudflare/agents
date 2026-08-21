@@ -1530,11 +1530,28 @@ export class MCPClientManager implements DurableObjectCapability {
       );
     }
 
-    // Create the in-memory connection
+    const authProvider =
+      options.transport?.authProvider ??
+      (options.callbackUrl
+        ? (this._createAuthProviderFn?.(options.callbackUrl) ??
+          this.createAuthProvider(
+            id,
+            options.callbackUrl,
+            this._name,
+            options.clientId
+          ))
+        : undefined);
+    if (authProvider) {
+      authProvider.serverId = id;
+      if (options.clientId) authProvider.clientId = options.clientId;
+    }
+
+    // Create the in-memory connection.
     this.createConnection(id, options.url, {
       client: options.client,
       transport: {
         ...options.transport,
+        authProvider,
         type: options.transport?.type ?? ("auto" as TransportType)
       }
     });

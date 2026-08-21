@@ -34,6 +34,9 @@ const EMPTY_CATALOG: McpCatalog = {
   resources: []
 };
 
+const OAUTH_WINDOW_FEATURES =
+  "width=640,height=760,resizable=yes,scrollbars=yes";
+
 type ConnectResult = {
   readonly id: string;
   readonly connection: {
@@ -168,7 +171,7 @@ function App() {
 
   const objectPath = useMemo(
     () =>
-      `/objects/mcp-client-object/${encodeURIComponent(
+      `/agents/mcp-client-object/${encodeURIComponent(
         instanceName.trim() || "demo"
       )}`,
     [instanceName]
@@ -180,7 +183,14 @@ function App() {
       if (!response.ok) throw new Error(await response.text());
       // SAFETY: objectPath is served by McpClientObject.onRequest, whose JSON
       // response is the exported McpCatalog shape consumed by this same app.
-      setCatalog((await response.json()) as McpCatalog);
+      const nextCatalog = (await response.json()) as McpCatalog;
+      setCatalog(nextCatalog);
+      const pending = nextCatalog.servers.find((server) => server.authUrl);
+      setAuthorization(
+        pending?.authUrl
+          ? { serverId: pending.id, url: pending.authUrl }
+          : undefined
+      );
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -217,6 +227,11 @@ function App() {
 
   const connect = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const authorizationWindow = window.open(
+      "about:blank",
+      "mcp-oauth",
+      OAUTH_WINDOW_FEATURES
+    );
     setConnecting(true);
     setError(undefined);
     try {
@@ -237,11 +252,14 @@ function App() {
           serverId: result.id,
           url: result.connection.authUrl
         });
+        authorizationWindow?.location.assign(result.connection.authUrl);
       } else {
+        authorizationWindow?.close();
         setAuthorization(undefined);
       }
       await refresh();
     } catch (cause) {
+      authorizationWindow?.close();
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setConnecting(false);
@@ -414,7 +432,7 @@ function App() {
                   window.open(
                     authorization.url,
                     "mcp-oauth",
-                    "width=640,height=760,resizable=yes,scrollbars=yes"
+                    OAUTH_WINDOW_FEATURES
                   )
                 }
               >
