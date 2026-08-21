@@ -1,0 +1,19 @@
+design/rfc-agent-channels.md
+  s_534c6b8842477b::t_f1c50765ea8d8a 1-455
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3c32a3af7b65c359da957b3f2378c92c16765913",
+  "prompts": {},
+  "sessions": {
+    "s_534c6b8842477b": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a02419-7f5c-7726-a145-147bdf0644e4",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
