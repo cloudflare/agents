@@ -53,6 +53,15 @@ import {
   type WSMessage,
   routeDurableObjectRequest
 } from "./lifecycle/durable-object-lifecycle";
+import { AgentWebSocketChannel } from "./internal/agent-websocket-channel";
+import { callableMetadata, type CallableMetadata } from "./internal/rpc";
+export { callable, StreamingResponse, unstable_callable } from "./internal/rpc";
+export type {
+  CallableMetadata,
+  RPCRequest,
+  RPCResponse,
+  StateUpdateMessage
+} from "./internal/rpc";
 import { getAgentByName } from "./agent-routing";
 export { getAgentByName, type AgentGetOptions } from "./agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
@@ -215,47 +224,6 @@ export type SendEmailOptions = {
 };
 
 /**
- * RPC request message from client
- */
-export type RPCRequest = {
-  type: "rpc";
-  id: string;
-  method: string;
-  args: unknown[];
-};
-
-/**
- * State update message from client
- */
-export type StateUpdateMessage = {
-  type: MessageType.CF_AGENT_STATE;
-  state: unknown;
-};
-
-/**
- * RPC response message to client
- */
-export type RPCResponse = {
-  type: MessageType.RPC;
-  id: string;
-} & (
-  | {
-      success: true;
-      result: unknown;
-      done?: false;
-    }
-  | {
-      success: true;
-      result: unknown;
-      done: true;
-    }
-  | {
-      success: false;
-      error: string;
-    }
-);
-
-/**
  * Enters an agent invocation: the context every handler reads, plus the span
  * scope that stops invocation-bounded spans from outliving it. Scopes do not
  * nest, so the outermost live entry point owns the boundary — pass
@@ -268,69 +236,6 @@ function runInInvocation<T>(
 ): T {
   return agentContext.run(store, () => withInvocationScope(body, options));
 }
-
-function isClosedWebSocketSendError(error: unknown): boolean {
-  return (
-    error instanceof TypeError &&
-    error.message.includes("WebSocket send() after close")
-  );
-}
-
-function sendRpcResponseIfOpen(
-  connection: Connection,
-  response: RPCResponse
-): boolean {
-  try {
-    connection.send(JSON.stringify(response));
-    return true;
-  } catch (error) {
-    if (isClosedWebSocketSendError(error)) return false;
-    throw error;
-  }
-}
-
-/**
- * Type guard for RPC request messages
- */
-function isRPCRequest(msg: unknown): msg is RPCRequest {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.RPC &&
-    "id" in msg &&
-    typeof msg.id === "string" &&
-    "method" in msg &&
-    typeof msg.method === "string" &&
-    "args" in msg &&
-    Array.isArray((msg as RPCRequest).args)
-  );
-}
-
-/**
- * Type guard for state update messages
- */
-function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.CF_AGENT_STATE &&
-    "state" in msg
-  );
-}
-
-/**
- * Metadata for a callable method
- */
-export type CallableMetadata = {
-  /** Optional description of what the method does */
-  description?: string;
-  /** Whether the method supports streaming responses */
-  streaming?: boolean;
-};
-
-const callableMetadata = new WeakMap<Function, CallableMetadata>();
 
 /**
  * Error class for SQL execution failures, containing the query that failed
@@ -538,40 +443,6 @@ export type SubAgentStub<T extends Agent> = {
       : never]: T[K] extends (...args: infer A) => infer R
     ? (...args: A) => Promisify<R>
     : never;
-};
-
-/**
- * Decorator that marks a method as callable by clients
- * @param metadata Optional metadata about the callable method
- */
-export function callable(metadata: CallableMetadata = {}) {
-  return function callableDecorator<This, Args extends unknown[], Return>(
-    target: (this: This, ...args: Args) => Return,
-    _context: ClassMethodDecoratorContext
-  ) {
-    if (!callableMetadata.has(target)) {
-      callableMetadata.set(target, metadata);
-    }
-
-    return target;
-  };
-}
-
-let didWarnAboutUnstableCallable = false;
-
-/**
- * Decorator that marks a method as callable by clients
- * @deprecated this has been renamed to callable, and unstable_callable will be removed in the next major version
- * @param metadata Optional metadata about the callable method
- */
-export const unstable_callable = (metadata: CallableMetadata = {}) => {
-  if (!didWarnAboutUnstableCallable) {
-    didWarnAboutUnstableCallable = true;
-    console.warn(
-      "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
-    );
-  }
-  return callable(metadata);
 };
 
 export type QueueItem<T = string> = {
@@ -1301,12 +1172,6 @@ function sanitizeErrorString(error: string | null): string | null {
 const _onStateUpdateWarnedClasses = new WeakSet<Function>();
 
 /**
- * Tracks which agent constructors have already emitted the
- * sendIdentityOnConnect deprecation warning, so it fires at most once per class.
- */
-const _sendIdentityWarnedClasses = new WeakSet<Function>();
-
-/**
  * Default options for Agent configuration.
  * Child classes can override specific options without spreading.
  */
@@ -1687,7 +1552,7 @@ export class Agent<
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
 
-  private _protocolBroadcastExcludeIds = new Set<string>();
+  #webSocketChannel: AgentWebSocketChannel<State>;
   private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
   private _cf_virtualSubAgentConnections = new Map<
     string,
@@ -2497,277 +2362,107 @@ export class Agent<
       );
     };
 
-    const _onMessage = this.onMessage.bind(this);
-    this.onMessage = async (connection: Connection, message: WSMessage) => {
-      if (await this._cf_forwardSubAgentWebSocketMessage(connection, message)) {
-        return;
-      }
-      this._ensureConnectionWrapped(connection);
-      return runInInvocation(
-        { agent: this, connection, request: undefined, email: undefined },
-        async () => {
-          if (typeof message !== "string") {
-            return this._tryCatch(() => _onMessage(connection, message));
-          }
+    const legacyOnMessage = this.onMessage.bind(this);
+    const legacyOnConnect = this.onConnect.bind(this);
+    const legacyOnClose = this.onClose.bind(this);
 
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(message);
-          } catch (_e) {
-            // silently fail and let the onMessage handler handle it
-            return this._tryCatch(() => _onMessage(connection, message));
-          }
-
-          if (isStateUpdateMessage(parsed)) {
-            // Check if connection is readonly
-            if (this.isConnectionReadonly(connection)) {
-              // Send error response back to the connection
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "Connection is readonly"
-                })
-              );
-              return;
-            }
-            try {
-              this._setStateInternal(parsed.state as State, connection);
-            } catch (e) {
-              // validateStateChange (or another sync error) rejected the update.
-              // Log the full error server-side, send a generic message to the client.
-              console.error("[Agent] State update rejected:", e);
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "State update rejected"
-                })
-              );
-            }
-            return;
-          }
-
-          if (isRPCRequest(parsed)) {
-            try {
-              const { id, method, args } = parsed;
-
-              // Check if method exists and is callable
-              const methodFn = this[method as keyof this];
-              if (typeof methodFn !== "function") {
-                throw new Error(`Method ${method} does not exist`);
-              }
-
-              if (!this._isCallable(method)) {
-                throw new Error(`Method ${method} is not callable`);
-              }
-
-              const metadata = callableMetadata.get(methodFn as Function);
-
-              // For streaming methods, pass a StreamingResponse object
-              if (metadata?.streaming) {
-                const stream = new StreamingResponse(connection, id);
-
-                this._emit("rpc", { method, streaming: true });
-
-                try {
-                  await methodFn.apply(this, [stream, ...args]);
-                } catch (err) {
-                  console.error(`Error in streaming method "${method}":`, err);
-                  this._emit("rpc:error", {
-                    method,
-                    error: err instanceof Error ? err.message : String(err)
-                  });
-                  // Auto-close stream with error if method throws before closing
-                  if (!stream.isClosed) {
-                    stream.error(
-                      err instanceof Error ? err.message : String(err)
-                    );
-                  }
-                }
-                return;
-              }
-
-              // For regular methods, execute and send response
-              const result = await methodFn.apply(this, args);
-
-              this._emit("rpc", { method, streaming: metadata?.streaming });
-
-              const response: RPCResponse = {
-                done: true,
-                id,
-                result,
-                success: true,
-                type: MessageType.RPC
-              };
-              sendRpcResponseIfOpen(connection, response);
-            } catch (e) {
-              // Send error response
-              const response: RPCResponse = {
-                error:
-                  e instanceof Error ? e.message : "Unknown error occurred",
-                id: parsed.id,
-                success: false,
-                type: MessageType.RPC
-              };
-              sendRpcResponseIfOpen(connection, response);
-              console.error("RPC error:", e);
-              this._emit("rpc:error", {
-                method: parsed.method,
-                error: e instanceof Error ? e.message : String(e)
-              });
-            }
-            return;
-          }
-
-          return this._tryCatch(() => _onMessage(connection, message));
-        }
-      );
-    };
-
-    const _onConnect = this.onConnect.bind(this);
-    this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
-      this._ensureConnectionWrapped(connection);
-      const subAgentOuterUrl = ctx.request.headers.get(
-        SUB_AGENT_OUTER_URL_HEADER
-      );
-      if (subAgentOuterUrl) {
-        this._unsafe_setConnectionFlag(
-          connection,
-          CF_SUB_AGENT_OUTER_URL_KEY,
-          subAgentOuterUrl
-        );
-      }
-      if (
-        await this._cf_forwardSubAgentWebSocketConnect(
-          connection,
-          ctx.request,
-          {
+    this.#webSocketChannel = new AgentWebSocketChannel<State>(
+      {
+        ensureConnectionWrapped: (connection) =>
+          this._ensureConnectionWrapped(connection),
+        setConnectionFlag: (connection, key, value) =>
+          this._unsafe_setConnectionFlag(connection, key, value),
+        forwardSubAgentConnect: (connection, request) =>
+          this._cf_forwardSubAgentWebSocketConnect(connection, request, {
             gate: false
-          }
-        )
-      ) {
-        return;
-      }
-      // TODO: This is a hack to ensure the state is sent after the connection is established
-      // must fix this
-      return runInInvocation(
-        { agent: this, connection, request: ctx.request, email: undefined },
-        async () => {
-          // Check if connection should be readonly before sending any messages
-          // so that the flag is set before the client can respond
-          if (this.shouldConnectionBeReadonly(connection, ctx)) {
-            this.setConnectionReadonly(connection, true);
-          }
-
-          // Check if protocol messages should be suppressed for this
-          // connection. When disabled, no identity/state/MCP text frames
-          // are sent — useful for binary-only clients (e.g. MQTT devices).
-          if (this.shouldSendProtocolMessages(connection, ctx)) {
-            // Send agent identity first so client knows which instance it's connected to
-            // Can be disabled via static options for security-sensitive instance names
-            if (this._resolvedOptions.sendIdentityOnConnect) {
-              const ctor = this.constructor as typeof Agent;
-              if (
-                ctor.options?.sendIdentityOnConnect === undefined &&
-                !_sendIdentityWarnedClasses.has(ctor) &&
-                // Facets are always addressed via `/sub/{class}/{name}`
-                // in the OUTER client URL, even though the request the
-                // facet itself receives has that segment stripped by
-                // `_cf_forwardToFacet`. The sendIdentityOnConnect
-                // concern (name only reachable via identity push) does
-                // not apply — skip the warning entirely for facets.
-                !this._isFacet
-              ) {
-                // Only warn when using custom routing — with default routing
-                // the name is already visible in the URL path (/agents/{class}/{name})
-                // so sendIdentityOnConnect leaks no additional information.
-                const urlPath = new URL(ctx.request.url).pathname;
-                if (!urlPath.includes(this.name)) {
-                  _sendIdentityWarnedClasses.add(ctor);
-                  console.warn(
-                    `[Agent] ${ctor.name}: sending instance name "${this.name}" to clients ` +
-                      `via sendIdentityOnConnect (the name is not visible in the URL with ` +
-                      `custom routing). If this name is sensitive, add ` +
-                      `\`static options = { sendIdentityOnConnect: false }\` to opt out. ` +
-                      `Set it to true to silence this message.`
-                  );
-                }
-              }
-              connection.send(
-                JSON.stringify({
-                  name: this.name,
-                  agent: camelCaseToKebabCase(this._ParentClass.name),
-                  type: MessageType.CF_AGENT_IDENTITY
-                })
-              );
-            }
-
-            const wasExcludedFromStateInitBroadcast =
-              this._protocolBroadcastExcludeIds.has(connection.id);
-            let currentState: State | undefined;
-            this._protocolBroadcastExcludeIds.add(connection.id);
-            try {
-              currentState = this.state;
-            } finally {
-              if (!wasExcludedFromStateInitBroadcast) {
-                this._protocolBroadcastExcludeIds.delete(connection.id);
-              }
-            }
-
-            if (currentState !== undefined) {
-              connection.send(
-                JSON.stringify({
-                  state: currentState,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
-            }
-
-            connection.send(
-              JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: MessageType.CF_AGENT_MCP_SERVERS
-              })
-            );
-          } else {
-            this._setConnectionNoProtocol(connection);
-          }
-
-          this._emit("connect", { connectionId: connection.id });
-          await this._replayAgentToolRuns(connection);
-          return this._tryCatch(() => _onConnect(connection, ctx));
-        }
-      );
-    };
-
-    const _onClose = this.onClose.bind(this);
-    this.onClose = async (
-      connection: Connection,
-      code: number,
-      reason: string,
-      wasClean: boolean
-    ) => {
-      if (
-        await this._cf_forwardSubAgentWebSocketClose(
-          connection,
-          code,
-          reason,
-          wasClean
-        )
-      ) {
-        return;
-      }
-      return runInInvocation(
-        { agent: this, connection, request: undefined, email: undefined },
-        () => {
-          this._emit("disconnect", {
-            connectionId: connection.id,
+          }),
+        forwardSubAgentMessage: (connection, message) =>
+          this._cf_forwardSubAgentWebSocketMessage(connection, message),
+        forwardSubAgentClose: (connection, code, reason, wasClean) =>
+          this._cf_forwardSubAgentWebSocketClose(
+            connection,
             code,
-            reason
-          });
-          return _onClose(connection, code, reason, wasClean);
-        }
-      );
-    };
+            reason,
+            wasClean
+          ),
+        runInConnectionContext: <T>(
+          connection: Connection,
+          request: Request | undefined,
+          operation: () => T
+        ): T =>
+          runInInvocation(
+            { agent: this, connection, request, email: undefined },
+            operation
+          ),
+        withErrorBoundary: (operation) => this._tryCatch(operation),
+        shouldConnectionBeReadonly: (connection, context) =>
+          this.shouldConnectionBeReadonly(connection, context),
+        setConnectionReadonly: (connection, readonly) =>
+          this.setConnectionReadonly(connection, readonly),
+        isConnectionReadonly: (connection) =>
+          this.isConnectionReadonly(connection),
+        shouldSendProtocolMessages: (connection, context) =>
+          this.shouldSendProtocolMessages(connection, context),
+        disableProtocolMessages: (connection) =>
+          this._setConnectionNoProtocol(connection),
+        isConnectionProtocolEnabled: (connection) =>
+          this.isConnectionProtocolEnabled(connection),
+        getConnections: () => this.getConnections(),
+        broadcast: (message, without) => this.broadcast(message, without),
+        getIdentity: () => {
+          const ctor = this.constructor as typeof Agent;
+          return {
+            agent: camelCaseToKebabCase(this._ParentClass.name),
+            agentClass: ctor,
+            explicitSetting: ctor.options?.sendIdentityOnConnect !== undefined,
+            isFacet: this._isFacet,
+            name: this.name,
+            sendOnConnect: this._resolvedOptions.sendIdentityOnConnect
+          };
+        },
+        getState: () => this.state,
+        setStateFromClient: (state, connection) =>
+          this._setStateInternal(state, connection),
+        getMcpServers: () => this.getMcpServers(),
+        resolveCallable: (method) => {
+          const methodFn = this[method as keyof this];
+          if (typeof methodFn !== "function") {
+            throw new Error(`Method ${method} does not exist`);
+          }
+          if (!this._isCallable(method)) {
+            throw new Error(`Method ${method} is not callable`);
+          }
+          const metadata = callableMetadata.get(methodFn as Function);
+          if (!metadata) {
+            throw new Error(`Method ${method} is not callable`);
+          }
+          return {
+            metadata,
+            invoke: (args: unknown[]) => methodFn.apply(this, args)
+          };
+        },
+        emit: (type, payload) => this._emit(type, payload),
+        replayAgentToolRuns: (connection) =>
+          this._replayAgentToolRuns(connection)
+      },
+      {
+        onConnect: legacyOnConnect,
+        onMessage: legacyOnMessage,
+        onClose: legacyOnClose
+      },
+      {
+        outerUrlHeader: SUB_AGENT_OUTER_URL_HEADER,
+        outerUrlKey: CF_SUB_AGENT_OUTER_URL_KEY
+      }
+    );
+
+    this.onConnect = this.#webSocketChannel.onConnect.bind(
+      this.#webSocketChannel
+    );
+    this.onMessage = this.#webSocketChannel.onMessage.bind(
+      this.#webSocketChannel
+    );
+    this.onClose = this.#webSocketChannel.onClose.bind(this.#webSocketChannel);
 
     const _onStart = this.onStart.bind(this);
     const startAgent = async (
@@ -2970,13 +2665,7 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
-    const exclude = [...excludeIds, ...this._protocolBroadcastExcludeIds];
-    for (const conn of this.getConnections()) {
-      if (!this.isConnectionProtocolEnabled(conn)) {
-        exclude.push(conn.id);
-      }
-    }
-    this.broadcast(msg, exclude);
+    this.#webSocketChannel.broadcastProtocol(msg, excludeIds);
   }
 
   private _setStateInternal(
@@ -2994,14 +2683,8 @@ export class Agent<
       VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
     `;
 
-    // Broadcast state to protocol-enabled connections, excluding the source
-    this._broadcastProtocol(
-      JSON.stringify({
-        state: nextState,
-        type: MessageType.CF_AGENT_STATE
-      }),
-      source !== "server" ? [source.id] : []
-    );
+    // The browser channel owns state protocol delivery.
+    this.#webSocketChannel.broadcastState(nextState, source);
 
     // Notification hook (non-gating). Run after broadcast and do not block.
     // Use waitUntil for reliability after the handler returns.
@@ -13123,86 +12806,4 @@ export async function routeAgentEmail<
     _secureRouted: routingInfo._secureRouted,
     _bridge: bridge
   });
-}
-
-/**
- * A wrapper for streaming responses in callable methods
- */
-export class StreamingResponse {
-  private _connection: Connection;
-  private _id: string;
-  private _closed = false;
-
-  constructor(connection: Connection, id: string) {
-    this._connection = connection;
-    this._id = id;
-  }
-
-  /**
-   * Whether the stream has been closed (via end() or error())
-   */
-  get isClosed(): boolean {
-    return this._closed;
-  }
-
-  /**
-   * Send a chunk of data to the client
-   * @param chunk The data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  send(chunk: unknown): boolean {
-    if (this._closed) {
-      console.warn(
-        "StreamingResponse.send() called after stream was closed - data not sent"
-      );
-      return false;
-    }
-    const response: RPCResponse = {
-      done: false,
-      id: this._id,
-      result: chunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return sendRpcResponseIfOpen(this._connection, response);
-  }
-
-  /**
-   * End the stream and send the final chunk (if any)
-   * @param finalChunk Optional final chunk of data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  end(finalChunk?: unknown): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      done: true,
-      id: this._id,
-      result: finalChunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return sendRpcResponseIfOpen(this._connection, response);
-  }
-
-  /**
-   * Send an error to the client and close the stream
-   * @param message Error message to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  error(message: string): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      error: message,
-      id: this._id,
-      success: false,
-      type: MessageType.RPC
-    };
-    return sendRpcResponseIfOpen(this._connection, response);
-  }
 }

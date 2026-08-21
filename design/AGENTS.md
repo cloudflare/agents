@@ -99,6 +99,8 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-coding-agent.md`                   | RFC        | `CodingAgent` — new `@cloudflare/coding-agent` package (extends AIChatAgent), CLI coding agents in Sandbox, pluggable engine (Cli/Harness), two-lifecycle durability (proposed) |
 | `test-coverage-matrix.md`               | design doc | Feature × test-layer coverage rollup, CI→layer mapping, skipped-test debt, nightly hygiene                                                                                      |
 | `mcp.md`                                | design doc | Stateless, Legacy compatibility, Legacy sessionful, client, package boundary, and conformance architecture                                                                      |
+| `agent-channels.md`                     | design doc | Internal Agent browser WebSocket channel and the boundary between lifecycle, protocols, and future durable channels                                                             |
+| `rfc-agent-channels.md`                 | RFC        | Proposed Lifecycle-composed channel runtime, normalized message entry point, Worker routing, and WebSocket ownership                                                            |
 | `rfc-durable-object-lifecycle.md`       | RFC        | Constructor-composed Durable Object lifecycle with reusable components and always-hibernating WebSockets                                                                        |
 
 ## Relationship to `/docs`
