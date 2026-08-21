@@ -1,5 +1,19 @@
 # @cloudflare/think
 
+## 0.17.0
+
+### Minor Changes
+
+- [#2071](https://github.com/cloudflare/agents/pull/2071) [`9620b58`](https://github.com/cloudflare/agents/commit/9620b58fcc78035e1dd9a65a647455f83328bc28) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Make durable chat recovery unconditional for `AIChatAgent` and `Think`.
+
+  Every chat turn now runs in a recovery fiber, including WebSocket, programmatic, retry, and continuation paths. `chatRecovery` accepts `true` or a configuration object; `false` is no longer supported. Previously compiled JavaScript that still supplies `false` safely receives the default recovery configuration.
+
+  To keep durable bookkeeping while preventing automatic inference after an interruption, return `{ continue: false }` from `onChatRecovery()`. Use durable cancellation, side-effect, or spend state in that hook and tune `chatRecovery` budgets when retries must be bounded.
+
+### Patch Changes
+
+- [#2059](https://github.com/cloudflare/agents/pull/2059) [`d5973c0`](https://github.com/cloudflare/agents/commit/d5973c0bb351fd77240550e27a4be4eeb2aa74d5) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Preserve orphaned durable execution outcomes as framework-authored notes, then project them to user context for inference so provider transcript validation cannot reject their arbitrary position. Existing outcome notes receive the same projection without rewriting stored history.
+
 ## 0.16.0
 
 ### Minor Changes

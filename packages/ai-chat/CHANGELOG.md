@@ -1,5 +1,15 @@
 # @cloudflare/ai-chat
 
+## 0.11.0
+
+### Minor Changes
+
+- [#2071](https://github.com/cloudflare/agents/pull/2071) [`9620b58`](https://github.com/cloudflare/agents/commit/9620b58fcc78035e1dd9a65a647455f83328bc28) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Make durable chat recovery unconditional for `AIChatAgent` and `Think`.
+
+  Every chat turn now runs in a recovery fiber, including WebSocket, programmatic, retry, and continuation paths. `chatRecovery` accepts `true` or a configuration object; `false` is no longer supported. Previously compiled JavaScript that still supplies `false` safely receives the default recovery configuration.
+
+  To keep durable bookkeeping while preventing automatic inference after an interruption, return `{ continue: false }` from `onChatRecovery()`. Use durable cancellation, side-effect, or spend state in that hook and tune `chatRecovery` budgets when retries must be bounded.
+
 ## 0.10.2
 
 ### Patch Changes
