@@ -50,7 +50,6 @@ import type {
 } from "../lifecycle/capability-runner";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
-import type { McpAgent } from "./legacy-agent";
 
 export type MCPAITool = {
   description?: string;
@@ -365,11 +364,6 @@ export type MCPClientManagerOptions = {
 
   /** Construct the OAuth provider used for a persisted HTTP server. */
   createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
-
-  /** Resolve a persisted Durable Object binding name during RPC restoration. */
-  resolveRpcBinding?: (
-    bindingName: string
-  ) => DurableObjectNamespace<McpAgent> | undefined;
 };
 
 /**
@@ -403,9 +397,6 @@ export class MCPClientManager implements DurableObjectCapability {
   private readonly _createAuthProviderFn:
     | ((callbackUrl: string) => AgentMcpOAuthProvider)
     | undefined;
-  private readonly _resolveRpcBinding:
-    | ((bindingName: string) => DurableObjectNamespace<McpAgent> | undefined)
-    | undefined;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
   private _elicitationHandlers?: MCPClientElicitationHandlers;
@@ -429,7 +420,7 @@ export class MCPClientManager implements DurableObjectCapability {
    *
    * @param _name - MCP client implementation name sent during negotiation.
    * @param _version - MCP client implementation version sent during negotiation.
-   * @param options - Explicit storage, OAuth, and RPC restoration dependencies.
+   * @param options - Explicit storage and OAuth dependencies.
    */
   constructor(
     private readonly _name: string,
@@ -443,10 +434,9 @@ export class MCPClientManager implements DurableObjectCapability {
     }
     this._storage = options.storage;
     this._createAuthProviderFn = options.createAuthProvider;
-    this._resolveRpcBinding = options.resolveRpcBinding;
   }
 
-  /** Restore persisted HTTP and RPC connections before the host handles work. */
+  /** Restore persisted HTTP connections before the host handles work. */
   async onStart(): Promise<void> {
     const schemaVersion =
       (await this._storage.get<number>(MCP_SCHEMA_VERSION_KEY)) ?? 0;
@@ -459,7 +449,6 @@ export class MCPClientManager implements DurableObjectCapability {
     }
 
     await this.restoreConnectionsFromStorage(this._name);
-    await this.restoreRpcServers();
     this._onServerStateChanged.fire();
   }
 
@@ -471,7 +460,6 @@ export class MCPClientManager implements DurableObjectCapability {
     if (!this.isCallbackRequest(request)) return undefined;
 
     const result = await this.handleCallbackRequest(request);
-    this._onServerStateChanged.fire();
     if (result.authSuccess) {
       void this.establishConnection(result.serverId).catch((error) => {
         console.error(
@@ -505,79 +493,20 @@ export class MCPClientManager implements DurableObjectCapability {
     if (config?.customHandler) return config.customHandler(result);
 
     const baseOrigin = new URL(request.url).origin;
-    if (config?.successRedirect && result.authSuccess) {
-      try {
-        return Response.redirect(
-          new URL(config.successRedirect, baseOrigin).href
-        );
-      } catch (error) {
-        console.error(
-          "Invalid successRedirect URL:",
-          config.successRedirect,
-          error
-        );
-        return Response.redirect(baseOrigin);
+    const redirect = result.authSuccess
+      ? config?.successRedirect
+      : config?.errorRedirect;
+    if (!redirect) return Response.redirect(baseOrigin);
+
+    try {
+      const target = new URL(redirect, baseOrigin);
+      if (!result.authSuccess) {
+        target.searchParams.set("error", result.authError);
       }
-    }
-
-    if (config?.errorRedirect && !result.authSuccess) {
-      try {
-        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
-          result.authError || "Unknown error"
-        )}`;
-        return Response.redirect(new URL(errorUrl, baseOrigin).href);
-      } catch (error) {
-        console.error(
-          "Invalid errorRedirect URL:",
-          config.errorRedirect,
-          error
-        );
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    return Response.redirect(baseOrigin);
-  }
-
-  private async restoreRpcServers(): Promise<void> {
-    const servers = this.getRpcServersFromStorage();
-    for (const server of servers) {
-      if (this.mcpConnections[server.id]) continue;
-
-      const options = decodeMcpServerOptions(server.server_options);
-      const bindingName = options.bindingName;
-      const namespace = bindingName
-        ? this._resolveRpcBinding?.(bindingName)
-        : undefined;
-      if (!bindingName || !namespace) {
-        console.warn(
-          `[MCPClientManager] Cannot restore RPC MCP server "${server.name}": ` +
-            `binding "${bindingName ?? "<missing>"}" is unavailable`
-        );
-        continue;
-      }
-
-      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-      try {
-        await this.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-          reconnect: { id: server.id },
-          transport: {
-            type: "rpc",
-            namespace,
-            name: normalizedName,
-            props: options.props
-          }
-        });
-        const connection = this.mcpConnections[server.id];
-        if (connection?.connectionState === MCPConnectionState.CONNECTED) {
-          await this.discoverIfConnected(server.id);
-        }
-      } catch (error) {
-        console.error(
-          `[MCPClientManager] Error restoring RPC MCP server "${server.name}":`,
-          error
-        );
-      }
+      return Response.redirect(target);
+    } catch (error) {
+      console.error("Invalid OAuth callback redirect URL:", redirect, error);
+      return Response.redirect(baseOrigin);
     }
   }
 
@@ -1040,7 +969,10 @@ export class MCPClientManager implements DurableObjectCapability {
     return authProvider;
   }
 
-  /** Get saved RPC servers from storage (servers with rpc:// URLs). */
+  /**
+   * Get saved RPC servers from storage (servers with rpc:// URLs).
+   * These are restored separately by the Agent class since they need env bindings.
+   */
   getRpcServersFromStorage(): MCPServerRow[] {
     return this.getServersFromStorage().filter((s) =>
       s.server_url.startsWith(RPC_DO_PREFIX)
@@ -1076,7 +1008,7 @@ export class MCPClientManager implements DurableObjectCapability {
 
   /**
    * Restore persisted HTTP MCP connections. RPC connections are restored by
-   * the capability startup phase through the configured binding resolver.
+   * the Agent adapter, which owns access to runtime bindings.
    *
    * @param clientName - Durable Object identity used to scope OAuth state.
    */

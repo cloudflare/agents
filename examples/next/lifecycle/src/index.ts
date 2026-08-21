@@ -69,13 +69,13 @@ export class DoAgent extends DurableObject<Env> {
       id: crypto.randomUUID(),
       startedAt: new Date().toISOString()
     };
-    console.log("started", this.ctx.id.name, this.wake);
+    console.log("started", this.lifecycle.name, this.wake);
   }
 
   async onRequest(): Promise<Response> {
     await this.ctx.storage.setAlarm(Date.now() + 5_000);
     return Response.json({
-      name: this.ctx.id.name,
+      name: this.lifecycle.name,
       message: "Hello from a plain Durable Object",
       wake: this.wake,
       activity: this.activity.getActivity()
@@ -83,14 +83,14 @@ export class DoAgent extends DurableObject<Env> {
   }
 
   onAlarm(): void {
-    console.log("alarm", this.ctx.id.name, this.activity.getActivity());
+    console.log("alarm", this.lifecycle.name, this.activity.getActivity());
   }
 
   onConnect(connection: Connection): void {
     connection.send(
       JSON.stringify({
         type: "connected",
-        name: this.ctx.id.name,
+        name: this.lifecycle.name,
         wake: this.wake,
         activity: this.activity.getActivity()
       })

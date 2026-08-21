@@ -1,9 +1,8 @@
 # Next: MCP client capability
 
-An early-access Vite + React demo that composes `MCPClientManager` into a plain
-Cloudflare `DurableObject`. It does not extend `Agent` and does not forward
-lifecycle hooks manually. The UI connects MCP servers, completes OAuth, and
-invokes discovered tools with JSON arguments.
+A Vite + React demo that installs `MCPClientManager` into a plain Cloudflare
+`DurableObject`. The UI accepts any Streamable HTTP MCP endpoint, completes
+OAuth in a popup, and invokes discovered tools with JSON arguments.
 
 ```ts
 export class McpClientObject extends DurableObject<Env> {
@@ -15,9 +14,9 @@ export class McpClientObject extends DurableObject<Env> {
 }
 ```
 
-`Lifecycle` automatically starts the manager before host work. The manager owns
-its SQLite schema, restores persisted connections after eviction, and intercepts
-registered OAuth callback URLs before `onRequest()`.
+The lifecycle initializes the manager's schema, restores persisted HTTP
+connections after eviction, and offers registered OAuth callback URLs to the
+manager before `onRequest()`.
 
 ## Run
 
@@ -26,44 +25,18 @@ pnpm install
 pnpm run start
 ```
 
-Use the named object `demo`:
+The React app uses the named object `demo`. Its HTTP API is:
 
-```sh
-# Inspect the persisted MCP catalog.
-curl http://localhost:8787/agents/mcp-client-object/demo
-
-# Connect to a public MCP server.
-curl -X POST \
-  http://localhost:8787/agents/mcp-client-object/demo/connect \
-  -H 'content-type: application/json' \
-  -d '{"name":"cloudflare-mcp","url":"https://mcp.cloudflare.com/mcp"}'
-
-# Remove the persisted server.
-curl -X DELETE \
-  http://localhost:8787/agents/mcp-client-object/demo/servers/cloudflare-mcp
+```text
+GET    /agents/mcp-client-object/demo
+POST   /agents/mcp-client-object/demo/connect
+POST   /agents/mcp-client-object/demo/tools/call
+DELETE /agents/mcp-client-object/demo/servers/:id
 ```
 
-Call a discovered tool after authorization:
+The connect route derives `/callback` from the current request and registers
+that exact URL. `routeAgentRequest()` forwards it to the same object; the
+manager does not impose that route shape.
 
-```sh
-curl -X POST \
-  http://localhost:8787/agents/mcp-client-object/demo/tools/call \
-  -H 'content-type: application/json' \
-  -d '{"serverId":"cloudflare-mcp","name":"example-tool","arguments":{}}'
-```
-
-If a server requires OAuth, the response includes its authorization URL. The
-example changes the current `/connect` URL suffix to `/callback`, registers that
-exact URL with the manager, and handles it through the manager's lifecycle
-request hook.
-
-`routeAgentRequest()` routes
-`/agents/mcp-client-object/demo/callback`, combining the standard `agents`
-prefix, binding name, and object name. The manager itself does not require that
-shape. You can use a custom prefix or a completely custom outer route as long
-as that callback request is forwarded to the same named Durable Object.
-Deriving the callback from the current request preserves that route choice.
-
-The `getCatalog()` RPC method demonstrates the native RPC boundary: arbitrary
-RPC bypasses `fetch`, so it explicitly calls `await this.lifecycle.start()`
-before accessing the capability.
+`getCatalog()` also demonstrates the native RPC boundary. RPC bypasses `fetch`,
+so the method calls `await this.lifecycle.start()` before using the capability.

@@ -18,34 +18,25 @@ import {
   TrashIcon,
   WrenchIcon
 } from "@phosphor-icons/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import type { McpCatalog } from "./demo-api";
 import "./styles.css";
 
-const DEFAULT_SERVER_NAME = "cloudflare-mcp";
-const DEFAULT_SERVER_URL = "https://mcp.cloudflare.com/mcp";
-const EMPTY_CATALOG: McpCatalog = {
-  servers: [],
-  tools: []
-};
-
+const OBJECT_PATH = "/agents/mcp-client-object/demo";
 const OAUTH_WINDOW_FEATURES =
   "width=640,height=760,resizable=yes,scrollbars=yes";
+const EMPTY_CATALOG: McpCatalog = { servers: [], tools: [] };
 
 type ConnectResult = {
   readonly id: string;
-  readonly connection: {
-    readonly state: string;
-    readonly authUrl?: string;
-  };
+  readonly connection: { readonly state: string; readonly authUrl?: string };
 };
 
-type PendingAuthorization = {
-  readonly serverId: string;
-  readonly url: string;
-};
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function ModeToggle() {
   const [mode, setMode] = useState(
@@ -70,7 +61,7 @@ function ModeToggle() {
 }
 
 function StatusBadge({ state }: { state: string }) {
-  const dot =
+  const color =
     state === "ready"
       ? "bg-green-500"
       : state === "failed"
@@ -81,44 +72,33 @@ function StatusBadge({ state }: { state: string }) {
 
   return (
     <Badge variant="secondary">
-      <span className={`mr-1.5 inline-block size-1.5 rounded-full ${dot}`} />
+      <span className={`mr-1.5 inline-block size-1.5 rounded-full ${color}`} />
       {state}
     </Badge>
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function ToolCard({
-  tool,
-  objectPath
-}: {
-  tool: McpCatalog["tools"][number];
-  objectPath: string;
-}) {
+function ToolCard({ tool }: { tool: McpCatalog["tools"][number] }) {
   const [argumentsJson, setArgumentsJson] = useState("{}");
   const [calling, setCalling] = useState(false);
-  const [result, setResult] = useState<unknown>();
-  const [callError, setCallError] = useState<string>();
+  const [output, setOutput] = useState<unknown>();
+  const [error, setError] = useState<string>();
 
   const callTool = async () => {
     setCalling(true);
-    setResult(undefined);
-    setCallError(undefined);
+    setOutput(undefined);
+    setError(undefined);
     try {
-      const parsed: unknown = JSON.parse(argumentsJson);
-      if (!isRecord(parsed)) {
-        throw new Error("Tool arguments must be a JSON object");
-      }
-      const response = await fetch(`${objectPath}/tools/call`, {
+      const args: unknown = JSON.parse(argumentsJson);
+      if (!isRecord(args)) throw new Error("Arguments must be a JSON object");
+
+      const response = await fetch(`${OBJECT_PATH}/tools/call`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           serverId: tool.serverId,
           name: tool.name,
-          arguments: parsed
+          arguments: args
         })
       });
       const payload: unknown = await response.json();
@@ -128,23 +108,22 @@ function ToolCard({
           typeof payload.error === "string" ? payload.error : "Tool call failed"
         );
       }
-      setResult(payload.result);
+      setOutput(payload.result);
     } catch (cause) {
-      setCallError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setCalling(false);
     }
   };
 
-  const resultIsError = isRecord(result) && result.isError === true;
+  const outputIsError = isRecord(output) && output.isError === true;
+  const argumentsId = `tool-${encodeURIComponent(tool.serverId)}-${encodeURIComponent(tool.name)}`;
 
   return (
     <Surface className="rounded-xl p-4 ring ring-kumo-line">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="break-words text-sm font-medium text-kumo-default">
-            {tool.name}
-          </h3>
+          <h3 className="break-words text-sm font-medium">{tool.name}</h3>
           {tool.description ? (
             <p className="mt-1 text-xs leading-5 text-kumo-subtle">
               {tool.description}
@@ -161,15 +140,12 @@ function ToolCard({
         </pre>
       </details>
 
-      <label
-        className="mt-3 block"
-        htmlFor={`tool-${tool.serverId}-${tool.name}`}
-      >
+      <label className="mt-3 block" htmlFor={argumentsId}>
         <span className="mb-1 block text-xs font-medium text-kumo-subtle">
           Arguments (JSON)
         </span>
         <Textarea
-          id={`tool-${tool.serverId}-${tool.name}`}
+          id={argumentsId}
           value={argumentsJson}
           onChange={(event) => setArgumentsJson(event.target.value)}
           spellCheck={false}
@@ -187,15 +163,11 @@ function ToolCard({
         {calling ? "Calling…" : "Call tool"}
       </Button>
 
-      {callError ? (
-        <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-lg bg-kumo-elevated p-3 text-xs text-kumo-danger">
-          {callError}
-        </pre>
-      ) : result !== undefined ? (
+      {error || output !== undefined ? (
         <pre
-          className={`mt-3 overflow-x-auto whitespace-pre-wrap rounded-lg bg-kumo-elevated p-3 text-xs ${resultIsError ? "text-kumo-danger" : "text-kumo-default"}`}
+          className={`mt-3 overflow-x-auto whitespace-pre-wrap rounded-lg bg-kumo-elevated p-3 text-xs ${error || outputIsError ? "text-kumo-danger" : "text-kumo-default"}`}
         >
-          {JSON.stringify(result, null, 2)}
+          {error ?? JSON.stringify(output, null, 2)}
         </pre>
       ) : null}
     </Surface>
@@ -203,68 +175,42 @@ function ToolCard({
 }
 
 function App() {
-  const [instanceName, setInstanceName] = useState(
-    () => localStorage.getItem("mcp-capability-instance") ?? "demo"
-  );
-  const [serverName, setServerName] = useState(DEFAULT_SERVER_NAME);
-  const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
+  const [serverName, setServerName] = useState("cloudflare-mcp");
+  const [serverUrl, setServerUrl] = useState("https://mcp.cloudflare.com/mcp");
   const [catalog, setCatalog] = useState<McpCatalog>(EMPTY_CATALOG);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string>();
-  const [authorization, setAuthorization] = useState<PendingAuthorization>();
-
-  const objectPath = useMemo(
-    () =>
-      `/agents/mcp-client-object/${encodeURIComponent(
-        instanceName.trim() || "demo"
-      )}`,
-    [instanceName]
-  );
 
   const refresh = useCallback(async () => {
     try {
-      const response = await fetch(objectPath);
+      const response = await fetch(OBJECT_PATH);
       if (!response.ok) throw new Error(await response.text());
-      // SAFETY: objectPath is served by McpClientObject.onRequest, whose JSON
-      // response is the exported McpCatalog shape consumed by this same app.
-      const nextCatalog = (await response.json()) as McpCatalog;
-      setCatalog(nextCatalog);
-      const pending = nextCatalog.servers.find((server) => server.authUrl);
-      setAuthorization(
-        pending?.authUrl
-          ? { serverId: pending.id, url: pending.authUrl }
-          : undefined
-      );
+      // SAFETY: This route is owned by getMcpCatalog in the same example.
+      setCatalog((await response.json()) as McpCatalog);
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
-  }, [objectPath]);
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem("mcp-capability-instance", instanceName);
-    setLoading(true);
     void refresh();
     const timer = window.setInterval(() => void refresh(), 2_500);
     return () => window.clearInterval(timer);
-  }, [instanceName, refresh]);
+  }, [refresh]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent<unknown>) => {
-      if (event.origin !== window.location.origin) return;
       if (
-        typeof event.data !== "object" ||
-        event.data === null ||
-        !("type" in event.data) ||
-        event.data.type !== "mcp-oauth-complete"
+        event.origin === window.location.origin &&
+        isRecord(event.data) &&
+        event.data.type === "mcp-oauth-complete"
       ) {
-        return;
+        void refresh();
       }
-      setAuthorization(undefined);
-      void refresh();
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -272,7 +218,7 @@ function App() {
 
   const connect = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const authorizationWindow = window.open(
+    const popup = window.open(
       "about:blank",
       "mcp-oauth",
       OAUTH_WINDOW_FEATURES
@@ -280,31 +226,22 @@ function App() {
     setConnecting(true);
     setError(undefined);
     try {
-      const response = await fetch(`${objectPath}/connect`, {
+      const response = await fetch(`${OBJECT_PATH}/connect`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: serverName, url: serverUrl })
       });
       if (!response.ok) throw new Error(await response.text());
-      // SAFETY: The connect endpoint always returns the manager's connection
-      // result together with the normalized server id.
+      // SAFETY: The connect route returns this local protocol shape.
       const result = (await response.json()) as ConnectResult;
-      if (
-        result.connection.state === "authenticating" &&
-        result.connection.authUrl
-      ) {
-        setAuthorization({
-          serverId: result.id,
-          url: result.connection.authUrl
-        });
-        authorizationWindow?.location.assign(result.connection.authUrl);
+      if (result.connection.authUrl) {
+        popup?.location.assign(result.connection.authUrl);
       } else {
-        authorizationWindow?.close();
-        setAuthorization(undefined);
+        popup?.close();
       }
       await refresh();
     } catch (cause) {
-      authorizationWindow?.close();
+      popup?.close();
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setConnecting(false);
@@ -312,24 +249,23 @@ function App() {
   };
 
   const removeServer = async (id: string) => {
-    setError(undefined);
-    try {
-      const response = await fetch(
-        `${objectPath}/servers/${encodeURIComponent(id)}`,
-        { method: "DELETE" }
-      );
-      if (!response.ok) throw new Error(await response.text());
-      if (authorization?.serverId === id) setAuthorization(undefined);
-      await refresh();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+    const response = await fetch(
+      `${OBJECT_PATH}/servers/${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    );
+    if (!response.ok) {
+      setError(await response.text());
+      return;
     }
+    await refresh();
   };
+
+  const authorization = catalog.servers.find((server) => server.authUrl);
 
   return (
     <div className="min-h-screen bg-kumo-elevated text-kumo-default">
       <header className="border-b border-kumo-line bg-kumo-base px-5 py-4">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="rounded-lg bg-kumo-accent p-2 text-white">
               <PlugIcon size={20} weight="bold" />
@@ -341,7 +277,7 @@ function App() {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex gap-2">
             <Button
               variant="ghost"
               shape="square"
@@ -354,7 +290,7 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl space-y-5 px-5 py-6">
+      <main className="mx-auto max-w-5xl space-y-5 px-5 py-6">
         <Surface className="rounded-xl p-4 ring ring-kumo-line">
           <div className="flex gap-3">
             <InfoIcon
@@ -364,110 +300,70 @@ function App() {
             />
             <div>
               <Text size="sm" bold>
-                What this demo proves
+                Durable MCP client
               </Text>
               <span className="mt-1 block">
                 <Text size="xs" variant="secondary">
-                  MCPClientManager owns its schema, restores connections after
-                  Durable Object eviction, and intercepts OAuth callbacks as a
-                  lifecycle capability. The host extends only DurableObject.
+                  Connect any Streamable HTTP MCP endpoint. The capability owns
+                  persistence, restoration, and OAuth callback handling.
                 </Text>
               </span>
             </div>
           </div>
         </Surface>
 
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]">
-          <Surface className="rounded-xl p-5 ring ring-kumo-line">
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <Text size="sm" bold>
-                  Connect an MCP server
-                </Text>
-                <span className="mt-1 block">
-                  <Text size="xs" variant="secondary">
-                    Enter any Streamable HTTP MCP endpoint.
-                  </Text>
-                </span>
-              </div>
-              <Badge variant="secondary">Streamable HTTP</Badge>
-            </div>
-
-            <form onSubmit={connect} className="space-y-3">
-              <label className="block" htmlFor="server-name">
-                <span className="mb-1 block text-xs font-medium text-kumo-subtle">
-                  Server name
-                </span>
-                <Input
-                  id="server-name"
-                  value={serverName}
-                  onChange={(event) => setServerName(event.target.value)}
-                  placeholder="cloudflare-docs"
-                  required
-                />
-              </label>
-              <label className="block" htmlFor="server-url">
-                <span className="mb-1 block text-xs font-medium text-kumo-subtle">
-                  MCP endpoint
-                </span>
-                <Input
-                  id="server-url"
-                  value={serverUrl}
-                  onChange={(event) => setServerUrl(event.target.value)}
-                  placeholder="https://example.com/mcp"
-                  type="url"
-                  required
-                />
-              </label>
-              <Button
-                variant="primary"
-                type="submit"
-                disabled={connecting}
-                icon={<PlugIcon size={16} />}
-              >
-                {connecting ? "Connecting…" : "Connect server"}
-              </Button>
-            </form>
-          </Surface>
-
-          <Surface className="rounded-xl p-5 ring ring-kumo-line">
+        <Surface className="rounded-xl p-5 ring ring-kumo-line">
+          <div className="mb-4 flex items-center justify-between">
             <Text size="sm" bold>
-              Durable Object instance
+              Connect an MCP server
             </Text>
-            <span className="mt-1 block">
-              <Text size="xs" variant="secondary">
-                Change the name to switch to an isolated MCP catalog.
-              </Text>
-            </span>
-            <div className="mt-4">
-              <label className="block" htmlFor="instance-name">
-                <span className="mb-1 block text-xs font-medium text-kumo-subtle">
-                  Instance name
-                </span>
-                <Input
-                  id="instance-name"
-                  value={instanceName}
-                  onChange={(event) => setInstanceName(event.target.value)}
-                  placeholder="demo"
-                />
-              </label>
-              <p className="mt-3 break-all font-mono text-xs text-kumo-subtle">
-                {objectPath}
-              </p>
-            </div>
-          </Surface>
-        </div>
+            <Badge variant="secondary">Streamable HTTP</Badge>
+          </div>
+          <form
+            onSubmit={connect}
+            className="grid gap-3 md:grid-cols-[12rem_1fr_auto] md:items-end"
+          >
+            <label htmlFor="server-name">
+              <span className="mb-1 block text-xs text-kumo-subtle">Name</span>
+              <Input
+                id="server-name"
+                value={serverName}
+                onChange={(event) => setServerName(event.target.value)}
+                required
+              />
+            </label>
+            <label htmlFor="server-url">
+              <span className="mb-1 block text-xs text-kumo-subtle">
+                MCP endpoint
+              </span>
+              <Input
+                id="server-url"
+                value={serverUrl}
+                onChange={(event) => setServerUrl(event.target.value)}
+                type="url"
+                required
+              />
+            </label>
+            <Button
+              variant="primary"
+              type="submit"
+              disabled={connecting}
+              icon={<PlugIcon size={16} />}
+            >
+              {connecting ? "Connecting…" : "Connect"}
+            </Button>
+          </form>
+        </Surface>
 
-        {authorization ? (
+        {authorization?.authUrl ? (
           <Surface className="rounded-xl p-4 ring ring-kumo-accent">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center justify-between gap-3">
               <div>
                 <Text size="sm" bold>
                   Authorization required
                 </Text>
                 <p className="mt-1 text-xs text-kumo-subtle">
-                  Finish OAuth for {authorization.serverId}. The popup will
-                  notify this page and the restored catalog will refresh.
+                  Finish OAuth for {authorization.name}.
                 </p>
               </div>
               <Button
@@ -475,7 +371,7 @@ function App() {
                 icon={<SignInIcon size={16} />}
                 onClick={() =>
                   window.open(
-                    authorization.url,
+                    authorization.authUrl,
                     "mcp-oauth",
                     OAUTH_WINDOW_FEATURES
                   )
@@ -489,10 +385,7 @@ function App() {
 
         {error ? (
           <Surface className="rounded-xl p-4 ring ring-kumo-danger">
-            <Text size="sm" bold>
-              Request failed
-            </Text>
-            <p className="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-kumo-danger">
+            <p className="whitespace-pre-wrap text-xs text-kumo-danger">
               {error}
             </p>
           </Surface>
@@ -500,20 +393,14 @@ function App() {
 
         <section>
           <div className="mb-3 flex items-center justify-between">
-            <div>
-              <h2 className="text-base font-semibold">Connected servers</h2>
-              <p className="text-xs text-kumo-subtle">
-                Persisted in this Durable Object and restored on its next wake.
-              </p>
-            </div>
+            <h2 className="text-base font-semibold">Servers</h2>
             {loading ? <Badge variant="secondary">Loading…</Badge> : null}
           </div>
-
           {catalog.servers.length === 0 ? (
             <Empty
               icon={<PlugIcon size={24} />}
               title="No MCP servers"
-              description="Connect an MCP server above to populate the catalog."
+              description="Connect a server to populate the catalog."
             />
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
@@ -550,15 +437,9 @@ function App() {
 
         <section>
           <div className="mb-3 flex items-center justify-between">
-            <div>
-              <h2 className="text-base font-semibold">Tools</h2>
-              <p className="text-xs text-kumo-subtle">
-                Enter a JSON object and invoke a discovered MCP tool directly.
-              </p>
-            </div>
+            <h2 className="text-base font-semibold">Tools</h2>
             <Badge variant="secondary">{catalog.tools.length}</Badge>
           </div>
-
           {catalog.tools.length === 0 ? (
             <Empty
               icon={<WrenchIcon size={24} />}
@@ -568,11 +449,7 @@ function App() {
           ) : (
             <div className="grid gap-4 lg:grid-cols-2">
               {catalog.tools.map((tool) => (
-                <ToolCard
-                  key={`${tool.serverId}-${tool.name}`}
-                  tool={tool}
-                  objectPath={objectPath}
-                />
+                <ToolCard key={`${tool.serverId}-${tool.name}`} tool={tool} />
               ))}
             </div>
           )}
@@ -580,7 +457,7 @@ function App() {
       </main>
 
       <footer className="border-t border-kumo-line bg-kumo-base px-5 py-3">
-        <div className="mx-auto flex max-w-6xl justify-center">
+        <div className="flex justify-center">
           <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
       </footer>
