@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
+import { routeAgentRequest } from "agents";
 import {
   Lifecycle,
-  routeDurableObjectRequest,
   type CapabilityRequestContext,
   type Connection,
   type DurableObjectCapability,
@@ -110,7 +110,7 @@ export class DoAgent extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     return (
-      (await routeDurableObjectRequest(request, env)) ??
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }

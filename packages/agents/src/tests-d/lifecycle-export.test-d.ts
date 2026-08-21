@@ -3,7 +3,6 @@ import { expectTypeOf } from "vitest";
 import type {
   Connection as AgentConnection,
   ConnectionContext as AgentConnectionContext,
-  RoutingRetryOptions as AgentRoutingRetryOptions,
   WSMessage as AgentWSMessage
 } from "../index";
 import {
@@ -11,13 +10,11 @@ import {
   type Connection,
   type ConnectionContext,
   type DurableObjectCapability,
-  type RoutingRetryOptions,
   type WSMessage
 } from "../lifecycle";
 
 expectTypeOf<AgentConnection>().toEqualTypeOf<Connection>();
 expectTypeOf<AgentConnectionContext>().toEqualTypeOf<ConnectionContext>();
-expectTypeOf<AgentRoutingRetryOptions>().toEqualTypeOf<RoutingRetryOptions>();
 expectTypeOf<AgentWSMessage>().toEqualTypeOf<WSMessage>();
 
 class LifecycleTypeProbe extends DurableObject {

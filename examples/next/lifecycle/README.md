@@ -49,13 +49,13 @@ Exercise the named object `demo`:
 
 ```sh
 # Host onRequest; also increments the capability's request count.
-curl http://localhost:8787/objects/do-agent/demo
+curl http://localhost:8787/agents/do-agent/demo
 
 # Intercepted by ActivityCapability before the host onRequest.
-curl http://localhost:8787/objects/do-agent/demo/stats
+curl http://localhost:8787/agents/do-agent/demo/stats
 ```
 
-Connect a WebSocket to `ws://localhost:8787/objects/do-agent/demo`. The object
+Connect a WebSocket to `ws://localhost:8787/agents/do-agent/demo`. The object
 sends a connection snapshot and echoes each message. The socket uses Cloudflare's
 WebSocket Hibernation API, so it remains connected while the Durable Object can
 leave memory.

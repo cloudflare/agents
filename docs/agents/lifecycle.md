@@ -46,19 +46,19 @@ constructor(ctx: DurableObjectState, env: Env) {
 Route named objects from the outer Worker when you want URL routing:
 
 ```ts
-import { routeDurableObjectRequest } from "agents/lifecycle";
+import { routeAgentRequest } from "agents";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     return (
-      (await routeDurableObjectRequest(request, env)) ??
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }
 };
 ```
 
-The default URL shape is `/objects/:binding/:name`. Direct
+The default URL shape is `/agents/:binding/:name`. Direct
 `env.MY_OBJECT.getByName(name).fetch(request)` calls work as well.
 
 `Agent` already constructs this lifecycle. Existing Agent classes continue to

@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
+import { routeAgentRequest } from "../index";
 import {
   Lifecycle,
-  routeDurableObjectRequest,
   type Connection,
   type DurableObjectCapability,
   type WSMessage
@@ -88,8 +88,7 @@ export class PlainLifecycleObject extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     return (
-      (await routeDurableObjectRequest(request, env, {
-        prefix: "objects",
+      (await routeAgentRequest(request, env, {
         props: { label: "routed" }
       })) ?? new Response("Not found", { status: 404 })
     );
