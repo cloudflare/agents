@@ -1,5 +1,14 @@
 # @cloudflare/agent-think
 
+## 0.0.7
+
+### Patch Changes
+
+- Updated dependencies [[`d5973c0`](https://github.com/cloudflare/agents/commit/d5973c0bb351fd77240550e27a4be4eeb2aa74d5), [`b7c7696`](https://github.com/cloudflare/agents/commit/b7c76964b329b9b5911c0c9a34b8b0f514fffafd), [`9620b58`](https://github.com/cloudflare/agents/commit/9620b58fcc78035e1dd9a65a647455f83328bc28), [`b038440`](https://github.com/cloudflare/agents/commit/b0384407915cacc9d81951e369466feae4389db0), [`d536067`](https://github.com/cloudflare/agents/commit/d536067ce69dfbe82db6c31f4b4d5042792088de), [`bf94bb2`](https://github.com/cloudflare/agents/commit/bf94bb2f8242f2ad46f6c6c88e56ee5e196cc706)]:
+  - @cloudflare/think@0.17.0
+  - agents@0.22.0
+  - @cloudflare/ai-chat@0.11.0
+
 ## 0.0.6
 
 ### Patch Changes

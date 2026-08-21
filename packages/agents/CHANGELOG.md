@@ -1,5 +1,27 @@
 # @cloudflare/agents
 
+## 0.22.0
+
+### Minor Changes
+
+- [#2071](https://github.com/cloudflare/agents/pull/2071) [`9620b58`](https://github.com/cloudflare/agents/commit/9620b58fcc78035e1dd9a65a647455f83328bc28) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Make durable chat recovery unconditional for `AIChatAgent` and `Think`.
+
+  Every chat turn now runs in a recovery fiber, including WebSocket, programmatic, retry, and continuation paths. `chatRecovery` accepts `true` or a configuration object; `false` is no longer supported. Previously compiled JavaScript that still supplies `false` safely receives the default recovery configuration.
+
+  To keep durable bookkeeping while preventing automatic inference after an interruption, return `{ continue: false }` from `onChatRecovery()`. Use durable cancellation, side-effect, or spend state in that hook and tune `chatRecovery` budgets when retries must be bounded.
+
+- [#2133](https://github.com/cloudflare/agents/pull/2133) [`d536067`](https://github.com/cloudflare/agents/commit/d536067ce69dfbe82db6c31f4b4d5042792088de) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Vendor the required PartyServer runtime into `agents/lifecycle` and add a reusable Durable Object lifecycle for startup, request interception, alarms, and WebSockets. `Agent` now directly extends Cloudflare's `DurableObject` and composes the same lifecycle used by standalone objects; standalone hosts use the explicit `Lifecycle.install(this)` factory (or the expanded `new ...` plus `installHandlers()` form). Both Agent subclasses and standalone hosts use the existing `routeAgentRequest()` API and `/agents` URL prefix; the lifecycle entry point does not introduce a second public router.
+
+  Lifecycle WebSockets always use Cloudflare's Hibernation API; the `static options.hibernate` switch and in-memory connection mode are removed. Named Durable Objects use native `ctx.id.name`, while a read-only `__ps_name` fallback migrates objects created by older releases without writing new compatibility state.
+
+### Patch Changes
+
+- [#1978](https://github.com/cloudflare/agents/pull/1978) [`b7c7696`](https://github.com/cloudflare/agents/commit/b7c76964b329b9b5911c0c9a34b8b0f514fffafd) Thanks [@Ankcorn](https://github.com/Ankcorn)! - Add Agents SDK instrumentation and agent instance identity attributes to SDK-created spans.
+
+- [#2120](https://github.com/cloudflare/agents/pull/2120) [`b038440`](https://github.com/cloudflare/agents/commit/b0384407915cacc9d81951e369466feae4389db0) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Keep Session compaction overlays scoped to their selected conversation branch and preserve deterministic ordering for overlays created in the same second.
+
+- [#2131](https://github.com/cloudflare/agents/pull/2131) [`bf94bb2`](https://github.com/cloudflare/agents/commit/bf94bb2f8242f2ad46f6c6c88e56ee5e196cc706) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Fall back to no-op tracing when an older Workers runtime exposes tracing without `startActiveSpan`, preventing Agent initialization from failing.
+
 ## 0.21.0
 
 ### Minor Changes
