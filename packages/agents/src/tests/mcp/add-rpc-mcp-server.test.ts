@@ -196,7 +196,7 @@ describe("addMcpServer with RPC binding", () => {
     expect(result.serverUrl).toMatch(/^rpc:/);
   });
 
-  it("restores RPC connections through the capability after eviction", async () => {
+  it("restores RPC connections through Agent startup after eviction", async () => {
     const agentStub = await getAgentByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-hibernate"

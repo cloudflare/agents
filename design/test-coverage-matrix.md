@@ -79,21 +79,8 @@ MCP has a dedicated official-referee matrix outside the layer table. It covers
 Stateless client and server behavior, Legacy compatibility, the Legacy handler,
 and `McpAgent`. `packages/agents/src/tests/mcp/v2-lifecycle.test.ts` also walks
 discovery or initialization, catalogs, a tool call, a prompt, a resource, and
-close through both the Stateless and Legacy compatibility client paths.
-
-Reusable client-capability coverage adds:
-
-- Layer 0 structural composition in
-  `tests-d/mcp-client-manager-capability.test-d.ts`;
-- Layer 3 direct composition into a plain `DurableObject`, exact OAuth callback
-  interception, and persisted restoration after `evictDurableObject()` in
-  `lifecycle-tests/mcp-client-capability.test.ts`;
-- Layer 3 Agent compatibility coverage for HTTP and RPC restoration, including
-  real eviction in `tests/mcp/add-rpc-mcp-server.test.ts` and
-  `tests/mcp/wait-connections-e2e.test.ts`.
-
-Refer to
-[`packages/agents/conformance/README.md`](../packages/agents/conformance/README.md)
+close through both the Stateless and Legacy compatibility client paths. Refer
+to [`packages/agents/conformance/README.md`](../packages/agents/conformance/README.md)
 for scenario counts and expected-failure rationale.
 
 ### Accepted coverage gaps

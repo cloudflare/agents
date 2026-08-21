@@ -38,8 +38,8 @@ export class MyObject extends DurableObject<Env> {
 
 The lifecycle calls the manager automatically:
 
-- `onStart()` initializes its schema and restores persisted HTTP and RPC
-  connections before the host handles work.
+- `onStart()` initializes its schema and restores persisted HTTP connections
+  before the host handles work.
 - `onRequest()` intercepts registered OAuth callback URLs before the host's
   request handler.
 
@@ -47,17 +47,6 @@ Do not call these hooks manually. For a native Durable Object RPC method,
 which bypasses `fetch`, call `await this.lifecycle.start()` before using the
 manager. Explicit cleanup remains available through `mcp.dispose()`; Durable
 Objects do not provide an eviction callback.
-
-Pass `resolveRpcBinding` when the manager must restore persisted RPC MCP
-connections:
-
-```typescript
-readonly mcp = new MCPClientManager("my-object", "1.0.0", {
-  storage: this.ctx.storage,
-  resolveRpcBinding: (bindingName) =>
-    bindingName === "MY_MCP" ? this.env.MY_MCP : undefined
-});
-```
 
 The manager does not require a particular OAuth callback route. Pass the exact
 callback URL to `registerServer()` and route that request to the same named

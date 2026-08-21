@@ -111,6 +111,7 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
+import { decodeMcpServerOptions } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
 export {
   AGENT_TOOL_PROGRESS_PART,
@@ -2420,15 +2421,7 @@ export class Agent<
         return new MCPClientManager(this._ParentClass.name, "0.0.1", {
           storage: this.ctx.storage,
           createAuthProvider: (callbackUrl) =>
-            this.createMcpOAuthProvider(callbackUrl),
-          resolveRpcBinding: (bindingName) => {
-            // SAFETY: Persisted binding names come from
-            // _findBindingNameForNamespace, which records only the exact
-            // DurableObjectNamespace object passed to addMcpServer.
-            return (this.env as Record<string, unknown>)[bindingName] as
-              | DurableObjectNamespace<McpAgent>
-              | undefined;
-          }
+            this.createMcpOAuthProvider(callbackUrl)
         });
       }
     );
@@ -2882,7 +2875,10 @@ export class Agent<
                 "restore_mcp_connections",
                 "startup",
                 {},
-                () => this.mcp.onStart()
+                async () => {
+                  await this.mcp.onStart();
+                  await this._restoreRpcMcpServers();
+                }
               )
             );
           }
@@ -12122,6 +12118,50 @@ export class Agent<
       }
     }
     return undefined;
+  }
+
+  private async _restoreRpcMcpServers(): Promise<void> {
+    for (const server of this.mcp.getRpcServersFromStorage()) {
+      if (this.mcp.mcpConnections[server.id]) continue;
+
+      const options = decodeMcpServerOptions(server.server_options);
+      const binding = options.bindingName
+        ? Object.entries(this.env).find(
+            ([name]) => name === options.bindingName
+          )?.[1]
+        : undefined;
+      const namespace = this._cf_asDurableObjectNamespace<McpAgent>(binding);
+      if (!namespace) {
+        console.warn(
+          `[Agent] Cannot restore RPC MCP server "${server.name}": binding ` +
+            `"${options.bindingName ?? "<missing>"}" not found in env`
+        );
+        continue;
+      }
+
+      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
+      try {
+        await this.mcp.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
+          reconnect: { id: server.id },
+          transport: {
+            type: "rpc",
+            namespace,
+            name: normalizedName,
+            props: options.props
+          }
+        });
+
+        const connection = this.mcp.mcpConnections[server.id];
+        if (connection?.connectionState === MCPConnectionState.CONNECTED) {
+          await this.mcp.discoverIfConnected(server.id);
+        }
+      } catch (error) {
+        console.error(
+          `[Agent] Error restoring RPC MCP server "${server.name}":`,
+          error
+        );
+      }
+    }
   }
 
   // ==========================================

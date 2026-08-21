@@ -140,7 +140,7 @@ describe("waitForConnections E2E", () => {
     expect(result.connectionStates["oauth-server"]).toBe("authenticating");
   });
 
-  describe("true hibernation round-trip (onStart lifecycle)", () => {
+  describe("Agent startup restoration after eviction", () => {
     it("should settle connections when waiting after onStart", async () => {
       const name = "hibernation-roundtrip";
       let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
