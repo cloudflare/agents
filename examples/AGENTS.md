@@ -10,6 +10,11 @@ Most examples have both a frontend and a backend. This makes them immediately ru
 
 Focused protocol examples can be server-only when a frontend would obscure the concept. Keep MCP server examples minimal when they demonstrate Cloudflare Workers setup, raw transports, or elicitation behavior that must be exercised from an MCP client.
 
+Early-access examples for a coordinated PR stack live under `examples/next/`.
+Each runnable child is an independent workspace package matched by
+`examples/next/*`; `examples/next/README.md` records the stack order. Move an
+example into the main catalog only after its public API stabilizes.
+
 Full-stack examples use the [Cloudflare Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/) for development and builds. Server-only examples use Wrangler directly.
 
 Framework-specific examples that intentionally demonstrate a non-React client

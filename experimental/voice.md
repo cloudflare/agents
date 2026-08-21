@@ -558,18 +558,7 @@ Override any model via `voiceOptions` or by overriding the corresponding method 
 
 ## Hibernation
 
-By default, Durable Objects hibernate when no JavaScript is executing. During an active voice call, `VoiceAgent` starts a keepalive timer to prevent this. However, there are known edge cases where hibernation can disrupt voice calls (see `design/voice.md` for details).
-
-**For production voice agents, disable hibernation:**
-
-```ts
-class MyAgent extends VoiceAgent<Env> {
-  static options = { hibernate: false };
-  // ...
-}
-```
-
-This keeps the DO alive as long as it has connections, at the cost of billable duration. The keepalive timer is a best-effort mitigation when hibernation is enabled.
+Agent WebSockets always hibernate. During active voice work, `VoiceAgent` uses `keepAlive()` so in-flight processing remains active, but idle call state must still tolerate eviction. Persist call state and avoid relying on class fields across pauses; see `design/voice.md` for the known edge cases.
 
 ## Telephony (phone calls)
 

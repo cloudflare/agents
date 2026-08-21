@@ -370,8 +370,6 @@ const Pcm24kVoiceBase = withVoice(Agent, {
  * Echoes back the transcript (no real AI).
  */
 export class TestVoiceAgent extends VoiceBase {
-  static options = { hibernate: false };
-
   transcriber: Transcriber | undefined = new TestTranscriber();
   tts = new TestTTS();
 
@@ -574,8 +572,6 @@ export class TestVoiceAgent extends VoiceBase {
  * Used to test the empty response guard.
  */
 export class TestEmptyResponseVoiceAgent extends VoiceBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
   tts = new TestTTS();
   #responseMode:
@@ -653,8 +649,6 @@ export class TestEmptyResponseVoiceAgent extends VoiceBase {
  * This lets protocol-level tests verify the VoiceTurnContext contract.
  */
 export class TestContextVoiceAgent extends VoiceBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
   tts = new TestTTS();
 
@@ -667,8 +661,6 @@ export class TestContextVoiceAgent extends VoiceBase {
 }
 
 export class TestAiSdkFullStreamVoiceAgent extends VoiceBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
   tts = new TestTTS();
   #mockResponse = defaultMockTextStreamResponse;
@@ -701,8 +693,6 @@ export class TestAiSdkFullStreamVoiceAgent extends VoiceBase {
 }
 
 export class TestAiSdkTextStreamVoiceAgent extends VoiceBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
   tts = new TestTTS();
   #mockResponse = defaultMockTextStreamResponse;
@@ -739,8 +729,6 @@ export class TestAiSdkTextStreamVoiceAgent extends VoiceBase {
  * (e.g. Gemini TTS). Verifies sampleRate is declared in audio_config.
  */
 export class TestPcm24kVoiceAgent extends Pcm24kVoiceBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
   tts = new TestTTS();
 

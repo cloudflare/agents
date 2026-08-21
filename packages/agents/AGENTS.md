@@ -10,6 +10,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | ---------------------------- | ---------------------------- | ---------------------------------------------------------------------------- |
 | `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
 | `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
+| `agents/lifecycle`           | `src/lifecycle/index.ts`     | Composable Durable Object lifecycle, routing, and hibernating connections    |
 | `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
 | `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
@@ -47,6 +48,11 @@ src/
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
   internal_context.ts   # AsyncLocalStorage context for getCurrentAgent()
+
+  lifecycle/            # Public Durable Object lifecycle composition
+    index.ts            # Intentionally small public lifecycle surface
+    durable-object-lifecycle.ts # Runtime handlers, routing, capabilities
+    connection.ts       # Hibernating WebSocket connection management
 
   chat/                 # Shared chat toolkit (mostly for sibling packages)
     index.ts            # Barrel for shared chat primitives
@@ -144,6 +150,15 @@ pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
+### Lifecycle tests (`src/lifecycle-tests/`)
+
+```bash
+pnpm exec vitest --project lifecycle --run
+```
+
+Proves constructor composition on a plain `DurableObject`, ordered capabilities,
+routing, native and migrated identity, alarms, and hibernating WebSockets.
+
 ### React tests (`src/react-tests/`)
 
 ```bash
@@ -222,7 +237,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 
 ## Key architecture notes
 
-- **Agent extends partyserver's `Server`** — Durable Object lifecycle, WebSocket hibernation, and connection management come from `partyserver`. The Agent class adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows on top.
+- **Agent directly extends `DurableObject` and composes `Lifecycle`** — the lifecycle installs request, alarm, and always-hibernating WebSocket entry points. Agent adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows.
 - **State sync is bidirectional** — `this.setState()` on the server broadcasts to all connected clients; `agent.setState()` from the client sends to the server. Both directions use the same message format (`MessageType.CF_AGENT_STATE`).
 - **Client RPC is decorator-gated** — methods on Agent subclasses must use `@callable()` before clients can invoke them through `agent.call("methodName", args)` or `agent.stub.methodName(...)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
@@ -235,7 +250,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - Every new public export needs: an entry in `package.json` `exports`, a build entry in `scripts/build.ts`, and a changeset
 - `src/index.ts` is very large (~6000 lines) — be surgical with edits, understand the full context before changing
 - `agents/chat` is published and versioned, but treat it as a sibling-package support layer first, not a broad user-facing surface. Prefer documenting `@cloudflare/ai-chat` / `@cloudflare/think` directly unless a primitive is intentionally shared.
-- The `partyserver`/`partysocket` dependency is foundational — don't try to replace it
+- The lifecycle substrate is vendored under `src/lifecycle` and ISC-attributed. Keep `agents/lifecycle` small: no alternate WebSocket modes, speculative phases, or second Durable Object base class.
 - Peer dependencies (`ai`, `@ai-sdk/*`, `react`, `zod`) are optional — guard usage with runtime checks or separate entry points
 
 ## Related

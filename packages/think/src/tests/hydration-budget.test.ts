@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
@@ -56,7 +56,7 @@ function uniqueName(prefix: string): string {
 
 describe("hydrationByteBudget — windowed hydration (#1710)", () => {
   it("boots an oversized transcript as a bounded recent window", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkWindowedHydrationAgent,
       uniqueName("seeded-windowed")
     )) as unknown as WindowedHydrationStub;
@@ -107,7 +107,7 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     });
 
     try {
-      const agent = (await getServerByName(
+      const agent = (await getAgentByName(
         env.ThinkWindowedHydrationAgent,
         uniqueName("seeded-windowed-events")
       )) as unknown as WindowedHydrationStub;
@@ -133,7 +133,7 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
   });
 
   it("exposes degraded onStart steps via the public accessor", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkWindowedHydrationAgent,
       uniqueName("seeded-windowed-accessor")
     )) as unknown as WindowedHydrationStub;
@@ -144,7 +144,7 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
   });
 
   it("a small transcript hydrates fully (not truncated)", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkWindowedHydrationAgent,
       uniqueName("empty-boot")
     )) as unknown as WindowedHydrationStub;
@@ -156,7 +156,7 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
   });
 
   it("chat works on a windowed-boot agent and persists past the window", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkWindowedHydrationAgent,
       uniqueName("seeded-windowed-chat")
     )) as unknown as WindowedHydrationStub;
@@ -176,7 +176,7 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
 
 describe("mediaEviction — aged media leaves the stored transcript (#1710)", () => {
   it("evicts data-URL file parts and large tool-output strings from aged messages", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkMediaEvictionAgent,
       uniqueName("evict")
     )) as unknown as MediaEvictionStub;
@@ -254,7 +254,7 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
     });
 
     try {
-      const agent = (await getServerByName(
+      const agent = (await getAgentByName(
         env.ThinkMediaEvictionAgent,
         uniqueName("evict-silent")
       )) as unknown as MediaEvictionStub;
@@ -287,7 +287,7 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
   });
 
   it("clamps keepRecentMessages to the model's full-fidelity window", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkMediaEvictionAgent,
       uniqueName("evict-clamp")
     )) as unknown as MediaEvictionStub;
@@ -312,7 +312,7 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
   });
 
   it("chains passes automatically when maxRowsPerPass leaves a backlog", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkMediaEvictionAgent,
       uniqueName("evict-chain")
     )) as unknown as MediaEvictionStub;
@@ -341,7 +341,7 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
   });
 
   it("a second pass is a cheap no-op (rewritten rows skip the size gate)", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkMediaEvictionAgent,
       uniqueName("evict-idempotent")
     )) as unknown as MediaEvictionStub;
@@ -365,7 +365,7 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
   });
 
   it("externalizeToWorkspace: false drops the bytes with a size-only marker", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkMediaEvictionAgent,
       uniqueName("evict-drop")
     )) as unknown as MediaEvictionStub;
@@ -391,7 +391,7 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
   });
 
   it("disabled eviction leaves everything untouched", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkMediaEvictionAgent,
       uniqueName("evict-disabled")
     )) as unknown as MediaEvictionStub;
@@ -406,7 +406,7 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
   });
 
   it("background pass triggered by conversation growth evicts automatically", async () => {
-    const agent = (await getServerByName(
+    const agent = (await getAgentByName(
       env.ThinkMediaEvictionAutoAgent,
       uniqueName("evict-auto")
     )) as unknown as MediaEvictionStub;

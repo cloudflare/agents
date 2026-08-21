@@ -31,7 +31,6 @@
     "esbuild": "^0.28.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.16",
-    "partyserver": "^0.5.9",
     "partysocket": "1.3.0",
     "yaml": "^2.9.0",
     "yargs": "^18.0.0"
@@ -122,6 +121,11 @@
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js",
       "require": "./dist/client.js"
+    },
+    "./lifecycle": {
+      "types": "./dist/lifecycle/index.d.ts",
+      "import": "./dist/lifecycle/index.js",
+      "require": "./dist/lifecycle/index.js"
     },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
