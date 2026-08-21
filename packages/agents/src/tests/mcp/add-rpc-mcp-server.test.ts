@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "../..";
 
@@ -195,38 +196,53 @@ describe("addMcpServer with RPC binding", () => {
     expect(result.serverUrl).toMatch(/^rpc:/);
   });
 
-  it("should restore RPC connections after simulated hibernation with stable ID", async () => {
+  it("restores RPC connections through the capability after eviction", async () => {
     const agentStub = await getAgentByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-hibernate"
     );
-    const result =
-      (await agentStub.testRpcServerRestoresAfterHibernation()) as unknown as {
+    const before =
+      (await agentStub.createRpcServerForEvictionTest()) as unknown as {
         success: boolean;
-        idBefore?: string;
-        idAfter?: string;
-        sameId?: boolean;
-        toolsBefore?: string[];
-        toolsDuring?: string[];
-        toolsAfter?: string[];
-        connectionCountBefore?: number;
-        connectionCountAfter?: number;
-        result?: { content: Array<{ type: string; text: string }> };
+        id?: string;
+        tools?: string[];
+        connectionCount?: number;
         error?: string;
       };
 
-    if (!result.success) {
-      throw new Error(`Test failed: ${result.error}`);
+    if (!before.success || !before.id || !before.tools) {
+      throw new Error(`Test setup failed: ${before.error}`);
     }
 
-    expect(result.sameId).toBe(true);
-    expect(result.connectionCountBefore).toBe(1);
-    expect(result.connectionCountAfter).toBe(1);
-    expect(result.toolsBefore!.length).toBeGreaterThan(0);
-    expect(result.toolsDuring).toEqual([]);
-    expect(result.toolsAfter!.length).toBeGreaterThan(0);
-    expect(result.toolsAfter!.length).toBe(result.toolsBefore!.length);
-    expect(result.result!.content[0].text).toBe("survives-hibernation");
+    expect(before.connectionCount).toBe(1);
+    expect(before.tools.length).toBeGreaterThan(0);
+
+    await evictDurableObject(agentStub);
+
+    // Fetch is a lifecycle-managed wake. Reconstructing the Agent invokes the
+    // MCP capability's onStart automatically before the host request handler.
+    await agentStub.fetch(new Request("https://example.com/wake"));
+
+    const after = (await agentStub.inspectRpcServerAfterEviction(
+      before.id
+    )) as unknown as {
+      success: boolean;
+      idAfter?: string;
+      sameId?: boolean;
+      tools?: string[];
+      connectionCount?: number;
+      result?: { content: Array<{ type: string; text: string }> };
+      error?: string;
+    };
+
+    if (!after.success || !after.tools || !after.result) {
+      throw new Error(`Test failed after eviction: ${after.error}`);
+    }
+
+    expect(after.sameId).toBe(true);
+    expect(after.connectionCount).toBe(1);
+    expect(after.tools.length).toBe(before.tools.length);
+    expect(after.result.content[0].text).toBe("survives-hibernation");
   });
 
   it("should deduplicate repeated addMcpServer calls for the same server", async () => {

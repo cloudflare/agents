@@ -15,7 +15,7 @@ Exact protocol-version strings remain at wire and conformance boundaries, but ar
 | Import              | Responsibility                                                        |
 | ------------------- | --------------------------------------------------------------------- |
 | `agents/mcp/server` | Isolated Stateless Worker handler and Agents auth-context helper      |
-| `agents/mcp/client` | Agent-side MCP client manager and connection APIs                     |
+| `agents/mcp/client` | Reusable Durable Object MCP client capability and connection APIs     |
 | `agents/mcp`        | Compatibility barrel retaining existing Legacy and historical imports |
 
 Stateless server constructors and protocol helpers remain owned by `@modelcontextprotocol/server`:
@@ -79,7 +79,23 @@ The tradeoff is one additional import and direct peer installation. That is pref
 
 ### Client
 
-The SDK v2 client negotiates Stateless first and falls back to Legacy on the same connection. Agents persists the selected protocol and discovery result alongside resumable HTTP state. An in-flight elicitation handler and continuation remain memory-only; isolate restart rejects the operation and the caller retries it.
+`MCPClientManager` is the MCP client and the reusable Durable Object capability;
+there is no second public lifecycle wrapper. A plain Durable Object keeps the
+manager as `this.mcp` and installs that same object with
+`Lifecycle.use(this.mcp)`. The manager owns its SQLite schema, persisted HTTP
+and RPC connection restoration, and OAuth callback interception.
+
+`Agent` exposes the same manager as `this.mcp`. Internally, Agent installs a
+private lifecycle adapter around it to preserve Agent invocation context,
+startup tracing and error semantics, and facet hydration order. Those
+Agent-specific policies do not expand the public manager options or create a
+second MCP capability.
+
+The SDK v2 client negotiates Stateless first and falls back to Legacy on the
+same connection. The manager persists the selected protocol and discovery
+result alongside resumable HTTP state. An in-flight elicitation handler and
+continuation remain memory-only; isolate restart rejects the operation and the
+caller retries it.
 
 ## Verification matrix
 

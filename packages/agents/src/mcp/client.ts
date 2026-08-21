@@ -44,8 +44,13 @@ import {
   type MCPServerRow,
   type PersistedMcpServerOptions
 } from "./client-storage";
+import type {
+  CapabilityRequestContext,
+  DurableObjectCapability
+} from "../lifecycle/capability-runner";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
+import type { McpAgent } from "./legacy-agent";
 
 export type MCPAITool = {
   description?: string;
@@ -350,9 +355,21 @@ export type MCPClientElicitationHandlers = {
   url?: MCPClientElicitationHandler;
 };
 
+const MCP_SCHEMA_VERSION_KEY = "cf_agents:mcp_schema_version";
+const CURRENT_MCP_SCHEMA_VERSION = 1;
+
+/** Dependencies used by {@link MCPClientManager} across Durable Object wakes. */
 export type MCPClientManagerOptions = {
+  /** Durable storage that owns the MCP server catalog. */
   storage: DurableObjectStorage;
+
+  /** Construct the OAuth provider used for a persisted HTTP server. */
   createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
+
+  /** Resolve a persisted Durable Object binding name during RPC restoration. */
+  resolveRpcBinding?: (
+    bindingName: string
+  ) => DurableObjectNamespace<McpAgent> | undefined;
 };
 
 /**
@@ -369,9 +386,10 @@ export type MCPServerFilter = {
 };
 
 /**
- * Utility class that aggregates multiple MCP clients into one
+ * A Durable Object capability that persists and aggregates MCP client
+ * connections.
  */
-export class MCPClientManager {
+export class MCPClientManager implements DurableObjectCapability {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   /** Cache only the current catalog so old schema graphs are not retained. */
   private readonly _aiToolSchemas = new WeakMap<
@@ -381,10 +399,13 @@ export class MCPClientManager {
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
-  private _storage: DurableObjectStorage;
-  private _createAuthProviderFn?: (
-    callbackUrl: string
-  ) => AgentMcpOAuthProvider;
+  private readonly _storage: DurableObjectStorage;
+  private readonly _createAuthProviderFn:
+    | ((callbackUrl: string) => AgentMcpOAuthProvider)
+    | undefined;
+  private readonly _resolveRpcBinding:
+    | ((bindingName: string) => DurableObjectNamespace<McpAgent> | undefined)
+    | undefined;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
   private _elicitationHandlers?: MCPClientElicitationHandlers;
@@ -404,13 +425,15 @@ export class MCPClientManager {
     this._onServerStateChanged.event;
 
   /**
-   * @param _name Name of the MCP client
-   * @param _version Version of the MCP Client
-   * @param options Storage adapter for persisting MCP server state
+   * Construct a reusable Durable Object MCP client capability.
+   *
+   * @param _name - MCP client implementation name sent during negotiation.
+   * @param _version - MCP client implementation version sent during negotiation.
+   * @param options - Explicit storage, OAuth, and RPC restoration dependencies.
    */
   constructor(
-    private _name: string,
-    private _version: string,
+    private readonly _name: string,
+    private readonly _version: string,
     options: MCPClientManagerOptions
   ) {
     if (!options.storage) {
@@ -420,6 +443,142 @@ export class MCPClientManager {
     }
     this._storage = options.storage;
     this._createAuthProviderFn = options.createAuthProvider;
+    this._resolveRpcBinding = options.resolveRpcBinding;
+  }
+
+  /** Restore persisted HTTP and RPC connections before the host handles work. */
+  async onStart(): Promise<void> {
+    const schemaVersion =
+      (await this._storage.get<number>(MCP_SCHEMA_VERSION_KEY)) ?? 0;
+    if (schemaVersion < CURRENT_MCP_SCHEMA_VERSION) {
+      this.ensureSchema();
+      await this._storage.put(
+        MCP_SCHEMA_VERSION_KEY,
+        CURRENT_MCP_SCHEMA_VERSION
+      );
+    }
+
+    await this.restoreConnectionsFromStorage(this._name);
+    await this.restoreRpcServers();
+    this._onServerStateChanged.fire();
+  }
+
+  /** Intercept a registered MCP OAuth callback request. */
+  async onRequest(
+    context: CapabilityRequestContext
+  ): Promise<Response | undefined> {
+    const { request } = context;
+    if (!this.isCallbackRequest(request)) return undefined;
+
+    const result = await this.handleCallbackRequest(request);
+    this._onServerStateChanged.fire();
+    if (result.authSuccess) {
+      void this.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[MCPClientManager] Connection establishment after OAuth failed:",
+          error
+        );
+      });
+    }
+    return this.oauthCallbackResponse(result, request);
+  }
+
+  private ensureSchema(): void {
+    this.sql(`
+          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            server_url TEXT NOT NULL,
+            callback_url TEXT NOT NULL,
+            client_id TEXT,
+            auth_url TEXT,
+            server_options TEXT
+          )
+        `);
+  }
+
+  private oauthCallbackResponse(
+    result: MCPClientOAuthResult,
+    request: Request
+  ): Response {
+    const config = this.getOAuthCallbackConfig();
+    if (config?.customHandler) return config.customHandler(result);
+
+    const baseOrigin = new URL(request.url).origin;
+    if (config?.successRedirect && result.authSuccess) {
+      try {
+        return Response.redirect(
+          new URL(config.successRedirect, baseOrigin).href
+        );
+      } catch (error) {
+        console.error(
+          "Invalid successRedirect URL:",
+          config.successRedirect,
+          error
+        );
+        return Response.redirect(baseOrigin);
+      }
+    }
+
+    if (config?.errorRedirect && !result.authSuccess) {
+      try {
+        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
+          result.authError || "Unknown error"
+        )}`;
+        return Response.redirect(new URL(errorUrl, baseOrigin).href);
+      } catch (error) {
+        console.error(
+          "Invalid errorRedirect URL:",
+          config.errorRedirect,
+          error
+        );
+        return Response.redirect(baseOrigin);
+      }
+    }
+
+    return Response.redirect(baseOrigin);
+  }
+
+  private async restoreRpcServers(): Promise<void> {
+    const servers = this.getRpcServersFromStorage();
+    for (const server of servers) {
+      if (this.mcpConnections[server.id]) continue;
+
+      const options = decodeMcpServerOptions(server.server_options);
+      const bindingName = options.bindingName;
+      const namespace = bindingName
+        ? this._resolveRpcBinding?.(bindingName)
+        : undefined;
+      if (!bindingName || !namespace) {
+        console.warn(
+          `[MCPClientManager] Cannot restore RPC MCP server "${server.name}": ` +
+            `binding "${bindingName ?? "<missing>"}" is unavailable`
+        );
+        continue;
+      }
+
+      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
+      try {
+        await this.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
+          reconnect: { id: server.id },
+          transport: {
+            type: "rpc",
+            namespace,
+            name: normalizedName,
+            props: options.props
+          }
+        });
+        const connection = this.mcpConnections[server.id];
+        if (connection?.connectionState === MCPConnectionState.CONNECTED) {
+          await this.discoverIfConnected(server.id);
+        }
+      } catch (error) {
+        console.error(
+          `[MCPClientManager] Error restoring RPC MCP server "${server.name}":`,
+          error
+        );
+      }
+    }
   }
 
   /**
@@ -881,10 +1040,7 @@ export class MCPClientManager {
     return authProvider;
   }
 
-  /**
-   * Get saved RPC servers from storage (servers with rpc:// URLs).
-   * These are restored separately by the Agent class since they need env bindings.
-   */
+  /** Get saved RPC servers from storage (servers with rpc:// URLs). */
   getRpcServersFromStorage(): MCPServerRow[] {
     return this.getServersFromStorage().filter((s) =>
       s.server_url.startsWith(RPC_DO_PREFIX)
@@ -919,12 +1075,10 @@ export class MCPClientManager {
   }
 
   /**
-   * Restore MCP server connections from storage
-   * This method is called on Agent initialization to restore previously connected servers.
-   * RPC servers (rpc:// URLs) are skipped here -- they are restored by the Agent class
-   * which has access to env bindings.
+   * Restore persisted HTTP MCP connections. RPC connections are restored by
+   * the capability startup phase through the configured binding resolver.
    *
-   * @param clientName Name to use for OAuth client (typically the agent instance name)
+   * @param clientName - Durable Object identity used to scope OAuth state.
    */
   async restoreConnectionsFromStorage(clientName: string): Promise<void> {
     if (this._isRestored) {
