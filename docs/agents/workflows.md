@@ -91,9 +91,7 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
       taskId: params.taskId
     });
 
-    // Report completion (durable via step)
-    await step.reportComplete(result);
-
+    // Returning reports completion and the result to the Agent automatically.
     return result;
   }
 }
@@ -210,14 +208,14 @@ Base class for Workflows that integrate with Agents.
 
 **Methods on `step` (durable, idempotent, won't repeat on retry):**
 
-| Method                          | Description                                    |
-| ------------------------------- | ---------------------------------------------- |
-| `step.reportComplete(result?)`  | Report successful completion                   |
-| `step.reportError(error)`       | Report an error                                |
-| `step.sendEvent(event)`         | Send a custom event to the Agent               |
-| `step.updateAgentState(state)`  | Replace Agent state (broadcasts to clients)    |
-| `step.mergeAgentState(partial)` | Merge into Agent state (broadcasts to clients) |
-| `step.resetAgentState()`        | Reset Agent state to initialState              |
+| Method                          | Description                                         |
+| ------------------------------- | --------------------------------------------------- |
+| `step.reportComplete(result?)`  | Explicitly report completion before `run()` returns |
+| `step.reportError(error)`       | Report a non-terminal error event                   |
+| `step.sendEvent(event)`         | Send a custom event to the Agent                    |
+| `step.updateAgentState(state)`  | Replace Agent state (broadcasts to clients)         |
+| `step.mergeAgentState(partial)` | Merge into Agent state (broadcasts to clients)      |
+| `step.resetAgentState()`        | Reset Agent state to initialState                   |
 
 **DefaultProgress Type:**
 
@@ -804,7 +802,8 @@ await this.reportProgress({
 });
 this.broadcastToClients({ type: "update", data });
 
-// Durable callbacks via step (idempotent, won't repeat on retry)
+// Terminal callbacks are automatic when run() returns or throws.
+// These methods remain available for explicit lifecycle notifications.
 await step.reportComplete(result);
 await step.reportError("Something went wrong");
 await step.sendEvent({ type: "custom", data: {} });
@@ -844,7 +843,7 @@ const approvalData = await this.waitForApproval(step, { timeout: "7 days" });
 1. **Keep workflows focused** - One workflow per logical task
 2. **Use meaningful step names** - Helps with debugging and observability
 3. **Report progress regularly** - Keeps users informed
-4. **Handle errors gracefully** - Use `reportError()` before throwing
+4. **Preserve error context** - Throw an `Error` with the message that `onWorkflowError()` should receive
 5. **Clean up completed workflows** - The `cf_agents_workflows` table can grow unbounded, so implement a retention policy:
 
 ```typescript

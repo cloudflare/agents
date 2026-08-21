@@ -50,13 +50,15 @@ export interface AgentWorkflowStep extends WorkflowStep {
   /**
    * Report successful completion to the Agent (durable).
    * Triggers onWorkflowComplete() on the Agent.
+   * AgentWorkflow calls this automatically with the value returned by run().
    * @param result - Optional result data
    */
   reportComplete<T = unknown>(result?: T): Promise<void>;
 
   /**
-   * Report an error to the Agent (durable).
+   * Report a non-terminal error event to the Agent (durable).
    * Triggers onWorkflowError() on the Agent.
+   * Throwing from run() reports the terminal error automatically.
    * @param error - Error or error message
    */
   reportError(error: Error | string): Promise<void>;
