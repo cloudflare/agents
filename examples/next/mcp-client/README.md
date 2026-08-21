@@ -2,8 +2,8 @@
 
 An early-access Vite + React demo that composes `MCPClientManager` into a plain
 Cloudflare `DurableObject`. It does not extend `Agent` and does not forward
-lifecycle hooks manually. The UI connects MCP servers and displays discovered
-tools, prompts, resources, and connection state.
+lifecycle hooks manually. The UI connects MCP servers, completes OAuth, and
+invokes discovered tools with JSON arguments.
 
 ```ts
 export class McpClientObject extends DurableObject<Env> {
@@ -36,11 +36,20 @@ curl http://localhost:8787/agents/mcp-client-object/demo
 curl -X POST \
   http://localhost:8787/agents/mcp-client-object/demo/connect \
   -H 'content-type: application/json' \
-  -d '{"name":"docs","url":"https://docs.mcp.cloudflare.com/mcp"}'
+  -d '{"name":"cloudflare-mcp","url":"https://mcp.cloudflare.com/mcp"}'
 
 # Remove the persisted server.
 curl -X DELETE \
-  http://localhost:8787/agents/mcp-client-object/demo/servers/docs
+  http://localhost:8787/agents/mcp-client-object/demo/servers/cloudflare-mcp
+```
+
+Call a discovered tool after authorization:
+
+```sh
+curl -X POST \
+  http://localhost:8787/agents/mcp-client-object/demo/tools/call \
+  -H 'content-type: application/json' \
+  -d '{"serverId":"cloudflare-mcp","name":"example-tool","arguments":{}}'
 ```
 
 If a server requires OAuth, the response includes its authorization URL. The
