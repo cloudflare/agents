@@ -289,6 +289,92 @@ function sendRpcResponseIfOpen(
   }
 }
 
+type RPCReplyTarget = {
+  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
+};
+
+type FacetRPCResponseDelivery = {
+  sent: boolean;
+  completion: Promise<void>;
+};
+
+type SubAgentRpcReplyInvocationContext = {
+  bridge?: SubAgentConnectionBridge;
+};
+
+const subAgentRpcReplyContext =
+  new AsyncLocalStorage<SubAgentRpcReplyInvocationContext>();
+
+function sendFacetRpcResponseIfOpen(
+  target: RPCReplyTarget,
+  response: RPCResponse
+): FacetRPCResponseDelivery {
+  try {
+    const completion = Promise.resolve(
+      target.send(JSON.stringify(response))
+    ).catch((error: unknown) => {
+      if (!isClosedWebSocketSendError(error)) {
+        console.error("[Agent] Facet RPC response delivery failed:", error);
+      }
+    });
+    return { sent: true, completion };
+  } catch (error) {
+    if (isClosedWebSocketSendError(error)) {
+      return { sent: false, completion: Promise.resolve() };
+    }
+    throw error;
+  }
+}
+
+type FacetStreamingResponseDeliveryState = {
+  replyTarget: RPCReplyTarget;
+  pending: Set<Promise<void>>;
+};
+
+const facetStreamingResponseDeliveryStates = new WeakMap<
+  StreamingResponse,
+  FacetStreamingResponseDeliveryState
+>();
+
+function createStreamingResponse(
+  connection: Connection,
+  id: string,
+  facetReplyTarget?: RPCReplyTarget
+): StreamingResponse {
+  const stream = new StreamingResponse(connection, id);
+  if (facetReplyTarget) {
+    facetStreamingResponseDeliveryStates.set(stream, {
+      replyTarget: facetReplyTarget,
+      pending: new Set()
+    });
+  }
+  return stream;
+}
+
+function trackFacetStreamingResponseDelivery(
+  stream: StreamingResponse,
+  completion: Promise<void>
+): void {
+  const state = facetStreamingResponseDeliveryStates.get(stream);
+  if (!state) return;
+
+  state.pending.add(completion);
+  void completion.finally(() => state.pending.delete(completion));
+}
+
+async function waitForFacetStreamingResponseDeliveries(
+  stream: StreamingResponse
+): Promise<void> {
+  const state = facetStreamingResponseDeliveryStates.get(stream);
+  if (!state) return;
+
+  try {
+    await Promise.all(state.pending);
+  } finally {
+    facetStreamingResponseDeliveryStates.delete(stream);
+  }
+}
+
 /**
  * Type guard for RPC request messages
  */
@@ -414,7 +500,8 @@ type SubAgentWebSocketEndpoint = {
   _cf_handleSubAgentWebSocketMessage(
     message: WSMessage,
     bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
+    meta: SubAgentConnectionMeta,
+    replyBridge?: SubAgentConnectionBridge
   ): Promise<void>;
   _cf_handleSubAgentWebSocketClose(
     code: number,
@@ -2499,7 +2586,14 @@ export class Agent<
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
-      if (await this._cf_forwardSubAgentWebSocketMessage(connection, message)) {
+      const replyBridge = subAgentRpcReplyContext.getStore()?.bridge;
+      if (
+        await this._cf_forwardSubAgentWebSocketMessage(
+          connection,
+          message,
+          replyBridge
+        )
+      ) {
         return;
       }
       this._ensureConnectionWrapped(connection);
@@ -2564,7 +2658,11 @@ export class Agent<
 
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
-                const stream = new StreamingResponse(connection, id);
+                const stream = createStreamingResponse(
+                  connection,
+                  id,
+                  replyBridge
+                );
 
                 this._emit("rpc", { method, streaming: true });
 
@@ -2583,6 +2681,7 @@ export class Agent<
                     );
                   }
                 }
+                await waitForFacetStreamingResponseDeliveries(stream);
                 return;
               }
 
@@ -2598,9 +2697,13 @@ export class Agent<
                 success: true,
                 type: MessageType.RPC
               };
-              sendRpcResponseIfOpen(connection, response);
+              if (replyBridge) {
+                await sendFacetRpcResponseIfOpen(replyBridge, response)
+                  .completion;
+              } else {
+                sendRpcResponseIfOpen(connection, response);
+              }
             } catch (e) {
-              // Send error response
               const response: RPCResponse = {
                 error:
                   e instanceof Error ? e.message : "Unknown error occurred",
@@ -2608,7 +2711,13 @@ export class Agent<
                 success: false,
                 type: MessageType.RPC
               };
-              sendRpcResponseIfOpen(connection, response);
+              if (replyBridge) {
+                await sendFacetRpcResponseIfOpen(replyBridge, response)
+                  .completion;
+              } else {
+                sendRpcResponseIfOpen(connection, response);
+              }
+
               console.error("RPC error:", e);
               this._emit("rpc:error", {
                 method: parsed.method,
@@ -7335,15 +7444,18 @@ export class Agent<
 
   private async _cf_forwardSubAgentWebSocketMessage(
     connection: Connection,
-    message: WSMessage
+    message: WSMessage,
+    replyBridge?: SubAgentConnectionBridge
   ): Promise<boolean> {
     const routed = await this._cf_resolveSubAgentConnection(connection);
     if (!routed) return false;
 
+    const bridge = this._cf_createSubAgentConnectionBridge(connection);
     await routed.child._cf_handleSubAgentWebSocketMessage(
       message,
-      this._cf_createSubAgentConnectionBridge(connection),
-      routed.meta
+      bridge,
+      routed.meta,
+      replyBridge ?? bridge
     );
     return true;
   }
@@ -7479,13 +7591,23 @@ export class Agent<
   async _cf_handleSubAgentWebSocketMessage(
     message: WSMessage,
     bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
+    meta: SubAgentConnectionMeta,
+    replyBridge: SubAgentConnectionBridge = bridge
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    await this._cf_runWithSubAgentBridge(bridge, () =>
-      this.onMessage(connection, message)
-    );
+    const replyContext: SubAgentRpcReplyInvocationContext = {
+      bridge: replyBridge
+    };
+    try {
+      await subAgentRpcReplyContext.run(replyContext, () =>
+        this._cf_runWithSubAgentBridge(bridge, () =>
+          this.onMessage(connection, message)
+        )
+      );
+    } finally {
+      replyContext.bridge = undefined;
+    }
   }
 
   async _cf_handleSubAgentWebSocketClose(
@@ -13138,6 +13260,17 @@ export class StreamingResponse {
     this._id = id;
   }
 
+  private _send(response: RPCResponse): boolean {
+    const state = facetStreamingResponseDeliveryStates.get(this);
+    if (!state) {
+      return sendRpcResponseIfOpen(this._connection, response);
+    }
+
+    const delivery = sendFacetRpcResponseIfOpen(state.replyTarget, response);
+    trackFacetStreamingResponseDelivery(this, delivery.completion);
+    return delivery.sent;
+  }
+
   /**
    * Whether the stream has been closed (via end() or error())
    */
@@ -13164,7 +13297,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    return sendRpcResponseIfOpen(this._connection, response);
+    return this._send(response);
   }
 
   /**
@@ -13184,7 +13317,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    return sendRpcResponseIfOpen(this._connection, response);
+    return this._send(response);
   }
 
   /**
@@ -13203,6 +13336,6 @@ export class StreamingResponse {
       success: false,
       type: MessageType.RPC
     };
-    return sendRpcResponseIfOpen(this._connection, response);
+    return this._send(response);
   }
 }
