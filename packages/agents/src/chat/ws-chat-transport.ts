@@ -434,7 +434,11 @@ export class WebSocketChatTransport<
         };
 
         const onClose = () => {
-          finish(() => controller.close(), false, false);
+          finish(
+            () => controller.error(new Error("WebSocket closed mid-stream")),
+            false,
+            false
+          );
         };
 
         agent.addEventListener("message", onMessage, {
@@ -786,7 +790,12 @@ export class WebSocketChatTransport<
           }
         };
 
-        const onClose = () => finish(() => controller.close());
+        const onClose = () =>
+          finish(() =>
+            requestId === null
+              ? controller.close()
+              : controller.error(new Error("WebSocket closed mid-stream"))
+          );
 
         agent.addEventListener("message", onMessage, {
           signal: streamController.signal
@@ -905,7 +914,11 @@ export class WebSocketChatTransport<
         };
 
         const onClose = () => {
-          finish(() => controller.close(), false, false);
+          finish(
+            () => controller.error(new Error("WebSocket closed mid-stream")),
+            false,
+            false
+          );
         };
 
         agent.addEventListener("message", onMessage, {
