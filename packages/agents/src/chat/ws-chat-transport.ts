@@ -7,6 +7,11 @@
 
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { nanoid } from "nanoid";
+import {
+  applyChatResponseFrame,
+  failChatStream,
+  ReplayChunkBatch
+} from "./replay-batch";
 import { MessageType, type OutgoingMessage } from "./wire-types";
 
 /**
@@ -605,6 +610,9 @@ export class WebSocketChatTransport<
     let requestId: string | null = null;
     let readerController: ReadableStreamDefaultController<UIMessageChunk> | null =
       null;
+    // Held outside start() so the close and detach paths can flush replayed
+    // content before they close the stream.
+    let replayBatch: ReplayChunkBatch | null = null;
     const probeId = nanoid(8);
     let onResumeRef: ((data: { id: string }) => void) | null = null;
     let onResumeNoneRef: ((data: { probeId?: string }) => boolean) | null =
@@ -682,7 +690,10 @@ export class WebSocketChatTransport<
     this._abortToolContinuation = abortToolContinuationRef;
     detachResumeStreamRef = () => {
       if (completed) return false;
-      finish(() => readerController?.close());
+      finish(() => {
+        replayBatch?.flush();
+        readerController?.close();
+      });
       return true;
     };
     this._detachResumeStream = detachResumeStreamRef;
@@ -690,6 +701,8 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         readerController = controller;
+        const batch = new ReplayChunkBatch(controller);
+        replayBatch = batch;
         let timeout: ReturnType<typeof setTimeout> | undefined;
 
         const armTimeout = (delay: number) => {
@@ -763,20 +776,11 @@ export class WebSocketChatTransport<
             }
 
             if (data.error) {
-              finish(() =>
-                controller.error(new Error(data.body || "Stream error"))
-              );
+              finish(() => failChatStream(batch, data.body || "Stream error"));
               return;
             }
 
-            if (data.body?.trim()) {
-              try {
-                const chunk = JSON.parse(data.body) as UIMessageChunk;
-                controller.enqueue(chunk);
-              } catch {
-                // Skip malformed chunk bodies
-              }
-            }
+            applyChatResponseFrame(batch, data);
 
             if (data.done) {
               finish(() => controller.close());
@@ -786,7 +790,11 @@ export class WebSocketChatTransport<
           }
         };
 
-        const onClose = () => finish(() => controller.close());
+        const onClose = () =>
+          finish(() => {
+            batch.flush();
+            controller.close();
+          });
 
         agent.addEventListener("message", onMessage, {
           signal: streamController.signal
@@ -851,6 +859,9 @@ export class WebSocketChatTransport<
 
     let streamController: ReadableStreamDefaultController<UIMessageChunk> | null =
       null;
+    // Held outside start() so the close and detach paths can flush replayed
+    // content before they close the stream.
+    let replayBatch: ReplayChunkBatch | null = null;
     const cancelActiveRequest = () => {
       if (completed) return false;
       finish(() => streamController?.error(abortError), true);
@@ -861,7 +872,10 @@ export class WebSocketChatTransport<
     const transport = this;
     detachResumeStream = () => {
       if (completed) return false;
-      finish(() => streamController?.close());
+      finish(() => {
+        replayBatch?.flush();
+        streamController?.close();
+      });
       return true;
     };
     this._detachResumeStream = detachResumeStream;
@@ -869,6 +883,8 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         streamController = controller;
+        const batch = new ReplayChunkBatch(controller);
+        replayBatch = batch;
 
         const onMessage = (event: MessageEvent) => {
           try {
@@ -880,21 +896,11 @@ export class WebSocketChatTransport<
             if (data.id !== requestId) return;
 
             if (data.error) {
-              finish(() =>
-                controller.error(new Error(data.body || "Stream error"))
-              );
+              finish(() => failChatStream(batch, data.body || "Stream error"));
               return;
             }
 
-            // Parse and enqueue the chunk
-            if (data.body?.trim()) {
-              try {
-                const chunk = JSON.parse(data.body) as UIMessageChunk;
-                controller.enqueue(chunk);
-              } catch {
-                // Skip malformed chunk bodies
-              }
-            }
+            applyChatResponseFrame(batch, data);
 
             if (data.done) {
               finish(() => controller.close());
@@ -905,7 +911,14 @@ export class WebSocketChatTransport<
         };
 
         const onClose = () => {
-          finish(() => controller.close(), false, false);
+          finish(
+            () => {
+              batch.flush();
+              controller.close();
+            },
+            false,
+            false
+          );
         };
 
         agent.addEventListener("message", onMessage, {
