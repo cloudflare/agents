@@ -13,6 +13,50 @@ The MCP client capability lets your agent:
 
 > **Note:** This page covers connecting to MCP servers as a client. To create your own MCP server, see [Creating MCP Servers](./mcp-servers.md).
 
+## Compose the MCP client with a Durable Object
+
+`MCPClientManager` is a lifecycle capability. A class can extend the platform
+`DurableObject` directly and install the manager without extending `Agent`:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { MCPClientManager } from "agents/mcp/client";
+
+export class MyObject extends DurableObject<Env> {
+  readonly mcp = new MCPClientManager("my-object", "1.0.0", {
+    storage: this.ctx.storage
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.mcp);
+
+  onRequest() {
+    return Response.json({ tools: this.mcp.listTools() });
+  }
+}
+```
+
+The lifecycle calls the manager automatically:
+
+- `onStart()` initializes its schema and restores persisted HTTP connections
+  before the host handles work.
+- `onRequest()` intercepts registered OAuth callback URLs before the host's
+  request handler.
+
+Do not call these hooks manually. For a native Durable Object RPC method,
+which bypasses `fetch`, call `await this.lifecycle.start()` before using the
+manager. Explicit cleanup remains available through `mcp.dispose()`; Durable
+Objects do not provide an eviction callback.
+
+The manager does not require a particular OAuth callback route. Pass the exact
+callback URL to `registerServer()` and route that request to the same named
+Durable Object. The manager persists the URL and only intercepts a callback
+whose origin and pathname match it.
+
+`Agent` composes the same capability internally. Existing `this.mcp`,
+`addMcpServer()`, `removeMcpServer()`, and `getMcpServers()` APIs remain
+available.
+
 ## Quick Start
 
 Install the exact MCP client peer used by this Agents release:

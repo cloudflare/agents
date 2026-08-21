@@ -606,9 +606,9 @@ export class TestRpcMcpClientAgent extends Agent {
     }
   }
 
-  async testRpcServerRestoresAfterHibernation() {
+  async createRpcServerForEvictionTest() {
     try {
-      const { id: idBefore } = await this.addMcpServer(
+      const { id } = await this.addMcpServer(
         "rpc-hibernate-test",
         this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
         {
@@ -616,28 +616,24 @@ export class TestRpcMcpClientAgent extends Agent {
         }
       );
 
-      const toolsBefore = this.mcp.listTools().map((t) => t.name);
-      const connectionCountBefore = Object.keys(this.mcp.mcpConnections).length;
+      return {
+        success: true,
+        id,
+        tools: this.mcp.listTools().map((tool) => tool.name),
+        connectionCount: Object.keys(this.mcp.mcpConnections).length
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
 
-      // Simulate hibernation: clear in-memory connections
-      for (const connId of Object.keys(this.mcp.mcpConnections)) {
-        try {
-          await this.mcp.mcpConnections[connId].client.close();
-        } catch (_) {}
-        delete this.mcp.mcpConnections[connId];
-      }
-
-      const toolsDuring = this.mcp.listTools().map((t) => t.name);
-
-      // Restore (this is what onStart calls internally)
-      await this.mcp.restoreConnectionsFromStorage(this.name);
-      // @ts-expect-error - accessing private method for testing
-      await this._restoreRpcMcpServers();
-
-      const toolsAfter = this.mcp.listTools().map((t) => t.name);
-      const connectionCountAfter = Object.keys(this.mcp.mcpConnections).length;
-      const idAfter = Object.keys(this.mcp.mcpConnections)[0];
-
+  async inspectRpcServerAfterEviction(idBefore: string) {
+    try {
+      const ids = Object.keys(this.mcp.mcpConnections);
+      const idAfter = ids[0];
       const result = await this.mcp.callTool({
         serverId: idAfter,
         name: "getPropsTestValue",
@@ -646,14 +642,10 @@ export class TestRpcMcpClientAgent extends Agent {
 
       return {
         success: true,
-        idBefore,
         idAfter,
         sameId: idBefore === idAfter,
-        toolsBefore,
-        toolsDuring,
-        toolsAfter,
-        connectionCountBefore,
-        connectionCountAfter,
+        tools: this.mcp.listTools().map((tool) => tool.name),
+        connectionCount: ids.length,
         result
       };
     } catch (error) {

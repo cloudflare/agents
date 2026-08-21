@@ -44,6 +44,10 @@ import {
   type MCPServerRow,
   type PersistedMcpServerOptions
 } from "./client-storage";
+import type {
+  CapabilityRequestContext,
+  DurableObjectCapability
+} from "../lifecycle/capability-runner";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 
@@ -350,8 +354,15 @@ export type MCPClientElicitationHandlers = {
   url?: MCPClientElicitationHandler;
 };
 
+const MCP_SCHEMA_VERSION_KEY = "cf_agents:mcp_schema_version";
+const CURRENT_MCP_SCHEMA_VERSION = 1;
+
+/** Dependencies used by {@link MCPClientManager} across Durable Object wakes. */
 export type MCPClientManagerOptions = {
+  /** Durable storage that owns the MCP server catalog. */
   storage: DurableObjectStorage;
+
+  /** Construct the OAuth provider used for a persisted HTTP server. */
   createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
 };
 
@@ -369,9 +380,10 @@ export type MCPServerFilter = {
 };
 
 /**
- * Utility class that aggregates multiple MCP clients into one
+ * A Durable Object capability that persists and aggregates MCP client
+ * connections.
  */
-export class MCPClientManager {
+export class MCPClientManager implements DurableObjectCapability {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   /** Cache only the current catalog so old schema graphs are not retained. */
   private readonly _aiToolSchemas = new WeakMap<
@@ -381,10 +393,10 @@ export class MCPClientManager {
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
-  private _storage: DurableObjectStorage;
-  private _createAuthProviderFn?: (
-    callbackUrl: string
-  ) => AgentMcpOAuthProvider;
+  private readonly _storage: DurableObjectStorage;
+  private readonly _createAuthProviderFn:
+    | ((callbackUrl: string) => AgentMcpOAuthProvider)
+    | undefined;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
   private _elicitationHandlers?: MCPClientElicitationHandlers;
@@ -404,13 +416,15 @@ export class MCPClientManager {
     this._onServerStateChanged.event;
 
   /**
-   * @param _name Name of the MCP client
-   * @param _version Version of the MCP Client
-   * @param options Storage adapter for persisting MCP server state
+   * Construct a reusable Durable Object MCP client capability.
+   *
+   * @param _name - MCP client implementation name sent during negotiation.
+   * @param _version - MCP client implementation version sent during negotiation.
+   * @param options - Explicit storage and OAuth dependencies.
    */
   constructor(
-    private _name: string,
-    private _version: string,
+    private readonly _name: string,
+    private readonly _version: string,
     options: MCPClientManagerOptions
   ) {
     if (!options.storage) {
@@ -420,6 +434,80 @@ export class MCPClientManager {
     }
     this._storage = options.storage;
     this._createAuthProviderFn = options.createAuthProvider;
+  }
+
+  /** Restore persisted HTTP connections before the host handles work. */
+  async onStart(): Promise<void> {
+    const schemaVersion =
+      (await this._storage.get<number>(MCP_SCHEMA_VERSION_KEY)) ?? 0;
+    if (schemaVersion < CURRENT_MCP_SCHEMA_VERSION) {
+      this.ensureSchema();
+      await this._storage.put(
+        MCP_SCHEMA_VERSION_KEY,
+        CURRENT_MCP_SCHEMA_VERSION
+      );
+    }
+
+    await this.restoreConnectionsFromStorage(this._name);
+    this._onServerStateChanged.fire();
+  }
+
+  /** Intercept a registered MCP OAuth callback request. */
+  async onRequest(
+    context: CapabilityRequestContext
+  ): Promise<Response | undefined> {
+    const { request } = context;
+    if (!this.isCallbackRequest(request)) return undefined;
+
+    const result = await this.handleCallbackRequest(request);
+    if (result.authSuccess) {
+      void this.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[MCPClientManager] Connection establishment after OAuth failed:",
+          error
+        );
+      });
+    }
+    return this.oauthCallbackResponse(result, request);
+  }
+
+  private ensureSchema(): void {
+    this.sql(`
+          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            server_url TEXT NOT NULL,
+            callback_url TEXT NOT NULL,
+            client_id TEXT,
+            auth_url TEXT,
+            server_options TEXT
+          )
+        `);
+  }
+
+  private oauthCallbackResponse(
+    result: MCPClientOAuthResult,
+    request: Request
+  ): Response {
+    const config = this.getOAuthCallbackConfig();
+    if (config?.customHandler) return config.customHandler(result);
+
+    const baseOrigin = new URL(request.url).origin;
+    const redirect = result.authSuccess
+      ? config?.successRedirect
+      : config?.errorRedirect;
+    if (!redirect) return Response.redirect(baseOrigin);
+
+    try {
+      const target = new URL(redirect, baseOrigin);
+      if (!result.authSuccess) {
+        target.searchParams.set("error", result.authError);
+      }
+      return Response.redirect(target);
+    } catch (error) {
+      console.error("Invalid OAuth callback redirect URL:", redirect, error);
+      return Response.redirect(baseOrigin);
+    }
   }
 
   /**
@@ -919,12 +1007,10 @@ export class MCPClientManager {
   }
 
   /**
-   * Restore MCP server connections from storage
-   * This method is called on Agent initialization to restore previously connected servers.
-   * RPC servers (rpc:// URLs) are skipped here -- they are restored by the Agent class
-   * which has access to env bindings.
+   * Restore persisted HTTP MCP connections. RPC connections are restored by
+   * the Agent adapter, which owns access to runtime bindings.
    *
-   * @param clientName Name to use for OAuth client (typically the agent instance name)
+   * @param clientName - Durable Object identity used to scope OAuth state.
    */
   async restoreConnectionsFromStorage(clientName: string): Promise<void> {
     if (this._isRestored) {
@@ -1376,11 +1462,28 @@ export class MCPClientManager {
       );
     }
 
-    // Create the in-memory connection
+    const authProvider =
+      options.transport?.authProvider ??
+      (options.callbackUrl
+        ? (this._createAuthProviderFn?.(options.callbackUrl) ??
+          this.createAuthProvider(
+            id,
+            options.callbackUrl,
+            this._name,
+            options.clientId
+          ))
+        : undefined);
+    if (authProvider) {
+      authProvider.serverId = id;
+      if (options.clientId) authProvider.clientId = options.clientId;
+    }
+
+    // Create the in-memory connection.
     this.createConnection(id, options.url, {
       client: options.client,
       transport: {
         ...options.transport,
+        authProvider,
         type: options.transport?.type ?? ("auto" as TransportType)
       }
     });

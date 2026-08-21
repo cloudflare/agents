@@ -15,13 +15,17 @@
       {
         "name": "PlainLifecycleObject",
         "class_name": "PlainLifecycleObject"
+      },
+      {
+        "name": "PlainMcpClientObject",
+        "class_name": "PlainMcpClientObject"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["PlainLifecycleObject"]
+      "new_sqlite_classes": ["PlainLifecycleObject", "PlainMcpClientObject"]
     }
   ]
 }

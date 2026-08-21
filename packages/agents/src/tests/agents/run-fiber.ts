@@ -572,11 +572,6 @@ export class TestRunFiberAgent extends Agent {
     this.mcp._isRestored = false;
   }
 
-  /** Re-run the wrapped wake sequence: MCP restore → fiber recovery → onStart. */
-  async rerunWakeSequence(): Promise<void> {
-    await this.onStart();
-  }
-
   async getRecoveryMcpConnections(): Promise<Record<string, string[]>> {
     return this.recoveryMcpConnections;
   }
