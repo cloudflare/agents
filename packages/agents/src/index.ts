@@ -389,21 +389,34 @@ type SubAgentConnectionMeta = {
   requestHeaders?: [string, string][];
 };
 
+/**
+ * Delivery methods return a promise so each hop can be awaited before
+ * the RPC that carried the bridge returns. A bridge is an `RpcTarget`
+ * whose stub is disposed the moment its inbound call completes, so a
+ * fire-and-forget hop deeper in the chain would be cut off with
+ * "RPC stub used after being disposed" (#2026).
+ */
 type SubAgentConnectionBridgeLike = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void;
-  close(code?: number, reason?: string): void;
+  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
+  close(code?: number, reason?: string): void | Promise<void>;
   setState(state: unknown): unknown;
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void;
+  ): void | Promise<void>;
 };
 
 type StoredSubAgentConnection = {
   bridge: SubAgentConnectionBridgeLike;
   meta: SubAgentConnectionMeta;
   connection?: Connection;
+  /**
+   * Deliveries started by this agent's virtual connection that have not
+   * settled yet. Drained before the inbound RPC returns so the bridge
+   * stub outlives the hop it feeds.
+   */
+  pending?: Set<Promise<unknown>>;
 };
 
 type SubAgentWebSocketEndpoint = {
@@ -434,7 +447,13 @@ class SubAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ) => void;
+  ) => void | Promise<void>;
+  /**
+   * Awaits any delivery this hop started on its own virtual connection.
+   * Without it, a nested chain returns while the next hop is still in
+   * flight and the caller disposes the stub underneath it (#2026).
+   */
+  #flush?: () => Promise<void>;
 
   constructor(
     connection: Connection,
@@ -442,31 +461,38 @@ class SubAgentConnectionBridge
       ownerPath: ReadonlyArray<{ className: string; name: string }>,
       message: string | ArrayBuffer | ArrayBufferView,
       without?: string[]
-    ) => void
+    ) => void | Promise<void>,
+    flush?: () => Promise<void>
   ) {
     super();
     this.#connection = connection;
     this.#broadcast = broadcast;
+    this.#flush = flush;
   }
 
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
+  async send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
     this.#connection.send(message);
+    await this.#flush?.();
   }
 
-  close(code?: number, reason?: string): void {
+  async close(code?: number, reason?: string): Promise<void> {
     this.#connection.close(code, reason);
+    await this.#flush?.();
   }
 
-  setState(state: unknown): unknown {
-    return this.#connection.setState(state);
+  async setState(state: unknown): Promise<unknown> {
+    const next = this.#connection.setState(state);
+    await this.#flush?.();
+    return next;
   }
 
-  broadcast(
+  async broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void {
-    this.#broadcast?.(ownerPath, message, without);
+  ): Promise<void> {
+    await this.#broadcast?.(ownerPath, message, without);
+    await this.#flush?.();
   }
 }
 
@@ -479,12 +505,12 @@ class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
     this.#connectionId = connectionId;
   }
 
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    void this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  async send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    await this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
   }
 
-  close(code?: number, reason?: string): void {
-    void this.#root._cf_closeSubAgentConnection(
+  async close(code?: number, reason?: string): Promise<void> {
+    await this.#root._cf_closeSubAgentConnection(
       this.#connectionId,
       code,
       reason
@@ -496,12 +522,12 @@ class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
     return state;
   }
 
-  broadcast(
+  async broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void {
-    void this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
+  ): Promise<void> {
+    await this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
   }
 }
 
@@ -1215,6 +1241,15 @@ const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
  * Hibernated events then wake the parent, which forwards frames to
  * the child over serializable RPC while keeping native WebSocket I/O
  * parent-owned.
+ *
+ * INVARIANT: only the agent that owns the physical socket — the root —
+ * may hold this. The route it describes is written from the root's
+ * point of view, so a descendant that holds it reads its own ancestors
+ * as its children. See issue #2026: descendants must route from their
+ * already-stripped `meta.uri` instead. Enforced at both ends —
+ * `_cf_getForwardedSubAgentState` and `_cf_resolveSubAgentConnection`
+ * strip it from forwarded state and headers, and
+ * `_cf_resolveSubAgentConnection` ignores it outright on a facet.
  */
 const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
@@ -1689,6 +1724,17 @@ export class Agent<
 
   private _protocolBroadcastExcludeIds = new Set<string>();
   private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
+  /**
+   * Collects facet deliveries started from a sync API (`broadcast`)
+   * while a single inbound sub-agent frame is being handled, so that
+   * frame can await them before returning (#2026).
+   *
+   * Scoped to the frame on purpose. An agent-wide set would also catch
+   * background and concurrent-frame broadcasts — a streaming agent could
+   * then hold one frame's RPC open for the length of an unrelated
+   * stream, and one connection could stall another.
+   */
+  private _cf_currentDeliverySink?: Set<Promise<unknown>>;
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
@@ -7044,7 +7090,13 @@ export class Agent<
     without?: string[]
   ): void {
     if (this._isFacet) {
-      void this._cf_broadcastToParentSubAgent(msg, without);
+      // `broadcast` is sync by contract, so the delivery is tracked
+      // rather than awaited. The frame that triggered it drains the set
+      // before its RPC returns, so the bridge stub carrying the message
+      // upstream is not disposed mid-flight (#2026).
+      this._cf_trackSubAgentDelivery(
+        this._cf_broadcastToParentSubAgent(msg, without)
+      );
       return;
     }
 
@@ -7110,7 +7162,11 @@ export class Agent<
     without?: string[]
   ): Promise<void> {
     if (this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
+      await this._cf_currentSubAgentBridge.broadcast(
+        this.selfPath,
+        message,
+        without
+      );
       return;
     }
     const root = await this._rootAlarmOwner();
@@ -7123,7 +7179,11 @@ export class Agent<
     without?: string[]
   ): Promise<void> {
     if (this._isFacet && this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
+      await this._cf_currentSubAgentBridge.broadcast(
+        ownerPath,
+        message,
+        without
+      );
       return;
     }
 
@@ -7327,10 +7387,77 @@ export class Agent<
   ): SubAgentConnectionBridge {
     return new SubAgentConnectionBridge(
       connection,
-      (ownerPath, message, without) => {
-        void this._cf_broadcastToSubAgent(ownerPath, message, without);
-      }
+      (ownerPath, message, without) =>
+        this._cf_broadcastToSubAgent(ownerPath, message, without),
+      () => this._cf_drainSubAgentConnection(connection.id)
     );
+  }
+
+  /**
+   * Track a delivery that has no synchronous caller to await it.
+   *
+   * Only while a frame is in progress. A broadcast started outside one —
+   * from an alarm, a background task, or a stream that outlives the
+   * frame that began it — travels via `_rootAlarmOwner()` on a stub this
+   * agent owns, so it is not exposed to the borrowed-bridge disposal
+   * race and nothing needs to wait for it.
+   */
+  private _cf_trackSubAgentDelivery(promise: Promise<unknown>): void {
+    const sink = this._cf_currentDeliverySink;
+    if (!sink) {
+      void promise.catch(() => {});
+      return;
+    }
+    sink.add(promise);
+    void promise
+      .catch(() => {})
+      .finally(() => {
+        sink.delete(promise);
+      });
+  }
+
+  /**
+   * Run `fn` as one sub-agent frame, then wait for the deliveries it
+   * started before letting the inbound RPC return.
+   *
+   * That wait is what keeps a borrowed bridge stub alive until the next
+   * hop has the message (#2026). The set is snapshotted once rather than
+   * polled: `send` and `broadcast` register synchronously, so everything
+   * the frame started is already present by the time it returns, and a
+   * completing delivery never queues another. Draining therefore cannot
+   * be extended by unrelated traffic.
+   */
+  private async _cf_runSubAgentFrame<T>(
+    id: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const sink = new Set<Promise<unknown>>();
+    const previous = this._cf_currentDeliverySink;
+    this._cf_currentDeliverySink = sink;
+    try {
+      return await fn();
+    } finally {
+      this._cf_currentDeliverySink = previous;
+      await this._cf_drainSubAgentConnection(id, sink);
+    }
+  }
+
+  /**
+   * Wait for in-flight deliveries on a virtual connection.
+   *
+   * A no-op for a root-owned physical socket, which sends natively and
+   * has nothing in flight.
+   */
+  private async _cf_drainSubAgentConnection(
+    id: string,
+    sink?: ReadonlySet<Promise<unknown>>
+  ): Promise<void> {
+    const inFlight = [
+      ...(this._cf_virtualSubAgentConnections.get(id)?.pending ?? []),
+      ...(sink ?? [])
+    ];
+    if (inFlight.length === 0) return;
+    await Promise.allSettled(inFlight);
   }
 
   private async _cf_forwardSubAgentWebSocketMessage(
@@ -7376,10 +7503,14 @@ export class Agent<
     meta: SubAgentConnectionMeta;
   } | null> {
     this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
-      connection,
-      CF_SUB_AGENT_OUTER_URL_KEY
-    );
+    // Only the root may hold the outer URL — see
+    // CF_SUB_AGENT_OUTER_URL_KEY. A facet's connection is virtual and
+    // its `uri` is already stripped one hop per level, so routing from
+    // it is both correct and immune to a stale ancestor route leaking
+    // back in (#2026).
+    const outerUri = this._isFacet
+      ? undefined
+      : this._unsafe_getConnectionFlag(connection, CF_SUB_AGENT_OUTER_URL_KEY);
     const uri = typeof outerUri === "string" ? outerUri : connection.uri;
     if (!uri) return null;
 
@@ -7436,12 +7567,40 @@ export class Agent<
         uri: childUri.toString(),
         tags,
         state: this._cf_getForwardedSubAgentState(connection),
-        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
+        requestHeaders: forwardReq
+          ? this._cf_getForwardedSubAgentHeaders(forwardReq)
+          : undefined
       }
     };
   }
 
+  /**
+   * Headers forwarded to a descendant, minus the private route note.
+   *
+   * The child rebuilds a Request from these and hands it to its own
+   * `onConnect`, which copies SUB_AGENT_OUTER_URL_HEADER onto the
+   * connection. Propagating it would give the child its *ancestor's*
+   * route, which it would then read as a route to one of its own
+   * children (#2026). Mirrors `_cf_getForwardedSubAgentState`.
+   */
+  private _cf_getForwardedSubAgentHeaders(
+    request: Request
+  ): [string, string][] {
+    return [...request.headers].filter(
+      ([name]) => name.toLowerCase() !== SUB_AGENT_OUTER_URL_HEADER
+    );
+  }
+
   async _cf_handleSubAgentWebSocketConnect(
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void> {
+    await this._cf_runSubAgentFrame(meta.id, () =>
+      this._cf_handleSubAgentWebSocketConnectInner(bridge, meta)
+    );
+  }
+
+  private async _cf_handleSubAgentWebSocketConnectInner(
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
@@ -7483,8 +7642,10 @@ export class Agent<
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    await this._cf_runWithSubAgentBridge(bridge, () =>
-      this.onMessage(connection, message)
+    await this._cf_runSubAgentFrame(meta.id, () =>
+      this._cf_runWithSubAgentBridge(bridge, () =>
+        this.onMessage(connection, message)
+      )
     );
   }
 
@@ -7497,10 +7658,15 @@ export class Agent<
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
     this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    await this._cf_runWithSubAgentBridge(bridge, () =>
-      this.onClose(connection, code, reason, wasClean)
-    );
-    this._cf_virtualSubAgentConnections.delete(meta.id);
+    try {
+      await this._cf_runSubAgentFrame(meta.id, () =>
+        this._cf_runWithSubAgentBridge(bridge, () =>
+          this.onClose(connection, code, reason, wasClean)
+        )
+      );
+    } finally {
+      this._cf_virtualSubAgentConnections.delete(meta.id);
+    }
   }
 
   private async _cf_runWithSubAgentBridge<T>(
@@ -7552,6 +7718,23 @@ export class Agent<
         current.meta = { ...current.meta, state: nextState };
       }
     };
+    // Record an in-flight delivery so the frame that triggered it can
+    // wait for it. `Connection.send` is sync by contract, so the promise
+    // has nowhere else to go (#2026).
+    const trackPending = (result: unknown) => {
+      if (!result || typeof (result as Promise<unknown>).then !== "function") {
+        return;
+      }
+      const promise = result as Promise<unknown>;
+      const current = getStored();
+      const pending = (current.pending ??= new Set());
+      pending.add(promise);
+      void promise
+        .catch(() => {})
+        .finally(() => {
+          pending.delete(promise);
+        });
+    };
 
     const connection = {
       id: meta.id,
@@ -7564,14 +7747,14 @@ export class Agent<
         const currentState = getStored().meta.state;
         const state = typeof next === "function" ? next(currentState) : next;
         updateStoredState(state);
-        void getStored().bridge.setState(state);
+        trackPending(getStored().bridge.setState(state));
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        void getStored().bridge.send(message);
+        trackPending(getStored().bridge.send(message));
       },
       close(code?: number, reason?: string) {
-        void getStored().bridge.close(code, reason);
+        trackPending(getStored().bridge.close(code, reason));
       },
       addEventListener() {},
       removeEventListener() {}
@@ -7598,7 +7781,10 @@ export class Agent<
         tags: [...connection.tags],
         state: this._cf_getRawConnectionState(connection)
       },
-      connection: stored?.connection ?? connection
+      connection: stored?.connection ?? connection,
+      // Carry in-flight deliveries across the re-store, otherwise the
+      // frame that started them loses track and returns early (#2026).
+      pending: stored?.pending
     });
   }
 
