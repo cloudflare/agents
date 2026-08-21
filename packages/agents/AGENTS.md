@@ -49,6 +49,10 @@ src/
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
   internal_context.ts   # AsyncLocalStorage context for getCurrentAgent()
 
+  internal/             # Package-private protocol implementation (not exported)
+    agent-websocket-channel.ts # Built-in browser WS protocol owner
+    rpc.ts              # Callable RPC parsing, dispatch types, streaming response
+
   lifecycle/            # Public Durable Object lifecycle composition
     index.ts            # Intentionally small public lifecycle surface
     durable-object-lifecycle.ts # Runtime handlers, routing, capabilities
