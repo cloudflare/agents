@@ -1,8 +1,8 @@
 # Agent channels
 
-Agent channels are the boundary between communication protocols and Agent
-application behavior. The public channel API is still proposed. The base Agents
-SDK now has one internal channel: the browser WebSocket channel.
+Channels are the boundary between communication protocols and durable
+application behavior. The public API is still proposed. The base Agents SDK now
+has one internal channel: the Agent browser WebSocket channel.
 
 ## Current implementation
 
@@ -77,8 +77,10 @@ owners.
 ## Proposed user model
 
 The proposed API is recorded in
-[`rfc-agent-channels.md`](./rfc-agent-channels.md). The intended direction is an
-Agent-owned registry and one transport-neutral application entry point:
+[`rfc-agent-channels.md`](./rfc-agent-channels.md). The intended foundation is a
+Lifecycle-composed runtime usable by any Durable Object. Agent provides a
+preconfigured browser protocol and one transport-neutral application entry
+point:
 
 ```ts
 export class SupportAgent extends Agent<Env> {
@@ -110,8 +112,8 @@ not a committed signature.
 
 ## Key decisions
 
-- The Agent owns its channel registry. Provider implementations may be separate
-  modules, but there is no second application host beside Agent.
+- The durable application owns its channel runtime as a Lifecycle capability.
+  Agent provides convenience over the same runtime rather than a separate host.
 - Raw connection callbacks belong to the WebSocket channel. They are retained on
   Agent only as compatibility hooks.
 - The lifecycle owns physical hibernating WebSockets. A channel never accepts a
@@ -120,7 +122,9 @@ not a committed signature.
   socket compose inside its protocol dispatcher.
 - `onRequest` remains a raw HTTP fallback. Lifecycle capabilities such as MCP
   may claim feature callback URLs before it, and request channels may normalize
-  selected requests into Agent messages.
+  selected requests into channel messages.
+- A configured set handles multiple shared provider webhooks. Each provider's
+  `route` callback returns the complete Durable Object target.
 
 ## Tradeoffs
 

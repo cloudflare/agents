@@ -18,6 +18,6 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 | [rfc-sub-agents.md](./rfc-sub-agents.md)                                         | RFC: Sub-agents — child DOs via facets, typed stubs, mixin API                |
 | [rfc-helper-sub-agent-orchestration.md](./rfc-helper-sub-agent-orchestration.md) | RFC: Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding |
 | [loopback.md](./loopback.md)                                                     | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates     |
-| [agent-channels.md](./agent-channels.md)                                         | Internal browser channel and future Agent channel boundary                    |
-| [rfc-agent-channels.md](./rfc-agent-channels.md)                                 | RFC: Agent-owned channels and one normalized message entry point              |
+| [agent-channels.md](./agent-channels.md)                                         | Internal Agent browser channel and future durable channel boundary            |
+| [rfc-agent-channels.md](./rfc-agent-channels.md)                                 | RFC: Lifecycle-composed channels and one normalized message entry point       |
 | [test-coverage-matrix.md](./test-coverage-matrix.md)                             | Feature × test-layer coverage rollup, CI mapping, skipped-test debt, hygiene  |

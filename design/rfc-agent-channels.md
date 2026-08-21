@@ -1,6 +1,6 @@
 Status: proposed
 
-# Agent channels
+# Lifecycle-composed channels
 
 ## The problem
 
@@ -14,86 +14,255 @@ class MyAgent extends Agent {
 }
 ```
 
-That boundary came from PartyServer. It no longer matches the runtime or the
-product we want to build.
+That shape came from PartyServer. It mixes several responsibilities:
 
-The Durable Object lifecycle owns physical requests, alarms, and hibernating
-WebSockets. The base Agent then mixes several concerns into its WebSocket
-callbacks:
+- the Durable Object lifecycle accepts and hibernates the socket;
+- the Agents browser protocol sends identity and synchronizes state;
+- callable RPC shares the same wire;
+- MCP and chat add more protocol frames;
+- unrecognized frames reach application code.
 
-- connection setup and sub-agent forwarding;
-- Agent identity and state synchronization;
-- callable RPC;
-- MCP server announcements;
-- application frames.
+Slack, Telegram, Discord, email, and HTTP messages enter through different
+APIs. An application cannot implement its behavior once and reuse it across
+those providers.
 
-Slack, Telegram, Discord, email, and HTTP messages have separate entry points.
-An application cannot implement its behavior once and reuse it across those
-providers.
-
-HTTP is overloaded too. `onRequest` can mean an application endpoint, but
-features such as the MCP client also need HTTP callback URLs. The MCP callback
-is not an application message. It should be claimed by an MCP lifecycle
-capability before the user's raw request fallback.
+HTTP is overloaded too. An MCP OAuth callback and an application JSON message
+both arrive as requests, but they are not the same kind of input. The MCP
+capability should claim its callback before channels and before the
+application's raw request fallback.
 
 ## Terms
 
-This RFC uses these terms:
-
-- **Lifecycle**: coordinates Durable Object startup, requests, alarms, and
+- **Lifecycle** coordinates Durable Object startup, requests, alarms, and
   hibernating WebSockets.
-- **Capability**: a reusable lifecycle extension. A capability may claim a
-  request such as an MCP OAuth callback.
-- **Channel**: an Agent-owned inbound and outbound communication adapter. The
-  browser WebSocket protocol, Slack, and a selected JSON message endpoint are
-  channels.
-- **Transport**: the mechanism carrying a channel, usually HTTP or WebSocket.
-  HTTP itself is not a channel.
-- **Gateway**: Worker-side channel ingress used when a shared provider webhook
-  must resolve the target Agent before calling it.
-- **Agent message**: the normalized application input produced by a channel.
-- **Protocol extension**: behavior multiplexed over a channel, such as state
-  synchronization or RPC over the browser WebSocket.
+- **Capability** is a reusable extension installed into a Lifecycle.
+- **Channel definition** describes one communication adapter without binding it
+  to a Durable Object instance. For shared ingress it also owns the application
+  routing callback that chooses the complete durable target. A Worker router and
+  a Durable Object runtime can share the same definition.
+- **Channel runtime** binds definitions to a Durable Object, storage, scheduling,
+  and an application message callback. It is a Lifecycle capability.
+- **Channel router** is Worker-side ingress over a set of channel definitions.
+  It is used when a shared provider webhook must resolve the target Durable
+  Object before calling it.
+- **Channel message** is the normalized application input produced by a channel.
+- **Reply target** is serializable data identifying the exact channel
+  destination derived from an inbound message.
+- **WebSocket owner** is the one named Lifecycle handler responsible for a
+  physical hibernating socket.
+- **Protocol extension** is behavior multiplexed inside one WebSocket channel,
+  such as state sync or RPC.
 
-## Decision
+# Ideal end state
 
-Channels belong to the Agent. Provider implementations may live in separate
-modules, but there is no second application host beside `Agent`.
+## Architecture
 
-A channel authenticates and decodes input, then calls one framework-owned Agent
-receive path. That path handles admission, durable acceptance where required,
-tracing, and invocation context before calling one application hook.
+Channels belong to the durable application, not specifically to `Agent`.
+`Agent` provides defaults and a shorter configuration API over the same runtime.
 
-Raw WebSocket connection hooks belong to the WebSocket channel. We retain the
-current Agent methods temporarily as compatibility callbacks.
+```text
+Worker
+├─ shared channel router, only when the target is not in the URL
+└─ ordinary Durable Object routing
 
-`onRequest` remains a raw HTTP fallback. Lifecycle capabilities and request
-channels may claim selected requests before it.
+DurableObject
+├─ Lifecycle
+│  ├─ MCP capability
+│  ├─ Channels capability
+│  ├─ schedules capability
+│  └─ raw host fallback
+├─ durable application state
+└─ one normalized channel-message handler
 
-## Proposed user experience
+Agent extends DurableObject
+├─ installs the same Lifecycle and Channels capability
+├─ preconfigures the Agents browser channel
+├─ supplies state, RPC, observability, and sub-agent protocol extensions
+└─ exposes defineChannels() and onMessage() as convenience
+```
 
-The exact names are provisional. This PR does not export any of them.
+The core dependency direction is:
+
+```text
+Lifecycle knows WebSocket owners and capability phases
+    ↑
+Channel runtime knows channel definitions and normalized messages
+    ↑
+Agent adds Agent-specific protocols and convenience
+    ↑
+Think adds turns, model policy, streaming recovery, and notices
+```
+
+`Lifecycle` does not know what a message, actor, Slack workspace, or model turn
+is. A provider adapter does not own application state. `Agent` is not required
+for channels to work.
+
+## End-state contracts
+
+The exact names remain open, but the final concepts should resemble this:
+
+```ts
+type ChannelMessage = {
+  /** Stable within the configured source channel. */
+  id: string;
+  text: string;
+  attachments?: readonly ChannelAttachment[];
+};
+
+type ChannelMessageContext = {
+  /** Stable configured key. This may be persisted with application data. */
+  channel: string;
+  actor?: ChannelActor;
+  conversation?: {
+    id: string;
+    threadId?: string;
+  };
+  replyTarget: ChannelReplyTarget;
+  reply(message: ChannelReply): Promise<ChannelDeliveryResult>;
+};
+
+type ChannelDeliveryResult =
+  | { status: "delivered"; reference?: string }
+  | { status: "failed"; retryable: boolean; error: ChannelError }
+  | { status: "uncertain"; error: ChannelError };
+```
+
+Provider payloads do not enter the application handler. Adapters may expose
+provider-specific routing callbacks in their configuration, where the raw type
+is known.
+
+One outbound `reply()` call performs one provider attempt. The runtime does not
+silently retry an uncertain delivery because that can duplicate a real message.
+
+Definitions are reusable and grouped into one configured set. The set handles
+more than one provider request path and retains each stable channel key:
+
+```ts
+const externalChannels = defineChannelSet<Env>({
+  slack: slackChannel({
+    webhookPath: "/webhooks/slack",
+    signingSecret: ({ env }) => env.SLACK_SIGNING_SECRET,
+    botToken: ({ env }) => env.SLACK_BOT_TOKEN,
+    route({ event, env }) {
+      return env.SupportAgent.getByName(event.workspaceId);
+    }
+  }),
+
+  telegram: telegramChannel({
+    webhookPath: "/webhooks/telegram",
+    secretToken: ({ env }) => env.TELEGRAM_WEBHOOK_SECRET,
+    botToken: ({ env }) => env.TELEGRAM_BOT_TOKEN,
+    route({ event, env }) {
+      return env.SupportAgent.getByName(`telegram:${event.chatId}`);
+    }
+  })
+});
+```
+
+`externalChannels.routeRequest(request, env)` offers the request to each
+HTTP-ingress definition. A channel returns `undefined` when the path does not
+belong to it. Once a channel claims and authenticates the request, its `route`
+callback chooses the complete Durable Object target.
+
+Returning the target keeps one routing decision together:
+
+```ts
+route({ event, env }) {
+  return env.SupportAgent.getByName(event.workspaceId);
+}
+```
+
+The alternative splits that decision across `namespace`, `resolveName`, and the
+router's own call to `getByName`. That makes the framework own application
+naming and prevents a channel from selecting another Durable Object class,
+jurisdiction, location hint, or existing stub. The router needs only a target
+with `fetch(request): Promise<Response>`.
+
+A route may return `null` to deliberately ignore an authenticated event. It must
+not return `undefined`, which is reserved for a channel declining an HTTP
+request before authentication and normalization.
+
+A runtime binds the same definitions to a durable host:
+
+```ts
+const channels = createChannelRuntime({
+  storage,
+  scheduler,
+  env,
+  channels: externalChannels.definitions,
+  onMessage
+});
+```
+
+The configured keys `slack` and `telegram` are durable data. Renaming one
+requires a migration for persisted inbox records and reply targets.
+
+## End state in an Agent
+
+`Agent` is the simple path. It already owns storage, Lifecycle, invocation
+context, observability, and the browser protocol.
 
 ```ts
 import {
   Agent,
+  callable,
   routeAgentRequest,
-  type AgentMessage,
-  type AgentMessageContext
+  type StreamingResponse
 } from "agents";
 import {
+  agentBrowserChannel,
+  defineChannelSet,
   requestChannel,
   slackChannel,
-  webSocketChannel
+  telegramChannel,
+  type ChannelMessage,
+  type ChannelMessageContext
 } from "agents/channels";
 
-export class SupportAgent extends Agent<Env> {
+interface Env {
+  SupportAgent: DurableObjectNamespace<SupportAgent>;
+  SLACK_BOT_TOKEN: string;
+  SLACK_SIGNING_SECRET: string;
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_WEBHOOK_SECRET: string;
+}
+
+type SupportState = {
+  handled: number;
+  lastChannel?: string;
+};
+
+const externalChannels = defineChannelSet<Env>({
+  slack: slackChannel({
+    webhookPath: "/webhooks/slack",
+    signingSecret: ({ env }) => env.SLACK_SIGNING_SECRET,
+    botToken: ({ env }) => env.SLACK_BOT_TOKEN,
+    route({ event, env }) {
+      return env.SupportAgent.getByName(event.workspaceId);
+    }
+  }),
+
+  telegram: telegramChannel({
+    webhookPath: "/webhooks/telegram",
+    secretToken: ({ env }) => env.TELEGRAM_WEBHOOK_SECRET,
+    botToken: ({ env }) => env.TELEGRAM_BOT_TOKEN,
+    route({ event, env }) {
+      return env.SupportAgent.getByName(`telegram:${event.chatId}`);
+    }
+  })
+});
+
+export class SupportAgent extends Agent<Env, SupportState> {
+  initialState: SupportState = { handled: 0 };
+
   readonly channels = this.defineChannels({
-    web: webSocketChannel({
+    // This channel includes the Agent identity, state, RPC, MCP publication,
+    // sub-agent, and chat protocol extensions.
+    web: agentBrowserChannel({
       onConnect({ connection }) {
         console.log("browser connected", connection.id);
       },
-      decode({ frame }) {
+      decodeApplicationFrame({ frame }) {
         if (typeof frame !== "string") return null;
         return {
           id: crypto.randomUUID(),
@@ -105,36 +274,57 @@ export class SupportAgent extends Agent<Env> {
       }
     }),
 
+    // Only this path is translated into a message. Other requests continue.
     api: requestChannel({
       path: "/messages",
       async decode(request) {
-        const input = await request.json<{
-          id: string;
-          text: string;
-        }>();
-        return input;
+        return request.json<{ id: string; text: string }>();
       }
     }),
 
-    slack: slackChannel({
-      webhookPath: "/slack",
-      signingSecret: ({ env }) => env.SLACK_SIGNING_SECRET,
-      botToken: ({ env }) => env.SLACK_BOT_TOKEN
-    })
+    ...externalChannels.definitions
   });
 
   async onMessage(
-    message: AgentMessage,
-    context: AgentMessageContext
+    message: ChannelMessage,
+    context: ChannelMessageContext
   ): Promise<void> {
-    const answer = await this.answer(message.text);
+    this.setState({
+      handled: this.state.handled + 1,
+      lastChannel: context.channel
+    });
+
+    const answer = await this.answer({
+      text: message.text,
+      channel: context.channel,
+      conversationId: context.conversation?.id
+    });
+
     await context.reply({ markdown: answer });
+  }
+
+  // RPC remains a protocol extension of the Agent browser channel.
+  @callable({ streaming: true })
+  async streamStatus(stream: StreamingResponse): Promise<void> {
+    stream.send({ phase: "working" });
+    stream.end({ phase: "ready", handled: this.state.handled });
+  }
+
+  // This runs only when no capability or channel claimed the request.
+  onRequest(request: Request): Response {
+    if (new URL(request.url).pathname.endsWith("/health")) {
+      return Response.json({ ok: true, handled: this.state.handled });
+    }
+    return new Response("Not found", { status: 404 });
   }
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // One router handles every gateway-capable definition. Each channel owns
+    // its provider-specific route to the complete Durable Object target.
     return (
+      (await externalChannels.routeRequest(request, env)) ??
       (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
@@ -142,314 +332,852 @@ export default {
 } satisfies ExportedHandler<Env>;
 ```
 
-The ownership is the important part:
+`defineChannels()` is convenience over the generic runtime. It installs the
+runtime into the Agent's Lifecycle and binds the normalized callback to
+`Agent.onMessage()`.
 
-- the registry is declared on the Agent;
-- WebSocket callbacks are configured on `webSocketChannel`;
-- provider details stay in provider adapters;
-- application messages reach one Agent callback;
-- unknown HTTP requests reach `onRequest`, then 404.
+The flow is:
 
-The initial normalized contract should stay small:
+```text
+browser / API / Slack
+-> channel adapter
+-> durable channel admission
+-> Agent.onMessage(message, context)
+-> context.reply(...)
+-> originating reply target
+```
+
+## End state in a plain Durable Object
+
+The reusable foundation uses the same definitions without extending `Agent`.
+The application supplies an explicit callback, so `Lifecycle` remains free of
+messaging concepts.
 
 ```ts
-type AgentMessage = {
-  /** Stable within the source channel. */
-  id: string;
-  text: string;
-  attachments?: readonly AgentMessageAttachment[];
-};
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle, routeDurableObjectRequest } from "agents/lifecycle";
+import {
+  createChannelRuntime,
+  defineChannelSet,
+  requestChannel,
+  slackChannel,
+  telegramChannel,
+  webSocketChannel,
+  type ChannelMessage,
+  type ChannelMessageContext
+} from "agents/channels";
 
-type AgentMessageContext = {
-  /** Stable key from the Agent's channel registry. */
-  channel: string;
-  actor?: AgentMessageActor;
-  conversation?: {
-    id: string;
-    threadId?: string;
-  };
-  reply(message: AgentReply): Promise<AgentDeliveryResult>;
-};
+interface Env {
+  SupportConversation: DurableObjectNamespace<SupportConversation>;
+  SLACK_BOT_TOKEN: string;
+  SLACK_SIGNING_SECRET: string;
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_WEBHOOK_SECRET: string;
+}
+
+const externalChannels = defineChannelSet<Env>({
+  slack: slackChannel({
+    webhookPath: "/webhooks/slack",
+    signingSecret: ({ env }) => env.SLACK_SIGNING_SECRET,
+    botToken: ({ env }) => env.SLACK_BOT_TOKEN,
+    route({ event, env }) {
+      return env.SupportConversation.getByName(event.workspaceId);
+    }
+  }),
+
+  telegram: telegramChannel({
+    webhookPath: "/webhooks/telegram",
+    secretToken: ({ env }) => env.TELEGRAM_WEBHOOK_SECRET,
+    botToken: ({ env }) => env.TELEGRAM_BOT_TOKEN,
+    route({ event, env }) {
+      return env.SupportConversation.getByName(`telegram:${event.chatId}`);
+    }
+  })
+});
+
+export class SupportConversation extends DurableObject<Env> {
+  private readonly channels = createChannelRuntime({
+    storage: this.ctx.storage,
+    env: this.env,
+
+    channels: {
+      web: webSocketChannel({
+        path: "/socket",
+        decode({ frame }) {
+          if (typeof frame !== "string") return null;
+          return {
+            id: crypto.randomUUID(),
+            text: frame
+          };
+        }
+      }),
+
+      api: requestChannel({
+        path: "/messages",
+        async decode(request) {
+          return request.json<{ id: string; text: string }>();
+        }
+      }),
+
+      ...externalChannels.definitions
+    },
+
+    onMessage: (message, context) => this.handleMessage(message, context)
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.channels);
+
+  onStart(): void {
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        channel TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        PRIMARY KEY (channel, message_id)
+      )
+    `);
+  }
+
+  private async handleMessage(
+    message: ChannelMessage,
+    context: ChannelMessageContext
+  ): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO messages
+       (channel, message_id, text, received_at)
+       VALUES (?, ?, ?, ?)`,
+      context.channel,
+      message.id,
+      message.text,
+      Date.now()
+    );
+
+    const rows = [
+      ...this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM messages"
+      )
+    ];
+
+    await context.reply({
+      markdown: `Stored message ${rows[0]?.count ?? 0}: ${message.text}`
+    });
+  }
+
+  // Raw fallback after lifecycle capabilities decline.
+  onRequest(request: Request): Response {
+    if (new URL(request.url).pathname.endsWith("/health")) {
+      return new Response("ok");
+    }
+    return new Response("Not found", { status: 404 });
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return (
+      (await externalChannels.routeRequest(request, env)) ??
+      (await routeDurableObjectRequest(request, env, {
+        prefix: "conversations"
+      })) ??
+      new Response("Not found", { status: 404 })
+    );
+  }
+} satisfies ExportedHandler<Env>;
 ```
 
-Provider payloads do not enter the application hook. An adapter may expose a
-provider-specific routing callback in its own configuration, where the raw
-payload type is known.
-
-A reply target must be serializable so the Agent can persist it with accepted
-work. Channel keys therefore become durable identifiers. Renaming one requires
-a migration for stored reply targets.
-
-## One application hook
-
-The Agent should not grow `onSlackMessage`, `onTelegramMessage`, or
-`onDiscordMessage`. That would preserve provider coupling and add a base-class
-hook for every integration.
-
-The target hook is `onMessage(message, context)`. It conflicts with the current
-raw WebSocket signature. An additive release may use `onAgentMessage`
-temporarily, but the API should converge on `onMessage` after raw frame handling
-has moved into `webSocketChannel`.
-
-Channels call an internal receive operation rather than invoking the override
-directly:
+The call path is:
 
 ```text
-channel ingress
--> Agent receive operation
-   -> parse normalized envelope
-   -> deduplicate when the source can redeliver
-   -> persist work and reply target when required
-   -> establish tracing and channel context
-   -> Agent.onMessage(message, context)
+routeDurableObjectRequest or provider gateway
+-> Durable Object stub.fetch(...)
+-> Lifecycle startup
+-> earlier request capabilities, such as MCP OAuth
+-> Channels capability
+-> handleMessage(message, context)
+-> raw Durable Object onRequest when unclaimed
 ```
 
-For webhook channels, provider acknowledgement means the target Agent has
-accepted the event durably. It does not mean the model has finished. Long
-processing must not hold a provider webhook open.
+## Request ownership in the end state
 
-## The browser WebSocket channel
-
-The first channel is the existing Agents browser protocol. It owns one physical
-WebSocket and multiplexes its protocol extensions in a fixed order:
-
-```text
-Lifecycle
--> browser WebSocket channel
-   -> sub-agent forwarding
-   -> identity protocol
-   -> state protocol
-   -> RPC protocol
-   -> MCP publication protocol
-   -> higher chat protocol
-   -> application frame decoder
-```
-
-State synchronization, RPC, identity, and MCP announcements are not separate
-channels. They share one connection and compose inside its protocol dispatcher.
-A binary voice socket could later be a different WebSocket channel with none of
-those browser frames.
-
-This PR performs only a private extraction:
-
-- `packages/agents/src/internal/agent-websocket-channel.ts` owns connection
-  setup, state sync, RPC dispatch, identity, MCP announcements, sub-agent
-  forwarding, agent-tool replay, and unrecognized-frame forwarding;
-- `packages/agents/src/internal/rpc.ts` owns callable RPC parsing and streaming
-  response mechanics;
-- neither module has a package export;
-- existing `Agent.onConnect`, raw `Agent.onMessage`, and `Agent.onClose` remain
-  compatibility callbacks;
-- `AIChatAgent` and Think retain their current wrapper order.
-
-The current connection form of `Agent.onError` still belongs to the lifecycle
-compatibility path. It should move with the other connection hooks when the
-public WebSocket channel API lands.
-
-## Requests and capabilities
-
-A request is not automatically a message. Request ownership remains explicit:
+A request is not automatically a message:
 
 ```text
 Lifecycle startup
--> lifecycle capability request hooks
--> Agent request-channel adapters
--> Agent.onRequest
--> 404
+-> capability onRequest hooks in registration order
+   -> MCP OAuth callback may return Response
+   -> Channels may return Response
+-> host onRequest
+-> 404 chosen by host
 ```
 
 Examples:
 
-- an MCP OAuth callback is claimed by the MCP capability;
-- a Slack webhook routed to an Agent is claimed by the Slack channel;
-- `POST /messages` is normalized by a request channel;
-- a health endpoint can remain in `onRequest` or its own capability;
-- an unknown request returns 404.
+- MCP OAuth callback: MCP capability.
+- Slack webhook routed directly to an instance: Slack channel.
+- `POST /messages`: request channel.
+- Health endpoint: host `onRequest` or a health capability.
+- Unknown request: 404.
 
-The first returned `Response` wins. Every capability and channel must decline
-requests outside its scope. Configuration should reject detectable path
-conflicts during startup.
+The first returned `Response` wins. Capabilities and channels decline requests
+outside their scope. Startup should reject path conflicts it can detect.
 
-## Shared provider gateways
+## WebSocket ownership in the end state
 
-The simple provider URL contains the Agent class and name:
-
-```text
-/agents/support-agent/customer-123/slack
-```
-
-`routeAgentRequest` resolves the Durable Object first, then the Agent's Slack
-channel verifies and handles the request.
-
-Some providers instead call one webhook shared by many Agent instances. In
-that case, a Worker-side gateway must authenticate and normalize the event
-before the target Agent is known:
+A physical socket has exactly one durable owner. Lifecycle owns acceptance and
+hibernation. The channel owns protocol semantics.
 
 ```text
-provider webhook
--> channel gateway
--> resolve Agent name
--> Agent receive operation
--> durable acceptance
--> provider acknowledgement
+Lifecycle WebSocket owner "channels:web"
+└─ browser channel
+   ├─ sub-agent forwarding protocol
+   ├─ identity protocol
+   ├─ state protocol
+   ├─ RPC protocol
+   ├─ MCP publication protocol
+   ├─ Think or AIChat protocol
+   └─ application frame decoder
 ```
 
-The same adapter definition should support both roles:
+A voice channel can claim another path and receive none of the browser
+protocols. Lifecycle never broadcasts one frame to every capability.
+
+The owner key belongs in Lifecycle attachment metadata, not
+`connection.state`. User and channel code must not be able to change ownership.
+
+## Durable ingress and acknowledgement
+
+A shared provider webhook must not wait for model completion, but it must not be
+acknowledged before the target Durable Object accepts it durably.
+
+The channel runtime owns a narrow normalized inbox for this handoff:
+
+```text
+Channel router receives provider event
+-> adapter authenticates and normalizes
+-> adapter computes stable dispatchId and serializable replyTarget
+-> router forwards an internal channel envelope to target.fetch(...)
+-> target ChannelRuntime transactionally inserts inbox row
+-> target schedules inbox drain
+-> target returns accepted
+-> router acknowledges provider
+-> target invokes application handler separately
+```
+
+This inbox is not the application's conversation store, delivery preference
+store, or outbound retry system. It records only accepted normalized ingress
+that must survive eviction and provider redelivery.
+
+Pseudocode:
 
 ```ts
-const slack = slackChannel<Env>({
-  webhookPath: "/slack",
-  signingSecret: ({ env }) => env.SLACK_SIGNING_SECRET,
-  botToken: ({ env }) => env.SLACK_BOT_TOKEN
+type ChannelEnvelope = {
+  channel: string;
+  dispatchId: string;
+  message: ChannelMessage;
+  context: {
+    actor?: ChannelActor;
+    conversation?: ChannelConversation;
+    replyTarget: ChannelReplyTarget;
+  };
+};
+
+async function accept(envelope: ChannelEnvelope): Promise<AcceptResult> {
+  return storage.transactionSync(() => {
+    const existing = inbox.get(envelope.channel, envelope.dispatchId);
+    if (existing) return { status: "duplicate" };
+
+    inbox.insert({
+      ...envelope,
+      state: "pending",
+      acceptedAt: Date.now()
+    });
+
+    scheduler.requestRun("channels:drain");
+    return { status: "accepted" };
+  });
+}
+```
+
+WebSocket and explicit request-response channels may use inline handling when
+their acknowledgement is the application response. Provider webhook channels
+use durable admission by default.
+
+# How we get there
+
+## Phase 0: extract the current browser protocol
+
+Status: included privately in this PR.
+
+Today `Agent` wraps its own methods in the constructor. The first step moves
+that behavior behind one internal object while preserving every public hook:
+
+```ts
+const userHooks = {
+  onConnect: this.onConnect.bind(this),
+  onMessage: this.onMessage.bind(this),
+  onClose: this.onClose.bind(this)
+};
+
+this.#webSocketChannel = new AgentWebSocketChannel(
+  agentProtocolPorts(this),
+  userHooks
+);
+
+this.onConnect = this.#webSocketChannel.onConnect.bind(this.#webSocketChannel);
+this.onMessage = this.#webSocketChannel.onMessage.bind(this.#webSocketChannel);
+this.onClose = this.#webSocketChannel.onClose.bind(this.#webSocketChannel);
+```
+
+The internal channel owns state and RPC frame classification. Unknown frames
+still reach the captured `Agent.onMessage(connection, frame)` callback.
+`AIChatAgent` and Think continue wrapping the same methods outside this layer.
+
+Exit criteria:
+
+- no new package export;
+- generated declarations contain no channel internals;
+- browser identity, state, RPC, readonly, protocol suppression, ordering, and
+  sub-agent tests remain unchanged;
+- AIChat and Think suites remain unchanged.
+
+## Phase 1: add named WebSocket ownership to Lifecycle
+
+The current Lifecycle assumes one host callback. Add an internal owner
+registry, then expose it only after the behavior is proven.
+
+Proposed shape:
+
+```ts
+type LifecycleWebSocketOwner = {
+  /** Stable key persisted in the socket attachment. */
+  key: string;
+  onUpgrade(
+    context: WebSocketUpgradeContext
+  ):
+    | { type: "accept"; tags?: readonly string[] }
+    | { type: "respond"; response: Response }
+    | undefined
+    | Promise<
+        | { type: "accept"; tags?: readonly string[] }
+        | { type: "respond"; response: Response }
+        | undefined
+      >;
+  onConnect?(context: WebSocketConnectContext): MaybePromise<void>;
+  onMessage?(context: WebSocketMessageContext): MaybePromise<void>;
+  onClose?(context: WebSocketCloseContext): MaybePromise<void>;
+  onError?(context: WebSocketErrorContext): MaybePromise<void>;
+};
+
+interface DurableObjectCapability {
+  webSockets?: readonly LifecycleWebSocketOwner[];
+}
+```
+
+Upgrade dispatch:
+
+```ts
+async function fetch(request: Request): Promise<Response> {
+  await start();
+
+  if (!isWebSocketUpgrade(request)) {
+    return dispatchRequest(request);
+  }
+
+  for (const owner of webSocketOwners) {
+    const decision = await owner.onUpgrade({ request });
+    if (decision === undefined) continue;
+    if (decision.type === "respond") return decision.response;
+
+    const connection = acceptHibernatingWebSocket({
+      request,
+      tags: decision.tags,
+      owner: owner.key
+    });
+    await owner.onConnect?.({ connection, request });
+    return switchingProtocols(connection);
+  }
+
+  return hostWebSocketFallback(request);
+}
+```
+
+Attachment metadata changes from:
+
+```ts
+{
+  (id, tags, uri);
+}
+```
+
+to:
+
+```ts
+{ id, tags, uri, owner: "channels:web" }
+```
+
+Wake dispatch:
+
+```ts
+async function webSocketMessage(socket, frame) {
+  const metadata = readLifecycleAttachment(socket);
+
+  if (metadata.owner === undefined) {
+    return host.onMessage?.(connection(socket), frame);
+  }
+
+  const owner = ownersByKey.get(metadata.owner);
+  if (!owner) {
+    socket.close(1011, "WebSocket owner is no longer configured");
+    reportMissingOwner(metadata.owner);
+    return;
+  }
+
+  await owner.onMessage?.({ connection: connection(socket), frame });
+}
+```
+
+Rules:
+
+1. first claim wins;
+2. duplicate owner keys fail during setup;
+3. a missing owner never falls through to another owner;
+4. owner keys are durable identifiers;
+5. old sockets without an owner retain current behavior;
+6. Lifecycle remains the only code calling `acceptWebSocket`.
+
+## Phase 2: replace method wrapping with browser protocol composition
+
+Define a protocol contract inside the WebSocket channel. Protocols consume a
+frame in order or pass it onward.
+
+```ts
+type WebSocketProtocol = {
+  onConnect?(context: ProtocolConnectContext): MaybePromise<void>;
+  onFrame?(context: ProtocolFrameContext): MaybePromise<"handled" | "next">;
+  onClose?(context: ProtocolCloseContext): MaybePromise<void>;
+  onError?(context: ProtocolErrorContext): MaybePromise<void>;
+};
+
+function webSocketChannel(options: {
+  path: string;
+  protocols?: readonly WebSocketProtocol[];
+  decode?: ApplicationFrameDecoder;
+  onConnect?: ConnectionHook;
+  onClose?: CloseHook;
+}): ChannelDefinition;
+```
+
+Agent composes its browser channel:
+
+```ts
+function createAgentBrowserChannel(agent: Agent) {
+  return webSocketChannel({
+    path: "/",
+    protocols: [
+      subAgentProtocol(agent),
+      identityProtocol(agent),
+      stateProtocol(agent),
+      rpcProtocol(agent),
+      mcpPublicationProtocol(agent.mcp),
+      ...agent.chatProtocols()
+    ],
+    decode: agent.applicationFrameDecoder
+  });
+}
+```
+
+Frame dispatch:
+
+```ts
+for (const protocol of protocols) {
+  if ((await protocol.onFrame?.(context)) === "handled") return;
+}
+
+const message = await decode?.(context);
+if (message) await channelRuntime.receive(message, context.replyTarget);
+```
+
+At this point `AIChatAgent` and Think register protocols instead of assigning to
+`this.onConnect` and `this.onMessage` in their constructors.
+
+The MCP request capability and MCP browser publication remain separate roles:
+
+```text
+MCP capability onRequest -> OAuth callback ownership
+MCP browser protocol     -> server-list publication on Agent browser sockets
+```
+
+## Phase 3: introduce internal channel definitions and runtime
+
+Start package-private. Prove the generic Durable Object composition before
+adding `agents/channels` to package exports.
+
+```ts
+type ChannelTarget = {
+  fetch(request: Request): Promise<Response>;
+};
+
+interface ChannelDefinition<Env, RoutingEvent = unknown, Raw = unknown> {
+  gateway?: {
+    receive(
+      request: Request,
+      context: { env: Env }
+    ): Promise<ChannelGatewayResult<RoutingEvent, Raw> | undefined>;
+    route(context: {
+      event: RoutingEvent;
+      raw: Raw;
+      env: Env;
+    }): MaybePromise<ChannelTarget | null>;
+  };
+  request?: ChannelRequestIngress<Env>;
+  email?: ChannelEmailIngress<Env>;
+  webSockets?: readonly ChannelWebSocketIngress<Env>[];
+  deliver(
+    target: ChannelReplyTarget,
+    message: ChannelReply
+  ): Promise<ChannelDeliveryResult>;
+}
+
+class ChannelRuntime<Env> implements DurableObjectCapability {
+  constructor(options: {
+    storage: DurableObjectStorage;
+    scheduler: DurableScheduler;
+    env: Env;
+    channels: Record<string, ChannelDefinition<Env>>;
+    onMessage: ChannelMessageHandler;
+  });
+
+  onStart(): void;
+  onRequest(context: CapabilityRequestContext): Promise<Response | undefined>;
+  onAlarm(): Promise<void>;
+  readonly webSockets: readonly LifecycleWebSocketOwner[];
+  accept(envelope: ChannelEnvelope): Promise<AcceptResult>;
+}
+```
+
+The configured set stamps channel keys onto normalized reply targets and gateway
+envelopes. A definition never needs to know the key under which an application
+installed it.
+
+Request dispatch pseudocode:
+
+```ts
+async onRequest({ request }): Promise<Response | undefined> {
+  if (isInternalGatewayEnvelope(request)) {
+    const envelope = await parseAndVerifyInternalEnvelope(request);
+    return Response.json(await this.accept(envelope), { status: 202 });
+  }
+
+  for (const [key, channel] of configuredChannels) {
+    const result = await channel.request?.receive(request);
+    if (result === undefined) continue;
+
+    const envelope = stampChannelKey(key, result.envelope);
+    if (result.mode === "durable") {
+      await this.accept(envelope);
+    } else {
+      await this.dispatchInline(envelope);
+    }
+    return result.response;
+  }
+}
+```
+
+## Phase 4: add durable inbox draining
+
+The runtime stores only normalized ingress needed for durable acknowledgement.
+The application owns conversation state and outbound policy.
+
+```ts
+type InboxRow = {
+  channel: string;
+  dispatchId: string;
+  envelopeJson: string;
+  state: "pending" | "running" | "completed";
+  acceptedAt: number;
+  leaseUntil: number | null;
+};
+```
+
+Drain pseudocode:
+
+```ts
+async function drainInbox(): Promise<void> {
+  for (const row of inbox.claimPending({ leaseMs: 60_000 })) {
+    const envelope = parseEnvelope(row.envelopeJson);
+
+    try {
+      await onMessage(envelope.message, makeContext(envelope));
+      inbox.complete(row.channel, row.dispatchId);
+    } catch (error) {
+      inbox.releaseOrFail(row, classifyChannelHandlerError(error));
+    }
+  }
+
+  if (inbox.hasPending()) {
+    scheduler.requestRun("channels:drain");
+  }
+}
+```
+
+The runtime deduplicates stable `(channel, dispatchId)` pairs. It does not claim
+exactly-once application side effects. Application handlers that perform
+external mutations still need their own idempotency key.
+
+## Phase 5: add request channels and one provider
+
+First prove two transports entering the same handler:
+
+```ts
+channels: {
+  web: webSocketChannel(...),
+  api: requestChannel(...)
+}
+```
+
+Then add one real provider, Slack or Telegram:
+
+```ts
+channels: {
+  web: webSocketChannel(...),
+  api: requestChannel(...),
+  slack: slackChannel(...)
+}
+```
+
+Do not add identity linking, approvals, fallback, fanout, AI tools, or automatic
+outbound retries in this phase. Those features should be evaluated against the
+working Agent and plain Durable Object consumers.
+
+## Phase 6: add the Worker channel router
+
+One configured set handles any number of gateway-capable channels:
+
+```ts
+const externalChannels = defineChannelSet({
+  slack: slackChannel(...),
+  telegram: telegramChannel(...),
+  discord: discordChannel(...)
 });
 
-export class SupportAgent extends Agent<Env> {
-  readonly channels = this.defineChannels({ slack });
-
-  async onMessage(message: AgentMessage, context: AgentMessageContext) {
-    await context.reply({ markdown: await this.answer(message.text) });
-  }
-}
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    return (
-      (await routeAgentChannelRequest({
-        request,
-        env,
-        namespace: env.SupportAgent,
-        channel: slack,
-        resolveAgent: (event) => event.workspaceId
-      })) ??
-      (await routeAgentRequest(request, env)) ??
-      new Response("Not found", { status: 404 })
-    );
-  }
-} satisfies ExportedHandler<Env>;
+const response = await externalChannels.routeRequest(request, env);
 ```
 
-The gateway is an inbound adapter, not a `ChannelHost`. It does not own
-application callbacks, conversation state, an outbox, retries, or delivery
-preferences. Its job ends at durable Agent acceptance.
-
-## Lifecycle prerequisite for multiple WebSocket channels
-
-The current lifecycle has one WebSocket host. It accepts every upgrade and
-calls host methods on the Durable Object. The private browser-channel
-extraction works because every Agent socket still has the same owner.
-
-Before exposing a second WebSocket channel, the lifecycle needs named ownership:
+The set checks channels in declaration order. A channel first decides whether it
+owns the HTTP request. Once it claims the request, no later channel sees it. The
+claiming channel either returns its provider-specific authentication error or
+normalizes provider events. Its own `route` callback then chooses the complete
+durable target for each event.
 
 ```ts
-interface DurableObjectCapability {
-  webSocket?: {
-    /** Stable key persisted with accepted sockets. */
-    key: string;
-    onUpgrade(
-      context: WebSocketUpgradeContext
-    ):
-      | { type: "accept"; tags?: readonly string[] }
-      | { type: "respond"; response: Response }
-      | undefined
-      | Promise<
-          | { type: "accept"; tags?: readonly string[] }
-          | { type: "respond"; response: Response }
-          | undefined
-        >;
-    onConnect?(context: WebSocketConnectContext): MaybePromise<void>;
-    onMessage?(context: WebSocketMessageContext): MaybePromise<void>;
-    onClose?(context: WebSocketCloseContext): MaybePromise<void>;
-    onError?(context: WebSocketErrorContext): MaybePromise<void>;
-  };
+async function routeRequest(request, env) {
+  for (const [channelKey, channel] of configuredChannels) {
+    const received = await channel.receiveGateway(request, { env });
+    if (received === undefined) continue;
+
+    for (const item of received.events) {
+      const target = await channel.route({
+        event: item.routing,
+        raw: item.raw,
+        env
+      });
+
+      if (target === null) continue;
+
+      const response = await target.fetch(
+        makeInternalChannelRequest({
+          channelKey,
+          envelope: item.envelope
+        })
+      );
+
+      if (!response.ok) return received.retryResponse();
+    }
+
+    return received.acknowledge();
+  }
+
+  return undefined;
 }
 ```
 
-The exact type is open. The required behavior is:
+`route` returns a stub rather than a name:
 
-1. handlers claim upgrades in registration order;
-2. the first accept or explicit response wins;
-3. the lifecycle accepts the socket through the Hibernation API;
-4. it stores the handler key in lifecycle-owned attachment metadata;
-5. wakes dispatch only to that handler;
-6. a missing handler is an ownership error, never fallthrough;
-7. old sockets without a key use the current host fallback;
-8. duplicate or renamed keys fail loudly.
+```ts
+route({ event, env }) {
+  return env.SupportAgent.getByName(event.workspaceId);
+}
+```
 
-The owner key must not live in `connection.state`, which belongs to channel and
-application code.
+This lets application policy choose the Durable Object class and any namespace
+options in one place. The router neither knows nor reconstructs application
+identity. The structural requirement is only:
 
-The in-progress request-only MCP capability does not depend on this change. If
-MCP publishes state over the browser socket, that publication should later
-register as a browser protocol extension rather than become a second socket
-owner.
+```ts
+type ChannelTarget = {
+  fetch(request: Request): Promise<Response>;
+};
+```
 
-## Compatibility and migration
+A provider request may contain several events. Each event may route to a
+different target. The router acknowledges the provider only after every
+non-ignored event has been durably accepted.
 
-1. Extract the browser protocol into an internal channel and retain current
-   hooks as callbacks. This PR does that.
-2. Add named WebSocket ownership to the lifecycle without changing Agent users.
-3. Add the Agent channel registry and normalized receive path.
-4. Move `AIChatAgent` and Think away from constructor-time method wrapping and
-   into browser protocol registration.
-5. Introduce the semantic message hook and deprecate raw Agent connection hooks.
-6. Remove or rename raw hooks only at an allowed breaking boundary.
+Use `target.fetch`, not arbitrary RPC, so Lifecycle startup and capability
+ordering remain automatic. The internal envelope must be authenticated or
+impossible to forge from the public internet.
 
-Compatibility must cover the browser client, React hooks, state sync, readonly
-connections, protocol suppression, RPC, chat recovery, connection ordering, and
-sub-agent routing.
+## Phase 7: add Agent convenience and migrate the hook
 
-## Relationship to existing channel work
+`Agent.defineChannels()` constructs and installs the generic runtime:
 
-Think already exports `ChannelDefinition`. It combines messenger configuration,
-turn policy, tool narrowing, and delivery. This RFC defines a lower boundary:
-transport normalization and reply delivery in base Agent, with turn policy and
-recovery remaining in Think.
+```ts
+protected defineChannels(definitions) {
+  const runtime = createChannelRuntime({
+    storage: this.ctx.storage,
+    scheduler: this.schedules,
+    env: this.env,
+    channels: {
+      web: createAgentBrowserChannel(this),
+      ...definitions
+    },
+    onMessage: (message, context) =>
+      this.onAgentMessage(message, context)
+  });
 
-We should avoid publishing another unrelated type named simply `Channel`.
-Explicit base names such as `AgentChannel`, `AgentMessage`, and
-`AgentMessageContext` are safer until the layers converge.
+  this.lifecycle.use(runtime);
+  return runtime;
+}
+```
 
-PR #2129 contains useful pieces, especially normalized provider events,
-serializable reply destinations, stable source IDs, and honest delivery
-outcomes. Its `ChannelHost` creates a second application callback and routing
-system beside Agent, and the PR also takes on identities, approvals, fallback,
-fanout, AI tools, and several providers at once.
+Use a temporary semantic hook while raw `onMessage(connection, frame)` exists:
 
-This proposal starts smaller:
+```ts
+async onAgentMessage(
+  message: ChannelMessage,
+  context: ChannelMessageContext
+): Promise<void> {}
+```
 
-1. private browser-channel extraction;
-2. lifecycle ownership for multiple WebSocket channels;
-3. one Agent message and reply boundary;
-4. request channel and one external provider;
-5. only then revisit identities, approvals, and composite delivery.
+Migration:
 
-## Alternatives
+```text
+release N
+  add onAgentMessage(message, context)
+  keep raw onMessage(connection, frame)
+  move docs to channel configuration
 
-- **Provider-specific Agent hooks.** Rejected because application logic stays
+breaking release
+  rename raw hook to onWebSocketFrame or remove it
+  rename onAgentMessage to onMessage
+  keep raw hooks only inside webSocketChannel options
+```
+
+The ideal final Agent has one semantic `onMessage(message, context)` method.
+Connection events live only in the configured WebSocket channel.
+
+## Phase 8: converge Think channels
+
+Think currently owns channel policy above a special-cased transport layer. It
+should consume base Channel messages rather than define another unrelated
+transport system.
+
+```text
+base ChannelRuntime receives message
+-> Think resolves channel policy
+-> Think admits durable turn
+-> Think runs model and recovery
+-> Think calls base context.reply
+```
+
+Think continues owning:
+
+- model instructions and tool narrowing;
+- turn admission and concurrency;
+- streaming and recovery;
+- notices and reply attachments.
+
+Base channels continue owning:
+
+- provider authentication and normalization;
+- durable ingress acceptance;
+- reply targets and delivery attempts;
+- WebSocket connection ownership.
+
+## Phase 9: publish only after the seams hold
+
+Add `agents/channels` only after:
+
+- one Agent and one plain Durable Object use the same runtime;
+- browser, request, and one external provider reach the same handler;
+- hibernation restores the correct WebSocket owner;
+- the shared channel router acknowledges only after durable acceptance;
+- existing Agent, AIChat, Think, React, RPC, state, readonly, and sub-agent tests
+  remain green;
+- generated declarations expose no implementation host interfaces.
+
+# Relationship to current work
+
+## This PR
+
+This PR implements Phase 0 only. It also records the proposed end state and
+migration. It exports no channel API.
+
+## MCP capability work
+
+The request-only MCP capability can proceed independently using the existing
+ordered `onRequest` phase. Later, MCP publication becomes a protocol extension
+inside the Agent browser channel. MCP does not become a WebSocket owner.
+
+## PR #2129
+
+PR #2129 contains useful ideas:
+
+- normalized provider events;
+- serializable reply destinations;
+- stable source IDs;
+- delivery results that admit uncertainty.
+
+This RFC does not adopt a standalone `ChannelHost` as the application owner.
+The durable application owns a `ChannelRuntime` capability beside its other
+capabilities. Identity linking, approvals, fallback, fanout, AI tools, and
+multiple providers are deferred until this smaller boundary works.
+
+# Alternatives
+
+- **Provider-specific Agent hooks.** Rejected because application logic remains
   tied to providers.
-- **Standalone `ChannelHost` as the application owner.** Rejected because Agent
-  would still need a second routing, callback, and durability model.
-- **Every capability observes every frame.** Rejected because consumption,
-  ordering, errors, and hibernation ownership become ambiguous.
-- **State and RPC as channels.** Rejected because they are extensions of one
-  browser connection.
-- **Every HTTP request becomes a message.** Rejected because callbacks, health
-  checks, assets, and arbitrary APIs have different semantics.
-- **Every provider URL includes the Agent name.** Preferred where possible, but
-  insufficient for a shared webhook serving many Agent instances.
+- **A standalone application `ChannelHost`.** Rejected because Agent and plain
+  Durable Objects would gain a second routing, callback, and durability model.
+- **Every capability observes every WebSocket frame.** Rejected because
+  consumption, ordering, error ownership, and hibernation routing become
+  ambiguous.
+- **State and RPC are channels.** Rejected because they are protocols carried by
+  one browser connection.
+- **Every HTTP request is a message.** Rejected because callbacks, health checks,
+  assets, and arbitrary APIs have different semantics.
+- **Every provider URL contains the Durable Object name.** Preferred where
+  possible, but insufficient for shared webhooks.
+- **Durability inside every adapter.** Rejected because providers would expose
+  inconsistent guarantees and duplicate runtime storage logic.
 
-## Open questions
+# Open questions
 
-- What temporary name should carry normalized messages while raw `onMessage`
-  remains supported?
-- How should one adapter definition bind Worker gateway configuration and Agent
-  instance delivery without duplication?
-- Which actor and conversation fields belong in base Agent rather than Think?
-- What durable inbox should webhook channels use?
-- How should protocol extensions register with the browser channel?
-- Should the first external proof use Slack or Telegram?
+- Should the temporary semantic hook be `onAgentMessage`, `onChannelMessage`, or
+  another name?
+- What scheduler port should the runtime use before schedules are fully
+  extracted from Agent?
+- Which actor and conversation fields belong in the base normalized contract?
+- Which ingress types may opt into inline rather than durable handling?
+- How should internal router envelopes be authenticated?
+- Should the first provider proof use Slack or Telegram?
+- When should the existing Think `ChannelDefinition` converge with this base
+  contract?
 
-## Decision status
+# Decision status
 
-Proposed. This PR makes the first private move by extracting the existing
-browser protocol without exporting a channel API.
+Proposed. The ideal architecture is a Lifecycle-composed `ChannelRuntime` usable
+from any Durable Object, with `Agent` providing the preconfigured browser
+protocol and a simpler API. This PR makes the first private move by extracting
+the current Agent browser protocol without exporting channel symbols.
