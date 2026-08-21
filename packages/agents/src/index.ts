@@ -36,7 +36,9 @@ export type {
   BuildAgentPathOptions,
   SubAgentPathMatch
 } from "./sub-routing";
-import { signAgentHeaders } from "./email";
+import { signAgentHeaders, type SendEmailOptions } from "./email";
+import { sendAgentEmail } from "./email-send";
+export type { EmailSendBinding, SendEmailOptions } from "./email";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
@@ -173,46 +175,6 @@ export type {
   WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 export { MessageType } from "./types";
-
-/**
- * Structural type for Cloudflare's `send_email` binding.
- * Accepts both raw MIME messages and structured builder objects.
- */
-export type EmailSendBinding = {
-  send(
-    message:
-      | EmailMessage
-      | {
-          from: string | { email: string; name?: string };
-          to: string | string[];
-          subject: string;
-          replyTo?: string | { email: string; name?: string };
-          cc?: string | string[];
-          bcc?: string | string[];
-          headers?: Record<string, string>;
-          text?: string;
-          html?: string;
-        }
-  ): Promise<EmailSendResult>;
-};
-
-/**
- * Options for Agent.sendEmail()
- */
-export type SendEmailOptions = {
-  binding: EmailSendBinding;
-  to: string | string[];
-  from: string | { email: string; name?: string };
-  subject: string;
-  text?: string;
-  html?: string;
-  replyTo?: string | { email: string; name?: string };
-  cc?: string | string[];
-  bcc?: string | string[];
-  inReplyTo?: string;
-  headers?: Record<string, string>;
-  secret?: string;
-};
 
 /**
  * RPC request message from client
@@ -3518,46 +3480,9 @@ export class Agent<
    */
   async sendEmail(options: SendEmailOptions): Promise<EmailSendResult> {
     return this._tryCatch(async () => {
-      if (!options.binding) {
-        throw new Error(
-          "binding is required. Pass your send_email binding, " +
-            "e.g. this.sendEmail({ binding: this.env.EMAIL, ... })."
-        );
-      }
-
-      const agentName = camelCaseToKebabCase(this._ParentClass.name);
-      const agentId = this.name;
-
-      const headers: Record<string, string> = {
-        ...options.headers,
-        "X-Agent-Name": agentName,
-        "X-Agent-ID": agentId
-      };
-
-      if (options.inReplyTo) {
-        headers["In-Reply-To"] = options.inReplyTo;
-      }
-
-      if (typeof options.secret === "string") {
-        const signedHeaders = await signAgentHeaders(
-          options.secret,
-          agentName,
-          agentId
-        );
-        headers["X-Agent-Sig"] = signedHeaders["X-Agent-Sig"];
-        headers["X-Agent-Sig-Ts"] = signedHeaders["X-Agent-Sig-Ts"];
-      }
-
-      const result = await options.binding.send({
-        from: options.from,
-        to: options.to,
-        subject: options.subject,
-        text: options.text,
-        html: options.html,
-        replyTo: options.replyTo,
-        cc: options.cc,
-        bcc: options.bcc,
-        headers
+      const result = await sendAgentEmail(options, {
+        agentName: camelCaseToKebabCase(this._ParentClass.name),
+        agentId: this.name
       });
 
       const fromAddr =
