@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { Lifecycle, routeDurableObjectRequest } from "agents/lifecycle";
+import { routeAgentRequest } from "agents";
+import { Lifecycle } from "agents/lifecycle";
 import { MCPClientManager } from "agents/mcp/client";
 import {
   configureOAuthPopup,
@@ -34,7 +35,7 @@ export class McpClientObject extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     return (
-      (await routeDurableObjectRequest(request, env)) ??
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }

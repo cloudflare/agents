@@ -7,6 +7,7 @@ import {
   type WSMessage
 } from "../lifecycle";
 import { MCPClientManager } from "../mcp/client";
+import { MCPConnectionState } from "../mcp/client-connection";
 
 export type Env = {
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
@@ -122,7 +123,7 @@ export class PlainMcpClientObject extends DurableObject<Env> {
     );
   }
 
-  async prepareOAuthCallback(): Promise<void> {
+  async prepareOAuthCallback(): Promise<string> {
     await this.lifecycle.start();
     this.mcp.configureOAuthCallback({
       customHandler: (result) => Response.json(result)
@@ -133,6 +134,83 @@ export class PlainMcpClientObject extends DurableObject<Env> {
       callbackUrl: "https://example.com/callback",
       transport: { type: "auto" }
     });
+
+    const connection = this.mcp.mcpConnections["callback-server"];
+    const authProvider = connection.options.transport.authProvider;
+    if (!authProvider?.state) {
+      throw new Error("Expected a stateful default OAuth provider");
+    }
+    connection.connectionState = MCPConnectionState.AUTHENTICATING;
+    return authProvider.state();
+  }
+
+  async startFreshOAuthFlow(): Promise<unknown> {
+    await this.lifecycle.start();
+    const serverUrl = "https://mcp.example.com/mcp";
+    const resourceMetadataUrl =
+      "https://mcp.example.com/.well-known/oauth-protected-resource/mcp";
+    const authorizationServerUrl = "https://auth.example.com";
+
+    const oauthFetch: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+
+      if (request.url === serverUrl) {
+        return new Response(null, {
+          status: 401,
+          headers: {
+            "www-authenticate": `Bearer resource_metadata="${resourceMetadataUrl}"`
+          }
+        });
+      }
+
+      if (request.url === resourceMetadataUrl) {
+        return Response.json({
+          resource: serverUrl,
+          authorization_servers: [authorizationServerUrl]
+        });
+      }
+
+      if (
+        url.origin === authorizationServerUrl &&
+        url.pathname.includes(".well-known")
+      ) {
+        return Response.json({
+          issuer: authorizationServerUrl,
+          authorization_endpoint: `${authorizationServerUrl}/authorize`,
+          token_endpoint: `${authorizationServerUrl}/token`,
+          registration_endpoint: `${authorizationServerUrl}/register`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          token_endpoint_auth_methods_supported: ["none"],
+          code_challenge_methods_supported: ["S256"]
+        });
+      }
+
+      if (
+        url.origin === authorizationServerUrl &&
+        url.pathname === "/register" &&
+        request.method === "POST"
+      ) {
+        return Response.json({
+          client_id: "test-client-id",
+          redirect_uris: ["https://example.com/callback"]
+        });
+      }
+
+      return new Response(`Unexpected OAuth test request: ${request.url}`, {
+        status: 500
+      });
+    };
+
+    await this.mcp.registerServer("fresh-oauth-server", {
+      name: "Fresh OAuth server",
+      url: serverUrl,
+      callbackUrl: "https://example.com/callback",
+      transport: { type: "streamable-http", fetch: oauthFetch }
+    });
+
+    return this.mcp.connectToServer("fresh-oauth-server");
   }
 }
 
