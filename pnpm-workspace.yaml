@@ -1,6 +1,8 @@
 packages:
   - "agent-think"
   - "examples/*"
+  - "!examples/next"
+  - "examples/next/*"
   - "packages/*"
   - "voice-providers/*"
   - "guides/*"
