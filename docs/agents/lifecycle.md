@@ -18,7 +18,7 @@ export class MyObject extends DurableObject<Env> {
   }
 
   onRequest(request: Request): Response {
-    return new Response(`Hello from ${this.lifecycle.name}: ${request.url}`);
+    return new Response(`Hello from ${this.ctx.id.name}: ${request.url}`);
   }
 
   onAlarm(): void {
@@ -168,8 +168,10 @@ Agent's internal RPC entry points already enforce this boundary.
 
 ## Object names
 
-Use `idFromName()` or `getByName()`. The lifecycle reads the authoritative name
-from `ctx.id.name` and exposes it as `lifecycle.name`.
+Use `idFromName()` or `getByName()`. Read the authoritative name from
+`this.ctx.id.name` inside the Durable Object. `Lifecycle.name` remains available
+as a compatibility fallback for older local runtimes that do not expose
+`ctx.id.name`.
 
 For migration only, the lifecycle can read an existing `__ps_name` record
 written by an older PartyServer release. It never writes that key. Deprecated

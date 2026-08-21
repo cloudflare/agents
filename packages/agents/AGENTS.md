@@ -16,7 +16,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
 | `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
 | `agents/mcp/server`          | `src/mcp/server.ts`          | Isolated Agents wrapper for SDK v2 stateless servers                         |
-| `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
+| `agents/mcp/client`          | `src/mcp/client.ts`          | Reusable Durable Object MCP client capability and connection APIs            |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
 | `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                             |
@@ -158,7 +158,8 @@ pnpm exec vitest --project lifecycle --run
 ```
 
 Proves constructor composition on a plain `DurableObject`, ordered capabilities,
-routing, native and migrated identity, alarms, and hibernating WebSockets.
+routing, native and migrated identity, alarms, hibernating WebSockets, and direct
+composition of `MCPClientManager` with restoration after real eviction.
 
 ### React tests (`src/react-tests/`)
 
@@ -243,7 +244,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - **Client RPC is decorator-gated** — methods on Agent subclasses must use `@callable()` before clients can invoke them through `agent.call("methodName", args)` or `agent.stub.methodName(...)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
 - **Scheduling uses cron-schedule** — `this.schedule()` accepts delays, Dates, or cron strings. Schedules persist in SQLite and survive hibernation.
-- **MCP has separate package boundaries** — `mcp/server.ts` is the Stateless Worker wrapper; `mcp/client.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/legacy-agent.ts`.
+- **MCP has separate package boundaries** — `mcp/server.ts` is the Stateless Worker wrapper; `MCPClientManager` in `mcp/client.ts` is itself a reusable Durable Object capability and remains exposed as `Agent.this.mcp`; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/legacy-agent.ts`.
 - **Telemetry has an independent schema version** — `instrumentation_scope.version` is hardcoded to `"1"`; it is not the package version. Notify Workers Observability and any other downstream consumers before bumping it.
 
 ## Boundaries

@@ -6,9 +6,11 @@ import {
   type DurableObjectCapability,
   type WSMessage
 } from "../lifecycle";
+import { MCPClientManager } from "../mcp/client";
 
 export type Env = {
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
+  PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
 };
 
 type StartupProps = { label: string };
@@ -82,6 +84,55 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   async startFromRpc(props: StartupProps): Promise<readonly string[]> {
     await this.lifecycle.start(props);
     return this.#events;
+  }
+}
+
+export class PlainMcpClientObject extends DurableObject<Env> {
+  readonly mcp = new MCPClientManager("plain-lifecycle-object", "1.0.0", {
+    storage: this.ctx.storage
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.mcp);
+
+  onRequest(): Response {
+    return Response.json({
+      connectionIds: Object.keys(this.mcp.mcpConnections),
+      states: Object.fromEntries(
+        Object.entries(this.mcp.mcpConnections).map(([id, connection]) => [
+          id,
+          connection.connectionState
+        ])
+      ),
+      storedServerCount: this.mcp.listServers().length
+    });
+  }
+
+  async prepareRestorableServer(): Promise<void> {
+    await this.lifecycle.start();
+    await this.mcp.registerServer("server", {
+      name: "Test server",
+      url: "https://mcp.example.com",
+      callbackUrl: "https://example.com/callback",
+      transport: { type: "auto" }
+    });
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_mcp_servers SET auth_url = ? WHERE id = ?",
+      "https://auth.example.com/authorize",
+      "server"
+    );
+  }
+
+  async prepareOAuthCallback(): Promise<void> {
+    await this.lifecycle.start();
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => Response.json(result)
+    });
+    await this.mcp.registerServer("callback-server", {
+      name: "Test server",
+      url: "https://mcp.example.com",
+      callbackUrl: "https://example.com/callback",
+      transport: { type: "auto" }
+    });
   }
 }
 

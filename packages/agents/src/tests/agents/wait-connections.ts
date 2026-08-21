@@ -146,56 +146,19 @@ export class TestWaitConnectionsAgent extends Agent {
     return elapsed < 100; // Should be near-instant
   }
 
-  /**
-   * Simulate a full hibernation round-trip:
-   *   onStart() (triggers restoreConnectionsFromStorage internally)
-   *   → waitForConnections()
-   *   → check connection states
-   *
-   * This tests the real lifecycle path, not the decomposed methods.
-   */
-  async hibernationRoundTrip(timeout?: number): Promise<{
+  /** Report lifecycle-restored connections without waiting for them to settle. */
+  reportWithoutWait(): {
     connectionIds: string[];
     connectionStates: Record<string, string>;
-  }> {
-    // onStart() calls restoreConnectionsFromStorage which fires
-    // background connections via _trackConnection
-    await this.onStart();
-
-    // This is what a consumer would call in onMessage / onChatMessage
-    await this.mcp.waitForConnections(
-      timeout != null ? { timeout } : undefined
-    );
-
-    const connectionStates: Record<string, string> = {};
-    for (const [id, conn] of Object.entries(this.mcp.mcpConnections)) {
-      connectionStates[id] = conn.connectionState;
-    }
-
+  } {
     return {
       connectionIds: Object.keys(this.mcp.mcpConnections),
-      connectionStates
-    };
-  }
-
-  /**
-   * Simulate hibernation round-trip WITHOUT waiting — demonstrates the race.
-   */
-  async hibernationRoundTripNoWait(): Promise<{
-    connectionIds: string[];
-    connectionStates: Record<string, string>;
-  }> {
-    await this.onStart();
-
-    // Check states immediately — no waitForConnections
-    const connectionStates: Record<string, string> = {};
-    for (const [id, conn] of Object.entries(this.mcp.mcpConnections)) {
-      connectionStates[id] = conn.connectionState;
-    }
-
-    return {
-      connectionIds: Object.keys(this.mcp.mcpConnections),
-      connectionStates
+      connectionStates: Object.fromEntries(
+        Object.entries(this.mcp.mcpConnections).map(([id, connection]) => [
+          id,
+          connection.connectionState
+        ])
+      )
     };
   }
 

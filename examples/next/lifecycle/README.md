@@ -21,7 +21,7 @@ export class DoAgent extends DurableObject<Env> {
 
   onRequest() {
     return Response.json({
-      name: this.lifecycle.name,
+      name: this.ctx.id.name,
       wake: this.wake,
       activity: this.activity.getActivity()
     });
