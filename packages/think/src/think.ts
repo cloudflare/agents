@@ -3295,17 +3295,28 @@ export class Think<
 
     // Repair preserves every message (orphans are flipped to errored in place,
     // never deleted), so there are no removed rows to delete — only updates.
+    // `messages` may be a selected historical branch used only for inference;
+    // persist those repairs without replacing the independently-owned active
+    // transcript cache with that branch.
+    const originalById = new Map(
+      messages.map((message) => [message.id, message] as const)
+    );
+    const activeMessageIds = new Set(
+      this._cachedMessages.map((message) => message.id)
+    );
+    let activeTranscriptChanged = false;
     for (const message of repair.messages) {
-      const original = messages.find(
-        (candidate) => candidate.id === message.id
-      );
+      const original = originalById.get(message.id);
       if (original && original.parts !== message.parts) {
+        activeTranscriptChanged ||= activeMessageIds.has(message.id);
         await this.session.updateMessage(sanitizeMessage(message));
       }
     }
 
-    this._replaceCachedMessages(repair.messages);
-    this._broadcastMessages();
+    // Session update events patch matching cached rows. Broadcast only when a
+    // repaired row belongs to the live view; branch-only model history must not
+    // change what connected clients see.
+    if (activeTranscriptChanged) this._broadcastMessages();
     this._emit("chat:transcript:repaired", {
       removedToolCalls: repair.removedToolCalls,
       normalizedInputs: repair.normalizedInputs,
