@@ -10,7 +10,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | ---------------------------- | ---------------------------- | ---------------------------------------------------------------------------- |
 | `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
 | `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
-| `agents/lifecycle`           | `src/lifecycle/index.ts`     | Composable Durable Object lifecycle, routing, and hibernating connections    |
+| `agents/lifecycle`           | `src/lifecycle/index.ts`     | Composable Durable Object lifecycle and hibernating connections              |
 | `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
 | `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
@@ -48,10 +48,11 @@ src/
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
   internal_context.ts   # AsyncLocalStorage context for getCurrentAgent()
+  agent-routing.ts      # Agent URL routing, named lookup, CORS, placement, retries
 
   lifecycle/            # Public Durable Object lifecycle composition
     index.ts            # Intentionally small public lifecycle surface
-    durable-object-lifecycle.ts # Runtime handlers, routing, capabilities
+    durable-object-lifecycle.ts # Runtime handlers and capabilities
     connection.ts       # Hibernating WebSocket connection management
 
   chat/                 # Shared chat toolkit (mostly for sibling packages)

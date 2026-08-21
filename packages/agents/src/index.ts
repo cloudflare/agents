@@ -49,12 +49,16 @@ import {
   type Connection,
   type ConnectionContext,
   Lifecycle,
-  type DurableObjectRouteOptions,
-  type WSMessage,
-  routeDurableObjectRequest
+  type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
-import { getAgentByName } from "./agent-routing";
-export { getAgentByName, type AgentGetOptions } from "./agent-routing";
+import { getAgentByName, type AgentOptions } from "./agent-routing";
+export {
+  getAgentByName,
+  routeAgentRequest,
+  type AgentGetOptions,
+  type AgentOptions,
+  type RoutingRetryOptions
+} from "./agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
 import {
@@ -169,7 +173,6 @@ export type {
 export type {
   Connection,
   ConnectionContext,
-  RoutingRetryOptions,
   WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 export { MessageType } from "./types";
@@ -12938,30 +12941,6 @@ export type AgentNamespace<Agentic extends Agent<Cloudflare.Env>> =
  * Agent's durable context
  */
 export type AgentContext = DurableObjectState;
-
-/**
- * Configuration options for Agent routing
- */
-export type AgentOptions<Env> = DurableObjectRouteOptions<Env>;
-
-/**
- * Route a request to the appropriate Agent
- * @param request Request to route
- * @param env Environment containing Agent bindings
- * @param options Routing options
- * @returns Response from the Agent or undefined if no route matched
- */
-export async function routeAgentRequest<Env>(
-  request: Request,
-  env: Env,
-  options?: AgentOptions<Env>
-) {
-  // oxlint-disable-next-line typescript/no-explicit-any
-  return routeDurableObjectRequest(request, env as any, {
-    prefix: "agents",
-    ...(options as DurableObjectRouteOptions<Record<string, unknown>>)
-  });
-}
 
 // Email routing - deprecated resolver kept in root for upgrade discoverability
 // Other email utilities moved to agents/email subpath

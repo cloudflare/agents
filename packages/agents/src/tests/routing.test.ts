@@ -176,16 +176,15 @@ describe("routeAgentRequest", () => {
       closeWs(res);
     });
 
-    it("should return 404 for non-WebSocket HTTP requests (routeAgentRequest only handles WebSocket)", async () => {
+    it("should route non-WebSocket HTTP requests", async () => {
       const res = await exports.default.fetch(
-        "http://example.com/agents/test-state-agent/room",
-        {
-          method: "GET"
-          // No WebSocket upgrade header
-        }
+        "http://example.com/agents/test-state-agent/room/state"
       );
-      // routeAgentRequest returns null for non-WebSocket requests, falling through to 404
-      expect(res.status).toBe(404);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        state: { count: 0, items: [], lastUpdated: null }
+      });
     });
   });
 
@@ -248,13 +247,18 @@ describe("routeAgentRequest", () => {
       closeWs(res);
     });
 
-    it("should not route non-WebSocket requests via routeAgentRequest", async () => {
+    it("should forward HTTP methods and bodies", async () => {
       const res = await exports.default.fetch(
-        "http://example.com/agents/test-state-agent/room"
+        "http://example.com/agents/test-state-agent/room/echo",
+        { method: "POST", body: "hello" }
       );
-      // routeAgentRequest only handles WebSocket upgrades, returns null for HTTP
-      // Custom HTTP handling requires manual routing with getAgentByName + fetch
-      expect(res.status).toBe(404);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        method: "POST",
+        body: "hello",
+        path: "echo"
+      });
     });
   });
 });

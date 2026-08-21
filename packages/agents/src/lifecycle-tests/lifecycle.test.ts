@@ -14,7 +14,7 @@ describe("Lifecycle", () => {
   it("installs fetch and dispatches startup, capabilities, then the host", async () => {
     const name = crypto.randomUUID();
     const response = await exports.default.fetch(
-      `https://example.com/objects/plain-lifecycle-object/${name}`
+      `https://example.com/agents/plain-lifecycle-object/${name}`
     );
 
     expect(response.status).toBe(200);
@@ -42,7 +42,7 @@ describe("Lifecycle", () => {
     const name = crypto.randomUUID();
     const response = await worker.fetch(
       new Request(
-        `https://example.com/objects/plain-lifecycle-object/${name}?capability`
+        `https://example.com/agents/plain-lifecycle-object/${name}?capability`
       ),
       env
     );
@@ -72,10 +72,9 @@ describe("Lifecycle", () => {
   it("installs always-hibernating WebSocket handlers", async () => {
     const name = crypto.randomUUID();
     const response = await worker.fetch(
-      new Request(
-        `https://example.com/objects/plain-lifecycle-object/${name}`,
-        { headers: { Upgrade: "websocket" } }
-      ),
+      new Request(`https://example.com/agents/plain-lifecycle-object/${name}`, {
+        headers: { Upgrade: "websocket" }
+      }),
       env
     );
     const socket = requireWebSocket(response);

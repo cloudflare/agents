@@ -179,7 +179,7 @@ Readonly is a WebSocket concept. HTTP requests (`onRequest`, `agentFetch`, `getA
 
 This is by design:
 
-- **Callables are WebSocket-only** — there's no HTTP callable path. `routeAgentRequest` only handles WebSocket upgrades; plain HTTP falls through to `onRequest`. So clients can't invoke `@callable()` methods over HTTP.
+- **Callables are WebSocket-only** — `routeAgentRequest` forwards both HTTP and WebSocket requests, but automatic `@callable()` dispatch exists only in the WebSocket message protocol. HTTP is delivered to the Agent's `onRequest`, so clients cannot invoke callable methods over HTTP unless application code exposes its own endpoint.
 - **`onRequest` is developer-authored** — unlike the WebSocket message handler (which has automatic setState/RPC processing), `onRequest` is entirely custom code. There's no framework behavior to gate.
 - **HTTP requests are stateless** — there's no persistent "connection" to mark as readonly. Each request stands alone. Standard HTTP auth (tokens, headers, cookies) is the right tool here.
 
