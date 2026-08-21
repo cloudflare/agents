@@ -10,14 +10,22 @@ export type McpCatalog = {
     readonly authUrl?: string;
   }>;
   readonly tools: ReturnType<MCPClientManager["listTools"]>;
-  readonly prompts: ReturnType<MCPClientManager["listPrompts"]>;
-  readonly resources: ReturnType<MCPClientManager["listResources"]>;
 };
 
 type ConnectInput = {
   readonly name: string;
   readonly url: string;
 };
+
+type ToolCallInput = {
+  readonly serverId: string;
+  readonly name: string;
+  readonly arguments: Record<string, unknown>;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function parseConnectInput(value: unknown): ConnectInput | undefined {
   if (
@@ -46,11 +54,27 @@ function parseConnectInput(value: unknown): ConnectInput | undefined {
   }
 }
 
-async function parseConnectRequest(
-  request: Request
-): Promise<ConnectInput | undefined> {
+function parseToolCallInput(value: unknown): ToolCallInput | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.serverId !== "string" ||
+    !value.serverId ||
+    typeof value.name !== "string" ||
+    !value.name ||
+    !isRecord(value.arguments)
+  ) {
+    return undefined;
+  }
+  return {
+    serverId: value.serverId,
+    name: value.name,
+    arguments: value.arguments
+  };
+}
+
+async function readJson(request: Request): Promise<unknown> {
   try {
-    return parseConnectInput(await request.json());
+    return await request.json();
   } catch {
     return undefined;
   }
@@ -88,9 +112,7 @@ export function getMcpCatalog(mcp: MCPClientManager): McpCatalog {
       state: mcp.mcpConnections[server.id]?.connectionState ?? "not-connected",
       authUrl: server.auth_url ?? undefined
     })),
-    tools: mcp.listTools(),
-    prompts: mcp.listPrompts(),
-    resources: mcp.listResources()
+    tools: mcp.listTools()
   };
 }
 
@@ -102,7 +124,7 @@ export async function handleDemoRequest(
   const url = new URL(request.url);
 
   if (request.method === "POST" && url.pathname.endsWith("/connect")) {
-    const input = await parseConnectRequest(request);
+    const input = parseConnectInput(await readJson(request));
     if (!input) {
       return Response.json(
         { error: "Expected a non-empty name and an HTTP(S) URL" },
@@ -135,6 +157,45 @@ export async function handleDemoRequest(
       return Response.json({ id, connection, discovery });
     }
     return Response.json({ id, connection });
+  }
+
+  if (request.method === "POST" && url.pathname.endsWith("/tools/call")) {
+    const input = parseToolCallInput(await readJson(request));
+    if (!input) {
+      return Response.json(
+        { error: "Expected serverId, tool name, and an arguments object" },
+        { status: 400 }
+      );
+    }
+    const connection = mcp.mcpConnections[input.serverId];
+    if (!connection) {
+      return Response.json(
+        { error: "MCP server is not connected" },
+        { status: 404 }
+      );
+    }
+    if (connection.connectionState !== "ready") {
+      return Response.json(
+        {
+          error: `MCP server is not ready (${connection.connectionState})`
+        },
+        { status: 409 }
+      );
+    }
+
+    try {
+      const result = await mcp.callTool({
+        serverId: input.serverId,
+        name: input.name,
+        arguments: input.arguments
+      });
+      return Response.json({ result });
+    } catch (cause) {
+      return Response.json(
+        { error: cause instanceof Error ? cause.message : String(cause) },
+        { status: 502 }
+      );
+    }
   }
 
   const marker = "/servers/";

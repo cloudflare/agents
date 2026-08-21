@@ -5,12 +5,11 @@ import {
   Input,
   PoweredByCloudflare,
   Surface,
-  Text
+  Text,
+  Textarea
 } from "@cloudflare/kumo";
 import {
   ArrowClockwiseIcon,
-  ChatTextIcon,
-  DatabaseIcon,
   InfoIcon,
   MoonIcon,
   PlugIcon,
@@ -20,18 +19,16 @@ import {
   WrenchIcon
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import type { McpCatalog } from "./demo-api";
 import "./styles.css";
 
-const DEFAULT_SERVER_NAME = "cloudflare-docs";
-const DEFAULT_SERVER_URL = "https://docs.mcp.cloudflare.com/mcp";
+const DEFAULT_SERVER_NAME = "cloudflare-mcp";
+const DEFAULT_SERVER_URL = "https://mcp.cloudflare.com/mcp";
 const EMPTY_CATALOG: McpCatalog = {
   servers: [],
-  tools: [],
-  prompts: [],
-  resources: []
+  tools: []
 };
 
 const OAUTH_WINDOW_FEATURES =
@@ -90,69 +87,117 @@ function StatusBadge({ state }: { state: string }) {
   );
 }
 
-function CapabilityPanel({
-  title,
-  icon,
-  items,
-  emptyDescription
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function ToolCard({
+  tool,
+  objectPath
 }: {
-  title: string;
-  icon: ReactNode;
-  items: ReadonlyArray<{
-    readonly name: string;
-    readonly description?: string;
-    readonly serverId?: string;
-    readonly uri?: string;
-  }>;
-  emptyDescription: string;
+  tool: McpCatalog["tools"][number];
+  objectPath: string;
 }) {
+  const [argumentsJson, setArgumentsJson] = useState("{}");
+  const [calling, setCalling] = useState(false);
+  const [result, setResult] = useState<unknown>();
+  const [callError, setCallError] = useState<string>();
+
+  const callTool = async () => {
+    setCalling(true);
+    setResult(undefined);
+    setCallError(undefined);
+    try {
+      const parsed: unknown = JSON.parse(argumentsJson);
+      if (!isRecord(parsed)) {
+        throw new Error("Tool arguments must be a JSON object");
+      }
+      const response = await fetch(`${objectPath}/tools/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          serverId: tool.serverId,
+          name: tool.name,
+          arguments: parsed
+        })
+      });
+      const payload: unknown = await response.json();
+      if (!isRecord(payload)) throw new Error("Invalid tool response");
+      if (!response.ok || typeof payload.error === "string") {
+        throw new Error(
+          typeof payload.error === "string" ? payload.error : "Tool call failed"
+        );
+      }
+      setResult(payload.result);
+    } catch (cause) {
+      setCallError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCalling(false);
+    }
+  };
+
+  const resultIsError = isRecord(result) && result.isError === true;
+
   return (
-    <Surface className="min-h-72 rounded-xl p-4 ring ring-kumo-line">
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-kumo-default">
-          {icon}
-          <Text size="sm" bold>
-            {title}
-          </Text>
+    <Surface className="rounded-xl p-4 ring ring-kumo-line">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="break-words text-sm font-medium text-kumo-default">
+            {tool.name}
+          </h3>
+          {tool.description ? (
+            <p className="mt-1 text-xs leading-5 text-kumo-subtle">
+              {tool.description}
+            </p>
+          ) : null}
         </div>
-        <Badge variant="secondary">{items.length}</Badge>
+        <Badge variant="secondary">{tool.serverId}</Badge>
       </div>
 
-      {items.length === 0 ? (
-        <Empty
-          icon={icon}
-          title={`No ${title.toLowerCase()} yet`}
-          description={emptyDescription}
+      <details className="mt-3 text-xs text-kumo-subtle">
+        <summary className="cursor-pointer">Input schema</summary>
+        <pre className="mt-2 overflow-x-auto rounded-lg bg-kumo-elevated p-3 font-mono text-[11px] leading-5">
+          {JSON.stringify(tool.inputSchema, null, 2)}
+        </pre>
+      </details>
+
+      <label
+        className="mt-3 block"
+        htmlFor={`tool-${tool.serverId}-${tool.name}`}
+      >
+        <span className="mb-1 block text-xs font-medium text-kumo-subtle">
+          Arguments (JSON)
+        </span>
+        <Textarea
+          id={`tool-${tool.serverId}-${tool.name}`}
+          value={argumentsJson}
+          onChange={(event) => setArgumentsJson(event.target.value)}
+          spellCheck={false}
+          className="min-h-24 resize-y font-mono text-xs"
         />
-      ) : (
-        <div className="space-y-2">
-          {items.map((item, index) => (
-            <div
-              key={`${item.serverId ?? "server"}-${item.name}-${index}`}
-              className="rounded-lg bg-kumo-elevated p-3"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <span className="min-w-0 break-words text-sm font-medium text-kumo-default">
-                  {item.name}
-                </span>
-                {item.serverId ? (
-                  <Badge variant="secondary">{item.serverId}</Badge>
-                ) : null}
-              </div>
-              {item.description ? (
-                <p className="mt-1 text-xs leading-5 text-kumo-subtle">
-                  {item.description}
-                </p>
-              ) : null}
-              {item.uri ? (
-                <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">
-                  {item.uri}
-                </p>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      )}
+      </label>
+
+      <Button
+        className="mt-3"
+        variant="primary"
+        disabled={calling}
+        icon={<WrenchIcon size={16} />}
+        onClick={() => void callTool()}
+      >
+        {calling ? "Calling…" : "Call tool"}
+      </Button>
+
+      {callError ? (
+        <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-lg bg-kumo-elevated p-3 text-xs text-kumo-danger">
+          {callError}
+        </pre>
+      ) : result !== undefined ? (
+        <pre
+          className={`mt-3 overflow-x-auto whitespace-pre-wrap rounded-lg bg-kumo-elevated p-3 text-xs ${resultIsError ? "text-kumo-danger" : "text-kumo-default"}`}
+        >
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      ) : null}
     </Surface>
   );
 }
@@ -341,7 +386,7 @@ function App() {
                 </Text>
                 <span className="mt-1 block">
                   <Text size="xs" variant="secondary">
-                    The public Cloudflare Docs server is ready to try.
+                    Enter any Streamable HTTP MCP endpoint.
                   </Text>
                 </span>
               </div>
@@ -468,7 +513,7 @@ function App() {
             <Empty
               icon={<PlugIcon size={24} />}
               title="No MCP servers"
-              description="Connect the Cloudflare Docs server above to populate the catalog."
+              description="Connect an MCP server above to populate the catalog."
             />
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
@@ -503,26 +548,35 @@ function App() {
           )}
         </section>
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          <CapabilityPanel
-            title="Tools"
-            icon={<WrenchIcon size={18} />}
-            items={catalog.tools}
-            emptyDescription="Tools appear after the server connects and discovery completes."
-          />
-          <CapabilityPanel
-            title="Prompts"
-            icon={<ChatTextIcon size={18} />}
-            items={catalog.prompts}
-            emptyDescription="This server has not exposed any prompts."
-          />
-          <CapabilityPanel
-            title="Resources"
-            icon={<DatabaseIcon size={18} />}
-            items={catalog.resources}
-            emptyDescription="This server has not exposed any resources."
-          />
-        </div>
+        <section>
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-semibold">Tools</h2>
+              <p className="text-xs text-kumo-subtle">
+                Enter a JSON object and invoke a discovered MCP tool directly.
+              </p>
+            </div>
+            <Badge variant="secondary">{catalog.tools.length}</Badge>
+          </div>
+
+          {catalog.tools.length === 0 ? (
+            <Empty
+              icon={<WrenchIcon size={24} />}
+              title="No tools discovered"
+              description="Authorize and connect a server to call its tools."
+            />
+          ) : (
+            <div className="grid gap-4 lg:grid-cols-2">
+              {catalog.tools.map((tool) => (
+                <ToolCard
+                  key={`${tool.serverId}-${tool.name}`}
+                  tool={tool}
+                  objectPath={objectPath}
+                />
+              ))}
+            </div>
+          )}
+        </section>
       </main>
 
       <footer className="border-t border-kumo-line bg-kumo-base px-5 py-3">
