@@ -4,11 +4,12 @@
 an Agent. It owns runtime handlers, ordered capability phases, current Agent
 context, and hibernating WebSocket connections.
 
-The base `Agent` interface exported from `agents/lifecycle` extends Cloudflare's
-`DurableObject`, requires the installed `Lifecycle`, and declares the optional
-semantic hooks Lifecycle dispatches. The batteries-included `Agent` class
-exported from `agents` is one implementation. It installs the same Lifecycle,
-then adds state, RPC, scheduling, MCP, workflows, fibers, and sub-agents.
+The `ComposableAgent` interface exported from `agents/lifecycle` extends
+Cloudflare's `DurableObject`, requires the installed `Lifecycle`, and declares
+the optional semantic hooks Lifecycle dispatches. The batteries-included
+`Agent` class exported from `agents` is one implementation. It installs the
+same Lifecycle, then adds state, RPC, scheduling, MCP, workflows, fibers, and
+sub-agents.
 
 ## Capability and user phases
 

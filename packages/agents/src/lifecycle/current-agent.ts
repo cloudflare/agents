@@ -7,10 +7,10 @@ import type { Connection, ConnectionContext } from "./types";
 /**
  * A Durable Object that has installed the Agents SDK Lifecycle.
  *
- * Pass a more specific Agent type to {@link getCurrentAgent} when shared code
- * needs APIs implemented by a particular Agent.
+ * Pass a more specific composable Agent type to {@link getCurrentAgent} when
+ * shared code needs APIs implemented by a particular Agent.
  */
-export interface Agent<
+export interface ComposableAgent<
   Env extends object = Cloudflare.Env,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
@@ -50,7 +50,7 @@ export type AgentContextStore = {
 
 /** Values returned by {@link getCurrentAgent}. */
 export type CurrentAgentContext<
-  Host extends DurableObject = Agent,
+  Host extends DurableObject = ComposableAgent,
   Email = unknown
 > = {
   agent: Host | undefined;
@@ -78,7 +78,7 @@ export const __DO_NOT_USE_WILL_BREAK__agentContext =
  * callable methods, and detached work.
  */
 export function getCurrentAgent<
-  Host extends DurableObject = Agent
+  Host extends DurableObject = ComposableAgent
 >(): CurrentAgentContext<Host> {
   const store = __DO_NOT_USE_WILL_BREAK__agentContext.getStore();
   if (!store) {
@@ -102,7 +102,7 @@ type LifecycleInvocationContext<
   Env extends object,
   Props extends Record<string, unknown>
 > = {
-  readonly host: Agent<Env, Props>;
+  readonly host: ComposableAgent<Env, Props>;
   readonly connection?: Connection;
   readonly request?: Request;
 };

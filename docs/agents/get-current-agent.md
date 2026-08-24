@@ -67,9 +67,9 @@ Lifecycle supplies the Agent and request dynamically for each invocation.
 
 ## Concrete Agent types
 
-Without a type argument, `agent` uses the lifecycle `Agent` interface: a
-`DurableObject` with an installed `Lifecycle` and its semantic hooks. Pass your
-concrete class when shared code needs its additional APIs:
+Without a type argument, `agent` uses `ComposableAgent`: a `DurableObject`
+with an installed `Lifecycle` and its semantic hooks. Pass your concrete class
+when shared code needs its additional APIs:
 
 ```ts
 function currentState() {
@@ -115,7 +115,7 @@ that establishes the appropriate entry context. Do not retain a `request`,
 ## API
 
 ```ts
-function getCurrentAgent<T extends DurableObject = Agent>(): {
+function getCurrentAgent<T extends DurableObject = ComposableAgent>(): {
   agent: T | undefined;
   connection: Connection | undefined;
   request: Request | undefined;

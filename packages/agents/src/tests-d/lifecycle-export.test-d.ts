@@ -10,7 +10,7 @@ import {
 import {
   getCurrentAgent,
   Lifecycle,
-  type Agent,
+  type ComposableAgent,
   type Connection,
   type ConnectionContext,
   type DurableObjectCapability,
@@ -30,11 +30,11 @@ class LifecycleTypeProbe extends DurableObject {
 }
 
 expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<DurableObject>();
-expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<Agent>();
+expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<ComposableAgent>();
 expectTypeOf<LifecycleTypeProbe["lifecycle"]>().toEqualTypeOf<Lifecycle>();
 
 type ProbeProps = { readonly label: string };
-type ProbeAgent = Agent<Cloudflare.Env, ProbeProps>;
+type ProbeAgent = ComposableAgent<Cloudflare.Env, ProbeProps>;
 expectTypeOf<ProbeAgent["onStart"]>().toEqualTypeOf<
   ((props?: ProbeProps) => void | Promise<void>) | undefined
 >();
@@ -74,7 +74,9 @@ expectTypeOf<ProbeAgent["getConnectionTags"]>().toEqualTypeOf<
     ) => string[] | Promise<string[]>)
   | undefined
 >();
-expectTypeOf(getCurrentAgent().agent).toEqualTypeOf<Agent | undefined>();
+expectTypeOf(getCurrentAgent().agent).toEqualTypeOf<
+  ComposableAgent | undefined
+>();
 expectTypeOf(getCurrentAgent<LifecycleTypeProbe>().agent).toEqualTypeOf<
   LifecycleTypeProbe | undefined
 >();

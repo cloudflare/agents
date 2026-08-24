@@ -160,9 +160,9 @@ class RequestAudit implements DurableObjectCapability {
 }
 ```
 
-`getCurrentAgent().agent` defaults to the lifecycle `Agent` interface: a
-`DurableObject` with an installed `Lifecycle` and its semantic hooks. Pass your
-concrete class when shared code needs its additional APIs:
+`getCurrentAgent().agent` defaults to `ComposableAgent`: a `DurableObject`
+with an installed `Lifecycle` and its semantic hooks. Pass your concrete class
+when shared code needs its additional APIs:
 
 ```ts
 const { agent } = getCurrentAgent<MyAgent>();

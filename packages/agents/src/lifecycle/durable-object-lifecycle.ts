@@ -13,7 +13,7 @@ import {
 
 import {
   runInLifecycleInvocation,
-  type Agent as LifecycleAgent
+  type ComposableAgent
 } from "./current-agent";
 import { isBenignTeardownError } from "./transport-errors";
 
@@ -120,7 +120,7 @@ function decodeProps(header: string): unknown {
 type LifecycleHost<
   Env extends object,
   Props extends Record<string, unknown>
-> = LifecycleAgent<Env, Props> & {
+> = ComposableAgent<Env, Props> & {
   readonly ctx: DurableObjectState;
   readonly constructor: { readonly name: string };
 };
