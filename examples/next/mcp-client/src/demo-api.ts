@@ -83,13 +83,9 @@ async function readJson(request: Request): Promise<unknown> {
 /** Configure the popup-closing OAuth response used only by the demo UI. */
 export function configureOAuthPopup(mcp: MCPClientManager): void {
   mcp.configureOAuthCallback({
-    customHandler: (result) => {
-      const message = JSON.stringify({
-        type: "mcp-oauth-complete",
-        success: result.authSuccess
-      });
+    customHandler: () => {
       return new Response(
-        `<!doctype html><title>MCP authorization complete</title><p>You can close this window.</p><script>window.opener?.postMessage(${message}, window.location.origin); window.close();</script>`,
+        "<!doctype html><title>MCP authorization complete</title><p>You can close this window.</p><script>window.close();</script>",
         {
           headers: {
             "content-type": "text/html; charset=utf-8",

@@ -30,6 +30,7 @@ localStorage.setItem(INSTANCE_KEY, instanceName);
 const OBJECT_PATH = `/agents/mcp-client-object/${encodeURIComponent(instanceName)}`;
 const OAUTH_WINDOW_FEATURES =
   "width=640,height=760,resizable=yes,scrollbars=yes";
+const OAUTH_DIRECT_WINDOW_FEATURES = `${OAUTH_WINDOW_FEATURES},noopener`;
 const EMPTY_CATALOG: McpCatalog = { servers: [], tools: [] };
 
 type ConnectResult = {
@@ -205,20 +206,6 @@ function App() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  useEffect(() => {
-    const onMessage = (event: MessageEvent<unknown>) => {
-      if (
-        event.origin === window.location.origin &&
-        isRecord(event.data) &&
-        event.data.type === "mcp-oauth-complete"
-      ) {
-        void refresh();
-      }
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [refresh]);
-
   const connect = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const popup = window.open(
@@ -238,7 +225,10 @@ function App() {
       // SAFETY: The connect route returns this local protocol shape.
       const result = (await response.json()) as ConnectResult;
       if (result.connection.authUrl) {
-        popup?.location.assign(result.connection.authUrl);
+        if (popup) {
+          popup.opener = null;
+          popup.location.assign(result.connection.authUrl);
+        }
       } else {
         popup?.close();
       }
@@ -376,7 +366,7 @@ function App() {
                   window.open(
                     authorization.authUrl,
                     "mcp-oauth",
-                    OAUTH_WINDOW_FEATURES
+                    OAUTH_DIRECT_WINDOW_FEATURES
                   )
                 }
               >
