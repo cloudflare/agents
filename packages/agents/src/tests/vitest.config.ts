@@ -23,6 +23,7 @@ export default defineConfig({
     name: "workers",
     retry: 3,
     include: [path.join(testsDir, "**/*.test.ts")],
+    exclude: [path.join(testsDir, "lifecycle/**/*.test.ts")],
     setupFiles: [path.join(testsDir, "setup.ts")],
     testTimeout: 10000,
     // Under the full parallel matrix, tearing down the workers-pool isolates can

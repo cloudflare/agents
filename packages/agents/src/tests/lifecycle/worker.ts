@@ -1,13 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
-import { routeAgentRequest } from "../index";
+import { routeAgentRequest } from "../../index";
 import {
   Lifecycle,
   type Connection,
   type DurableObjectCapability,
   type WSMessage
-} from "../lifecycle";
-import { MCPClientManager } from "../mcp/client";
-import { MCPConnectionState } from "../mcp/client-connection";
+} from "../../lifecycle";
+import { MCPClientManager } from "../../mcp/client";
+import { MCPConnectionState } from "../../mcp/client-connection";
 
 export type Env = {
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
