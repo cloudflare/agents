@@ -2479,7 +2479,7 @@ export class Agent<
 
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
-      this.mcp.onServerStateChanged(async () => {
+      this.mcp.onServerStateChanged(() => {
         this.broadcastMcpServers();
       })
     );
@@ -2928,7 +2928,15 @@ export class Agent<
       );
   }
 
-  /** Preserve Agent-specific policy around the reusable MCP capability. */
+  /**
+   * Preserve Agent execution semantics around the reusable MCP capability.
+   *
+   * Do not replace this with `lifecycle.use(this.mcp)` without first adding an
+   * Agent execution boundary to Lifecycle itself. Capability hooks run before
+   * Agent's wrapped host hooks, so direct installation would lose
+   * `getCurrentAgent()` during provider restoration and OAuth callbacks, and
+   * would restore MCP before persisted facet identity is hydrated.
+   */
   private _agentMcpLifecycleAdapter(): DurableObjectCapability<Props> {
     return {
       onStart: () =>

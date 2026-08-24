@@ -1,4 +1,4 @@
-import { Agent } from "../../index.ts";
+import { Agent, getCurrentAgent } from "../../index.ts";
 import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
 import type { AgentMcpOAuthProvider } from "../../mcp/do-oauth-client-provider";
 import {
@@ -47,6 +47,19 @@ async function createAuthorizationUrl(
 export class TestOAuthAgent extends Agent {
   async onRequest(_request: Request): Promise<Response> {
     return new Response("Test OAuth Agent");
+  }
+
+  /** Configure a callback that reports the current Agent request context. */
+  configureOAuthContextProbe(): void {
+    this.mcp.configureOAuthCallback({
+      customHandler: () => {
+        const { agent, request } = getCurrentAgent();
+        return Response.json({
+          hasAgentContext: agent === this,
+          requestUrl: request?.url ?? null
+        });
+      }
+    });
   }
 
   // Allow tests to configure OAuth callback behavior
@@ -950,9 +963,11 @@ export class TestOAuthAgent extends Agent {
 // Test Agent that overrides createMcpOAuthProvider with a custom implementation
 export class TestCustomOAuthAgent extends Agent {
   private _customProviderCallbackUrl: string | undefined;
+  private _restoreProviderHadAgentContext: boolean | undefined;
 
   createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
     this._customProviderCallbackUrl = callbackUrl;
+    this._restoreProviderHadAgentContext = getCurrentAgent().agent === this;
     // Return a minimal mock that satisfies the interface
     return {
       authUrl: undefined,
@@ -992,6 +1007,28 @@ export class TestCustomOAuthAgent extends Agent {
       clientId: provider.clientId,
       callbackUrl: this._customProviderCallbackUrl
     };
+  }
+
+  /** Seed an OAuth row that the next lifecycle startup must restore. */
+  seedOAuthServerForLifecycleRestore(callbackUrl: string): void {
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (
+        id, name, server_url, client_id, auth_url, callback_url, server_options
+      ) VALUES (
+        ${"lifecycle-restore-context"},
+        ${"Lifecycle Restore Context"},
+        ${"http://restore-context.example.com"},
+        ${null},
+        ${"https://auth.example.com/authorize"},
+        ${callbackUrl},
+        ${null}
+      )
+    `;
+  }
+
+  /** Report whether the restored provider was constructed in Agent context. */
+  getRestoreProviderContext(): boolean | undefined {
+    return this._restoreProviderHadAgentContext;
   }
 
   async testRestoreUsesOverride(): Promise<{
