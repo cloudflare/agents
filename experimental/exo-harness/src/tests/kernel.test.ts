@@ -64,6 +64,9 @@ describe("genesis", () => {
 
     const identity = await agent.getFileContent("/harness/identity.md");
     expect(identity).toContain("PERSONA:");
+    expect(await agent.getFileContent("/harness/policy.json")).toContain(
+      '"model": "openai/gpt-5.6-terra"'
+    );
 
     const journal = await agent.getJournal();
     expect(kinds(journal)).toContain("genesis");

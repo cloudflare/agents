@@ -26,7 +26,7 @@ Operating rules:
 `;
 
 export const SEED_POLICY = `{
-  "model": "openai/gpt-5.4",
+  "model": "openai/gpt-5.6-terra",
   "maxSteps": 8
 }
 `;

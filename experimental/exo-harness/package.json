@@ -12,7 +12,6 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
     "@ai-sdk/provider": "^4.0.0",
     "@cloudflare/ai-chat": "*",

@@ -17,10 +17,7 @@ import jqModules from "@cloudflare/computer/shell/jq";
 import jsExecModules from "@cloudflare/computer/shell/js-exec";
 import sqliteModules from "@cloudflare/computer/shell/sqlite";
 import fileModules from "@cloudflare/computer/shell/file";
-import { createOpenAI } from "@ai-sdk/openai";
 import { createWorkersAI } from "workers-ai-provider";
-import { anthropic } from "workers-ai-provider/anthropic";
-import { openai } from "workers-ai-provider/openai";
 import {
   streamText,
   generateText,
@@ -44,8 +41,7 @@ import {
   type ExoWorkspace
 } from "./kernel/harness";
 import {
-  createBindingRunFetch,
-  openaiResponsesModelId,
+  createExoGatewayOpenAIModel,
   parseModelSpec,
   publicModelError
 } from "./kernel/model";
@@ -73,12 +69,17 @@ interface AdoptableKernel {
   adoptGenesis(origin: ForkOrigin): Promise<{ version: number; sha: string }>;
 }
 
+/** Runtime bindings plus the managed team AI Gateway secret. */
+export type ExoHarnessEnv = Env & {
+  CLOUDFLARE_AIG_TOKEN?: string;
+};
+
 let accessAuthenticator:
   | ReturnType<typeof createAccessRequestAuthenticator>
   | undefined;
 
 function configuredAccessAuthenticator(
-  env: Env
+  env: ExoHarnessEnv
 ): ReturnType<typeof createAccessRequestAuthenticator> | Response {
   if (accessAuthenticator) return accessAuthenticator;
   const parsed = parseAccessAuthenticationConfig(env);
@@ -102,7 +103,7 @@ export { WorkspaceProxy, WorkspaceServiceProxy };
  * tools) lives as files under /harness in the Workspace and is hot-loaded
  * on every turn — see src/kernel/harness.ts.
  */
-export class ExoKernel extends AIChatAgent<Env, ExoState> {
+export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
   /** Keep the Access-derived Durable Object name out of client protocol messages. */
   static options = { sendIdentityOnConnect: false };
 
@@ -614,11 +615,8 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
         return createMockModel();
       case "workers-ai":
         return this.workersAI()(parsed.id);
-      case "catalog": {
-        const openaiId = openaiResponsesModelId(parsed.slug);
-        if (openaiId) return this.openaiResponses(openaiId);
-        return this.workersAI()(parsed.slug);
-      }
+      case "openai":
+        return this.openaiResponses(parsed.id);
       default: {
         const _exhaustive: never = parsed;
         throw new Error(`unhandled model kind: ${JSON.stringify(_exhaustive)}`);
@@ -626,53 +624,20 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
     }
   }
 
-  /**
-   * Shared Workers AI + AI Gateway provider. `@cf/...` stays on Workers AI;
-   * `"<provider>/<model>"` catalog slugs (openai/gpt-5.4, …) go through the
-   * AI binding's gateway delegate and Unified Billing — no provider keys.
-   */
+  /** Workers AI provider for `@cf/...` models selected by harness policy. */
   workersAI(): ReturnType<typeof createWorkersAI> {
     if (!this.env.AI) {
       throw new Error(
         "This model needs the Workers AI binding. Use MODEL_OVERRIDE=mock offline, or start with wrangler.jsonc / wrangler.dev.jsonc."
       );
     }
-    this.#workersai ??= createWorkersAI({
-      binding: this.env.AI,
-      providers: [openai, anthropic],
-      gateway: this.env.AI_GATEWAY_ID
-        ? { id: this.env.AI_GATEWAY_ID }
-        : undefined
-    });
+    this.#workersai ??= createWorkersAI({ binding: this.env.AI });
     return this.#workersai;
   }
 
-  /**
-   * OpenAI catalog models via the Responses API (luna/sol/terra are
-   * Responses-only; Chat Completions 400s). The @ai-sdk/openai client
-   * shapes the Responses body; `createBindingRunFetch` sends it through
-   * `env.AI.run` so Unified Billing authenticates — no OpenAI key.
-   */
+  /** OpenAI Responses model authenticated through the managed team gateway. */
   openaiResponses(modelId: string): LanguageModel {
-    if (!this.env.AI) {
-      throw new Error(
-        "This model needs the Workers AI binding. Use MODEL_OVERRIDE=mock offline, or start with wrangler.jsonc / wrangler.dev.jsonc."
-      );
-    }
-    const gatewayId = this.env.AI_GATEWAY_ID;
-    if (!gatewayId) {
-      throw new Error(
-        `openai/${modelId} needs AI_GATEWAY_ID (Responses API via AI Gateway)`
-      );
-    }
-    return createOpenAI({
-      apiKey: "unused",
-      fetch: createBindingRunFetch({
-        binding: this.env.AI,
-        slug: `openai/${modelId}`,
-        gateway: gatewayId
-      })
-    }).responses(modelId);
+    return createExoGatewayOpenAIModel(modelId, this.env.CLOUDFLARE_AIG_TOKEN);
   }
 
   #journalTurnError(source: string, message: string): void {
@@ -702,7 +667,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
       "You are a self-modifying agent. Your evolvable source lives in your",
       "workspace under /harness and is hot-loaded every turn:",
       "- /harness/identity.md — your identity and operating rules (the section after this briefing)",
-      '- /harness/policy.json — model policy, e.g. {"model": "openai/gpt-5.6-luna", "maxSteps": 8} (Workers AI: "workers-ai:@cf/<id>"; openai/* uses the Responses API)',
+      '- /harness/policy.json — model policy, e.g. {"model": "openai/gpt-5.6-terra", "maxSteps": 8} (Workers AI: "workers-ai:@cf/<id>"; openai/* uses the managed Responses API)',
       contextLine,
       "- /harness/tools/*.js — your harness tools (ES modules; see tools/echo.js for the format)",
       "",
@@ -871,7 +836,7 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: ExoHarnessEnv, ctx: ExecutionContext) {
     const pathname = new URL(request.url).pathname;
     if (pathname !== "/agent") {
       return new Response("Not found", { status: 404 });
@@ -888,4 +853,4 @@ export default {
     );
     return agent.fetch(request);
   }
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<ExoHarnessEnv>;

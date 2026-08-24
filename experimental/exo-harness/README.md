@@ -87,22 +87,20 @@ workspace.
 
 ```bash
 pnpm install
+cp .dev.vars.example .dev.vars # add your team gateway token
 pnpm run start
 ```
 
-By default the model comes from `/harness/policy.json` (`openai/gpt-5.4`),
-routed through the `AI` binding and the `exo-harness` [AI Gateway](https://developers.cloudflare.com/ai-gateway/)
-(Unified Billing — no OpenAI API key in the worker). Edit that file and
-`activate_harness` to switch: `workers-ai:@cf/moonshotai/kimi-k2.7-code`
-stays on Workers AI; `openai/<id>` slugs (including Responses-only models
-like `openai/gpt-5.6-luna`) use the OpenAI Responses API through
-`env.AI.run` (Unified Billing — the `exo-harness` gateway must have
-authentication enabled, or third-party `/run` calls 402; do not use the
-OpenAI-native gateway passthrough, which 401s without a provider key);
-other catalog slugs (`anthropic/claude-sonnet-4-5`, …) use the Workers AI
-run path. `MODEL_OVERRIDE` in wrangler vars forces a spec for every agent
-and ignores policy. A failed model call is journaled and shown in the
-chat pane — the AI SDK default used to hide it as "An error occurred." Local dev runs under a separate worker name
+By default, new agents use `openai/gpt-5.6-terra` from
+`/harness/policy.json`. OpenAI models use the Responses API through the
+managed team [AI Gateway](https://developers.cloudflare.com/ai-gateway/),
+authenticated by `CLOUDFLARE_AIG_TOKEN` and attributed to
+`agents-team-exo-harness`. Put the token in a local `.dev.vars` file for
+`pnpm run start`; never commit it. `workers-ai:@cf/<id>` remains available
+through the `AI` binding. Other third-party provider slugs are rejected.
+`MODEL_OVERRIDE` forces a model for every agent and ignores policy. A failed
+model call is journaled and shown safely in the chat pane. Local dev runs
+under a separate worker name
 (`wrangler.dev.jsonc`, `exo-harness-dev`): the remote-bindings tunnel uses
 the worker's own `workers.dev` host, and the production host is behind
 Cloudflare Access, which would otherwise 302 every binding call. Without
@@ -142,13 +140,17 @@ protocol:
    journal one insight about yourself". Watch the Tasks tab count down and
    the journal record the autonomous turn when it fires.
 7. **Switch models** — ask it to set `/harness/policy.json` `"model"` to
-   `anthropic/claude-sonnet-4-5` (or back to
-   `workers-ai:@cf/moonshotai/kimi-k2.7-code`) and `activate_harness`.
-   The Context tab's model badge is the live spec.
+   `workers-ai:@cf/moonshotai/kimi-k2.7-code` (or back to
+   `openai/gpt-5.6-terra`) and `activate_harness`. The Context tab's model
+   badge is the live spec.
 
 ## Deploy
 
+Install the team gateway token without putting it in Wrangler vars or source,
+then deploy:
+
 ```bash
+pnpm exec wrangler secret put CLOUDFLARE_AIG_TOKEN
 pnpm run deploy
 ```
 

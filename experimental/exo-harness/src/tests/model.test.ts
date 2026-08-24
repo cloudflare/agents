@@ -1,161 +1,260 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  createBindingRunFetch,
-  gatewayErrorMessage,
-  openaiResponsesModelId,
-  parseJsonRequestBody,
+  createExoGatewayOpenAIModel,
   parseModelSpec,
   publicModelError
 } from "../kernel/model";
 
-describe("parseModelSpec", () => {
-  it("accepts the offline mock driver", () => {
-    expect(parseModelSpec("mock")).toEqual({ kind: "mock" });
-  });
+const completion = {
+  id: "resp-test",
+  created_at: 1,
+  model: "gpt-5.6-terra",
+  output: [
+    {
+      type: "message",
+      id: "msg-test",
+      role: "assistant",
+      content: [
+        { type: "output_text", text: "ok", annotations: [], logprobs: null }
+      ]
+    }
+  ],
+  incomplete_details: null,
+  usage: {
+    input_tokens: 1,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens: 2,
+    output_tokens_details: { reasoning_tokens: 1 }
+  }
+};
 
-  it("keeps the workers-ai: prefix as a Workers AI id", () => {
+const toolCallStreamEvents = [
+  {
+    type: "response.created",
+    response: {
+      id: "resp-stream",
+      created_at: 1,
+      model: "gpt-5.6-terra",
+      service_tier: null
+    }
+  },
+  {
+    type: "response.output_item.added",
+    output_index: 0,
+    item: {
+      type: "function_call",
+      id: "fc-echo",
+      call_id: "call-echo",
+      name: "echo",
+      arguments: "",
+      namespace: null
+    }
+  },
+  {
+    type: "response.function_call_arguments.delta",
+    item_id: "fc-echo",
+    output_index: 0,
+    delta: '{"message":"hi"}'
+  },
+  {
+    type: "response.output_item.done",
+    output_index: 0,
+    item: {
+      type: "function_call",
+      id: "fc-echo",
+      call_id: "call-echo",
+      name: "echo",
+      arguments: '{"message":"hi"}',
+      status: "completed",
+      namespace: null
+    }
+  },
+  {
+    type: "response.completed",
+    response: {
+      incomplete_details: null,
+      usage: {
+        input_tokens: 1,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 2,
+        output_tokens_details: { reasoning_tokens: 1 }
+      },
+      service_tier: null
+    }
+  }
+];
+
+const prompt = [
+  { role: "user" as const, content: [{ type: "text" as const, text: "hello" }] }
+];
+
+describe("parseModelSpec", () => {
+  it("accepts supported offline, Workers AI, and OpenAI models", () => {
+    expect(parseModelSpec("mock")).toEqual({ kind: "mock" });
     expect(parseModelSpec("workers-ai:@cf/moonshotai/kimi-k2.7-code")).toEqual({
       kind: "workers-ai",
       id: "@cf/moonshotai/kimi-k2.7-code"
     });
-  });
-
-  it("treats a bare @cf/ id as Workers AI, not a catalog slug", () => {
     expect(parseModelSpec("@cf/moonshotai/kimi-k2.7-code")).toEqual({
       kind: "workers-ai",
       id: "@cf/moonshotai/kimi-k2.7-code"
     });
-  });
-
-  it("accepts AI Gateway catalog slugs", () => {
-    expect(parseModelSpec("openai/gpt-5.4")).toEqual({
-      kind: "catalog",
-      slug: "openai/gpt-5.4"
+    expect(parseModelSpec("openai/gpt-5.6-terra")).toEqual({
+      kind: "openai",
+      id: "gpt-5.6-terra"
     });
-    expect(parseModelSpec("anthropic/claude-sonnet-4-5")).toEqual({
-      kind: "catalog",
-      slug: "anthropic/claude-sonnet-4-5"
+    expect(parseModelSpec("openai:gpt-5.6-terra")).toEqual({
+      kind: "openai",
+      id: "gpt-5.6-terra"
     });
   });
 
-  it("accepts provider:model as a catalog slug", () => {
-    expect(parseModelSpec("openai:gpt-5.4")).toEqual({
-      kind: "catalog",
-      slug: "openai/gpt-5.4"
-    });
-  });
-
-  it("rejects empty and unknown shapes", () => {
+  it("rejects empty, malformed, and unsupported provider specs", () => {
     expect(() => parseModelSpec("")).toThrow(/empty/);
     expect(() => parseModelSpec("workers-ai:")).toThrow(/empty/);
-    expect(() => parseModelSpec("gpt-5.4")).toThrow(/Unknown model/);
+    expect(() => parseModelSpec("openai/")).toThrow(/empty/);
+    expect(() => parseModelSpec("gpt-5.6-terra")).toThrow(/Unknown model/);
+    expect(() => parseModelSpec("anthropic/claude-sonnet-4-5")).toThrow(
+      'Unsupported model provider "anthropic"'
+    );
   });
 });
 
-describe("openaiResponsesModelId", () => {
-  it("strips the openai/ prefix for Responses-API catalog slugs", () => {
-    expect(openaiResponsesModelId("openai/gpt-5.6-luna")).toBe("gpt-5.6-luna");
-    expect(openaiResponsesModelId("anthropic/claude-sonnet-4-5")).toBeNull();
-    expect(openaiResponsesModelId("openai/")).toBeNull();
+describe("createExoGatewayOpenAIModel", () => {
+  it("routes Terra through the managed gateway with team authentication and attribution", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json(completion)
+    );
+    const model = createExoGatewayOpenAIModel(
+      "gpt-5.6-terra",
+      "team-token",
+      fetch
+    );
+
+    await model.doGenerate({
+      prompt,
+      headers: {
+        authorization: "Bearer placeholder-provider-token",
+        "x-api-key": "placeholder-provider-key"
+      }
+    });
+
+    expect(fetch).toHaveBeenCalledOnce();
+    const [input, init] = fetch.mock.calls[0];
+    expect(String(input)).toBe(
+      "https://gateway.ai.cloudflare.com/v1/27b146402af2103944379f33841b6234/project-gateway/openai/v1/responses"
+    );
+    const headers = new Headers(init?.headers);
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("x-api-key")).toBeNull();
+    expect(headers.get("cf-aig-authorization")).toBe("Bearer team-token");
+    expect(headers.get("cf-aig-metadata")).toBe(
+      JSON.stringify({ project: "agents-team-exo-harness" })
+    );
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: "gpt-5.6-terra"
+    });
+  });
+
+  it("preserves streaming, abort signals, and tool calls", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () =>
+        new Response(
+          toolCallStreamEvents
+            .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+            .join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } }
+        )
+    );
+    const controller = new AbortController();
+    const model = createExoGatewayOpenAIModel(
+      "gpt-5.6-terra",
+      "team-token",
+      fetch
+    );
+
+    const result = await model.doStream({
+      prompt,
+      abortSignal: controller.signal,
+      tools: [
+        {
+          type: "function",
+          name: "echo",
+          description: "Echo a message",
+          inputSchema: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"]
+          }
+        }
+      ]
+    });
+    const chunks: unknown[] = [];
+    for await (const chunk of result.stream) chunks.push(chunk);
+
+    expect(fetch).toHaveBeenCalledOnce();
+    const [, init] = fetch.mock.calls[0];
+    expect(init?.signal).toBe(controller.signal);
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: "gpt-5.6-terra",
+      stream: true,
+      tools: [
+        {
+          type: "function",
+          name: "echo"
+        }
+      ]
+    });
+    expect(chunks).toContainEqual(
+      expect.objectContaining({
+        type: "tool-call",
+        toolCallId: "call-echo",
+        toolName: "echo",
+        input: '{"message":"hi"}'
+      })
+    );
+  });
+
+  it.each([undefined, "", "   "])(
+    "fails closed when the team gateway token is unavailable (%s)",
+    (token) => {
+      expect(() =>
+        createExoGatewayOpenAIModel("gpt-5.6-terra", token, vi.fn())
+      ).toThrow("CLOUDFLARE_AIG_TOKEN is not configured");
+    }
+  );
+
+  it("keeps gateway failures client-safe", async () => {
+    const token = "secret-team-token";
+    const model = createExoGatewayOpenAIModel(
+      "gpt-5.6-terra",
+      token,
+      vi.fn<typeof globalThis.fetch>(async () =>
+        Response.json(
+          { error: { message: "Gateway unavailable", type: "gateway_error" } },
+          { status: 503 }
+        )
+      )
+    );
+
+    let message = "";
+    try {
+      await model.doGenerate({ prompt });
+    } catch (error) {
+      message = publicModelError(error);
+    }
+
+    expect(message).toContain("Gateway unavailable");
+    expect(message).not.toContain(token);
+    expect(message).not.toContain("\n");
   });
 });
 
 describe("publicModelError", () => {
-  it("returns a one-line message without stacking", () => {
+  it("returns a bounded one-line message without a stack", () => {
     expect(publicModelError(new Error("Invalid input\n    at foo"))).toBe(
       "Invalid input"
     );
     expect(publicModelError("plain")).toBe("plain");
-  });
-});
-
-describe("parseJsonRequestBody", () => {
-  it("parses string and byte bodies", () => {
-    expect(parseJsonRequestBody('{"input":"hi"}')).toEqual({ input: "hi" });
-    expect(parseJsonRequestBody(new TextEncoder().encode('{"n":1}'))).toEqual({
-      n: 1
-    });
-    expect(parseJsonRequestBody(undefined)).toEqual({});
-  });
-});
-
-describe("createBindingRunFetch", () => {
-  it("forwards the Responses body to env.AI.run on the Unified Billing path", async () => {
-    const calls: {
-      model: string;
-      inputs: Record<string, unknown>;
-      options: Record<string, unknown> | undefined;
-    }[] = [];
-    const fetchImpl = createBindingRunFetch({
-      slug: "openai/gpt-5.6-luna",
-      gateway: "exo-harness",
-      binding: {
-        async run(model, inputs, options) {
-          calls.push({ model, inputs, options });
-          return new Response(JSON.stringify({ id: "resp_test" }), {
-            status: 200
-          });
-        }
-      }
-    });
-
-    const resp = await fetchImpl("https://api.openai.com/v1/responses", {
-      method: "POST",
-      body: JSON.stringify({
-        model: "gpt-5.6-luna",
-        input: "pong",
-        max_output_tokens: 16,
-        stream: true
-      })
-    });
-
-    expect(resp.status).toBe(200);
-    expect(await resp.json()).toEqual({ id: "resp_test" });
-    expect(calls).toHaveLength(1);
-    expect(calls[0].model).toBe("openai/gpt-5.6-luna");
-    expect(calls[0].inputs).toEqual({
-      input: "pong",
-      max_output_tokens: 16,
-      stream: true
-    });
-    expect(calls[0].options).toEqual({
-      gateway: { id: "exo-harness" },
-      returnRawResponse: true
-    });
-  });
-
-  it("throws the gateway JSON error instead of HTTP status text", async () => {
-    const fetchImpl = createBindingRunFetch({
-      slug: "openai/gpt-5.6-luna",
-      gateway: "exo-harness",
-      binding: {
-        async run() {
-          return new Response(
-            JSON.stringify({
-              error:
-                "Gateway authentication is required to use unified billing. Enable authentication on your gateway or provide your own API key (BYOK)."
-            }),
-            { status: 402, statusText: "Payment Required" }
-          );
-        }
-      }
-    });
-
-    await expect(
-      fetchImpl("https://api.openai.com/v1/responses", {
-        method: "POST",
-        body: JSON.stringify({ input: "hi" })
-      })
-    ).rejects.toThrow(/Gateway authentication is required/);
-  });
-});
-
-describe("gatewayErrorMessage", () => {
-  it("reads error from a JSON body", async () => {
-    const resp = new Response(JSON.stringify({ error: "credits empty" }), {
-      status: 402,
-      statusText: "Payment Required"
-    });
-    expect(await gatewayErrorMessage(resp)).toBe("credits empty");
   });
 });

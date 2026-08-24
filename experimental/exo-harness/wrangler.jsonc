@@ -14,16 +14,9 @@
     { "binding": "ARTIFACTS", "namespace": "exo-harness", "remote": true }
   ],
   "vars": {
-    // "" = use the model from /harness/policy.json; "mock" = offline dev
-    // driver (see src/kernel/mock-model.ts); "workers-ai:<id>"; or an
-    // AI Gateway catalog slug ("openai/gpt-5.4").
+    // "" = use /harness/policy.json; "mock" = offline; "workers-ai:<id>"
+    // = Workers AI; "openai/<id>" = the managed team AI Gateway.
     "MODEL_OVERRIDE": "",
-    // AI Gateway used for third-party catalog slugs (Unified Billing).
-    // That gateway must have authentication enabled — Unified Billing
-    // 402s third-party /run calls on an open gateway. Empty = account
-    // "default" gateway. Dedicated so exo logs stay separate from
-    // other apps on this account.
-    "AI_GATEWAY_ID": "exo-harness",
     // Environment prefix for per-agent Artifacts repo names, so prod and
     // local dev agents with the same name never share (and force-push
     // over) the same mirror.
