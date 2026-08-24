@@ -35,11 +35,13 @@ import {
   type LegacyCallToolResultSchema
 } from "./client-invoker";
 import { toErrorMessage } from "./errors";
-import { isDurableObjectNamespace, RPC_DO_PREFIX } from "./rpc";
+import { restoreRpcConnections } from "./client-rpc";
+import { RPC_DO_PREFIX } from "./rpc";
 import type { McpClientOptions, TransportType } from "./types";
 import {
   decodeMcpServerOptions,
   encodeMcpServerOptions,
+  ensureMcpServerTable,
   withMcpSession,
   type MCPServerRow,
   type PersistedMcpServerOptions
@@ -363,13 +365,13 @@ export type MCPClientManagerOptions = {
    * Runtime bindings used to restore persisted RPC MCP connections.
    * Required when the durable catalog contains `rpc://` servers.
    */
-  env?: Cloudflare.Env;
+  readonly env?: Cloudflare.Env;
 
   /** Durable storage that owns the MCP server catalog. */
-  storage: DurableObjectStorage;
+  readonly storage: DurableObjectStorage;
 
   /** Construct the OAuth provider used for a persisted HTTP server. */
-  createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
+  readonly createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
 };
 
 /**
@@ -427,7 +429,7 @@ export class MCPClientManager implements DurableObjectCapability {
    *
    * @param _name - MCP client implementation name sent during negotiation.
    * @param _version - MCP client implementation version sent during negotiation.
-   * @param options - Explicit storage and OAuth dependencies.
+   * @param options - Explicit runtime, storage, and OAuth dependencies.
    */
   constructor(
     private readonly _name: string,
@@ -444,12 +446,12 @@ export class MCPClientManager implements DurableObjectCapability {
     this._createAuthProviderFn = options.createAuthProvider;
   }
 
-  /** Restore persisted HTTP connections before the host handles work. */
+  /** Restore persisted HTTP and RPC connections before the host handles work. */
   async onStart(): Promise<void> {
     const schemaVersion =
       (await this._storage.get<number>(MCP_SCHEMA_VERSION_KEY)) ?? 0;
     if (schemaVersion < CURRENT_MCP_SCHEMA_VERSION) {
-      this.ensureSchema();
+      ensureMcpServerTable(this._storage);
       await this._storage.put(
         MCP_SCHEMA_VERSION_KEY,
         CURRENT_MCP_SCHEMA_VERSION
@@ -457,7 +459,11 @@ export class MCPClientManager implements DurableObjectCapability {
     }
 
     await this.restoreConnectionsFromStorage(this._name);
-    await this.restoreRpcConnectionsFromStorage();
+    await restoreRpcConnections(
+      this,
+      this._env,
+      this.getRpcServersFromStorage()
+    );
     this._onServerStateChanged.fire();
   }
 
@@ -478,20 +484,6 @@ export class MCPClientManager implements DurableObjectCapability {
       });
     }
     return this.oauthCallbackResponse(result, request);
-  }
-
-  private ensureSchema(): void {
-    this.sql(`
-          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )
-        `);
   }
 
   private oauthCallbackResponse(
@@ -987,8 +979,8 @@ export class MCPClientManager implements DurableObjectCapability {
 
   /**
    * Save an RPC server to storage for hibernation recovery.
-   * The bindingName is stored in server_options so the Agent can look up
-   * the namespace from env during restore.
+   * The binding name is stored so this manager can resolve the namespace from
+   * its runtime environment during restore.
    */
   saveRpcServerToStorage(
     id: string,
@@ -1010,60 +1002,6 @@ export class MCPClientManager implements DurableObjectCapability {
         capabilities: this.advertisedHandlerCapabilities()
       })
     });
-  }
-
-  private async restoreRpcConnectionsFromStorage(): Promise<void> {
-    const rpcServers = this.getRpcServersFromStorage();
-    if (!this._env) {
-      for (const server of rpcServers) {
-        console.warn(
-          `[MCPClientManager] Cannot restore RPC MCP server "${server.name}": ` +
-            "no env was provided; pass { env } when constructing MCPClientManager"
-        );
-      }
-      return;
-    }
-
-    for (const server of rpcServers) {
-      if (this.mcpConnections[server.id]) continue;
-
-      const options = decodeMcpServerOptions(server.server_options);
-      const binding = options.bindingName
-        ? Object.entries(this._env).find(
-            ([name]) => name === options.bindingName
-          )?.[1]
-        : undefined;
-      if (!isDurableObjectNamespace(binding)) {
-        console.warn(
-          `[MCPClientManager] Cannot restore RPC MCP server "${server.name}": binding ` +
-            `"${options.bindingName ?? "<missing>"}" not found in env`
-        );
-        continue;
-      }
-
-      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-      try {
-        await this.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-          reconnect: { id: server.id },
-          transport: {
-            type: "rpc",
-            namespace: binding,
-            name: normalizedName,
-            props: options.props
-          }
-        });
-
-        const connection = this.mcpConnections[server.id];
-        if (connection?.connectionState === MCPConnectionState.CONNECTED) {
-          await this.discoverIfConnected(server.id);
-        }
-      } catch (error) {
-        console.error(
-          `[MCPClientManager] Error restoring RPC MCP server "${server.name}":`,
-          error
-        );
-      }
-    }
   }
 
   /**

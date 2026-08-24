@@ -19,6 +19,21 @@ export type MCPServerRow = {
   server_options: string | null;
 };
 
+/** Create the durable MCP server catalog table when it does not exist. */
+export function ensureMcpServerTable(storage: DurableObjectStorage): void {
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      server_url TEXT NOT NULL,
+      callback_url TEXT NOT NULL,
+      client_id TEXT,
+      auth_url TEXT,
+      server_options TEXT
+    )
+  `);
+}
+
 /** Explicitly supported durable subset of MCP SDK client options. */
 export type PersistedMcpClientOptions = Pick<
   McpClientOptions,

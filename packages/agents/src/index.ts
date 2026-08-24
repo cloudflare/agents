@@ -113,6 +113,7 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
+import { ensureMcpServerTable } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
 export {
   AGENT_TOOL_PROGRESS_PART,
@@ -2096,17 +2097,7 @@ export class Agent<
       versionRow.length > 0 ? Number(versionRow[0].state) : 0;
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
-      this.sql`
-          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )
-        `;
+      ensureMcpServerTable(this.ctx.storage);
 
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_queues (

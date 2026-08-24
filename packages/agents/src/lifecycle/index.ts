@@ -1,7 +1,6 @@
 /** Durable Object lifecycle composition for Agents and standalone objects. */
 export {
   Lifecycle,
-  type CapabilityPhase,
   type CapabilityPhaseContext,
   type Connection,
   type ConnectionContext,

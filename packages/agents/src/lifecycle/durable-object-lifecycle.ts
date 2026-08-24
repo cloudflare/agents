@@ -3,7 +3,8 @@ import { nanoid } from "nanoid";
 
 import {
   CapabilityRunner,
-  type CapabilityPhaseContext,
+  type CapabilityRequestContext,
+  type CapabilityStartContext,
   type DurableObjectCapability
 } from "./capability-runner";
 import {
@@ -22,8 +23,6 @@ import type {
 } from "./types";
 
 export {
-  type CapabilityPhase,
-  type CapabilityPhaseContext,
   type CapabilityRequestContext,
   type CapabilityStartContext,
   type DurableObjectCapability
@@ -117,6 +116,12 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+/** Context supplied to a lifecycle capability execution boundary. */
+export type CapabilityPhaseContext<Props extends object = object> =
+  | ({ readonly phase: "start" } & CapabilityStartContext<Props>)
+  | ({ readonly phase: "request" } & CapabilityRequestContext)
+  | { readonly phase: "alarm" };
+
 /** Composition policy for capability phases in a Durable Object lifecycle. */
 export type LifecycleOptions<Props extends object = object> = {
   /**
@@ -125,7 +130,7 @@ export type LifecycleOptions<Props extends object = object> = {
    * Call `operation` and return its result. Lifecycle retains capability
    * ordering and request interception. Host callbacks run outside this boundary.
    */
-  runCapabilityPhase?: <T>(
+  readonly runCapabilityPhase?: <T>(
     context: CapabilityPhaseContext<Props>,
     operation: () => Promise<T>
   ) => Promise<T>;

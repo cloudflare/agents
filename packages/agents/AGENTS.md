@@ -74,6 +74,7 @@ src/
     transport.ts        # McpAgent SSE + Streamable HTTP transports
     client.ts           # MCPClientManager for connecting to remote MCP servers
     client-connection.ts
+    client-rpc.ts       # Persisted RPC binding restoration
     client-storage.ts
     client-transports.ts
     do-oauth-client-provider.ts

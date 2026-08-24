@@ -12,28 +12,6 @@ export type CapabilityRequestContext = {
   readonly request: Request;
 };
 
-/** A lifecycle phase owned by capability composition. */
-export type CapabilityPhase = "start" | "request" | "alarm";
-
-/** Context supplied to a lifecycle capability execution boundary. */
-export type CapabilityPhaseContext<Props extends object = object> =
-  | {
-      /** Start every installed capability. */
-      readonly phase: "start";
-      /** Properties supplied while resolving the Durable Object. */
-      readonly props: Props | undefined;
-    }
-  | {
-      /** Offer an HTTP request to installed capabilities. */
-      readonly phase: "request";
-      /** The request entering the Durable Object. */
-      readonly request: Request;
-    }
-  | {
-      /** Run alarm work owned by installed capabilities. */
-      readonly phase: "alarm";
-    };
-
 /**
  * A capability installed into a Durable Object lifecycle.
  *
