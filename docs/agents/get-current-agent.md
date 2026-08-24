@@ -1,204 +1,127 @@
 # `getCurrentAgent()`
 
-## Automatic context for custom methods
+`getCurrentAgent()` returns the Agent selected for the current invocation,
+together with request-specific values such as its HTTP request or WebSocket
+connection.
 
-The framework detects and wraps custom Agent methods during initialization so `getCurrentAgent()` can resolve the active agent inside them and the functions they call.
+Import it from `agents/lifecycle`:
 
-## How It Works
+```ts
+import { getCurrentAgent } from "agents/lifecycle";
+```
 
-```typescript
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import { getCurrentAgent } from "agents";
+The root `agents` package exports the same function as a compatibility alias.
 
-export class MyAgent extends AIChatAgent {
-  async customMethod() {
-    const { agent } = getCurrentAgent<MyAgent>();
-    // ✅ agent is automatically available!
-    console.log(agent.name);
-  }
+## What is an Agent?
 
-  async anotherMethod() {
-    // ✅ This works too - no setup needed!
-    const { agent } = getCurrentAgent<MyAgent>();
-    return agent.state;
+An Agent is any Cloudflare Durable Object with an installed `Lifecycle`:
+
+```ts
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+
+export class MyAgent extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this);
+}
+```
+
+The batteries-included `Agent` class exported from `agents` installs the same
+Lifecycle and adds state, RPC, scheduling, MCP, workflows, fibers, and
+sub-agents.
+
+## Lifecycle hooks
+
+Lifecycle establishes the current Agent context around capability hooks and
+semantic user hooks:
+
+| Hook                              | Available context                        |
+| --------------------------------- | ---------------------------------------- |
+| `onStart`, `onAlarm`              | `agent`                                  |
+| `onRequest`                       | `agent`, `request`                       |
+| `onConnect`                       | `agent`, `connection`, upgrade `request` |
+| `onMessage`, `onClose`, `onError` | `agent`, `connection`                    |
+
+`getConnectionTags(connection, { request })` remains argument-driven because it
+already receives both values explicitly.
+
+Code inside a hook normally uses `this` and its arguments. The ambient context
+is useful for shared code whose Agent is selected only when it is invoked:
+
+```ts
+import { getCurrentAgent } from "agents/lifecycle";
+
+function currentRequestOrigin(): string | undefined {
+  const { request } = getCurrentAgent();
+  return request ? new URL(request.url).origin : undefined;
+}
+
+class RequestAudit {
+  onRequest(): void {
+    console.log(currentRequestOrigin());
   }
 }
 ```
 
-**Zero configuration required!** The framework automatically:
+The shared function is defined once and cannot capture the correct instance.
+Lifecycle supplies the Agent and request dynamically for each invocation.
 
-1. Scans your agent class for custom methods
-2. Wraps them with agent context during initialization
-3. Ensures `getCurrentAgent()` works in all external functions called from your methods
+## Concrete Agent types
 
-## Real-World Example
+Without a type argument, `agent` uses the lifecycle `Agent` interface: a
+`DurableObject` with an installed `Lifecycle` and its semantic hooks. Pass your
+concrete class when shared code needs its additional APIs:
 
-```typescript
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import { getCurrentAgent } from "agents";
-import { generateText } from "ai";
-import { openai } from "@ai-sdk/openai";
-
-// External utility function that needs agent context
-async function processWithAI(prompt: string) {
+```ts
+function currentState() {
   const { agent } = getCurrentAgent<MyAgent>();
-  // ✅ External functions can access the current agent!
-
-  return await generateText({
-    model: openai("gpt-4"),
-    prompt: `Agent ${agent?.name}: ${prompt}`
-  });
-}
-
-export class MyAgent extends AIChatAgent {
-  async customMethod(message: string) {
-    // Use this.* to access agent properties directly
-    console.log("Agent name:", this.name);
-    console.log("Agent state:", this.state);
-
-    // External functions automatically work!
-    const result = await processWithAI(message);
-    return result.text;
-  }
+  return agent?.state;
 }
 ```
 
-### Built-in vs Custom Methods
+The fields are optional because the function can be called outside an Agent
+invocation:
 
-- **Built-in methods** (onRequest, onEmail, onStateChanged): Already have context
-- **Custom methods** (your methods): Automatically wrapped during initialization
-- **External functions**: Access context through `getCurrentAgent()`
-
-### The Context Flow
-
-```typescript
-// When you call a custom method:
-agent.customMethod()
-  → automatically wrapped with agentContext.run()
-  → your method executes with full context
-  → external functions can use getCurrentAgent()
+```ts
+const { agent, connection, request, email } = getCurrentAgent<MyAgent>();
 ```
 
-## Common Use Cases
+## Batteries-included Agent entry points
 
-### Working with AI SDK Tools
+The batteries-included `Agent` class also establishes context for entry points
+outside Lifecycle, including:
 
-```typescript
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import { generateText } from "ai";
-import { openai } from "@ai-sdk/openai";
+- WebSocket callable methods;
+- native Durable Object RPC and cross-Agent public-method entry;
+- email handlers;
+- scheduled and queued callbacks;
+- fiber and chat recovery;
+- AI chat turns, tools, and detached work.
 
-export class MyAgent extends AIChatAgent {
-  async generateResponse(prompt: string) {
-    // AI SDK tools automatically work
-    const response = await generateText({
-      model: openai("gpt-4"),
-      prompt,
-      tools: {
-        // Tools that use getCurrentAgent() work perfectly
-      }
-    });
-
-    return response.text;
-  }
-}
-```
-
-### Calling External Libraries
-
-```typescript
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import { getCurrentAgent } from "agents";
-
-async function saveToDatabase(data: any) {
-  const { agent } = getCurrentAgent<MyAgent>();
-  // Can access agent info for logging, context, etc.
-  console.log(`Saving data for agent: ${agent?.name}`);
-}
-
-export class MyAgent extends AIChatAgent {
-  async processData(data: any) {
-    // External functions automatically have context
-    await saveToDatabase(data);
-  }
-}
-```
+The public-method wrapper remains separate from Lifecycle because native Durable
+Object RPC bypasses Lifecycle handlers. Lifecycle owns capability and semantic
+hook context; the batteries-included class owns its additional entry surfaces.
 
 ## When context is lost
 
-The agent context only propagates along the call tree of the original
-invocation. Code reached outside that call tree starts with an empty context,
-so `getCurrentAgent()` returns an object whose fields are `undefined`. Common
-cases include:
+Context propagates only along the asynchronous call tree of its invocation.
+Code reached through a fresh entry point starts with no context. Examples
+include callbacks invoked through Worker Loader RPC, service bindings, and a
+Durable Object RPC entry that is not managed by the batteries-included Agent.
 
-- a host callback invoked through RPC from a Worker Loader child isolate, such
-  as sandboxed Codemode execution;
-- a service binding or Durable Object RPC entrypoint;
-- a queue consumer or another entrypoint that retains an agent reference.
+Pass the required Agent explicitly, or route the call through an Agent method
+that establishes the appropriate entry context. Do not retain a `request`,
+`connection`, or `email` beyond its native invocation.
 
-Route the callback through a public method on the agent. Custom methods are
-wrapped automatically, so calling `agent.someMethod()` re-enters that agent's
-context:
+## API
 
-```typescript
-import { RpcTarget } from "cloudflare:workers";
-
-class HostCallbackBridge extends RpcTarget {
-  constructor(private agent: MyMcpAgent) {
-    super();
-  }
-
-  // Invoked through RPC from a Worker Loader child isolate. There is no context
-  // ancestry. Calling a public agent method restores it automatically.
-  async invoke() {
-    return this.agent.handleSandboxCallback();
-  }
-}
-
-export class MyMcpAgent extends McpAgent {
-  async handleSandboxCallback() {
-    const { agent } = getCurrentAgent<MyMcpAgent>();
-    // `agent` is available again.
-  }
-}
+```ts
+function getCurrentAgent<T extends DurableObject = Agent>(): {
+  agent: T | undefined;
+  connection: Connection | undefined;
+  request: Request | undefined;
+  email: unknown | undefined;
+};
 ```
 
-Context restored this way has `connection`, `request`, and `email` unset. It
-is not tied to live client I/O.
-
-Server-initiated MCP requests (`elicitInput`, `createMessage`, and `listRoots`)
-on `McpAgent` do not require this indirection because the MCP transport retains
-its owning agent.
-
-## API reference
-
-The agents package exports one main function for context management:
-
-### `getCurrentAgent<T>()`
-
-Gets the current agent from any context where it's available.
-
-**Returns:**
-
-```typescript
-{
-  agent: T | undefined,
-  connection: Connection | undefined,
-  request: Request | undefined
-}
-```
-
-**Usage:**
-
-```typescript
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import { getCurrentAgent } from "agents";
-
-export class MyAgent extends AIChatAgent {
-  async customMethod() {
-    const { agent, connection, request } = getCurrentAgent<MyAgent>();
-    // agent is properly typed as MyAgent
-    // connection and request available if called from a request handler
-  }
-}
-```
+The root `agents` alias retains the richer batteries-included `Agent` and
+`AgentEmail` defaults for existing applications.

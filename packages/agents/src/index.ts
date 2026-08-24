@@ -53,6 +53,10 @@ import {
   Lifecycle,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
+import {
+  getCurrentAgent as getCurrentLifecycleAgent,
+  type CurrentAgentContext
+} from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 export {
   getAgentByName,
@@ -1575,38 +1579,15 @@ function resolveRetryConfig(
 // layers (e.g. `@cloudflare/think`) classify with the SAME matcher instead of
 // drifting copies.
 
-export function getCurrentAgent<
-  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
->(): {
-  agent: T | undefined;
-  connection: Connection | undefined;
-  request: Request | undefined;
-  email: AgentEmail | undefined;
-} {
-  const store = agentContext.getStore() as
-    | {
-        agent: T;
-        connection: Connection | undefined;
-        request: Request | undefined;
-        email: AgentEmail | undefined;
-      }
-    | undefined;
-  if (!store) {
-    return {
-      agent: undefined,
-      connection: undefined,
-      request: undefined,
-      email: undefined
-    };
-  }
-  return store;
-}
+/** Compatibility alias for the lifecycle-owned current Agent accessor. */
+export const getCurrentAgent = getCurrentLifecycleAgent as <
+  T extends DurableObject = Agent<Cloudflare.Env>
+>() => CurrentAgentContext<T, AgentEmail>;
 
 /**
- * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
- * @param agent The agent instance
- * @param method The method to wrap
- * @returns A wrapped method that runs within the agent context
+ * Restore Agent context when a public method is entered outside a Lifecycle
+ * hook, notably through native Durable Object RPC or cross-Agent re-entry.
+ * Lifecycle already owns context for its capability and semantic user hooks.
  */
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
@@ -2536,11 +2517,15 @@ export class Agent<
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       const replyBridge = subAgentRpcReplyContext.getStore()?.bridge;
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketMessage(
-          connection,
-          message,
-          replyBridge
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketMessage(
+            connection,
+            message,
+            replyBridge
+          )
         )
       ) {
         return;
@@ -2694,13 +2679,13 @@ export class Agent<
           subAgentOuterUrl
         );
       }
+      // Lifecycle establishes the root socket/request context before entering
+      // this wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketConnect(
-          connection,
-          ctx.request,
-          {
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketConnect(connection, ctx.request, {
             gate: false
-          }
+          })
         )
       ) {
         return;
@@ -2804,12 +2789,16 @@ export class Agent<
       reason: string,
       wasClean: boolean
     ) => {
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketClose(
-          connection,
-          code,
-          reason,
-          wasClean
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketClose(
+            connection,
+            code,
+            reason,
+            wasClean
+          )
         )
       ) {
         return;
@@ -3594,8 +3583,8 @@ export class Agent<
   }
 
   /**
-   * Automatically wrap custom methods with agent context
-   * This ensures getCurrentAgent() works in all custom methods without decorators
+   * Wrap public subclass methods that may be entered outside Lifecycle, such as
+   * native Durable Object RPC. Lifecycle hooks already have Agent context.
    */
   private _autoWrapCustomMethods() {
     // Agent.prototype traversal also covers the DurableObject base class.

@@ -11,11 +11,14 @@ import {
   isManagedWebSocket
 } from "./connection";
 
+import {
+  runInLifecycleInvocation,
+  type Agent as LifecycleAgent
+} from "./current-agent";
 import { isBenignTeardownError } from "./transport-errors";
 
 import type {
   Connection,
-  ConnectionContext,
   ConnectionSetStateFn,
   ConnectionState
 } from "./types";
@@ -114,28 +117,12 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-type LifecycleHost<Props extends object> = {
+type LifecycleHost<
+  Env extends object,
+  Props extends Record<string, unknown>
+> = LifecycleAgent<Env, Props> & {
   readonly ctx: DurableObjectState;
   readonly constructor: { readonly name: string };
-  onStart?(props?: Props): void | Promise<void>;
-  onRequest?(request: Request): Response | Promise<Response>;
-  onAlarm?(): void | Promise<void>;
-  onConnect?(
-    connection: Connection,
-    context: ConnectionContext
-  ): void | Promise<void>;
-  onMessage?(connection: Connection, message: WSMessage): void | Promise<void>;
-  onClose?(
-    connection: Connection,
-    code: number,
-    reason: string,
-    wasClean: boolean
-  ): void | Promise<void>;
-  onError?(connection: Connection, error: unknown): void | Promise<void>;
-  getConnectionTags?(
-    connection: Connection,
-    context: ConnectionContext
-  ): string[] | Promise<string[]>;
 };
 
 /**
@@ -149,7 +136,7 @@ export class Lifecycle<
   Env extends object = Cloudflare.Env,
   Props extends Record<string, unknown> = Record<string, unknown>
 > {
-  readonly #host: LifecycleHost<Props>;
+  readonly #host: LifecycleHost<Env, Props>;
   readonly #ctx: DurableObjectState;
   readonly #parentClassName: string;
   readonly #capabilities: DurableObjectCapability<Props>[] = [];
@@ -186,7 +173,7 @@ export class Lifecycle<
     // SAFETY: DurableObject exposes ctx as protected to subclasses. The
     // lifecycle is constructed by that subclass with `this`, so this boundary
     // accesses the same runtime-owned context without exposing it publicly.
-    this.#host = host as unknown as LifecycleHost<Props>;
+    this.#host = host as unknown as LifecycleHost<Env, Props>;
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
     this.#connectionManager = new ConnectionManager(this.#ctx);
@@ -281,12 +268,19 @@ export class Lifecycle<
       const url = new URL(request.url);
 
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-        const capabilityResponse = await this.#capabilityRunner.request({
-          request
-        });
-        if (capabilityResponse !== undefined) return capabilityResponse;
-        if (this.#host.onRequest) return await this.#host.onRequest(request);
-        return new Response("Not implemented", { status: 404 });
+        return await runInLifecycleInvocation(
+          { host: this.#host, request },
+          async () => {
+            const capabilityResponse = await this.#capabilityRunner.request({
+              request
+            });
+            if (capabilityResponse !== undefined) return capabilityResponse;
+            if (this.#host.onRequest) {
+              return await this.#host.onRequest(request);
+            }
+            return new Response("Not implemented", { status: 404 });
+          }
+        );
       } else {
         // Create the websocket pair for the client
         const { 0: clientWebSocket, 1: serverWebSocket } = new WebSocketPair();
@@ -316,13 +310,19 @@ export class Lifecycle<
 
         const ctx = { request };
 
+        // getConnectionTags already receives both connection and request
+        // explicitly. TODO: run it in Agent context if shared callback code
+        // develops a concrete need for getCurrentAgent() in this hook.
         const tags = this.#host.getConnectionTags
           ? await this.#host.getConnectionTags(connection, ctx)
           : [];
 
         // Hibernating WebSockets remain connected while the object is evicted.
         connection = this.#connectionManager.accept(connection, { tags });
-        await this.#host.onConnect?.(connection, ctx);
+        await runInLifecycleInvocation(
+          { host: this.#host, connection, request },
+          () => this.#host.onConnect?.(connection, ctx)
+        );
 
         return new Response(null, { status: 101, webSocket: clientWebSocket });
       }
@@ -360,7 +360,9 @@ export class Lifecycle<
       const connection = createConnection(ws);
 
       await this.#ensureInitialized();
-      return this.#host.onMessage?.(connection, message);
+      return runInLifecycleInvocation({ host: this.#host, connection }, () =>
+        this.#host.onMessage?.(connection, message)
+      );
     } catch (e) {
       console.error(
         `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketMessage:`,
@@ -384,7 +386,9 @@ export class Lifecycle<
       const connection = createConnection(ws);
 
       await this.#ensureInitialized();
-      await this.#host.onClose?.(connection, code, reason, wasClean);
+      await runInLifecycleInvocation({ host: this.#host, connection }, () =>
+        this.#host.onClose?.(connection, code, reason, wasClean)
+      );
     } catch (e) {
       console.error(
         `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketClose:`,
@@ -423,7 +427,9 @@ export class Lifecycle<
       const connection = createConnection(ws);
 
       await this.#ensureInitialized();
-      return this.#host.onError?.(connection, error);
+      return runInLifecycleInvocation({ host: this.#host, connection }, () =>
+        this.#host.onError?.(connection, error)
+      );
     } catch (e) {
       console.error(
         `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketError:`,
@@ -461,8 +467,10 @@ export class Lifecycle<
     await this.#ctx.blockConcurrencyWhile(async () => {
       this.#status = "starting";
       try {
-        await this.#capabilityRunner.start({ props: this.#props });
-        await this.#host.onStart?.(this.#props);
+        await runInLifecycleInvocation({ host: this.#host }, async () => {
+          await this.#capabilityRunner.start({ props: this.#props });
+          await this.#host.onStart?.(this.#props);
+        });
         this.#status = "started";
       } catch (cause) {
         this.#status = "zero";
@@ -532,7 +540,9 @@ export class Lifecycle<
   /** Dispatch lifecycle and host alarm callbacks after startup. */
   async alarm(): Promise<void> {
     await this.#ensureInitialized();
-    await this.#capabilityRunner.alarm();
-    await this.#host.onAlarm?.();
+    await runInLifecycleInvocation({ host: this.#host }, async () => {
+      await this.#capabilityRunner.alarm();
+      await this.#host.onAlarm?.();
+    });
   }
 }

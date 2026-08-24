@@ -58,7 +58,7 @@ class ActivityCapability implements DurableObjectCapability {
   }
 }
 
-/** A plain Durable Object composed with the Agents lifecycle. */
+/** A composable Agent built from DurableObject and Lifecycle. */
 export class DoAgent extends DurableObject<Env> {
   private readonly activity = new ActivityCapability(this.ctx.storage);
   private wake: Wake | undefined;
@@ -76,7 +76,7 @@ export class DoAgent extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + 5_000);
     return Response.json({
       name: this.lifecycle.name,
-      message: "Hello from a plain Durable Object",
+      message: "Hello from a composable Agent",
       wake: this.wake,
       activity: this.activity.getActivity()
     });

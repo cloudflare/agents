@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-next-mcp-client-example",
-  "description": "Next: MCPClientManager composed into a plain Durable Object",
+  "description": "Next: MCPClientManager composed into a Lifecycle Agent",
   "private": true,
   "type": "module",
   "version": "0.0.0",

@@ -1,4 +1,4 @@
-import { Agent } from "../../index.ts";
+import { Agent, getCurrentAgent } from "../../index.ts";
 import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
 import type { AgentMcpOAuthProvider } from "../../mcp/do-oauth-client-provider";
 import {
@@ -47,6 +47,13 @@ async function createAuthorizationUrl(
 export class TestOAuthAgent extends Agent {
   async onRequest(_request: Request): Promise<Response> {
     return new Response("Test OAuth Agent");
+  }
+
+  /** Configure a shared callback that reports its Lifecycle context. */
+  configureOAuthContextProbe(): void {
+    this.mcp.configureOAuthCallback({
+      customHandler: currentOAuthRequestContext
+    });
   }
 
   // Allow tests to configure OAuth callback behavior
@@ -947,12 +954,23 @@ export class TestOAuthAgent extends Agent {
   }
 }
 
+function currentOAuthRequestContext(): Response {
+  const { agent, request } = getCurrentAgent<TestOAuthAgent>();
+  return Response.json({
+    agentName: agent?.name ?? null,
+    requestUrl: request?.url ?? null
+  });
+}
+
 // Test Agent that overrides createMcpOAuthProvider with a custom implementation
 export class TestCustomOAuthAgent extends Agent {
   private _customProviderCallbackUrl: string | undefined;
+  private _restoreProviderAgentName: string | undefined;
 
   createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
     this._customProviderCallbackUrl = callbackUrl;
+    this._restoreProviderAgentName =
+      getCurrentAgent<TestCustomOAuthAgent>().agent?.name;
     // Return a minimal mock that satisfies the interface
     return {
       authUrl: undefined,
@@ -978,6 +996,28 @@ export class TestCustomOAuthAgent extends Agent {
       saveCodeVerifier: async () => {},
       codeVerifier: async () => "mock-verifier"
     } as AgentMcpOAuthProvider;
+  }
+
+  /** Seed an OAuth row that the next Lifecycle startup must restore. */
+  seedOAuthServerForLifecycleRestore(callbackUrl: string): void {
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (
+        id, name, server_url, client_id, auth_url, callback_url, server_options
+      ) VALUES (
+        ${"lifecycle-restore-context"},
+        ${"Lifecycle Restore Context"},
+        ${"http://restore-context.example.com"},
+        ${null},
+        ${"https://auth.example.com/authorize"},
+        ${callbackUrl},
+        ${null}
+      )
+    `;
+  }
+
+  /** Report the Agent selected while constructing a restored provider. */
+  getRestoreProviderAgentName(): string | undefined {
+    return this._restoreProviderAgentName;
   }
 
   testCreateMcpOAuthProvider(callbackUrl: string): {

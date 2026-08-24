@@ -69,6 +69,30 @@ describe("Lifecycle", () => {
     ]);
   });
 
+  it("runs capability and user hooks in the Lifecycle Agent context", async () => {
+    const name = crypto.randomUUID();
+    const requestUrl = `https://example.com/agents/plain-lifecycle-object/${name}`;
+    await worker.fetch(new Request(requestUrl), env);
+
+    const stub = env.PlainLifecycleObject.getByName(name);
+    expect(await stub.contextAccessorsAreAliases()).toBe(true);
+    const requestContexts = [
+      { hostName: name, phase: "start", requestUrl: null },
+      { hostName: name, phase: "request", requestUrl }
+    ];
+    expect(await stub.getCapabilityContextEvents()).toEqual(requestContexts);
+    expect(await stub.getHostContextEvents()).toEqual(requestContexts);
+
+    await stub.scheduleAlarm();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const alarmContexts = [
+      ...requestContexts,
+      { hostName: name, phase: "alarm", requestUrl: null }
+    ];
+    expect(await stub.getCapabilityContextEvents()).toEqual(alarmContexts);
+    expect(await stub.getHostContextEvents()).toEqual(alarmContexts);
+  });
+
   it("installs always-hibernating WebSocket handlers", async () => {
     const name = crypto.randomUUID();
     const response = await worker.fetch(
@@ -98,7 +122,38 @@ describe("Lifecycle", () => {
       );
     });
     expect(echoed).toBe("echo:hello");
+    const closed = new Promise<void>((resolve) => {
+      socket.addEventListener("close", () => resolve(), { once: true });
+    });
     socket.close(1000, "done");
+    await closed;
+
+    const contexts =
+      await env.PlainLifecycleObject.getByName(
+        name
+      ).getWebSocketContextEvents();
+    expect(contexts).toHaveLength(3);
+    expect(contexts).toEqual([
+      {
+        connectionId: contexts[0]?.connectionId,
+        hostName: name,
+        phase: "connect",
+        requestUrl: `https://example.com/agents/plain-lifecycle-object/${name}`
+      },
+      {
+        connectionId: contexts[0]?.connectionId,
+        hostName: name,
+        phase: "message",
+        requestUrl: null
+      },
+      {
+        connectionId: contexts[0]?.connectionId,
+        hostName: name,
+        phase: "close",
+        requestUrl: null
+      }
+    ]);
+    expect(contexts[0]?.connectionId).not.toBeNull();
   });
 
   it("reads an old __ps_name record without writing new fallback state", async () => {

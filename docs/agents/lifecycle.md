@@ -1,10 +1,11 @@
 # Durable Object lifecycle
 
-`agents/lifecycle` lets reusable durable capabilities work in both `Agent` and a
-plain Cloudflare Durable Object. It uses composition: your class extends the
-platform `DurableObject`, then constructs a lifecycle with `this`.
+`agents/lifecycle` turns a Cloudflare Durable Object into an Agent through
+composition. Your class extends the platform `DurableObject`, then installs a
+lifecycle with `this`. Reusable capabilities work in both these composable
+Agents and the batteries-included `Agent` class exported from `agents`.
 
-## Plain Durable Object
+## Composable Agent
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
@@ -127,9 +128,58 @@ Capabilities run in registration order. Startup and alarms run every hook
 sequentially. Request handling stops at the first returned `Response`. A phase
 failure propagates, and failed startup can be retried.
 
-Pass dependencies to a capability explicitly. A capability should not receive an
-entire Agent merely to reach storage, bindings, authentication, observability,
-or protocol methods.
+Pass durable dependencies to a capability explicitly. A capability should not
+use ambient context merely to reach storage, bindings, authentication,
+observability, or protocol methods.
+
+## Current Agent context
+
+Lifecycle runs capability hooks and Agent user hooks in the context of the
+current Agent. Capability `onStart` hooks still run before the Agent's
+`onStart`; ambient context identifies the host but does not imply that host
+startup has completed. Each capability restores the state it owns.
+
+Shared code that cannot capture a particular instance can read the current
+context from `agents/lifecycle`:
+
+```ts
+import {
+  getCurrentAgent,
+  type DurableObjectCapability
+} from "agents/lifecycle";
+
+function currentRequestOrigin(): string | undefined {
+  const { request } = getCurrentAgent();
+  return request ? new URL(request.url).origin : undefined;
+}
+
+class RequestAudit implements DurableObjectCapability {
+  onRequest(): void {
+    console.log(currentRequestOrigin());
+  }
+}
+```
+
+`getCurrentAgent().agent` defaults to the lifecycle `Agent` interface: a
+`DurableObject` with an installed `Lifecycle` and its semantic hooks. Pass your
+concrete class when shared code needs its additional APIs:
+
+```ts
+const { agent } = getCurrentAgent<MyAgent>();
+```
+
+Context values follow the invocation:
+
+- `onStart` and `onAlarm`: `agent`;
+- `onRequest`: `agent` and `request`;
+- `onConnect`: `agent`, `connection`, and the upgrade `request`;
+- `onMessage`, `onClose`, and `onError`: `agent` and `connection`.
+
+`getConnectionTags(connection, { request })` remains argument-driven because it
+already receives both values explicitly. The batteries-included `Agent` class
+adds context for callables, chat turns, email, schedules, fibers, and detached
+work. The root `agents` package continues to export `getCurrentAgent` as an
+alias for compatibility.
 
 ## WebSockets always hibernate
 

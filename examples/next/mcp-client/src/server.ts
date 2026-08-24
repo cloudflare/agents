@@ -9,7 +9,7 @@ import {
 } from "./demo-api";
 import type { McpCatalog } from "./demo-api";
 
-/** Plain Durable Object composed with the reusable MCP client capability. */
+/** Lifecycle-composed Agent with the reusable MCP client capability. */
 export class McpClientObject extends DurableObject<Env> {
   readonly mcp = new MCPClientManager("mcp-client-object", "1.0.0", {
     storage: this.ctx.storage

@@ -47,11 +47,12 @@ src/
   serializable.ts       # RPC serialization types
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
-  internal_context.ts   # AsyncLocalStorage context for getCurrentAgent()
+  internal_context.ts   # Compatibility re-export of Lifecycle Agent context
   agent-routing.ts      # Agent URL routing, named lookup, CORS, placement, retries
 
-  lifecycle/            # Public Durable Object lifecycle composition
+  lifecycle/            # Public Agent lifecycle composition
     index.ts            # Intentionally small public lifecycle surface
+    current-agent.ts    # Shared context and canonical getCurrentAgent()
     durable-object-lifecycle.ts # Runtime handlers and capabilities
     connection.ts       # Hibernating WebSocket connection management
 
@@ -158,8 +159,9 @@ Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `w
 pnpm exec vitest --project lifecycle --run
 ```
 
-Proves constructor composition on a plain `DurableObject`, ordered capabilities,
-routing, native and migrated identity, alarms, and hibernating WebSockets.
+Proves Lifecycle composition on a `DurableObject`, ordered capabilities,
+current Agent context, root-export aliasing, routing, native and migrated
+identity, alarms, and hibernating WebSockets.
 
 ### React tests (`src/react-tests/`)
 
@@ -239,7 +241,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 
 ## Key architecture notes
 
-- **Agent directly extends `DurableObject` and composes `Lifecycle`** — the lifecycle installs request, alarm, and always-hibernating WebSocket entry points. Agent adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows.
+- **Any `DurableObject` that installs `Lifecycle` is an Agent** — Lifecycle installs request, alarm, current Agent context, and always-hibernating WebSocket entry points. The batteries-included `Agent` class adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows.
 - **State sync is bidirectional** — `this.setState()` on the server broadcasts to all connected clients; `agent.setState()` from the client sends to the server. Both directions use the same message format (`MessageType.CF_AGENT_STATE`).
 - **Client RPC is decorator-gated** — methods on Agent subclasses must use `@callable()` before clients can invoke them through `agent.call("methodName", args)` or `agent.stub.methodName(...)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.

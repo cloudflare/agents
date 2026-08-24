@@ -1,6 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { routeAgentRequest } from "../../index";
 import {
+  getCurrentAgent as getCurrentRootAgent,
+  routeAgentRequest
+} from "../../index";
+import {
+  getCurrentAgent,
   Lifecycle,
   type Connection,
   type DurableObjectCapability,
@@ -16,29 +20,96 @@ export type Env = {
 
 type StartupProps = { label: string };
 
+type CapabilityContextEvent = {
+  readonly hostName: string | null;
+  readonly phase: "alarm" | "request" | "start";
+  readonly requestUrl: string | null;
+};
+
+type WebSocketContextEvent = {
+  readonly connectionId: string | null;
+  readonly hostName: string | null;
+  readonly phase: "close" | "connect" | "message";
+  readonly requestUrl: string | null;
+};
+
+function currentLifecycleContext(
+  phase: CapabilityContextEvent["phase"]
+): CapabilityContextEvent {
+  const { agent: host, request } = getCurrentAgent<PlainLifecycleObject>();
+  return {
+    hostName: host?.lifecycle.name ?? null,
+    phase,
+    requestUrl: request?.url ?? null
+  };
+}
+
+function currentWebSocketContext(
+  phase: WebSocketContextEvent["phase"]
+): WebSocketContextEvent {
+  const {
+    agent: host,
+    connection,
+    request
+  } = getCurrentAgent<PlainLifecycleObject>();
+  return {
+    connectionId: connection?.id ?? null,
+    hostName: host?.lifecycle.name ?? null,
+    phase,
+    requestUrl: request?.url ?? null
+  };
+}
+
+class CapabilityContextProbe implements DurableObjectCapability<StartupProps> {
+  readonly events: CapabilityContextEvent[] = [];
+
+  onStart(): void {
+    this.#capture("start");
+  }
+
+  onRequest(): void {
+    this.#capture("request");
+  }
+
+  onAlarm(): void {
+    this.#capture("alarm");
+  }
+
+  #capture(phase: CapabilityContextEvent["phase"]): void {
+    this.events.push(currentLifecycleContext(phase));
+  }
+}
+
 export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #events: string[] = [];
+  readonly #capabilityContexts = new CapabilityContextProbe();
+  readonly #hostContexts: CapabilityContextEvent[] = [];
+  readonly #webSocketContexts: WebSocketContextEvent[] = [];
 
-  readonly lifecycle = Lifecycle.install<Env, StartupProps>(this).use({
-    onStart: ({ props }) => {
-      this.#events.push(`capability:start:${props?.label ?? "none"}`);
-    },
-    onRequest: ({ request }) => {
-      this.#events.push("capability:request");
-      if (new URL(request.url).searchParams.has("capability")) {
-        return Response.json(this.#events);
+  readonly lifecycle = Lifecycle.install<Env, StartupProps>(this)
+    .use(this.#capabilityContexts)
+    .use({
+      onStart: ({ props }) => {
+        this.#events.push(`capability:start:${props?.label ?? "none"}`);
+      },
+      onRequest: ({ request }) => {
+        this.#events.push("capability:request");
+        if (new URL(request.url).searchParams.has("capability")) {
+          return Response.json(this.#events);
+        }
+      },
+      onAlarm: () => {
+        this.#events.push("capability:alarm");
       }
-    },
-    onAlarm: () => {
-      this.#events.push("capability:alarm");
-    }
-  } satisfies DurableObjectCapability<StartupProps>);
+    } satisfies DurableObjectCapability<StartupProps>);
 
   onStart(props?: StartupProps): void {
+    this.#hostContexts.push(currentLifecycleContext("start"));
     this.#events.push(`host:start:${props?.label ?? "none"}`);
   }
 
   onRequest(request: Request): Response {
+    this.#hostContexts.push(currentLifecycleContext("request"));
     this.#events.push("host:request");
     return Response.json({
       name: this.lifecycle.name,
@@ -48,15 +119,22 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   }
 
   onAlarm(): void {
+    this.#hostContexts.push(currentLifecycleContext("alarm"));
     this.#events.push("host:alarm");
   }
 
   onConnect(connection: Connection): void {
+    this.#webSocketContexts.push(currentWebSocketContext("connect"));
     connection.send(`connected:${this.lifecycle.name}`);
   }
 
   onMessage(connection: Connection, message: WSMessage): void {
+    this.#webSocketContexts.push(currentWebSocketContext("message"));
     connection.send(`echo:${String(message)}`);
+  }
+
+  onClose(): void {
+    this.#webSocketContexts.push(currentWebSocketContext("close"));
   }
 
   installHandlersAgainForTest(): string {
@@ -80,6 +158,27 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   async getEvents(): Promise<readonly string[]> {
     await this.lifecycle.start();
     return this.#events;
+  }
+
+  contextAccessorsAreAliases(): boolean {
+    return getCurrentAgent === getCurrentRootAgent;
+  }
+
+  async getCapabilityContextEvents(): Promise<
+    readonly CapabilityContextEvent[]
+  > {
+    await this.lifecycle.start();
+    return this.#capabilityContexts.events;
+  }
+
+  async getHostContextEvents(): Promise<readonly CapabilityContextEvent[]> {
+    await this.lifecycle.start();
+    return this.#hostContexts;
+  }
+
+  async getWebSocketContextEvents(): Promise<readonly WebSocketContextEvent[]> {
+    await this.lifecycle.start();
+    return this.#webSocketContexts;
   }
 
   async startFromRpc(props: StartupProps): Promise<readonly string[]> {
