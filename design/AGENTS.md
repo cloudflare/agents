@@ -100,6 +100,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `test-coverage-matrix.md`               | design doc | Feature × test-layer coverage rollup, CI→layer mapping, skipped-test debt, nightly hygiene                                                                                      |
 | `mcp.md`                                | design doc | Stateless, Legacy compatibility, Legacy sessionful, client, package boundary, and conformance architecture                                                                      |
 | `rfc-durable-object-lifecycle.md`       | RFC        | Constructor-composed Durable Object lifecycle with reusable components and always-hibernating WebSockets                                                                        |
+| `rfc-cold-rpc-initialization.md`        | RFC        | Cold native RPC runs lifecycle startup — widened prototype wrapping, exclusion boundary, alternatives weighed (accepted)                                                        |
 
 ## Relationship to `/docs`
 
