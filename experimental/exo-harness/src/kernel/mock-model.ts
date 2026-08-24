@@ -13,6 +13,7 @@
  *   !tools [{"name","input"}]  call several tools in sequence, one per step,
  *                              within the same turn (like a real multi-step
  *                              model turn — no harness reload in between)
+ *   !model-error               simulate a failed model request
  *   anything else              echo reply, prefixed with the live PERSONA line
  */
 
@@ -108,6 +109,12 @@ function describeOutput(output: unknown): string {
 }
 
 let callCounter = 0;
+
+function failIfRequested(options: LanguageModelV4CallOptions): void {
+  if (lastUserText(options.prompt).text === "!model-error") {
+    throw new Error("mock model request failed");
+  }
+}
 
 function planTurn(options: LanguageModelV4CallOptions): TurnPlan {
   const prompt = options.prompt;
@@ -221,13 +228,17 @@ export function createMockModel() {
   return new MockLanguageModelV4({
     modelId: "exo-mock",
     doGenerate: async (options) => {
+      failIfRequested(options);
       const { content, finishReason } = planToContent(planTurn(options));
       return { content, finishReason, usage: USAGE, warnings: [] };
     },
-    doStream: async (options) => ({
-      stream: simulateReadableStream({
-        chunks: planToChunks(planTurn(options))
-      })
-    })
+    doStream: async (options) => {
+      failIfRequested(options);
+      return {
+        stream: simulateReadableStream({
+          chunks: planToChunks(planTurn(options))
+        })
+      };
+    }
   });
 }

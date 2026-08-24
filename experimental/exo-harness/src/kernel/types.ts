@@ -12,6 +12,7 @@ export type JsonObject = { [key: string]: Json };
 
 export type JournalKind =
   | "genesis"
+  | "model_invocation"
   | "turn_start"
   | "turn_end"
   | "tool_call"
@@ -150,6 +151,12 @@ export const TASK_BOUNDS = {
   maxRunsPerDay: 48,
   minMsBetweenRuns: 5 * 60_000,
   disableAfterConsecutiveFailures: 5
+} as const;
+
+/** Fixed per-agent circuit breaker for model inference. */
+export const MODEL_INVOCATION_BOUNDS = {
+  maxPerRolling24Hours: 10_000,
+  rollingWindowMs: 24 * 60 * 60 * 1000
 } as const;
 
 export interface LoadedHarness {

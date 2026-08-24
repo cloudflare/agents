@@ -8,6 +8,7 @@ const KIND_STYLE: Record<
   { variant: "primary" | "secondary" | "destructive"; label?: string }
 > = {
   genesis: { variant: "primary" },
+  model_invocation: { variant: "secondary" },
   turn_start: { variant: "secondary" },
   turn_end: { variant: "secondary" },
   tool_call: { variant: "secondary" },
@@ -76,6 +77,8 @@ function summarize(entry: JournalEntry): string {
       return String(d.path);
     case "note":
       return `${String(d.text)} — ${String(d.source)}`;
+    case "model_invocation":
+      return `${String(d.source)} · step ${d.stepNumber}`;
     case "turn_start":
       return `${String(d.source)} @ v${d.version}`;
     case "turn_end":

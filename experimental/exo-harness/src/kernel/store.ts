@@ -8,6 +8,7 @@
  *   (rollback) or inspected (UI diffs) without touching git history.
  */
 
+import { MODEL_INVOCATION_BOUNDS } from "./types";
 import type {
   ContextSnapshot,
   JournalEntry,
@@ -43,6 +44,19 @@ interface TaskRow {
   consecutive_failures: number;
 }
 
+class ModelInvocationLimitReached extends Error {
+  readonly _tag = "ModelInvocationLimitReached" as const;
+
+  constructor(
+    readonly limit: number,
+    readonly windowMs: number
+  ) {
+    super(
+      `Model invocation limit reached (${limit.toLocaleString("en-US")} in rolling 24 hours)`
+    );
+  }
+}
+
 interface VersionRow {
   version: number;
   sha: string;
@@ -65,6 +79,10 @@ export class KernelStore {
         kind TEXT NOT NULL,
         data TEXT NOT NULL
       )
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS exo_journal_kind_ts
+      ON exo_journal (kind, ts)
     `;
     this.sql`
       CREATE TABLE IF NOT EXISTS exo_versions (
@@ -182,6 +200,26 @@ export class KernelStore {
       SELECT MAX(last_run_ts) AS ts FROM exo_tasks
     `;
     return rows[0]?.ts ?? null;
+  }
+
+  /** Reserve a model step and record its non-sensitive diagnostic origin. */
+  reserveModelInvocation(
+    source: ContextSnapshot["source"],
+    stepNumber: number
+  ): ModelInvocationLimitReached | null {
+    const now = Date.now();
+    const count = this.journalCountSince(
+      "model_invocation",
+      now - MODEL_INVOCATION_BOUNDS.rollingWindowMs
+    );
+    if (count >= MODEL_INVOCATION_BOUNDS.maxPerRolling24Hours) {
+      return new ModelInvocationLimitReached(
+        MODEL_INVOCATION_BOUNDS.maxPerRolling24Hours,
+        MODEL_INVOCATION_BOUNDS.rollingWindowMs
+      );
+    }
+    this.appendJournal("model_invocation", { source, stepNumber });
+    return null;
   }
 
   /** Journal entries of one kind since a timestamp (daily budget check). */

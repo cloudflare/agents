@@ -262,6 +262,7 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
       messages,
       tools,
       stopWhen: isStepCount(loaded.policy.maxSteps ?? 8),
+      prepareStep: this.#modelInvocationReservation("chat"),
       onFinish: () => {
         store.appendJournal("turn_end", { source: "chat" });
         this.refreshSyncedState();
@@ -334,7 +335,8 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
         system,
         messages,
         tools,
-        stopWhen: isStepCount(loaded.policy.maxSteps ?? 8)
+        stopWhen: isStepCount(loaded.policy.maxSteps ?? 8),
+        prepareStep: this.#modelInvocationReservation(source)
       });
     } catch (error) {
       this.#journalTurnError(source, publicModelError(error));
@@ -638,6 +640,14 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
   /** OpenAI Responses model authenticated through the managed team gateway. */
   openaiResponses(modelId: string): LanguageModel {
     return createExoGatewayOpenAIModel(modelId, this.env.CLOUDFLARE_AIG_TOKEN);
+  }
+
+  #modelInvocationReservation(source: ContextSnapshot["source"]) {
+    return ({ stepNumber }: { stepNumber: number }) => {
+      const error = this.store().reserveModelInvocation(source, stepNumber);
+      if (error) throw error;
+      return {};
+    };
   }
 
   #journalTurnError(source: string, message: string): void {

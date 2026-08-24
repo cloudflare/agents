@@ -6,6 +6,7 @@
  */
 
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import { artifactsSessionId } from "../kernel/harness";
@@ -110,6 +111,137 @@ describe("turn loop with live harness", () => {
     // And its call/result were journaled by the kernel wrapper.
     expect(kinds(journal)).toContain("tool_call");
     expect(kinds(journal)).toContain("tool_result");
+  });
+});
+
+describe("model invocation circuit breaker", () => {
+  it("reserves one diagnostic journal event before every model step", async () => {
+    const agent = await freshAgent("invocations-multi-step");
+
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        { name: "journal_note", input: { text: "first" } },
+        { name: "journal_note", input: { text: "second" } }
+      ])}`
+    );
+
+    const invocations = (await agent.getJournal()).filter(
+      (entry) => entry.kind === "model_invocation"
+    );
+    expect(invocations.map((entry) => entry.data)).toEqual([
+      { source: "prompt", stepNumber: 0 },
+      { source: "prompt", stepNumber: 1 },
+      { source: "prompt", stepNumber: 2 }
+    ]);
+  });
+
+  it("counts a model request that fails after reservation", async () => {
+    const stub = await getAgentByName(
+      env.ExoKernel,
+      "invocations-failed-request"
+    );
+    const agent = stub as unknown as KernelStub;
+    await agent.boot();
+
+    const failure = await runInDurableObject(stub, async (instance) => {
+      try {
+        await instance.prompt("!model-error");
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(failure).toContain("mock model request failed");
+
+    const invocations = (await agent.getJournal()).filter(
+      (entry) => entry.kind === "model_invocation"
+    );
+    expect(invocations.map((entry) => entry.data)).toEqual([
+      { source: "prompt", stepNumber: 0 }
+    ]);
+  });
+
+  it("shares accounting across chat, prompt, and scheduled turns", async () => {
+    const stub = await getAgentByName(
+      env.ExoKernel,
+      "invocations-all-turn-sources"
+    );
+    const agent = stub as unknown as KernelStub;
+    await agent.boot();
+
+    await agent.prompt("prompt turn");
+    await agent.prompt(
+      '!tool schedule_task {"instruction": "scheduled turn", "delaySeconds": 3600}'
+    );
+    const [task] = (await agent.boot()).tasks;
+    await agent.runScheduledTask(
+      { instruction: "scheduled turn" },
+      { id: task.id }
+    );
+    const chatBody = await runInDurableObject(stub, async (instance) => {
+      instance.messages = [
+        {
+          id: "chat-turn",
+          role: "user",
+          parts: [{ type: "text", text: "chat turn" }]
+        }
+      ];
+      const response = await instance.onChatMessage(undefined);
+      return response.text();
+    });
+    expect(chatBody).toContain("You said");
+
+    const sources = (await agent.getJournal())
+      .filter((entry) => entry.kind === "model_invocation")
+      .map((entry) => entry.data.source);
+    expect(new Set(sources)).toEqual(new Set(["chat", "prompt", "task"]));
+  });
+
+  it("rejects invocation 10,001 before calling the model", async () => {
+    const stub = await getAgentByName(
+      env.ExoKernel,
+      "invocations-daily-ceiling"
+    );
+    const agent = stub as unknown as KernelStub;
+    await agent.boot();
+    await runInDurableObject(stub, (instance) => {
+      for (let i = 0; i < 10_000; i++) {
+        instance.store().appendJournal("model_invocation", {
+          source: "prompt",
+          stepNumber: 0
+        });
+      }
+    });
+
+    const failure = await runInDurableObject(stub, async (instance) => {
+      try {
+        await instance.prompt("the model must not see this");
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(failure).toContain(
+      "Model invocation limit reached (10,000 in rolling 24 hours)"
+    );
+
+    const journal = await agent.getJournal();
+    const turnStart = journal
+      .map((entry) => entry.kind)
+      .lastIndexOf("turn_start");
+    expect(journal.slice(turnStart + 1).map((entry) => entry.kind)).toEqual([
+      "error"
+    ]);
+
+    await runInDurableObject(stub, (instance) => {
+      const expiredTs = Date.now() - 24 * 60 * 60 * 1000 - 1;
+      instance.sql`
+        UPDATE exo_journal SET ts = ${expiredTs}
+        WHERE kind = 'model_invocation'
+      `;
+    });
+    const afterWindow = await agent.prompt("the rolling window has passed");
+    expect(afterWindow.text).toContain("the rolling window has passed");
   });
 });
 

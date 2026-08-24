@@ -73,6 +73,12 @@ loud `task_disabled` journal entry (otherwise failures never cancel a
 cron — least surprise). New tasks can only be created in human-initiated
 turns: a scheduled turn's tool surface has no `schedule_task`.
 
+The kernel also reserves every model step in the journal before inference.
+Chat, prompt, tool-continuation, and scheduled steps share a fixed circuit
+breaker: at 10,000 invocations in a rolling 24-hour window, the next step is
+rejected before reaching the model. Failed requests remain counted; journal
+records include only turn source and step number, never prompt content.
+
 In production, Cloudflare Access identity selects the agent: the Worker
 verifies the application identity and maps its stable subject to one isolated
 `ExoKernel`. Browser URLs cannot select another agent. Forking is temporarily
@@ -118,6 +124,7 @@ protocol:
 - `!tool <name> <json>` — call one tool, e.g.
   `!tool write_file {"path": "/harness/identity.md", "content": "PERSONA: pirate.\n"}`
 - `!tools [{"name": …, "input": …}, …]` — several tools in one multi-step turn
+- `!model-error` — simulate a failed model request
 - anything else — echo, prefixed with the live `PERSONA:` line from
   `/harness/identity.md`
 
@@ -169,7 +176,8 @@ pnpm test
 
 Runs in the Workers runtime (`@cloudflare/vitest-pool-workers`) with the mock
 driver: genesis, persona hot-reload, isolate tool execution, auto-rollback,
-the activation gate, forward-only rollback, and journal ordering.
+the activation gate, forward-only rollback, journal ordering, and the model
+invocation circuit breaker.
 
 ## Where this is going
 
