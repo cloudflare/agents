@@ -208,11 +208,7 @@ function App() {
 
   const connect = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const popup = window.open(
-      "about:blank",
-      "mcp-oauth",
-      OAUTH_WINDOW_FEATURES
-    );
+    const popup = window.open("about:blank", "_blank", OAUTH_WINDOW_FEATURES);
     setConnecting(true);
     setError(undefined);
     try {
@@ -253,7 +249,7 @@ function App() {
     await refresh();
   };
 
-  const authorization = catalog.servers.find((server) => server.authUrl);
+  const authorizations = catalog.servers.filter((server) => server.authUrl);
 
   return (
     <div className="min-h-screen bg-kumo-elevated text-kumo-default">
@@ -348,8 +344,11 @@ function App() {
           </form>
         </Surface>
 
-        {authorization?.authUrl ? (
-          <Surface className="rounded-xl p-4 ring ring-kumo-accent">
+        {authorizations.map((authorization) => (
+          <Surface
+            key={authorization.id}
+            className="rounded-xl p-4 ring ring-kumo-accent"
+          >
             <div className="flex items-center justify-between gap-3">
               <div>
                 <Text size="sm" bold>
@@ -365,7 +364,7 @@ function App() {
                 onClick={() =>
                   window.open(
                     authorization.authUrl,
-                    "mcp-oauth",
+                    "_blank",
                     OAUTH_DIRECT_WINDOW_FEATURES
                   )
                 }
@@ -374,7 +373,7 @@ function App() {
               </Button>
             </div>
           </Surface>
-        ) : null}
+        ))}
 
         {error ? (
           <Surface className="rounded-xl p-4 ring ring-kumo-danger">
