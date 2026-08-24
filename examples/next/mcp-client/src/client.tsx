@@ -24,7 +24,10 @@ import { createRoot } from "react-dom/client";
 import type { McpCatalog } from "./demo-api";
 import "./styles.css";
 
-const OBJECT_PATH = "/agents/mcp-client-object/demo";
+const INSTANCE_KEY = "mcp-client-instance";
+const instanceName = localStorage.getItem(INSTANCE_KEY) ?? crypto.randomUUID();
+localStorage.setItem(INSTANCE_KEY, instanceName);
+const OBJECT_PATH = `/agents/mcp-client-object/${encodeURIComponent(instanceName)}`;
 const OAUTH_WINDOW_FEATURES =
   "width=640,height=760,resizable=yes,scrollbars=yes";
 const EMPTY_CATALOG: McpCatalog = { servers: [], tools: [] };
