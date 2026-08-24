@@ -1,8 +1,9 @@
-import { Agent, getCurrentAgent } from "../../index.ts";
+import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
   FiberInspection,
   FiberRecoveryContext,
-  FiberRecoveryResult
+  FiberRecoveryResult,
+  StreamingResponse
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
@@ -1082,6 +1083,11 @@ export class CustomBoundSubAgentParent extends Agent {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  async delayedEchoFromParent(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `parent:${value}`;
+  }
+
   async onMessage(
     connection: { send(message: string): void },
     message: string | ArrayBuffer
@@ -2210,6 +2216,46 @@ class _UnboundParent extends Agent {
   }
 }
 export { _UnboundParent as TestUnboundParentAgent };
+
+// Regression fixture for issue #1991. The onMessage wrapper is intentional:
+// facet RPC replies must retain their originating bridge through application
+// and framework middleware before the Agent protocol dispatcher handles them.
+export class SlowReplySubAgent extends Agent {
+  onStart(): void {
+    const handleMessage = this.onMessage.bind(this);
+    this.onMessage = async (connection, message) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await handleMessage(connection, message);
+    };
+  }
+
+  @callable()
+  async slowEcho(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `slow:${value}`;
+  }
+
+  @callable()
+  fastEcho(value: string): string {
+    return `fast:${value}`;
+  }
+
+  @callable()
+  async parentEcho(value: string): Promise<string> {
+    const parent = await this.parentAgent(TestSubAgentParent);
+    return await parent.delayedEchoFromParent(value);
+  }
+
+  @callable({ streaming: true })
+  async slowStreamingEcho(
+    stream: StreamingResponse,
+    value: string
+  ): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    stream.send(`slow-stream:${value}:chunk`);
+    stream.end(`slow-stream:${value}:done`);
+  }
+}
 
 /** Class identifier `_a`, exported as `TestMinifiedNameParentAgent`. */
 class _a extends Agent {

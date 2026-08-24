@@ -65,6 +65,7 @@ export {
   LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
+  SlowReplySubAgent,
   HookingSubAgentParent,
   Sub,
   SUB,
