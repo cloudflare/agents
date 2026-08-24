@@ -51,7 +51,6 @@ import {
   type Connection,
   type ConnectionContext,
   Lifecycle,
-  type DurableObjectCapability,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
@@ -2475,12 +2474,18 @@ export class Agent<
       }
     );
 
-    this.lifecycle.use(this._agentMcpLifecycleAdapter());
+    // MCPClientManager is itself the reusable lifecycle capability. Agent-only
+    // recovery remains in the host startup sequence below.
+    this.lifecycle.use(this.mcp);
 
-    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
+    // MCP starts before Agent restores facet routing state. Defer its initial
+    // state publication until Agent can route broadcasts to the right owner.
+    let mcpBroadcastReady = false;
     this._disposables.add(
       this.mcp.onServerStateChanged(async () => {
-        this.broadcastMcpServers();
+        if (mcpBroadcastReady) {
+          this.broadcastMcpServers();
+        }
       })
     );
 
@@ -2848,7 +2853,56 @@ export class Agent<
           email: undefined
         },
         async () => {
+          await this._withAgentSpan(
+            "restore_agent_state",
+            "startup",
+            {},
+            async () => {
+              // Hydrate _isFacet from persistent storage so the flag
+              // survives hibernation (the DO constructor resets it to false).
+              const isFacet =
+                await this.ctx.storage.get<boolean>("cf_agents_is_facet");
+              if (isFacet) this._isFacet = true;
+
+              const storedFacetName = await this.ctx.storage.get<string>(
+                "cf_agents_facet_name"
+              );
+              if (typeof storedFacetName === "string") {
+                this._facetName = storedFacetName;
+              }
+
+              const storedParentPath = await this.ctx.storage.get<
+                Array<{ className: string; name: string }>
+              >("cf_agents_parent_path");
+              if (isValidParentPath(storedParentPath)) {
+                this._parentPath = storedParentPath;
+              }
+              try {
+                await this._cf_hydrateSubAgentConnectionsFromRoot();
+              } catch (error) {
+                console.warn(
+                  "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+                  error
+                );
+              }
+            }
+          );
+
           await this._tryCatch(async () => {
+            // MCPClientManager has already restored its own HTTP connections as
+            // a lifecycle capability. Agent owns the remaining RPC binding
+            // lookup because DurableObjectNamespace values cannot be persisted.
+            await this._withAgentSpan(
+              "restore_mcp_connections",
+              "startup",
+              {},
+              async () => {
+                await this._restoreRpcMcpServers();
+                this.broadcastMcpServers();
+                mcpBroadcastReady = true;
+              }
+            );
+
             const startupAgentToolRunIds = await this._withAgentSpan(
               "recover_agent_work",
               "startup",
@@ -2926,83 +2980,6 @@ export class Agent<
       this._withAgentSpan("agent_start", "startup", {}, (update) =>
         startAgent(props, update)
       );
-  }
-
-  /** Preserve Agent-specific policy around the reusable MCP capability. */
-  private _agentMcpLifecycleAdapter(): DurableObjectCapability<Props> {
-    return {
-      onStart: () =>
-        runInInvocation(
-          {
-            agent: this,
-            connection: undefined,
-            request: undefined,
-            email: undefined
-          },
-          async () => {
-            await this._restoreAgentStateBeforeMcp();
-            return this._tryCatch(() =>
-              this._withAgentSpan(
-                "restore_mcp_connections",
-                "startup",
-                {},
-                async () => {
-                  await this.mcp.onStart();
-                  await this._restoreRpcMcpServers();
-                }
-              )
-            );
-          }
-        ),
-      onRequest: ({ request }) =>
-        runInInvocation(
-          {
-            agent: this,
-            connection: undefined,
-            request,
-            email: undefined
-          },
-          () => this.mcp.onRequest({ request })
-        )
-    };
-  }
-
-  private async _restoreAgentStateBeforeMcp(): Promise<void> {
-    await this._withAgentSpan(
-      "restore_agent_state",
-      "startup",
-      {},
-      async () => {
-        // MCP restores before the host onStart callback, so hydrate Agent-owned
-        // facet identity and bridges first, preserving the prior Agent order.
-        const isFacet =
-          await this.ctx.storage.get<boolean>("cf_agents_is_facet");
-        if (isFacet) this._isFacet = true;
-
-        const storedFacetName = await this.ctx.storage.get<string>(
-          "cf_agents_facet_name"
-        );
-        if (typeof storedFacetName === "string") {
-          this._facetName = storedFacetName;
-        }
-
-        const storedParentPath = await this.ctx.storage.get<
-          Array<{ className: string; name: string }>
-        >("cf_agents_parent_path");
-        if (isValidParentPath(storedParentPath)) {
-          this._parentPath = storedParentPath;
-        }
-
-        try {
-          await this._cf_hydrateSubAgentConnectionsFromRoot();
-        } catch (error) {
-          console.warn(
-            "[Agent] Unable to hydrate sub-agent WebSocket connections:",
-            error
-          );
-        }
-      }
-    );
   }
 
   /**

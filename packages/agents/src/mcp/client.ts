@@ -1007,8 +1007,8 @@ export class MCPClientManager implements DurableObjectCapability {
   }
 
   /**
-   * Restore persisted HTTP MCP connections. RPC connections are restored by
-   * the Agent adapter, which owns access to runtime bindings.
+   * Restore persisted HTTP MCP connections. Agent restores RPC connections in
+   * its own startup sequence because it owns access to runtime bindings.
    *
    * @param clientName - Durable Object identity used to scope OAuth state.
    */
