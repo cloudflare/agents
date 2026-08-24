@@ -71,7 +71,6 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 | File                                    | Type       | Scope                                                                                                                                                                           |
 | --------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `durable-object-lifecycle.md`           | design doc | Durable Object lifecycle phases, capability composition, and host execution policy                                                                                              |
 | `chat-shared-layer.md`                  | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat                                                                                             |
 | `durable-streams-comparison.md`         | analysis   | Durable Streams (ElectricSQL) vs the Agents SDK — layer mapping, what each has, strategic takeaways                                                                             |
 | `think.md`                              | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions                                                                                           |
@@ -101,7 +100,6 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `test-coverage-matrix.md`               | design doc | Feature × test-layer coverage rollup, CI→layer mapping, skipped-test debt, nightly hygiene                                                                                      |
 | `mcp.md`                                | design doc | Stateless, Legacy compatibility, Legacy sessionful, client, package boundary, and conformance architecture                                                                      |
 | `rfc-durable-object-lifecycle.md`       | RFC        | Constructor-composed Durable Object lifecycle with reusable components and always-hibernating WebSockets                                                                        |
-| `rfc-lifecycle-execution-boundary.md`   | RFC        | Host execution policy around lifecycle-owned capability phases                                                                                                                  |
 
 ## Relationship to `/docs`
 

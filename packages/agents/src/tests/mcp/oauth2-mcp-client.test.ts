@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { createExecutionContext, evictDurableObject } from "cloudflare:test";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import worker, { type TestOAuthAgent } from "../worker";
 import { nanoid } from "nanoid";
@@ -152,22 +152,6 @@ describe("OAuth2 MCP Client - Hibernation", () => {
     expect(await agentStub.isCallbackUrlRegistered(callbackWithState)).toBe(
       true
     );
-  });
-});
-
-describe("OAuth2 MCP Client - Agent compatibility", () => {
-  it("constructs a restored custom provider in the Agent startup context", async () => {
-    const agentName = `custom-oauth-context-${nanoid(8)}`;
-    const agentId = env.TestCustomOAuthAgent.idFromName(agentName);
-    const agentStub = env.TestCustomOAuthAgent.get(agentId);
-    await agentStub.seedOAuthServerForLifecycleRestore(
-      "http://example.com/custom-oauth-callback"
-    );
-
-    await evictDurableObject(agentStub);
-    await agentStub.fetch(new Request("http://example.com/wake"));
-
-    expect(await agentStub.getRestoreProviderContext()).toBe(true);
   });
 });
 
@@ -428,33 +412,6 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
 });
 
 describe("OAuth2 MCP Client - Callback Handling", () => {
-  it("runs a custom callback handler in the Agent request context", async () => {
-    const agentId = env.TestOAuthAgent.idFromName(`oauth-context-${nanoid(8)}`);
-    const agentStub = env.TestOAuthAgent.get(agentId);
-    const serverId = nanoid(8);
-    const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
-
-    await agentStub.__unsafe_ensureInitialized();
-    await agentStub.configureOAuthContextProbe();
-    await agentStub.setupMockMcpConnection(
-      serverId,
-      "context-test",
-      "http://example.com/mcp",
-      callbackUrl,
-      "client-id"
-    );
-    await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
-
-    const state = await createStateWithSetup(agentStub, serverId);
-    const requestUrl = `${callbackUrl}?code=test-code&state=${state}`;
-    const response = await agentStub.fetch(new Request(requestUrl));
-
-    expect(await response.json()).toEqual({
-      hasAgentContext: true,
-      requestUrl
-    });
-  });
-
   it("should process OAuth callback with valid connection", async () => {
     const agentId = env.TestOAuthAgent.idFromName(`oauth-test-${nanoid(8)}`);
     const agentStub = env.TestOAuthAgent.get(agentId);

@@ -48,7 +48,6 @@ import {
   exports as workerExports
 } from "cloudflare:workers";
 import {
-  type CapabilityPhaseContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
@@ -1666,10 +1665,7 @@ export class Agent<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
   /** Runtime lifecycle and reusable durable capabilities for this Agent. */
-  readonly lifecycle = Lifecycle.install<Env, Props>(this, {
-    runCapabilityPhase: (context, operation) =>
-      this._runAgentCapabilityPhase(context, operation)
-  });
+  readonly lifecycle = Lifecycle.install<Env, Props>(this);
 
   /** Run user initialization after lifecycle components have started. */
   onStart(_props?: Props): void | Promise<void> {}
@@ -2471,10 +2467,12 @@ export class Agent<
 
     this.lifecycle.use(this.mcp);
 
-    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
+    // MCP starts before Agent restores facet routing state. Defer its initial
+    // publication until broadcasts can be routed to the correct owner.
+    let mcpBroadcastReady = false;
     this._disposables.add(
       this.mcp.onServerStateChanged(() => {
-        this.broadcastMcpServers();
+        if (mcpBroadcastReady) this.broadcastMcpServers();
       })
     );
 
@@ -2842,7 +2840,12 @@ export class Agent<
           email: undefined
         },
         async () => {
+          await this._restoreAgentFacetContext();
+
           await this._tryCatch(async () => {
+            mcpBroadcastReady = true;
+            this.broadcastMcpServers();
+
             const startupAgentToolRunIds = await this._withAgentSpan(
               "recover_agent_work",
               "startup",
@@ -2922,43 +2925,13 @@ export class Agent<
       );
   }
 
-  private _runAgentCapabilityPhase<T>(
-    context: CapabilityPhaseContext<Props>,
-    operation: () => Promise<T>
-  ): Promise<T> {
-    const request = context.phase === "request" ? context.request : undefined;
-    return runInInvocation(
-      {
-        agent: this,
-        connection: undefined,
-        request,
-        email: undefined
-      },
-      async () => {
-        if (context.phase === "start") {
-          await this._restoreAgentStateForCapabilities();
-          return this._tryCatch(() =>
-            this._withAgentSpan(
-              "restore_mcp_connections",
-              "startup",
-              {},
-              operation
-            )
-          );
-        }
-        return operation();
-      }
-    );
-  }
-
-  private async _restoreAgentStateForCapabilities(): Promise<void> {
+  private async _restoreAgentFacetContext(): Promise<void> {
     await this._withAgentSpan(
       "restore_agent_state",
       "startup",
       {},
       async () => {
-        // Capabilities start before the host onStart callback, so hydrate
-        // Agent-owned facet identity and bridges first.
+        // Facet identity and bridges belong to Agent, not to any capability.
         const isFacet =
           await this.ctx.storage.get<boolean>("cf_agents_is_facet");
         if (isFacet) this._isFacet = true;

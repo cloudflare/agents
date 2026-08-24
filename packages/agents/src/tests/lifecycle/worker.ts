@@ -19,16 +19,7 @@ type StartupProps = { label: string };
 export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #events: string[] = [];
 
-  readonly lifecycle = Lifecycle.install<Env, StartupProps>(this, {
-    runCapabilityPhase: async ({ phase }, operation) => {
-      this.#events.push(`phase:${phase}:before`);
-      try {
-        return await operation();
-      } finally {
-        this.#events.push(`phase:${phase}:after`);
-      }
-    }
-  }).use({
+  readonly lifecycle = Lifecycle.install<Env, StartupProps>(this).use({
     onStart: ({ props }) => {
       this.#events.push(`capability:start:${props?.label ?? "none"}`);
     },
