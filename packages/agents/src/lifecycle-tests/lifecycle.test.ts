@@ -22,9 +22,13 @@ describe("Lifecycle", () => {
       name,
       hasInternalPropsHeader: false,
       events: [
+        "phase:start:before",
         "capability:start:routed",
+        "phase:start:after",
         "host:start:routed",
+        "phase:request:before",
         "capability:request",
+        "phase:request:after",
         "host:request"
       ]
     });
@@ -48,9 +52,21 @@ describe("Lifecycle", () => {
     );
 
     expect(await response.json()).toEqual([
+      "phase:start:before",
       "capability:start:routed",
+      "phase:start:after",
       "host:start:routed",
+      "phase:request:before",
       "capability:request"
+    ]);
+    expect(await env.PlainLifecycleObject.getByName(name).getEvents()).toEqual([
+      "phase:start:before",
+      "capability:start:routed",
+      "phase:start:after",
+      "host:start:routed",
+      "phase:request:before",
+      "capability:request",
+      "phase:request:after"
     ]);
   });
 
@@ -62,9 +78,13 @@ describe("Lifecycle", () => {
 
     expect(await runDurableObjectAlarm(stub)).toBe(true);
     expect(await stub.getEvents()).toEqual([
+      "phase:start:before",
       "capability:start:rpc",
+      "phase:start:after",
       "host:start:rpc",
+      "phase:alarm:before",
       "capability:alarm",
+      "phase:alarm:after",
       "host:alarm"
     ]);
   });

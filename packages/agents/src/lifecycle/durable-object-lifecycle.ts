@@ -3,6 +3,7 @@ import { nanoid } from "nanoid";
 
 import {
   CapabilityRunner,
+  type CapabilityPhaseContext,
   type DurableObjectCapability
 } from "./capability-runner";
 import {
@@ -21,9 +22,11 @@ import type {
 } from "./types";
 
 export {
-  type DurableObjectCapability,
+  type CapabilityPhase,
+  type CapabilityPhaseContext,
   type CapabilityRequestContext,
-  type CapabilityStartContext
+  type CapabilityStartContext,
+  type DurableObjectCapability
 } from "./capability-runner";
 export * from "./types";
 
@@ -114,6 +117,20 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+/** Composition policy for capability phases in a Durable Object lifecycle. */
+export type LifecycleOptions<Props extends object = object> = {
+  /**
+   * Run one complete capability phase inside a host-owned execution boundary.
+   *
+   * Call `operation` and return its result. Lifecycle retains capability
+   * ordering and request interception. Host callbacks run outside this boundary.
+   */
+  runCapabilityPhase?: <T>(
+    context: CapabilityPhaseContext<Props>,
+    operation: () => Promise<T>
+  ) => Promise<T>;
+};
+
 type LifecycleHost<Props extends object> = {
   readonly ctx: DurableObjectState;
   readonly constructor: { readonly name: string };
@@ -151,6 +168,7 @@ export class Lifecycle<
 > {
   readonly #host: LifecycleHost<Props>;
   readonly #ctx: DurableObjectState;
+  readonly #options: LifecycleOptions<Props>;
   readonly #parentClassName: string;
   readonly #capabilities: DurableObjectCapability<Props>[] = [];
   readonly #capabilityRunner = new CapabilityRunner<Props>(
@@ -166,13 +184,17 @@ export class Lifecycle<
    * Construct and install a lifecycle in one explicit operation.
    *
    * @param host - The Durable Object whose runtime handlers the lifecycle owns.
+   * @param options - Optional host execution policy for capability phases.
    * @returns The installed lifecycle.
    */
   static install<
     Env extends object,
     Props extends Record<string, unknown> = Record<string, unknown>
-  >(host: DurableObject<Env>): Lifecycle<Env, Props> {
-    const lifecycle = new Lifecycle<Env, Props>(host);
+  >(
+    host: DurableObject<Env>,
+    options: LifecycleOptions<Props> = {}
+  ): Lifecycle<Env, Props> {
+    const lifecycle = new Lifecycle<Env, Props>(host, options);
     lifecycle.installHandlers();
     return lifecycle;
   }
@@ -181,13 +203,15 @@ export class Lifecycle<
    * Bind a lifecycle to a Durable Object instance without mutating its handlers.
    *
    * @param host - The Durable Object whose runtime lifecycle this object owns.
+   * @param options - Optional host execution policy for capability phases.
    */
-  constructor(host: DurableObject<Env>) {
+  constructor(host: DurableObject<Env>, options: LifecycleOptions<Props> = {}) {
     // SAFETY: DurableObject exposes ctx as protected to subclasses. The
     // lifecycle is constructed by that subclass with `this`, so this boundary
     // accesses the same runtime-owned context without exposing it publicly.
     this.#host = host as unknown as LifecycleHost<Props>;
     this.#ctx = this.#host.ctx;
+    this.#options = options;
     this.#parentClassName = this.#host.constructor.name;
     this.#connectionManager = new ConnectionManager(this.#ctx);
   }
@@ -281,9 +305,10 @@ export class Lifecycle<
       const url = new URL(request.url);
 
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-        const capabilityResponse = await this.#capabilityRunner.request({
-          request
-        });
+        const capabilityResponse = await this.#runCapabilityPhase(
+          { phase: "request", request },
+          () => this.#capabilityRunner.request({ request })
+        );
         if (capabilityResponse !== undefined) return capabilityResponse;
         if (this.#host.onRequest) return await this.#host.onRequest(request);
         return new Response("Not implemented", { status: 404 });
@@ -461,7 +486,11 @@ export class Lifecycle<
     await this.#ctx.blockConcurrencyWhile(async () => {
       this.#status = "starting";
       try {
-        await this.#capabilityRunner.start({ props: this.#props });
+        const startContext = { props: this.#props };
+        await this.#runCapabilityPhase(
+          { phase: "start", ...startContext },
+          () => this.#capabilityRunner.start(startContext)
+        );
         await this.#host.onStart?.(this.#props);
         this.#status = "started";
       } catch (cause) {
@@ -472,6 +501,14 @@ export class Lifecycle<
     // Re-throw outside blockConcurrencyWhile so the input gate is not
     // permanently broken and a later invocation can retry startup.
     if (error) throw error;
+  }
+
+  async #runCapabilityPhase<T>(
+    context: CapabilityPhaseContext<Props>,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const run = this.#options.runCapabilityPhase;
+    return run ? run(context, operation) : operation();
   }
 
   #legacyName: string | undefined;
@@ -532,7 +569,9 @@ export class Lifecycle<
   /** Dispatch lifecycle and host alarm callbacks after startup. */
   async alarm(): Promise<void> {
     await this.#ensureInitialized();
-    await this.#capabilityRunner.alarm();
+    await this.#runCapabilityPhase({ phase: "alarm" }, () =>
+      this.#capabilityRunner.alarm()
+    );
     await this.#host.onAlarm?.();
   }
 }

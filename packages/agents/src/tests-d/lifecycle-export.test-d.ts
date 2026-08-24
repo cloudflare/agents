@@ -7,9 +7,11 @@ import type {
 } from "../index";
 import {
   Lifecycle,
+  type CapabilityPhaseContext,
   type Connection,
   type ConnectionContext,
   type DurableObjectCapability,
+  type LifecycleOptions,
   type WSMessage
 } from "../lifecycle";
 
@@ -36,3 +38,25 @@ const capability: DurableObjectCapability = {
 };
 
 expectTypeOf(capability).toMatchTypeOf<DurableObjectCapability>();
+
+type ProbeProps = { label: string };
+const options: LifecycleOptions<ProbeProps> = {
+  runCapabilityPhase: async (context, operation) => {
+    expectTypeOf(context).toEqualTypeOf<CapabilityPhaseContext<ProbeProps>>();
+    if (context.phase === "request") {
+      expectTypeOf(context.request).toEqualTypeOf<Request>();
+    }
+    if (context.phase === "start") {
+      expectTypeOf(context.props).toEqualTypeOf<ProbeProps | undefined>();
+    }
+    return operation();
+  }
+};
+
+class ConfiguredLifecycleTypeProbe extends DurableObject {
+  readonly lifecycle = Lifecycle.install(this, options);
+}
+
+expectTypeOf<ConfiguredLifecycleTypeProbe["lifecycle"]>().toEqualTypeOf<
+  Lifecycle<Cloudflare.Env, ProbeProps>
+>();

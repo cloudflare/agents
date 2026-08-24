@@ -131,6 +131,44 @@ Pass dependencies to a capability explicitly. A capability should not receive an
 entire Agent merely to reach storage, bindings, authentication, observability,
 or protocol methods.
 
+## Run capability phases in host context
+
+Pass `runCapabilityPhase` when every capability hook must run inside host-owned
+invocation context, tracing, or error handling:
+
+```ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+
+const invocation = new AsyncLocalStorage<{ request?: Request }>();
+
+export class MyObject extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this, {
+    runCapabilityPhase: (context, operation) =>
+      invocation.run(
+        {
+          request: context.phase === "request" ? context.request : undefined
+        },
+        operation
+      )
+  });
+}
+```
+
+The boundary receives the complete `"start"`, `"request"`, or `"alarm"` phase.
+It must call `operation` and return its result. Lifecycle still controls
+capability ordering and request interception. Host callbacks such as `onStart`
+and `onRequest` remain outside this boundary.
+
+The expanded constructor accepts the same options:
+
+```ts
+readonly lifecycle = new Lifecycle(this, {
+  runCapabilityPhase: (context, operation) => operation()
+});
+```
+
 ## WebSockets always hibernate
 
 The lifecycle always uses Cloudflare's WebSocket Hibernation API. Idle clients
