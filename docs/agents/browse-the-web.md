@@ -244,7 +244,7 @@ const md = await browserMarkdown(this.env.BROWSER, { url });
 const data = await browserExtract<{ price: number }>(this.env.BROWSER, {
   url,
   prompt: "the product price",
-  response_format: { type: "json_schema", schema: priceSchema }
+  response_format: { type: "json_schema", json_schema: priceSchema }
 });
 ```
 
@@ -278,6 +278,21 @@ class Researcher extends Think<Env> {
 ```
 
 Quick Actions require a Worker `compatibility_date` of `2026-03-24` or later and `remote: true` on the browser binding for local `wrangler dev`.
+
+## Using Kitesurf
+
+To use Kitesurf with the CDP-based `browser_execute` tool, select it in the session options:
+
+```ts
+const tools = createBrowserTools({
+  ctx: this.ctx,
+  browser: this.env.BROWSER,
+  loader: this.env.LOADER,
+  session: { browser: "kitesurf" }
+});
+```
+
+A Kitesurf browser is scoped to its CDP WebSocket. It therefore supports only one-shot execution. Session reuse, pause and resume, Live View, recording, `keepAliveMs`, protocol discovery, and Kitesurf-backed Quick Actions are not available.
 
 ## Live View and human-in-the-loop
 

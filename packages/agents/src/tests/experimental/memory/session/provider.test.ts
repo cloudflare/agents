@@ -22,6 +22,7 @@ interface SessionAgentStub {
     toId: string
   ): Promise<unknown>;
   getCompactions(): Promise<unknown[]>;
+  seedSameTimestampCompactionsForTest(): Promise<void>;
   search(
     query: string
   ): Promise<Array<{ id: string; role: string; content: string }>>;
@@ -350,6 +351,102 @@ describe("AgentSessionProvider — tree-structured messages", () => {
     // Both compactions stored, but only the latest applies
     const compactions = await agent.getCompactions();
     expect(compactions).toHaveLength(2);
+  });
+
+  it("uses insertion order when compaction timestamps tie", async () => {
+    const agent = await getAgent(name);
+    for (let i = 0; i < 4; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    await agent.seedSameTimestampCompactionsForTest();
+
+    const history = await agent.getHistory("m3");
+    expect(history).toHaveLength(2);
+    expect(history[0].parts[0]).toEqual({
+      type: "text",
+      text: "New summary"
+    });
+    expect(history[1].id).toBe("m3");
+  });
+
+  it("keeps sibling branch compaction overlays isolated", async () => {
+    const agent = await getAgent(name);
+
+    await agent.appendMessage({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "root" }]
+    });
+    await agent.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "shared" }]
+    });
+    await agent.appendMessage(
+      {
+        id: "a2",
+        role: "user",
+        parts: [{ type: "text", text: "branch A" }]
+      },
+      "m1"
+    );
+    await agent.appendMessage(
+      {
+        id: "a3",
+        role: "assistant",
+        parts: [{ type: "text", text: "branch A reply" }]
+      },
+      "a2"
+    );
+    await agent.appendMessage(
+      {
+        id: "a4",
+        role: "user",
+        parts: [{ type: "text", text: "branch A tail" }]
+      },
+      "a3"
+    );
+    await agent.appendMessage(
+      {
+        id: "b2",
+        role: "user",
+        parts: [{ type: "text", text: "branch B" }]
+      },
+      "m1"
+    );
+    await agent.appendMessage(
+      {
+        id: "b3",
+        role: "assistant",
+        parts: [{ type: "text", text: "branch B tail" }]
+      },
+      "b2"
+    );
+
+    await agent.addCompaction("Branch A summary 1", "m0", "a2");
+    await agent.addCompaction("Branch B summary", "m0", "b2");
+    await agent.addCompaction("Branch A summary 2", "m0", "a3");
+
+    const historyA = await agent.getHistory("a4");
+    expect(historyA).toHaveLength(2);
+    expect(historyA[0].parts[0]).toEqual({
+      type: "text",
+      text: "Branch A summary 2"
+    });
+    expect(historyA[1].id).toBe("a4");
+
+    const historyB = await agent.getHistory("b3");
+    expect(historyB).toHaveLength(2);
+    expect(historyB[0].parts[0]).toEqual({
+      type: "text",
+      text: "Branch B summary"
+    });
+    expect(historyB[1].id).toBe("b3");
   });
 
   it("FTS search", async () => {

@@ -10,12 +10,13 @@ Each export maps to a public entry point that users `import` from. These are the
 | ---------------------------- | ---------------------------- | ---------------------------------------------------------------------------- |
 | `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
 | `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
+| `agents/lifecycle`           | `src/lifecycle/index.ts`     | Composable Durable Object lifecycle and hibernating connections              |
 | `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
+| `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
 | `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
 | `agents/mcp/server`          | `src/mcp/server.ts`          | Isolated Agents wrapper for SDK v2 stateless servers                         |
 | `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
-| `agents/x402`                | `src/mcp/x402.ts`            | Deprecated and feature-frozen x402 integration for MCP                       |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
 | `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                             |
@@ -47,6 +48,12 @@ src/
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
   internal_context.ts   # AsyncLocalStorage context for getCurrentAgent()
+  agent-routing.ts      # Agent URL routing, named lookup, CORS, placement, retries
+
+  lifecycle/            # Public Durable Object lifecycle composition
+    index.ts            # Intentionally small public lifecycle surface
+    durable-object-lifecycle.ts # Runtime handlers and capabilities
+    connection.ts       # Hibernating WebSocket connection management
 
   chat/                 # Shared chat toolkit (mostly for sibling packages)
     index.ts            # Barrel for shared chat primitives
@@ -139,15 +146,24 @@ Multiple separate test suites, each with its own vitest config:
 ### Workers tests (`src/tests/`)
 
 ```bash
-pnpm run test:workers   # or: vitest -r src/tests
+pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 ```
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
+### Lifecycle tests (`src/lifecycle-tests/`)
+
+```bash
+pnpm exec vitest --project lifecycle --run
+```
+
+Proves constructor composition on a plain `DurableObject`, ordered capabilities,
+routing, native and migrated identity, alarms, and hibernating WebSockets.
+
 ### React tests (`src/react-tests/`)
 
 ```bash
-pnpm run test:react     # or: vitest -r src/react-tests
+pnpm run test:react     # or: pnpm exec vitest -r src/react-tests
 ```
 
 Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global setup script starts a miniflare worker on port 18787. Tests cover: `useAgent` hook, cache invalidation, cache TTL, state sync.
@@ -155,7 +171,7 @@ Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global
 ### CLI tests (`src/cli-tests/`)
 
 ```bash
-pnpm run test:cli       # or: vitest -r src/cli-tests
+pnpm run test:cli       # or: pnpm exec vitest -r src/cli-tests
 ```
 
 Plain Node.js environment. Tests the `npx agents` CLI.
@@ -171,7 +187,7 @@ Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Te
 ### x402 tests (`src/x402-tests/`)
 
 ```bash
-pnpm run test:x402     # or: vitest --project x402
+pnpm run test:x402     # or: pnpm exec vitest --project x402
 ```
 
 Focused tests for the x402 payment / auth integration.
@@ -192,7 +208,7 @@ Chromium — run it locally when touching `src/browser/`.
 ### Chat primitive tests (`src/chat/__tests__/`)
 
 ```bash
-vitest --project chat
+pnpm exec vitest --project chat
 ```
 
 Low-level tests for shared chat primitives in `src/chat/` (turn queue,
@@ -203,13 +219,14 @@ resumable streams, sanitization, etc.). These back both
 
 Files ending in `.test-d.ts`. These use `expectTypeOf` / `assertType` to verify TypeScript types at compile time. They're checked by the typecheck script, not by vitest directly.
 
-### E2E tests (`src/e2e/`)
+### E2E tests (`src/e2e-tests/`)
 
 ```bash
-pnpm run test:e2e       # or: vitest run src/e2e/e2e.test.ts
+pnpm run test:e2e       # or: pnpm exec vitest run -c src/e2e-tests/vitest.config.ts
 ```
 
-End-to-end tests that start real workers and test MCP server flows.
+End-to-end tests that start real workers and exercise managed-fiber and facet
+recovery across process termination.
 
 ### Evals (`evals/`)
 
@@ -221,19 +238,20 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 
 ## Key architecture notes
 
-- **Agent extends partyserver's `Server`** — Durable Object lifecycle, WebSocket hibernation, and connection management come from `partyserver`. The Agent class adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows on top.
+- **Agent directly extends `DurableObject` and composes `Lifecycle`** — the lifecycle installs request, alarm, and always-hibernating WebSocket entry points. Agent adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows.
 - **State sync is bidirectional** — `this.setState()` on the server broadcasts to all connected clients; `agent.setState()` from the client sends to the server. Both directions use the same message format (`MessageType.CF_AGENT_STATE`).
-- **RPC is reflection-based** — public methods on Agent subclasses are automatically callable from clients via `agent.call("methodName", ...args)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
+- **Client RPC is decorator-gated** — methods on Agent subclasses must use `@callable()` before clients can invoke them through `agent.call("methodName", args)` or `agent.stub.methodName(...)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
 - **Scheduling uses cron-schedule** — `this.schedule()` accepts delays, Dates, or cron strings. Schedules persist in SQLite and survive hibernation.
 - **MCP has separate package boundaries** — `mcp/server.ts` is the Stateless Worker wrapper; `mcp/client.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/legacy-agent.ts`.
+- **Telemetry has an independent schema version** — `instrumentation_scope.version` is hardcoded to `"1"`; it is not the package version. Notify Workers Observability and any other downstream consumers before bumping it.
 
 ## Boundaries
 
 - Every new public export needs: an entry in `package.json` `exports`, a build entry in `scripts/build.ts`, and a changeset
 - `src/index.ts` is very large (~6000 lines) — be surgical with edits, understand the full context before changing
 - `agents/chat` is published and versioned, but treat it as a sibling-package support layer first, not a broad user-facing surface. Prefer documenting `@cloudflare/ai-chat` / `@cloudflare/think` directly unless a primitive is intentionally shared.
-- The `partyserver`/`partysocket` dependency is foundational — don't try to replace it
+- The lifecycle substrate is vendored under `src/lifecycle` and ISC-attributed. Keep `agents/lifecycle` small: no alternate WebSocket modes, speculative phases, or second Durable Object base class.
 - Peer dependencies (`ai`, `@ai-sdk/*`, `react`, `zod`) are optional — guard usage with runtime checks or separate entry points
 
 ## Related

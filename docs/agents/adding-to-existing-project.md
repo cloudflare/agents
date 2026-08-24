@@ -32,7 +32,7 @@ npm install agents hono-agents
 Create a new file for your agent (e.g., `src/agents/counter.ts`):
 
 ```typescript
-import { Agent } from "agents";
+import { Agent, callable } from "agents";
 
 type CounterState = {
   count: number;
@@ -41,11 +41,13 @@ type CounterState = {
 export class Counter extends Agent<Env, CounterState> {
   initialState: CounterState = { count: 0 };
 
+  @callable()
   increment() {
     this.setState({ count: this.state.count + 1 });
     return this.state.count;
   }
 
+  @callable()
   decrement() {
     this.setState({ count: this.state.count - 1 });
     return this.state.count;
@@ -371,7 +373,7 @@ By default, agents are routed at `/agents/{agent-name}/{instance-name}`. You can
 import { routeAgentRequest } from "agents";
 
 const agentResponse = await routeAgentRequest(request, env, {
-  prefix: "/api/agents" // Now routes at /api/agents/{agent-name}/{instance-name}
+  prefix: "api/agents" // Now routes at /api/agents/{agent-name}/{instance-name}
 });
 ```
 

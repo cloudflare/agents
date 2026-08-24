@@ -1,5 +1,9 @@
 import { Agent } from "../../index.ts";
-import type { WorkflowStatus, WorkflowInfo } from "../../workflows.ts";
+import type {
+  RunWorkflowOptions,
+  WorkflowStatus,
+  WorkflowInfo
+} from "../../workflows.ts";
 
 type WorkflowSubAgentState = {
   status: string;
@@ -699,6 +703,17 @@ export class TestWorkflowAgent extends Agent {
     return this.runWorkflow("SIMPLE_WORKFLOW", params, {
       id: workflowId
     });
+  }
+
+  async runSimpleWorkflowWithRetentionTest(
+    workflowId: string,
+    retention: NonNullable<RunWorkflowOptions["retention"]>
+  ): Promise<string> {
+    return this.runWorkflow(
+      "SIMPLE_WORKFLOW",
+      { value: "retention-test" },
+      { id: workflowId, retention }
+    );
   }
 
   // Start a simple workflow using the Agent's generated default ID

@@ -66,11 +66,14 @@ export {
   LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
+  SlowReplySubAgent,
   HookingSubAgentParent,
   Sub,
   SUB,
   Sub_,
   ReservedClassParent,
   TestUnboundParentAgent,
-  TestMinifiedNameParentAgent
+  TestMinifiedNameParentAgent,
+  BodyProbeSubAgent,
+  BodyProbeRootAgent
 } from "./sub-agent";

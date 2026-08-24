@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { toolApprovalSpan, toolCallSpan } from "../../genai/telemetry";
+import type { SemanticContext } from "../../genai/telemetry";
 import { toolInputAttributes, toolOutputAttributes } from "../content";
 import { readString } from "../read";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
@@ -11,6 +12,7 @@ export function wrapTools(
   tracer: AgentTracer,
   tools: unknown,
   storeTools: boolean,
+  context: SemanticContext,
   boundToInvocation = false,
   approvedToolCalls?: Map<string, string>
 ): unknown {
@@ -27,6 +29,7 @@ export function wrapTools(
       toolName,
       tool,
       storeTools,
+      context,
       boundToInvocation,
       approvedToolCalls
     );
@@ -39,6 +42,7 @@ function wrapTool(
   toolName: string,
   tool: unknown,
   storeTools: boolean,
+  context: SemanticContext,
   boundToInvocation: boolean,
   approvedToolCalls: Map<string, string> | undefined
 ): unknown {
@@ -69,6 +73,7 @@ function wrapTool(
       toolRecord,
       tool,
       toolName,
+      context,
       boundToInvocation
     );
   }
@@ -86,6 +91,7 @@ function wrapTool(
 
   wrappedTool.execute = (...args) => {
     const span = toolCallSpan({
+      context,
       operation: "tool.execute",
       toolCallId: extractToolCallId(args[1]),
       toolName
@@ -116,6 +122,7 @@ function wrapTool(
             toolName,
             toolCallId,
             "approved",
+            context,
             boundToInvocation
           );
           if (toolCallId !== undefined) approvedToolCalls?.delete(toolCallId);
@@ -148,6 +155,7 @@ function wrapApprovalCheck(
   toolRecord: Record<string, unknown>,
   tool: object,
   toolName: string,
+  context: SemanticContext,
   boundToInvocation: boolean
 ): void {
   const approval = toolRecord.needsApproval;
@@ -166,6 +174,7 @@ function wrapApprovalCheck(
           toolName,
           toolCallId,
           "requested",
+          context,
           boundToInvocation
         );
       }
@@ -183,6 +192,7 @@ export function wrapToolApprovalPolicy(
   tracer: AgentTracer,
   policy: unknown,
   approvedToolCalls: Map<string, string>,
+  context: SemanticContext,
   boundToInvocation = false
 ): unknown {
   if (typeof policy === "function") {
@@ -195,6 +205,7 @@ export function wrapToolApprovalPolicy(
         readString(toolCall?.toolCallId),
         tracer,
         approvedToolCalls,
+        context,
         boundToInvocation
       );
     };
@@ -212,6 +223,7 @@ export function wrapToolApprovalPolicy(
             extractToolCallId(args[1]),
             tracer,
             approvedToolCalls,
+            context,
             boundToInvocation
           )
       ]
@@ -225,6 +237,7 @@ function observePolicyResult(
   toolCallId: string | undefined,
   tracer: AgentTracer,
   approvedToolCalls: Map<string, string>,
+  context: SemanticContext,
   boundToInvocation = false
 ): unknown {
   const observe = (status: unknown): unknown => {
@@ -241,6 +254,7 @@ function observePolicyResult(
         toolName,
         toolCallId,
         type === "denied" ? "denied" : "requested",
+        context,
         boundToInvocation
       );
     }
@@ -254,7 +268,8 @@ function observePolicyResult(
 /** Records denied responses, whose tool never reaches execute(). */
 export function recordDeniedApprovalResponses(
   tracer: AgentTracer,
-  messages: unknown
+  messages: unknown,
+  context: SemanticContext
 ): void {
   for (const response of approvalResponses(messages)) {
     if (!response.approved) {
@@ -262,7 +277,8 @@ export function recordDeniedApprovalResponses(
         tracer,
         response.toolName,
         response.toolCallId,
-        "denied"
+        "denied",
+        context
       );
     }
   }
@@ -273,9 +289,11 @@ function recordApprovalSegment(
   toolName: string,
   toolCallId: string | undefined,
   state: "approved" | "denied" | "requested",
+  context: SemanticContext,
   boundToInvocation = false
 ): void {
   const tool = toolCallSpan({
+    context,
     operation: "tool.approval",
     toolCallId,
     toolName
@@ -289,6 +307,7 @@ function recordApprovalSegment(
         toolName,
         toolCallId,
         state,
+        context,
         boundToInvocation
       );
     },
@@ -301,9 +320,15 @@ function recordApprovalChild(
   toolName: string,
   toolCallId: string | undefined,
   state: "approved" | "denied" | "requested",
+  context: SemanticContext,
   boundToInvocation = false
 ): void {
-  const approval = toolApprovalSpan({ state, toolCallId, toolName });
+  const approval = toolApprovalSpan({
+    context,
+    state,
+    toolCallId,
+    toolName
+  });
   tracer.withSpan(
     approval.name,
     approval.attributes,

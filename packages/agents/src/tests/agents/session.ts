@@ -108,6 +108,27 @@ export class TestSessionAgent extends Agent {
     return this.session.getCompactions();
   }
 
+  /** Seed same-timestamp compactions in an index order opposite insertion. */
+  async seedSameTimestampCompactionsForTest(): Promise<void> {
+    const createdAt = "2026-08-15 12:00:00";
+    this.sql`
+      INSERT INTO assistant_compactions
+        (id, session_id, summary, from_message_id, to_message_id, created_at)
+      VALUES
+        (${"compaction-a-old"}, ${""}, ${"Old summary"}, ${"m0"}, ${"m1"}, ${createdAt})
+    `;
+    this.sql`
+      INSERT INTO assistant_compactions
+        (id, session_id, summary, from_message_id, to_message_id, created_at)
+      VALUES
+        (${"compaction-z-new"}, ${""}, ${"New summary"}, ${"m0"}, ${"m2"}, ${createdAt})
+    `;
+    this.sql`
+      CREATE INDEX assistant_compactions_tie_order_test
+      ON assistant_compactions(session_id, created_at ASC, id DESC)
+    `;
+  }
+
   // ── Search ──────────────────────────────────────────────────────
 
   async search(

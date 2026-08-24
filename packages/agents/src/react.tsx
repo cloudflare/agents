@@ -19,6 +19,7 @@ import {
   AgentConnectionError as AgentConnectionErrorCtor,
   isTerminalCloseEvent
 } from "./client";
+import { buildSubAgentPathUnchecked } from "./sub-routing";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
 import {
@@ -84,18 +85,10 @@ function buildSubPath(
   subChain: ReadonlyArray<{ agent: string; name: string }>,
   extraPath?: string
 ): string {
-  if (subChain.length === 0) return extraPath ?? "";
-  const parts = subChain.flatMap((step) => [
-    "sub",
-    camelCaseToKebabCase(step.agent),
-    encodeURIComponent(step.name)
-  ]);
-  const combined = parts.join("/");
-  if (extraPath) {
-    const trimmed = extraPath.startsWith("/") ? extraPath.slice(1) : extraPath;
-    return `${combined}/${trimmed}`;
-  }
-  return combined;
+  return buildSubAgentPathUnchecked(
+    subChain.map((step) => ({ className: step.agent, name: step.name })),
+    extraPath
+  );
 }
 
 function getCacheEntry(key: string): CacheEntry | undefined {

@@ -2,7 +2,7 @@
  * E2E test worker for chat recovery after process eviction.
  *
  * ChatRecoveryTestAgent:
- * - chatRecovery = true (chat turns wrapped in runFiber)
+ * - uses always-on durable recovery (chat turns are wrapped in runFiber)
  * - onChatMessage streams slow SSE chunks (1 chunk/second)
  * - onChatRecovery records recovery context and uses defaults
  * - Callable methods for test inspection
@@ -233,7 +233,6 @@ function makeSSEStream(
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
 
   override async onChatMessage(
     _onFinish: unknown,
@@ -480,7 +479,7 @@ export class ChatNoPersistNoContinueAgent extends ChatRecoveryTestAgent {
  * before the redeploy evicts the DO, leaving nothing to recover. A turn that
  * never completes is guaranteed to still be in-flight when the eviction lands,
  * which removes that timing race and deterministically produces an orphaned
- * fiber for restart detection to recover. It inherits `chatRecovery = true` and
+ * fiber for restart detection to recover. It inherits always-on recovery and
  * the recovery-context recording from `ChatRecoveryTestAgent`.
  */
 export class ChatHangingRecoveryAgent extends ChatRecoveryTestAgent {
@@ -503,12 +502,16 @@ export class ChatHangingRecoveryAgent extends ChatRecoveryTestAgent {
 /**
  * Sub-agent SIGKILL parity (Think has this, ai-chat didn't): an `AIChatAgent`
  * run as an agent-tool CHILD. It inherits `ChatRecoveryTestAgent`'s slow finite
- * stream (~10s) + `chatRecovery = true` + default `onChatRecovery` (continue),
- * so a SIGKILL mid agent-tool run leaves the child's turn interrupted, and on
- * restart the child self-heals via continue recovery while the parent
- * re-attaches to its still-running run and collects the real terminal (#1630).
+ * stream (~10s) and default `onChatRecovery` (continue). It also simulates stale
+ * compiled JavaScript that still assigns the removed `chatRecovery = false`.
+ * A SIGKILL mid agent-tool run must still recover durably, allowing the parent
+ * to re-attach and collect the real terminal instead of misclassifying the live
+ * child from fresh in-memory stream state (#1630, #2044).
  */
 export class ChatRecoveryHelperChild extends ChatRecoveryTestAgent {
+  // @ts-expect-error `false` is no longer accepted, but stale JavaScript must
+  // still use durable recovery.
+  override chatRecovery: ChatRecoveryConfig = false;
   override formatAgentToolInput(
     input: { prompt: string },
     request: { runId: string }

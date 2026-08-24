@@ -62,6 +62,7 @@ export {
   LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
+  SlowReplySubAgent,
   TestConnectionUriAgent,
   SpikeSubParent,
   SpikeSubChild,
@@ -71,7 +72,9 @@ export {
   Sub_,
   ReservedClassParent,
   TestUnboundParentAgent,
-  TestMinifiedNameParentAgent
+  TestMinifiedNameParentAgent,
+  BodyProbeSubAgent,
+  BodyProbeRootAgent
 } from "./agents";
 export { ChatSdkStateAgent } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
@@ -144,7 +147,8 @@ import type {
   HookingSubAgentParent,
   ReservedClassParent,
   TestUnboundParentAgent,
-  TestMinifiedNameParentAgent
+  TestMinifiedNameParentAgent,
+  BodyProbeRootAgent
 } from "./agents";
 
 export type Env = {
@@ -199,6 +203,7 @@ export type Env = {
   HookingSubAgentParent: DurableObjectNamespace<HookingSubAgentParent>;
   ReservedClassParent: DurableObjectNamespace<ReservedClassParent>;
   TestConnectionUriAgent: DurableObjectNamespace<TestConnectionUriAgent>;
+  BodyProbeRootAgent: DurableObjectNamespace<BodyProbeRootAgent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
   // accessed via ctx.exports as facet classes — no standalone bindings needed.
   // Workflow bindings for integration testing
@@ -254,6 +259,13 @@ export default {
 
     if (url.pathname === "/500") {
       return new Response("Internal Server Error", { status: 500 });
+    }
+
+    if (url.pathname.startsWith("/api/agents/")) {
+      return (
+        (await routeAgentRequest(request, env, { prefix: "api/agents" })) ??
+        new Response("Not found", { status: 404 })
+      );
     }
 
     // Custom routing exercising `routeSubAgentRequest` directly —

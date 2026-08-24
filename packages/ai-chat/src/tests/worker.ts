@@ -1741,7 +1741,6 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 // ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
-  override chatRecovery: ChatRecoveryConfig = true;
   recoveryContexts: ChatRecoveryContext[] = [];
   exhaustedContexts: ChatRecoveryExhaustedContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
@@ -2957,14 +2956,20 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── NonChatRecoveryTestAgent (same output as ChatRecoveryTestAgent, chatRecovery=false) ──
+// ── NonChatRecoveryTestAgent (legacy runtime false compatibility) ──
 
 export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
+  // @ts-expect-error `false` is no longer accepted, but stale JavaScript must
+  // still take the always-on durable recovery path.
+  override chatRecovery: ChatRecoveryConfig = false;
   recoveryContexts: ChatRecoveryContext[] = [];
   onChatMessageCallCount = 0;
+  private _stashSucceeded = false;
 
   async onChatMessage() {
     this.onChatMessageCallCount++;
+    this.stash({ source: "legacy-false-config" });
+    this._stashSucceeded = true;
     return makeSSEChunkResponse([
       { type: "text-start" },
       { type: "text-delta", delta: "Continued response." },
@@ -2995,6 +3000,10 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this.onChatMessageCallCount;
   }
 
+  getStashSucceeded(): boolean {
+    return this._stashSucceeded;
+  }
+
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (
       this.sql<{ id: string; name: string }>`
@@ -3017,7 +3026,7 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
 // ── RecoveryThrowingAgent (chatRecovery=true, onChatMessage can throw) ──
 
 export class RecoveryThrowingAgent extends AIChatAgent<Env> {
-  override chatRecovery = true;
+  override chatRecovery: ChatRecoveryConfig = true;
   private _shouldThrow = false;
   onChatMessageCallCount = 0;
 
@@ -3073,7 +3082,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
 // ── RecoverySlowStreamAgent (SlowStreamAgent with chatRecovery=true) ──
 
 export class RecoverySlowStreamAgent extends SlowStreamAgent {
-  override chatRecovery = true;
+  override chatRecovery: ChatRecoveryConfig = true;
 
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (

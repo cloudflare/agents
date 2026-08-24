@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -31,13 +31,13 @@
     "esbuild": "^0.28.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.16",
-    "partyserver": "^0.5.9",
     "partysocket": "1.3.0",
     "yaml": "^2.9.0",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
     "@ai-sdk/react": "^4.0.0",
+    "@ai-sdk/valibot": "3.0.6",
     "@cloudflare/codemode": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.10",
@@ -46,7 +46,7 @@
     "@tanstack/ai": "0.38.0",
     "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
-    "@vitest/browser-playwright": "^4.1.9",
+    "@valibot/to-json-schema": "1.3.0",
     "@x402/core": "^2.17.0",
     "@x402/evm": "^2.17.0",
     "ai": "^7.0.0",
@@ -54,7 +54,7 @@
     "glob": "^13.0.6",
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
-    "vitest-browser-react": "^2.2.0",
+    "valibot": "1.4.1",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
@@ -98,6 +98,9 @@
     "just-bash": {
       "optional": true
     },
+    "react": {
+      "optional": true
+    },
     "vite": {
       "optional": true
     }
@@ -118,6 +121,11 @@
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js",
       "require": "./dist/client.js"
+    },
+    "./lifecycle": {
+      "types": "./dist/lifecycle/index.d.ts",
+      "import": "./dist/lifecycle/index.js",
+      "require": "./dist/lifecycle/index.js"
     },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
@@ -198,6 +206,11 @@
       "types": "./dist/chat/index.d.ts",
       "import": "./dist/chat/index.js",
       "require": "./dist/chat/index.js"
+    },
+    "./chat/transport": {
+      "types": "./dist/chat/transport.d.ts",
+      "import": "./dist/chat/transport.js",
+      "require": "./dist/chat/transport.js"
     },
     "./chat/react": {
       "types": "./dist/chat/react.d.ts",

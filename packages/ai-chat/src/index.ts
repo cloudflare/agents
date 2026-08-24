@@ -289,7 +289,7 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
  * These tools are executed on the client, not the server.
  *
  * **For most apps**, define tools on the server with `tool()` from `"ai"` —
- * you get full Zod type safety, server-side execution, and simpler code.
+ * you get schema-derived type safety, server-side execution, and simpler code.
  * Use `onToolCall` in `useAgentChat` for tools that need client-side execution.
  *
  * **For SDKs and platforms** where the tool surface is determined dynamically
@@ -297,7 +297,8 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
  * client register tools the server does not know about at deploy time.
  *
  * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema`
- * because this is the wire format. Zod schemas cannot be serialized.
+ * because this is the wire format. Runtime validation schemas cannot be
+ * serialized.
  */
 export type { ClientToolSchema } from "agents/chat";
 
@@ -454,9 +455,9 @@ export class AIChatAgent<
   private _turnQueue = new TurnQueue();
 
   /**
-   * When true, chat turns are wrapped in `runFiber` for durable execution.
-   * Enables `onChatRecovery` hook and `this.stash()` during streaming.
-   * Set to `true` in subclasses to enable durable streaming.
+   * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
+   * enabling `onChatRecovery` and `this.stash()` during streaming. Assign an
+   * object to tune recovery budgets and terminal behavior.
    *
    * Assign this as a class field or in the constructor — NOT in `onStart()`.
    * On every wake the SDK evaluates recovery budgets (and may seal an
@@ -464,15 +465,14 @@ export class AIChatAgent<
    * set in `onStart()` is applied too late and the built-in defaults are used
    * for the recovery that matters. See {@link ChatRecoveryConfig}.
    */
-  chatRecovery: ChatRecoveryConfig = false;
+  chatRecovery: ChatRecoveryConfig = true;
 
   /**
    * Inactivity watchdog for the live model/transport stream, in milliseconds.
    * If more than this many ms elapse between stream chunks, the turn is aborted
-   * and — when {@link chatRecovery} is enabled — routed into bounded recovery
-   * (the same continuation machinery as a deploy/eviction interruption, #1626)
-   * rather than parking forever on a hung provider. With recovery disabled, a
-   * stall instead surfaces as a terminal stream error (kills the spinner).
+   * and routed into bounded recovery (the same continuation machinery as a
+   * deploy or eviction interruption, #1626) rather than parking forever on a
+   * hung provider.
    *
    * Default `0` disables the watchdog (opt-in), matching `@cloudflare/think`.
    * A value such as `60_000` (60s) is a reasonable starting point; tune it
@@ -1248,15 +1248,11 @@ export class AIChatAgent<
                         }
                       };
 
-                      if (this.chatRecovery) {
-                        await this._runChatRecoveryFiber(
-                          chatMessageId,
-                          false,
-                          chatTurnBody
-                        );
-                      } else {
-                        await chatTurnBody();
-                      }
+                      await this._runChatRecoveryFiber(
+                        chatMessageId,
+                        false,
+                        chatTurnBody
+                      );
                     }
                   );
                 });
@@ -1634,16 +1630,10 @@ export class AIChatAgent<
       this._flushAwaitingStreamStartConnections();
       this._activateDeferredAutoContinuation();
     }
-    // Arm on START as well as finish so a stream whose DO is evicted mid-flight
-    // and never reaches a finish still gets a future sweep instead of leaking.
-    // This matters for `chatRecovery: false` (the default): those turns don't
-    // run inside `runFiber`, so there is no durable keepAlive alarm and no
-    // fiber-recovery scan — if the client never reconnects, nothing else ever
-    // wakes the DO to finalize the orphan. (With `chatRecovery: true` the
-    // leftover keepAlive alarm wakes the DO within ~keepAliveIntervalMs and
-    // recovery finalizes the stream, which arms cleanup anyway — so this is
-    // belt-and-suspenders there.) The last-activity sweep threshold keeps an
-    // actively streaming run from being reclaimed before it goes quiet (#1706).
+    // Arm on START as well as finish so cleanup still has a belt-and-suspenders
+    // wake if fiber recovery cannot finalize a stream. The last-activity sweep
+    // threshold keeps an actively streaming run from being reclaimed before it
+    // goes quiet (#1706).
     void this._ensureStreamCleanupScheduled();
     return streamId;
   }
@@ -1918,8 +1908,8 @@ export class AIChatAgent<
    * framework can't repair "inside" it the way Think does; it repairs
    * `this.messages` at each point right before handing control to
    * `onChatMessage` instead. This reaches the cases the recovery-only repair
-   * missed: a mixed client+server orphan whose client replay drives an
-   * auto-continuation, and any agent running with `chatRecovery` disabled.
+   * missed, including a mixed client+server orphan whose client replay drives
+   * an auto-continuation.
    *
    * Scope: repair only ever flips a DEAD SERVER orphan (an interrupted tool with
    * no settled result whose `execute()` died with the evicted isolate). A part
@@ -2894,15 +2884,11 @@ export class AIChatAgent<
                   }
                 };
 
-                if (this.chatRecovery) {
-                  await this._runChatRecoveryFiber(
-                    requestId,
-                    true,
-                    autoContinuationBody
-                  );
-                } else {
-                  await autoContinuationBody();
-                }
+                await this._runChatRecoveryFiber(
+                  requestId,
+                  true,
+                  autoContinuationBody
+                );
               }
             );
           });
@@ -2973,15 +2959,11 @@ export class AIChatAgent<
               }
             };
 
-            if (this.chatRecovery) {
-              await this._runChatRecoveryFiber(
-                requestId,
-                false,
-                programmaticBody
-              );
-            } else {
-              await programmaticBody();
-            }
+            await this._runChatRecoveryFiber(
+              requestId,
+              false,
+              programmaticBody
+            );
           } finally {
             if (abortSignal?.aborted) wasAborted = true;
             detachExternal();
@@ -4268,11 +4250,7 @@ export class AIChatAgent<
           });
         };
 
-        if (this.chatRecovery) {
-          await this._runChatRecoveryFiber(requestId, true, turnBody);
-        } else {
-          await turnBody();
-        }
+        await this._runChatRecoveryFiber(requestId, true, turnBody);
       },
       { epoch }
     );
@@ -4995,9 +4973,7 @@ export class AIChatAgent<
    * Unlike Think there is no durable-submission layer to complete here, so the
    * schedule payload carries no `recoveredRequestId`.
    *
-   * Returns `"disabled"` when chat recovery is off (the caller then surfaces the
-   * stall as a terminal stream error — the watchdog's "kill the spinner"
-   * guarantee), `"exhausted"` when the budget was spent (terminal UX already
+   * Returns `"exhausted"` when the budget was spent (terminal UX already
    * delivered), or `"scheduled"` when a continuation was queued.
    */
   private async _routeStallToBoundedRecovery(input: {
@@ -5005,11 +4981,7 @@ export class AIChatAgent<
     streamId: string;
     partialParts: MessagePart[];
     targetAssistantId?: string;
-  }): Promise<"scheduled" | "exhausted" | "disabled"> {
-    // Stall-recovery is automatic only when chat recovery is enabled. With
-    // recovery off there is no budget/continuation machinery to route into, so
-    // the stall stays terminal.
-    if (!this._resolveChatRecoveryConfig().enabled) return "disabled";
+  }): Promise<"scheduled" | "exhausted"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const latestUserMessageId =
@@ -6772,9 +6744,7 @@ export class AIChatAgent<
             // A stall watchdog abort (#1626) is a recoverable interruption, not a
             // terminal error. Persist the settled partial (so the continuation
             // re-anchors without re-running completed tool calls, and the user
-            // keeps generated content), then route into bounded recovery; only
-            // fall through to the terminal path once the budget is exhausted or
-            // recovery is disabled.
+            // keeps generated content), then route into bounded recovery.
             if (
               error instanceof ChatStreamStalledError &&
               !streamCompleted.value
@@ -6818,9 +6788,6 @@ export class AIChatAgent<
                 streamCompleted.value = true;
                 stallRouted = true;
               }
-              // outcome === "disabled" (chat recovery off): fall through to the
-              // generic terminal path — the watchdog's "kill the spinner"
-              // guarantee.
             }
             if (!stallRouted) {
               const errorMessage =

@@ -196,7 +196,7 @@ Define tools with `needsApproval` to require human confirmation:
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createWorkersAI } from "workers-ai-provider";
-import { streamText, tool, convertToModelMessages } from "ai";
+import { streamText, tool, convertToModelMessages, stepCountIs } from "ai";
 import { z } from "zod";
 
 export class MyAgent extends AIChatAgent {
@@ -238,13 +238,15 @@ export class MyAgent extends AIChatAgent {
           execute: async ({ city }) => fetchWeather(city)
         })
       },
-      maxSteps: 5
+      stopWhen: stepCountIs(5)
     });
 
     return result.toUIMessageStreamResponse();
   }
 }
 ```
+
+The `inputSchema` accepts the AI SDK's flexible schema format, so you are not limited to Zod. You can also use Valibot, a Standard JSON Schema-compatible schema, or a raw JSON Schema wrapped with `jsonSchema()` from `ai`. See [Use Valibot or another schema library](./agent-tools.md#use-valibot-or-another-schema-library) for details.
 
 ### Client
 
@@ -355,7 +357,7 @@ See the complete example: [guides/human-in-the-loop/](https://github.com/cloudfl
 
 ### Surviving restarts while waiting for a human
 
-A Durable Object can be evicted at any time (a deploy, an inactivity timeout, a resource limit), including while a turn is paused on an approval prompt or a client-side tool call. When [`chatRecovery`](./chat-agents.md#stream-recovery) is enabled (the default for `Think`), the SDK recognizes that such a turn is _waiting on the human_, not stuck, and does **not** seal it: the no-progress window, attempt cap, `maxRecoveryWork`, and `shouldKeepRecovering` are all suspended while the interaction is pending. Recovery parks the turn instead of failing it, and the user's eventual approval or `tool_result` resumes the conversation through the normal continuation path. A user who takes minutes to respond to a prompt that was interrupted by a deploy therefore does not see a spurious "session interrupted" error.
+A Durable Object can be evicted at any time (a deploy, an inactivity timeout, a resource limit), including while a turn is paused on an approval prompt or a client-side tool call. Durable [`chatRecovery`](./chat-agents.md#stream-recovery) is always enabled. The SDK recognizes that such a turn is _waiting on the human_, not stuck, and does **not** seal it: the no-progress window, attempt cap, `maxRecoveryWork`, and `shouldKeepRecovering` are all suspended while the interaction is pending. Recovery parks the turn instead of failing it, and the user's eventual approval or `tool_result` resumes the conversation through the normal continuation path. A user who takes minutes to respond to a prompt that was interrupted by a deploy therefore does not see a spurious "session interrupted" error.
 
 This protection applies to interactions only the client can resolve — `approval-requested` parts and `input-available` parts for client-side tools (those without a server `execute`). A server tool whose `execute()` was killed mid-flight is a genuine orphan and recovers through the normal transcript-repair path instead.
 
@@ -380,7 +382,7 @@ export class MyAgent extends AIChatAgent {
           inputSchema: z.object({})
         })
       },
-      maxSteps: 3
+      stopWhen: stepCountIs(3)
     });
 
     return result.toUIMessageStreamResponse();
@@ -410,17 +412,18 @@ const { messages, sendMessage } = useAgentChat({
 });
 ```
 
-The server receives the tool output via `CF_AGENT_TOOL_RESULT` and can auto-continue the conversation (with `maxSteps > 1`), letting the LLM respond to the location data in the same turn.
+The server receives the tool output via `CF_AGENT_TOOL_RESULT` and can auto-continue the conversation when `stopWhen` allows another step, letting the LLM respond to the location data in the same turn.
 
 ### OpenAI Agents SDK Pattern
 
 When using the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/), use the `needsApproval` function for conditional approval:
 
 ```typescript
-import { Agent } from "agents";
-import { tool, run } from "@openai/agents";
+import { Agent as CloudflareAgent } from "agents";
+import { Agent as OpenAIAgent, tool, run } from "@openai/agents";
+import { z } from "zod";
 
-export class WeatherAgent extends Agent<Env, AgentState> {
+export class WeatherAgent extends CloudflareAgent<Env> {
   async processQuery(query: string) {
     const weatherTool = tool({
       name: "get_weather",
@@ -438,13 +441,13 @@ export class WeatherAgent extends Agent<Env, AgentState> {
       }
     });
 
-    const result = await run(this.openai, {
-      model: "gpt-4o",
-      tools: [weatherTool],
-      input: query
+    const openaiAgent = new OpenAIAgent({
+      name: "Weather assistant",
+      instructions: "Help the user check the weather.",
+      tools: [weatherTool]
     });
 
-    return result;
+    return run(openaiAgent, query);
   }
 }
 ```

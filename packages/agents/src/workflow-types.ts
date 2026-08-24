@@ -13,8 +13,9 @@ import type {
   WorkflowStep,
   WorkflowSleepDuration
 } from "cloudflare:workers";
+import type { AgentPathStep } from "./sub-routing";
 
-export type AgentWorkflowPathStep = { className: string; name: string };
+export type AgentWorkflowPathStep = AgentPathStep;
 
 export type AgentWorkflowOrigin =
   | {
@@ -230,6 +231,8 @@ export type RunWorkflowOptions = {
   metadata?: Record<string, unknown>;
   /** Agent binding name (auto-detected from class name if not provided) */
   agentBinding?: string;
+  /** Retention policy for the underlying Workflow instance */
+  retention?: WorkflowInstanceCreateOptions["retention"];
 };
 
 /**

@@ -1,4 +1,5 @@
 import { aiGatewayLogAttributes, modelCallSpan } from "../../genai/telemetry";
+import type { SemanticContext } from "../../genai/telemetry";
 import { writeSpanAttributes } from "../../tracing/tracer";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 import {
@@ -21,6 +22,7 @@ export function wrapModel(
   model: unknown,
   parentOperation: string,
   storeMessages: boolean,
+  context: SemanticContext,
   boundToInvocation = false
 ): unknown {
   if (!wrapLanguageModel) {
@@ -44,7 +46,8 @@ export function wrapModel(
           modelInfo,
           params,
           parentOperation,
-          storeMessages
+          storeMessages,
+          context
         );
         return tracer.withSpan(
           span.name,
@@ -76,7 +79,8 @@ export function wrapModel(
           modelInfo,
           params,
           parentOperation,
-          storeMessages
+          storeMessages,
+          context
         );
         // The provider call runs INSIDE the activation callback so its work
         // (fetch subrequests, etc.) nests under the chat span; the span stays
@@ -126,13 +130,15 @@ function modelCallSpanForModel(
   model: ModelInfo | undefined,
   params: unknown,
   parentOperation: string,
-  storeMessages: boolean
+  storeMessages: boolean,
+  context: SemanticContext
 ): ReturnType<typeof modelCallSpan> {
   const record =
     typeof params === "object" && params !== null
       ? (params as Record<string, unknown>)
       : {};
   const span = modelCallSpan({
+    context,
     model: model?.modelId,
     operation,
     provider: model?.provider,

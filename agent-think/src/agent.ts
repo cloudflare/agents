@@ -21,6 +21,7 @@ import type {
   ChatRecoveryOptions,
   ChatResponseResult,
   Session,
+  ThinkSubmissionStatus,
   ToolCallResultContext,
   TurnContext,
   WorkspaceLike as ThinkWorkspaceLike
@@ -55,6 +56,19 @@ const RESET_ABORT_DELAY_MS = 100;
 export interface RunContext extends RunTarget {
   /** Short-lived GitHub App installation token. */
   installationToken: string;
+}
+
+/** Durable state for one Think submission, safe to return across RPC. */
+export interface AgentThinkSubmissionStatus {
+  /**
+   * Persisted submission state, not a liveness signal. `running` may remain
+   * while durable recovery is pending; callers must wait for a terminal state.
+   */
+  status: ThinkSubmissionStatus;
+  error?: string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
 }
 
 /**
@@ -224,6 +238,29 @@ export class ThinkAgent extends ThinkBase {
   /** Test/diagnostic proof of the stable Think-session → Workspace mapping. */
   async debugWorkspaceIdentity(): Promise<{ id: string }> {
     return this.#workspaceAgent.debugIdentity();
+  }
+
+  /**
+   * Returns null when no durable record exists. This includes unknown ids and
+   * submissions removed by a session reset; null never means pending.
+   */
+  async getSubmissionStatus(
+    submissionId: string
+  ): Promise<AgentThinkSubmissionStatus | null> {
+    const submission = await this.inspectSubmission(submissionId);
+    if (!submission) return null;
+
+    return {
+      status: submission.status,
+      createdAt: submission.createdAt,
+      ...(submission.error === undefined ? {} : { error: submission.error }),
+      ...(submission.startedAt === undefined
+        ? {}
+        : { startedAt: submission.startedAt }),
+      ...(submission.completedAt === undefined
+        ? {}
+        : { completedAt: submission.completedAt })
+    };
   }
 
   async refreshInstallationToken(installationToken: string): Promise<void> {

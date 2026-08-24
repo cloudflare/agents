@@ -33,9 +33,6 @@ function createAgent<
         "cf-aig-authorization": `Bearer ${this.env.AI_GATEWAY_TOKEN}`
       }
     });
-    static options = {
-      hibernate: true
-    };
     status: {
       isRunning: boolean;
       output: string | undefined;

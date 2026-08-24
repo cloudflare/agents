@@ -5,11 +5,12 @@
  * did not).
  *
  * A plain `Agent` parent starts an agent-tool run whose child is an
- * `AIChatAgent` (`ChatRecoveryHelperChild`). The child streams a slow finite
- * turn, so a SIGKILL lands while the run is in-flight. On restart the child
- * self-heals via continue recovery and the parent re-attaches to the still-
- * running `cf_agent_tool_runs` row, following it to its REAL terminal
- * (`completed`) rather than abandoning it as `interrupted`.
+ * `AIChatAgent` (`ChatRecoveryHelperChild`). The child simulates stale compiled
+ * JavaScript that assigns the removed `chatRecovery = false`, then streams a
+ * slow finite turn so a SIGKILL lands while the run is in-flight. Recovery must
+ * remain durable: on restart the child self-heals and the parent re-attaches to
+ * the still-running row, following it to `completed` instead of crashing on
+ * fresh in-memory stream state or abandoning it as `interrupted` (#2044).
  *
  * Coverage split (mirrors Think's `reattach-budget` e2e note): this is the
  * INTEGRATION smoke for the full eviction → self-heal → re-attach loop. The
@@ -79,7 +80,7 @@ describe("sub-agent agent-tool recovery e2e", () => {
     }
   });
 
-  it("re-attaches to a still-running child agent-tool run after a SIGKILL and collects its terminal result (#1630)", async () => {
+  it("recovers a legacy-false child after SIGKILL and collects its terminal result (#2044)", async () => {
     wrangler = harness.start();
     await harness.waitForReady();
 

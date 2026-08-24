@@ -1,8 +1,9 @@
-import { Agent, getCurrentAgent } from "../../index.ts";
+import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
   FiberInspection,
   FiberRecoveryContext,
-  FiberRecoveryResult
+  FiberRecoveryResult,
+  StreamingResponse
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
@@ -1082,6 +1083,11 @@ export class CustomBoundSubAgentParent extends Agent {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  async delayedEchoFromParent(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `parent:${value}`;
+  }
+
   async onMessage(
     connection: { send(message: string): void },
     message: string | ArrayBuffer
@@ -2211,6 +2217,46 @@ class _UnboundParent extends Agent {
 }
 export { _UnboundParent as TestUnboundParentAgent };
 
+// Regression fixture for issue #1991. The onMessage wrapper is intentional:
+// facet RPC replies must retain their originating bridge through application
+// and framework middleware before the Agent protocol dispatcher handles them.
+export class SlowReplySubAgent extends Agent {
+  onStart(): void {
+    const handleMessage = this.onMessage.bind(this);
+    this.onMessage = async (connection, message) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await handleMessage(connection, message);
+    };
+  }
+
+  @callable()
+  async slowEcho(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `slow:${value}`;
+  }
+
+  @callable()
+  fastEcho(value: string): string {
+    return `fast:${value}`;
+  }
+
+  @callable()
+  async parentEcho(value: string): Promise<string> {
+    const parent = await this.parentAgent(TestSubAgentParent);
+    return await parent.delayedEchoFromParent(value);
+  }
+
+  @callable({ streaming: true })
+  async slowStreamingEcho(
+    stream: StreamingResponse,
+    value: string
+  ): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    stream.send(`slow-stream:${value}:chunk`);
+    stream.end(`slow-stream:${value}:done`);
+  }
+}
+
 /** Class identifier `_a`, exported as `TestMinifiedNameParentAgent`. */
 class _a extends Agent {
   async tryToSpawn(name: string): Promise<string> {
@@ -2223,3 +2269,100 @@ class _a extends Agent {
   }
 }
 export { _a as TestMinifiedNameParentAgent };
+
+// ── Request-body forwarding probes (issue #2015) ─────────────────────
+//
+// `_cf_forwardToFacet` and `routeSubAgentRequest` used to materialise
+// the whole forwarded body via `await req.arrayBuffer()` before
+// dispatching. These fixtures let a test observe *when* the child sees
+// the request relative to the client finishing its upload, which is
+// what distinguishes streaming from buffering.
+//
+// The same handler backs a facet child (`BodyProbeSubAgent`) and a
+// root Agent (`BodyProbeRootAgent`). The root is the control: it
+// proves the *test harness* can stream a request body, so a hang on
+// the facet path can be attributed to the forwarder rather than to
+// vitest-pool-workers.
+
+function toHex(buf: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Probe endpoints:
+ *   - `/probe/ignore`      — reply immediately, never touch the body.
+ *   - `/probe/first-chunk` — read exactly one chunk, then reply.
+ *   - `/probe/drain`       — read to completion, reply with size + digest.
+ */
+async function handleBodyProbe(
+  agentName: string,
+  request: Request
+): Promise<Response> {
+  const { pathname } = new URL(request.url);
+
+  // Matched by suffix, not equality: a facet child sees the tail after
+  // `/sub/{class}/{name}` (the forwarder rewrites the pathname), while a
+  // root Agent sees the full `/agents/{class}/{name}/...` path. The same
+  // handler has to serve both.
+  if (pathname.endsWith("/probe/ignore")) {
+    return Response.json({ agentName, probe: "ignore" });
+  }
+
+  if (pathname.endsWith("/probe/first-chunk")) {
+    if (!request.body) {
+      return Response.json({ agentName, chunk: null, probe: "first-chunk" });
+    }
+    const reader = request.body.getReader();
+    try {
+      const { done, value } = await reader.read();
+      return Response.json({
+        agentName,
+        chunk: value ? new TextDecoder().decode(value) : null,
+        done,
+        probe: "first-chunk"
+      });
+    } finally {
+      // Let go without draining — the point of this probe is that the
+      // child can act on a prefix of a body the client hasn't finished
+      // sending.
+      reader.cancel().catch(() => {});
+    }
+  }
+
+  if (pathname.endsWith("/probe/drain")) {
+    const body = await request.arrayBuffer();
+    return Response.json({
+      agentName,
+      bytes: body.byteLength,
+      contentLength: request.headers.get("content-length"),
+      probe: "drain",
+      sha256: toHex(await crypto.subtle.digest("SHA-256", body))
+    });
+  }
+
+  return Response.json(
+    { agentName, path: pathname, probe: "unknown" },
+    {
+      status: 404
+    }
+  );
+}
+
+/** Facet-only child. Reached via `/sub/body-probe-sub-agent/{name}`. */
+export class BodyProbeSubAgent extends Agent {
+  override async onRequest(request: Request): Promise<Response> {
+    return handleBodyProbe(this.name, request);
+  }
+}
+
+/**
+ * Root Agent running the identical handler — the canonical (non-facet)
+ * control path from the issue's measurement table.
+ */
+export class BodyProbeRootAgent extends Agent {
+  override async onRequest(request: Request): Promise<Response> {
+    return handleBodyProbe(this.name, request);
+  }
+}

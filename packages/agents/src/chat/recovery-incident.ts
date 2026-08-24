@@ -209,14 +209,14 @@ export const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
 
 /**
  * Resolve a raw `chatRecovery` config field into the fully-defaulted form the
- * engine reasons about. Identical defaulting in both packages today.
+ * engine reasons about. Durable recovery is always enabled; a legacy runtime
+ * `false` value from previously compiled JavaScript safely receives defaults.
  */
 export function resolveChatRecoveryConfig(
   raw: ChatRecoveryConfig | undefined
 ): ResolvedChatRecoveryConfig {
   const custom = typeof raw === "object" && raw !== null ? raw : undefined;
   return {
-    enabled: raw !== false,
     maxAttempts: Math.max(
       1,
       Math.floor(custom?.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS)

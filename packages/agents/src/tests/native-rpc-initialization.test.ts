@@ -117,38 +117,38 @@ describe("native Durable Object RPC initialization", () => {
     // deferred-destroy.test.ts separately verifies that teardown erases storage.
   });
 
-  it("recovers a setName fallback before application RPC after eviction", async () => {
+  it("hydrates a migrated legacy name before application RPC", async () => {
     const namespace = env.TestNativeRpcAgent;
+    // An object created by an older PartyServer release has no native
+    // ctx.id.name, only the persisted __ps_name the lifecycle migrates from.
     const stub = namespace.get(namespace.newUniqueId());
     const name = uniqueName();
 
-    await stub.setName(name);
-    expect(await stub.applicationRpc()).toMatchObject({
-      name,
-      ready: true,
-      startCount: 1
-    });
-
+    // Arrange: persist the legacy name without starting the Agent.
+    await runInDurableObject(stub, (_instance, ctx) =>
+      ctx.storage.put("__ps_name", name)
+    );
     await evictDurableObject(stub);
 
-    expect(await stub.applicationRpc()).toMatchObject({
-      name,
-      ready: true,
-      startCount: 2
-    });
+    // Act: the first call into the cold instance is a native RPC.
+    const result = await stub.applicationRpc();
+
+    // Assert: startup resolved the legacy identity and ran before the method.
+    expect(result).toMatchObject({ name, ready: true, startCount: 1 });
   });
 
-  it("rejects a truly unnamed PartyServer application RPC clearly", async () => {
+  it("rejects a truly unnamed application RPC clearly", async () => {
     const namespace = env.TestNativeRpcAgent;
     const stub = namespace.get(namespace.newUniqueId());
 
-    // Agent startup requires PartyServer's resolvable instance name. Raw IDs
-    // are unsupported until setName() bootstraps that name; failing clearly is
-    // safer than preserving the old bug where RPC ran against uninitialized state.
+    // Agent startup requires a resolvable Durable Object name, and neither a
+    // native nor a migrated legacy name exists here. Failing with the
+    // lifecycle's addressing guidance is safer than preserving the old bug
+    // where RPC ran against uninitialized state.
     // Invoke in-process because vitest-pool-workers reports an expected remote
     // stub rejection as an unhandled rejection even when the promise is caught.
     await expect(
       runInDurableObject(stub, (instance) => instance.applicationRpc())
-    ).rejects.toThrow(/ctx\.id\.name is not set.*setName\(\)/);
+    ).rejects.toThrow(/could not determine its Durable Object name/);
   });
 });

@@ -1,0 +1,46 @@
+{
+  "name": "@cloudflare/voice-plivo",
+  "version": "0.1.0",
+  "description": "Plivo audio streaming adapter for Cloudflare Agents voice pipeline — connect phone calls to VoiceAgent",
+  "repository": {
+    "directory": "voice-providers/plivo",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "peerDependencies": {
+    "@cloudflare/voice": ">=0.3.3 <1.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "voice",
+    "plivo",
+    "telephony",
+    "phone",
+    "audio-streaming"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  }
+}

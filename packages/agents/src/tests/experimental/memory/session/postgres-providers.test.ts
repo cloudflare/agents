@@ -468,6 +468,45 @@ describe("PostgresSessionProvider", () => {
     expect(all[0].summary).toBe("summary");
   });
 
+  it("keeps sibling branch compaction overlays isolated", async () => {
+    await provider.appendMessage(makeMessage("m0", "user", "root"));
+    await provider.appendMessage(makeMessage("m1", "assistant", "shared"));
+    await provider.appendMessage(makeMessage("a2", "user", "branch A"), "m1");
+    await provider.appendMessage(
+      makeMessage("a3", "assistant", "branch A reply"),
+      "a2"
+    );
+    await provider.appendMessage(
+      makeMessage("a4", "user", "branch A tail"),
+      "a3"
+    );
+    await provider.appendMessage(makeMessage("b2", "user", "branch B"), "m1");
+    await provider.appendMessage(
+      makeMessage("b3", "assistant", "branch B tail"),
+      "b2"
+    );
+
+    await provider.addCompaction("Branch A summary 1", "m0", "a2");
+    await provider.addCompaction("Branch B summary", "m0", "b2");
+    await provider.addCompaction("Branch A summary 2", "m0", "a3");
+
+    const historyA = await provider.getHistory("a4");
+    expect(historyA).toHaveLength(2);
+    expect(historyA[0].parts[0]).toEqual({
+      type: "text",
+      text: "Branch A summary 2"
+    });
+    expect(historyA[1].id).toBe("a4");
+
+    const historyB = await provider.getHistory("b3");
+    expect(historyB).toHaveLength(2);
+    expect(historyB[0].parts[0]).toEqual({
+      type: "text",
+      text: "Branch B summary"
+    });
+    expect(historyB[1].id).toBe("b3");
+  });
+
   it("normalizes compaction timestamps returned as Date objects", async () => {
     const createdAt = new Date("2026-05-18T15:42:29.000Z");
     const dateConn: PostgresConnection = {

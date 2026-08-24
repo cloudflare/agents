@@ -29,6 +29,219 @@ import type { Agent, SubAgentClass, SubAgentStub } from "./index";
  */
 export const SUB_PREFIX = "sub";
 
+/** One agent identity in a root-first address chain. */
+export interface AgentPathStep {
+  /** Agent class name as exported by the Worker. */
+  className: string;
+  /** Logical Agent instance name. */
+  name: string;
+}
+
+export interface BuildAgentPathOptions {
+  /** Top-level route prefix. Must match `routeAgentRequest`; defaults to `agents`. */
+  prefix?: string;
+  /** Pathname suffix appended after the destination Agent identity. */
+  leafPath?: string;
+  /** Root Durable Object binding name, when it differs from the root class name. */
+  rootBinding?: string;
+}
+
+function validateLeafPath(leafPath: string): string {
+  const normalized = leafPath.startsWith("/") ? leafPath : `/${leafPath}`;
+  const parsed = new URL(normalized, "https://agents.invalid");
+  if (
+    normalized.includes("//") ||
+    (normalized.length > 1 && normalized.endsWith("/")) ||
+    parsed.pathname !== normalized ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error(
+      `Cannot build an Agent path for leaf path ${JSON.stringify(leafPath)} because it is not a stable pathname.`
+    );
+  }
+  return normalized;
+}
+
+function validateRoutingPrefix(prefix: string): string {
+  const prefixParts = prefix.split("/");
+  const rawPath = `/${prefix}/leaf`;
+  const parsed = new URL(rawPath, "https://agents.invalid");
+  if (
+    prefixParts.some(
+      (part) => !part || part === "." || part === ".." || part === SUB_PREFIX
+    ) ||
+    parsed.pathname !== rawPath ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error(
+      `Cannot build an Agent path for routing prefix ${JSON.stringify(prefix)} because it is not externally routable.`
+    );
+  }
+  return prefix;
+}
+
+function encodeAgentClassName(className: string): string {
+  const segment = camelCaseToKebabCase(className);
+  if (segment === SUB_PREFIX) {
+    throw new Error(
+      `Cannot build an Agent path for Agent class name ${JSON.stringify(className)} because ${JSON.stringify(SUB_PREFIX)} is reserved.`
+    );
+  }
+
+  const rawPath = `/root/${segment}/leaf`;
+  const parsed = new URL(rawPath, "https://agents.invalid");
+  const parts = parsed.pathname.split("/");
+  if (
+    !segment ||
+    parsed.pathname !== rawPath ||
+    parsed.search ||
+    parsed.hash ||
+    parts.length !== 4 ||
+    parts[2] !== segment
+  ) {
+    throw new Error(
+      `Cannot build an Agent path for Agent class name ${JSON.stringify(className)} because it is not externally routable.`
+    );
+  }
+  return segment;
+}
+
+function encodeChildAgentName(name: string): string {
+  if (!name || name === "." || name === ".." || name.includes("\0")) {
+    throw new Error(
+      `Cannot build an Agent path for child Agent name ${JSON.stringify(name)} because it is not externally routable.`
+    );
+  }
+  try {
+    return encodeURIComponent(name);
+  } catch {
+    throw new Error(
+      `Cannot build an Agent path for child Agent name ${JSON.stringify(name)} because it is not valid Unicode.`
+    );
+  }
+}
+
+function validateRootAgentName(name: string): string {
+  if (name === SUB_PREFIX) {
+    throw new Error(
+      `Cannot build an Agent path for root Agent name ${JSON.stringify(name)} because ${JSON.stringify(SUB_PREFIX)} is reserved.`
+    );
+  }
+
+  const rawPath = `/root/${name}/leaf`;
+  const parsed = new URL(rawPath, "https://agents.invalid");
+  const parts = parsed.pathname.split("/");
+  if (
+    !name ||
+    parsed.pathname !== rawPath ||
+    parsed.search ||
+    parsed.hash ||
+    parts.length !== 4 ||
+    parts[2] !== name
+  ) {
+    throw new Error(
+      `Cannot build an Agent path for root Agent name ${JSON.stringify(name)} because it is not externally routable.`
+    );
+  }
+  return name;
+}
+
+function serializeSubAgentPath(
+  path: ReadonlyArray<AgentPathStep>,
+  leafPath: string | undefined,
+  validate: boolean
+): string {
+  if (path.length === 0) return leafPath ?? "";
+
+  const segments = path.flatMap((child) => [
+    SUB_PREFIX,
+    validate
+      ? encodeAgentClassName(child.className)
+      : camelCaseToKebabCase(child.className),
+    validate ? encodeChildAgentName(child.name) : encodeURIComponent(child.name)
+  ]);
+  const subPath = segments.join("/");
+  if (!leafPath) return subPath;
+  const normalizedLeaf = leafPath.startsWith("/") ? leafPath : `/${leafPath}`;
+  return `${subPath}${normalizedLeaf}`;
+}
+
+/** @internal Build the strictly validated path tail for sub-agent routing. */
+export function buildSubAgentPath(
+  path: ReadonlyArray<AgentPathStep>,
+  leafPath?: string
+): string {
+  return serializeSubAgentPath(path, leafPath, true);
+}
+
+/** @internal Preserve React's tolerant path composition for disabled placeholders. */
+export function buildSubAgentPathUnchecked(
+  path: ReadonlyArray<AgentPathStep>,
+  leafPath?: string
+): string {
+  return serializeSubAgentPath(path, leafPath, false);
+}
+
+/**
+ * Build the canonical pathname for a root Agent or nested sub-agent.
+ *
+ * The address is root-first and accepts `Agent#selfPath`. Pass
+ * `rootBinding` when the root Durable Object binding and class names differ.
+ */
+export function buildAgentPath(
+  path: ReadonlyArray<AgentPathStep>,
+  options: BuildAgentPathOptions = {}
+): string {
+  const [root, ...children] = path;
+  if (!root) {
+    throw new Error("Agent path must contain at least one step.");
+  }
+
+  const rootPath = [
+    validateRoutingPrefix(options.prefix ?? "agents"),
+    encodeAgentClassName(options.rootBinding ?? root.className),
+    validateRootAgentName(root.name)
+  ].join("/");
+  const leafPath = options.leafPath
+    ? validateLeafPath(options.leafPath)
+    : undefined;
+  if (children.length === 0) {
+    return `/${rootPath}${leafPath ?? ""}`;
+  }
+  return `/${rootPath}/${buildSubAgentPath(children, leafPath)}`;
+}
+
+/** Build an absolute URL for a root Agent or nested sub-agent. */
+export function buildAgentUrl(
+  origin: string | URL,
+  path: ReadonlyArray<AgentPathStep>,
+  options: BuildAgentPathOptions = {}
+): URL {
+  let base: URL;
+  try {
+    base = new URL(origin.toString());
+  } catch {
+    throw new Error(`Invalid Agent URL origin ${JSON.stringify(origin)}.`);
+  }
+
+  if (
+    !["http:", "https:", "ws:", "wss:"].includes(base.protocol) ||
+    base.username ||
+    base.password ||
+    base.pathname !== "/" ||
+    base.search ||
+    base.hash
+  ) {
+    throw new Error(
+      `Invalid Agent URL origin ${JSON.stringify(origin.toString())}. Pass an HTTP(S) or WS(S) origin without credentials, a pathname, query, or fragment.`
+    );
+  }
+
+  return new URL(buildAgentPath(path, options), base);
+}
+
 export interface SubAgentPathMatch {
   /** CamelCase class name of the child, as it appears in `ctx.exports`. */
   childClass: string;
@@ -211,8 +424,12 @@ export async function routeSubAgentRequest(
     method: req.method,
     headers: new Headers(req.headers)
   };
+  // Stream the body through rather than buffering it — see #2015. This
+  // helper runs in the caller's isolate, but the same request then hits
+  // `_cf_forwardToFacet` on the parent, so buffering here would put a
+  // second unbounded copy in front of the child.
   if (req.body && req.method !== "GET" && req.method !== "HEAD") {
-    forwardInit.body = await req.arrayBuffer();
+    forwardInit.body = req.body;
   }
   const forwardReq = new Request(forwardUrl, forwardInit);
 

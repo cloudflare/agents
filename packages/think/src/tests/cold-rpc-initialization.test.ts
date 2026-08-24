@@ -67,7 +67,7 @@ describe("native RPC initialization", () => {
     await evictDurableObject(durableStub);
 
     // HostBridgeLoopback reconstructs the already-named Agent stub from its
-    // string id, so startup must recover the persisted PartyServer name.
+    // string id, so startup must still resolve the object's name.
     const hostStub = namespace.get(
       namespace.idFromString(durableStub.id.toString())
     ) as unknown as ColdRpcStub;
@@ -93,8 +93,8 @@ describe("native RPC initialization", () => {
     await stub.addMessages([message]);
     await evictDurableObject(durableStub);
 
-    // Reuse the existing native stub directly: no getServerByName()/setName()
-    // handshake may initialize the reconstructed instance before this RPC.
+    // Reuse the existing native stub directly: no getAgentByName() handshake
+    // may initialize the reconstructed instance before this RPC.
     expect(await stub.getSessionMessagesForColdRpcTest()).toEqual({
       messages: [message],
       onStartCount: 1
