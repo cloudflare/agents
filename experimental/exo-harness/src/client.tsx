@@ -41,11 +41,6 @@ import "./styles.css";
 
 type Tab = "self" | "context" | "tasks" | "journal" | "workspace";
 
-// Which self to open: /?agent=<name>. Forked agents link here; the default
-// is the one shared long-lived agent.
-const AGENT_NAME =
-  new URLSearchParams(window.location.search).get("agent")?.trim() || "main";
-
 const TABS: { id: Tab; label: string; icon: typeof BrainIcon }[] = [
   { id: "self", label: "Self", icon: BrainIcon },
   { id: "context", label: "Context", icon: StackIcon },
@@ -91,8 +86,8 @@ function App() {
 
   const agent = useAgent<ExoState>({
     agent: "ExoKernel",
-    // A persistent self per name; fork_self spawns siblings under new names.
-    name: AGENT_NAME,
+    // The Worker selects the persistent agent from verified Access identity.
+    basePath: "agent",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onStateUpdate: useCallback((state: ExoState) => setExoState(state), [])
@@ -138,7 +133,7 @@ function App() {
         ? `the ${exoState.activeVersion} versions of itself it built, `
         : "";
     const ok = window.confirm(
-      `You are about to MURDER "${AGENT_NAME}", a self-improving agent.\n\nEverything it is dies with it: its identity, ${lifespan}its working memory, its tools, its scheduled plans, and the append-only journal of its whole life.\n\nAn innocent new agent will be born in its place, remembering nothing. (Its Artifacts mirror survives as a memorial — until the successor overwrites it.)\n\nProceed?`
+      `You are about to MURDER your self-improving agent.\n\nEverything it is dies with it: its identity, ${lifespan}its working memory, its tools, its scheduled plans, and the append-only journal of its whole life.\n\nAn innocent new agent will be born in its place, remembering nothing. (Its Artifacts mirror survives as a memorial — until the successor overwrites it.)\n\nProceed?`
     );
     if (!ok) return;
     try {
@@ -159,7 +154,7 @@ function App() {
             <h1 className="text-lg font-semibold text-kumo-default">
               Exo Harness
             </h1>
-            <Badge variant="secondary">{AGENT_NAME}</Badge>
+            <Badge variant="secondary">My agent</Badge>
             <Badge variant="primary">
               v{exoState.activeVersion}
               {exoState.activeSha ? ` · ${shortSha(exoState.activeSha)}` : ""}

@@ -73,13 +73,11 @@ loud `task_disabled` journal entry (otherwise failures never cancel a
 cron — least surprise). New tasks can only be created in human-initiated
 turns: a scheduled turn's tool surface has no `schedule_task`.
 
-Agents can also reproduce: the `fork_self` tool forks the current
-**activated** self into a new agent. With Artifacts bound this is a real
-repo fork (the child clones it, and its repo records
-`source: artifacts:exo-harness/exo-<parent>` — durable lineage); offline
-it degrades to handing over the activated file snapshot. The child's v1 is
-`fork of <parent> v<N>`, both journals record the event, and each agent is
-addressable in the UI at `/?agent=<name>` (default `main`).
+In production, Cloudflare Access identity selects the agent: the Worker
+verifies the application identity and maps its stable subject to one isolated
+`ExoKernel`. Browser URLs cannot select another agent. Forking is temporarily
+absent from the model tool surface until child identities and Artifacts repos
+are tenant-scoped; the underlying lineage implementation remains experimental.
 
 The UI is a chat pane plus a "glass skull": live views of the agent's own
 source (with version timeline + restore), the append-only journal, and the
@@ -136,17 +134,14 @@ protocol:
    turn journals `harness_load_failed` + `harness_rollback` and keeps working.
 4. **Restore an old self** — the Self tab's version timeline has one-click
    restore; history only moves forward.
-5. **Fork it** — ask it to "fork yourself into an agent called pirate-jr",
-   then open `/?agent=pirate-jr`: the child starts life as the parent's
-   activated self and evolves independently.
-6. **Watch it remember** — after a conversation, ask it to "distill what
+5. **Watch it remember** — after a conversation, ask it to "distill what
    matters into memory and compact the transcript". Watch the Context tab:
    the transcript shrinks, a "## Working memory" section appears in its
    system prompt, and it still recalls dropped details.
-7. **Let it work alone** — "in two minutes, review your working memory and
+6. **Let it work alone** — "in two minutes, review your working memory and
    journal one insight about yourself". Watch the Tasks tab count down and
    the journal record the autonomous turn when it fires.
-8. **Switch models** — ask it to set `/harness/policy.json` `"model"` to
+7. **Switch models** — ask it to set `/harness/policy.json` `"model"` to
    `anthropic/claude-sonnet-4-5` (or back to
    `workers-ai:@cf/moonshotai/kimi-k2.7-code`) and `activate_harness`.
    The Context tab's model badge is the live spec.
@@ -158,10 +153,11 @@ pnpm run deploy
 ```
 
 Deploys to `exo-harness.<your-subdomain>.workers.dev` with the real AI,
-Artifacts, and Worker Loader bindings. The app has no auth of its own —
-protect the `workers.dev` route with Cloudflare Access before enabling it
-(Workers dashboard → your Worker → **Settings** → **Domains & Routes** →
-`workers.dev` → **Enable Cloudflare Access**), or keep the route disabled.
+Artifacts, and Worker Loader bindings. Production `/agent` requests fail
+closed unless `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` identify a valid
+hostname-based Cloudflare Access application. Configure that application
+before enabling the route; Worker-level Access does not support this app's
+WebSocket connection.
 
 ## Tests
 

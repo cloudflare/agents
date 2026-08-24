@@ -1,4 +1,4 @@
-import { routeAgentRequest, callable, getAgentByName } from "agents";
+import { callable, getAgentByName } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   Workspace,
@@ -32,6 +32,11 @@ import {
   type ToolSet,
   type UIMessage
 } from "ai";
+import {
+  accessSubjectAgentName,
+  createAccessRequestAuthenticator,
+  parseAccessAuthenticationConfig
+} from "./access-auth";
 import { KernelStore } from "./kernel/store";
 import {
   artifactsSessionId,
@@ -68,6 +73,22 @@ interface AdoptableKernel {
   adoptGenesis(origin: ForkOrigin): Promise<{ version: number; sha: string }>;
 }
 
+let accessAuthenticator:
+  | ReturnType<typeof createAccessRequestAuthenticator>
+  | undefined;
+
+function configuredAccessAuthenticator(
+  env: Env
+): ReturnType<typeof createAccessRequestAuthenticator> | Response {
+  if (accessAuthenticator) return accessAuthenticator;
+  const parsed = parseAccessAuthenticationConfig(env);
+  if (!parsed.ok) {
+    return new Response(parsed.error.message, { status: 500 });
+  }
+  accessAuthenticator = createAccessRequestAuthenticator(parsed.config);
+  return accessAuthenticator;
+}
+
 // Loopback plumbing for @cloudflare/computer: the worker-shell isolate
 // reaches the host workspace through ctx.exports.WorkspaceServiceProxy;
 // WorkspaceProxy carries a (future) container backend's egress.
@@ -82,6 +103,9 @@ export { WorkspaceProxy, WorkspaceServiceProxy };
  * on every turn — see src/kernel/harness.ts.
  */
 export class ExoKernel extends AIChatAgent<Env, ExoState> {
+  /** Keep the Access-derived Durable Object name out of client protocol messages. */
+  static options = { sendIdentityOnConnect: false };
+
   initialState = INITIAL_STATE;
 
   #workspace: ExoWorkspace | undefined;
@@ -847,10 +871,21 @@ export class ExoKernel extends AIChatAgent<Env, ExoState> {
 }
 
 export default {
-  async fetch(request: Request, env: Env) {
-    return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const pathname = new URL(request.url).pathname;
+    if (pathname !== "/agent") {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const authenticator = configuredAccessAuthenticator(env);
+    if (authenticator instanceof Response) return authenticator;
+    const authenticated = await authenticator(request, ctx.access);
+    if (!authenticated.ok) return authenticated.response;
+
+    const agent = await getAgentByName(
+      env.ExoKernel,
+      accessSubjectAgentName(authenticated.identity.subject)
     );
+    return agent.fetch(request);
   }
 } satisfies ExportedHandler<Env>;

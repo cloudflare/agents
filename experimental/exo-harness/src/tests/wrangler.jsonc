@@ -6,7 +6,12 @@
   "worker_loaders": [{ "binding": "LOADER" }],
   "vars": {
     // Tests always run the deterministic offline driver.
-    "MODEL_OVERRIDE": "mock"
+    "MODEL_OVERRIDE": "mock",
+    "AUTH_MODE": "development",
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": "",
+    "DEVELOPMENT_ACCESS_SUBJECT": "local-test-user",
+    "DEVELOPMENT_ACCESS_EMAIL": "test@cloudflare.com"
   },
   "durable_objects": {
     "bindings": [

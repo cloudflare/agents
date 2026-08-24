@@ -591,7 +591,6 @@ ${imports}
     version: number;
     sha: string;
     origin: ForkOrigin["kind"];
-    url: string;
   }> {
     const name = childName.trim();
     if (!name) throw new Error("fork needs a non-empty agent name");
@@ -653,8 +652,7 @@ ${imports}
       child: name,
       version: child.version,
       sha: child.sha,
-      origin: origin.kind,
-      url: `/?agent=${encodeURIComponent(name)}`
+      origin: origin.kind
     };
   }
 
@@ -920,22 +918,6 @@ export default async function main(input) {
             );
           }
         )
-      }),
-      fork_self: tool({
-        description:
-          "Fork your current ACTIVATED self into a new, independent agent. The child starts life exactly as you are now (identity, policy, tools) and evolves on its own; your journal records the fork. Unactivated edits are not inherited.",
-        inputSchema: z.object({
-          name: z.string().describe('Name for the new agent, e.g. "pirate-jr"')
-        }),
-        execute: this.#journaled("fork_self", async ({ name }) => {
-          try {
-            return await this.forkSelf(name);
-          } catch (error) {
-            return {
-              error: error instanceof Error ? error.message : String(error)
-            };
-          }
-        })
       }),
       run_harness_tool: tool({
         description:

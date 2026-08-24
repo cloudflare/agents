@@ -340,57 +340,6 @@ describe("journal", () => {
   });
 });
 
-describe("fork_self (snapshot path — no Artifacts binding in tests)", () => {
-  it("forks the activated self into a new agent with lineage recorded", async () => {
-    const parent = await freshAgent("fork-parent");
-    await parent.prompt(
-      '!tool write_file {"path": "/harness/identity.md", "content": "PERSONA: ancestor.\\n"}'
-    );
-    await parent.prompt('!tool activate_harness {"note": "ancestor persona"}');
-
-    const forked = await parent.prompt(
-      '!tool fork_self {"name": "fork-child"}'
-    );
-    expect(forked.text).toContain('"child":"fork-child"');
-    expect(forked.text).toContain('"origin":"files"');
-
-    // The child exists with the parent's activated self as its v1…
-    const child = (await getAgentByName(
-      env.ExoKernel,
-      "fork-child"
-    )) as unknown as KernelStub;
-    const reply = await child.prompt("hello");
-    expect(reply.text).toContain("[ancestor.]");
-    const versions = await child.getVersions();
-    expect(versions).toHaveLength(1);
-    expect(versions[0].note).toBe("fork of fork-parent v2");
-
-    // …and both sides journaled the lineage.
-    const parentJournal = await parent.getJournal();
-    const fork = parentJournal.find((e) => e.kind === "fork");
-    expect(fork?.data.child).toBe("fork-child");
-    expect(fork?.data.origin).toBe("files");
-    expect(fork?.data.fromVersion).toBe(2);
-
-    const childJournal = await child.getJournal();
-    const genesis = childJournal.find((e) => e.kind === "genesis");
-    expect(genesis?.data.parent).toBe("fork-parent");
-    expect(genesis?.data.parentVersion).toBe(2);
-  });
-
-  it("refuses to fork onto itself or an existing agent", async () => {
-    const parent = await freshAgent("fork-guard");
-    const self = await parent.prompt('!tool fork_self {"name": "fork-guard"}');
-    expect(self.text).toContain("cannot fork onto yourself");
-
-    await freshAgent("fork-guard-taken"); // already has a history
-    const taken = await parent.prompt(
-      '!tool fork_self {"name": "fork-guard-taken"}'
-    );
-    expect(taken.text).toContain("already has a history");
-  });
-});
-
 describe("artifacts mirror", () => {
   it("activation cleanly skips the push when no binding is bound", async () => {
     // The test worker (src/tests/wrangler.jsonc) deliberately has no
@@ -444,10 +393,10 @@ describe("context snapshot (glass-skull Context tab)", () => {
         "read_file",
         "write_file",
         "activate_harness",
-        "fork_self",
         "echo"
       ])
     );
+    expect(toolNames).not.toContain("fork_self");
 
     // Self-modification changes what the next snapshot contains.
     await agent.prompt(
