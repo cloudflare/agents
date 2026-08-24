@@ -226,10 +226,9 @@ export async function createApp(
   // Install npm dependencies if needed
   const installWarnings: string[] = [];
   if (hasDependencies(fileSystem)) {
-    const installResult = await installDependencies(
-      fileSystem,
-      registry ? { registry } : {}
-    );
+    const installResult = await installDependencies(fileSystem, {
+      ...(registry ? { registry } : {})
+    });
     installWarnings.push(...installResult.warnings);
   }
 

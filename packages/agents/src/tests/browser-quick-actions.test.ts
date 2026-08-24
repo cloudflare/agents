@@ -1,3 +1,4 @@
+import { asSchema } from "ai";
 import { describe, expect, it } from "vitest";
 import {
   browserContent,
@@ -72,7 +73,7 @@ describe("quick action helpers", () => {
         prompt: "list products",
         response_format: {
           type: "json_schema",
-          schema: { type: "object" }
+          json_schema: { type: "object" }
         }
       }
     );
@@ -226,6 +227,33 @@ describe("createQuickActionTools", () => {
     ]);
   });
 
+  it("rejects stringified extraction schemas", async () => {
+    const { browser } = fakeBrowser(() => jsonResult({ ok: true }));
+    const tool = createQuickActionTools({ browser }).browser_extract;
+    const schema = asSchema(tool.inputSchema);
+    if (!schema.validate)
+      throw new Error("Expected a runtime schema validator");
+
+    expect(schema.jsonSchema).toMatchObject({
+      properties: { schema: { type: "object" } }
+    });
+
+    const invalid = await schema.validate({
+      url: "https://example.com",
+      schema: '{"type":"object"}'
+    });
+    expect(invalid.success).toBe(false);
+    if (invalid.success) throw new Error("Expected validation to fail");
+    expect(invalid.error.message).toContain("Schema must be a JSON object");
+
+    await expect(
+      schema.validate({
+        url: "https://example.com",
+        schema: { type: "object" }
+      })
+    ).resolves.toMatchObject({ success: true });
+  });
+
   it("truncates long markdown results to maxChars", async () => {
     const { browser } = fakeBrowser(() => jsonResult("x".repeat(100)));
     const tools = createQuickActionTools({ browser, maxChars: 10 });
@@ -237,7 +265,7 @@ describe("createQuickActionTools", () => {
     );
   });
 
-  it("maps the extract tool's schema onto response_format", async () => {
+  it("maps the extract tool's schema onto response_format.json_schema", async () => {
     const { browser, calls } = fakeBrowser(() => jsonResult({ ok: true }));
     const tools = createQuickActionTools({ browser });
     await runTool(tools.browser_extract, {
@@ -248,7 +276,7 @@ describe("createQuickActionTools", () => {
     expect(calls[0].action).toBe("json");
     expect(calls[0].params.response_format).toEqual({
       type: "json_schema",
-      schema: { type: "object" }
+      json_schema: { type: "object" }
     });
   });
 

@@ -220,6 +220,21 @@
         "class_name": "BroadcastSubAgent",
         "name": "BroadcastSubAgent"
       },
+      // Request-body forwarding probes (issue #2015). The sub-agent is
+      // facet-only (binding is a harness requirement, no migration); the
+      // root agent is the canonical control path and needs storage.
+      {
+        "class_name": "BodyProbeSubAgent",
+        "name": "BodyProbeSubAgent"
+      },
+      {
+        "class_name": "BodyProbeRootAgent",
+        "name": "BodyProbeRootAgent"
+      },
+      {
+        "class_name": "SlowReplySubAgent",
+        "name": "SlowReplySubAgent"
+      },
       {
         "class_name": "TestMigrationAgent",
         "name": "TestMigrationAgent"
@@ -371,7 +386,8 @@
         "HookingSubAgentParent",
         "ReservedClassParent",
         "TestUnboundParentAgent",
-        "TestMinifiedNameParentAgent"
+        "TestMinifiedNameParentAgent",
+        "BodyProbeRootAgent"
       ],
       "tag": "v1"
     }

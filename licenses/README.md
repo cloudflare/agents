@@ -18,6 +18,7 @@ This directory contains the full license texts for third-party dependencies.
 - `apache-2.0-vercel-ai-sdk.txt` - Vercel AI SDK (Apache 2.0)
 - `mit-typescript-vfs.txt` - TypeScript VFS (MIT)
 - `apache-2.0-typescript.txt` - TypeScript (Apache 2.0)
+- `isc-partyserver.txt` - PartyServer (ISC)
 
 ## Adding New Licenses
 

@@ -1912,6 +1912,24 @@ const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
  */
 const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
 
+/** Stable id prefix for fallback notes that preserve orphaned execution outcomes. */
+const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
+
+/**
+ * Present framework-authored execution outcome notes to providers as user
+ * context. Think persists these notes as system messages so clients and
+ * recovery do not mistake them for human input, but AI SDK v7 and strict
+ * providers reject system messages in arbitrary transcript
+ * positions. The provider-only projection leaves current and legacy session
+ * history unchanged.
+ */
+function toProviderSafeExecutionOutcomeMessage(message: UIMessage): UIMessage {
+  return message.role === "system" &&
+    message.id.startsWith(EXECUTION_OUTCOME_MESSAGE_PREFIX)
+    ? { ...message, role: "user" }
+    : message;
+}
+
 /**
  * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
  * deliver its structured final answer. The agent runs a full multi-step,
@@ -2173,6 +2191,19 @@ export interface TurnConfig {
   experimental_transform?: Parameters<
     typeof streamText
   >[0]["experimental_transform"];
+  /**
+   * Repairs tool calls that the AI SDK cannot parse or validate before tool
+   * execution. The returned tool call is parsed and validated again. Configure
+   * this function from a Think subclass; sandboxed extensions cannot send
+   * functions over RPC.
+   *
+   * Typed via the `experimental_repairToolCall` key, which exists in both AI
+   * SDK v6 and v7 (`repairToolCall` is v7-only), so this type resolves under
+   * either supported major.
+   */
+  repairToolCall?: Parameters<
+    typeof streamText
+  >[0]["experimental_repairToolCall"];
   /**
    * Optional structured-output specification (AI SDK `output`).
    * Forwarded to `streamText` so the model's final response is parsed
@@ -2760,8 +2791,9 @@ export class Think<
   mediaEviction: MediaEvictionConfig | boolean = true;
 
   /**
-   * When true, chat turns are wrapped in `runFiber` for durable execution.
-   * Enables `onChatRecovery` hook and `this.stash()` during streaming.
+   * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
+   * enabling `onChatRecovery` and `this.stash()` during streaming. Assign an
+   * object to tune recovery budgets and terminal behavior.
    *
    * Assign this as a class field or in the constructor — NOT in `onStart()`.
    * On every wake the SDK evaluates recovery budgets (and may seal an
@@ -5303,7 +5335,10 @@ export class Think<
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
     const history = await this._repairTranscriptForProvider(this.messages);
-    const truncated = truncateOlderMessages(history) as UIMessage[];
+    const providerSafeHistory = history.map(
+      toProviderSafeExecutionOutcomeMessage
+    );
+    const truncated = truncateOlderMessages(providerSafeHistory) as UIMessage[];
     // `_repairTranscriptForProvider` above already heals orphan tool calls
     // (flipping them to errored results, preserving the record). This is the
     // last-line backstop: if any incomplete tool call still slips through
@@ -5843,6 +5878,10 @@ export class Think<
       // can inspect/rewrite the stream (e.g. emit `source` parts derived from
       // tool results) without owning the stream pipeline themselves.
       experimental_transform: config.experimental_transform,
+      // `experimental_repairToolCall` is the common option name across AI SDK
+      // v6 and v7. TurnConfig exposes the stable v7 name while this boundary
+      // keeps both supported majors working.
+      experimental_repairToolCall: config.repairToolCall,
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
@@ -7434,11 +7473,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, false, chatBody);
-          } else {
-            await chatBody();
-          }
+          await this._runChatRecoveryFiber(requestId, false, chatBody);
         }
       });
     } finally {
@@ -10882,15 +10917,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(
-              requestId,
-              false,
-              programmaticBody
-            );
-          } else {
-            await programmaticBody();
-          }
+          await this._runChatRecoveryFiber(requestId, false, programmaticBody);
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -11009,11 +11036,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
-          } else {
-            await continueTurnBody();
-          }
+          await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -11108,11 +11131,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
-          } else {
-            await retryTurnBody();
-          }
+          await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -11671,11 +11690,7 @@ export class Think<
               }
             };
 
-            if (this.chatRecovery) {
-              await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
-            } else {
-              await chatTurnBody();
-            }
+            await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
           }
         });
 
@@ -12335,8 +12350,6 @@ export class Think<
           await callback.onInterrupted?.();
           return { status: "aborted" };
         }
-        // outcome === "disabled" (chat recovery off): fall through to the
-        // generic terminal path below (unchanged watchdog behavior).
       }
       if (!streamFinalized) {
         this._errorResumableStream(streamId);
@@ -12793,9 +12806,6 @@ export class Think<
           this._streamingAssistant = null;
           return { status: "aborted" };
         }
-        // outcome === "disabled" (chat recovery off): fall through to the
-        // generic terminal path (the watchdog's original "kill the spinner"
-        // guarantee, unchanged).
       }
       streamError = error instanceof Error ? error.message : "Stream error";
       if (options?.captureProgrammaticStreamError) {
@@ -13453,15 +13463,17 @@ export class Think<
   }
 
   /**
-   * Replace a paused execute-tool output in the transcript with the
-   * execution's new outcome and kick the auto-continuation so the model sees
-   * it.
+   * Replace a paused execute-tool or durable-action output in the transcript
+   * with the execution's new outcome and kick the auto-continuation so the
+   * model sees it.
    *
    * When no paused part carries `executionId` — the output was already
    * replaced from another tab, or compaction summarized the part away — the
    * runtime has still durably applied the approval/rejection, so the outcome
-   * must not be dropped: it is appended as a system note instead, and the
-   * continuation still fires so the model can act on it.
+   * must not be dropped: it is appended as a framework-authored system note,
+   * and the continuation still fires so the model can act on it. Provider
+   * assembly projects this narrowly identified note to ordinary user context
+   * without changing its durable authorship.
    */
   private async _applyExecutionOutcome(
     executionId: string,
@@ -13478,14 +13490,17 @@ export class Think<
       } catch {
         summary = String(output);
       }
+      const outcomeSource = executionId.startsWith(ACTION_PAUSE_ID_PREFIX)
+        ? "durable action"
+        : "execute tool";
       await this._appendMessageToHistory({
-        id: `exec-outcome-${executionId}-${crypto.randomUUID()}`,
+        id: `${EXECUTION_OUTCOME_MESSAGE_PREFIX}${executionId}-${crypto.randomUUID()}`,
         role: "system",
         parts: [
           {
             type: "text",
             text:
-              `[execute tool] The paused execution "${executionId}" was ` +
+              `[${outcomeSource}] The paused execution "${executionId}" was ` +
               `resolved, but its tool call is no longer in the transcript ` +
               `(it may have been compacted). Outcome: ${summary}`
           }
@@ -14101,20 +14116,13 @@ export class Think<
    *   emits `chat:recovery:exhausted`, marks the submission interrupted, and
    *   delivers the configured `terminalMessage`). The caller must NOT run the
    *   generic terminal path — the terminal UX is already delivered.
-   * - `"disabled"` — chat recovery is off; the caller falls through to the
-   *   generic terminal error (the watchdog's original "kill the spinner"
-   *   behavior, unchanged).
    */
   private async _routeStallToBoundedRecovery(input: {
     requestId: string;
     streamId: string;
     partialParts: MessagePart[];
     targetAssistantId?: string;
-  }): Promise<"scheduled" | "exhausted" | "disabled"> {
-    // Stall-recovery is automatic only when chat recovery is enabled (the
-    // default for Think). With recovery off, a stall stays terminal — there is
-    // no budget/continuation machinery to route into.
-    if (!this._resolveChatRecoveryConfig().enabled) return "disabled";
+  }): Promise<"scheduled" | "exhausted"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const latestUserMessageId =
@@ -14391,27 +14399,27 @@ export class Think<
         "skipped",
         "continue_disabled"
       );
-      const disabledMessage =
-        "Submission was interrupted and chat recovery was disabled.";
+      const declinedMessage =
+        "Submission was interrupted and automatic continuation was declined.";
       // Key off the recovery ROOT, not this continuation's `requestId` — a
       // chained submission's row still carries the root id, so passing the
       // per-continuation id would miss it and leave it stuck `running`.
       await this._markRecoveredSubmissionInterrupted(
         recoveryRootRequestId,
-        disabledMessage
+        declinedMessage
       );
       // Unlike `conversation_changed` (a newer turn owns the UI, so silence is
-      // correct), disabling recovery abandons the turn with no superseding turn.
-      // Surface it like exhaustion so a reconnecting client isn't frozen.
+      // correct), declining continuation abandons the turn with no superseding
+      // turn. Surface it like exhaustion so a reconnecting client isn't frozen.
       await this._recordTerminalChatStatus(
         "interrupted",
         requestId,
-        disabledMessage
+        declinedMessage
       );
       this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
-        body: disabledMessage,
+        body: declinedMessage,
         done: true,
         error: true
       });
@@ -15389,11 +15397,7 @@ export class Think<
             }
           };
 
-          if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, true, continuationBody);
-          } else {
-            await continuationBody();
-          }
+          await this._runChatRecoveryFiber(requestId, true, continuationBody);
         } finally {
           this._aborts.remove(requestId);
           if (!streamed) {
@@ -15462,15 +15466,7 @@ export class Think<
               }
             };
 
-            if (this.chatRecovery) {
-              await this._runChatRecoveryFiber(
-                requestId,
-                true,
-                continuationBody
-              );
-            } else {
-              await continuationBody();
-            }
+            await this._runChatRecoveryFiber(requestId, true, continuationBody);
           }
         });
       } catch (error) {

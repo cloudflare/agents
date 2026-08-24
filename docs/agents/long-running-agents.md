@@ -86,7 +86,7 @@ type Task = {
   externalJobId?: string;
 };
 
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   initialState: ProjectState = {
     name: "",
     status: "planning",
@@ -115,7 +115,7 @@ The pattern extends naturally to any event source that can reach a Worker — an
 The agent does not need to be "started" or "deployed" separately for each wake source — they all route to the same Durable Object instance. The agent's identity (its name) is the routing key.
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async onStart() {
     // Daily deadline check at 9am UTC — idempotent, safe across restarts
     await this.schedule(
@@ -163,7 +163,7 @@ Sometimes an agent needs to do work that takes longer than the idle eviction win
 `keepAlive()` prevents this by creating a heartbeat that resets the inactivity timer:
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async generateProjectPlan(goal: string) {
     const result = await this.keepAliveWhile(async () => {
       const plan = await this.callLLM(`Create a project plan for: ${goal}`);
@@ -223,7 +223,7 @@ side effects. If recovery succeeds, return a recovery result from
 aborted, failed, or intentionally left interrupted.
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async executeTask(task: Task) {
     await this.runFiber(`task:${task.id}`, async (ctx) => {
       const resources = await this.gatherResources(task);
@@ -268,7 +268,7 @@ The project manager frequently kicks off work that takes far longer than any sin
 The project manager starts a CI pipeline for a task. The pipeline takes 20 minutes. Rather than holding a connection open, the agent registers its own URL as the callback and goes to sleep:
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async startCIPipeline(task: Task) {
     const response = await fetch("https://ci.example.com/api/pipelines", {
       method: "POST",
@@ -307,7 +307,7 @@ export class ProjectManager extends Agent<ProjectState> {
 Not every external service supports callbacks. When the project manager submits a video asset for generation, it needs to check back periodically until the job completes:
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async startVideoGeneration(task: Task) {
     const response = await fetch("https://video-api.example.com/generate", {
       method: "POST",
@@ -354,7 +354,7 @@ export class ProjectManager extends Agent<ProjectState> {
 A production deployment involves multiple steps that must each retry independently — build, test, stage, promote. The project manager should not manage these steps internally; it delegates to a [Workflow](./workflows.md) that handles retries and step sequencing:
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async startDeployment(task: Task) {
     const instanceId = await this.runWorkflow("DEPLOY_WORKFLOW", {
       taskId: task.id,
@@ -422,7 +422,7 @@ type PlanStep = {
   result?: unknown;
 };
 
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async createPlan(goal: string) {
     const steps = await this.keepAliveWhile(async () => {
       return this.callLLM(`
@@ -508,7 +508,7 @@ This pattern has several advantages for long-running agents:
 A project manager does not do everything itself. It delegates specialized work to sub-agents — child Durable Objects (facets) spawned under the parent. Each facet has its own isolated SQLite state and runs in parallel, but stays colocated on the same machine as the parent.
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async delegateTask(task: Task) {
     // Get a stub to a specialized agent (same DO namespace, unique name)
     const researcher = await this.subAgent(
@@ -537,7 +537,7 @@ For chat-oriented sub-agents, [Think](https://github.com/cloudflare/agents/blob/
 
 The patterns above handle the project manager's coordination work — scheduling, delegating, polling. But the project manager also uses an LLM directly: generating plans, summarizing progress, drafting status emails. Those LLM calls stream tokens over a connection that cannot be resumed if the agent is evicted mid-response.
 
-For chat-oriented agents built on `AIChatAgent`, this is an even sharper problem — the user is watching the response stream in real time and sees it stop mid-sentence. `chatRecovery` wraps each chat turn in a `runFiber`, providing automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
+For chat-oriented agents built on `AIChatAgent` or `Think`, this is an even sharper problem — the user is watching the response stream in real time and sees it stop mid-sentence. Durable recovery wraps every chat turn in a `runFiber`, providing automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
@@ -547,8 +547,6 @@ import type {
 } from "@cloudflare/ai-chat";
 
 class ProjectChat extends AIChatAgent<Env> {
-  override chatRecovery = true;
-
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
@@ -573,7 +571,7 @@ The right recovery strategy depends on the LLM provider:
 
 For a complete multi-provider implementation with full code for each strategy, see the [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) and the [`forever.md` design doc](https://github.com/cloudflare/agents/tree/main/experimental/forever.md).
 
-[Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) enables `chatRecovery` by default. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
+`AIChatAgent` and [Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) always enable durable recovery. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
 
 If the agent is interrupted before any assistant stream chunks are written, there is no partial assistant message to continue. When the latest persisted message is still the unanswered user message from that turn, chat recovery retries the turn automatically unless `onChatRecovery` returns `{ continue: false }`.
 
@@ -586,7 +584,7 @@ An agent that runs for months accumulates data: conversation history, timeline e
 Schedule periodic cleanup to prune old data and archive completed work:
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async onStart() {
     await this.schedule("0 0 * * *", "housekeeping", {}, { idempotent: true });
   }
@@ -634,7 +632,7 @@ For simpler cases: keep only the last N messages in the active context (sliding 
 A long-running agent eventually completes its purpose. The project ships, the investigation concludes, the monitoring window closes. Clean up explicitly:
 
 ```typescript
-export class ProjectManager extends Agent<ProjectState> {
+export class ProjectManager extends Agent<Env, ProjectState> {
   async completeProject() {
     // Cancel remaining schedules
     const schedules = await this.listSchedules();

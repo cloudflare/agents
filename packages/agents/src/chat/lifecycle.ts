@@ -221,9 +221,11 @@ export type ChatRecoveryProgressContext = {
 };
 
 /**
- * Configuration for durable chat recovery. `true` uses these defaults:
- * `maxAttempts: 10`, `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000`
- * (5 min), `maxRecoveryWork: 1000`, and a generic terminal message.
+ * Configuration for durable chat recovery, which is always enabled for chat
+ * turns. `true` uses these defaults: `maxAttempts: 10`,
+ * `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000` (5 min),
+ * `maxRecoveryWork: 1000`, and a generic terminal message. Assign an object to
+ * tune recovery without disabling its durable bookkeeping.
  *
  * **Apply this as a class field or in the constructor — never assign it in
  * `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal
@@ -235,7 +237,7 @@ export type ChatRecoveryProgressContext = {
  * `onStart()`.
  */
 export type ChatRecoveryConfig =
-  | boolean
+  | true
   | {
       maxAttempts?: number;
       stableTimeoutMs?: number;
@@ -297,8 +299,8 @@ export type ChatRecoveryConfig =
       onExhausted?(ctx: ChatRecoveryExhaustedContext): void | Promise<void>;
     };
 
+/** Fully-defaulted configuration for always-on durable chat recovery. */
 export type ResolvedChatRecoveryConfig = {
-  enabled: boolean;
   maxAttempts: number;
   stableTimeoutMs: number;
   terminalMessage: string;

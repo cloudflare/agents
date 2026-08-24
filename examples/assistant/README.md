@@ -116,26 +116,28 @@ SQLite storage, extensions, and message history — plus a
 operations and MCP tool invocations back to the directory.
 
 The browser never chooses a DO name. It connects to `/chat` (the
-directory) and `/chat/sub/my-assistant/<chatId>` (a specific chat), and
-the Think generated Worker entry calls `src/server.ts`, where the app resolves
-the `AssistantDirectory` instance from the authenticated GitHub cookie:
+directory) and `/chat/sub/my-assistant/<chatId>` (a specific chat). The explicit
+Worker entry in `src/server.ts` resolves the `AssistantDirectory` instance from
+the authenticated GitHub cookie and dispatches child requests with the Agents
+SDK routing primitive:
 
 ```ts
-if (url.pathname === "/chat" || url.pathname.startsWith("/chat/")) {
-  const user = await getGitHubUserFromRequest(request);
-  if (!user) return createUnauthorizedResponse(request);
-  const directory = await getAgentByName(env.AssistantDirectory, user.login);
-  return think.router.routeSubAgent(request, directory, {
-    parent: "assistant"
+const directory = await getAgentByName(env.AssistantDirectory, user.login);
+
+if (url.pathname.startsWith("/chat/sub/my-assistant/")) {
+  const chatId = url.pathname.slice("/chat/sub/my-assistant/".length);
+  return routeSubAgentRequest(request, directory, {
+    fromPath: `/sub/${camelCaseToKebabCase(MyAssistant.name)}/${chatId}`
   });
 }
+
+return directory.fetch(request);
 ```
 
-Think's router resolves the friendly `/sub/my-assistant/<chatId>` tail through
-the generated manifest before handing off to the directory's built-in sub-agent
-router. No per-chat plumbing or generated class URL segment knowledge lives in
-the Worker. Access control lives on the parent via `onBeforeSubAgent` as a
-strict registry gate:
+`AssistantDirectory` and `MyAssistant` are the runtime class names exported by
+the Worker. The root Durable Object binding points to `AssistantDirectory`, and
+child routing derives its URL segment from `MyAssistant.name`. Access control
+lives on the parent via `onBeforeSubAgent` as a strict registry gate:
 
 ```ts
 override async onBeforeSubAgent(_req, { className, name }) {
@@ -368,7 +370,6 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 }
 
 export class MyAssistant extends Think<Env> {
-  chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
   getModel() {

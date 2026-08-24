@@ -66,8 +66,6 @@ const InputBase = withVoiceInput(Agent);
  * Tracks onTranscript calls and consumer lifecycle invocations for assertions.
  */
 export class TestVoiceInputAgent extends InputBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
 
   #transcripts: string[] = [];
@@ -175,8 +173,6 @@ export class TestVoiceInputAgent extends InputBase {
  * Voice input agent that rejects calls via beforeCallStart.
  */
 export class TestRejectCallVoiceInputAgent extends InputBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
 
   beforeCallStart(_connection: Connection): boolean {

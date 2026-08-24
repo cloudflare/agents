@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { ChatRecoveryTestAgent } from "./worker";
 
 async function freshRecoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ChatRecoveryTestAgent as unknown as DurableObjectNamespace<ChatRecoveryTestAgent>,
     name
   );

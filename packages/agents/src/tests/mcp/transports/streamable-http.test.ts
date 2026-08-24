@@ -7,7 +7,7 @@ import type {
   JSONRPCNotification,
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Connection } from "partyserver";
+import type { Connection } from "../../../lifecycle/types";
 import { describe, expect, it, vi } from "vitest";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../../../internal_context";
 import { StreamableHTTPServerTransport } from "../../../mcp/transport";

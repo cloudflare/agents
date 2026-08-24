@@ -59,8 +59,6 @@ type DetachedBackboneSchedule = {
 };
 
 export class TestAgentToolReplayAgent extends Agent {
-  static options = { hibernate: true };
-
   private get _agentTool(): AgentToolInternals {
     return this as unknown as AgentToolInternals;
   }
@@ -422,8 +420,6 @@ export class TestAgentToolReplayAgent extends Agent {
  * wakes a hibernated DO can still replay them via `getAgentToolChunks`.
  */
 export class TestAgentToolStubChild extends Agent {
-  static options = { hibernate: true };
-
   private _ensureTables(): void {
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_test_stub_chunks (

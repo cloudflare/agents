@@ -16,6 +16,11 @@ Or add to an existing project:
 npm install agents
 ```
 
+The examples below use `@callable()` decorators. Vite projects must extend
+`agents/tsconfig` and add the `agents/vite` plugin; other bundlers must support
+TC39 decorators (`2023-11`). See
+[Adding Agents to an Existing Project](../../docs/agents/adding-to-existing-project.md#4-configure-typescript-and-vite).
+
 ---
 
 ## Why Agents, Why Now
@@ -44,7 +49,7 @@ A counter agent with real-time state sync and callable methods:
 // server.ts
 import { Agent, callable } from "agents";
 
-type State = { count: number };
+export type State = { count: number };
 
 export class CounterAgent extends Agent<Env, State> {
   initialState: State = { count: 0 };
@@ -67,11 +72,12 @@ export class CounterAgent extends Agent<Env, State> {
 // client.tsx
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import type { CounterAgent, State } from "./server";
 
 function Counter() {
   const [count, setCount] = useState(0);
 
-  const agent = useAgent<State>({
+  const agent = useAgent<CounterAgent, State>({
     agent: "counter-agent",
     name: "my-counter",
     onStateUpdate: (state) => setCount(state.count)
@@ -120,8 +126,12 @@ Platform     Observability · Cross-domain auth · Resumable streams
 State persists across requests and syncs to all connected clients:
 
 ```typescript
-export class MyAgent extends Agent<Env, { items: string[] }> {
-  initialState = { items: [] };
+import { Agent, callable, type Connection } from "agents";
+
+type State = { items: string[] };
+
+export class MyAgent extends Agent<Env, State> {
+  initialState: State = { items: [] };
 
   @callable()
   addItem(item: string) {
@@ -262,6 +272,29 @@ export class Assistant extends Think<Env> {
 }
 ```
 
+`inputSchema` accepts schemas supported by the AI SDK, including Zod, Standard
+JSON Schema-compatible schemas, raw JSON Schema through `jsonSchema()`, and
+schemas exposed through AI SDK adapters. For example, use `@ai-sdk/valibot` v2
+with AI SDK 6 or v3 with AI SDK 7:
+
+```typescript
+import { valibotSchema } from "@ai-sdk/valibot";
+import * as v from "valibot";
+
+const researchInput = valibotSchema(
+  v.object({ query: v.pipe(v.string(), v.minLength(3)) })
+);
+
+agentTool(Researcher, {
+  description: "Research one topic in depth.",
+  inputSchema: researchInput
+});
+```
+
+Tool inputs need model-facing JSON Schema in addition to runtime validation. A
+validation-only Standard Schema is therefore insufficient; use its Standard
+JSON Schema extension or an AI SDK adapter.
+
 For deterministic fan-out, call `this.runAgentTool(Researcher, { input })`
 directly. Parent recovery reconciles stale child rows after restarts and marks
 unrecoverable runs `interrupted` instead of hanging. In React, use
@@ -294,7 +327,9 @@ async onClose(connection: Connection) {
 Agents can receive and respond to emails:
 
 ```typescript
-async onEmail(email: EmailMessage) {
+import type { AgentEmail } from "agents/email";
+
+async onEmail(email: AgentEmail) {
   const from = email.from;
   const subject = email.headers.get("subject");
   // Process incoming email
@@ -392,15 +427,18 @@ For AI-powered chat experiences with persistent conversations, streaming respons
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
+import { createWorkersAI } from "workers-ai-provider";
+import { convertToModelMessages, streamText } from "ai";
 
 export class ChatAgent extends AIChatAgent<Env> {
-  async onChatMessage(onFinish) {
-    return streamText({
-      model: openai("gpt-4o"),
-      messages: this.messages,
-      tools: this.tools,
-      onFinish
+  async onChatMessage() {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+      messages: await convertToModelMessages(this.messages)
     });
+
+    return result.toUIMessageStreamResponse();
   }
 }
 ```
@@ -409,7 +447,7 @@ export class ChatAgent extends AIChatAgent<Env> {
 // Client
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 
-const { messages, input, handleSubmit } = useAgentChat({
+const { messages, sendMessage } = useAgentChat({
   agent: useAgent({ agent: "chat-agent" })
 });
 ```
@@ -525,6 +563,7 @@ The published package includes the complete documentation tree at
 [State Management](../../docs/agents/state.md) ·
 [Scheduling](../../docs/agents/scheduling.md) ·
 [Callable Methods](../../docs/agents/callable-methods.md) ·
+[Durable Object Lifecycle](../../docs/agents/lifecycle.md) ·
 [MCP Integration](../../docs/agents/mcp-client.md) ·
 [Full Documentation](../../docs/agents/index.md)
 

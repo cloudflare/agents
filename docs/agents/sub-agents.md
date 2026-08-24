@@ -273,7 +273,52 @@ const chat = useAgent({
 
 Every other `useAgent` feature works as usual: `state` sync, `stub.method()` calls, `@callable` RPCs, `useAgentChat` on top of the returned socket.
 
-### Direct HTTP / custom routing
+### Direct HTTP and WebSocket URLs
+
+Use `buildAgentPath()` to turn a root-first Agent identity into the canonical URL pathname used by both HTTP requests and WebSocket connections:
+
+```typescript
+import { buildAgentPath } from "agents";
+
+const path = buildAgentPath(
+  [
+    { className: "Inbox", name: userId },
+    { className: "Chat", name: chatId }
+  ],
+  { leafPath: "/callbacks/job" }
+);
+
+// /agents/inbox/{userId}/sub/chat/{chatId}/callbacks/job
+```
+
+Inside an Agent, pass `this.selfPath` directly. If the root Durable Object binding name differs from its class name, also pass `rootBinding` in the options. `buildAgentUrl()` adds a public origin, which is useful when registering callbacks, webhooks, approval URLs, or asynchronous job-completion URLs with an external system:
+
+```typescript
+import { buildAgentUrl } from "agents";
+
+export class Chat extends Agent<Env> {
+  callbackUrl() {
+    return buildAgentUrl(this.env.PUBLIC_ORIGIN, this.selfPath, {
+      leafPath: "/callbacks/job"
+    });
+  }
+
+  override async onRequest(request: Request) {
+    if (new URL(request.url).pathname === "/callbacks/job") {
+      return this.handleJobCallback(request);
+    }
+    return new Response("Not found", { status: 404 });
+  }
+}
+```
+
+The Worker must pass the incoming request to `routeAgentRequest()`. Each ancestor's `onBeforeSubAgent` hook runs before the destination receives the request. For a sub-agent destination, the nested `/sub/...` routing segments are removed during forwarding, so its pathname is the `leafPath` suffix.
+
+`buildAgentUrl()` accepts an HTTP(S) or WS(S) origin without a pathname, query, fragment, or credentials. Set callback query parameters through the returned URL's `searchParams`. If you use a custom routing prefix, pass the same value to both `buildAgentPath()` and `routeAgentRequest()`.
+
+Root Agent names follow `routeAgentRequest`'s raw pathname-segment behavior and must already be externally routable. The `sub` segment is reserved in routing prefixes, class and binding names, and root Agent names. Descendant names are URL-encoded by the helper, so names containing spaces, Unicode, `/`, or URL-reserved characters round-trip safely.
+
+### Custom routing
 
 For fetch handlers that do their own top-level URL parsing, use `routeSubAgentRequest` to dispatch a request into a sub-agent from an already-resolved parent stub:
 
@@ -293,7 +338,7 @@ export default {
 };
 ```
 
-`fromPath` takes the sub-agent tail (something like `/sub/chat/chat-abc/...`). The helper parses it, runs the parent's `onBeforeSubAgent` hook, and forwards into the facet.
+`fromPath` takes any pathname containing the sub-agent tail (something like `/sub/chat/chat-abc/...`). When the destination is already represented as a root-first Agent path, pass the result of `buildAgentPath()` directly. The helper parses the first child hop, runs the parent's `onBeforeSubAgent` hook, and forwards into the facet.
 
 ### External typed RPC
 

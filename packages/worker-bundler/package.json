@@ -1,7 +1,7 @@
 {
   "name": "@cloudflare/worker-bundler",
   "description": "Build and bundle Workers at runtime for Cloudflare Worker Loader binding",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -36,6 +36,7 @@
     "@typescript/vfs": "^1.6.4",
     "es-module-lexer": "^2.2.0",
     "esbuild-wasm": "0.28.1",
+    "fflate": "^0.8.2",
     "resolve.exports": "^2.0.3",
     "semver": "^7.8.5",
     "smol-toml": "^1.7.0",

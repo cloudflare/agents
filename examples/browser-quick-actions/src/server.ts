@@ -42,7 +42,7 @@ export class QuickActionsAgent extends Agent<Env> {
       prompt,
       response_format: {
         type: "json_schema",
-        schema: {
+        json_schema: {
           type: "object",
           properties: { items: { type: "array", items: { type: "string" } } },
           required: ["items"]

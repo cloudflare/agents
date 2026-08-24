@@ -9,6 +9,7 @@ interface ChatTestStub {
   getPersistedMessages(): Promise<ChatMessage[]>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   getOnChatMessageCallCount(): Promise<number>;
+  getStashSucceeded(): Promise<boolean>;
   getRecoveryContexts(): Promise<
     Array<{
       recoveryData: unknown;
@@ -173,7 +174,7 @@ const userMessage: ChatMessage = {
 };
 
 describe("chatRecovery", () => {
-  describe("chatRecovery=true via WebSocket", () => {
+  describe("default durable recovery via WebSocket", () => {
     it("persists messages and cleans up fibers after chat turn", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -206,8 +207,8 @@ describe("chatRecovery", () => {
     });
   });
 
-  describe("chatRecovery=false via WebSocket", () => {
-    it("persists messages without creating fiber rows or firing recovery", async () => {
+  describe("legacy runtime chatRecovery=false via WebSocket", () => {
+    it("uses durable recovery despite the removed false config", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
         `/agents/non-chat-recovery-test-agent/${room}`
@@ -229,6 +230,7 @@ describe("chatRecovery", () => {
       expect(userMsgs).toHaveLength(1);
       expect(assistantMsgs).toHaveLength(1);
       expect(extractAssistantText(messages)).toContain("Continued response.");
+      expect(await stub.getStashSucceeded()).toBe(true);
 
       const fibers = await stub.getActiveFibers();
       expect(fibers).toHaveLength(0);
@@ -240,8 +242,8 @@ describe("chatRecovery", () => {
     });
   });
 
-  describe("behavioral parity", () => {
-    it("produces equivalent persisted messages regardless of chatRecovery", async () => {
+  describe("legacy false compatibility", () => {
+    it("preserves the same persisted messages", async () => {
       const durableRoom = crypto.randomUUID();
       const nonDurableRoom = crypto.randomUUID();
 
@@ -298,8 +300,8 @@ describe("chatRecovery", () => {
     });
   });
 
-  describe("continueLastTurn with chatRecovery=false", () => {
-    it("appends to the last assistant message without fiber wrapping", async () => {
+  describe("continueLastTurn with legacy runtime false", () => {
+    it("appends to the last assistant message through a durable fiber", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
         env.NonChatRecoveryTestAgent,
@@ -364,7 +366,7 @@ describe("chatRecovery", () => {
     });
   });
 
-  describe("error handling with chatRecovery=true", () => {
+  describe("error handling with durable chat recovery", () => {
     it("cleans up fibers and abort controllers when onChatMessage throws", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -437,7 +439,7 @@ describe("chatRecovery", () => {
     });
   });
 
-  describe("multiple consecutive WS turns with chatRecovery=true", () => {
+  describe("multiple consecutive durable WebSocket turns", () => {
     it("handles sequential chat turns without fiber leaks", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -835,7 +837,7 @@ describe("chatRecovery", () => {
     });
   });
 
-  describe("programmatic turn with chatRecovery=true", () => {
+  describe("durable programmatic turn", () => {
     it("wraps saveMessages-triggered turn in a fiber and cleans up", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
@@ -864,7 +866,7 @@ describe("chatRecovery", () => {
     });
   });
 
-  describe("cancellation with chatRecovery=true", () => {
+  describe("cancellation with durable chat recovery", () => {
     it("cleans up fibers and abort controllers when cancelled", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(

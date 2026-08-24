@@ -102,46 +102,61 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function getScreenshotPreview(outer: unknown): {
-  src: string;
-  base64Length: number;
-} | null {
+// The sandbox script chooses these fields, so only render media types and
+// payloads we know are safe to inline.
+const SCREENSHOT_MEDIA_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function getScreenshotPreview(outer: unknown): { src: string } | null {
   // browser_execute wraps the sandbox return value: { status, result, ... }
   const output =
     isRecord(outer) && isRecord(outer.result) ? outer.result : outer;
-  if (!isRecord(output) || typeof output.data !== "string") {
+  if (
+    !isRecord(output) ||
+    output.type !== "browser_screenshot" ||
+    typeof output.mediaType !== "string" ||
+    !SCREENSHOT_MEDIA_TYPES.includes(output.mediaType) ||
+    typeof output.data !== "string" ||
+    !BASE64_PATTERN.test(output.data)
+  ) {
     return null;
   }
 
-  const format = output.format;
-  const mimeType =
-    format === "jpeg" || format === "jpg" ? "image/jpeg" : "image/png";
-
-  return {
-    src: `data:${mimeType};base64,${output.data}`,
-    base64Length: output.data.length
-  };
+  return { src: `data:${output.mediaType};base64,${output.data}` };
 }
 
-function formatToolOutput(
-  output: unknown,
-  screenshotPreview: {
-    base64Length: number;
-  } | null
-): string {
+// Any large `data` string is an inline payload (a screenshot or another
+// binary blob) and is kept out of the transcript. The tool output also carries
+// codemode's `calls` log, so the whole object is walked, not just its root.
+const INLINE_DATA_REDACTION_THRESHOLD = 1024;
+const MAX_REDACTION_DEPTH = 20;
+
+function redactInlineData(value: unknown, key?: string, depth = 0): unknown {
+  if (typeof value === "string") {
+    return key === "data" && value.length > INLINE_DATA_REDACTION_THRESHOLD
+      ? `[inline data omitted: ${value.length} chars]`
+      : value;
+  }
+  if (depth >= MAX_REDACTION_DEPTH || !isRecord(value)) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactInlineData(entry, key, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entry]) => [
+      entryKey,
+      redactInlineData(entry, entryKey, depth + 1)
+    ])
+  );
+}
+
+function formatToolOutput(output: unknown): string {
   if (typeof output === "string") {
     return output;
   }
 
-  if (screenshotPreview && isRecord(output)) {
-    const omitted = `[base64 image data omitted: ${screenshotPreview.base64Length} chars]`;
-    const redacted = isRecord(output.result)
-      ? { ...output, result: { ...output.result, data: omitted } }
-      : { ...output, data: omitted };
-    return JSON.stringify(redacted, null, 2);
-  }
-
-  return JSON.stringify(output, null, 2);
+  return JSON.stringify(redactInlineData(output), null, 2);
 }
 
 function Chat() {
@@ -677,7 +692,7 @@ function Chat() {
                               </div>
                             )}
                             <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
-                              {formatToolOutput(toolOutput, screenshotPreview)}
+                              {formatToolOutput(toolOutput)}
                             </pre>
                           </div>
                         )}

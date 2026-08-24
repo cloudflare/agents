@@ -7,9 +7,9 @@
  * The mock model:
  *  - with no execute result in the prompt, calls the `execute` tool with the
  *    code the test configured (`setExecuteCode`);
- *  - otherwise emits text reporting every execution status it can see in the
- *    prompt (`seen:<status,...>`), so tests can assert what the model
- *    observed on each (auto-)continuation.
+ *  - otherwise emits text reporting every execution status and orphaned
+ *    execution-outcome role it can see in the prompt, so tests can assert what
+ *    the model observed on each (auto-)continuation.
  */
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
@@ -17,26 +17,39 @@ import { z } from "zod";
 import { Think } from "../../think";
 import { createExecuteTool } from "../../tools/execute";
 
-function promptHasExecuteResult(options: Record<string, unknown>): boolean {
-  const messages = (options as { prompt?: unknown[] }).prompt ?? [];
-  return messages.some(
-    (m: unknown) =>
-      typeof m === "object" &&
-      m !== null &&
-      (m as Record<string, unknown>).role === "tool"
-  );
+type HitlLanguageModelCallOptions = Parameters<
+  Extract<LanguageModel, { specificationVersion: "v3" }>["doStream"]
+>[0];
+
+function promptHasExecuteResult(
+  options: HitlLanguageModelCallOptions
+): boolean {
+  return options.prompt.some((message) => message.role === "tool");
 }
 
-function statusesInPrompt(options: Record<string, unknown>): string[] {
-  const serialized = JSON.stringify(
-    (options as { prompt?: unknown[] }).prompt ?? []
-  );
+function statusesInPrompt(options: HitlLanguageModelCallOptions): string[] {
+  const serialized = JSON.stringify(options.prompt);
   const seen: string[] = [];
-  const re = /"status"\s*:\s*"(completed|paused|rejected|error)"/g;
+  const re = /\\?"status\\?"\s*:\s*\\?"(completed|paused|rejected|error)\\?"/g;
   for (const match of serialized.matchAll(re)) {
     if (!seen.includes(match[1])) seen.push(match[1]);
   }
   return seen;
+}
+
+function executionOutcomeRolesInPrompt(
+  options: HitlLanguageModelCallOptions
+): string[] {
+  const roles: string[] = [];
+  for (const message of options.prompt) {
+    if (
+      JSON.stringify(message.content).includes("[execute tool]") &&
+      !roles.includes(message.role)
+    ) {
+      roles.push(message.role);
+    }
+  }
+  return roles;
 }
 
 function enqueueExecuteCall(
@@ -70,7 +83,7 @@ function createHitlMockModel(agent: ThinkExecuteHitlAgent): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented");
     },
-    doStream(options: Record<string, unknown>) {
+    doStream(options: HitlLanguageModelCallOptions) {
       callCount++;
       const step = callCount;
       const stream = new ReadableStream({
@@ -92,7 +105,9 @@ function createHitlMockModel(agent: ThinkExecuteHitlAgent): LanguageModel {
             controller.enqueue({
               type: "text-delta",
               id,
-              delta: `seen:${statusesInPrompt(options).join(",")}`
+              delta:
+                `seen:${statusesInPrompt(options).join(",")};` +
+                `execution-outcome-roles:${executionOutcomeRolesInPrompt(options).join(",")}`
             });
             controller.enqueue({ type: "text-end", id });
             controller.enqueue({
@@ -244,16 +259,54 @@ export class ThinkExecuteHitlAgent extends Think {
     }
   }
 
-  /** Text of system messages (the orphaned-outcome fallback notes). */
-  async systemNoteTexts(): Promise<string[]> {
+  /** Orphaned execution outcome notes, including their transcript role. */
+  async executionOutcomeNotes(): Promise<
+    Array<{
+      id: string;
+      role: string;
+      text: string;
+      metadataOrigin?: string;
+    }>
+  > {
     return this.messages
-      .filter((m) => m.role === "system")
-      .map((m) =>
-        (m as UIMessage).parts
-          .filter((p) => p.type === "text")
-          .map((p) => (p as { text: string }).text)
-          .join("")
-      );
+      .filter((message) => message.id.startsWith("exec-outcome-"))
+      .map((message) => {
+        const metadataOrigin =
+          message.metadata &&
+          typeof message.metadata === "object" &&
+          "origin" in message.metadata &&
+          typeof message.metadata.origin === "string"
+            ? message.metadata.origin
+            : undefined;
+        return {
+          id: message.id,
+          role: message.role,
+          text: (message as UIMessage).parts
+            .filter((part) => part.type === "text")
+            .map((part) => (part as { text: string }).text)
+            .join(""),
+          ...(metadataOrigin ? { metadataOrigin } : {})
+        };
+      });
+  }
+
+  /** Seed the system-role execution outcome produced by older Think releases. */
+  async appendLegacyExecutionOutcomeForTest(
+    executionId: string
+  ): Promise<void> {
+    await this.appendMessageToHistory({
+      id: `exec-outcome-${executionId}-legacy`,
+      role: "system",
+      parts: [
+        {
+          type: "text",
+          text:
+            `[execute tool] The paused execution "${executionId}" was ` +
+            `resolved, but its tool call is no longer in the transcript ` +
+            `(it may have been compacted). Outcome: {"status":"completed"}`
+        }
+      ]
+    } as UIMessage);
   }
 
   /** Expire all paused runs immediately (stage 1 `expirePaused`). */

@@ -50,16 +50,21 @@ export class MyAgent extends VoiceAgent<Env> {
 ```typescript
 import { streamText } from "ai";
 
-async onTurn(transcript: string) {
+async onTurn(transcript: string, context: VoiceTurnContext) {
   const result = streamText({
     model: myModel,
     instructions: "You are a helpful voice assistant. Keep replies short.",
-    messages: [{ role: "user", content: transcript }]
+    messages: [
+      ...context.messages,
+      { role: "user", content: transcript }
+    ]
   });
 
   return result.stream;
 }
 ```
+
+`context.messages` contains completed conversation history before the current transcript. Append `transcript` exactly once when constructing the LLM request. The pipeline persists the transcript before `onTurn()` runs, so calling `getConversationHistory()` directly inside the hook returns stored history that includes the current transcript.
 
 ### Provider properties
 

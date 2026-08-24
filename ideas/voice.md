@@ -454,7 +454,7 @@ Detailed competitive analyses with architecture comparisons, gap assessments, an
 
 ### Analyzed: Hibernation and voice sessions
 
-Hibernation is ON by default (`static options = { hibernate: true }`). The DO evicts from memory when no JS is executing, but WebSocket connections and SQLite data survive.
+Agent WebSockets always hibernate. The DO can leave memory when no JavaScript is executing, while WebSocket connections and SQLite data survive.
 
 **What survives hibernation:** WebSocket connections (platform-managed), SQLite (`cf_voice_messages`), scheduled alarms.
 

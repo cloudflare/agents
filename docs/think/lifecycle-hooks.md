@@ -143,6 +143,7 @@ All fields are optional. Return only what you want to change.
 | `chatStreamStallTimeoutMs` | `number`                                       | Override the stream-stall watchdog for this turn (`0` disables it); auto-resets after the turn. Useful for a turn with a known-slow tool — see [Think configuration](./index.md). |
 | `headers`                  | `Record<string, string>`                       | Additional provider request headers                                                                                                                                               |
 | `providerOptions`          | `Record<string, unknown>`                      | Provider-specific options                                                                                                                                                         |
+| `repairToolCall`           | `ToolCallRepairFunction`                       | Repair a tool call that the AI SDK cannot parse or validate. The returned call is revalidated before execution.                                                                   |
 | `experimental_transform`   | `StreamTextTransform \| StreamTextTransform[]` | AI SDK stream transform(s) for this turn — inspect or rewrite stream parts (for example, emit `source` parts derived from tool results). Applied in order.                        |
 
 ### Examples
@@ -198,6 +199,29 @@ beforeTurn() {
 ```
 
 `stopWhen` is additive: Think sends both `stepCountIs(maxSteps)` and your condition(s) to the AI SDK, so the loop ends when either one matches. Stop conditions are functions, so they can be returned from a Think subclass's `beforeTurn`, but not from sandboxed extension `beforeTurn` hooks over RPC.
+
+Repair fenced JSON tool input before execution:
+
+````typescript
+import { InvalidToolInputError } from "ai";
+
+beforeTurn() {
+  return {
+    repairToolCall: async ({ toolCall, error }) => {
+      if (!InvalidToolInputError.isInstance(error)) return null;
+
+      const fencedJson = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(
+        toolCall.input
+      );
+      if (!fencedJson?.[1]) return null;
+
+      return { ...toolCall, input: fencedJson[1] };
+    }
+  };
+}
+````
+
+The AI SDK invokes `repairToolCall` only for `NoSuchToolError` or `InvalidToolInputError`. Return a complete raw tool call, usually by preserving the original call and replacing its `input` JSON string, or return `null` when the call cannot be repaired. The SDK parses and schema-validates a returned call once before `beforeToolCall` and tool execution. Because the callback is a function, configure it from a Think subclass; sandboxed extensions cannot send it over RPC.
 
 Prune older tool calls from the model context with the AI SDK's [`pruneMessages`](https://ai-sdk.dev/):
 

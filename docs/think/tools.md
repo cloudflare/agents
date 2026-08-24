@@ -276,9 +276,9 @@ Setup checklist:
 ```
 
 ```typescript
-// worker entry — the runtime lives in a Durable Object facet, so the class
-// must be exported (the @cloudflare/codemode/vite plugin does this
-// automatically; the Think framework's generated entry already includes it)
+// Worker entry — the runtime lives in a Durable Object facet, so the class
+// must be exported. The @cloudflare/codemode/vite plugin can do this
+// automatically; otherwise export it explicitly.
 export { CodemodeRuntime } from "@cloudflare/codemode";
 ```
 

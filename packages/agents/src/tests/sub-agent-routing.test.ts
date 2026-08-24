@@ -16,13 +16,72 @@
 import { exports, env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../index";
-import { getAgentByName, getSubAgentByName, parseSubAgentPath } from "../index";
+import {
+  buildAgentPath,
+  buildAgentUrl,
+  getAgentByName,
+  getSubAgentByName,
+  parseSubAgentPath
+} from "../index";
 
 function uniqueName() {
   return `sub-routing-${Math.random().toString(36).slice(2)}`;
 }
 
 describe("sub-agent routing — routeAgentRequest + /sub/... URLs", () => {
+  it("routes external HTTP through a canonical root-first Agent path", async () => {
+    const parent = uniqueName();
+    const outer = "outer/with space";
+    const inner = "inner%literal";
+    const pathname = buildAgentPath(
+      [
+        { className: "TestSubAgentParent", name: parent },
+        { className: "OuterSubAgent", name: outer },
+        { className: "InnerSubAgent", name: inner }
+      ],
+      { leafPath: "/callbacks/job" }
+    );
+
+    const response = await exports.default.fetch(
+      new Request(`https://app.example.com${pathname}?job=123`, {
+        body: "completed",
+        headers: { "x-parent-agent-test": "yes" },
+        method: "POST"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      agentName: inner,
+      body: "completed",
+      header: "yes",
+      method: "POST",
+      path: "/callbacks/job",
+      search: "?job=123"
+    });
+  });
+
+  it("routes a canonical nested path through a custom prefix", async () => {
+    const child = "custom-prefix-child";
+    const pathname = buildAgentPath(
+      [
+        { className: "TestSubAgentParent", name: uniqueName() },
+        { className: "OuterSubAgent", name: child }
+      ],
+      { prefix: "api/agents", leafPath: "/callbacks/job" }
+    );
+
+    const response = await exports.default.fetch(
+      `https://app.example.com${pathname}`
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      agentName: child,
+      path: "/callbacks/job"
+    });
+  });
+
   it("resolves a child facet when the URL contains /sub/", async () => {
     const parent = uniqueName();
     const child = uniqueName();
@@ -166,7 +225,7 @@ describe("onBeforeSubAgent hook — allow / reject / mutate", () => {
       `http://x/custom-sub/${parent}/sub/counter-sub-agent/${child}/anything`
     );
     // The child (CounterSubAgent) doesn't implement `onRequest` — it
-    // would return the default partyserver 404/500 shape. What we
+    // returns the default lifecycle 404/500 shape. What we
     // care about here is that the hook fired and the framework
     // dispatched, not that the child served the path.
     expect(await parentStub.hookCount("called")).toBe(1);
@@ -227,7 +286,7 @@ describe("onBeforeSubAgent hook — allow / reject / mutate", () => {
       `http://x/custom-sub/${parent}/sub/counter-sub-agent/${knownChild}/anything`
     );
     // The hook allowed, the framework dispatched. The response text
-    // didn't come from our deny path — the child (or partyserver's
+    // didn't come from our deny path — the child (or lifecycle's
     // default onRequest) produced whatever it produced.
     expect(await resKnown.text()).not.toBe("child not pre-registered");
   });
@@ -250,6 +309,182 @@ describe("onBeforeSubAgent hook — allow / reject / mutate", () => {
     );
     expect(res.status).toBe(404);
     expect(await parentStub.hookCount("called")).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("buildAgentPath", () => {
+  it("requires a root Agent identity", () => {
+    expect(() => buildAgentPath([])).toThrow(/at least one step/);
+  });
+
+  it("builds a canonical root-first path to a nested agent", () => {
+    expect(
+      buildAgentPath(
+        [
+          { className: "Inbox", name: "user-123" },
+          { className: "ChatAgent", name: "chat/a" }
+        ],
+        { leafPath: "/callbacks/job" }
+      )
+    ).toBe("/agents/inbox/user-123/sub/chat-agent/chat%2Fa/callbacks/job");
+  });
+
+  it.each([
+    [[{ className: "Inbox", name: "user-123" }], "/agents/inbox/user-123/"],
+    [
+      [
+        { className: "Inbox", name: "user-123" },
+        { className: "Chat", name: "chat-456" }
+      ],
+      "/agents/inbox/user-123/sub/chat/chat-456/"
+    ]
+  ] as const)("preserves a root leaf pathname", (path, expected) => {
+    expect(buildAgentPath(path, { leafPath: "/" })).toBe(expected);
+  });
+
+  it("preserves literal-percent root name semantics", () => {
+    expect(buildAgentPath([{ className: "Inbox", name: "user%2F123" }])).toBe(
+      "/agents/inbox/user%2F123"
+    );
+  });
+
+  it("encodes URL-reserved and Unicode characters in child names", () => {
+    expect(
+      buildAgentPath([
+        { className: "Inbox", name: "user-123" },
+        { className: "Chat", name: "space ü?%#" }
+      ])
+    ).toBe("/agents/inbox/user-123/sub/chat/space%20%C3%BC%3F%25%23");
+  });
+
+  it("builds an absolute URL without inheriting a base pathname", () => {
+    expect(
+      buildAgentUrl(
+        "https://app.example.com/",
+        [{ className: "Inbox", name: "user-123" }],
+        { leafPath: "/webhooks/complete" }
+      ).href
+    ).toBe("https://app.example.com/agents/inbox/user-123/webhooks/complete");
+  });
+
+  it.each([
+    "",
+    ".",
+    "..",
+    "%2e",
+    "%2e%2e",
+    "has/slash",
+    "has?query",
+    "has#fragment",
+    "has space",
+    "ümlaut"
+  ])("rejects the non-routable root Agent name %j", (name) => {
+    expect(() => buildAgentPath([{ className: "Inbox", name }])).toThrow(
+      /root Agent name/
+    );
+  });
+
+  it.each(["", ".", "..", "has\0null", "\ud800"])(
+    "rejects the non-routable child Agent name %j",
+    (name) => {
+      expect(() =>
+        buildAgentPath([
+          { className: "Inbox", name: "user-123" },
+          { className: "Chat", name }
+        ])
+      ).toThrow(/child Agent name/);
+    }
+  );
+
+  it.each(["", ".", "..", "Has/Slash", "Has?Query", "Has#Fragment"])(
+    "rejects the non-routable Agent class name %j",
+    (className) => {
+      expect(() => buildAgentPath([{ className, name: "user-123" }])).toThrow(
+        /Agent class name/
+      );
+    }
+  );
+
+  it.each([
+    [[{ className: "Sub", name: "root" }]],
+    [[{ className: "Inbox", name: "sub" }]],
+    [
+      [
+        { className: "Inbox", name: "user-123" },
+        { className: "Sub", name: "child" }
+      ]
+    ]
+  ] as const)(
+    "rejects an identity that collides with the sub route separator",
+    (path) => {
+      expect(() => buildAgentPath(path)).toThrow(/reserved/);
+    }
+  );
+
+  it("supports a root Durable Object binding that differs from its class", () => {
+    expect(
+      buildAgentPath([{ className: "CounterAgent", name: "user-123" }], {
+        rootBinding: "COUNTER_DO"
+      })
+    ).toBe("/agents/counter-do/user-123");
+  });
+
+  it("supports a multi-segment custom routing prefix", () => {
+    expect(
+      buildAgentPath([{ className: "Inbox", name: "user-123" }], {
+        prefix: "api/agents"
+      })
+    ).toBe("/api/agents/inbox/user-123");
+  });
+
+  it.each([
+    "",
+    "/agents",
+    "agents/",
+    "api//agents",
+    "api/./agents",
+    "api/../agents",
+    "api/sub",
+    "api?version=1"
+  ])("rejects the invalid routing prefix %j", (prefix) => {
+    expect(() =>
+      buildAgentPath([{ className: "Inbox", name: "user-123" }], { prefix })
+    ).toThrow(/routing prefix/);
+  });
+
+  it.each([
+    "/callback?code=test",
+    "/callback#complete",
+    "/api/../callback",
+    "/callbacks//job",
+    "/callbacks/",
+    "/has space"
+  ])("rejects the non-pathname leaf path %j", (leafPath) => {
+    expect(() =>
+      buildAgentPath([{ className: "Inbox", name: "user-123" }], {
+        leafPath
+      })
+    ).toThrow(/leaf path/);
+  });
+
+  it("can build a WebSocket URL from the same transport-neutral path", () => {
+    expect(
+      buildAgentUrl("wss://app.example.com", [
+        { className: "Inbox", name: "user-123" }
+      ]).href
+    ).toBe("wss://app.example.com/agents/inbox/user-123");
+  });
+
+  it.each([
+    "ftp://app.example.com",
+    "https://user:password@app.example.com",
+    "https://app.example.com/deployment",
+    "https://app.example.com/?version=1",
+    "https://app.example.com/#fragment"
+  ])("rejects the invalid URL origin %j", (origin) => {
+    expect(() =>
+      buildAgentUrl(origin, [{ className: "Inbox", name: "user-123" }])
+    ).toThrow(/origin/);
   });
 });
 
@@ -352,6 +587,31 @@ describe("parseSubAgentPath", () => {
 });
 
 describe("routeSubAgentRequest — query-param preservation", () => {
+  it("accepts a canonical root-first Agent path", async () => {
+    const parent = uniqueName();
+    const child = "child/with space";
+    const parentStub = await getAgentByName(env.HookingSubAgentParent, parent);
+    await parentStub.setHookMode("allow");
+    const { routeSubAgentRequest } = await import("../index");
+    const fromPath = buildAgentPath(
+      [
+        { className: "HookingSubAgentParent", name: parent },
+        { className: "CounterSubAgent", name: child }
+      ],
+      { leafPath: "/callbacks/job" }
+    );
+
+    await routeSubAgentRequest(
+      new Request("https://app.example.com/webhooks/complete?job=123"),
+      parentStub,
+      { fromPath }
+    );
+
+    const observed = new URL((await parentStub.lastObservedUrl())!);
+    expect(observed.pathname).toBe(fromPath);
+    expect(observed.search).toBe("?job=123");
+  });
+
   it("preserves original request query params when `fromPath` is used", async () => {
     // Custom-routing worker handler at worker.ts:/custom-sub/...
     // extracts `rest` from the pathname (no query). Without a fix,

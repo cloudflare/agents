@@ -2139,10 +2139,10 @@ export function useAgentChat<
               }
             }
 
-            if (data.done || data.replayComplete) {
+            if (data.done || data.error || data.replayComplete) {
               pendingReplayResumeRequestIdsRef.current.delete(data.id);
             }
-            if (data.done) {
+            if (data.done || data.error) {
               if (
                 streamStateRef.current.status === "observing" &&
                 streamStateRef.current.streamId === data.id
@@ -2170,6 +2170,31 @@ export function useAgentChat<
           ) {
             return;
           }
+          if (data.error) {
+            pendingReplayResumeRequestIdsRef.current.delete(data.id);
+            customTransport.handleServerTurnCompleted(data.id);
+            fallbackAckedResumeRequestIdsRef.current.delete(data.id);
+            setIsRecovering(false);
+
+            if (
+              streamStateRef.current.status === "idle" ||
+              streamStateRef.current.streamId === data.id
+            ) {
+              const result = broadcastTransition(streamStateRef.current, {
+                type: "clear"
+              });
+              streamStateRef.current = result.state;
+              setIsServerStreaming(result.isStreaming);
+            }
+            if (observedToolContinuationRequestIdRef.current === data.id) {
+              resetToolContinuation();
+            }
+            break;
+          }
+
+          // Error bodies are human-readable diagnostics, not UI message
+          // chunks. The transport-owned path short-circuits them before JSON
+          // parsing; observers must do the same.
           if (data.body?.trim()) {
             try {
               chunkData = JSON.parse(data.body);

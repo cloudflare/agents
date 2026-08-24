@@ -20,6 +20,10 @@
         "name": "TestEmptyResponseVoiceAgent"
       },
       {
+        "class_name": "TestContextVoiceAgent",
+        "name": "TestContextVoiceAgent"
+      },
+      {
         "class_name": "TestAiSdkFullStreamVoiceAgent",
         "name": "TestAiSdkFullStreamVoiceAgent"
       },
@@ -47,6 +51,7 @@
       "new_sqlite_classes": [
         "TestVoiceAgent",
         "TestEmptyResponseVoiceAgent",
+        "TestContextVoiceAgent",
         "TestAiSdkFullStreamVoiceAgent",
         "TestAiSdkTextStreamVoiceAgent",
         "TestPcm24kVoiceAgent",

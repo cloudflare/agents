@@ -66,7 +66,7 @@ export class MyAgent extends AIChatAgent<Env> {
 | `this.messages`                      | `ChatMessage[]`          | Current conversation history        |
 | `maxPersistedMessages`               | `number \| undefined`    | Storage cap                         |
 | `messageConcurrency`                 | `MessageConcurrency`     | Overlap strategy                    |
-| `chatRecovery`                       | `boolean`                | Fiber-wrapped turns                 |
+| `chatRecovery`                       | `ChatRecoveryConfig`     | Tune always-on durable recovery     |
 | `waitForMcpConnections`              | `boolean \| { timeout }` | MCP wait                            |
 | `saveMessages(msgs)`                 | method                   | Programmatic turn                   |
 | `continueLastTurn(body?)`            | method                   | Continue last assistant message     |

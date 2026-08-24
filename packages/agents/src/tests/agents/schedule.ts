@@ -2,8 +2,8 @@ import { Agent, callable, type Schedule } from "../../index.ts";
 
 /**
  * Test agent that verifies this.name is accessible during scheduled callback
- * execution. This catches the bug where Agent.alarm() bypassed PartyServer's
- * #ensureInitialized(), causing this.name to throw when accessed in alarm-triggered
+ * execution. This catches lifecycle initialization being bypassed by
+ * Agent.alarm(), which would leave this.name unavailable in scheduled
  * callbacks.
  */
 export class TestAlarmInitAgent extends Agent {

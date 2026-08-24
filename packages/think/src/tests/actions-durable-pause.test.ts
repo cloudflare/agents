@@ -315,6 +315,56 @@ describe("durable-pause actions (turn-driven, connection-less)", () => {
 
     expect(await agent.listActionPendingForTest()).toHaveLength(0);
   });
+
+  it("labels orphaned durable-pause outcomes without re-invoking the action", async () => {
+    const agent = await freshPauseAgent(`dp-orphan-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+
+    const pending = await agent.listActionPendingForTest();
+    expect(pending).toHaveLength(1);
+    const executionId = pending[0].execution_id;
+    await agent.stripDurablePausePartsForTest();
+
+    const messagesBefore = (await agent.getStoredMessages()) as UIMessage[];
+    const textPartsBefore = messagesBefore
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) => message.parts)
+      .filter((part) => part.type === "text").length;
+
+    const rejected = (await agent.rejectExecutionForTest(
+      executionId,
+      "not now"
+    )) as PausedOutput;
+    expect(rejected.status).toBe("rejected");
+
+    await vi.waitFor(
+      async () => {
+        const messages = (await agent.getStoredMessages()) as UIMessage[];
+        const note = messages.find((message) =>
+          message.id.startsWith(`exec-outcome-${executionId}-`)
+        );
+        const noteText = note?.parts
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("");
+        expect(note?.role).toBe("system");
+        expect(noteText).toContain("[durable action]");
+        expect(noteText).not.toContain("[execute tool]");
+        expect(noteText).toContain('"action":"pauseAction"');
+
+        const textPartsAfter = messages
+          .filter((message) => message.role === "assistant")
+          .flatMap((message) => message.parts)
+          .filter((part) => part.type === "text").length;
+        expect(textPartsAfter).toBeGreaterThan(textPartsBefore);
+        expect(await agent.listActionPendingForTest()).toHaveLength(0);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+  });
 });
 
 describe("paused-output descriptor derivation", () => {
