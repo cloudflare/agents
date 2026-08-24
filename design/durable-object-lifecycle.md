@@ -38,4 +38,4 @@ explicitly to reconstruct persisted RPC bindings.
 ## History
 
 - [Durable Object lifecycle composition](./rfc-durable-object-lifecycle.md)
-- [Lifecycle capability execution boundary](./rfc-lifecycle-capability-execution-boundary.md)
+- [Lifecycle capability execution boundary](./rfc-lifecycle-execution-boundary.md)
