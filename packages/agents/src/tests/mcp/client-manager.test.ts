@@ -238,6 +238,32 @@ describe("MCPClientManager OAuth Integration", () => {
     });
   });
 
+  describe("RPC restoration dependencies", () => {
+    it("warns when persisted RPC servers cannot be restored without env", async () => {
+      saveServerToMock({
+        id: "rpc-without-env",
+        name: "RPC without env",
+        server_url: "rpc://server",
+        client_id: null,
+        auth_url: null,
+        callback_url: "",
+        server_options: JSON.stringify({ bindingName: "MCP_OBJECT" })
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      try {
+        await manager.onStart();
+
+        expect(warn).toHaveBeenCalledWith(
+          '[MCPClientManager] Cannot restore RPC MCP server "RPC without env": ' +
+            "no env was provided; pass { env } when constructing MCPClientManager"
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
   describe("Connection Reuse During OAuth", () => {
     it("should test OAuth reconnect logic through connection reuse condition", async () => {
       const serverId = "test-server-id";

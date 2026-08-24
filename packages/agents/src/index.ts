@@ -48,10 +48,10 @@ import {
   exports as workerExports
 } from "cloudflare:workers";
 import {
+  type CapabilityPhaseContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
-  type DurableObjectCapability,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
@@ -113,7 +113,6 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
-import { decodeMcpServerOptions } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
 export {
   AGENT_TOOL_PROGRESS_PART,
@@ -1666,7 +1665,10 @@ export class Agent<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
   /** Runtime lifecycle and reusable durable capabilities for this Agent. */
-  readonly lifecycle = Lifecycle.install<Env, Props>(this);
+  readonly lifecycle = Lifecycle.install<Env, Props>(this, {
+    runCapabilityPhase: (context, operation) =>
+      this._runAgentCapabilityPhase(context, operation)
+  });
 
   /** Run user initialization after lifecycle components have started. */
   onStart(_props?: Props): void | Promise<void> {}
@@ -2468,6 +2470,7 @@ export class Agent<
 
         // Initialize MCPClientManager AFTER tables are created.
         return new MCPClientManager(this._ParentClass.name, "0.0.1", {
+          env: this.env,
           storage: this.ctx.storage,
           createAuthProvider: (callbackUrl) =>
             this.createMcpOAuthProvider(callbackUrl)
@@ -2475,7 +2478,7 @@ export class Agent<
       }
     );
 
-    this.lifecycle.use(this._agentMcpLifecycleAdapter());
+    this.lifecycle.use(this.mcp);
 
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
@@ -2928,61 +2931,43 @@ export class Agent<
       );
   }
 
-  /**
-   * Preserve Agent execution semantics around the reusable MCP capability.
-   *
-   * Do not replace this with `lifecycle.use(this.mcp)` without first adding an
-   * Agent execution boundary to Lifecycle itself. Capability hooks run before
-   * Agent's wrapped host hooks, so direct installation would lose
-   * `getCurrentAgent()` during provider restoration and OAuth callbacks, and
-   * would restore MCP before persisted facet identity is hydrated.
-   */
-  private _agentMcpLifecycleAdapter(): DurableObjectCapability<Props> {
-    return {
-      onStart: () =>
-        runInInvocation(
-          {
-            agent: this,
-            connection: undefined,
-            request: undefined,
-            email: undefined
-          },
-          async () => {
-            await this._restoreAgentStateBeforeMcp();
-            return this._tryCatch(() =>
-              this._withAgentSpan(
-                "restore_mcp_connections",
-                "startup",
-                {},
-                async () => {
-                  await this.mcp.onStart();
-                  await this._restoreRpcMcpServers();
-                }
-              )
-            );
-          }
-        ),
-      onRequest: ({ request }) =>
-        runInInvocation(
-          {
-            agent: this,
-            connection: undefined,
-            request,
-            email: undefined
-          },
-          () => this.mcp.onRequest({ request })
-        )
-    };
+  private _runAgentCapabilityPhase<T>(
+    context: CapabilityPhaseContext<Props>,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const request = context.phase === "request" ? context.request : undefined;
+    return runInInvocation(
+      {
+        agent: this,
+        connection: undefined,
+        request,
+        email: undefined
+      },
+      async () => {
+        if (context.phase === "start") {
+          await this._restoreAgentStateForCapabilities();
+          return this._tryCatch(() =>
+            this._withAgentSpan(
+              "restore_mcp_connections",
+              "startup",
+              {},
+              operation
+            )
+          );
+        }
+        return operation();
+      }
+    );
   }
 
-  private async _restoreAgentStateBeforeMcp(): Promise<void> {
+  private async _restoreAgentStateForCapabilities(): Promise<void> {
     await this._withAgentSpan(
       "restore_agent_state",
       "startup",
       {},
       async () => {
-        // MCP restores before the host onStart callback, so hydrate Agent-owned
-        // facet identity and bridges first, preserving the prior Agent order.
+        // Capabilities start before the host onStart callback, so hydrate
+        // Agent-owned facet identity and bridges first.
         const isFacet =
           await this.ctx.storage.get<boolean>("cf_agents_is_facet");
         if (isFacet) this._isFacet = true;
@@ -12173,50 +12158,6 @@ export class Agent<
       }
     }
     return undefined;
-  }
-
-  private async _restoreRpcMcpServers(): Promise<void> {
-    for (const server of this.mcp.getRpcServersFromStorage()) {
-      if (this.mcp.mcpConnections[server.id]) continue;
-
-      const options = decodeMcpServerOptions(server.server_options);
-      const binding = options.bindingName
-        ? Object.entries(this.env).find(
-            ([name]) => name === options.bindingName
-          )?.[1]
-        : undefined;
-      const namespace = this._cf_asDurableObjectNamespace<McpAgent>(binding);
-      if (!namespace) {
-        console.warn(
-          `[Agent] Cannot restore RPC MCP server "${server.name}": binding ` +
-            `"${options.bindingName ?? "<missing>"}" not found in env`
-        );
-        continue;
-      }
-
-      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-      try {
-        await this.mcp.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-          reconnect: { id: server.id },
-          transport: {
-            type: "rpc",
-            namespace,
-            name: normalizedName,
-            props: options.props
-          }
-        });
-
-        const connection = this.mcp.mcpConnections[server.id];
-        if (connection?.connectionState === MCPConnectionState.CONNECTED) {
-          await this.mcp.discoverIfConnected(server.id);
-        }
-      } catch (error) {
-        console.error(
-          `[Agent] Error restoring RPC MCP server "${server.name}":`,
-          error
-        );
-      }
-    }
   }
 
   // ==========================================

@@ -24,14 +24,17 @@ import {
   createLegacySseHandler,
   createStreamingHttpHandler,
   handleCORS,
-  isDurableObjectNamespace,
   MCP_HTTP_METHOD_HEADER,
   MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 import type { EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { DurableObjectEventStore } from "./event-store";
-import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
+import {
+  isDurableObjectNamespace,
+  RPCServerTransport,
+  type RPCServerTransportOptions
+} from "./rpc";
 
 /**
  * @deprecated McpAgent is feature-frozen. Migrate to an SDK v2 factory with

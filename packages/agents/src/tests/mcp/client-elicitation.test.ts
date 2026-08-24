@@ -872,8 +872,8 @@ describe("MCP client elicitation options (#1875)", () => {
       });
       managerA.saveRpcServerToStorage("srv-rpc", "rpc-server", name, "MCP");
 
-      // Wake: the Agent RPC restore path reconnects by stored id before any
-      // handler exists — the manager seeds capabilities from its own row
+      // Wake: RPC restoration reconnects by stored id before any handler
+      // exists, so the manager seeds capabilities from its own row.
       const managerB = new MCPClientManager("test-client", "1.0.0", {
         storage
       });

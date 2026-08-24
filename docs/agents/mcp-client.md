@@ -38,8 +38,8 @@ export class MyObject extends DurableObject<Env> {
 
 The lifecycle calls the manager automatically:
 
-- `onStart()` initializes its schema and restores persisted HTTP connections
-  before the host handles work.
+- `onStart()` initializes its schema and restores persisted connections before
+  the host handles work.
 - `onRequest()` intercepts registered OAuth callback URLs before the host's
   request handler.
 
@@ -53,7 +53,21 @@ callback URL to `registerServer()` and route that request to the same named
 Durable Object. The manager persists the URL and only intercepts a callback
 whose origin and pathname match it.
 
-`Agent` composes the same capability internally. Existing `this.mcp`,
+An HTTP-only manager does not need `env`. Pass the Durable Object environment
+when the catalog can contain RPC servers so persisted binding names can be
+resolved after a wake:
+
+```ts
+readonly mcp = new MCPClientManager("my-object", "1.0.0", {
+  env: this.env,
+  storage: this.ctx.storage
+});
+```
+
+If an RPC row exists without `env`, startup logs a warning identifying the
+server and does not recreate that connection.
+
+`Agent` installs this same capability object directly. Existing `this.mcp`,
 `addMcpServer()`, `removeMcpServer()`, and `getMcpServers()` APIs remain
 available.
 
