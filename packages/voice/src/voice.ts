@@ -27,8 +27,14 @@
 
 import type { Agent, Connection, WSMessage } from "agents";
 import { SentenceChunker } from "./sentence-chunker";
+import { logVoiceError, toVoiceError, voiceErrorMessage } from "./errors";
 import {
-  iterateText,
+  ServerDiagnostics,
+  type DiagnosticData,
+  type ModelDiagnosticTracker,
+  type TurnDiagnostics
+} from "./diagnostics";
+import {
   iterateTextEvents,
   type TextSource,
   type TextStreamEvent
@@ -40,7 +46,11 @@ import type {
   TTSProvider,
   StreamingTTSProvider,
   Transcriber,
-  TranscriberSession
+  TranscriberSession,
+  VoiceCompletionOutcome,
+  VoiceModelFinishReason,
+  VoiceDiagnosticsOptions,
+  VoiceTurnOutcome
 } from "./types";
 import {
   AudioConnectionManager,
@@ -61,6 +71,18 @@ export type {
   VoiceAudioFormat,
   VoiceAudioInput,
   VoiceTransport,
+  VoiceTransportCloseInfo,
+  VoiceError,
+  VoiceErrorCode,
+  VoiceErrorStage,
+  VoiceCompletionOutcome,
+  VoiceCompletionOutcomeCode,
+  VoiceModelFinishReason,
+  VoiceDiagnosticsOptions,
+  VoiceDiagnosticEvent,
+  VoiceTurnMetrics,
+  VoiceTurnOutcome,
+  VoiceTurnSource,
   VoiceClientMessage,
   VoiceServerMessage,
   VoicePipelineMetrics,
@@ -73,7 +95,7 @@ export type {
 } from "./types";
 
 // Re-export voice input mixin (STT-only, no TTS/LLM)
-export { withVoiceInput } from "./voice-input";
+export { withVoiceInput, type VoiceInputOptions } from "./voice-input";
 
 // Re-export text stream utility
 export { iterateText, type TextSource } from "./text-stream";
@@ -132,6 +154,8 @@ export interface VoiceAgentOptions {
   sampleRate?: number;
   /** Max conversation messages to keep in SQLite. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
+  /** Optional diagnostic output. Diagnostic event names and metadata are not stable API. */
+  diagnostics?: VoiceDiagnosticsOptions;
 }
 
 // --- Default option values ---
@@ -139,6 +163,50 @@ export interface VoiceAgentOptions {
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
+
+class ModelStreamError extends Error {
+  readonly streamError: Error;
+  readonly partialOutput: boolean;
+
+  constructor(streamError: Error, partialOutput: boolean) {
+    super(streamError.message, { cause: streamError });
+    this.name = "ModelStreamError";
+    this.streamError = streamError;
+    this.partialOutput = partialOutput;
+  }
+}
+
+function completionOutcomeCode(
+  finishReason: VoiceModelFinishReason | undefined,
+  hasOutput: boolean
+): VoiceCompletionOutcome["code"] | null {
+  if (finishReason === "length") return "output_limit";
+  if (finishReason === "content-filter") return "content_filtered";
+  if (finishReason === "error") return "model_error";
+  return hasOutput ? null : "no_output";
+}
+
+function stableTurnOutcome(
+  finishReason: VoiceModelFinishReason | undefined,
+  hasOutput: boolean
+): VoiceTurnOutcome {
+  return completionOutcomeCode(finishReason, hasOutput) ?? "completed";
+}
+
+function createCompletionOutcome(
+  finishReason: VoiceModelFinishReason | undefined,
+  partialOutput: boolean
+): VoiceCompletionOutcome | null {
+  const code = completionOutcomeCode(finishReason, partialOutput);
+  return code === null
+    ? null
+    : {
+        code,
+        stage: "llm",
+        ...(finishReason === undefined ? {} : { finishReason }),
+        partialOutput
+      };
+}
 
 // --- Mixin ---
 
@@ -148,6 +216,12 @@ type Constructor<T = object> = new (...args: any[]) => T;
 type AgentLike = Constructor<
   Pick<Agent<Cloudflare.Env>, "sql" | "getConnections" | "keepAlive">
 >;
+
+type ActiveTurnDiagnostics = {
+  signal: AbortSignal;
+  turn: TurnDiagnostics;
+  model?: ModelDiagnosticTracker;
+};
 
 /** Public surface of the voice mixin, used as an explicit return type to satisfy TS6 declaration emit. */
 export interface VoiceAgentMixinMembers {
@@ -217,6 +291,9 @@ export function withVoice<TBase extends AgentLike>(
   voiceOptions?: VoiceAgentOptions
 ): VoiceAgentMixinReturn<TBase> {
   const opts = voiceOptions ?? {};
+  const diagnostics = new ServerDiagnostics(
+    opts.diagnostics?.browserConsole === true
+  );
 
   function opt<K extends keyof VoiceAgentOptions>(
     key: K,
@@ -241,6 +318,11 @@ export function withVoice<TBase extends AgentLike>(
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
+    // Persists after readiness so callbacks from replaced sessions cannot affect a newer call.
+    #callTokens = new Map<string, symbol>();
+    #turnSequence = 0;
+    #inputTurns = new Map<string, TurnDiagnostics>();
+    #activeTurnDiagnostics = new Map<string, ActiveTurnDiagnostics>();
 
     // Voice protocol message types handled internally
     static #VOICE_MESSAGES = new Set([
@@ -288,15 +370,30 @@ export function withVoice<TBase extends AgentLike>(
       ) => {
         this.#sendJSON(connection, {
           type: "welcome",
-          protocol_version: VOICE_PROTOCOL_VERSION
+          protocol_version: VOICE_PROTOCOL_VERSION,
+          ...(diagnostics.browserConsole
+            ? { diagnostics: { browser_console: true as const } }
+            : {})
         });
+        this.#diagnose(connection, "connection.opened");
         this.#sendJSON(connection, { type: "status", status: "idle" });
         return _onConnect?.(connection, ...rest);
       };
 
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
+        this.#diagnose(connection, "connection.closed", {
+          in_call: this.#cm.isInCall(connection.id)
+        });
+        this.#requestActiveTurnAbort(
+          connection,
+          "turn.abort_requested",
+          "connection_closed"
+        );
+        this.#abortInputTurn(connection, "connection_closed");
+        this.#activeTurnDiagnostics.delete(connection.id);
         this.#startupTokens.delete(connection.id);
+        this.#callTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
         return _onClose?.(connection, ...rest);
@@ -457,7 +554,6 @@ export function withVoice<TBase extends AgentLike>(
     async speak(connection: Connection, text: string): Promise<void> {
       const signal = this.#cm.createPipelineAbort(connection.id);
       try {
-        this.#sendJSON(connection, { type: "status", status: "speaking" });
         this.#sendJSON(connection, {
           type: "transcript_start",
           role: "assistant"
@@ -466,7 +562,14 @@ export function withVoice<TBase extends AgentLike>(
 
         const audio = await this.#synthesizeWithHooks(text, connection, signal);
         if (audio && !signal.aborted) {
+          this.#sendJSON(connection, { type: "status", status: "speaking" });
+          this.#diagnose(connection, "audio.first_sent", {
+            bytes: audio.byteLength
+          });
           connection.send(audio);
+          this.#diagnose(connection, "audio.completed", {
+            bytes: audio.byteLength
+          });
         }
 
         if (!signal.aborted) {
@@ -488,7 +591,6 @@ export function withVoice<TBase extends AgentLike>(
       for (const connection of connections) {
         const signal = this.#cm.createPipelineAbort(connection.id);
         try {
-          this.#sendJSON(connection, { type: "status", status: "speaking" });
           this.#sendJSON(connection, {
             type: "transcript_start",
             role: "assistant"
@@ -501,7 +603,17 @@ export function withVoice<TBase extends AgentLike>(
             signal
           );
           if (audio && !signal.aborted) {
+            this.#sendJSON(connection, {
+              type: "status",
+              status: "speaking"
+            });
+            this.#diagnose(connection, "audio.first_sent", {
+              bytes: audio.byteLength
+            });
             connection.send(audio);
+            this.#diagnose(connection, "audio.completed", {
+              bytes: audio.byteLength
+            });
           }
 
           if (!signal.aborted) {
@@ -529,21 +641,93 @@ export function withVoice<TBase extends AgentLike>(
     async #synthesizeWithHooks(
       text: string,
       connection: Connection,
-      signal?: AbortSignal
+      signal?: AbortSignal,
+      turn?: TurnDiagnostics
     ): Promise<ArrayBuffer | null> {
-      const textToSpeak = await this.beforeSynthesize(text, connection);
-      if (!textToSpeak) return null;
-      const rawAudio = await this.#requireTTS().synthesize(textToSpeak, signal);
-      return this.afterSynthesize(rawAudio, textToSpeak, connection);
+      const sentence = turn?.beginTtsSentence();
+      let sentenceOutcome: "completed" | "skipped" | "failed" = "completed";
+      try {
+        let textToSpeak: string | null;
+        try {
+          textToSpeak = await this.beforeSynthesize(text, connection);
+        } catch (error) {
+          const voiceError = toVoiceError(error, "TTS preparation failed");
+          this.#emitTurnDiagnostic(connection, turn, "tts.failed", {
+            stage: "before_synthesize",
+            error: voiceError
+          });
+          throw voiceError;
+        }
+
+        if (!textToSpeak) {
+          sentenceOutcome = "skipped";
+          this.#emitTurnDiagnostic(connection, turn, "tts.skipped", {
+            reason: "before_synthesize"
+          });
+          return null;
+        }
+
+        let tts: TTSProvider & Partial<StreamingTTSProvider>;
+        try {
+          tts = this.#requireTTS();
+        } catch (error) {
+          const voiceError = toVoiceError(error, "TTS is not configured");
+          this.#emitTurnDiagnostic(connection, turn, "tts.failed", {
+            stage: "configuration",
+            error: voiceError
+          });
+          throw voiceError;
+        }
+
+        const startedAt = Date.now();
+        this.#emitTurnDiagnostic(connection, turn, "tts.started", {
+          characters: textToSpeak.length
+        });
+        sentence?.providerStarted();
+        try {
+          const rawAudio = await tts.synthesize(textToSpeak, signal);
+          const audio = await this.afterSynthesize(
+            rawAudio,
+            textToSpeak,
+            connection
+          );
+          this.#emitTurnDiagnostic(connection, turn, "tts.completed", {
+            duration_ms: Date.now() - startedAt,
+            outcome: audio ? "audio" : "no_audio",
+            bytes: audio?.byteLength ?? 0
+          });
+          return audio;
+        } catch (error) {
+          const voiceError = toVoiceError(error, "TTS failed");
+          this.#emitTurnDiagnostic(connection, turn, "tts.failed", {
+            duration_ms: Date.now() - startedAt,
+            error: voiceError
+          });
+          throw voiceError;
+        }
+      } catch (error) {
+        sentenceOutcome = "failed";
+        throw error;
+      } finally {
+        sentence?.settle(sentenceOutcome);
+      }
     }
 
     // --- Internal: call lifecycle ---
 
     async #handleStartCall(connection: Connection, _preferredFormat?: string) {
-      if (this.#cm.isInCall(connection.id)) return;
+      if (this.#cm.isInCall(connection.id)) {
+        this.#diagnose(connection, "call.start_ignored", {
+          reason: "already_active"
+        });
+        return;
+      }
 
+      this.#diagnose(connection, "call.starting");
+      this.#abortInputTurn(connection, "call_restarted");
       const startupToken = Symbol(connection.id);
       this.#startupTokens.set(connection.id, startupToken);
+      this.#callTokens.set(connection.id, startupToken);
 
       // Mark as in-call before any await to prevent duplicate start_call
       // from leaking keepAlive refs during the beforeCallStart window.
@@ -569,7 +753,13 @@ export function withVoice<TBase extends AgentLike>(
         if (!provider) {
           const message =
             "No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber().";
-          console.error(`[VoiceAgent] ${message}`);
+          logVoiceError({
+            component: "VoiceAgent",
+            stage: "configuration",
+            message,
+            connectionId: connection.id,
+            error: new Error(message)
+          });
           await this.#handleStartupFailure(
             connection,
             startupToken,
@@ -598,7 +788,7 @@ export function withVoice<TBase extends AgentLike>(
         await this.#handleStartupFailure(
           connection,
           startupToken,
-          error,
+          toVoiceError(error, "Voice call failed to start"),
           "Voice call failed to start"
         );
         return;
@@ -608,22 +798,37 @@ export function withVoice<TBase extends AgentLike>(
 
       let session: TranscriberSession;
       try {
+        this.#diagnose(connection, "stt.starting");
         session = this.#cm.startTranscriberSession(connection.id, provider, {
           onInterim: (text: string) => {
+            if (this.#callTokens.get(connection.id) !== startupToken) return;
+            const turn = this.#getOrCreateInputTurn(connection);
+            turn.firstInterim(text.length);
             this.#sendJSON(connection, {
               type: "transcript_interim",
               text
             });
           },
           onSpeechStart: () => {
+            if (this.#callTokens.get(connection.id) !== startupToken) return;
+            const turn = this.#replaceInputTurn(connection);
+            turn.speechStarted();
             this.#handleBargeIn(connection);
           },
           onUtterance: (transcript: string) => {
+            if (this.#callTokens.get(connection.id) !== startupToken) return;
+            const turn = this.#takeInputTurn(connection);
+            turn.finalInput(transcript.length);
             this.#sendJSON(connection, {
               type: "transcript_interim",
               text: ""
             });
-            this.#runPipeline(connection, transcript);
+            this.#runPipeline(connection, transcript, turn);
+          },
+          onFatalError: (error: Error) => {
+            runBackground("transcriber_fatal", () =>
+              this.#handleTranscriberFatal(connection, startupToken, error)
+            );
           }
         });
 
@@ -632,7 +837,7 @@ export function withVoice<TBase extends AgentLike>(
         await this.#handleTranscriberStartupFailure(
           connection,
           startupToken,
-          error
+          toVoiceError(error, "Speech recognition failed to start")
         );
         return;
       }
@@ -640,7 +845,9 @@ export function withVoice<TBase extends AgentLike>(
       if (!this.#isCurrentStartup(connection.id, startupToken)) return;
       this.#startupTokens.delete(connection.id);
 
+      this.#diagnose(connection, "stt.ready");
       this.#sendJSON(connection, { type: "status", status: "listening" });
+      this.#diagnose(connection, "call.ready");
       await this.onCallStart(connection);
     }
 
@@ -654,36 +861,113 @@ export function withVoice<TBase extends AgentLike>(
     async #handleTranscriberStartupFailure(
       connection: Connection,
       startupToken: symbol,
-      error: unknown
+      error: Error
     ): Promise<void> {
       await this.#handleStartupFailure(
         connection,
         startupToken,
         error,
         "Speech recognition failed to start",
-        "[VoiceAgent] Transcriber startup failed:"
+        "transcriber_startup",
+        {
+          code: "stt_startup_failed",
+          stage: "stt",
+          retryable: false
+        }
       );
     }
 
     async #handleStartupFailure(
       connection: Connection,
       startupToken: symbol,
-      error: unknown,
+      error: Error | undefined,
       clientMessage: string,
-      logPrefix: string | null = "[VoiceAgent] Call startup failed:"
+      logStage: string | null = "call_startup",
+      structuredError?: {
+        code: "stt_startup_failed";
+        stage: "stt";
+        retryable: false;
+      }
     ): Promise<void> {
       if (!this.#isCurrentStartup(connection.id, startupToken)) return;
 
       // The client starts local audio optimistically on start_call. Every
       // terminal startup path must send error + idle so it tears that down.
-      if (logPrefix && error !== undefined) console.error(logPrefix, error);
+      if (logStage && error !== undefined) {
+        logVoiceError({
+          component: "VoiceAgent",
+          stage: logStage,
+          message: clientMessage,
+          connectionId: connection.id,
+          error
+        });
+      }
       this.#startupTokens.delete(connection.id);
+      if (this.#callTokens.get(connection.id) === startupToken) {
+        this.#callTokens.delete(connection.id);
+      }
+      this.#diagnose(connection, "call.start_failed", {
+        stage: logStage ?? "authorization",
+        retryable: structuredError?.retryable ?? false,
+        ...(error === undefined ? {} : { error })
+      });
       this.#sendJSON(connection, {
         type: "error",
-        message: clientMessage
+        message: clientMessage,
+        ...structuredError
       });
       this.#cm.cleanup(connection.id);
       this.#releaseKeepAlive(connection.id);
+      this.#diagnose(connection, "cleanup.completed");
+      this.#diagnose(connection, "call.ended", {
+        reason: "startup_failed"
+      });
+      this.#sendJSON(connection, { type: "status", status: "idle" });
+      await this.onCallEnd(connection);
+    }
+
+    async #handleTranscriberFatal(
+      connection: Connection,
+      callToken: symbol,
+      error: Error
+    ): Promise<void> {
+      if (
+        this.#callTokens.get(connection.id) !== callToken ||
+        !this.#cm.isInCall(connection.id)
+      ) {
+        return;
+      }
+
+      const isStarting = this.#startupTokens.get(connection.id) === callToken;
+      const message = isStarting
+        ? "Speech recognition failed to start"
+        : "Speech recognition connection was lost";
+      logVoiceError({
+        component: "VoiceAgent",
+        stage: isStarting ? "transcriber_startup" : "transcriber_runtime",
+        message,
+        connectionId: connection.id,
+        error
+      });
+      this.#startupTokens.delete(connection.id);
+      this.#callTokens.delete(connection.id);
+      this.#abortInputTurn(connection, "stt_fatal");
+      this.#diagnose(connection, "stt.fatal", {
+        stage: isStarting ? "startup" : "runtime",
+        retryable: !isStarting,
+        error
+      });
+      this.#sendJSON(connection, {
+        type: "error",
+        message,
+        code: isStarting ? "stt_startup_failed" : "stt_connection_lost",
+        stage: "stt",
+        retryable: !isStarting
+      });
+      this.#cm.cleanup(connection.id);
+      this.#releaseKeepAlive(connection.id);
+      this.#diagnose(connection, "cleanup.completed");
+      this.#diagnose(connection, "call.ended", { reason: "stt_fatal" });
       this.#sendJSON(connection, { type: "status", status: "idle" });
       await this.onCallEnd(connection);
     }
@@ -697,14 +981,29 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     #handleEndCall(connection: Connection): void | Promise<void> {
+      this.#diagnose(connection, "call.ended", { reason: "requested" });
+      this.#requestActiveTurnAbort(
+        connection,
+        "turn.abort_requested",
+        "call_ended"
+      );
       this.#startupTokens.delete(connection.id);
+      this.#callTokens.delete(connection.id);
+      this.#abortInputTurn(connection, "call_ended");
       this.#cm.cleanup(connection.id);
       this.#releaseKeepAlive(connection.id);
+      this.#diagnose(connection, "cleanup.completed");
       this.#sendJSON(connection, { type: "status", status: "idle" });
       return this.onCallEnd(connection);
     }
 
     #handleInterrupt(connection: Connection): void | Promise<void> {
+      this.#abortInputTurn(connection, "client_interrupt");
+      this.#requestActiveTurnAbort(
+        connection,
+        "turn.interrupt_requested",
+        "client_interrupt"
+      );
       this.#cm.abortPipeline(connection.id);
       this.#cm.clearAudioBuffer(connection.id);
       this.#sendJSON(connection, { type: "status", status: "listening" });
@@ -712,10 +1011,108 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     #handleBargeIn(connection: Connection) {
+      this.#requestActiveTurnAbort(
+        connection,
+        "turn.abort_requested",
+        "barge_in"
+      );
       if (!this.#cm.abortPipeline(connection.id)) return;
       this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
       this.onInterrupt(connection);
+    }
+
+    #createTurn(
+      connection: Connection,
+      source: "speech" | "text"
+    ): TurnDiagnostics {
+      const turn = diagnostics.turn(
+        connection,
+        `turn_${(++this.#turnSequence).toString(36)}`,
+        source
+      );
+      if (source === "text") turn.markTextInput();
+      turn.emit("turn.started", { source });
+      return turn;
+    }
+
+    #replaceInputTurn(connection: Connection): TurnDiagnostics {
+      this.#abortInputTurn(connection, "replaced");
+      const turn = this.#createTurn(connection, "speech");
+      this.#inputTurns.set(connection.id, turn);
+      return turn;
+    }
+
+    #getOrCreateInputTurn(connection: Connection): TurnDiagnostics {
+      const current = this.#inputTurns.get(connection.id);
+      if (current) return current;
+      const turn = this.#createTurn(connection, "speech");
+      this.#inputTurns.set(connection.id, turn);
+      return turn;
+    }
+
+    #takeInputTurn(connection: Connection): TurnDiagnostics {
+      const turn = this.#getOrCreateInputTurn(connection);
+      this.#inputTurns.delete(connection.id);
+      return turn;
+    }
+
+    #abortInputTurn(connection: Connection, reason: string): void {
+      const turn = this.#inputTurns.get(connection.id);
+      if (!turn) return;
+      this.#inputTurns.delete(connection.id);
+      turn.emit("turn.aborted", { reason });
+      turn.finish("aborted");
+    }
+
+    #beginTurnDiagnostics(
+      connection: Connection,
+      source: "speech" | "text",
+      turn = this.#createTurn(connection, source)
+    ): ActiveTurnDiagnostics {
+      const previous = this.#activeTurnDiagnostics.get(connection.id);
+      if (previous) {
+        previous.turn.emit("turn.abort_requested", { reason: "replaced" });
+        previous.model?.abort();
+      }
+
+      const signal = this.#cm.createPipelineAbort(connection.id);
+      const active: ActiveTurnDiagnostics = { signal, turn };
+      this.#activeTurnDiagnostics.set(connection.id, active);
+      return active;
+    }
+
+    #requestActiveTurnAbort(
+      connection: Connection,
+      event: "turn.abort_requested" | "turn.interrupt_requested",
+      reason: string
+    ): void {
+      const active = this.#activeTurnDiagnostics.get(connection.id);
+      if (!active) return;
+      active.turn.emit(event, { reason });
+      active.model?.abort();
+    }
+
+    #clearActiveTurn(
+      connectionId: string,
+      active: ActiveTurnDiagnostics
+    ): void {
+      if (this.#activeTurnDiagnostics.get(connectionId) === active) {
+        this.#activeTurnDiagnostics.delete(connectionId);
+      }
+    }
+
+    #emitTurnDiagnostic(
+      connection: Connection,
+      turn: TurnDiagnostics | undefined,
+      event: string,
+      data?: DiagnosticData
+    ): void {
+      if (turn) {
+        turn.emit(event, data);
+      } else {
+        this.#diagnose(connection, event, data);
+      }
     }
 
     // --- Internal: text message handling ---
@@ -724,8 +1121,10 @@ export function withVoice<TBase extends AgentLike>(
       if (!text || text.trim().length === 0) return;
 
       const userText = text.trim();
-      const signal = this.#cm.createPipelineAbort(connection.id);
       const pipelineStart = Date.now();
+      const active = this.#beginTurnDiagnostics(connection, "text");
+      const { signal, turn } = active;
+      let turnOutcome: VoiceTurnOutcome = "completed";
 
       this.#sendJSON(connection, { type: "status", status: "thinking" });
 
@@ -744,7 +1143,8 @@ export function withVoice<TBase extends AgentLike>(
           signal
         };
 
-        const llmStart = Date.now();
+        const model = turn.startModel();
+        active.model = model;
         const turnResult = await this.onTurn(userText, context);
 
         if (signal.aborted) return;
@@ -752,21 +1152,41 @@ export function withVoice<TBase extends AgentLike>(
         const isInCall = this.#cm.isInCall(connection.id);
 
         if (isInCall) {
-          this.#sendJSON(connection, { type: "status", status: "speaking" });
-
-          const { text: fullText } = await this.#streamResponse(
+          const { text: fullText, finishReason } = await this.#streamResponse(
             connection,
             turnResult,
-            llmStart,
             pipelineStart,
-            signal
+            signal,
+            turn,
+            model
           );
 
           if (signal.aborted) return;
 
-          if (fullText && fullText.trim().length > 0) {
+          const hasOutput = fullText.trim().length > 0;
+          turnOutcome = stableTurnOutcome(finishReason, hasOutput);
+          if (turnOutcome === "completed" && turn.hasTtsFailures) {
+            turnOutcome = "tts_error";
+          }
+          if (hasOutput) {
             this.#cm.updateAgentContext(connection.id, fullText);
             this.saveMessage("assistant", fullText);
+          }
+          const completionOutcome = createCompletionOutcome(
+            finishReason,
+            hasOutput
+          );
+          if (completionOutcome) {
+            this.#sendJSON(connection, {
+              type: "completion_outcome",
+              ...completionOutcome
+            });
+          }
+          if (!hasOutput) {
+            this.#sendJSON(connection, {
+              type: "error",
+              message: "No response generated"
+            });
           }
           this.#sendJSON(connection, { type: "status", status: "listening" });
         } else {
@@ -794,13 +1214,33 @@ export function withVoice<TBase extends AgentLike>(
             });
           };
 
-          for await (const token of iterateText(turnResult)) {
+          let finishReason: VoiceModelFinishReason | undefined;
+          for await (const event of iterateTextEvents(turnResult)) {
             if (signal.aborted) break;
-            fullText += token;
-            sendAssistantDelta(token);
+            model.observe(event);
+            if (event.type === "finish") {
+              finishReason = event.finishReason;
+            } else if (event.type === "error") {
+              if (transcriptStarted) {
+                this.#sendJSON(connection, {
+                  type: "transcript_end",
+                  text: fullText
+                });
+              }
+              throw new ModelStreamError(
+                event.error,
+                fullText.trim().length > 0
+              );
+            } else if (event.type === "text") {
+              fullText += event.text;
+              sendAssistantDelta(event.text);
+            }
           }
 
-          if (fullText && fullText.trim().length > 0) {
+          const hasOutput = fullText.trim().length > 0;
+          model.complete(hasOutput ? "output" : "no_output", finishReason);
+          turnOutcome = stableTurnOutcome(finishReason, hasOutput);
+          if (hasOutput) {
             if (transcriptStarted) {
               this.#sendJSON(connection, {
                 type: "transcript_end",
@@ -809,35 +1249,99 @@ export function withVoice<TBase extends AgentLike>(
             }
             this.saveMessage("assistant", fullText);
           }
+          const completionOutcome = createCompletionOutcome(
+            finishReason,
+            hasOutput
+          );
+          if (completionOutcome) {
+            this.#sendJSON(connection, {
+              type: "completion_outcome",
+              ...completionOutcome
+            });
+          }
+          if (!hasOutput) {
+            this.#sendJSON(connection, {
+              type: "error",
+              message: "No response generated"
+            });
+          }
           this.#sendJSON(connection, { type: "status", status: "idle" });
         }
       } catch (error) {
         if (signal.aborted) return;
-        console.error("[VoiceAgent] Text pipeline error:", error);
+        turnOutcome =
+          error instanceof ModelStreamError
+            ? "model_error"
+            : turn.hasTtsFailures
+              ? "tts_error"
+              : "error";
+        const pipelineError =
+          error instanceof ModelStreamError
+            ? error.streamError
+            : toVoiceError(error, "Text turn failed");
+        active.model?.fail(pipelineError);
+        turn.emit("turn.error", {
+          stage: error instanceof ModelStreamError ? "model" : "pipeline",
+          error: pipelineError
+        });
+        if (error instanceof ModelStreamError) {
+          this.#sendJSON(connection, {
+            type: "completion_outcome",
+            code: "model_error",
+            stage: "llm",
+            partialOutput: error.partialOutput
+          });
+        }
+        logVoiceError({
+          component: "VoiceAgent",
+          stage: "text_pipeline",
+          message: "Text pipeline failed",
+          connectionId: connection.id,
+          error: pipelineError
+        });
         this.#sendJSON(connection, {
           type: "error",
-          message:
-            error instanceof Error ? error.message : "Text pipeline failed"
+          message: voiceErrorMessage(pipelineError, "Text pipeline failed")
         });
         this.#sendJSON(connection, {
           type: "status",
           status: this.#cm.isInCall(connection.id) ? "listening" : "idle"
         });
       } finally {
+        if (signal.aborted) {
+          turnOutcome = "aborted";
+          active.model?.abort();
+          turn.emit("turn.aborted");
+        }
+        turn.finish(turnOutcome);
         this.#cm.clearPipelineAbort(connection.id, signal);
+        this.#clearActiveTurn(connection.id, active);
       }
     }
 
     // --- Internal: voice pipeline ---
 
-    async #runPipeline(connection: Connection, transcript: string) {
-      const signal = this.#cm.createPipelineAbort(connection.id);
+    async #runPipeline(
+      connection: Connection,
+      transcript: string,
+      turn: TurnDiagnostics
+    ) {
       const pipelineStart = Date.now();
+      const active = this.#beginTurnDiagnostics(connection, "speech", turn);
+      const { signal } = active;
+      let turnOutcome: VoiceTurnOutcome = "completed";
 
       try {
+        const afterTranscribeStart = Date.now();
         const userText = await this.afterTranscribe(transcript, connection);
+        turn.recordAfterTranscribe(
+          Date.now() - afterTranscribeStart,
+          userText ? "accepted" : "skipped",
+          userText?.length ?? 0
+        );
         if (signal.aborted) return;
         if (!userText) {
+          turnOutcome = "skipped";
           this.#sendJSON(connection, { type: "status", status: "listening" });
           return;
         }
@@ -858,35 +1362,58 @@ export function withVoice<TBase extends AgentLike>(
           signal
         };
 
-        const llmStart = Date.now();
+        const model = turn.startModel();
+        active.model = model;
         const turnResult = await this.onTurn(userText, context);
 
         if (signal.aborted) return;
-
-        this.#sendJSON(connection, { type: "status", status: "speaking" });
 
         const {
           text: fullText,
           llmMs,
           ttsMs,
-          firstAudioMs
+          firstAudioMs,
+          finishReason
         } = await this.#streamResponse(
           connection,
           turnResult,
-          llmStart,
           pipelineStart,
-          signal
+          signal,
+          turn,
+          model
         );
 
         if (signal.aborted) return;
 
-        if (!fullText || fullText.trim().length === 0) {
+        const hasOutput = fullText.trim().length > 0;
+        turnOutcome = stableTurnOutcome(finishReason, hasOutput);
+        if (turnOutcome === "completed" && turn.hasTtsFailures) {
+          turnOutcome = "tts_error";
+        }
+
+        if (!hasOutput) {
+          const completionOutcome = createCompletionOutcome(
+            finishReason,
+            false
+          );
+          this.#sendJSON(connection, {
+            type: "completion_outcome",
+            ...completionOutcome
+          });
           this.#sendJSON(connection, {
             type: "error",
             message: "No response generated"
           });
           this.#sendJSON(connection, { type: "status", status: "listening" });
           return;
+        }
+
+        const completionOutcome = createCompletionOutcome(finishReason, true);
+        if (completionOutcome) {
+          this.#sendJSON(connection, {
+            type: "completion_outcome",
+            ...completionOutcome
+          });
         }
 
         const totalMs = Date.now() - pipelineStart;
@@ -906,15 +1433,50 @@ export function withVoice<TBase extends AgentLike>(
         this.#sendJSON(connection, { type: "status", status: "listening" });
       } catch (error) {
         if (signal.aborted) return;
-        console.error("[VoiceAgent] Pipeline error:", error);
+        turnOutcome =
+          error instanceof ModelStreamError
+            ? "model_error"
+            : turn.hasTtsFailures
+              ? "tts_error"
+              : "error";
+        const pipelineError =
+          error instanceof ModelStreamError
+            ? error.streamError
+            : toVoiceError(error, "Voice turn failed");
+        active.model?.fail(pipelineError);
+        turn.emit("turn.error", {
+          stage: error instanceof ModelStreamError ? "model" : "pipeline",
+          error: pipelineError
+        });
+        if (error instanceof ModelStreamError) {
+          this.#sendJSON(connection, {
+            type: "completion_outcome",
+            code: "model_error",
+            stage: "llm",
+            partialOutput: error.partialOutput
+          });
+        }
+        logVoiceError({
+          component: "VoiceAgent",
+          stage: "pipeline",
+          message: "Voice pipeline failed",
+          connectionId: connection.id,
+          error: pipelineError
+        });
         this.#sendJSON(connection, {
           type: "error",
-          message:
-            error instanceof Error ? error.message : "Voice pipeline failed"
+          message: voiceErrorMessage(pipelineError, "Voice pipeline failed")
         });
         this.#sendJSON(connection, { type: "status", status: "listening" });
       } finally {
+        if (signal.aborted) {
+          turnOutcome = "aborted";
+          active.model?.abort();
+          turn.emit("turn.aborted");
+        }
+        turn.finish(turnOutcome);
         this.#cm.clearPipelineAbort(connection.id, signal);
+        this.#clearActiveTurn(connection.id, active);
       }
     }
 
@@ -923,22 +1485,27 @@ export function withVoice<TBase extends AgentLike>(
     async #streamResponse(
       connection: Connection,
       response: TextSource,
-      llmStart: number,
       pipelineStart: number,
-      signal: AbortSignal
+      signal: AbortSignal,
+      turn: TurnDiagnostics,
+      model: ModelDiagnosticTracker
     ): Promise<{
       text: string;
       llmMs: number;
       ttsMs: number;
       firstAudioMs: number;
+      finishReason?: VoiceModelFinishReason;
     }> {
       if (typeof response === "string") {
-        const llmMs = Date.now() - llmStart;
+        const llmMs = model.elapsedMs();
 
         if (response.trim().length === 0) {
+          model.complete("no_output");
           return { text: response, llmMs, ttsMs: 0, firstAudioMs: 0 };
         }
 
+        model.observe({ type: "text", text: response });
+        model.complete("output");
         this.#sendJSON(connection, {
           type: "transcript_start",
           role: "assistant"
@@ -949,37 +1516,64 @@ export function withVoice<TBase extends AgentLike>(
         });
 
         const ttsStart = Date.now();
-        const audio = await this.#synthesizeWithHooks(response, connection);
+        let audio: ArrayBuffer | null;
+        try {
+          audio = await this.#synthesizeWithHooks(
+            response,
+            connection,
+            undefined,
+            turn
+          );
+        } finally {
+          turn.finishTts();
+        }
         const ttsMs = Date.now() - ttsStart;
 
+        let firstAudioMs = 0;
         if (audio && !signal.aborted) {
+          this.#sendJSON(connection, { type: "status", status: "speaking" });
+          firstAudioMs = Date.now() - pipelineStart;
+          turn.emit("audio.first_sent", {
+            bytes: audio.byteLength,
+            elapsed_ms: firstAudioMs
+          });
+          turn.audioSent();
           connection.send(audio);
+          turn.emit("audio.completed", {
+            bytes: audio.byteLength
+          });
         }
 
-        const firstAudioMs = Date.now() - pipelineStart;
         return { text: response, llmMs, ttsMs, firstAudioMs };
       }
 
-      return this.#streamingTTSPipeline(
-        connection,
-        iterateTextEvents(response),
-        llmStart,
-        pipelineStart,
-        signal
-      );
+      try {
+        return await this.#streamingTTSPipeline(
+          connection,
+          iterateTextEvents(response),
+          pipelineStart,
+          signal,
+          turn,
+          model
+        );
+      } finally {
+        turn.finishTts();
+      }
     }
 
     async #streamingTTSPipeline(
       connection: Connection,
       tokenStream: AsyncIterable<TextStreamEvent>,
-      llmStart: number,
       pipelineStart: number,
-      signal: AbortSignal
+      signal: AbortSignal,
+      turn: TurnDiagnostics,
+      model: ModelDiagnosticTracker
     ): Promise<{
       text: string;
       llmMs: number;
       ttsMs: number;
       firstAudioMs: number;
+      finishReason?: VoiceModelFinishReason;
     }> {
       const chunker = new SentenceChunker();
       const ttsQueue: AsyncIterable<ArrayBuffer>[] = [];
@@ -987,7 +1581,12 @@ export function withVoice<TBase extends AgentLike>(
       let pendingTranscriptText = "";
       let transcriptStarted = false;
       let firstAudioSentAt: number | null = null;
+      let firstTtsStartedAt: number | null = null;
       let cumulativeTtsMs = 0;
+      let totalAudioBytes = 0;
+      let skippedSentences = 0;
+      let ttsFailures = 0;
+      let finishReason: VoiceModelFinishReason | undefined;
 
       let streamComplete = false;
       let drainNotify: (() => void) | null = null;
@@ -1046,18 +1645,39 @@ export function withVoice<TBase extends AgentLike>(
           try {
             for await (const chunk of ttsQueue[i]) {
               if (signal.aborted) return;
-              connection.send(chunk);
-              if (!firstAudioSentAt) {
+              if (firstAudioSentAt === null) {
+                this.#sendJSON(connection, {
+                  type: "status",
+                  status: "speaking"
+                });
                 firstAudioSentAt = Date.now();
+                turn.emit("audio.first_sent", {
+                  bytes: chunk.byteLength,
+                  elapsed_ms: firstAudioSentAt - pipelineStart
+                });
               }
+              totalAudioBytes += chunk.byteLength;
+              turn.audioSent();
+              connection.send(chunk);
             }
-          } catch (err) {
+          } catch (error) {
             if (signal.aborted) return;
-            console.error("[VoiceAgent] TTS error for sentence:", err);
+            const voiceError = toVoiceError(error, "TTS sentence failed");
+            ttsFailures++;
+            turn.emit("tts.failed", { error: voiceError });
+            logVoiceError({
+              component: "VoiceAgent",
+              stage: "tts",
+              message: "TTS failed for a sentence",
+              connectionId: connection.id,
+              error: voiceError
+            });
             this.#sendJSON(connection, {
               type: "error",
-              message:
-                err instanceof Error ? err.message : "TTS failed for a sentence"
+              message: voiceErrorMessage(
+                voiceError,
+                "TTS failed for a sentence"
+              )
             });
           }
           i++;
@@ -1071,29 +1691,49 @@ export function withVoice<TBase extends AgentLike>(
       ): AsyncIterable<ArrayBuffer> => {
         const self = this;
         async function* generate() {
-          const ttsStart = Date.now();
-          const text = await self.beforeSynthesize(sentence, connection);
-          if (!text) return;
+          const attempt = turn.beginTtsSentence();
+          let sentenceOutcome: "completed" | "skipped" | "failed" = "completed";
+          try {
+            const text = await self.beforeSynthesize(sentence, connection);
+            if (!text) {
+              sentenceOutcome = "skipped";
+              skippedSentences++;
+              return;
+            }
 
-          if (hasStreamingTTS) {
-            for await (const chunk of tts.synthesizeStream!(text, signal)) {
+            if (firstTtsStartedAt === null) {
+              firstTtsStartedAt = Date.now();
+              turn.emit("tts.started", {
+                mode: hasStreamingTTS ? "streaming" : "buffered",
+                characters: text.length
+              });
+            }
+            attempt.providerStarted();
+
+            if (hasStreamingTTS) {
+              for await (const chunk of tts.synthesizeStream!(text, signal)) {
+                const processed = await self.afterSynthesize(
+                  chunk,
+                  text,
+                  connection
+                );
+                if (processed) yield processed;
+              }
+            } else {
+              const rawAudio = await tts.synthesize(text, signal);
               const processed = await self.afterSynthesize(
-                chunk,
+                rawAudio,
                 text,
                 connection
               );
               if (processed) yield processed;
             }
-          } else {
-            const rawAudio = await tts.synthesize(text, signal);
-            const processed = await self.afterSynthesize(
-              rawAudio,
-              text,
-              connection
-            );
-            if (processed) yield processed;
+          } catch (error) {
+            sentenceOutcome = "failed";
+            throw error;
+          } finally {
+            cumulativeTtsMs += attempt.settle(sentenceOutcome);
           }
-          cumulativeTtsMs += Date.now() - ttsStart;
         }
 
         return eagerAsyncIterable(generate());
@@ -1123,12 +1763,18 @@ export function withVoice<TBase extends AgentLike>(
 
       for await (const event of tokenStream) {
         if (signal.aborted) break;
+        model.observe(event);
 
         if (event.type === "boundary") {
           for (const sentence of chunker.flush()) {
             enqueueSentence(sentence);
           }
           await waitForDrained(ttsQueue.length);
+          continue;
+        }
+
+        if (event.type === "finish") {
+          finishReason = event.finishReason;
           continue;
         }
 
@@ -1146,9 +1792,10 @@ export function withVoice<TBase extends AgentLike>(
           streamComplete = true;
           notifyDrain();
           await drainPromise;
-          throw event.error;
+          throw new ModelStreamError(event.error, fullText.trim().length > 0);
         }
 
+        if (event.type !== "text") continue;
         const token = event.text;
 
         fullText += token;
@@ -1160,7 +1807,11 @@ export function withVoice<TBase extends AgentLike>(
         }
       }
 
-      const llmMs = Date.now() - llmStart;
+      const llmMs = model.elapsedMs();
+      model.complete(
+        fullText.trim().length > 0 ? "output" : "no_output",
+        finishReason
+      );
 
       const remaining = chunker.flush();
       for (const sentence of remaining) {
@@ -1175,14 +1826,61 @@ export function withVoice<TBase extends AgentLike>(
 
       await drainPromise;
 
+      if (firstTtsStartedAt === null) {
+        turn.emit("tts.skipped", {
+          reason:
+            fullText.trim().length === 0
+              ? "no_output"
+              : ttsFailures > 0
+                ? "preparation_failed"
+                : "before_synthesize",
+          sentences: skippedSentences,
+          failures: ttsFailures
+        });
+      } else {
+        turn.emit("tts.completed", {
+          duration_ms: Date.now() - firstTtsStartedAt,
+          outcome:
+            totalAudioBytes > 0
+              ? ttsFailures > 0
+                ? "partial"
+                : "audio"
+              : ttsFailures > 0
+                ? "failed"
+                : "no_audio",
+          bytes: totalAudioBytes,
+          failures: ttsFailures,
+          skipped_sentences: skippedSentences
+        });
+      }
+      if (totalAudioBytes > 0) {
+        turn.emit("audio.completed", {
+          bytes: totalAudioBytes
+        });
+      }
+
       const firstAudioMs = firstAudioSentAt
         ? firstAudioSentAt - pipelineStart
         : 0;
 
-      return { text: fullText, llmMs, ttsMs: cumulativeTtsMs, firstAudioMs };
+      return {
+        text: fullText,
+        llmMs,
+        ttsMs: cumulativeTtsMs,
+        firstAudioMs,
+        ...(finishReason === undefined ? {} : { finishReason })
+      };
     }
 
     // --- Internal: protocol helpers ---
+
+    #diagnose(
+      connection: Connection,
+      event: string,
+      data?: DiagnosticData
+    ): void {
+      diagnostics.emit(connection, event, data);
+    }
 
     #sendJSON(connection: Connection, data: unknown) {
       const parsed = data as Record<string, unknown>;

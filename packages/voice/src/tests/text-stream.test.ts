@@ -152,6 +152,73 @@ describe("iterateText", () => {
       { type: "boundary" }
     ]);
   });
+
+  it("preserves reasoning lifecycle without reasoning content", async () => {
+    async function* stream() {
+      yield { type: "reasoning-start", id: "reasoning" };
+      yield {
+        type: "reasoning-delta",
+        id: "reasoning",
+        text: "private chain of thought"
+      };
+      yield { type: "reasoning-end", id: "reasoning" };
+      yield { type: "text-delta", id: "answer", text: "Visible answer" };
+    }
+
+    const events = await collectEvents(iterateTextEvents(stream()));
+    expect(events).toEqual([
+      { type: "reasoning-start", id: "reasoning" },
+      { type: "reasoning-end", id: "reasoning" },
+      { type: "text", text: "Visible answer" }
+    ]);
+    expect(JSON.stringify(events)).not.toContain("private chain of thought");
+    await expect(collect(iterateText(stream()))).resolves.toEqual([
+      "Visible answer"
+    ]);
+  });
+
+  it("does not expose reasoning deltas as text or semantic events", async () => {
+    async function* stream() {
+      yield {
+        type: "reasoning-delta",
+        id: "reasoning",
+        text: "private inferred reasoning"
+      };
+    }
+
+    const events = await collectEvents(iterateTextEvents(stream()));
+    expect(events).toEqual([]);
+    await expect(collect(iterateText(stream()))).resolves.toEqual([]);
+  });
+
+  it("keeps text spacing across reasoning chunks", async () => {
+    async function* stream() {
+      yield { type: "text-delta", id: "before", text: "First" };
+      yield { type: "reasoning-start", id: "reasoning" };
+      yield {
+        type: "reasoning-delta",
+        id: "reasoning",
+        text: "private reasoning"
+      };
+      yield { type: "reasoning-end", id: "reasoning" };
+      yield { type: "text-delta", id: "after", text: "answer" };
+    }
+
+    const events = await collectEvents(iterateTextEvents(stream()));
+    expect(events).toEqual([
+      { type: "text", text: "First" },
+      { type: "boundary" },
+      { type: "reasoning-start", id: "reasoning" },
+      { type: "reasoning-end", id: "reasoning" },
+      { type: "text", text: " " },
+      { type: "text", text: "answer" }
+    ]);
+    await expect(collect(iterateText(stream()))).resolves.toEqual([
+      "First",
+      " ",
+      "answer"
+    ]);
+  });
 });
 
 describe("SSE parsing resilience", () => {

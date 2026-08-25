@@ -27,7 +27,10 @@ it("rejects readiness when closed while the connection is pending", async () => 
     vi.fn(() => new Promise<Response>(() => {}))
   );
 
-  const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession();
+  const fatalErrors: unknown[] = [];
+  const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession({
+    onFatalError: (error) => fatalErrors.push(error)
+  });
   const readiness = expect(session.waitUntilReady?.()).rejects.toThrow(
     "ElevenLabsSTT: WebSocket closed before session start."
   );
@@ -35,11 +38,15 @@ it("rejects readiness when closed while the connection is pending", async () => 
   session.close();
 
   await readiness;
+  expect(fatalErrors).toEqual([]);
 });
 
 it("handles connection rejection before readiness is awaited", async () => {
   const { ws } = connectWith();
-  const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession();
+  const fatalErrors: unknown[] = [];
+  const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession({
+    onFatalError: (error) => fatalErrors.push(error)
+  });
   await flush();
 
   ws.dispatchEvent(new Event("error"));
@@ -48,6 +55,63 @@ it("handles connection rejection before readiness is awaited", async () => {
   await expect(session.waitUntilReady?.()).rejects.toThrow(
     "ElevenLabsSTT: WebSocket error."
   );
+  expect(fatalErrors).toHaveLength(1);
+  expect((fatalErrors[0] as Error).message).toBe(
+    "ElevenLabsSTT: WebSocket error."
+  );
+});
+
+it("reports one fatal error when a ready socket errors and then closes", async () => {
+  const { ws } = connectWith();
+  const fatalErrors: unknown[] = [];
+  const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession({
+    onFatalError: (error) => fatalErrors.push(error)
+  });
+  await flush();
+  ws.dispatchEvent(
+    new MessageEvent("message", {
+      data: JSON.stringify({ message_type: "session_started" })
+    })
+  );
+  await session.waitUntilReady?.();
+
+  ws.dispatchEvent(new Event("error"));
+  ws.dispatchEvent(new Event("close"));
+
+  expect(fatalErrors).toHaveLength(1);
+  expect((fatalErrors[0] as Error).message).toBe(
+    "ElevenLabsSTT: WebSocket error."
+  );
+});
+
+it("wraps a non-Error connection failure without logging its payload", async () => {
+  const providerError = {
+    code: 429,
+    error: { message: "quota exceeded", apiKey: "must-not-leak" }
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Promise.reject(providerError))
+  );
+  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession();
+
+  await expect(session.waitUntilReady?.()).rejects.toThrow(
+    "ElevenLabs STT connection failed"
+  );
+  expect(errorSpy).toHaveBeenCalledWith({
+    component: "ElevenLabsSTT",
+    stage: "connection",
+    message: "ElevenLabs STT connection failed",
+    error: expect.objectContaining({
+      name: "Error",
+      message: "ElevenLabs STT connection failed"
+    })
+  });
+  expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("quota exceeded");
+  expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("must-not-leak");
+  errorSpy.mockRestore();
 });
 
 it("converts a local ws base URL for the fetch upgrade", async () => {
@@ -86,6 +150,8 @@ it("caps audio buffered while the connection is pending", async () => {
   );
 
   const session = new ElevenLabsSTT({ apiKey: "test-key" }).createSession();
+  await flush();
+  errorSpy.mockClear();
   for (let i = 0; i < 31; i++) {
     session.feed(new ArrayBuffer(32_000));
   }
@@ -95,7 +161,15 @@ it("caps audio buffered while the connection is pending", async () => {
 
   expect(ws.send).toHaveBeenCalledTimes(30);
   expect(errorSpy).toHaveBeenCalledTimes(1);
-  expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("dropping"));
+  expect(errorSpy).toHaveBeenCalledWith(
+    expect.objectContaining({
+      component: "ElevenLabsSTT",
+      stage: "audio_buffer",
+      error: expect.objectContaining({
+        message: "Dropping audio until the socket connects"
+      })
+    })
+  );
   errorSpy.mockRestore();
 
   ws.dispatchEvent(
@@ -149,8 +223,11 @@ it("contains audio send failures while the socket is closing", async () => {
 
   expect(() => session.feed(new ArrayBuffer(3_200))).not.toThrow();
   expect(errorSpy).toHaveBeenCalledWith(
-    expect.stringContaining("send failed"),
-    expect.anything()
+    expect.objectContaining({
+      component: "ElevenLabsSTT",
+      stage: "websocket_send",
+      error: expect.objectContaining({ message: "socket is closing" })
+    })
   );
 
   errorSpy.mockRestore();

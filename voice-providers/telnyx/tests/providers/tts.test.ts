@@ -263,7 +263,13 @@ describe("TelnyxTTS", () => {
 
       expect(audio).toBeNull();
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Cloudflare Workers runtime")
+        expect.objectContaining({
+          component: "TelnyxTTS",
+          stage: "connection",
+          error: expect.objectContaining({
+            message: expect.stringContaining("Cloudflare Workers runtime")
+          })
+        })
       );
       consoleSpy.mockRestore();
     });
@@ -280,8 +286,14 @@ describe("TelnyxTTS", () => {
 
       expect(audio).toBeNull();
       expect(consoleSpy).toHaveBeenCalledWith(
-        "[TelnyxTTS] WebSocket connection failed:",
-        fetchError
+        expect.objectContaining({
+          component: "TelnyxTTS",
+          stage: "connection",
+          error: expect.objectContaining({
+            name: "TypeError",
+            message: "fetch failed"
+          })
+        })
       );
       consoleSpy.mockRestore();
     });

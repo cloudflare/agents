@@ -248,15 +248,27 @@ describe("TelnyxSTTSession", () => {
     });
 
     it("does nothing after WebSocket error", async () => {
-      const session = new TelnyxSTT({ apiKey: "test-key" }).createSession();
-      await flushConnection();
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+      const fatalErrors: unknown[] = [];
+      const session = new TelnyxSTT({ apiKey: "test-key" }).createSession({
+        onFatalError: (error) => fatalErrors.push(error)
+      });
+      await session.waitUntilReady?.();
 
       const ws = mockWebSockets[0];
       ws.simulateError();
+      ws.simulateClose();
       ws.send.mockClear();
       session.feed(new ArrayBuffer(1024));
 
       expect(ws.send).not.toHaveBeenCalled();
+      expect(fatalErrors).toHaveLength(1);
+      expect((fatalErrors[0] as Error).message).toBe(
+        "Telnyx STT WebSocket error"
+      );
+      consoleSpy.mockRestore();
     });
 
     it("does nothing after fetch fails", async () => {
@@ -284,12 +296,22 @@ describe("TelnyxSTTSession", () => {
       const consoleSpy = vi
         .spyOn(console, "error")
         .mockImplementation(() => {});
+      const fatalErrors: unknown[] = [];
 
-      const session = new TelnyxSTT({ apiKey: "test-key" }).createSession();
-      await flushConnection();
+      const session = new TelnyxSTT({ apiKey: "test-key" }).createSession({
+        onFatalError: (error) => fatalErrors.push(error)
+      });
+      if (!session.waitUntilReady) throw new Error("expected readiness method");
+      await expect(session.waitUntilReady()).rejects.toThrow(
+        "STT WebSocket requires the Cloudflare Workers runtime"
+      );
       session.feed(new ArrayBuffer(1024));
 
       expect(mockWebSockets).toHaveLength(0);
+      expect(fatalErrors).toHaveLength(1);
+      expect((fatalErrors[0] as Error).message).toContain(
+        "STT WebSocket requires the Cloudflare Workers runtime"
+      );
       consoleSpy.mockRestore();
     });
   });
@@ -398,12 +420,17 @@ describe("TelnyxSTTSession", () => {
     });
 
     it("closes the WebSocket", async () => {
-      const session = new TelnyxSTT({ apiKey: "test-key" }).createSession();
-      await flushConnection();
+      const onFatalError = vi.fn();
+      const session = new TelnyxSTT({ apiKey: "test-key" }).createSession({
+        onFatalError
+      });
+      await session.waitUntilReady?.();
 
       session.close();
+      mockWebSockets[0].simulateClose();
 
       expect(mockWebSockets[0].close).toHaveBeenCalledTimes(1);
+      expect(onFatalError).not.toHaveBeenCalled();
     });
 
     it("clears pending buffer on close before connection", async () => {
