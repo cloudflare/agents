@@ -92,10 +92,6 @@ src/
     agent.ts            # Agent-level events
     mcp.ts              # MCP-level events
 
-  cli/                  # `npx agents` CLI
-    index.ts
-    create.ts
-
   codemode/             # Experimental code generation
     ai.ts
 
@@ -171,13 +167,14 @@ pnpm run test:react     # or: pnpm exec vitest -r src/react-tests
 
 Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global setup script starts a miniflare worker on port 18787. Tests cover: `useAgent` hook, cache invalidation, cache TTL, state sync.
 
-### CLI tests (`src/cli-tests/`)
+### Node tests (`src/node-tests/`)
 
 ```bash
-pnpm run test:cli       # or: pnpm exec vitest -r src/cli-tests
+pnpm run test:node      # or: pnpm exec vitest --project node
 ```
 
-Plain Node.js environment. Tests the `npx agents` CLI.
+Plain Node.js tests for package entry-point bundle isolation and the Vite skills
+plugin.
 
 ### WebMCP tests (`src/webmcp-tests/`)
 

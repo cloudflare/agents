@@ -14,7 +14,6 @@ const entries = [
   "src/chat/transport.ts",
   "src/chat/react.tsx",
   "src/chat-sdk/index.ts",
-  "src/cli/index.ts",
   "src/mcp/index.ts",
   "src/mcp/client.ts",
   "src/mcp/server.ts",
