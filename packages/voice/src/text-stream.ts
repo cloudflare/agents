@@ -200,7 +200,7 @@ function textEvent(text: string): TextStreamEvent {
   return { type: "text", text };
 }
 
-function warnDeprecatedTextStream(source?: object): void {
+function warnDeprecatedTextStream(source?: Exclude<TextSource, string>): void {
   if (!source || !(source instanceof ReadableStream)) return;
   if (warnedTextStreamSources.has(source)) return;
   warnedTextStreamSources.add(source);

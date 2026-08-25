@@ -5,10 +5,31 @@
     "correctness": "error"
   },
   "rules": {
+    "anti-slop/no-chained-type-assertions": "off",
+    "anti-slop/no-conditional-empty-object-spread": "off",
+    "anti-slop/no-known-value-widening": "off",
+    "anti-slop/no-module-mocking": "error",
+    "anti-slop/no-object-parameters": "error",
+    "anti-slop/no-reflect-apply": "error",
+    "anti-slop/no-reflect-get": "error",
+    "anti-slop/no-runtime-typeof": "off",
+    "anti-slop/no-shape-in-symbol-names": "off",
+    "anti-slop/no-unknown-parameters": "off",
+    "anti-slop/no-unknown-returns": "off",
+    "anti-slop/no-unknown-type-aliases": "error",
+    "anti-slop/no-unsafe-dictionary-type": "off",
+    "anti-slop/no-widen-then-assert": "error",
+    "anti-slop/require-safety-comment-for-type-assertion": "off",
+    "anti-slop-effect/no-service-constructor-imports": "error",
     "no-explicit-any": "error",
     "no-unused-expressions": "off",
     "typescript/no-deprecated": "warn",
     "no-this-alias": "off",
+    "react/globals": "off",
+    "react/immutability": "off",
+    "react/purity": "off",
+    "react/refs": "off",
+    "react/set-state-in-effect": "off",
     "react-hooks/exhaustive-deps": "warn",
     "no-unused-vars": [
       "error",
@@ -19,5 +40,78 @@
       }
     ]
   },
-  "ignorePatterns": ["**/env.d.ts", "**/routeTree.gen.ts"]
+  "ignorePatterns": [
+    "**/env.d.ts",
+    "**/routeTree.gen.ts",
+    ".agent/**",
+    ".agents/**",
+    ".claude/**",
+    ".codex/**",
+    ".continue/**",
+    ".cursor/**",
+    ".gemini/**",
+    ".opencode/**",
+    ".pi/**",
+    ".roo/**",
+    ".windsurf/**",
+    "tools/oxlint/anti-slop/**"
+  ],
+  "jsPlugins": [
+    {
+      "name": "anti-slop",
+      "specifier": "./tools/oxlint/anti-slop/index.ts"
+    },
+    {
+      "name": "anti-slop-effect",
+      "specifier": "./tools/oxlint/anti-slop/effect/index.ts"
+    }
+  ],
+  "overrides": [
+    {
+      "files": ["packages/agents/src/index.ts"],
+      "rules": {
+        "anti-slop/no-widen-then-assert": "off"
+      }
+    },
+    {
+      "files": [
+        "packages/agents/src/observability/ai/ai-gateway.ts",
+        "packages/agents/src/observability/ai/wrapper/wrap.ts"
+      ],
+      "rules": {
+        "anti-slop/no-reflect-apply": "off",
+        "anti-slop/no-reflect-get": "off"
+      }
+    },
+    {
+      "files": ["packages/agents/src/tests/email-routing.test.ts"],
+      "rules": {
+        "anti-slop/no-reflect-apply": "off"
+      }
+    },
+    {
+      "files": [
+        "packages/agents/src/x402-tests/x402.test.ts",
+        "packages/voice/src/react-tests/useVoiceAgent.test.tsx",
+        "packages/voice/src/react-tests/useVoiceInput.test.tsx",
+        "voice-providers/telnyx/tests/helpers/transport-config.test.ts",
+        "voice-providers/telnyx/tests/providers/call-bridge.test.ts"
+      ],
+      "rules": {
+        "anti-slop/no-module-mocking": "off"
+      }
+    },
+    {
+      "files": [
+        "packages/ai-chat/src/index.ts",
+        "packages/agents/src/observability/ai/ai-gateway.ts",
+        "packages/agents/src/observability/ai/wrapper/tools.ts",
+        "packages/think/src/think.ts",
+        "voice-providers/plivo/src/index.ts"
+      ],
+      "rules": {
+        "anti-slop/no-object-parameters": "off"
+      }
+    }
+  ]
 }

@@ -943,7 +943,7 @@ describe("createAISDKWrapper", () => {
   it("keeps a streaming tool's span open until its iterable is fully consumed", async () => {
     const tracing = new RecordingTracer();
     const countTool = {
-      async *execute(_input: object) {
+      async *execute() {
         yield "chunk-1";
         yield "chunk-2";
       }
@@ -951,7 +951,7 @@ describe("createAISDKWrapper", () => {
     const ai: AISDKNamespace = {
       generateText: async (params) => {
         const tools = params.tools as { readonly count: typeof countTool };
-        return { output: tools.count.execute({}), text: "ok" };
+        return { output: tools.count.execute(), text: "ok" };
       }
     };
 
@@ -981,7 +981,7 @@ describe("createAISDKWrapper", () => {
     const tracing = new RecordingTracer();
     const tools = {
       count: {
-        async *execute(_input: object) {
+        async *execute() {
           yield "chunk-1";
           // Opened between yields: the generator resumes at the CONSUMER's
           // next() call site, so without context re-entry this span would
@@ -994,7 +994,7 @@ describe("createAISDKWrapper", () => {
     const ai: AISDKNamespace = {
       generateText: async (params) => {
         const wrappedToolset = params.tools as typeof tools;
-        return { output: wrappedToolset.count.execute({}), text: "ok" };
+        return { output: wrappedToolset.count.execute(), text: "ok" };
       }
     };
 
@@ -1025,7 +1025,7 @@ describe("createAISDKWrapper", () => {
     let cleanedUp = false;
     const tools = {
       count: {
-        async *execute(_input: object) {
+        async *execute() {
           try {
             yield "chunk-1";
             yield "chunk-2";
@@ -1042,7 +1042,7 @@ describe("createAISDKWrapper", () => {
     const ai: AISDKNamespace = {
       generateText: async (params) => {
         const wrappedToolset = params.tools as typeof tools;
-        return { output: wrappedToolset.count.execute({}), text: "ok" };
+        return { output: wrappedToolset.count.execute(), text: "ok" };
       }
     };
 
