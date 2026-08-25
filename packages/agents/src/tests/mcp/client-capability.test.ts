@@ -1,4 +1,5 @@
-import { env, evictDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 describe("MCPClientManager capability", () => {

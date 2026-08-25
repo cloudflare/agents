@@ -5,7 +5,7 @@ import {
   nextCronTimeMs,
   parseInterval,
   parseWhen
-} from "../schedules/schedule-timing";
+} from "../../schedules/schedule-timing";
 
 const NOW_MS = Date.UTC(2026, 0, 1, 0, 30, 0);
 

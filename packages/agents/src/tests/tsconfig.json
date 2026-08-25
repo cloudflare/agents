@@ -1,5 +1,4 @@
 {
   "extends": "agents/tsconfig",
-  "include": ["./**/*.ts"],
-  "exclude": ["./lifecycle/**/*.ts"]
+  "include": ["./**/*.ts"]
 }

@@ -4,6 +4,7 @@ import {
   getCurrentAgent,
   type Schedule
 } from "../../index.ts";
+import { captureConsoleWarnings } from "../shared/console-capture";
 
 /**
  * Test agent that verifies this.name is accessible during scheduled callback
@@ -110,27 +111,6 @@ export class TestDestroyScheduleAgent extends Agent<
 }
 
 /**
- * Capture console.warn output emitted while `run` executes, so onStart
- * scheduling warnings can be asserted through their observable behavior
- * instead of Scheduler internals.
- */
-async function captureWarnings(
-  sink: string[],
-  run: () => Promise<void>
-): Promise<void> {
-  const original = console.warn;
-  console.warn = (...args: unknown[]) => {
-    sink.push(String(args[0]));
-    original.apply(console, args);
-  };
-  try {
-    await run();
-  } finally {
-    console.warn = original;
-  }
-}
-
-/**
  * Agent that calls schedule() in onStart() without idempotent — should warn.
  */
 export class TestOnStartScheduleWarnAgent extends Agent {
@@ -141,7 +121,7 @@ export class TestOnStartScheduleWarnAgent extends Agent {
   }
 
   async onStart() {
-    await captureWarnings(this.scheduleWarnings, async () => {
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
       await this.schedule(60, "maintenanceCallback");
     });
   }
@@ -173,7 +153,7 @@ export class TestOnStartScheduleNoWarnAgent extends Agent {
   }
 
   async onStart() {
-    await captureWarnings(this.scheduleWarnings, async () => {
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
       await this.schedule(60, "maintenanceCallback", undefined, {
         idempotent: true
       });
@@ -208,7 +188,7 @@ export class TestOnStartScheduleExplicitFalseAgent extends Agent {
   }
 
   async onStart() {
-    await captureWarnings(this.scheduleWarnings, async () => {
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
       await this.schedule(60, "maintenanceCallback", undefined, {
         idempotent: false
       });

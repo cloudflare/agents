@@ -1,14 +1,11 @@
-import {
-  env,
-  runDurableObjectAlarm,
-  runInDurableObject
-} from "cloudflare:test";
-import {
-  subscribe as subscribeDiagnostic,
-  unsubscribe as unsubscribeDiagnostic
-} from "node:diagnostics_channel";
+import { env } from "cloudflare:workers";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { SchedulerHarnessObject } from "./worker";
+import {
+  backdateScheduleRow,
+  type SchedulerHarnessObject
+} from "../capabilities/scheduler";
+import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 
 /**
  * Capability-level Scheduler tests: the capability installed on a minimal
@@ -19,33 +16,8 @@ import type { SchedulerHarnessObject } from "./worker";
  * lifecycle.test.ts and ../schedule.test.ts respectively.
  */
 
-type CapturedEvent = { readonly type: string; readonly payload: unknown };
-
-/** Collect `agents:schedule` diagnostics events for one named object. */
-function captureScheduleEvents(name: string): {
-  readonly events: CapturedEvent[];
-  readonly stop: () => void;
-} {
-  const events: CapturedEvent[] = [];
-  const handler = (message: unknown) => {
-    if (message === null || typeof message !== "object") return;
-    const record = message as Record<string, unknown>;
-    if (record.name !== name) return;
-    events.push({ type: String(record.type), payload: record.payload });
-  };
-  subscribeDiagnostic("agents:schedule", handler);
-  return {
-    events,
-    stop: () => unsubscribeDiagnostic("agents:schedule", handler)
-  };
-}
-
-function backdateRow(storage: DurableObjectStorage, id: string): void {
-  storage.sql.exec(
-    "UPDATE cf_agents_schedules SET time = ? WHERE id = ?",
-    Math.floor(Date.now() / 1000) - 5,
-    id
-  );
+function captureScheduleEvents(name: string) {
+  return captureDiagnosticsEvents("agents:schedule", name);
 }
 
 describe("Scheduler capability", () => {
@@ -198,7 +170,7 @@ describe("Scheduler capability", () => {
         expect(await state.storage.getAlarm()).toBe(sooner.time * 1000);
 
         // An overdue row (a restart lost the alarm) is clamped to the future.
-        backdateRow(state.storage, sooner.id);
+        backdateScheduleRow(state.storage, sooner.id);
         const before = Date.now();
         const overdue = instance.scheduler.getNextAlarm();
         expect(overdue as number).toBeGreaterThan(before);
@@ -229,9 +201,9 @@ describe("Scheduler capability", () => {
             "remind",
             { n: 3 }
           );
-          backdateRow(state.storage, oneShot.id);
-          backdateRow(state.storage, interval.id);
-          backdateRow(state.storage, cron.id);
+          backdateScheduleRow(state.storage, oneShot.id);
+          backdateScheduleRow(state.storage, interval.id);
+          backdateScheduleRow(state.storage, cron.id);
           return { oneShot: oneShot.id, interval: interval.id, cron: cron.id };
         }
       );
@@ -291,7 +263,7 @@ describe("Scheduler capability", () => {
             "flaky",
             "payload"
           );
-          backdateRow(state.storage, schedule.id);
+          backdateScheduleRow(state.storage, schedule.id);
           return schedule.id;
         }
       );
@@ -330,7 +302,7 @@ describe("Scheduler capability", () => {
         stub,
         async (instance: SchedulerHarnessObject, state) => {
           const schedule = await instance.scheduler.schedule(60, "broken");
-          backdateRow(state.storage, schedule.id);
+          backdateScheduleRow(state.storage, schedule.id);
         }
       );
 
@@ -413,8 +385,8 @@ describe("Scheduler capability", () => {
         const second = await instance.scheduler.schedule(90, "remind", {
           order: 2
         });
-        backdateRow(state.storage, first.id);
-        backdateRow(state.storage, second.id);
+        backdateScheduleRow(state.storage, first.id);
+        backdateScheduleRow(state.storage, second.id);
         // Simulate a callback tearing the host down mid-phase.
         instance.disableAlarmsOnNextCallback = true;
         return [first.id, second.id];

@@ -1,4 +1,3 @@
-import { DurableObject } from "cloudflare:workers";
 import { McpAgent } from "../mcp/index.ts";
 import {
   getAgentByName,
@@ -6,13 +5,30 @@ import {
   routeSubAgentRequest
 } from "../index.ts";
 
-/**
- * Bare Durable Object for capability-level MCP client tests. Tests construct
- * their own MCPClientManager instances inside runInDurableObject and bind
- * them to this object's real storage through a real Lifecycle — see
- * `tests/mcp/real-do-harness.ts`.
- */
-export class McpTestHarnessObject extends DurableObject<Env> {}
+// Capability test fixtures (harness Durable Objects); see
+// tests/capabilities/AGENTS.md for the capability testing pattern.
+export { CapabilityHarnessObject } from "./capabilities/harness.ts";
+import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
+export {
+  PlainLifecycleObject,
+  RetryableStartObject
+} from "./capabilities/lifecycle.ts";
+import type {
+  PlainLifecycleObject,
+  RetryableStartObject
+} from "./capabilities/lifecycle.ts";
+export {
+  ScheduledLifecycleObject,
+  SchedulerHarnessObject,
+  SchedulerStartupWarnObject
+} from "./capabilities/scheduler.ts";
+import type {
+  ScheduledLifecycleObject,
+  SchedulerHarnessObject,
+  SchedulerStartupWarnObject
+} from "./capabilities/scheduler.ts";
+export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
+import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
@@ -160,7 +176,13 @@ import type {
 
 export type Env = {
   LOADER: WorkerLoader;
-  McpTestHarnessObject: DurableObjectNamespace<McpTestHarnessObject>;
+  CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
+  PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
+  RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
+  ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
+  SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
+  SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
+  PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;

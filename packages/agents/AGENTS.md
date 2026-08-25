@@ -152,19 +152,17 @@ pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
-### Lifecycle tests (`src/tests/lifecycle/`)
+### Lifecycle and capability tests (`src/tests/lifecycle/`, `src/tests/capabilities/`)
 
-```bash
-pnpm exec vitest --project lifecycle --run
-```
-
-Proves constructor composition on a plain `DurableObject`, ordered capabilities,
-host-hook context, root accessor aliasing, routing, native and migrated identity,
-alarms, and hibernating WebSockets. `scheduler-capability.test.ts` exercises the
-Scheduler capability in isolation on `SchedulerHarnessObject` — a minimal real
-Durable Object whose only capability is the Scheduler, driven through real
-Lifecycle startup, storage, and platform alarms. That harness-object pattern is
-how any capability should be unit tested.
+Part of the shared workers project — there is no separate Lifecycle vitest
+project or wrangler config. `src/tests/lifecycle/` holds one test file per
+Lifecycle functionality: runtime handlers, startup (including failure retry),
+alarm arbitration, capability events, capability routing, host context,
+hibernating WebSockets, identity, and disposal. Capability contract tests
+mirror their source module (`src/tests/schedules/capability.test.ts`,
+`src/tests/mcp/client-capability.test.ts`) and drive real harness Durable
+Objects defined one-per-capability in `src/tests/capabilities/` — see
+`src/tests/capabilities/AGENTS.md` for the pattern.
 
 ### React tests (`src/react-tests/`)
 

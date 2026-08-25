@@ -87,23 +87,27 @@ Object or Agent context as appropriate.
 ## Testing capabilities
 
 Capabilities are testable at every layer without module mocks or fake
-services:
+services. Harness Durable Objects live one-per-capability in `tests/capabilities/` (see
+its AGENTS.md), so every capability follows the same pattern:
 
 1. **Pure domain logic** (timing parsers, selection rules) lives in
    dependency-free modules and is unit tested directly, e.g.
-   `tests/schedule-timing.test.ts`.
-2. **The capability itself** is installed on a minimal real Durable Object
-   whose only capability is the one under test, then driven through real
-   Lifecycle startup, real storage, real platform alarms, and the real
-   diagnostics event sink — e.g. `SchedulerHarnessObject` and
-   `tests/lifecycle/scheduler-capability.test.ts`. The Workers vitest pool
+   `tests/schedules/timing.test.ts`.
+2. **The capability in isolation, on a real Durable Object** —
+   `withCapabilityHarness()` binds per-test-constructed capabilities to a
+   real Lifecycle over real SQLite storage inside a bare harness object
+   (the MCP client suites), while a capability whose tests need real
+   platform dispatch gets a dedicated harness object with runtime handlers
+   installed — `SchedulerHarnessObject` driven through real alarms in
+   `tests/schedules/capability.test.ts`. The Workers vitest pool
    makes real objects cheap, so there is no fake-services seam to keep in
    sync with Lifecycle semantics.
 3. **Lifecycle integration** proves cross-capability behavior: alarm
    arbitration across contributors, phase order, context boundaries, and
-   eviction recovery — `tests/lifecycle/lifecycle.test.ts`.
-4. **Host surface** tests exercise the batteries-included Agent API —
-   `tests/schedule.test.ts` and friends.
+   eviction recovery — the per-functionality files in `tests/lifecycle/`.
+4. **Host surface** tests exercise the capability through the complete
+   `Agent` class and its public API — `tests/schedule.test.ts`, the MCP
+   agent suites, and the think/ai-chat packages.
 
 A new capability should arrive with layers 2 and 3; layer 1 applies when it
 owns non-trivial pure rules.
