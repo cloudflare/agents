@@ -52,6 +52,7 @@ import {
   type ConnectionContext,
   Lifecycle,
   setLifecycleEventSink,
+  setLifecycleHostInvoker,
   setLifecycleRouteTransport,
   type LifecycleRouteEnvelope,
   type WSMessage
@@ -120,7 +121,7 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
-import { Scheduler, createScheduler } from "./schedules/scheduler";
+import { Scheduler } from "./schedules/scheduler";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -1659,12 +1660,6 @@ export class Agent<
    */
   private _parentPath: ReadonlyArray<AgentPathStep> = [];
 
-  /** True while user's onStart() is executing. Used to warn about non-idempotent schedule() calls. */
-  private _insideOnStart = false;
-
-  /** Tracks callbacks already warned about during this onStart() to avoid log spam. */
-  private _warnedScheduleInOnStart = new Set<string>();
-
   /** Warn-once guard: `chatRecovery` reassigned during onStart() (too late for wake recovery). */
   private _warnedChatRecoveryInOnStart = false;
 
@@ -2251,62 +2246,36 @@ export class Agent<
       this._emit(event.type as ObservabilityEvent["type"], payload);
     });
 
-    this.scheduler = createScheduler(
-      this,
-      {
-        hungScheduleTimeoutSeconds:
-          this._resolvedOptions.hungScheduleTimeoutSeconds
-      },
-      {
-        host: this,
-        storage: this.ctx.storage,
-        now: Date.now,
-        createId: () => nanoid(9),
-        sql: this.sql.bind(this),
-        rawSql: (query, ...params) =>
-          this.ctx.storage.sql.exec(query, ...params),
-        retryDefaults: () => this._resolvedOptions.retry,
-        hungScheduleTimeoutSeconds: () =>
-          this._resolvedOptions.hungScheduleTimeoutSeconds,
-        validateSchedule: (when, callback, options) =>
-          this._validateScheduleCallback(when, callback as keyof this, options),
-        hasCallback: (callback) =>
-          typeof this[callback as keyof this] === "function",
-        invokeCallback: (callback, payload, schedule) => {
-          const method = this[callback as keyof this];
-          if (typeof method !== "function") {
-            throw new Error(`this.${callback} is not a function`);
-          }
-          return runInInvocation(
-            {
-              agent: this,
-              connection: undefined,
-              request: undefined,
-              email: undefined
-            },
-            () =>
-              (
-                method as (
-                  payload: unknown,
-                  schedule: Schedule<unknown>
-                ) => void | Promise<void>
-              ).call(this, payload, schedule)
-          );
+    // Capability-invoked host callbacks (scheduled methods and future
+    // capability callbacks) enter through Agent's invocation boundary so they
+    // get the same tracing span scope as every other Agent entry point.
+    setLifecycleHostInvoker(this.lifecycle, (run) =>
+      runInInvocation(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
         },
-        rearm: () => this.lifecycle.rearmAlarm(),
-        isDestroyed: () => this._destroyed,
-        onError: (error) =>
-          runInInvocation(
-            {
-              agent: this,
-              connection: undefined,
-              request: undefined,
-              email: undefined
-            },
-            () => this.onError(error)
-          )
-      }
+        run
+      )
     );
+
+    this.scheduler = new Scheduler(this, {
+      retry: this._resolvedOptions.retry,
+      hungScheduleTimeoutSeconds:
+        this._resolvedOptions.hungScheduleTimeoutSeconds,
+      onError: (error) =>
+        runInInvocation(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          () => this.onError(error)
+        )
+    });
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -2770,19 +2739,12 @@ export class Agent<
             const chatRecoveryBefore = (this as { chatRecovery?: unknown })
               .chatRecovery;
 
-            this._insideOnStart = true;
-            this._warnedScheduleInOnStart.clear();
-            let result: Awaited<ReturnType<typeof _onStart>>;
-            try {
-              result = await this._withAgentSpan(
-                "run_user_on_start",
-                "startup",
-                {},
-                () => _onStart(props)
-              );
-            } finally {
-              this._insideOnStart = false;
-            }
+            const result = await this._withAgentSpan(
+              "run_user_on_start",
+              "startup",
+              {},
+              () => _onStart(props)
+            );
 
             const chatRecoveryAfter = (this as { chatRecovery?: unknown })
               .chatRecovery;
@@ -3944,39 +3906,6 @@ export class Agent<
     return binding.idFromName(root.name).equals(this.ctx.id);
   }
 
-  private _validateScheduleCallback(
-    when: Date | string | number,
-    callback: keyof this,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): asserts callback is Extract<keyof this, string> {
-    if (typeof callback !== "string") {
-      throw new Error("Callback must be a string");
-    }
-
-    if (typeof this[callback] !== "function") {
-      throw new Error(`this.${callback} is not a function`);
-    }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    if (
-      this._insideOnStart &&
-      options?.idempotent === undefined &&
-      typeof when !== "string" &&
-      !this._warnedScheduleInOnStart.has(callback)
-    ) {
-      this._warnedScheduleInOnStart.add(callback);
-      console.warn(
-        `schedule("${callback}") called inside onStart() without { idempotent: true }. ` +
-          `This creates a new row on every Durable Object restart, which can cause ` +
-          `duplicate executions. Pass { idempotent: true } to deduplicate, or use ` +
-          `scheduleEvery() for recurring tasks.`
-      );
-    }
-  }
-
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
 
   /**
@@ -4171,7 +4100,7 @@ export class Agent<
    * @returns The Schedule object or undefined if not found
    */
   getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
-    return this.scheduler.getScheduleById(id);
+    return this.scheduler.get(id);
   }
 
   /**
@@ -4197,7 +4126,7 @@ export class Agent<
    * @returns Array of matching Schedule objects
    */
   listSchedules(criteria: ScheduleCriteria = {}): Promise<Schedule<unknown>[]> {
-    return this.scheduler.listSchedules(criteria);
+    return this.scheduler.list(criteria);
   }
 
   /**
@@ -4215,7 +4144,7 @@ export class Agent<
    * @returns true if the task was cancelled, false if the task was not found
    */
   cancelSchedule(id: string): Promise<boolean> {
-    return this.scheduler.cancelSchedule(id);
+    return this.scheduler.cancel(id);
   }
 
   /**

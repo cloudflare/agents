@@ -2,19 +2,19 @@
  * Lifecycle scheduling primitive. Owns the `cf_agents_schedules` table,
  * callback retry policy, and due-row processing.
  *
- * Lifecycle combines Scheduler's next wake-up candidate with contributions
- * from other capabilities and the host before arming the Durable Object.
+ * Scheduler consumes only the standard capability services: storage, alarm
+ * coordination, host callbacks, events, and routing. Lifecycle combines
+ * Scheduler's next wake-up candidate with contributions from other
+ * capabilities and the host before arming the Durable Object.
  */
 
-import { parseCronExpression } from "cron-schedule";
+import { nanoid } from "nanoid";
 import {
   LifecycleCapability,
+  type LifecycleRouteAddress,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
-import {
-  runInLifecycleHostContext,
-  type LifecycleObject
-} from "../lifecycle/current-agent";
+import type { LifecycleObject } from "../lifecycle/current-agent";
 import {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
@@ -23,24 +23,30 @@ import {
   validateRetryOptions
 } from "../retries";
 import type { RetryOptions } from "../retries";
+import type { SchedulerEventType, SchedulerOptions } from "./options";
+import {
+  isRecurring,
+  nextCronTimeMs,
+  parseInterval,
+  parseWhen,
+  validateIntervalSeconds,
+  type ScheduleTiming
+} from "./schedule-timing";
 import type {
-  SchedulerEventType,
-  SchedulerIntegration,
-  SchedulerOptions,
-  SchedulerOwner
-} from "./options";
-import type { Schedule, ScheduleCriteria, ScheduleStorageRow } from "./types";
-
-function parseRetryOptions(
-  row: Record<string, unknown>
-): RetryOptions | undefined {
-  return typeof row.retry_options === "string"
-    ? (JSON.parse(row.retry_options) as RetryOptions)
-    : undefined;
-}
+  Schedule,
+  ScheduleCriteria,
+  ScheduleOptions,
+  ScheduleStorageRow
+} from "./types";
 
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
 const CURRENT_SCHEDULE_SCHEMA_VERSION = 1;
+
+const DEFAULT_RETRY: Required<RetryOptions> = {
+  maxAttempts: 3,
+  baseDelayMs: 100,
+  maxDelayMs: 3000
+};
 
 type SchedulerRouteMessage =
   | {
@@ -48,18 +54,29 @@ type SchedulerRouteMessage =
       readonly when: Date | string | number;
       readonly callback: string;
       readonly payload?: unknown;
-      readonly options?: { retry?: RetryOptions; idempotent?: boolean };
+      readonly options?: ScheduleOptions;
     }
   | {
       readonly type: "every";
       readonly intervalSeconds: number;
       readonly callback: string;
       readonly payload?: unknown;
-      readonly options?: { retry?: RetryOptions; idempotent?: boolean };
+      readonly options?: ScheduleOptions;
     }
   | { readonly type: "get" | "cancel"; readonly id: string }
   | { readonly type: "list"; readonly criteria?: ScheduleCriteria }
   | { readonly type: "dispatch"; readonly row: ScheduleStorageRow };
+
+type InsertResult<T> = {
+  readonly schedule: Schedule<T>;
+  readonly created: boolean;
+};
+
+function parseRetryOptions(row: ScheduleStorageRow): RetryOptions | undefined {
+  return typeof row.retry_options === "string"
+    ? (JSON.parse(row.retry_options) as RetryOptions)
+    : undefined;
+}
 
 function resolveRetryConfig(
   retry: RetryOptions | undefined,
@@ -72,201 +89,394 @@ function resolveRetryConfig(
   };
 }
 
-function getNextCronTime(cron: string, now: number) {
-  const interval = parseCronExpression(cron);
-  return interval.getNextDate(new Date(now));
-}
-
-const schedulerIntegrationSetters = new WeakMap<
-  object,
-  (integration: SchedulerIntegration<LifecycleObject>) => void
->();
-
-const DEFAULT_RETRY: Required<RetryOptions> = {
-  maxAttempts: 3,
-  baseDelayMs: 100,
-  maxDelayMs: 3000
-};
-
-function executeSql<T>(
-  storage: DurableObjectStorage,
-  strings: TemplateStringsArray,
-  values: (string | number | boolean | null)[]
-): T[] {
-  const query = strings.reduce(
-    (result, part, index) => result + part + (index < values.length ? "?" : ""),
-    ""
-  );
-  return [...storage.sql.exec(query, ...values)] as T[];
-}
-
-function createStandaloneIntegration<Host extends LifecycleObject>(
-  target: Host,
-  storage: DurableObjectStorage,
-  options: SchedulerOptions,
-  rearm: () => void | Promise<void>
-): SchedulerIntegration<Host> {
-  // SAFETY: Scheduler callback names are persisted string keys. Runtime checks
-  // below narrow each lookup to a function before it is invoked.
-  const callbacks = target as unknown as Record<string, unknown>;
-  if (options.retry) validateRetryOptions(options.retry, DEFAULT_RETRY);
-  const retryDefaults: Required<RetryOptions> = {
-    maxAttempts: options.retry?.maxAttempts ?? DEFAULT_RETRY.maxAttempts,
-    baseDelayMs: options.retry?.baseDelayMs ?? DEFAULT_RETRY.baseDelayMs,
-    maxDelayMs: options.retry?.maxDelayMs ?? DEFAULT_RETRY.maxDelayMs
-  };
-
-  return {
-    host: target,
-    storage,
-    now: Date.now,
-    createId: () => crypto.randomUUID(),
-    sql: <T>(
-      strings: TemplateStringsArray,
-      ...values: (string | number | boolean | null)[]
-    ) => executeSql<T>(storage, strings, values),
-    rawSql: (query, ...params) => storage.sql.exec(query, ...params),
-    retryDefaults: () => retryDefaults,
-    hungScheduleTimeoutSeconds: () => options.hungScheduleTimeoutSeconds ?? 30,
-    validateSchedule: (when, callback, scheduleOptions) => {
-      if (typeof callback !== "string") {
-        throw new Error("Callback must be a string");
-      }
-      if (typeof callbacks[callback] !== "function") {
-        throw new Error(`callbacks.${callback} is not a function`);
-      }
-      if (scheduleOptions?.retry) {
-        validateRetryOptions(scheduleOptions.retry, retryDefaults);
-      }
-      if (
-        !(when instanceof Date) &&
-        typeof when !== "number" &&
-        typeof when !== "string"
-      ) {
-        throw new Error(
-          `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
-        );
-      }
-    },
-    hasCallback: (callback) => typeof callbacks[callback] === "function",
-    invokeCallback: (callback, payload, schedule) => {
-      const method = callbacks[callback];
-      if (typeof method !== "function") {
-        throw new Error(`callbacks.${callback} is not a function`);
-      }
-      return runInLifecycleHostContext({ host: target }, () =>
-        (
-          method as (
-            payload: unknown,
-            schedule: Schedule<unknown>
-          ) => void | Promise<void>
-        ).call(target, payload, schedule)
-      );
-    },
-    rearm,
-    isDestroyed: () => false,
-    onError: (error) => options.onError?.(error)
-  };
-}
-
 /**
  * Persistent task scheduling for a Lifecycle Object.
  *
- * Install the same instance with `Lifecycle.use()`. Scheduler owns its SQL
- * schema, task CRUD, callback retries, and due-row processing. It contributes
- * its next wake time while Lifecycle owns the physical alarm.
+ * Construct with the host and install the same instance with
+ * `Lifecycle.use()`. Scheduler owns its SQL schema, task CRUD, callback
+ * retries, and due-row processing. It contributes its next wake time while
+ * Lifecycle owns the physical alarm, and it invokes named host callbacks
+ * through Lifecycle's host-callback boundary.
  */
 export class Scheduler<
   Host extends LifecycleObject = LifecycleObject
 > extends LifecycleCapability {
-  private _host: SchedulerIntegration<Host> | undefined;
-  private _executingScheduleRowId?: string;
-  private _schemaReady = false;
+  readonly #retryDefaults: Required<RetryOptions>;
+  readonly #hungScheduleTimeoutSeconds: number;
+  readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
+  readonly #warnedStartupCallbacks = new Set<string>();
+  #executingRowId: string | undefined;
 
-  /** Create a persistent Scheduler targeting named methods on this object. */
-  constructor(
-    private readonly _target: Host,
-    private readonly _options: SchedulerOptions = {}
-  ) {
+  /**
+   * Create a persistent Scheduler targeting named methods on the host.
+   *
+   * @param _host - The Lifecycle Object whose named methods scheduled
+   * callbacks invoke — the same object this Scheduler is installed on. It
+   * anchors callback typing for {@link set} and {@link every}; dispatch runs
+   * through the installing Lifecycle.
+   * @param options - Optional retry, hung-interval, and error policy.
+   */
+  constructor(_host: Host, options: SchedulerOptions = {}) {
     super("scheduler");
-
-    schedulerIntegrationSetters.set(this, (integration) => {
-      // SAFETY: createScheduler passes the same Host type used to construct this
-      // Scheduler; the WeakMap erases that generic only at the package boundary.
-      this._host = integration as SchedulerIntegration<Host>;
-    });
+    if (options.retry) validateRetryOptions(options.retry, DEFAULT_RETRY);
+    this.#retryDefaults = resolveRetryConfig(options.retry, DEFAULT_RETRY);
+    this.#hungScheduleTimeoutSeconds = options.hungScheduleTimeoutSeconds ?? 30;
+    this.#onError = options.onError;
   }
 
-  #host(): SchedulerIntegration<Host> {
-    if (!this._host) {
-      this._host = createStandaloneIntegration(
-        this._target,
-        this.lifecycle.storage,
-        this._options,
-        this.lifecycle.alarms.rearm
-      );
-    }
-    return this._host;
+  // ── Lifecycle capability hooks ───────────────────────────────────────────
+
+  /** Initialize and migrate schedule storage during Lifecycle startup. */
+  async onStart(): Promise<void> {
+    this.#warnedStartupCallbacks.clear();
+    const storage = this.lifecycle.storage;
+    const version =
+      (await storage.get<number>(SCHEDULE_SCHEMA_VERSION_KEY)) ?? 0;
+    if (version >= CURRENT_SCHEDULE_SCHEMA_VERSION) return;
+
+    this.#migrateSchema();
+    await storage.put(
+      SCHEDULE_SCHEMA_VERSION_KEY,
+      CURRENT_SCHEDULE_SCHEMA_VERSION
+    );
   }
 
-  #emit(type: SchedulerEventType, payload: Record<string, unknown>): void {
-    this.lifecycle.events.emit(type, payload);
+  /** Execute due schedule rows during the Lifecycle alarm phase. */
+  async onAlarm(): Promise<void> {
+    await this.#fireDueSchedules();
   }
 
   /** Handle Scheduler protocol messages routed by another Lifecycle. */
   async onRoute(context: LifecycleRouteContext): Promise<unknown> {
     const message = context.payload as SchedulerRouteMessage;
-    const owner = context.source
-      ? { key: context.source.key, data: context.source.data }
-      : null;
+    const owner = context.source ?? null;
     switch (message.type) {
       case "schedule":
-        return this.insertForOwner(
+        return this.#insert(
           owner,
-          message.when,
+          parseWhen(message.when, Date.now(), message.callback),
           message.callback,
           message.payload,
           message.options
         );
       case "every":
-        return this.insertIntervalForOwner(
+        return this.#insert(
           owner,
-          message.intervalSeconds,
+          parseInterval(message.intervalSeconds, Date.now()),
           message.callback,
           message.payload,
           message.options
         );
       case "get":
-        return this.getForOwner(owner, message.id);
+        return this.#getForOwner(owner, message.id);
       case "list":
-        return this.listForOwner(owner, message.criteria);
+        return this.#listForOwner(owner, message.criteria);
       case "cancel":
-        return this.cancelForOwner(owner, message.id);
+        return this.#cancelForOwner(owner, message.id);
       case "dispatch":
-        await this.executeCallback(message.row);
+        await this.#executeCallback(message.row);
         return true;
       default:
         throw new Error("Unknown routed Scheduler message");
     }
   }
 
-  /** Initialize and migrate schedule storage during Lifecycle startup. */
-  async onStart(): Promise<void> {
-    const version =
-      (await this.#host().storage.get<number>(SCHEDULE_SCHEMA_VERSION_KEY)) ??
-      0;
-    if (version >= CURRENT_SCHEDULE_SCHEMA_VERSION) return;
+  /** Contribute the earliest pending schedule to Lifecycle alarm selection. */
+  getNextAlarm(): number | null {
+    const nowMs = Date.now();
+    const hungCutoffSeconds =
+      Math.floor(nowMs / 1000) - this.#hungScheduleTimeoutSeconds;
+    const nextSchedule = this.#nextScheduleTimeMs(nowMs, hungCutoffSeconds);
+    const hungIntervalRecheck =
+      this.#nextHungIntervalRecheckMs(hungCutoffSeconds);
+    if (nextSchedule === null) return hungIntervalRecheck;
+    if (hungIntervalRecheck === null) return nextSchedule;
+    return Math.min(nextSchedule, hungIntervalRecheck);
+  }
 
-    if (!this._schemaReady) this.ensureSchema();
-    await this.#host().storage.put(
-      SCHEDULE_SCHEMA_VERSION_KEY,
-      CURRENT_SCHEDULE_SCHEMA_VERSION
+  // ── Scheduling API ───────────────────────────────────────────────────────
+
+  /** Schedule a delayed, dated, or cron callback by name. */
+  async schedule<T = string>(
+    when: Date | string | number,
+    callback: string,
+    payload?: T,
+    options?: ScheduleOptions
+  ): Promise<Schedule<T>> {
+    await this.lifecycle.ready();
+    this.#validateSchedule(when, callback, options);
+    const result = this.lifecycle.routes.source
+      ? ((await this.lifecycle.routes.toRoot({
+          type: "schedule",
+          when,
+          callback,
+          payload,
+          options
+        } satisfies SchedulerRouteMessage)) as InsertResult<T>)
+      : await this.#insert<T>(
+          null,
+          parseWhen(when, Date.now(), callback),
+          callback,
+          payload,
+          options
+        );
+    this.#emitCreated(result);
+    return result.schedule;
+  }
+
+  /** Set a delayed, dated, or cron callback on this Scheduler's host. */
+  set<
+    Name extends keyof Host,
+    Method extends Extract<Host[Name], (...args: never[]) => unknown>
+  >(
+    when: Date | string | number,
+    callback: Name,
+    payload: Parameters<Method>[0],
+    options?: ScheduleOptions
+  ): Promise<Schedule<Parameters<Method>[0]>> {
+    return this.schedule(when, callback as string, payload, options) as Promise<
+      Schedule<Parameters<Method>[0]>
+    >;
+  }
+
+  /** Schedule a callback at a fixed interval by name. */
+  async scheduleEvery<T = string>(
+    intervalSeconds: number,
+    callback: string,
+    payload?: T,
+    options?: ScheduleOptions
+  ): Promise<Schedule<T>> {
+    await this.lifecycle.ready();
+    this.#validateInterval(intervalSeconds, callback, options?.retry);
+    const result = this.lifecycle.routes.source
+      ? ((await this.lifecycle.routes.toRoot({
+          type: "every",
+          intervalSeconds,
+          callback,
+          payload,
+          options
+        } satisfies SchedulerRouteMessage)) as InsertResult<T>)
+      : await this.#insert<T>(
+          null,
+          parseInterval(intervalSeconds, Date.now()),
+          callback,
+          payload,
+          options
+        );
+    this.#emitCreated(result);
+    return result.schedule;
+  }
+
+  /** Set a fixed-interval callback on this Scheduler's host. */
+  every<
+    Name extends keyof Host,
+    Method extends Extract<Host[Name], (...args: never[]) => unknown>
+  >(
+    intervalSeconds: number,
+    callback: Name,
+    payload: Parameters<Method>[0],
+    options?: ScheduleOptions
+  ): Promise<Schedule<Parameters<Method>[0]>> {
+    return this.scheduleEvery(
+      intervalSeconds,
+      callback as string,
+      payload,
+      options
+    ) as Promise<Schedule<Parameters<Method>[0]>>;
+  }
+
+  /** Get a schedule by ID. Works inside routed sub-agents. */
+  async get(id: string): Promise<Schedule<unknown> | undefined> {
+    await this.lifecycle.ready();
+    return this.lifecycle.routes.source
+      ? ((await this.lifecycle.routes.toRoot({
+          type: "get",
+          id
+        } satisfies SchedulerRouteMessage)) as Schedule<unknown> | undefined)
+      : this.#getForOwner(null, id);
+  }
+
+  /** List schedules matching criteria. Works inside routed sub-agents. */
+  async list(criteria: ScheduleCriteria = {}): Promise<Schedule<unknown>[]> {
+    await this.lifecycle.ready();
+    return this.lifecycle.routes.source
+      ? ((await this.lifecycle.routes.toRoot({
+          type: "list",
+          criteria
+        } satisfies SchedulerRouteMessage)) as Schedule<unknown>[])
+      : this.#listForOwner(null, criteria);
+  }
+
+  /**
+   * Cancel one schedule owned by this Scheduler.
+   *
+   * @param id - ID of the schedule to cancel.
+   * @returns True when a schedule was cancelled, false when none matched.
+   */
+  async cancel(id: string): Promise<boolean> {
+    await this.lifecycle.ready();
+    const result = this.lifecycle.routes.source
+      ? ((await this.lifecycle.routes.toRoot({
+          type: "cancel",
+          id
+        } satisfies SchedulerRouteMessage)) as {
+          ok: boolean;
+          callback?: string;
+        })
+      : await this.#cancelForOwner(null, id);
+    if (result.ok && result.callback) {
+      this.#emit("schedule:cancel", { callback: result.callback, id });
+    }
+    return result.ok;
+  }
+
+  /**
+   * Get a schedule by ID.
+   *
+   * @deprecated Use {@link get}. This synchronous API cannot cross Durable
+   * Object boundaries and throws inside routed sub-agents.
+   */
+  getSchedule<T = string>(id: string): Schedule<T> | undefined {
+    if (this.lifecycle.routes.source) {
+      throw new Error(
+        "getSchedule() is synchronous and cannot read routed schedule storage. " +
+          "Use await scheduler.get(id) instead."
+      );
+    }
+    return this.#getForOwner(null, id);
+  }
+
+  /**
+   * List schedules matching criteria.
+   *
+   * @deprecated Use {@link list}. This synchronous API cannot cross Durable
+   * Object boundaries and throws inside routed sub-agents.
+   */
+  getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
+    if (this.lifecycle.routes.source) {
+      throw new Error(
+        "getSchedules() is synchronous and cannot read routed schedule storage. " +
+          "Use await scheduler.list(criteria) instead."
+      );
+    }
+    return this.#listForOwner(null, criteria);
+  }
+
+  // ── Host-owned policy apertures ──────────────────────────────────────────
+
+  /** @internal Remove rows owned by one routed Lifecycle subtree. */
+  cleanupRoutePrefix(prefix: string): void {
+    this.#cancelOwners(
+      (owner) => owner.key === prefix || owner.key.startsWith(`${prefix}/`)
     );
   }
 
-  /** @internal Re-run the idempotent schedule schema migration. */
-  private ensureSchema(): void {
-    this.#host().rawSql(`
+  /** @internal Apply Agent's outer alarm memory-limit policy to Scheduler rows. */
+  handleAlarmMemoryLimit(options: {
+    readonly callbacks: ReadonlyArray<string>;
+    readonly sealed: boolean;
+    readonly nextTime?: number;
+  }): void {
+    const executingRowId = this.#executingRowId;
+    this.#executingRowId = undefined;
+    if (options.sealed) {
+      this.#deleteRows(options.callbacks, executingRowId);
+      return;
+    }
+    if (options.nextTime === undefined) {
+      throw new Error("Scheduler memory-limit backoff requires nextTime");
+    }
+    this.#moveRows(options.callbacks, executingRowId, options.nextTime);
+  }
+
+  // ── Validation ───────────────────────────────────────────────────────────
+
+  #validateSchedule(
+    when: Date | string | number,
+    callback: string,
+    options?: ScheduleOptions
+  ): void {
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+    if (!this.lifecycle.callbacks.has(callback)) {
+      throw new Error(`this.${callback} is not a function`);
+    }
+    if (options?.retry) {
+      validateRetryOptions(options.retry, this.#retryDefaults);
+    }
+    if (
+      !(when instanceof Date) &&
+      typeof when !== "number" &&
+      typeof when !== "string"
+    ) {
+      throw new Error(
+        `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
+      );
+    }
+    this.#warnWhenScheduledDuringStartup(when, callback, options);
+  }
+
+  #validateInterval(
+    intervalSeconds: number,
+    callback: string,
+    retry?: RetryOptions
+  ): void {
+    validateIntervalSeconds(intervalSeconds);
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+    if (!this.lifecycle.callbacks.has(callback)) {
+      throw new Error(`this.${callback} is not a function`);
+    }
+    if (retry) validateRetryOptions(retry, this.#retryDefaults);
+  }
+
+  /**
+   * A non-idempotent one-shot created during startup accumulates one row per
+   * Durable Object wake. Warn once per callback; `_`-prefixed callbacks are
+   * framework-internal and manage their own idempotency.
+   */
+  #warnWhenScheduledDuringStartup(
+    when: Date | string | number,
+    callback: string,
+    options?: ScheduleOptions
+  ): void {
+    if (!this.lifecycle.starting()) return;
+    if (options?.idempotent !== undefined) return;
+    if (typeof when === "string") return;
+    if (callback.startsWith("_")) return;
+    if (this.#warnedStartupCallbacks.has(callback)) return;
+    this.#warnedStartupCallbacks.add(callback);
+    console.warn(
+      `schedule("${callback}") called inside onStart() without { idempotent: true }. ` +
+        `This creates a new row on every Durable Object restart, which can cause ` +
+        `duplicate executions. Pass { idempotent: true } to deduplicate, or use ` +
+        `scheduleEvery() for recurring tasks.`
+    );
+  }
+
+  // ── Storage ──────────────────────────────────────────────────────────────
+
+  #sql<T = Record<string, string | number | boolean | null>>(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ): T[] {
+    const query = strings.reduce(
+      (result, part, index) =>
+        result + part + (index < values.length ? "?" : ""),
+      ""
+    );
+    // SAFETY: Scheduler queries select from its own schema; T describes the
+    // projected columns of the accompanying query text.
+    return [...this.lifecycle.storage.sql.exec(query, ...values)] as T[];
+  }
+
+  #migrateSchema(): void {
+    const rawSql = (query: string, ...params: (string | number | null)[]) =>
+      this.lifecycle.storage.sql.exec(query, ...params);
+
+    rawSql(`
         CREATE TABLE IF NOT EXISTS cf_agents_schedules (
           id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
           callback TEXT,
@@ -287,7 +497,7 @@ export class Scheduler<
 
     const addColumnIfMissing = (statement: string): void => {
       try {
-        this.#host().rawSql(statement);
+        rawSql(statement);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!message.toLowerCase().includes("duplicate column")) throw error;
@@ -312,15 +522,13 @@ export class Scheduler<
       "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path_key TEXT"
     );
 
-    const rows = this.#host()
-      .rawSql<{ sql: string }>(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-      )
-      .toArray();
-    const ddl = rows[0]?.sql ?? "";
+    const rows = rawSql(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
+    ).toArray();
+    const ddl = typeof rows[0]?.sql === "string" ? rows[0].sql : "";
     if (ddl && !ddl.includes("'interval'")) {
-      this.#host().rawSql("DROP TABLE IF EXISTS cf_agents_schedules_new");
-      this.#host().rawSql(`
+      rawSql("DROP TABLE IF EXISTS cf_agents_schedules_new");
+      rawSql(`
           CREATE TABLE cf_agents_schedules_new (
             id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
             callback TEXT,
@@ -338,7 +546,7 @@ export class Scheduler<
             owner_path_key TEXT
           )
         `);
-      this.#host().rawSql(`
+      rawSql(`
         INSERT INTO cf_agents_schedules_new
           (id, callback, payload, type, time, delayInSeconds, cron,
            intervalSeconds, running, created_at, execution_started_at,
@@ -348,610 +556,210 @@ export class Scheduler<
                retry_options, owner_path, owner_path_key
         FROM cf_agents_schedules
       `);
-      this.#host().rawSql("DROP TABLE cf_agents_schedules");
-      this.#host().rawSql(
+      rawSql("DROP TABLE cf_agents_schedules");
+      rawSql(
         "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
       );
     }
 
     // Keep-alive no longer uses schedule rows. Remove orphaned heartbeat rows
     // left by older Scheduler versions.
-    this.#host().rawSql(
+    rawSql(
       "DELETE FROM cf_agents_schedules WHERE callback = '_cf_keepAliveHeartbeat'"
     );
-    this._schemaReady = true;
-  }
-
-  /** Execute due schedule rows during the Lifecycle alarm phase. */
-  async onAlarm(): Promise<void> {
-    await this.fireDueSchedules();
-  }
-
-  /** @internal Consume the row ID retained when callback execution escaped. */
-  private takeExecutingScheduleRowId(): string | undefined {
-    const id = this._executingScheduleRowId;
-    this._executingScheduleRowId = undefined;
-    return id;
-  }
-
-  /** @internal Delete rows selected by a host-owned failure policy. */
-  private deleteRows(
-    callbacks: ReadonlyArray<string>,
-    executingRowId?: string
-  ): void {
-    for (const callback of callbacks) {
-      try {
-        this.#host().sql`
-          DELETE FROM cf_agents_schedules WHERE callback = ${callback}
-        `;
-      } catch {
-        // best-effort at a host failure boundary
-      }
-    }
-    if (executingRowId) {
-      try {
-        this.#host().sql`
-          DELETE FROM cf_agents_schedules WHERE id = ${executingRowId}
-        `;
-      } catch {
-        // best-effort at a host failure boundary
-      }
-    }
-  }
-
-  /** @internal Move rows selected by a host-owned failure policy. */
-  private moveRows(
-    callbacks: ReadonlyArray<string>,
-    executingRowId: string | undefined,
-    nextTime: number
-  ): void {
-    for (const callback of callbacks) {
-      try {
-        this.#host().sql`
-          UPDATE cf_agents_schedules
-          SET time = ${nextTime}
-          WHERE callback = ${callback} AND time <= ${nextTime}
-        `;
-      } catch {
-        // best-effort at a host failure boundary
-      }
-    }
-    if (executingRowId) {
-      try {
-        this.#host().sql`
-          UPDATE cf_agents_schedules
-          SET time = ${nextTime}
-          WHERE id = ${executingRowId} AND time <= ${nextTime}
-        `;
-      } catch {
-        // best-effort at a host failure boundary
-      }
-    }
-  }
-
-  /** Schedule a delayed, dated, or cron callback. */
-  async schedule<T = string>(
-    when: Date | string | number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<Schedule<T>> {
-    await this.lifecycle.ready();
-    this.#host().validateSchedule(when, callback, options);
-    const result = this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "schedule",
-          when,
-          callback,
-          payload,
-          options
-        } satisfies SchedulerRouteMessage)) as {
-          schedule: Schedule<T>;
-          created: boolean;
-        })
-      : await this.insertForOwner(null, when, callback, payload, options);
-    if (result.created) {
-      this.#emit("schedule:create", {
-        callback: result.schedule.callback,
-        id: result.schedule.id
-      });
-    }
-    return result.schedule;
-  }
-
-  /** Set a delayed, dated, or cron callback on this Scheduler's target. */
-  set<
-    Name extends keyof Host,
-    Method extends Extract<Host[Name], (...args: never[]) => unknown>
-  >(
-    when: Date | string | number,
-    callback: Name,
-    payload: Parameters<Method>[0],
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<Schedule<Parameters<Method>[0]>> {
-    return this.schedule(when, callback as string, payload, options) as Promise<
-      Schedule<Parameters<Method>[0]>
-    >;
-  }
-
-  /** Schedule a callback at a fixed interval. */
-  async scheduleEvery<T = string>(
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<Schedule<T>> {
-    await this.lifecycle.ready();
-    this.validateIntervalSchedule(intervalSeconds, callback, options?.retry);
-    const result = this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "every",
-          intervalSeconds,
-          callback,
-          payload,
-          options
-        } satisfies SchedulerRouteMessage)) as {
-          schedule: Schedule<T>;
-          created: boolean;
-        })
-      : await this.insertIntervalForOwner(
-          null,
-          intervalSeconds,
-          callback,
-          payload,
-          options
-        );
-    if (result.created) {
-      this.#emit("schedule:create", {
-        callback: result.schedule.callback,
-        id: result.schedule.id
-      });
-    }
-    return result.schedule;
-  }
-
-  /** Set a fixed-interval callback on this Scheduler's target. */
-  every<
-    Name extends keyof Host,
-    Method extends Extract<Host[Name], (...args: never[]) => unknown>
-  >(
-    intervalSeconds: number,
-    callback: Name,
-    payload: Parameters<Method>[0],
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<Schedule<Parameters<Method>[0]>> {
-    return this.scheduleEvery(
-      intervalSeconds,
-      callback as string,
-      payload,
-      options
-    ) as Promise<Schedule<Parameters<Method>[0]>>;
-  }
-
-  /** Get a schedule by ID. */
-  getSchedule<T = string>(id: string): Schedule<T> | undefined {
-    if (this.lifecycle.routes.source) {
-      throw new Error(
-        "getSchedule() is synchronous and cannot read routed schedule storage. " +
-          "Use await scheduler.get(id) instead."
-      );
-    }
-    return this.getForOwner(null, id);
-  }
-
-  /** Get a schedule by ID through an asynchronous-compatible API. */
-  async getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
-    await this.lifecycle.ready();
-    return this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "get",
-          id
-        } satisfies SchedulerRouteMessage)) as Schedule<unknown> | undefined)
-      : this.getForOwner(null, id);
-  }
-
-  /** Get a schedule through the primary asynchronous API. */
-  get(id: string): Promise<Schedule<unknown> | undefined> {
-    return this.getScheduleById(id);
-  }
-
-  /** List schedules matching criteria. */
-  getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
-    if (this.lifecycle.routes.source) {
-      throw new Error(
-        "getSchedules() is synchronous and cannot read routed schedule storage. " +
-          "Use await scheduler.list(criteria) instead."
-      );
-    }
-    return this.listForOwner(null, criteria);
-  }
-
-  /** List schedules through an asynchronous-compatible API. */
-  async listSchedules(
-    criteria: ScheduleCriteria = {}
-  ): Promise<Schedule<unknown>[]> {
-    await this.lifecycle.ready();
-    return this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "list",
-          criteria
-        } satisfies SchedulerRouteMessage)) as Schedule<unknown>[])
-      : this.listForOwner(null, criteria);
-  }
-
-  /** List schedules through the primary asynchronous API. */
-  list(criteria: ScheduleCriteria = {}): Promise<Schedule<unknown>[]> {
-    return this.listSchedules(criteria);
-  }
-
-  /** Cancel one schedule owned by this Scheduler. */
-  async cancelSchedule(id: string): Promise<boolean> {
-    await this.lifecycle.ready();
-    const result = this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "cancel",
-          id
-        } satisfies SchedulerRouteMessage)) as {
-          ok: boolean;
-          callback?: string;
-        })
-      : await this.cancelForOwner(null, id);
-    if (result.ok && result.callback) {
-      this.#emit("schedule:cancel", {
-        callback: result.callback,
-        id
-      });
-    }
-    return result.ok;
-  }
-
-  /** Cancel a schedule through the primary API. */
-  cancel(id: string): Promise<boolean> {
-    return this.cancelSchedule(id);
-  }
-
-  /** @internal Remove rows owned by one routed Lifecycle subtree. */
-  cleanupRoutePrefix(prefix: string): void {
-    this.cancelOwners(
-      (owner) => owner.key === prefix || owner.key.startsWith(`${prefix}/`)
-    );
-  }
-
-  /** @internal Apply Agent's outer alarm memory-limit policy to Scheduler rows. */
-  handleAlarmMemoryLimit(options: {
-    readonly callbacks: ReadonlyArray<string>;
-    readonly sealed: boolean;
-    readonly nextTime?: number;
-  }): void {
-    const executingRowId = this.takeExecutingScheduleRowId();
-    if (options.sealed) {
-      this.deleteRows(options.callbacks, executingRowId);
-      return;
-    }
-    if (options.nextTime === undefined) {
-      throw new Error("Scheduler memory-limit backoff requires nextTime");
-    }
-    this.moveRows(options.callbacks, executingRowId, options.nextTime);
-  }
-
-  /** @internal Validate an interval before a host adapter persists it. */
-  private validateIntervalSchedule(
-    intervalSeconds: number,
-    callback: string,
-    retry?: RetryOptions
-  ): void {
-    const maxIntervalSeconds = 30 * 24 * 60 * 60;
-    if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
-      throw new Error("intervalSeconds must be a positive number");
-    }
-    if (intervalSeconds > maxIntervalSeconds) {
-      throw new Error(
-        `intervalSeconds cannot exceed ${maxIntervalSeconds} seconds (30 days)`
-      );
-    }
-    if (typeof callback !== "string") {
-      throw new Error("Callback must be a string");
-    }
-    if (!this.#host().hasCallback(callback)) {
-      throw new Error(`this.${callback} is not a function`);
-    }
-    if (retry) validateRetryOptions(retry, this.#host().retryDefaults());
   }
 
   /**
-   * Insert (or, for idempotent calls, return the existing row for) a
-   * schedule owned locally (`owner === null`) or by an opaque host adapter.
-   * Returns `{ schedule, created }` — `created`
-   * is `false` when an idempotent insert deduplicates onto an existing
-   * row, so callers can suppress the `schedule:create` event in that
-   * case to match historic semantics.
+   * Insert a schedule row for the given owner, or return the existing row
+   * when an idempotent request matches one. One-shot timings deduplicate only
+   * when `idempotent: true` is passed; recurring timings deduplicate unless
+   * `idempotent: false` opts out. `created: false` marks a dedup hit so
+   * callers suppress the `schedule:create` event.
    */
-  private async insertForOwner<T = string>(
-    owner: SchedulerOwner | null,
-    when: Date | string | number,
+  async #insert<T = string>(
+    owner: LifecycleRouteAddress | null,
+    timing: ScheduleTiming,
     callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    const ownerPathJson = owner?.data ?? null;
-    const ownerPathKey = owner?.key ?? null;
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
+    payload: unknown,
+    options?: ScheduleOptions
+  ): Promise<InsertResult<T>> {
     const payloadJson = JSON.stringify(payload);
-
-    if (when instanceof Date) {
-      const timestamp = Math.floor(when.getTime() / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.#host().sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'scheduled'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this.#host().rearm();
-          return {
-            schedule: {
-              callback: row.callback,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "scheduled"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = this.#host().createId();
-      this.#host().sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'scheduled', ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this.#host().rearm();
-      return {
-        schedule: {
-          callback,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "scheduled"
-        },
-        created: true
-      };
-    }
-
-    if (typeof when === "number") {
-      const timestamp = Math.floor((this.#host().now() + when * 1000) / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.#host().sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'delayed'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this.#host().rearm();
-          return {
-            schedule: {
-              callback: row.callback,
-              delayInSeconds: row.delayInSeconds ?? 0,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "delayed"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = this.#host().createId();
-      this.#host().sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, delayInSeconds, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'delayed', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this.#host().rearm();
-      return {
-        schedule: {
-          callback,
-          delayInSeconds: when,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "delayed"
-        },
-        created: true
-      };
-    }
-
-    if (typeof when === "string") {
-      const timestamp = Math.floor(
-        getNextCronTime(when, this.#host().now()).getTime() / 1000
-      );
-      const idempotent = options?.idempotent !== false;
-
-      if (idempotent) {
-        const existing = this.#host().sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'cron'
-            AND callback = ${callback}
-            AND cron = ${when}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this.#host().rearm();
-          return {
-            schedule: {
-              callback: row.callback,
-              cron: row.cron ?? when,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "cron"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = this.#host().createId();
-      this.#host().sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, cron, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'cron', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this.#host().rearm();
-      return {
-        schedule: {
-          callback,
-          cron: when,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "cron"
-        },
-        created: true
-      };
-    }
-
-    throw new Error(
-      `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
-    );
-  }
-
-  /**
-   * Insert (or, for idempotent calls, return the existing row for) an
-   * interval schedule. Mirrors {@link insertForOwner} — returns
-   * `{ schedule, created }` so callers can suppress `schedule:create`
-   * on dedup.
-   */
-  private async insertIntervalForOwner<T = string>(
-    owner: SchedulerOwner | null,
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    const ownerPathJson = owner?.data ?? null;
-    const ownerPathKey = owner?.key ?? null;
-    const idempotent = options?.idempotent !== false;
-    const payloadJson = JSON.stringify(payload);
+    const idempotent = isRecurring(timing)
+      ? options?.idempotent !== false
+      : options?.idempotent === true;
 
     if (idempotent) {
-      const existing = this.#host().sql<ScheduleStorageRow>`
-        SELECT * FROM cf_agents_schedules
-        WHERE type = 'interval'
-          AND callback = ${callback}
-          AND intervalSeconds = ${intervalSeconds}
-          AND payload IS ${payloadJson}
-          AND owner_path_key IS ${ownerPathKey}
-        LIMIT 1
-      `;
-
-      if (existing.length > 0) {
-        const row = existing[0];
-        await this.#host().rearm();
-        return {
-          schedule: {
-            callback: row.callback,
-            id: row.id,
-            intervalSeconds: row.intervalSeconds ?? intervalSeconds,
-            payload: JSON.parse(row.payload) as T,
-            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
-            time: row.time,
-            type: "interval"
-          },
-          created: false
-        };
+      const existing = this.#findMatchingRow(
+        owner?.key ?? null,
+        timing,
+        callback,
+        payloadJson
+      );
+      if (existing) {
+        await this.lifecycle.alarms.rearm();
+        return { schedule: this.#rowToSchedule<T>(existing), created: false };
       }
     }
 
-    const id = this.#host().createId();
-    const timestamp = Math.floor(
-      (this.#host().now() + intervalSeconds * 1000) / 1000
-    );
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.#host().sql`
+    const id = nanoid(9);
+    this.#sql`
       INSERT OR REPLACE INTO cf_agents_schedules
-        (id, callback, payload, type, intervalSeconds, time, running, retry_options, owner_path, owner_path_key)
+        (id, callback, payload, type, time, delayInSeconds, cron,
+         intervalSeconds, running, retry_options, owner_path, owner_path_key)
       VALUES
-        (${id}, ${callback}, ${payloadJson}, 'interval', ${intervalSeconds}, ${timestamp}, 0, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
+        (${id}, ${callback}, ${payloadJson}, ${timing.type}, ${timing.time},
+         ${timing.type === "delayed" ? timing.delayInSeconds : null},
+         ${timing.type === "cron" ? timing.cron : null},
+         ${timing.type === "interval" ? timing.intervalSeconds : null},
+         0,
+         ${options?.retry ? JSON.stringify(options.retry) : null},
+         ${owner?.data ?? null}, ${owner?.key ?? null})
     `;
+    await this.lifecycle.alarms.rearm();
 
-    await this.#host().rearm();
     return {
       schedule: {
-        callback,
         id,
-        intervalSeconds,
+        callback,
+        // SAFETY: payload is optional at the call site; historical API shape
+        // types an omitted payload as the schedule's payload type.
         payload: payload as T,
         retry: options?.retry,
-        time: timestamp,
-        type: "interval"
+        ...timing
       },
       created: true
     };
   }
 
-  /** @internal Cancel a row belonging to an opaque host-owned identity. */
-  private async cancelForOwner(
-    owner: SchedulerOwner | null,
+  /** Find the row an idempotent insert deduplicates onto, if any. */
+  #findMatchingRow(
+    ownerKey: string | null,
+    timing: ScheduleTiming,
+    callback: string,
+    payloadJson: string
+  ): ScheduleStorageRow | undefined {
+    let query =
+      "SELECT * FROM cf_agents_schedules " +
+      "WHERE type = ? AND callback = ? AND payload IS ? AND owner_path_key IS ?";
+    const params: (string | number | null)[] = [
+      timing.type,
+      callback,
+      payloadJson,
+      ownerKey
+    ];
+    if (timing.type === "cron") {
+      query += " AND cron = ?";
+      params.push(timing.cron);
+    }
+    if (timing.type === "interval") {
+      query += " AND intervalSeconds = ?";
+      params.push(timing.intervalSeconds);
+    }
+    const rows = this.lifecycle.storage.sql.exec(query, ...params).toArray();
+    // SAFETY: the query selects * from Scheduler's own schema.
+    return rows[0] as unknown as ScheduleStorageRow | undefined;
+  }
+
+  #rowToSchedule<T>(row: ScheduleStorageRow): Schedule<T> {
+    const base = {
+      callback: row.callback,
+      id: row.id,
+      payload: JSON.parse(row.payload) as T,
+      retry: parseRetryOptions(row)
+    };
+
+    switch (row.type) {
+      case "scheduled":
+        return { ...base, time: row.time, type: "scheduled" };
+      case "delayed":
+        return {
+          ...base,
+          delayInSeconds: row.delayInSeconds ?? 0,
+          time: row.time,
+          type: "delayed"
+        };
+      case "cron":
+        return { ...base, cron: row.cron ?? "", time: row.time, type: "cron" };
+      case "interval":
+        return {
+          ...base,
+          intervalSeconds: row.intervalSeconds ?? 0,
+          time: row.time,
+          type: "interval"
+        };
+    }
+  }
+
+  #getForOwner<T = string>(
+    owner: LifecycleRouteAddress | null,
+    id: string
+  ): Schedule<T> | undefined {
+    const ownerPathKey = owner?.key ?? null;
+    const result = this.#sql<ScheduleStorageRow>`
+      SELECT * FROM cf_agents_schedules
+      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
+    `;
+    if (result.length === 0) return undefined;
+    return this.#rowToSchedule<T>(result[0]);
+  }
+
+  #listForOwner<T = string>(
+    owner: LifecycleRouteAddress | null,
+    criteria: ScheduleCriteria = {}
+  ): Schedule<T>[] {
+    let query = "SELECT * FROM cf_agents_schedules WHERE owner_path_key IS ?";
+    const params: Array<string | number | null> = [owner?.key ?? null];
+
+    if (criteria.id) {
+      query += " AND id = ?";
+      params.push(criteria.id);
+    }
+    if (criteria.type) {
+      query += " AND type = ?";
+      params.push(criteria.type);
+    }
+    if (criteria.timeRange) {
+      query += " AND time >= ? AND time <= ?";
+      const start = criteria.timeRange.start || new Date(0);
+      const end = criteria.timeRange.end || new Date(999999999999999);
+      params.push(
+        Math.floor(start.getTime() / 1000),
+        Math.floor(end.getTime() / 1000)
+      );
+    }
+
+    return this.lifecycle.storage.sql
+      .exec(query, ...params)
+      .toArray()
+      .map((row) =>
+        // SAFETY: the query selects * from Scheduler's own schema.
+        this.#rowToSchedule<T>(row as unknown as ScheduleStorageRow)
+      );
+  }
+
+  async #cancelForOwner(
+    owner: LifecycleRouteAddress | null,
     id: string
   ): Promise<{ ok: boolean; callback?: string }> {
     const ownerPathKey = owner?.key ?? null;
-    const result = this.#host().sql<ScheduleStorageRow>`
+    const result = this.#sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
       WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
     `;
     if (result.length === 0) return { ok: false };
 
     const callback = result[0].callback;
-    this.#host().sql`
+    this.#sql`
       DELETE FROM cf_agents_schedules
       WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
     `;
-    await this.#host().rearm();
+    await this.lifecycle.alarms.rearm();
     return { ok: true, callback };
   }
 
-  /** @internal Cancel opaque owner rows selected by a host adapter. */
-  private cancelOwners(matches: (owner: SchedulerOwner) => boolean): void {
-    const rows = this.#host().sql<ScheduleStorageRow>`
+  /** Cancel every owned row matched by a route-address predicate. */
+  #cancelOwners(matches: (owner: LifecycleRouteAddress) => boolean): void {
+    const rows = this.#sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules
       WHERE owner_path IS NOT NULL
     `;
@@ -964,129 +772,97 @@ export class Scheduler<
         })
       )
         continue;
-      this.#emit("schedule:cancel", {
-        callback: row.callback,
-        id: row.id
-      });
-      this.#host().sql`DELETE FROM cf_agents_schedules WHERE id = ${row.id}`;
+      this.#emit("schedule:cancel", { callback: row.callback, id: row.id });
+      this.#sql`DELETE FROM cf_agents_schedules WHERE id = ${row.id}`;
     }
   }
 
-  private rowToSchedule<T>(row: ScheduleStorageRow): Schedule<T> {
-    const base = {
-      callback: row.callback,
-      id: row.id,
-      payload: JSON.parse(row.payload) as T,
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
-
-    switch (row.type) {
-      case "scheduled":
-        return {
-          ...base,
-          time: row.time,
-          type: "scheduled"
-        };
-      case "delayed":
-        return {
-          ...base,
-          delayInSeconds: row.delayInSeconds ?? 0,
-          time: row.time,
-          type: "delayed"
-        };
-      case "cron":
-        return {
-          ...base,
-          cron: row.cron ?? "",
-          time: row.time,
-          type: "cron"
-        };
-      case "interval":
-        return {
-          ...base,
-          intervalSeconds: row.intervalSeconds ?? 0,
-          time: row.time,
-          type: "interval"
-        };
+  /** Delete rows selected by a host-owned failure policy. Best-effort. */
+  #deleteRows(callbacks: ReadonlyArray<string>, executingRowId?: string): void {
+    for (const callback of callbacks) {
+      try {
+        this.#sql`
+          DELETE FROM cf_agents_schedules WHERE callback = ${callback}
+        `;
+      } catch {
+        // best-effort at a host failure boundary
+      }
+    }
+    if (executingRowId) {
+      try {
+        this.#sql`
+          DELETE FROM cf_agents_schedules WHERE id = ${executingRowId}
+        `;
+      } catch {
+        // best-effort at a host failure boundary
+      }
     }
   }
 
-  /** Read a single schedule row for the given owner. */
-  private getForOwner<T = string>(
-    owner: SchedulerOwner | null,
-    id: string
-  ): Schedule<T> | undefined {
-    const ownerPathKey = owner?.key ?? null;
-    const result = this.#host().sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules
-      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
-    `;
-    if (!result || result.length === 0) {
-      return undefined;
+  /** Delay rows selected by a host-owned failure policy. Best-effort. */
+  #moveRows(
+    callbacks: ReadonlyArray<string>,
+    executingRowId: string | undefined,
+    nextTime: number
+  ): void {
+    for (const callback of callbacks) {
+      try {
+        this.#sql`
+          UPDATE cf_agents_schedules
+          SET time = ${nextTime}
+          WHERE callback = ${callback} AND time <= ${nextTime}
+        `;
+      } catch {
+        // best-effort at a host failure boundary
+      }
     }
-    return this.rowToSchedule<T>(result[0]);
+    if (executingRowId) {
+      try {
+        this.#sql`
+          UPDATE cf_agents_schedules
+          SET time = ${nextTime}
+          WHERE id = ${executingRowId} AND time <= ${nextTime}
+        `;
+      } catch {
+        // best-effort at a host failure boundary
+      }
+    }
   }
 
-  /** List schedule rows for the given owner, filtered by criteria. */
-  private listForOwner<T = string>(
-    owner: SchedulerOwner | null,
-    criteria: ScheduleCriteria = {}
-  ): Schedule<T>[] {
-    const ownerPathKey = owner?.key ?? null;
-    let query = "SELECT * FROM cf_agents_schedules WHERE owner_path_key IS ?";
-    const params: Array<string | number | null> = [ownerPathKey];
+  // ── Execution ────────────────────────────────────────────────────────────
 
-    if (criteria.id) {
-      query += " AND id = ?";
-      params.push(criteria.id);
-    }
+  #emit(type: SchedulerEventType, payload: Record<string, unknown>): void {
+    this.lifecycle.events.emit(type, payload);
+  }
 
-    if (criteria.type) {
-      query += " AND type = ?";
-      params.push(criteria.type);
-    }
-
-    if (criteria.timeRange) {
-      query += " AND time >= ? AND time <= ?";
-      const start = criteria.timeRange.start || new Date(0);
-      const end = criteria.timeRange.end || new Date(999999999999999);
-      params.push(
-        Math.floor(start.getTime() / 1000),
-        Math.floor(end.getTime() / 1000)
-      );
-    }
-
-    return this.#host()
-      .rawSql(query, ...params)
-      .toArray()
-      .map((row) =>
-        this.rowToSchedule<T>(row as unknown as ScheduleStorageRow)
-      );
+  #emitCreated(result: InsertResult<unknown>): void {
+    if (!result.created) return;
+    this.#emit("schedule:create", {
+      callback: result.schedule.callback,
+      id: result.schedule.id
+    });
   }
 
   /**
    * Execute a local schedule row with retry handling.
    *
-   * The capability remains outside ambient context. The callback adapter
-   * establishes Lifecycle Object context only around user callback invocation.
+   * The capability remains outside ambient context. Lifecycle's host-callback
+   * boundary establishes host context only around user callback invocation.
    */
-  private async executeCallback(row: ScheduleStorageRow): Promise<void> {
-    if (!this.#host().hasCallback(row.callback)) {
+  async #executeCallback(row: ScheduleStorageRow): Promise<void> {
+    if (!this.lifecycle.callbacks.has(row.callback)) {
       console.error(`callback ${row.callback} not found`);
       return;
     }
 
-    const retryOpts = parseRetryOptions(
-      row as unknown as Record<string, unknown>
-    );
     const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-      retryOpts,
-      this.#host().retryDefaults()
+      parseRetryOptions(row),
+      this.#retryDefaults
     );
 
     let parsedPayload: unknown;
     try {
-      parsedPayload = JSON.parse(row.payload as string);
+      parsedPayload = JSON.parse(row.payload);
     } catch (error) {
       console.error(
         `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
@@ -1101,13 +877,13 @@ export class Scheduler<
       return;
     }
 
-    // A one-shot row is deleted by `alarm()` once this returns normally.
-    // If it fails with a superseded-isolate error (a deploy / code update
-    // replaced the isolate — "reset because its code was updated" or "this
-    // script has been upgraded"), burning in-process retries is futile
+    // A one-shot row is deleted by the alarm phase once this returns
+    // normally. If it fails with a superseded-isolate error (a deploy / code
+    // update replaced the isolate — "reset because its code was updated" or
+    // "this script has been upgraded"), burning in-process retries is futile
     // (code never reloads mid-invocation) and swallowing the error would let
-    // `alarm()` delete the row. Re-throw platform transients so the durable
-    // alarm can retry the preserved row on a fresh invocation.
+    // the alarm phase delete the row. Re-throw platform transients so the
+    // durable alarm can retry the preserved row on a fresh invocation.
     const isOneShotSchedule =
       row.type === "delayed" || row.type === "scheduled";
     const shouldDeferReset = (error: unknown): boolean =>
@@ -1117,13 +893,10 @@ export class Scheduler<
     const shouldDeferMemoryLimit = (error: unknown): boolean =>
       isOneShotSchedule && isDurableObjectMemoryLimitReset(error);
 
-    const schedule = this.rowToSchedule<unknown>(row);
+    const schedule = this.#rowToSchedule<unknown>(row);
 
     try {
-      this.#emit("schedule:execute", {
-        callback: row.callback,
-        id: row.id
-      });
+      this.#emit("schedule:execute", { callback: row.callback, id: row.id });
 
       await tryN(
         maxAttempts,
@@ -1136,11 +909,10 @@ export class Scheduler<
               maxAttempts
             });
           }
-          await this.#host().invokeCallback(
-            row.callback,
+          await this.lifecycle.callbacks.invoke(row.callback, [
             parsedPayload,
             schedule
-          );
+          ]);
         },
         {
           baseDelayMs,
@@ -1178,191 +950,181 @@ export class Scheduler<
         attempts: maxAttempts
       });
       try {
-        await this.#host().onError(error);
+        await this.#onError?.(error);
       } catch {
         // swallow onError errors
       }
     }
   }
 
-  /** Execute every schedule row due in the current Lifecycle alarm phase. */
-  private async fireDueSchedules(): Promise<void> {
-    const now = Math.floor(this.#host().now() / 1000);
-
-    // Get all schedules that should be executed now
-    const result = this.#host().sql<ScheduleStorageRow>`
+  /** Execute every schedule row due in the current alarm phase. */
+  async #fireDueSchedules(): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    const dueRows = this.#sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules WHERE time <= ${now}
     `;
+    this.#warnStaleOneShots(dueRows);
 
-    if (result && Array.isArray(result)) {
-      // Warn when many stale one-shot rows share the same callback — this
-      // usually means schedule() was called repeatedly (e.g. in onStart)
-      // without idempotent:true and rows accumulated across restarts.
-      const DUPLICATE_SCHEDULE_THRESHOLD = 10;
-      const oneShotCounts = new Map<string, number>();
-      for (const row of result) {
-        if (row.type === "delayed" || row.type === "scheduled") {
-          oneShotCounts.set(
-            row.callback,
-            (oneShotCounts.get(row.callback) ?? 0) + 1
-          );
-        }
+    for (const row of dueRows) {
+      const outcome = await this.#runDueRow(row, now);
+      if (outcome === "stop") return;
+      if (outcome === "executed") this.#advanceRow(row);
+    }
+  }
+
+  /**
+   * Warn when many stale one-shot rows share the same callback — this
+   * usually means schedule() was called repeatedly (e.g. in onStart)
+   * without idempotent:true and rows accumulated across restarts.
+   */
+  #warnStaleOneShots(dueRows: ReadonlyArray<ScheduleStorageRow>): void {
+    const DUPLICATE_SCHEDULE_THRESHOLD = 10;
+    const oneShotCounts = new Map<string, number>();
+    for (const row of dueRows) {
+      if (row.type === "delayed" || row.type === "scheduled") {
+        oneShotCounts.set(
+          row.callback,
+          (oneShotCounts.get(row.callback) ?? 0) + 1
+        );
       }
-      for (const [cb, count] of oneShotCounts) {
-        if (count >= DUPLICATE_SCHEDULE_THRESHOLD) {
-          try {
-            console.warn(
-              `Processing ${count} stale "${cb}" schedules in a single alarm cycle. ` +
-                `This usually means schedule() is being called repeatedly without ` +
-                `the idempotent option. Consider using scheduleEvery() for recurring ` +
-                `tasks or passing { idempotent: true } to schedule().`
-            );
-            this.#emit("schedule:duplicate_warning", {
-              callback: cb,
-              count,
-              type: "one-shot"
-            });
-          } catch {
-            // Warning emission is non-critical — never block row processing.
-          }
-        }
-      }
-
-      for (const row of result as ScheduleStorageRow[]) {
-        let executed = false;
-
-        // Overlap prevention for interval schedules with hung callback detection
-        if (row.type === "interval" && row.running === 1) {
-          const executionStartedAt =
-            (row as { execution_started_at?: number }).execution_started_at ??
-            0;
-          const hungTimeoutSeconds = this.#host().hungScheduleTimeoutSeconds();
-          const elapsedSeconds = now - executionStartedAt;
-
-          if (elapsedSeconds < hungTimeoutSeconds) {
-            console.warn(
-              `Skipping interval schedule ${row.id}: previous execution still running`
-            );
-            continue;
-          }
-          // Previous execution appears hung, force reset and re-execute
-          console.warn(
-            `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
-          );
-        }
-
-        // Mark interval as running before execution
-        if (row.type === "interval") {
-          this.#host()
-            .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
-        }
-
-        if (row.owner_path) {
-          try {
-            executed = (await this.lifecycle.routes.to(
-              {
-                key: row.owner_path_key ?? row.owner_path,
-                data: row.owner_path
-              },
-              { type: "dispatch", row } satisfies SchedulerRouteMessage
-            )) as boolean;
-          } catch (e) {
-            console.error(
-              `error dispatching scheduled callback "${row.callback}"`,
-              e
-            );
-            this.#emit("schedule:error", {
-              callback: row.callback,
-              id: row.id,
-              error: e instanceof Error ? e.message : String(e),
-              attempts: 0
-            });
-            try {
-              await this.#host().onError(e);
-            } catch {
-              // swallow onError errors
-            }
-            // Reset the in-flight flag for interval rows so the row
-            // doesn't stay stuck in `running=1` when dispatch fails
-            // (for example, an adapter can no longer resolve its owner). The
-            // next alarm cycle will retry.
-            if (row.type === "interval") {
-              this.#host().sql`
-                UPDATE cf_agents_schedules SET running = 0 WHERE id = ${row.id}
-              `;
-            }
-            continue;
-          }
-        } else {
-          // Retain the row ID when callback execution escapes so a host failure
-          // policy can target the exact looping row without owning storage.
-          this._executingScheduleRowId = row.id;
-          await this.executeCallback(row);
-          this._executingScheduleRowId = undefined;
-          executed = true;
-        }
-
-        if (this.#host().isDestroyed()) return;
-        if (!executed) continue;
-
-        if (row.type === "cron") {
-          // Update next execution time for cron schedules
-          const nextExecutionTime = getNextCronTime(
-            row.cron ?? "",
-            this.#host().now()
-          );
-          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
-
-          this.#host().sql`
-            UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else if (row.type === "interval") {
-          // Reset running flag and schedule next interval execution
-          const nextTimestamp =
-            Math.floor(this.#host().now() / 1000) + (row.intervalSeconds ?? 0);
-
-          this.#host().sql`
-            UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else {
-          // Delete one-time schedules after execution
-          this.#host().sql`
-            DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-          `;
-        }
+    }
+    for (const [callback, count] of oneShotCounts) {
+      if (count < DUPLICATE_SCHEDULE_THRESHOLD) continue;
+      try {
+        console.warn(
+          `Processing ${count} stale "${callback}" schedules in a single alarm cycle. ` +
+            `This usually means schedule() is being called repeatedly without ` +
+            `the idempotent option. Consider using scheduleEvery() for recurring ` +
+            `tasks or passing { idempotent: true } to schedule().`
+        );
+        this.#emit("schedule:duplicate_warning", {
+          callback,
+          count,
+          type: "one-shot"
+        });
+      } catch {
+        // Warning emission is non-critical — never block row processing.
       }
     }
   }
 
-  /** Contribute the earliest pending schedule to Lifecycle alarm selection. */
-  getNextAlarm(): number | null {
-    const nowMs = this.#host().now();
-    const nowSeconds = Math.floor(nowMs / 1000);
-    const hungCutoffSeconds =
-      nowSeconds - this.#host().hungScheduleTimeoutSeconds();
-    const nextSchedule = this.nextScheduleTimeMs(nowMs, hungCutoffSeconds);
-    const hungIntervalRecheck =
-      this.nextHungIntervalRecheckMs(hungCutoffSeconds);
-    if (nextSchedule === null) return hungIntervalRecheck;
-    if (hungIntervalRecheck === null) return nextSchedule;
-    return Math.min(nextSchedule, hungIntervalRecheck);
+  /**
+   * Run one due row.
+   *
+   * @returns "executed" when the row ran and should advance, "skipped" when
+   * it should be left for a later alarm cycle, and "stop" when host teardown
+   * disabled further durable work mid-phase.
+   */
+  async #runDueRow(
+    row: ScheduleStorageRow,
+    now: number
+  ): Promise<"executed" | "skipped" | "stop"> {
+    // Overlap prevention for interval schedules with hung callback detection.
+    if (row.type === "interval" && row.running === 1) {
+      const elapsedSeconds = now - (row.execution_started_at ?? 0);
+      if (elapsedSeconds < this.#hungScheduleTimeoutSeconds) {
+        console.warn(
+          `Skipping interval schedule ${row.id}: previous execution still running`
+        );
+        return "skipped";
+      }
+      // Previous execution appears hung; force reset and re-execute.
+      console.warn(
+        `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
+      );
+    }
+
+    if (row.type === "interval") {
+      this.#sql`
+        UPDATE cf_agents_schedules
+        SET running = 1, execution_started_at = ${now}
+        WHERE id = ${row.id}
+      `;
+    }
+
+    let executed = false;
+    if (row.owner_path) {
+      try {
+        executed = (await this.lifecycle.routes.to(
+          { key: row.owner_path_key ?? row.owner_path, data: row.owner_path },
+          { type: "dispatch", row } satisfies SchedulerRouteMessage
+        )) as boolean;
+      } catch (error) {
+        console.error(
+          `error dispatching scheduled callback "${row.callback}"`,
+          error
+        );
+        this.#emit("schedule:error", {
+          callback: row.callback,
+          id: row.id,
+          error: error instanceof Error ? error.message : String(error),
+          attempts: 0
+        });
+        try {
+          await this.#onError?.(error);
+        } catch {
+          // swallow onError errors
+        }
+        // Reset the in-flight flag for interval rows so the row doesn't stay
+        // stuck in `running=1` when dispatch fails (for example, a transport
+        // can no longer resolve its owner). The next alarm cycle will retry.
+        if (row.type === "interval") {
+          this.#sql`
+            UPDATE cf_agents_schedules SET running = 0 WHERE id = ${row.id}
+          `;
+        }
+        return "skipped";
+      }
+    } else {
+      // Retain the row ID while callback execution can escape so a host
+      // failure policy can target the exact looping row without owning
+      // storage.
+      this.#executingRowId = row.id;
+      await this.#executeCallback(row);
+      this.#executingRowId = undefined;
+      executed = true;
+    }
+
+    // A callback may have destroyed the host; its storage is gone.
+    if (this.lifecycle.alarms.disabled()) return "stop";
+    return executed ? "executed" : "skipped";
   }
+
+  /** Reschedule a recurring row or delete an executed one-shot row. */
+  #advanceRow(row: ScheduleStorageRow): void {
+    if (row.type === "cron") {
+      const nextTimestamp = Math.floor(
+        nextCronTimeMs(row.cron ?? "", Date.now()) / 1000
+      );
+      this.#sql`
+        UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
+      `;
+    } else if (row.type === "interval") {
+      const nextTimestamp =
+        Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
+      this.#sql`
+        UPDATE cf_agents_schedules
+        SET running = 0, time = ${nextTimestamp}
+        WHERE id = ${row.id}
+      `;
+    } else {
+      this.#sql`
+        DELETE FROM cf_agents_schedules WHERE id = ${row.id}
+      `;
+    }
+  }
+
+  // ── Alarm contribution ───────────────────────────────────────────────────
 
   /**
    * Earliest wall-clock time (ms) a schedule row is ready to execute,
-   * clamped to the future, or `null` when no row qualifies. Coordinated
-   * hosts include this candidate when selecting their shared physical alarm.
+   * clamped to the future, or `null` when no row qualifies.
    */
-  private nextScheduleTimeMs(
-    nowMs: number,
-    hungCutoffSeconds: number
-  ): number | null {
+  #nextScheduleTimeMs(nowMs: number, hungCutoffSeconds: number): number | null {
     // Find the earliest schedule row that is safe to execute now, even if it
     // is already overdue. Overdue schedules can happen after a DO restart
     // because the SQLite row survives but the in-memory alarm does not.
-    const readySchedules = this.#host().sql<{
-      time: number;
-    }>`
+    const readySchedules = this.#sql<{ time: number }>`
       SELECT time FROM cf_agents_schedules
       WHERE type != 'interval'
         OR running = 0
@@ -1372,20 +1134,20 @@ export class Scheduler<
     `;
 
     if (readySchedules.length > 0 && "time" in readySchedules[0]) {
-      return Math.max((readySchedules[0].time as number) * 1000, nowMs + 1);
+      return Math.max(readySchedules[0].time * 1000, nowMs + 1);
     }
     return null;
   }
 
   /**
-   * Wall-clock time (ms) at which the earliest still-running (not yet
-   * hung) interval schedule crosses the hung timeout and must be
-   * re-checked, or `null` when none is running.
+   * Wall-clock time (ms) at which the earliest still-running (not yet hung)
+   * interval schedule crosses the hung timeout and must be re-checked, or
+   * `null` when none is running.
    */
-  private nextHungIntervalRecheckMs(hungCutoffSeconds: number): number | null {
+  #nextHungIntervalRecheckMs(hungCutoffSeconds: number): number | null {
     // Running interval schedules that are not hung yet still need a future
     // alarm so the runtime can re-check them once they cross the hung timeout.
-    const recoveringIntervals = this.#host().sql<{
+    const recoveringIntervals = this.#sql<{
       execution_started_at: number | null;
     }>`
       SELECT execution_started_at FROM cf_agents_schedules
@@ -1396,30 +1158,10 @@ export class Scheduler<
       LIMIT 1
     `;
 
-    if (
-      recoveringIntervals.length > 0 &&
-      recoveringIntervals[0].execution_started_at !== null
-    ) {
-      return (
-        (recoveringIntervals[0].execution_started_at +
-          this.#host().hungScheduleTimeoutSeconds()) *
-        1000
-      );
+    const startedAt = recoveringIntervals[0]?.execution_started_at;
+    if (startedAt !== null && startedAt !== undefined) {
+      return (startedAt + this.#hungScheduleTimeoutSeconds) * 1000;
     }
     return null;
   }
-}
-
-/** @internal Construct a Scheduler with a host integration adapter. */
-export function createScheduler<Host extends LifecycleObject>(
-  target: Host,
-  options: SchedulerOptions,
-  integration: SchedulerIntegration<Host>
-): Scheduler<Host> {
-  const scheduler = new Scheduler(target, options);
-  const setIntegration = schedulerIntegrationSetters.get(scheduler);
-  if (!setIntegration) throw new Error("Scheduler integration is unavailable");
-  // SAFETY: Scheduler and integration share Host at this package boundary.
-  setIntegration(integration as SchedulerIntegration<LifecycleObject>);
-  return scheduler;
 }

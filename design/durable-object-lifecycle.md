@@ -56,12 +56,22 @@ contributes its earliest runnable row or hung-interval recheck. Agent constructs
 the same Scheduler exposed at `Agent.this.scheduler`; existing Agent scheduling
 methods remain compatibility delegators.
 
-Capabilities extending `LifecycleCapability` receive storage, readiness, alarm
-coordination, events, and generic capability routing. Lifecycle routes an
+Capabilities extending `LifecycleCapability` receive storage, readiness,
+startup state, alarm coordination, host-callback dispatch, events, and generic
+capability routing. That service surface is the whole contract: Scheduler
+consumes only standard services plus its own policy options, and a future
+capability composes the same way with no host adapter. Lifecycle routes an
 envelope to the matching capability ID at the destination. Agent supplies an
 internal facet transport through one generic RPC aperture, so Scheduler routes
 owner-scoped CRUD and callbacks without facet-specific methods or an Agent
 adapter. Existing facet rows stay in the root Scheduler table.
+
+Host adaptation happens only at a composition root, through three internal
+apertures: the capability event sink, the routed-capability transport, and the
+host-callback invoker. Agent uses them to route events into its observability
+interface, carry envelopes between facets, and wrap capability-invoked user
+callbacks in its tracing invocation boundary. A plain Lifecycle Object uses
+the defaults and configures nothing.
 
 Capabilities publish best-effort telemetry through
 `this.lifecycle.events.emit()`. Lifecycle sends plain Lifecycle Object events to
@@ -73,6 +83,26 @@ Alarm contribution, capability hooks, and capability-event delivery run outside
 ambient host context.
 Scheduled methods are user callbacks, so Scheduler invokes them in Lifecycle
 Object or Agent context as appropriate.
+
+## Testing capabilities
+
+Capabilities are testable at every layer without module mocks:
+
+1. **Pure domain logic** (timing parsers, selection rules) lives in dependency
+   free modules and is unit tested directly, e.g.
+   `tests/schedule-timing.test.ts`.
+2. **The capability itself** binds fake `LifecycleServices` through the public
+   `bindLifecycleCapability()` seam — real Durable Object storage, recorded
+   rearm/event/callback interactions, no Lifecycle instance — e.g.
+   `tests/lifecycle/scheduler-capability.test.ts`.
+3. **Lifecycle integration** uses real Durable Objects in the Workers pool to
+   prove alarm arbitration, phase order, context boundaries, and eviction
+   recovery — `tests/lifecycle/lifecycle.test.ts`.
+4. **Host surface** tests exercise the batteries-included Agent API —
+   `tests/schedule.test.ts` and friends.
+
+A new capability should arrive with layers 2 and 3; layer 1 applies when it
+owns non-trivial pure rules.
 
 ## Host context
 
@@ -95,6 +125,13 @@ their own `this`, phase arguments, and explicit dependencies. Lifecycle exits
 any inherited current-Agent context before invoking capability startup,
 request, or alarm hooks, so behavior does not depend on the entrypoint that
 triggered the phase.
+
+User callbacks are the exception: when a capability invokes a named host
+method through `this.lifecycle.callbacks.invoke()`, Lifecycle establishes the
+host invocation context around that call. This is the one boundary a host
+composition root may wrap — Agent substitutes its tracing invocation scope —
+so every capability that dispatches user callbacks inherits the host's
+invocation semantics without capability-specific hooks.
 
 ## Agent entry surfaces
 

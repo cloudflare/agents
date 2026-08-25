@@ -47,6 +47,18 @@ export type Schedule<T = string> = {
     }
 );
 
+/** Options accepted when creating one schedule. */
+export type ScheduleOptions = {
+  /** Retry policy for callback execution, overriding the Scheduler default. */
+  retry?: RetryOptions;
+  /**
+   * Deduplicate onto an existing matching schedule instead of creating a new
+   * row. Defaults to `true` for cron and interval schedules, `false` for
+   * one-shot schedules.
+   */
+  idempotent?: boolean;
+};
+
 /** Filters accepted by `getSchedules()` and `listSchedules()`. */
 export type ScheduleCriteria = {
   id?: string;

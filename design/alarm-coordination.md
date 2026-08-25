@@ -51,10 +51,14 @@ one. Sharing the physical alarm is not such a dependency.
 
 ## Agent integration
 
-Agent installs the public Scheduler primitive. Lifecycle's generic routing
-surface carries owner-scoped Scheduler messages to the root and dispatches due
-callbacks to facets through one internal Agent transport aperture. Existing
-facet schedule rows remain in the root Scheduler table; no data migration or
+Agent installs the public Scheduler primitive with policy options only —
+retry defaults, hung-interval timeout, and an error observer. Everything else
+Scheduler needs (storage, rearm, teardown state, startup state, host-callback
+dispatch) arrives through the standard capability services, so there is no
+Agent-specific Scheduler adapter. Lifecycle's generic routing surface carries
+owner-scoped Scheduler messages to the root and dispatches due callbacks to
+facets through one internal Agent transport aperture. Existing facet schedule
+rows remain in the root Scheduler table; no data migration or
 Scheduler-specific Agent RPC methods are required.
 
 Scheduler publishes telemetry through Lifecycle's event bus. Plain Lifecycle

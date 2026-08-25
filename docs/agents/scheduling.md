@@ -52,6 +52,11 @@ contribution from Scheduler, other capabilities, and the host, then rearms after
 every alarm phase. A future Fiber or MCP capability can contribute its own wake
 time without storing work in Scheduler or depending on it.
 
+Scheduler's primary API is small: `set()` and `every()` create typed schedules
+(`schedule()` and `scheduleEvery()` are their string-name equivalents), and
+`get()`, `list()`, and `cancel()` manage them. All of these are asynchronous
+and work inside routed sub-agents.
+
 Scheduler Lifecycle hooks run without ambient host context. Scheduled methods
 are user callbacks, so they run with the Lifecycle Object as `this` and with
 that object available through `getCurrentAgent()`.
@@ -66,10 +71,12 @@ Existing Agent applications continue to use the established methods:
 - `this.cancelSchedule()` removes a schedule.
 
 These methods delegate to `this.scheduler`; no setup or migration is required.
-Sub-agent ownership, Agent observability, retry defaults, and OOM handling are
-supplied by the Agent integration. Scheduler contributes its next wake time to
-the same Lifecycle alarm selection as Agent keep-alive, fibers, sub-agent work,
-and deferred destruction.
+Agent passes only policy options (retry defaults, hung-interval timeout, error
+routing) and adapts Lifecycle's event sink, facet transport, and host-callback
+boundary at its composition root — there is no Agent-specific Scheduler
+adapter. Scheduler contributes its next wake time to the same Lifecycle alarm
+selection as Agent keep-alive, fibers, sub-agent work, and deferred
+destruction.
 
 Import `Scheduler` and runtime schedule types from the dependency-light entry
 point:

@@ -942,11 +942,6 @@ export class MCPClientManager extends LifecycleCapability {
     clientName: string,
     clientId?: string
   ): AgentMcpOAuthProvider {
-    if (!this.lifecycle.storage) {
-      throw new Error(
-        "Cannot create auth provider: storage is not initialized"
-      );
-    }
     const authProvider = new DurableObjectOAuthClientProvider(
       this.lifecycle.storage,
       clientName,
