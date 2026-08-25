@@ -3,6 +3,7 @@
  * Used internally by both withVoice and withVoiceInput mixins.
  */
 
+import { logVoiceError, toVoiceError } from "./errors";
 import type {
   Transcriber,
   TranscriberSession,
@@ -50,9 +51,14 @@ export function runBackground(
 ): void {
   Promise.resolve()
     .then(fn)
-    .catch((err: unknown) => {
-      if (isConnectionTeardownError(err)) return;
-      console.error(`[voice] ${label} failed:`, err);
+    .catch((error: unknown) => {
+      if (isConnectionTeardownError(error)) return;
+      logVoiceError({
+        component: "voice",
+        stage: "background_task",
+        message: `${label} failed`,
+        error: toVoiceError(error, `${label} failed`)
+      });
     });
 }
 

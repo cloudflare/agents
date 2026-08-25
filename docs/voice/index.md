@@ -278,7 +278,10 @@ const VoiceAgent = withVoice(Agent, {
   historyLimit: 20, // Max messages loaded for context (default: 20)
   audioFormat: "mp3", // Audio format sent to client (default: "mp3")
   sampleRate: 16000, // Sample rate (Hz) for raw pcm16 payloads (default: 16000)
-  maxMessageCount: 1000 // Max messages in SQLite (default: 1000)
+  maxMessageCount: 1000, // Max messages in SQLite (default: 1000)
+  diagnostics: {
+    browserConsole: false // forward server diagnostics to browser console (default: false)
+  }
 });
 ```
 
@@ -333,7 +336,7 @@ const {
   status, // "idle" | "listening" | "thinking" | "speaking"
   transcript, // TranscriptMessage[] — conversation history
   interimTranscript, // string | null — real-time partial transcript
-  metrics, // VoicePipelineMetrics | null
+  turnMetrics, // VoiceTurnMetrics | null (latest stable terminal summary)
   audioLevel, // number (0–1) — current mic RMS level
   isMuted, // boolean
   connected, // boolean — WebSocket connected
@@ -393,6 +396,7 @@ function Dictation() {
   const {
     transcript, // string — accumulated text from all utterances
     interimTranscript, // string | null — current partial transcript
+    turnMetrics, // VoiceTurnMetrics | null — latest terminal STT summary
     isListening, // boolean
     audioLevel, // number (0–1)
     isMuted, // boolean
@@ -451,18 +455,18 @@ client.disconnect();
 
 ### Events
 
-| Event               | Data Type              | Description                           |
-| ------------------- | ---------------------- | ------------------------------------- |
-| `statuschange`      | `VoiceStatus`          | Pipeline state changed                |
-| `transcriptchange`  | `TranscriptMessage[]`  | Transcript updated                    |
-| `interimtranscript` | `string \| null`       | Interim transcript from streaming STT |
-| `metricschange`     | `VoicePipelineMetrics` | Pipeline timing metrics               |
-| `audiolevelchange`  | `number`               | Mic audio level (0–1)                 |
-| `connectionchange`  | `boolean`              | WebSocket connected/disconnected      |
-| `mutechange`        | `boolean`              | Mute state changed                    |
-| `error`             | `string \| null`       | Error occurred                        |
-| `outputdeviceerror` | `string \| null`       | Non-fatal speaker routing issue       |
-| `custommessage`     | `unknown`              | Non-voice message from server         |
+| Event               | Data Type             | Description                              |
+| ------------------- | --------------------- | ---------------------------------------- |
+| `statuschange`      | `VoiceStatus`         | Pipeline state changed                   |
+| `transcriptchange`  | `TranscriptMessage[]` | Transcript updated                       |
+| `interimtranscript` | `string \| null`      | Interim transcript from streaming STT    |
+| `turnmetrics`       | `VoiceTurnMetrics`    | Stable terminal per-turn summary metrics |
+| `audiolevelchange`  | `number`              | Mic audio level (0–1)                    |
+| `connectionchange`  | `boolean`             | WebSocket connected/disconnected         |
+| `mutechange`        | `boolean`             | Mute state changed                       |
+| `error`             | `string \| null`      | Error occurred                           |
+| `outputdeviceerror` | `string \| null`      | Non-fatal speaker routing issue          |
+| `custommessage`     | `unknown`             | Non-voice message from server            |
 
 ### Advanced Options
 
@@ -688,19 +692,31 @@ Phone → Twilio → WebSocket → TwilioAdapter → WebSocket → VoiceAgent
 
 **Important:** `WorkersAITTS` returns MP3, which cannot be decoded to PCM in the Workers runtime. When using the Twilio adapter, use a TTS provider that outputs raw PCM (for example, ElevenLabs with `outputFormat: "pcm_16000"`).
 
-## Pipeline Metrics
+## Pipeline metrics
 
-`withVoice` agents emit timing metrics after each turn:
+`VoiceTurnMetrics` is emitted once for every allocated speech or text turn, including aborted, skipped, empty, model-error, and TTS-error outcomes. `turnId`, `source`, and `outcome` are dimensions used to correlate and interpret the timing fields; they are not measurements. Unreached timings are omitted rather than set to zero. All durations use the Worker clock, overlap, and are not additive.
+
+```typescript
+client.addEventListener("turnmetrics", (turnMetrics) => {
+  console.log(turnMetrics.turnId, turnMetrics.outcome);
+});
+
+client.turnMetrics; // VoiceTurnMetrics | null, the last terminal summary
+```
+
+`useVoiceAgent()` and `useVoiceInput()` expose the same last value as `turnMetrics`. `withVoiceInput` emits the speech, `afterTranscribe`, and total timings it can measure. Model and TTS timings remain absent.
+
+| Kind                  | Stable fields when available                                                                                                           |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Dimensions            | `turnId`, `source`, `outcome`                                                                                                          |
+| Speech timing         | `speechStartToFirstInterimMs`, `speechStartToFinalMs`                                                                                  |
+| Turn and model timing | `afterTranscribeMs`, `modelToFirstTextMs`, `exposedReasoningMs`, `modelStreamConsumptionMs`, `finalInputToFirstAudioMs`, `turnTotalMs` |
+| TTS timing            | `ttsToFirstAudioMs`, `ttsWallMs`, cumulative overlapping `ttsWorkMs`                                                                   |
+
+Terminal outcomes are `completed`, `no_output`, `output_limit`, `content_filtered`, `model_error`, `tts_error`, `aborted`, `skipped`, and `error`.
 
 ```tsx
-const { metrics } = useVoiceAgent({ agent: "MyAgent" });
-
-// metrics: {
-//   llm_ms: 850,         // LLM response time
-//   tts_ms: 200,         // Cumulative TTS synthesis time
-//   first_audio_ms: 950, // Time to first audio byte
-//   total_ms: 1200       // Total pipeline time
-// }
+const { turnMetrics } = useVoiceAgent({ agent: "MyAgent" });
 ```
 
 ## Conversation History
