@@ -139,6 +139,17 @@ type LifecycleHost<Props extends object> = {
 };
 
 /**
+ * The names of the semantic callbacks a lifecycle dispatches to its host.
+ *
+ * A host that also exposes its methods over native Durable Object RPC can use
+ * this to tell lifecycle dispatch apart from its own application surface.
+ */
+export type LifecycleHostCallback = Exclude<
+  keyof LifecycleHost<Record<string, unknown>>,
+  "ctx" | "constructor"
+>;
+
+/**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
  * Construct this as an instance field on a class that directly extends

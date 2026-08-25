@@ -164,7 +164,9 @@ async runTask(): Promise<void> {
 }
 ```
 
-Agent's internal RPC entry points already enforce this boundary.
+An `Agent` enforces this boundary for you. Its internal RPC entry points and
+the public methods your subclass exposes over RPC start the lifecycle before
+they run, so a cold instance never serves a call against uninitialized state.
 
 ## Object names
 

@@ -7,7 +7,9 @@ import { describe, expect, it } from "vitest";
 // reproduced with an in-memory mock).
 describe("DurableObjectOAuthClientProvider PKCE binding", () => {
   function agent() {
-    const id = env.TestOAuthAgent.newUniqueId();
+    const id = env.TestOAuthAgent.idFromName(
+      `oauth-provider-${crypto.randomUUID()}`
+    );
     return env.TestOAuthAgent.get(id);
   }
 

@@ -14,6 +14,95 @@ import { getAgentByName } from "../..";
  * these run against real Durable Object stubs with SQLite.
  */
 describe("waitForConnections E2E", () => {
+  it("initializes a cold Agent before an application RPC method executes", async () => {
+    // Arrange: seed persisted MCP state through synchronous SQL without running
+    // the Agent lifecycle.
+    const agentId = env.TestWaitConnectionsAgent.idFromName(
+      `cold-custom-rpc-${crypto.randomUUID()}`
+    );
+    const stub = env.TestWaitConnectionsAgent.get(agentId);
+
+    stub.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        callback_url TEXT NOT NULL,
+        client_id TEXT,
+        auth_url TEXT,
+        server_options TEXT
+      )
+    `;
+    stub.sql`
+      INSERT INTO cf_agents_mcp_servers (
+        id, name, server_url, callback_url, client_id, auth_url, server_options
+      ) VALUES (
+        'cold-custom-server',
+        'Cold Custom Server',
+        'http://cold-custom.example.com',
+        'http://localhost:3000/callback',
+        NULL,
+        NULL,
+        NULL
+      )
+    `;
+
+    // Act: waitAndReport is a test-fixture application RPC that waits for the
+    // MCP restores started by onStart, then reports their in-memory state
+    // without triggering another restore.
+    const result = await stub.waitAndReport();
+
+    // Assert
+    expect(result.connectionIds).toContain("cold-custom-server");
+  });
+
+  it("initializes a cold Agent before an inherited Agent RPC method executes", async () => {
+    // Arrange: seed persisted MCP state through synchronous SQL without running
+    // the Agent lifecycle.
+    const agentId = env.TestWaitConnectionsAgent.idFromName(
+      `cold-base-rpc-${crypto.randomUUID()}`
+    );
+    const stub = env.TestWaitConnectionsAgent.get(agentId);
+
+    stub.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        callback_url TEXT NOT NULL,
+        client_id TEXT,
+        auth_url TEXT,
+        server_options TEXT
+      )
+    `;
+    stub.sql`
+      INSERT INTO cf_agents_mcp_servers (
+        id, name, server_url, callback_url, client_id, auth_url, server_options
+      ) VALUES (
+        'cold-base-server',
+        'Cold Base Server',
+        'http://cold-base.example.com',
+        'http://localhost:3000/callback',
+        NULL,
+        NULL,
+        NULL
+      )
+    `;
+
+    // Act: getMcpServers is the inherited Agent RPC whose cold invocation must
+    // restore the persisted MCP server before it reads the in-memory view.
+    const result = await (
+      stub as unknown as {
+        getMcpServers(): Promise<{
+          servers: Record<string, { state: string }>;
+        }>;
+      }
+    ).getMcpServers();
+
+    // Assert
+    expect(result.servers["cold-base-server"]?.state).toBe("connecting");
+  });
+
   it("should resolve immediately when agent has no MCP servers", async () => {
     const agentId = env.TestWaitConnectionsAgent.idFromName("no-servers-test");
     const stub = env.TestWaitConnectionsAgent.get(agentId);
