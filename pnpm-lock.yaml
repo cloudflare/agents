@@ -759,15 +759,15 @@ importers:
 
   examples/channels:
     dependencies:
-      '@cloudflare/channels':
-        specifier: '*'
-        version: link:../../packages/channels
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -796,9 +796,6 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.3
         version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.2.3)(vite@8.1.0(@types/node@26.2.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.1.0(@types/node@26.2.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
-      agents:
-        specifier: '*'
-        version: link:../../packages/agents
       tailwindcss:
         specifier: ^4.3.2
         version: 4.3.2
@@ -4046,6 +4043,9 @@ importers:
       partysocket:
         specifier: 1.3.0
         version: 1.3.0(react@19.2.7)
+      postal-mime:
+        specifier: ^2.7.5
+        version: 2.7.5
       vite:
         specifier: '>=6.0.0 <9.0.0'
         version: 8.1.0(@types/node@26.2.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
@@ -4138,25 +4138,6 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
-
-  packages/channels:
-    dependencies:
-      '@cloudflare/voice':
-        specifier: workspace:*
-        version: link:../voice
-      postal-mime:
-        specifier: ^2.7.5
-        version: 2.7.5
-    devDependencies:
-      '@tanstack/ai':
-        specifier: 0.38.0
-        version: 0.38.0(@opentelemetry/api@1.9.1)
-      ai:
-        specifier: ^7.0.0
-        version: 7.0.18(zod@4.4.3)
-      vitest:
-        specifier: 4.1.10
-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.2.0)(@vitest/browser-playwright@4.1.10)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.2.0)(typescript@6.0.3))(vite@8.1.0(@types/node@26.2.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
   packages/codemode:
     dependencies:

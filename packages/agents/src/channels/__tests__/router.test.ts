@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  ChannelHost,
+  ChannelRouter,
   matchesPath,
   type Channel,
   type ChannelApprovalResponse,
@@ -78,33 +78,33 @@ function emailInput(): ChannelEmailInput {
   };
 }
 
-function host(
+function router(
   channels: Record<string, Channel>,
-  overrides: Partial<ConstructorParameters<typeof ChannelHost>[0]> = {}
+  overrides: Partial<ConstructorParameters<typeof ChannelRouter>[0]> = {}
 ) {
-  return new ChannelHost({
+  return new ChannelRouter({
     channels,
     onMessage: vi.fn(),
     ...overrides
   });
 }
 
-describe("stateless ChannelHost", () => {
-  it("allows an outbound-only Host without ingress callbacks", async () => {
+describe("stateless ChannelRouter", () => {
+  it("allows an outbound-only Router without ingress callbacks", async () => {
     const deliver = vi.fn(delivered);
-    const channelHost = new ChannelHost({
+    const channelRouter = new ChannelRouter({
       channels: { outbound: { deliver } }
     });
     const destination = { ...surface, channelKey: "outbound" };
 
     await expect(
-      channelHost.deliver(destination, { markdown: "Hello" })
+      channelRouter.deliver(destination, { markdown: "Hello" })
     ).resolves.toEqual({ status: "delivered" });
   });
 
   it("accepts an inbound-only Channel without deliver", async () => {
     const onMessage = vi.fn();
-    const channelHost = host(
+    const channelRouter = router(
       {
         inbound: {
           ingress: httpIngress("/inbound", [{ event: message(), raw: null }])
@@ -113,7 +113,7 @@ describe("stateless ChannelHost", () => {
       { onMessage }
     );
 
-    await channelHost.handleRequest(
+    await channelRouter.handleRequest(
       new Request("https://example.com/inbound", { method: "POST" })
     );
 
@@ -126,14 +126,14 @@ describe("stateless ChannelHost", () => {
     const declines = httpIngress("/other", []);
     const first = httpIngress("/webhook", []);
     const duplicate = httpIngress("/webhook", []);
-    const channelHost = host({
+    const channelRouter = router({
       declines: { deliver: delivered, ingress: declines },
       first: { deliver: delivered, ingress: first },
       duplicate: { deliver: delivered, ingress: duplicate }
     });
 
     await expect(
-      channelHost.handleRequest(
+      channelRouter.handleRequest(
         new Request("https://example.com/webhook", { method: "POST" })
       )
     ).resolves.toMatchObject({ status: 202 });
@@ -145,12 +145,12 @@ describe("stateless ChannelHost", () => {
 
   it("returns undefined when every HTTP ingress declines an exact pathname", async () => {
     const ingress = httpIngress("/webhooks/telegram", []);
-    const channelHost = host({
+    const channelRouter = router({
       telegram: { deliver: delivered, ingress }
     });
 
     await expect(
-      channelHost.handleRequest(
+      channelRouter.handleRequest(
         new Request("https://example.com/anything/webhooks/telegram", {
           method: "POST"
         })
@@ -167,20 +167,20 @@ describe("stateless ChannelHost", () => {
       }))
     };
     const later = httpIngress("/webhook", []);
-    const channelHost = host({
+    const channelRouter = router({
       rejection: { deliver: delivered, ingress: rejection },
       later: { deliver: delivered, ingress: later }
     });
 
     await expect(
-      channelHost.handleRequest(
+      channelRouter.handleRequest(
         new Request("https://example.com/webhook", { method: "POST" })
       )
     ).resolves.toMatchObject({ status: 401 });
     expect(later.receive).not.toHaveBeenCalled();
   });
 
-  it("uses Channel route before Host default route and passes the exact raw value only to routing", async () => {
+  it("uses Channel route before Router default route and passes the exact raw value only to routing", async () => {
     const raw = { authenticatedUpdate: 42 };
     const onMessage = vi.fn();
     const defaultRoute = vi.fn(() => "host-default");
@@ -198,13 +198,13 @@ describe("stateless ChannelHost", () => {
       outputOnly: { deliver: delivered }
     };
     const findUser = vi.fn();
-    const channelHost = host(channels, {
+    const channelRouter = router(channels, {
       defaultRoute,
       findUser,
       onMessage
     });
 
-    const response = await channelHost.handleRequest(
+    const response = await channelRouter.handleRequest(
       new Request("https://example.com/webhook", { method: "POST" })
     );
 
@@ -218,11 +218,11 @@ describe("stateless ChannelHost", () => {
     expect(onMessage.mock.calls[0]?.[0]).not.toHaveProperty("raw");
   });
 
-  it("uses the Host default route before falling back to the provider thread id", async () => {
+  it("uses the Router default route before falling back to the provider thread id", async () => {
     const event = message();
     const defaultMessage = vi.fn();
     const threadMessage = vi.fn();
-    const withDefault = host(
+    const withDefault = router(
       {
         inbound: {
           deliver: delivered,
@@ -231,7 +231,7 @@ describe("stateless ChannelHost", () => {
       },
       { defaultRoute: () => "host-default", onMessage: defaultMessage }
     );
-    const withThreadFallback = host(
+    const withThreadFallback = router(
       {
         inbound: {
           deliver: delivered,
@@ -279,7 +279,7 @@ describe("stateless ChannelHost", () => {
       }
     );
     const onMessage = vi.fn();
-    const channelHost = host(
+    const channelRouter = router(
       {
         inbound: {
           route,
@@ -290,7 +290,7 @@ describe("stateless ChannelHost", () => {
       { findUser, onMessage }
     );
 
-    await channelHost.handleRequest(
+    await channelRouter.handleRequest(
       new Request("https://example.com/identity", { method: "POST" })
     );
 
@@ -328,7 +328,7 @@ describe("stateless ChannelHost", () => {
       }
     };
 
-    await host(
+    await router(
       {
         inbound: {
           route: withoutIdentity,
@@ -342,7 +342,7 @@ describe("stateless ChannelHost", () => {
     ).handleRequest(
       new Request("https://example.com/without-identity", { method: "POST" })
     );
-    await host({
+    await router({
       inbound: {
         route: withoutLookup,
         deliver: delivered,
@@ -365,7 +365,7 @@ describe("stateless ChannelHost", () => {
     });
     const onRoute = vi.fn(async (_event: ChannelRouteEvent) => routeFinished);
     const onMessage = vi.fn();
-    const channelHost = host(
+    const channelRouter = router(
       {
         inbound: {
           route() {
@@ -380,7 +380,7 @@ describe("stateless ChannelHost", () => {
       { onRoute, onMessage }
     );
 
-    const handling = channelHost.handleRequest(
+    const handling = channelRouter.handleRequest(
       new Request("https://example.com/routed", { method: "POST" })
     );
     await vi.waitFor(() => expect(onRoute).toHaveBeenCalledOnce());
@@ -414,7 +414,7 @@ describe("stateless ChannelHost", () => {
     const onRoute = vi.fn(async (_event: ChannelRouteEvent) => routeFinished);
     const onMessage = vi.fn();
     const defaultRoute = vi.fn(() => "host-default");
-    const channelHost = host(
+    const channelRouter = router(
       {
         inbound: {
           route() {
@@ -428,7 +428,7 @@ describe("stateless ChannelHost", () => {
     );
 
     let responded = false;
-    const handling = channelHost
+    const handling = channelRouter
       .handleRequest(
         new Request("https://example.com/ignored", { method: "POST" })
       )
@@ -455,7 +455,7 @@ describe("stateless ChannelHost", () => {
 
   it("turns an accidental undefined route into an HTTP 500", async () => {
     const onMessage = vi.fn();
-    const channelHost = host(
+    const channelRouter = router(
       {
         inbound: {
           route() {
@@ -468,7 +468,7 @@ describe("stateless ChannelHost", () => {
       { defaultRoute: () => "host-default", onMessage }
     );
 
-    const response = await channelHost.handleRequest(
+    const response = await channelRouter.handleRequest(
       new Request("https://example.com/invalid", { method: "POST" })
     );
 
@@ -480,7 +480,7 @@ describe("stateless ChannelHost", () => {
     let route = "first-route";
     const onMessage = vi.fn();
     const event = message("immutable-event");
-    const channelHost = host(
+    const channelRouter = router(
       {
         inbound: {
           route() {
@@ -493,11 +493,11 @@ describe("stateless ChannelHost", () => {
       { onMessage }
     );
 
-    await channelHost.handleRequest(
+    await channelRouter.handleRequest(
       new Request("https://example.com/rerouted", { method: "POST" })
     );
     route = "second-route";
-    await channelHost.handleRequest(
+    await channelRouter.handleRequest(
       new Request("https://example.com/rerouted", { method: "POST" })
     );
 
@@ -520,18 +520,18 @@ describe("stateless ChannelHost", () => {
     const later: ChannelEmailIngress = {
       receive: vi.fn(async () => ({ events: [] }))
     };
-    const channelHost = host({
+    const channelRouter = router({
       declines: { deliver: delivered, emailIngress: declines },
       first: { deliver: delivered, emailIngress: first },
       later: { deliver: delivered, emailIngress: later }
     });
 
-    await expect(channelHost.handleEmail(emailInput())).resolves.toBe(true);
+    await expect(channelRouter.handleEmail(emailInput())).resolves.toBe(true);
     expect(declines.receive).toHaveBeenCalledOnce();
     expect(first.receive).toHaveBeenCalledOnce();
     expect(later.receive).not.toHaveBeenCalled();
 
-    const allDecline = host({
+    const allDecline = router({
       first: { deliver: delivered, emailIngress: declines },
       outputOnly: { deliver: delivered }
     });
@@ -551,7 +551,7 @@ describe("stateless ChannelHost", () => {
       expect(raw).toBe(emailRaw);
       return "approval-route";
     });
-    const channelHost = host(
+    const channelRouter = router(
       {
         http: {
           deliver: delivered,
@@ -568,10 +568,10 @@ describe("stateless ChannelHost", () => {
       { onMessage, onApprovalResponse }
     );
 
-    await channelHost.handleRequest(
+    await channelRouter.handleRequest(
       new Request("https://example.com/message", { method: "POST" })
     );
-    await expect(channelHost.handleEmail(emailInput())).resolves.toBe(true);
+    await expect(channelRouter.handleEmail(emailInput())).resolves.toBe(true);
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -604,7 +604,7 @@ describe("stateless ChannelHost", () => {
         label: "Support thread"
       }
     } as const;
-    const channelHost = host(
+    const channelRouter = router(
       {
         support: {
           route,
@@ -614,7 +614,7 @@ describe("stateless ChannelHost", () => {
       { onMessage }
     );
 
-    await channelHost.handleRequest(
+    await channelRouter.handleRequest(
       new Request("https://example.com/support", { method: "POST" })
     );
 
@@ -635,7 +635,7 @@ describe("stateless ChannelHost", () => {
   it("resolves direct and approval delivery through the surface key", async () => {
     const deliver = vi.fn(delivered);
     const requestApproval = vi.fn(delivered);
-    const channelHost = host({ outbound: { deliver, requestApproval } });
+    const channelRouter = router({ outbound: { deliver, requestApproval } });
     const destination = { ...surface, channelKey: "outbound" };
     const message = { markdown: "Hello" };
     const approval = {
@@ -643,11 +643,11 @@ describe("stateless ChannelHost", () => {
       request: { summary: "Proceed?", input: {} }
     };
 
-    await expect(channelHost.deliver(destination, message)).resolves.toEqual({
+    await expect(channelRouter.deliver(destination, message)).resolves.toEqual({
       status: "delivered"
     });
     await expect(
-      channelHost.requestApproval(destination, approval)
+      channelRouter.requestApproval(destination, approval)
     ).resolves.toEqual({ status: "delivered" });
     expect(deliver).toHaveBeenCalledWith(destination, message, undefined);
     expect(requestApproval).toHaveBeenCalledWith(destination, approval);
@@ -666,12 +666,12 @@ describe("stateless ChannelHost", () => {
       channelKey: "second",
       subject: "actor-1"
     } as const;
-    const channelHost = host({
+    const channelRouter = router({
       first: { contactSurface: first },
       second: { contactSurface: second }
     });
 
-    expect(channelHost.contactSurface(identity)).toEqual({
+    expect(channelRouter.contactSurface(identity)).toEqual({
       channelKey: "second",
       version: 1,
       address: { userId: "actor-1" },
@@ -684,17 +684,17 @@ describe("stateless ChannelHost", () => {
   it.each(["fallback", "fanout"])(
     "rejects the reserved %s Channel key",
     (channelKey) => {
-      expect(() => host({ [channelKey]: {} })).toThrow(
+      expect(() => router({ [channelKey]: {} })).toThrow(
         `Channel key "${channelKey}" is reserved for a delivery policy`
       );
     }
   );
 
   it("fails loudly when a surface names an unknown configured Channel", async () => {
-    const channelHost = host({});
+    const channelRouter = router({});
 
     await expect(
-      channelHost.deliver(
+      channelRouter.deliver(
         { ...surface, channelKey: "renamed-or-missing" },
         { markdown: "Hello" }
       )
@@ -713,7 +713,7 @@ describe("stateless ChannelHost", () => {
         events: [{ event: message(), raw: null }]
       }))
     };
-    const channelHost = host(
+    const channelRouter = router(
       {
         http: {
           deliver: delivered,
@@ -724,12 +724,12 @@ describe("stateless ChannelHost", () => {
       { onMessage }
     );
 
-    const response = await channelHost.handleRequest(
+    const response = await channelRouter.handleRequest(
       new Request("https://example.com/failing", { method: "POST" })
     );
 
     expect(response?.status).toBe(500);
-    await expect(channelHost.handleEmail(emailInput())).rejects.toThrow(
+    await expect(channelRouter.handleEmail(emailInput())).rejects.toThrow(
       "durable handoff failed"
     );
   });

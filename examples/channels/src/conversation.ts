@@ -4,9 +4,9 @@ import {
   type ChannelIdentity,
   type ChannelInboundMessage,
   type ChannelMessageSurface
-} from "@cloudflare/channels";
+} from "agents/channels";
 import { directoryFor } from "./directory";
-import { createHost } from "./server";
+import { createRouter } from "./server";
 import {
   type ConversationPage,
   type ConversationSnapshot,
@@ -26,7 +26,7 @@ type ConversationRow = {
  * It stores what arrived, remembers where to answer, and answers there.
  */
 export class Conversation extends DurableObject<Env> {
-  #host = createHost(this.env);
+  #router = createRouter(this.env);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -109,7 +109,7 @@ export class Conversation extends DurableObject<Env> {
   ): Promise<ConversationPage> {
     const row = this.#row();
     if (row.closed_at) throw new Error("This conversation is closed");
-    const delivery = await this.#host.deliver(surface, { markdown });
+    const delivery = await this.#router.deliver(surface, { markdown });
     const destination = {
       channelKey: surface.channelKey,
       label: surface.label
@@ -142,7 +142,7 @@ export class Conversation extends DurableObject<Env> {
     };
 
     const interactionId = crypto.randomUUID();
-    const delivery = await this.#host.requestApproval(surface, {
+    const delivery = await this.#router.requestApproval(surface, {
       interactionId,
       request: {
         title: "Elevated access request",
@@ -215,7 +215,7 @@ export class Conversation extends DurableObject<Env> {
       : undefined;
     if (replySurface) targets.push(replySurface);
     for (const identity of user?.channelIdentities ?? []) {
-      const contactSurface = this.#host.contactSurface(identity);
+      const contactSurface = this.#router.contactSurface(identity);
       if (contactSurface) targets.push(contactSurface);
     }
     return { conversation, user, targets };

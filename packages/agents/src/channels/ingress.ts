@@ -24,7 +24,7 @@ export type ChannelActor = {
   readonly isSelf?: boolean;
 };
 
-/** An actor before the Host stamps its configured Channel key. */
+/** An actor before the Router stamps its configured Channel key. */
 export type ChannelActorInput = Omit<ChannelActor, "identity"> & {
   readonly identity?: ChannelIdentityInput;
 };
@@ -79,7 +79,7 @@ export type ChannelIngressEvent =
   | ChannelInboundMessage
   | ChannelApprovalResponse;
 
-/** A normalized message before the Host stamps its configured Channel key. */
+/** A normalized message before the Router stamps its configured Channel key. */
 export type ChannelEventContextInput = Omit<
   ChannelEventContext,
   "replySurface" | "actor"
@@ -96,7 +96,7 @@ export type ChannelInboundMessageInput = Omit<
   readonly actor?: ChannelActorInput;
 };
 
-/** A normalized approval before the Host stamps its configured Channel key. */
+/** A normalized approval before the Router stamps its configured Channel key. */
 export type ChannelApprovalResponseInput = Omit<
   ChannelApprovalResponse,
   "replySurface" | "actor"
@@ -105,12 +105,12 @@ export type ChannelApprovalResponseInput = Omit<
   readonly actor?: ChannelActorInput;
 };
 
-/** Authenticated event produced by a Channel before Host dispatch. */
+/** Authenticated event produced by a Channel before Router dispatch. */
 export type ChannelIngressEventInput =
   | ChannelInboundMessageInput
   | ChannelApprovalResponseInput;
 
-/** Authenticated adapter output retained only until Host routing completes. */
+/** Authenticated adapter output retained only until Router routing completes. */
 export type ChannelIngressEnvelope<TRaw = unknown> = {
   event: ChannelIngressEventInput;
   raw: TRaw;

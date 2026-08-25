@@ -1,6 +1,6 @@
 import { jsonSchema, tool, type Tool } from "ai";
 import type { ChannelMessage, DeliveryResult } from "./channel";
-import type { ChannelHost } from "./host";
+import type { ChannelRouter } from "./router";
 import type { ChannelMessageSurface } from "./surface";
 import { channelMessageJsonSchema, parseChannelMessage } from "./tool-schema";
 
@@ -34,19 +34,19 @@ const channelMessageSchema = jsonSchema<ChannelMessage>(
 );
 
 /**
- * Adapt one Host-resolved surface to an AI SDK tool.
+ * Adapt one Router-resolved surface to an AI SDK tool.
  *
  * The caller chooses the key used in its ToolSet and owns model-facing policy
  * such as the description, examples, metadata, and approval requirement.
  */
 export function createSendMessageTool(
-  host: ChannelHost,
+  router: ChannelRouter,
   surface: ChannelMessageSurface,
   options: CreateSendMessageToolOptions = {}
 ): Tool<ChannelMessage, DeliveryResult> {
   return tool({
     ...options,
     inputSchema: channelMessageSchema,
-    execute: (message) => host.deliver(surface, message)
+    execute: (message) => router.deliver(surface, message)
   });
 }

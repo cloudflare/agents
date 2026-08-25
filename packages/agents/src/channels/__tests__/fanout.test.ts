@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  ChannelHost,
+  ChannelRouter,
   fallback,
   fanout,
   fanoutChannel,
@@ -28,8 +28,8 @@ function channel(
   };
 }
 
-function host(channels: Record<string, Channel>) {
-  return new ChannelHost({ channels, onMessage() {} });
+function router(channels: Record<string, Channel>) {
+  return new ChannelRouter({ channels, onMessage() {} });
 }
 
 describe("fanout surfaces", () => {
@@ -53,11 +53,11 @@ describe("fanout surfaces", () => {
       }
     };
     const second = channel({ status: "delivered", reference: "email-1" });
-    const channelHost = host({ first, second });
+    const channelRouter = router({ first, second });
     const message = { title: "Update", markdown: "Hello" };
     const context = { deliveryId: "notice-1" };
 
-    const delivery = channelHost.deliver(
+    const delivery = channelRouter.deliver(
       fanout([surface("first"), surface("second")]),
       message,
       context
@@ -76,7 +76,7 @@ describe("fanout surfaces", () => {
   });
 
   it("reports any uncertain destination as uncertain", async () => {
-    const channelHost = host({
+    const channelRouter = router({
       first: channel({ status: "delivered" }),
       second: channel({
         status: "uncertain",
@@ -85,7 +85,7 @@ describe("fanout surfaces", () => {
     });
 
     await expect(
-      channelHost.deliver(fanout([surface("first"), surface("second")]), {
+      channelRouter.deliver(fanout([surface("first"), surface("second")]), {
         markdown: "Hello"
       })
     ).resolves.toEqual({
@@ -99,7 +99,7 @@ describe("fanout surfaces", () => {
   });
 
   it("reports a mix of delivered and confirmed failed as uncertain", async () => {
-    const channelHost = host({
+    const channelRouter = router({
       first: channel({ status: "delivered" }),
       second: channel({
         status: "failed",
@@ -109,7 +109,7 @@ describe("fanout surfaces", () => {
     });
 
     await expect(
-      channelHost.deliver(fanout([surface("first"), surface("second")]), {
+      channelRouter.deliver(fanout([surface("first"), surface("second")]), {
         markdown: "Hello"
       })
     ).resolves.toMatchObject({ status: "uncertain" });
@@ -122,7 +122,7 @@ describe("fanout surfaces", () => {
   ])(
     "reports unanimous failures with retryable=%s and %s as %s",
     async (firstRetryable, secondRetryable, expectedRetryable) => {
-      const channelHost = host({
+      const channelRouter = router({
         first: channel({
           status: "failed",
           retryable: firstRetryable,
@@ -136,7 +136,7 @@ describe("fanout surfaces", () => {
       });
 
       await expect(
-        channelHost.deliver(fanout([surface("first"), surface("second")]), {
+        channelRouter.deliver(fanout([surface("first"), surface("second")]), {
           markdown: "Hello"
         })
       ).resolves.toEqual({
@@ -151,10 +151,10 @@ describe("fanout surfaces", () => {
   );
 
   it("turns a configured inbound-only destination into an honest failed result", async () => {
-    const channelHost = host({ inbound: {} });
+    const channelRouter = router({ inbound: {} });
 
     await expect(
-      channelHost.deliver(fanout([surface("inbound")]), {
+      channelRouter.deliver(fanout([surface("inbound")]), {
         markdown: "Hello"
       })
     ).resolves.toEqual({
@@ -189,10 +189,10 @@ describe("fanout surfaces", () => {
     const first = channel({ status: "delivered" }, true);
     const unavailable = channel({ status: "delivered" }, false);
     const final = channel({ status: "delivered", reference: "final" });
-    const channelHost = host({ first, unavailable, final });
+    const channelRouter = router({ first, unavailable, final });
 
     await expect(
-      channelHost.deliver(
+      channelRouter.deliver(
         fallback([
           fanout([surface("first"), surface("unavailable")]),
           surface("final")

@@ -3,7 +3,7 @@ import {
   type Channel,
   type ChannelInboundMessageInput,
   type ChannelRoute
-} from "@cloudflare/channels";
+} from "agents/channels";
 
 /** The JSON body this Channel accepts. */
 export type SupportFormRaw = {

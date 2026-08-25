@@ -1,7 +1,4 @@
-import type {
-  ChannelIdentity,
-  ChannelMessageSurface
-} from "@cloudflare/channels";
+import type { ChannelIdentity, ChannelMessageSurface } from "agents/channels";
 import { directoryFor } from "./directory";
 
 /**
@@ -28,19 +25,20 @@ export async function handleApi(
       return Response.json(await directory.userPage(id));
     }
     if (collection === "links") {
-      return Response.json(await directory.link(body.identity!, body.userId));
+      if (!body.identity) throw new Error("A Channel identity is required");
+      return Response.json(await directory.link(body.identity, body.userId));
     }
     if (collection === "conversations" && id) {
       const conversation = env.Conversation.getByName(id);
       const markdown = body.markdown ?? "";
-      // The browser chose one of the surfaces this conversation offered.
-      const surface = body.surface!;
-      if (action === "reply") {
-        return Response.json(await conversation.reply(markdown, surface));
-      }
-      if (action === "approval") {
+      if (action === "reply" || action === "approval") {
+        // The browser chose one of the surfaces this conversation offered.
+        const surface = body.surface;
+        if (!surface) throw new Error("A Channel surface is required");
         return Response.json(
-          await conversation.requestApproval(markdown, surface)
+          action === "reply"
+            ? await conversation.reply(markdown, surface)
+            : await conversation.requestApproval(markdown, surface)
         );
       }
       if (action === "close") {

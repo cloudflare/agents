@@ -48,7 +48,7 @@ export type ChannelMessageSurface<
   label: string;
 }>;
 
-/** A Channel-produced destination before its Host stamps the configured key. */
+/** A Channel-produced destination before its Router stamps the configured key. */
 export type ChannelMessageSurfaceInput<
   TAddress extends ChannelSurfaceValue = ChannelSurfaceValue
 > = Readonly<{

@@ -129,7 +129,7 @@ export type SlackChannelOptions = {
   toText?: (message: ChannelMessage) => string;
   /** Add signed Slack HTTP ingress to the returned Channel. */
   webhook?: SlackWebhookOptions;
-  /** Select an application route from the event, exact payload, and Host context. */
+  /** Select an application route from the event, exact payload, and Router context. */
   route?: ChannelRoute<SlackIngressPayload>;
   /** Override fetch for testing or custom network routing. */
   fetch?: typeof globalThis.fetch;

@@ -44,7 +44,7 @@ export type EmailChannelOptions = {
   from: EmailAddress;
   /** Subject used when a message does not provide a title. */
   defaultTitle?: string;
-  /** Select an application route from the event, parsed email, and Host context. */
+  /** Select an application route from the event, parsed email, and Router context. */
   route?: ChannelRoute<InboundEmailRaw>;
   /** Override inferred Workers Email ingress addresses. */
   inbound?: InboundEmailOptions;

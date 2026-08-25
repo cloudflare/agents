@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
-  ChannelHost,
+  ChannelRouter,
   fallback,
   telegram,
   telegramWebhook,
@@ -362,7 +362,7 @@ describe("experimental Telegram channel", () => {
       status: "delivered" as const,
       reference: "email-1"
     }));
-    const host = new ChannelHost({
+    const router = new ChannelRouter({
       channels: {
         telegram: createChannel(fetch),
         email: { deliver: emailDeliver }
@@ -372,7 +372,7 @@ describe("experimental Telegram channel", () => {
     const message = { markdown: "Help" };
 
     await expect(
-      host.deliver(fallback([TELEGRAM_SURFACE, emailSurface]), message)
+      router.deliver(fallback([TELEGRAM_SURFACE, emailSurface]), message)
     ).resolves.toEqual({ status: "delivered", reference: "email-1" });
     expect(emailDeliver).toHaveBeenCalledWith(emailSurface, message, undefined);
   });

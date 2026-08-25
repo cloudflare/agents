@@ -1,6 +1,6 @@
 # Channels support application
 
-A small support inbox built on [`@cloudflare/channels`](../../packages/channels).
+A small support inbox built on [`agents/channels`](../../docs/agents/channels.md).
 Slack, Telegram, email, and support-form messages become one normalized event;
 each conversation lives in a Durable Object; and stored surfaces let the
 application answer later on the same or another Channel.
@@ -30,24 +30,24 @@ Email ingress requires a deployed Worker with Email Routing configured.
 
 ## Where to read
 
-| File                                                         | What it shows                                               |
-| ------------------------------------------------------------ | ----------------------------------------------------------- |
-| [`src/server.ts`](src/server.ts)                             | Every Channel, its routing, the Host, and the entry points  |
-| [`src/conversation.ts`](src/conversation.ts)                 | Storing what arrived and delivering through stored surfaces |
-| [`src/directory.ts`](src/directory.ts)                       | Linking Channel identities to users                         |
-| [`src/support-form-channel.ts`](src/support-form-channel.ts) | Writing an inbound-only Channel                             |
+| File                                                         | What it shows                                                |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| [`src/server.ts`](src/server.ts)                             | Every Channel, its routing, the Router, and the entry points |
+| [`src/conversation.ts`](src/conversation.ts)                 | Storing what arrived and delivering through stored surfaces  |
+| [`src/directory.ts`](src/directory.ts)                       | Linking Channel identities to users                          |
+| [`src/support-form-channel.ts`](src/support-form-channel.ts) | Writing an inbound-only Channel                              |
 
 `src/api.ts` and `src/ui/` are browser plumbing. Nothing in them is specific to
 Channels.
 
 ## Ingress and routing
 
-A `ChannelHost` authenticates and normalizes each provider event, asks the
+A `ChannelRouter` authenticates and normalizes each provider event, asks the
 receiving Channel for an application route, stamps its reply surface with the
 configured `channelKey`, and hands it to the application:
 
 ```typescript
-new ChannelHost({
+new ChannelRouter({
   channels: createChannels(env),
   findUser: (identity) => directoryFor(env).userFor(identity),
   async onMessage({ channelKey, route, dispatchId, message }) {
@@ -83,13 +83,13 @@ Durable Object deduplicates on `dispatchId` before storing anything.
 ## Surfaces and replies
 
 Each inbound message may carry `replySurface`: the exact place the conversation
-can be answered. The Host stamps the configured Channel key before the
+can be answered. The Router stamps the configured Channel key before the
 application stores it. Every surface also carries an adapter-provided display
-label. Replying later requires only the Host and that surface:
+label. Replying later requires only the Router and that surface:
 
 ```typescript
 const surface = JSON.parse(row.reply_surface);
-const delivery = await host.deliver(surface, { markdown });
+const delivery = await router.deliver(surface, { markdown });
 ```
 
 The conversation stores the resulting `delivered`, `failed`, or `uncertain`
@@ -101,12 +101,12 @@ outbound contact surface when one exists.
 
 ## Approvals
 
-The composer can ask for elevated access instead of sending a message. The Host
+The composer can ask for elevated access instead of sending a message. The Router
 resolves the same stored surface, and the selected Channel renders the request
 as Slack buttons, a Telegram prompt, or email links:
 
 ```typescript
-await host.requestApproval(surface, {
+await router.requestApproval(surface, {
   interactionId: crypto.randomUUID(),
   request: { title: "Elevated access request", summary, input }
 });
@@ -122,7 +122,7 @@ Identity and destination are separate:
 
 - `actor.identity` says **who** sent an inbound message;
 - `replySurface` says **where** this conversation can be answered;
-- `host.contactSurface(identity)` finds a new direct destination;
+- `router.contactSurface(identity)` finds a new direct destination;
 - `createUserIdentityStore()` records explicit links between identities that
   represent the same application user.
 
@@ -132,5 +132,5 @@ Telegram events from linked identities therefore continue in one cross-channel
 conversation. Linking does not merge conversations that already exist; it
 changes where future events route.
 
-See [`packages/channels/README.md`](../../packages/channels/README.md) for the
+See [`docs/agents/channels.md`](../../docs/agents/channels.md) for the
 complete package API.

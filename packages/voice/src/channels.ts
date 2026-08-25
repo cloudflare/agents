@@ -1,19 +1,17 @@
+import type {
+  Channel,
+  ChannelMessage,
+  ChannelMessageSurface,
+  DeliveryFailure,
+  DeliveryResult
+} from "agents/channels";
+import { isChannelMessageSurface } from "agents/channels";
 import {
   VOICE_PROTOCOL_VERSION,
   type TTSProvider,
   type VoiceAudioFormat,
   type VoiceServerMessage
-} from "@cloudflare/voice";
-import type {
-  Channel,
-  ChannelMessage,
-  DeliveryFailure,
-  DeliveryResult
-} from "../channel";
-import {
-  isChannelMessageSurface,
-  type ChannelMessageSurface
-} from "../surface";
+} from "./types";
 
 export type BrowserVoiceSurface = ChannelMessageSurface<
   string,
@@ -38,6 +36,15 @@ export type BrowserVoiceChannelOptions = {
   sampleRate?: number;
   /** Project the canonical Markdown message into text suitable for speech. */
   toSpeechText?: (message: ChannelMessage) => string;
+};
+
+/** Output-only Channel returned by {@link browserVoice}. */
+export type BrowserVoiceChannel = Channel & {
+  isAvailable(surface?: ChannelMessageSurface): boolean;
+  deliver(
+    surface: ChannelMessageSurface,
+    message: ChannelMessage
+  ): Promise<DeliveryResult>;
 };
 
 const DEFAULT_SAMPLE_RATE = 16_000;
@@ -127,7 +134,9 @@ function sendJSON(
  * The browser should connect with `VoiceClient` or `useVoiceAgent()`. No
  * `withVoice()` mixin, microphone, or speech-to-text provider is required.
  */
-export function browserVoice(options: BrowserVoiceChannelOptions): Channel {
+export function browserVoice(
+  options: BrowserVoiceChannelOptions
+): BrowserVoiceChannel {
   const audioFormat = options.audioFormat ?? "mp3";
   const sampleRate = options.sampleRate ?? DEFAULT_SAMPLE_RATE;
   const toSpeechText = options.toSpeechText ?? ((message) => message.markdown);

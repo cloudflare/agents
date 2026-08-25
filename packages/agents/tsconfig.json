@@ -2,6 +2,7 @@
   "extends": "agents/tsconfig",
   "exclude": [
     "src/tests/**/*.ts",
+    "src/channels/__tests__/**/*.ts",
     "src/react-tests/**/*.ts",
     "src/react-tests/**/*.tsx"
   ]

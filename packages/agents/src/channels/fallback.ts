@@ -25,9 +25,9 @@ type FallbackOperation = (
 ) => Promise<DeliveryResult>;
 
 /**
- * Build an inert fallback destination for a `ChannelHost` to resolve.
+ * Build an inert fallback destination for a `ChannelRouter` to resolve.
  *
- * The Host skips unavailable destinations, advances after confirmed failures,
+ * The Router skips unavailable destinations, advances after confirmed failures,
  * and stops after a delivered or uncertain result to avoid duplicates.
  */
 export function fallback(surfaces: FallbackSurfaceOptions): FallbackSurface {
@@ -53,15 +53,21 @@ export function fallbackChannel(resolve: OutboundResolver): Channel {
       );
     }
 
-    for (let index = 0; index < destinations.length - 1; index += 1) {
-      const destination = destinations[index]!;
+    for (const destination of destinations.slice(0, -1)) {
       if (await resolve.isAvailable(destination)) {
         const result = await operation(destination);
         if (result.status !== "failed") return result;
       }
     }
-    // try the last one if we haven't returned yet
-    return operation(destinations.at(-1)!);
+
+    const finalDestination = destinations.at(-1);
+    if (!finalDestination) {
+      return unsupported(
+        "FALLBACK_SURFACE_INVALID",
+        "Fallback surface must contain at least one valid destination"
+      );
+    }
+    return operation(finalDestination);
   }
 
   return {

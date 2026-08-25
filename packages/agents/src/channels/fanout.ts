@@ -24,7 +24,7 @@ type FanoutOperation = (
   surface: ChannelMessageSurface
 ) => Promise<DeliveryResult>;
 
-/** Build an inert fanout destination for a `ChannelHost` to resolve. */
+/** Build an inert fanout destination for a `ChannelRouter` to resolve. */
 export function fanout(surfaces: FanoutSurfaceOptions): FanoutSurface {
   return {
     channelKey: "fanout",

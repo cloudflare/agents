@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ChannelHost, type ChannelMessage, type DeliveryResult } from "..";
+import { ChannelRouter, type ChannelMessage, type DeliveryResult } from "..";
 import { createSendMessageTool } from "../tanstack-ai";
 
 function executable(tool: ReturnType<typeof createSendMessageTool>) {
@@ -15,19 +15,21 @@ const surface = {
   label: "Test destination"
 } as const;
 
-function host(deliver = vi.fn(async () => ({ status: "delivered" as const }))) {
-  return new ChannelHost({ channels: { test: { deliver } } });
+function router(
+  deliver = vi.fn(async () => ({ status: "delivered" as const }))
+) {
+  return new ChannelRouter({ channels: { test: { deliver } } });
 }
 
 describe("TanStack AI message adapter", () => {
-  it("creates a named server tool that delivers through the Host", async () => {
+  it("creates a named server tool that delivers through the Router", async () => {
     const deliver = vi.fn(
       async (): Promise<DeliveryResult> => ({
         status: "delivered",
         reference: "message-1"
       })
     );
-    const messageTool = createSendMessageTool(host(deliver), surface, {
+    const messageTool = createSendMessageTool(router(deliver), surface, {
       name: "contactSupport",
       description: "Escalate to a person",
       needsApproval: true,
@@ -49,7 +51,7 @@ describe("TanStack AI message adapter", () => {
   });
 
   it("validates tool input without a schema-library dependency", async () => {
-    const messageTool = createSendMessageTool(host(), surface, {
+    const messageTool = createSendMessageTool(router(), surface, {
       name: "notify"
     });
 

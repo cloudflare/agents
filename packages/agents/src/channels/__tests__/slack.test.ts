@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ChannelHost } from "..";
+import { ChannelRouter } from "..";
 import {
   slack,
   slackWebhook,
@@ -305,7 +305,7 @@ describe("Slack signed ingress", () => {
     const route = vi.fn((event) => event.thread.id);
     const onRoute = vi.fn();
     const onMessage = vi.fn();
-    const channelHost = new ChannelHost({
+    const channelRouter = new ChannelRouter({
       channels: {
         slack: slack({
           botToken: BOT_TOKEN,
@@ -331,7 +331,7 @@ describe("Slack signed ingress", () => {
       }
     };
 
-    await channelHost.handleRequest(
+    await channelRouter.handleRequest(
       await signedRequest(JSON.stringify(payload))
     );
 
@@ -407,11 +407,11 @@ describe("Slack interactions and delivery outcomes", () => {
       botToken: BOT_TOKEN,
       fetch
     });
-    const channelHost = new ChannelHost({
+    const channelRouter = new ChannelRouter({
       channels: { slack: channel },
       onMessage() {}
     });
-    const contact = channelHost.contactSurface({
+    const contact = channelRouter.contactSurface({
       channelKey: "slack",
       scope: "TWORK",
       subject: "UADA"
@@ -424,7 +424,7 @@ describe("Slack interactions and delivery outcomes", () => {
       label: "Slack · user UADA"
     });
     if (!contact) throw new Error("Expected a Slack contact surface");
-    await channelHost.deliver(contact, { markdown: "Hello Ada" });
+    await channelRouter.deliver(contact, { markdown: "Hello Ada" });
 
     expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({
       channel: "DADA",

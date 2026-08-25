@@ -29,6 +29,11 @@
       "import": "./dist/voice.js",
       "require": "./dist/voice.js"
     },
+    "./channels": {
+      "types": "./dist/channels.d.ts",
+      "import": "./dist/channels.js",
+      "require": "./dist/channels.js"
+    },
     "./client": {
       "types": "./dist/voice-client.d.ts",
       "import": "./dist/voice-client.js",

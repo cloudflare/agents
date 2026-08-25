@@ -89,7 +89,7 @@ export type TelegramChannelOptions = {
   toText?: (message: ChannelMessage) => string;
   /** Parse mode for caller-formatted delivery text. */
   parseMode?: "HTML" | "MarkdownV2";
-  /** Select an application route from the event, raw update, and Host context. */
+  /** Select an application route from the event, raw update, and Router context. */
   route?: ChannelRoute<TelegramUpdate>;
   /** Add secret-verified Telegram webhook ingress to the returned Channel. */
   webhook?: {

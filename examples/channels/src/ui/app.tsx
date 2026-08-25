@@ -12,10 +12,7 @@ import {
   ClipboardTextIcon,
   PlugsConnectedIcon
 } from "@phosphor-icons/react";
-import type {
-  ChannelIdentity,
-  ChannelMessageSurface
-} from "@cloudflare/channels";
+import type { ChannelIdentity, ChannelMessageSurface } from "agents/channels";
 import type { ConversationPage, UserPage } from "../types";
 import { api, useDirectory } from "./api";
 import { ConversationView } from "./conversation";

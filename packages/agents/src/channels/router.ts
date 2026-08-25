@@ -6,15 +6,15 @@ import type {
   ChannelRoute,
   ChannelRouteContext,
   DeliveryResult
-} from "../channel";
-import { fallbackChannel } from "../fallback";
-import { fanoutChannel } from "../fanout";
+} from "./channel";
+import { fallbackChannel } from "./fallback";
+import { fanoutChannel } from "./fanout";
 import type {
   ChannelIdentity,
   ChannelIdentityInput,
   UserIdentity
-} from "../identity";
-import { unsupported } from "../internal";
+} from "./identity";
+import { unsupported } from "./internal";
 import type {
   ChannelApprovalResponse,
   ChannelEmailInput,
@@ -22,12 +22,12 @@ import type {
   ChannelIngressEnvelope,
   ChannelIngressEvent,
   ChannelIngressEventInput
-} from "../ingress";
+} from "./ingress";
 import {
   isChannelMessageSurface,
   type ChannelMessageSurface,
   type ChannelMessageSurfaceInput
-} from "../surface";
+} from "./surface";
 
 export type ChannelMessageEvent = {
   channelKey: string;
@@ -53,7 +53,7 @@ export type ChannelRouteEvent = {
   dispatchId: string;
 };
 
-export type ChannelHostOptions = {
+export type ChannelRouterOptions = {
   channels: Record<string, Channel>;
   /** Used when a Channel does not provide a route. Default: event thread id. */
   defaultRoute?: ChannelRoute;
@@ -78,15 +78,15 @@ const POLICY_KEYS = new Set(["fallback", "fanout"]);
  * Authenticates and normalizes ingress through configured Channel adapters,
  * resolves outbound surfaces, and awaits the application's durable handoff.
  */
-export class ChannelHost {
+export class ChannelRouter {
   readonly #channels: Record<string, Channel>;
   readonly #defaultRoute: ChannelRoute | undefined;
-  readonly #findUser: ChannelHostOptions["findUser"];
-  readonly #onRoute: ChannelHostOptions["onRoute"];
-  readonly #onMessage: ChannelHostOptions["onMessage"];
-  readonly #onApprovalResponse: ChannelHostOptions["onApprovalResponse"];
+  readonly #findUser: ChannelRouterOptions["findUser"];
+  readonly #onRoute: ChannelRouterOptions["onRoute"];
+  readonly #onMessage: ChannelRouterOptions["onMessage"];
+  readonly #onApprovalResponse: ChannelRouterOptions["onApprovalResponse"];
 
-  constructor(options: ChannelHostOptions) {
+  constructor(options: ChannelRouterOptions) {
     for (const channelKey of Object.keys(options.channels)) {
       if (POLICY_KEYS.has(channelKey)) {
         throw new Error(

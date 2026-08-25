@@ -52,9 +52,12 @@ function firstReference(value: string | undefined): string | undefined {
 function boundedReferences(references: readonly string[]): string[] {
   const unique = [...new Set(references.filter(Boolean))];
   if (unique.length < 2) return unique;
-  const selected = [unique[0]!];
+  const first = unique.at(0);
+  if (!first) return [];
+  const selected = [first];
   for (let index = unique.length - 1; index > 0; index -= 1) {
-    const candidate = unique[index]!;
+    const candidate = unique.at(index);
+    if (!candidate) continue;
     const header = [...selected, candidate]
       .map((reference) => `<${reference}>`)
       .join(" ");

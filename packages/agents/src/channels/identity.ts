@@ -7,7 +7,7 @@ export type ChannelIdentity = Readonly<{
   subject: string;
 }>;
 
-/** A Channel-produced identity before its Host stamps the configured key. */
+/** A Channel-produced identity before its Router stamps the configured key. */
 export type ChannelIdentityInput = Readonly<{
   scope?: string;
   subject: string;

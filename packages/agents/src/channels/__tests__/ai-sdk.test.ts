@@ -1,7 +1,7 @@
 import { asSchema } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import {
-  ChannelHost,
+  ChannelRouter,
   fallback,
   type ChannelMessage,
   type DeliveryResult
@@ -21,24 +21,26 @@ const surface = {
   label: "Test destination"
 } as const;
 
-function host(deliver = vi.fn(async () => ({ status: "delivered" as const }))) {
+function router(
+  deliver = vi.fn(async () => ({ status: "delivered" as const }))
+) {
   return {
     deliver,
-    channelHost: new ChannelHost({ channels: { test: { deliver } } })
+    channelRouter: new ChannelRouter({ channels: { test: { deliver } } })
   };
 }
 
 describe("AI SDK message adapter", () => {
-  it("adapts a Host-resolved surface to a caller-described tool", async () => {
+  it("adapts a Router-resolved surface to a caller-described tool", async () => {
     const deliver = vi.fn(
       async (): Promise<DeliveryResult> => ({
         status: "delivered",
         reference: "message-1"
       })
     );
-    const { channelHost } = host(deliver);
+    const { channelRouter } = router(deliver);
 
-    const messageTool = createSendMessageTool(channelHost, surface, {
+    const messageTool = createSendMessageTool(channelRouter, surface, {
       description: "Escalate to a human",
       needsApproval: true,
       metadata: { purpose: "escalation" },
@@ -59,13 +61,13 @@ describe("AI SDK message adapter", () => {
     );
   });
 
-  it("passes composite surfaces through the same Host API", async () => {
+  it("passes composite surfaces through the same Router API", async () => {
     const deliver = vi.fn(async () => ({ status: "delivered" as const }));
-    const channelHost = {
+    const channelRouter = {
       deliver
-    } as Pick<ChannelHost, "deliver"> as ChannelHost;
+    } as Pick<ChannelRouter, "deliver"> as ChannelRouter;
     const composite = fallback([surface]);
-    const messageTool = createSendMessageTool(channelHost, composite);
+    const messageTool = createSendMessageTool(channelRouter, composite);
 
     await executable(messageTool)({ markdown: "Hello" });
 
@@ -73,8 +75,8 @@ describe("AI SDK message adapter", () => {
   });
 
   it("validates tool input without requiring a schema library", async () => {
-    const { channelHost } = host();
-    const messageTool = createSendMessageTool(channelHost, surface);
+    const { channelRouter } = router();
+    const messageTool = createSendMessageTool(channelRouter, surface);
     const schema = asSchema(messageTool.inputSchema);
 
     expect(await schema.validate?.({ markdown: "" })).toMatchObject({

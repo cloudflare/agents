@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { browserVoice, type BrowserVoiceConnection } from "../adapters/voice";
+import { browserVoice, type BrowserVoiceConnection } from "../channels";
 
 const VOICE_SURFACE = {
   channelKey: "voice",

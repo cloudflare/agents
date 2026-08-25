@@ -4,7 +4,7 @@ import {
   identityKey,
   type ChannelIdentity,
   type UserIdentity
-} from "@cloudflare/channels";
+} from "agents/channels";
 import {
   DIRECTORY_NAME,
   type ConversationSummary,

@@ -3,7 +3,7 @@ import type {
   ChannelMessageSurface,
   DeliveryResult,
   UserIdentity
-} from "@cloudflare/channels";
+} from "agents/channels";
 
 /** The Durable Object name of the single conversation-and-user directory. */
 export const DIRECTORY_NAME = "support";

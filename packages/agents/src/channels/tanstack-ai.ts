@@ -1,5 +1,5 @@
 import { toolDefinition } from "@tanstack/ai";
-import type { ChannelHost } from "./host";
+import type { ChannelRouter } from "./router";
 import type { ChannelMessageSurface } from "./surface";
 import { channelMessageJsonSchema, parseChannelMessage } from "./tool-schema";
 
@@ -11,9 +11,9 @@ export type CreateSendMessageToolOptions = {
   metadata?: Record<string, unknown>;
 };
 
-/** Adapt one Host-resolved surface to a TanStack AI server tool. */
+/** Adapt one Router-resolved surface to a TanStack AI server tool. */
 export function createSendMessageTool(
-  host: ChannelHost,
+  router: ChannelRouter,
   surface: ChannelMessageSurface,
   options: CreateSendMessageToolOptions
 ) {
@@ -27,6 +27,6 @@ export function createSendMessageTool(
   });
 
   return definition.server(async (value) =>
-    host.deliver(surface, parseChannelMessage(value))
+    router.deliver(surface, parseChannelMessage(value))
   );
 }

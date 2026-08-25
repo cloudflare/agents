@@ -7,6 +7,7 @@ export default defineConfig({
       "src/tests/lifecycle/vitest.config.ts",
       "src/react-tests/vitest.config.ts",
       "src/node-tests/vitest.config.ts",
+      "src/channels/__tests__/vitest.config.ts",
       "src/x402-tests/vitest.config.ts",
       "src/chat/__tests__/vitest.config.ts",
       "src/webmcp-tests/vitest.config.ts"

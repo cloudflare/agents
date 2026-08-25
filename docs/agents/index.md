@@ -53,6 +53,7 @@ The differentiator is not "we have durable state" — it is what happens when a 
 
 ## Communication Channels
 
+- [Channels](./channels.md) - Route and deliver messages across Slack, Telegram, email, and custom transports
 - [Email Service](./email.md) - Sending, receiving, and replying to emails
 - [Webhooks](./webhooks.md) - Receiving and sending webhook events
 - [Push Notifications](./push-notifications.md) - Browser push notifications via Web Push API and scheduled delivery

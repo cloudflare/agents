@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  ChannelHost,
+  ChannelRouter,
   fallback,
   fallbackChannel,
   type Channel,
@@ -27,18 +27,18 @@ function channel(
   };
 }
 
-function host(channels: Record<string, Channel>) {
-  return new ChannelHost({ channels, onMessage() {} });
+function router(channels: Record<string, Channel>) {
+  return new ChannelRouter({ channels, onMessage() {} });
 }
 
 describe("fallback surfaces", () => {
   it("uses the first available destination", async () => {
     const first = channel({ status: "delivered", reference: "voice-1" }, true);
     const second = channel({ status: "delivered", reference: "email-1" });
-    const channelHost = host({ first, second });
+    const channelRouter = router({ first, second });
 
     await expect(
-      channelHost.deliver(fallback([surface("first"), surface("second")]), {
+      channelRouter.deliver(fallback([surface("first"), surface("second")]), {
         markdown: "Hello"
       })
     ).resolves.toEqual({ status: "delivered", reference: "voice-1" });
@@ -48,11 +48,11 @@ describe("fallback surfaces", () => {
   it("skips unavailable destinations but always attempts the final one", async () => {
     const first = channel({ status: "delivered" }, false);
     const final = channel({ status: "delivered", reference: "email-1" }, false);
-    const channelHost = host({ first, final });
+    const channelRouter = router({ first, final });
     const message = { title: "Update", markdown: "Hello" };
 
     await expect(
-      channelHost.deliver(
+      channelRouter.deliver(
         fallback([surface("first"), surface("final")]),
         message
       )
@@ -74,10 +74,10 @@ describe("fallback surfaces", () => {
         error: { code: "DELIVERY_FAILED", message: "Not delivered" }
       });
       const second = channel({ status: "delivered", reference: "email-1" });
-      const channelHost = host({ first, second });
+      const channelRouter = router({ first, second });
 
       await expect(
-        channelHost.deliver(fallback([surface("first"), surface("second")]), {
+        channelRouter.deliver(fallback([surface("first"), surface("second")]), {
           markdown: "Hello"
         })
       ).resolves.toEqual({ status: "delivered", reference: "email-1" });
@@ -90,11 +90,14 @@ describe("fallback surfaces", () => {
       error: { code: "DELIVERY_ERROR", message: "Unknown outcome" }
     });
     const second = channel({ status: "delivered" });
-    const channelHost = host({ first, second });
+    const channelRouter = router({ first, second });
 
-    await channelHost.deliver(fallback([surface("first"), surface("second")]), {
-      markdown: "Hello"
-    });
+    await channelRouter.deliver(
+      fallback([surface("first"), surface("second")]),
+      {
+        markdown: "Hello"
+      }
+    );
 
     expect(first.deliver).toHaveBeenCalledOnce();
     expect(second.deliver).not.toHaveBeenCalled();
@@ -102,11 +105,11 @@ describe("fallback surfaces", () => {
 
   it("forwards delivery context to the resolved Channel", async () => {
     const first = channel({ status: "delivered" });
-    const channelHost = host({ first });
+    const channelRouter = router({ first });
     const message = { markdown: "Hello" };
     const context = { deliveryId: "notice-1" };
 
-    await channelHost.deliver(fallback([surface("first")]), message, context);
+    await channelRouter.deliver(fallback([surface("first")]), message, context);
 
     expect(first.deliver).toHaveBeenCalledWith(
       surface("first"),
@@ -125,7 +128,7 @@ describe("fallback surfaces", () => {
       status: "delivered" as const,
       reference: "approval-1"
     }));
-    const channelHost = host({
+    const channelRouter = router({
       first: { requestApproval: first },
       second: { requestApproval: second }
     });
@@ -135,7 +138,7 @@ describe("fallback surfaces", () => {
     };
 
     await expect(
-      channelHost.requestApproval(
+      channelRouter.requestApproval(
         fallback([surface("first"), surface("second")]),
         options
       )
@@ -145,10 +148,10 @@ describe("fallback surfaces", () => {
 
   it("treats a configured inbound-only Channel as a confirmed failure", async () => {
     const second = channel({ status: "delivered", reference: "email-1" });
-    const channelHost = host({ inbound: {}, second });
+    const channelRouter = router({ inbound: {}, second });
 
     await expect(
-      channelHost.deliver(fallback([surface("inbound"), surface("second")]), {
+      channelRouter.deliver(fallback([surface("inbound"), surface("second")]), {
         markdown: "Hello"
       })
     ).resolves.toEqual({ status: "delivered", reference: "email-1" });

@@ -6,13 +6,14 @@ Build real-time voice agents with speech-to-text, text-to-speech, and conversati
 
 `@cloudflare/voice` provides two server-side mixins and matching React hooks:
 
-| Export           | Import                     | Purpose                                      |
-| ---------------- | -------------------------- | -------------------------------------------- |
-| `withVoice`      | `@cloudflare/voice`        | Full voice agent: STT, LLM, TTS, persistence |
-| `withVoiceInput` | `@cloudflare/voice`        | STT-only: transcription without response     |
-| `useVoiceAgent`  | `@cloudflare/voice/react`  | React hook for `withVoice` agents            |
-| `useVoiceInput`  | `@cloudflare/voice/react`  | React hook for `withVoiceInput` agents       |
-| `VoiceClient`    | `@cloudflare/voice/client` | Framework-agnostic client                    |
+| Export           | Import                       | Purpose                                      |
+| ---------------- | ---------------------------- | -------------------------------------------- |
+| `withVoice`      | `@cloudflare/voice`          | Full voice agent: STT, LLM, TTS, persistence |
+| `withVoiceInput` | `@cloudflare/voice`          | STT-only: transcription without response     |
+| `useVoiceAgent`  | `@cloudflare/voice/react`    | React hook for `withVoice` agents            |
+| `useVoiceInput`  | `@cloudflare/voice/react`    | React hook for `withVoiceInput` agents       |
+| `VoiceClient`    | `@cloudflare/voice/client`   | Framework-agnostic client                    |
+| `browserVoice`   | `@cloudflare/voice/channels` | Output-only Channel for a connected browser  |
 
 Built on Cloudflare Durable Objects, you get:
 
@@ -100,6 +101,37 @@ function VoiceUI() {
     </div>
   );
 }
+```
+
+### Output-only Channel
+
+Use `browserVoice()` when an existing Agent connection only needs synthesized
+output. The adapter implements the `Channel` contract from `agents/channels` and
+does not add microphone or speech-to-text handling:
+
+```typescript
+import { ChannelRouter } from "agents/channels";
+import { WorkersAITTS } from "@cloudflare/voice";
+import { browserVoice } from "@cloudflare/voice/channels";
+
+const router = new ChannelRouter({
+  channels: {
+    voice: browserVoice({
+      tts: new WorkersAITTS(env.AI),
+      getConnection: () => currentConnection
+    })
+  }
+});
+
+await router.deliver(
+  {
+    channelKey: "voice",
+    version: 1,
+    address: { connection: "current" },
+    label: "Browser voice"
+  },
+  { markdown: "The import finished." }
+);
 ```
 
 ### Wrangler Config

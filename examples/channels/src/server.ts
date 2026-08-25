@@ -1,11 +1,11 @@
 import {
-  ChannelHost,
+  ChannelRouter,
   email,
   routes,
   telegram,
   type Channel
-} from "@cloudflare/channels";
-import { slack } from "@cloudflare/channels/slack";
+} from "agents/channels";
+import { slack } from "agents/channels/slack";
 import { handleApi } from "./api";
 import { Conversation } from "./conversation";
 import { Directory, directoryFor } from "./directory";
@@ -88,13 +88,13 @@ function createChannels(env: Env): Record<string, Channel> {
 }
 
 /**
- * A Host authenticates and normalizes provider input, asks the Channel where
+ * A router authenticates and normalizes provider input, asks the Channel where
  * the event belongs, and hands it to the application.
  *
  * It holds no state, so it's safe to build a new one per request.
  */
-export function createHost(env: Env): ChannelHost {
-  return new ChannelHost({
+export function createRouter(env: Env): ChannelRouter {
+  return new ChannelRouter({
     channels: createChannels(env),
     findUser(identity) {
       return directoryFor(env).userFor(identity);
@@ -127,8 +127,8 @@ export function createHost(env: Env): ChannelHost {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Channel ingress first: each Channel tries to handle requests to its webhook, returning a response if it matches
-    const ingress = await createHost(env).handleRequest(request);
-    if (ingress) return ingress;
+    const response = await createRouter(env).handleRequest(request);
+    if (response) return response;
 
     // if the request hasn't been handled by a channels webhook, pass it to our own API
     const api = await handleApi(request, env);
@@ -137,6 +137,6 @@ export default {
 
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
     // channel ingress for email
-    await createHost(env).handleEmail(message);
+    await createRouter(env).handleEmail(message);
   }
 } satisfies ExportedHandler<Env>;
