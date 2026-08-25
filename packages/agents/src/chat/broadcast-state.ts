@@ -40,7 +40,7 @@ export type BroadcastStreamEvent =
       replay?: boolean;
       replayComplete?: boolean;
       continuation?: boolean;
-      /** Required when continuation=true so the accumulator can pick up existing parts. */
+      /** @deprecated Continuations now seed from current messages in `messagesUpdate`. */
       currentMessages?: UIMessage[];
     }
   | {
@@ -103,33 +103,9 @@ export function transition(
         state.streamId !== event.streamId ||
         isReplayedStart
       ) {
-        let messageId = event.messageId;
-        let existingParts: UIMessage["parts"] | undefined;
-        let existingMetadata: Record<string, unknown> | undefined;
-
-        if (event.continuation && event.currentMessages) {
-          for (let i = event.currentMessages.length - 1; i >= 0; i--) {
-            if (event.currentMessages[i].role === "assistant") {
-              messageId = event.currentMessages[i].id;
-              existingParts = [...event.currentMessages[i].parts];
-              if (event.currentMessages[i].metadata != null) {
-                existingMetadata = {
-                  ...(event.currentMessages[i].metadata as Record<
-                    string,
-                    unknown
-                  >)
-                };
-              }
-              break;
-            }
-          }
-        }
-
         accumulator = new StreamAccumulator({
-          messageId,
-          continuation: event.continuation,
-          existingParts,
-          existingMetadata
+          messageId: event.messageId,
+          continuation: event.continuation
         });
       } else {
         accumulator = state.accumulator;
