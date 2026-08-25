@@ -13,6 +13,10 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "McpTestHarnessObject",
+        "name": "McpTestHarnessObject"
+      },
+      {
         "class_name": "TestMcpAgent",
         "name": "MCP_OBJECT"
       },
@@ -335,6 +339,7 @@
   "migrations": [
     {
       "new_sqlite_classes": [
+        "McpTestHarnessObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
         "TestEmailAgent",

@@ -1,9 +1,18 @@
+import { DurableObject } from "cloudflare:workers";
 import { McpAgent } from "../mcp/index.ts";
 import {
   getAgentByName,
   routeAgentRequest,
   routeSubAgentRequest
 } from "../index.ts";
+
+/**
+ * Bare Durable Object for capability-level MCP client tests. Tests construct
+ * their own MCPClientManager instances inside runInDurableObject and bind
+ * them to this object's real storage through a real Lifecycle — see
+ * `tests/mcp/real-do-harness.ts`.
+ */
+export class McpTestHarnessObject extends DurableObject<Env> {}
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
@@ -151,6 +160,7 @@ import type {
 
 export type Env = {
   LOADER: WorkerLoader;
+  McpTestHarnessObject: DurableObjectNamespace<McpTestHarnessObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
