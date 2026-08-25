@@ -17,6 +17,7 @@ The architecture splits the agent into two layers:
   - `/harness/identity.md` — its identity prompt
   - `/harness/policy.json` — model + turn policy
   - `/harness/tools/*.js` — its tools, hot-loaded ES modules
+  - `/harness/runtime.js` — optional turn orchestration middleware
 
 Every turn, the kernel re-loads the live harness files, validates the tool
 modules inside an isolated dynamic Worker (Worker Loader — same machinery as
@@ -37,6 +38,49 @@ Worker (worker-shell backend) over the same files, with text tools (grep,
 sed, awk, jq, curl, sqlite) plus a `js` command and host-side `git`
 and `artifacts` commands. No container anywhere; a full-Linux container
 backend is the planned phase 2.
+
+`/harness/runtime.js` can default-export any of `beforeTurn`, `beforeStep`,
+`beforeToolCall`, `afterToolCall`, `transformOutput`, and `afterTurn`. Hooks
+receive `(event, host)`. Turn hooks can replace or append model messages,
+change instructions, and choose the model or active tools; `beforeTurn` can
+also change the step limit. Tool hooks can block execution, substitute a
+result, or rewrite the
+result seen by the model. `transformOutput` buffers one text block and can
+replace it before the client receives it. The hook-scoped `host` supports
+side inference, named tool execution, journal reads/writes, task
+creation/cancellation, and durable chat reads/appends; runtime modules can use
+Workspace-backed
+`node:fs/promises` directly.
+
+```js
+export default {
+  async beforeTurn(event, host) {
+    const side = await host.infer({ prompt: "Critique the next turn." });
+    return {
+      appendMessages: [
+        { role: "user", content: `Side-agent note: ${side.text}` }
+      ]
+    };
+  },
+  transformOutput({ text }) {
+    return { text: text.replaceAll("TODO", "next step") };
+  },
+  async afterTurn(_event, host) {
+    await host.scheduleTask({
+      instruction: "Revisit this turn",
+      delaySeconds: 3600
+    });
+  }
+};
+```
+
+The stable kernel still owns Access identity, tenant boundaries, model
+accounting, append-only history, task limits, capability expiry, versioning,
+and rollback. Each hook can launch at most four side inferences; all still
+count against the rolling per-user model ceiling. Hook failures are journaled
+and ignored so a bad runtime cannot
+brick the agent; invalid runtime modules fail activation and trigger the same
+last-good rollback as broken tools.
 
 When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), genesis and
 every successful activation push the workspace git history to the agent's
@@ -74,9 +118,9 @@ cron — least surprise). New tasks can only be created in human-initiated
 turns: a scheduled turn's tool surface has no `schedule_task`.
 
 The kernel also reserves every model step in the journal before inference.
-Chat, prompt, tool-continuation, and scheduled steps share a fixed circuit
-breaker: at 10,000 invocations in a rolling 24-hour window, the next step is
-rejected before reaching the model. Failed requests remain counted; journal
+Chat, prompt, tool-continuation, scheduled, and runtime side-agent requests
+share a fixed circuit breaker: at 10,000 invocations in a rolling 24-hour
+window, the next request is rejected before reaching the model. Failed requests remain counted; journal
 records include only turn source and step number, never prompt content.
 
 In production, Cloudflare Access identity selects the agent: the Worker
@@ -107,7 +151,7 @@ through the `AI` binding. Other third-party provider slugs are rejected.
 `MODEL_OVERRIDE` forces a model for every agent and ignores policy. A failed
 model call is journaled and shown safely in the chat pane. Local dev runs
 under a separate worker name
-(`wrangler.dev.jsonc`, `exo-harness-dev`): the remote-bindings tunnel uses
+(`wrangler.dev.jsonc`, `self-modifying-dev`): the remote-bindings tunnel uses
 the worker's own `workers.dev` host, and the production host is behind
 Cloudflare Access, which would otherwise 302 every binding call. Without
 any Cloudflare credentials, run fully offline with the deterministic
@@ -146,7 +190,10 @@ protocol:
 6. **Let it work alone** — "in two minutes, review your working memory and
    journal one insight about yourself". Watch the Tasks tab count down and
    the journal record the autonomous turn when it fires.
-7. **Switch models** — ask it to set `/harness/policy.json` `"model"` to
+7. **Rewrite the turn loop** — ask it to create `/harness/runtime.js` that
+   asks a side agent to critique each turn, injects that critique into model
+   context, and rewrites the final output before delivery.
+8. **Switch models** — ask it to set `/harness/policy.json` `"model"` to
    `workers-ai:@cf/moonshotai/kimi-k2.7-code` (or back to
    `openai/gpt-5.6-terra`) and `activate_harness`. The Context tab's model
    badge is the live spec.
@@ -161,7 +208,7 @@ pnpm exec wrangler secret put CLOUDFLARE_AIG_TOKEN
 pnpm run deploy
 ```
 
-Deploys to `exo-harness.<your-subdomain>.workers.dev` with the real AI,
+Deploys to `self-modifying.agents-b8a.workers.dev` with the real AI,
 Artifacts, and Worker Loader bindings. Production `/agent` requests fail
 closed unless `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` identify a valid
 hostname-based Cloudflare Access application. Configure that application
@@ -175,9 +222,9 @@ pnpm test
 ```
 
 Runs in the Workers runtime (`@cloudflare/vitest-pool-workers`) with the mock
-driver: genesis, persona hot-reload, isolate tool execution, auto-rollback,
-the activation gate, forward-only rollback, journal ordering, and the model
-invocation circuit breaker.
+driver: genesis, persona hot-reload, isolate tool execution, evolvable turn
+orchestration, auto-rollback, the activation gate, forward-only rollback,
+journal ordering, and the model invocation circuit breaker.
 
 ## Where this is going
 

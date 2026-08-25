@@ -14,6 +14,7 @@ import type {
   JournalEntry,
   JournalKind,
   JsonObject,
+  ModelInvocationSource,
   PendingCompaction,
   TaskInfo,
   TaskState,
@@ -204,7 +205,7 @@ export class KernelStore {
 
   /** Reserve a model step and record its non-sensitive diagnostic origin. */
   reserveModelInvocation(
-    source: ContextSnapshot["source"],
+    source: ModelInvocationSource,
     stepNumber: number
   ): ModelInvocationLimitReached | null {
     const now = Date.now();

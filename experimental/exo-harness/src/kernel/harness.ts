@@ -15,19 +15,26 @@ import type {
   Workspace
 } from "@cloudflare/computer";
 import { createArtifact } from "@cloudflare/computer/artifacts";
-import { jsonSchema, tool, type ToolSet } from "ai";
+import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import { z } from "zod";
 import type { KernelStore } from "./store";
 import { SEED_FILES } from "./seed";
 import {
   CONTEXT_POLICY_BOUNDS,
   DEFAULT_CONTEXT_POLICY,
+  HARNESS_RUNTIME_HOOK_NAMES,
   type ContextPolicy,
   type ForkOrigin,
   type ForkParent,
   type HarnessPolicy,
+  type HarnessRuntimeHookName,
+  type HarnessRuntimeManifest,
+  type HarnessRuntimeToolCall,
+  type HarnessRuntimeToolDecision,
+  type HarnessRuntimeToolResult,
   type HarnessToolManifest,
-  type LoadedHarness
+  type LoadedHarness,
+  type TurnSource
 } from "./types";
 
 /**
@@ -128,6 +135,17 @@ function isArtifactsNotFound(error: unknown): boolean {
     typeof message === "string" &&
     (message.includes("Repository not found") || message.includes("not found"))
   );
+}
+
+interface BuildToolsOptions {
+  source: TurnSource;
+  allowScheduling?: boolean;
+  beforeToolCall?: (
+    call: HarnessRuntimeToolCall
+  ) => Promise<HarnessRuntimeToolDecision | undefined>;
+  afterToolCall?: (
+    result: HarnessRuntimeToolResult
+  ) => Promise<{ output: unknown } | undefined>;
 }
 
 export interface ExoCoreOptions {
@@ -322,8 +340,11 @@ export class ExoCore {
       (path) => path.startsWith("/harness/tools/") && path.endsWith(".js")
     );
     const tools = await this.#loadToolManifests(toolPaths);
+    const runtime = files["/harness/runtime.js"]
+      ? await this.#loadRuntimeManifest()
+      : null;
 
-    return { identity, policy, context, tools, files };
+    return { identity, policy, context, tools, runtime, files };
   }
 
   /**
@@ -439,6 +460,87 @@ ${imports}
     return manifests;
   }
 
+  /** Validate the optional self-editable turn runtime inside its isolate. */
+  async #loadRuntimeManifest(): Promise<HarnessRuntimeManifest> {
+    const source = `import runtime from "./harness/runtime.js";
+export default async function main() {
+  if (!runtime || typeof runtime !== "object") {
+    throw new Error("runtime.js: default export must be an object");
+  }
+  const known = ${JSON.stringify(HARNESS_RUNTIME_HOOK_NAMES)};
+  const hooks = [];
+  for (const name of known) {
+    if (runtime[name] === undefined) continue;
+    if (typeof runtime[name] !== "function") {
+      throw new Error("runtime.js: " + name + " must be a function");
+    }
+    hooks.push(name);
+  }
+  return { file: "runtime.js", hooks };
+}`;
+    using handle = await this.workspace.runtime.exec(source, {
+      backend: "worker-javascript",
+      cwd: "/",
+      encoding: "utf8",
+      timeoutMs: TOOL_TIMEOUT_MS
+    });
+    const result = await handle.result();
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `harness runtime failed to load: ${clampText(result.stderr || result.stdout || "unknown error", 1000)}`
+      );
+    }
+    // SAFETY: the isolate constructs this value exclusively from the fixed
+    // hook-name tuple after checking every included property is a function.
+    return result.value as unknown as HarnessRuntimeManifest;
+  }
+
+  /** Execute one hook from /harness/runtime.js with a scoped host bridge. */
+  async runRuntimeHook(
+    runtime: HarnessRuntimeManifest,
+    hook: HarnessRuntimeHookName,
+    event: unknown,
+    capabilityToken: string
+  ): Promise<unknown> {
+    if (!runtime.hooks.includes(hook)) return undefined;
+    const source = `import runtime from "./harness/runtime.js";
+import { call } from "ws:kernel";
+export default async function main(input) {
+  const invoke = (method, value) => call(method, input.capabilityToken, value);
+  const host = {
+    infer: (request) => invoke("infer", request),
+    readMessages: () => invoke("readMessages"),
+    appendMessages: (messages) => invoke("appendMessages", messages),
+    executeTool: (name, input) => invoke("executeTool", { name, input }),
+    journal: (text) => invoke("journal", text),
+    readJournal: (limit) => invoke("readJournal", limit),
+    scheduleTask: (request) => invoke("scheduleTask", request),
+    cancelTask: (id) => invoke("cancelTask", id)
+  };
+  return await runtime[input.hook](input.event, host);
+}`;
+    using handle = await this.workspace.runtime.exec(source, {
+      backend: "worker-javascript",
+      cwd: "/",
+      encoding: "utf8",
+      // SAFETY: Workspace runtime input is JSON data, but its generic backend
+      // surface cannot express this per-execution payload.
+      input: {
+        hook,
+        event: toWorkspaceRuntimeValue(event),
+        capabilityToken
+      } as never,
+      timeoutMs: TOOL_TIMEOUT_MS
+    });
+    const result = await handle.result();
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `runtime ${hook} failed: ${clampText(result.stderr || result.stdout || "unknown error", 1000)}`
+      );
+    }
+    return result.value;
+  }
+
   /** Overwrite /harness with the given snapshot (deleting extra files). */
   async restoreFiles(snapshot: Record<string, string>): Promise<void> {
     const current = await this.globHarness();
@@ -458,9 +560,12 @@ ${imports}
    * Throws (with a useful message) if the live harness fails validation —
    * activation is the safety gate, so a broken self never becomes a version.
    */
-  async activate(
-    note: string
-  ): Promise<{ version: number; sha: string; liveTools: string[] }> {
+  async activate(note: string): Promise<{
+    version: number;
+    sha: string;
+    liveTools: string[];
+    runtimeHooks: HarnessRuntimeHookName[];
+  }> {
     const loaded = await this.#loadOnce();
     const git = this.workspace.git;
     await git.add({ paths: [], all: true });
@@ -483,7 +588,8 @@ ${imports}
     return {
       version: version.version,
       sha: oid,
-      liveTools: loaded.tools.map((t) => t.name)
+      liveTools: loaded.tools.map((t) => t.name),
+      runtimeHooks: loaded.runtime?.hooks ?? []
     };
   }
 
@@ -779,11 +885,12 @@ export default async function main(input) {
    * journaling. Task CREATION is only exposed on human-initiated turns
    * (`allowScheduling`) — a scheduled turn cannot schedule more tasks.
    */
-  buildTools(
-    loaded: LoadedHarness,
-    opts: { allowScheduling?: boolean } = {}
-  ): ToolSet {
+  buildTools(loaded: LoadedHarness, opts: BuildToolsOptions): ToolSet {
     const allowScheduling = opts.allowScheduling ?? true;
+    const journaled = <TInput, TOutput>(
+      name: string,
+      fn: (input: TInput) => Promise<TOutput>
+    ) => this.#journaled(name, fn, opts);
     const tools: ToolSet = {
       read_file: tool({
         description:
@@ -791,7 +898,7 @@ export default async function main(input) {
         inputSchema: z.object({
           path: z.string().describe("Absolute path, e.g. /harness/identity.md")
         }),
-        execute: this.#journaled("read_file", async ({ path }) => {
+        execute: journaled("read_file", async ({ path }) => {
           const content = await this.workspace.readFile(path);
           return content === null
             ? { error: `not found: ${path}` }
@@ -805,7 +912,7 @@ export default async function main(input) {
           path: z.string().describe("Absolute path"),
           content: z.string().describe("Full new file content")
         }),
-        execute: this.#journaled("write_file", async ({ path, content }) => {
+        execute: journaled("write_file", async ({ path, content }) => {
           await this.#write(path, content);
           this.store.appendJournal("file_write", {
             path,
@@ -820,7 +927,7 @@ export default async function main(input) {
         inputSchema: z.object({
           path: z.string().describe("Absolute directory path, e.g. /harness")
         }),
-        execute: this.#journaled("list_files", async ({ path }) => {
+        execute: journaled("list_files", async ({ path }) => {
           const entries = await this.workspace.readDir(path);
           return entries.map((e) => ({
             path: e.path,
@@ -834,7 +941,7 @@ export default async function main(input) {
         inputSchema: z.object({
           path: z.string().describe("Absolute path to delete")
         }),
-        execute: this.#journaled("delete_file", async ({ path }) => {
+        execute: journaled("delete_file", async ({ path }) => {
           await this.workspace.rm(path);
           this.store.appendJournal("file_delete", { path });
           this.#onMutation();
@@ -847,7 +954,7 @@ export default async function main(input) {
         inputSchema: z.object({
           command: z.string().describe("The shell command to run")
         }),
-        execute: this.#journaled("exec", async ({ command }) => {
+        execute: journaled("exec", async ({ command }) => {
           return this.execShell(command);
         })
       }),
@@ -859,12 +966,12 @@ export default async function main(input) {
             .string()
             .describe("Short human-readable summary of what changed")
         }),
-        execute: this.#journaled("activate_harness", async ({ note }) => {
+        execute: journaled("activate_harness", async ({ note }) => {
           try {
             const result = await this.activate(note);
             return {
               ...result,
-              hint: "Tools added or changed this turn are callable NOW via run_harness_tool; they appear as first-class functions from the next turn."
+              hint: "Tools added or changed this turn are callable NOW via run_harness_tool; first-class tools and runtime hooks refresh from the next turn."
             };
           } catch (error) {
             return {
@@ -879,7 +986,7 @@ export default async function main(input) {
         inputSchema: z.object({
           version: z.number().int().describe("Version number to restore")
         }),
-        execute: this.#journaled("rollback_harness", async ({ version }) => {
+        execute: journaled("rollback_harness", async ({ version }) => {
           try {
             return await this.rollbackTo(version);
           } catch (error) {
@@ -908,16 +1015,9 @@ export default async function main(input) {
             .optional()
             .describe("How many recent messages to keep (default 6)")
         }),
-        execute: this.#journaled(
-          "compact_history",
-          async ({ summary, keepLast }) => {
-            return this.requestCompaction(
-              loaded.context,
-              summary,
-              keepLast ?? 6
-            );
-          }
-        )
+        execute: journaled("compact_history", async ({ summary, keepLast }) => {
+          return this.requestCompaction(loaded.context, summary, keepLast ?? 6);
+        })
       }),
       run_harness_tool: tool({
         description:
@@ -931,19 +1031,16 @@ export default async function main(input) {
             .optional()
             .describe("Input object for the tool, matching its inputSchema")
         }),
-        execute: this.#journaled(
-          "run_harness_tool",
-          async ({ name, input }) => {
-            const live = await this.#loadOnce();
-            const manifest = live.tools.find((t) => t.name === name);
-            if (!manifest) {
-              return {
-                error: `no harness tool named "${name}" in the live harness (have: ${live.tools.map((t) => t.name).join(", ") || "none"})`
-              };
-            }
-            return this.runHarnessTool(manifest, input);
+        execute: journaled("run_harness_tool", async ({ name, input }) => {
+          const live = await this.#loadOnce();
+          const manifest = live.tools.find((t) => t.name === name);
+          if (!manifest) {
+            return {
+              error: `no harness tool named "${name}" in the live harness (have: ${live.tools.map((t) => t.name).join(", ") || "none"})`
+            };
           }
-        )
+          return this.runHarnessTool(manifest, input);
+        })
       }),
       journal_note: tool({
         description:
@@ -951,7 +1048,7 @@ export default async function main(input) {
         inputSchema: z.object({
           text: z.string().describe("The note to record")
         }),
-        execute: this.#journaled("journal_note", async ({ text }) => {
+        execute: journaled("journal_note", async ({ text }) => {
           const id = this.store.appendJournal("note", {
             text,
             source: "agent"
@@ -964,7 +1061,7 @@ export default async function main(input) {
         description:
           "List your self-scheduled tasks (instruction, cadence, state, run counts). Tasks run as autonomous turns outside the chat.",
         inputSchema: z.object({}),
-        execute: this.#journaled("list_tasks", async () => {
+        execute: journaled("list_tasks", async () => {
           return this.store.listTasks();
         })
       }),
@@ -973,7 +1070,7 @@ export default async function main(input) {
         inputSchema: z.object({
           id: z.string().describe("Task id (from list_tasks)")
         }),
-        execute: this.#journaled("cancel_task", async ({ id }) => {
+        execute: journaled("cancel_task", async ({ id }) => {
           const cancelled = await this.#cancelTask(id);
           return cancelled
             ? { id, cancelled: true }
@@ -992,7 +1089,7 @@ export default async function main(input) {
             .optional()
             .describe("How many entries (default 20)")
         }),
-        execute: this.#journaled("read_journal", async ({ limit }) => {
+        execute: journaled("read_journal", async ({ limit }) => {
           return this.store.journalTail(limit ?? 20);
         })
       })
@@ -1021,7 +1118,7 @@ export default async function main(input) {
             .optional()
             .describe('Run repeatedly on a cron expression, e.g. "0 3 * * *"')
         }),
-        execute: this.#journaled(
+        execute: journaled(
           "schedule_task",
           async ({ instruction, delaySeconds, at, cron }) => {
             const provided = [delaySeconds, at, cron].filter(
@@ -1071,7 +1168,7 @@ export default async function main(input) {
         inputSchema: jsonSchema<Record<string, unknown>>(
           manifest.inputSchema as Parameters<typeof jsonSchema>[0]
         ),
-        execute: this.#journaled(manifest.name, (input) =>
+        execute: journaled(manifest.name, (input) =>
           this.runHarnessTool(manifest, input)
         )
       });
@@ -1080,42 +1177,80 @@ export default async function main(input) {
     return tools;
   }
 
-  /** Wrap a tool execute with tool_call / tool_result journaling. */
+  /** Wrap tool execution with journal records and evolvable runtime control. */
   #journaled<TInput, TOutput>(
     name: string,
-    fn: (input: TInput) => Promise<TOutput>
-  ): (input: TInput) => Promise<TOutput | { error: string }> {
-    return async (input: TInput) => {
+    fn: (input: TInput) => Promise<TOutput>,
+    opts: BuildToolsOptions
+  ): (
+    input: TInput,
+    options: ToolExecutionOptions<unknown>
+  ) => Promise<unknown> {
+    return async (input: TInput, options: ToolExecutionOptions<unknown>) => {
+      const decision = await opts.beforeToolCall?.({
+        source: opts.source,
+        tool: name,
+        toolCallId: options.toolCallId,
+        input,
+        messages: options.messages
+      });
+      // SAFETY: runtime input replacement is intentionally dynamic. The tool
+      // implementation remains the trust boundary and converts failures into
+      // ordinary tool errors below.
+      const effectiveInput =
+        decision?.action === "allow" && decision.input !== undefined
+          ? (decision.input as TInput)
+          : input;
       this.store.appendJournal("tool_call", {
         tool: name,
-        input: preview(input)
+        input: preview(effectiveInput)
       });
-      try {
-        const result = await fn(input);
-        const failed =
-          typeof result === "object" &&
-          result !== null &&
-          "error" in result &&
-          (result as { error?: unknown }).error !== undefined;
-        this.store.appendJournal("tool_result", {
-          tool: name,
-          ok: !failed,
-          output: preview(result)
-        });
-        this.#onMutation();
-        return result;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.store.appendJournal("tool_result", {
-          tool: name,
-          ok: false,
-          error: message
-        });
-        this.#onMutation();
-        return { error: message };
+
+      let output: unknown;
+      if (decision?.action === "block") {
+        output = { error: decision.reason };
+      } else if (decision?.action === "substitute") {
+        output = decision.output;
+      } else {
+        try {
+          output = await fn(effectiveInput);
+        } catch (error) {
+          output = {
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
       }
+
+      const transformed = await opts.afterToolCall?.({
+        source: opts.source,
+        tool: name,
+        toolCallId: options.toolCallId,
+        input: effectiveInput,
+        messages: options.messages,
+        output
+      });
+      if (transformed) output = transformed.output;
+      const failed =
+        typeof output === "object" &&
+        output !== null &&
+        "error" in output &&
+        output.error !== undefined;
+      this.store.appendJournal("tool_result", {
+        tool: name,
+        ok: !failed,
+        output: preview(output)
+      });
+      this.#onMutation();
+      return output;
     };
   }
+}
+
+/** Strip undefined/provider-only fields before crossing the runtime boundary. */
+function toWorkspaceRuntimeValue(value: unknown): unknown {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return null;
+  return JSON.parse(serialized) as unknown;
 }
 
 /** Compact JSON preview for journal entries. */

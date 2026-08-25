@@ -79,6 +79,259 @@ describe("genesis", () => {
 });
 
 describe("turn loop with live harness", () => {
+  it("lets an evolvable runtime orchestrate inference, output, messages, and tasks", async () => {
+    const stub = await getAgentByName(env.ExoKernel, "turn-runtime");
+    const agent = stub as unknown as KernelStub;
+    await agent.boot();
+    const runtime = `export default {
+  async beforeTurn(_event, host) {
+    const identity = await host.executeTool("read_file", {
+      path: "/harness/identity.md"
+    });
+    const side = await host.infer({
+      prompt: "side-agent observation: " + identity.content.slice(0, 40)
+    });
+    await host.journal("side-agent: " + side.text);
+    return {
+      appendMessages: [
+        { role: "user", content: "runtime context: " + side.text }
+      ]
+    };
+  },
+  transformOutput(event) {
+    return { text: "[runtime] " + event.text };
+  },
+  async afterTurn(_event, host) {
+    await host.readMessages();
+    await host.appendMessages([
+      {
+        id: "runtime-stored-message",
+        role: "assistant",
+        parts: [{ type: "text", text: "stored by runtime" }]
+      }
+    ]);
+    await host.scheduleTask({
+      instruction: "runtime scheduled task",
+      delaySeconds: 3600
+    });
+  }
+};
+`;
+
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/runtime.js", content: runtime }
+        },
+        {
+          name: "activate_harness",
+          input: { note: "add evolvable turn runtime" }
+        }
+      ])}`
+    );
+
+    const reply = await agent.prompt("main turn");
+    expect(reply.text).toContain("[runtime]");
+    expect(reply.text).toContain("runtime context:");
+
+    const journal = await agent.getJournal();
+    expect(
+      journal.find(
+        (entry) => entry.kind === "note" && entry.data.source === "runtime"
+      )?.data.text
+    ).toContain("side-agent:");
+    expect(
+      journal.filter(
+        (entry) =>
+          entry.kind === "model_invocation" && entry.data.source === "runtime"
+      )
+    ).toHaveLength(1);
+    expect(journal).toContainEqual(
+      expect.objectContaining({
+        kind: "tool_call",
+        data: expect.objectContaining({ tool: "read_file" })
+      })
+    );
+
+    const storedMessages = await runInDurableObject(
+      stub,
+      async (instance) => instance.messages
+    );
+    expect(storedMessages).toContainEqual(
+      expect.objectContaining({ id: "runtime-stored-message" })
+    );
+    expect((await agent.boot()).tasks).toContainEqual(
+      expect.objectContaining({ instruction: "runtime scheduled task" })
+    );
+  });
+
+  it("lets the evolvable runtime replace tool execution and results", async () => {
+    const agent = await freshAgent("turn-runtime-tools");
+    const runtime = `export default {
+  beforeToolCall(event) {
+    if (event.tool !== "read_file") return;
+    return {
+      action: "substitute",
+      output: { path: event.input.path, content: "substituted" }
+    };
+  },
+  afterToolCall(event) {
+    if (event.tool !== "read_file") return;
+    return {
+      output: { ...event.output, content: event.output.content + " after" }
+    };
+  }
+};
+`;
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/runtime.js", content: runtime }
+        },
+        {
+          name: "activate_harness",
+          input: { note: "control tool execution" }
+        }
+      ])}`
+    );
+
+    const reply = await agent.prompt(
+      '!tool read_file {"path":"/harness/identity.md"}'
+    );
+    expect(reply.text).toContain("substituted after");
+  });
+
+  it("applies runtime changes between tool steps and before streaming output", async () => {
+    const stub = await getAgentByName(env.ExoKernel, "turn-runtime-stream");
+    const agent = stub as unknown as KernelStub;
+    await agent.boot();
+    const runtime = `export default {
+  beforeStep(event) {
+    if (event.stepNumber !== 1) return;
+    return {
+      appendMessages: [
+        { role: "user", content: "runtime step override" }
+      ]
+    };
+  },
+  transformOutput({ text }) {
+    return { text: "[streamed] " + text };
+  }
+};
+`;
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/runtime.js", content: runtime }
+        },
+        {
+          name: "activate_harness",
+          input: { note: "control steps and streams" }
+        }
+      ])}`
+    );
+
+    const toolReply = await agent.prompt(
+      '!tool read_file {"path":"/harness/identity.md"}'
+    );
+    expect(toolReply.text).toContain("[streamed]");
+    expect(toolReply.text).toContain("runtime step override");
+
+    const streamBody = await runInDurableObject(stub, async (instance) => {
+      await instance.persistMessages([
+        {
+          id: "runtime-stream-user",
+          role: "user",
+          parts: [{ type: "text", text: "stream this" }]
+        }
+      ]);
+      return (await instance.onChatMessage(undefined)).text();
+    });
+    expect(streamBody).toContain("[streamed]");
+  });
+
+  it("bounds side inference fan-out without bricking the turn", async () => {
+    const agent = await freshAgent("turn-runtime-inference-bound");
+    const runtime = `export default {
+  async beforeTurn(_event, host) {
+    for (let index = 0; index < 5; index++) {
+      await host.infer({ prompt: "side " + index });
+    }
+  }
+};
+`;
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/runtime.js", content: runtime }
+        },
+        {
+          name: "activate_harness",
+          input: { note: "attempt excessive inference fan-out" }
+        }
+      ])}`
+    );
+
+    expect((await agent.prompt("main survives")).text).toContain(
+      "main survives"
+    );
+    const journal = await agent.getJournal();
+    expect(
+      journal.filter(
+        (entry) =>
+          entry.kind === "model_invocation" && entry.data.source === "runtime"
+      )
+    ).toHaveLength(4);
+    expect(journal).toContainEqual(
+      expect.objectContaining({
+        kind: "error",
+        data: expect.objectContaining({
+          source: "runtime",
+          hook: "beforeTurn"
+        })
+      })
+    );
+  });
+
+  it("ignores an invalid runtime patch without bricking the turn", async () => {
+    const agent = await freshAgent("turn-runtime-invalid-patch");
+    const runtime = `export default {
+  beforeTurn() {
+    return {
+      appendMessages: [{ role: "invalid", content: "break the turn" }]
+    };
+  }
+};
+`;
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/runtime.js", content: runtime }
+        },
+        {
+          name: "activate_harness",
+          input: { note: "invalid runtime patch" }
+        }
+      ])}`
+    );
+
+    expect((await agent.prompt("still alive")).text).toContain("still alive");
+    expect(await agent.getJournal()).toContainEqual(
+      expect.objectContaining({
+        kind: "error",
+        data: expect.objectContaining({
+          source: "runtime",
+          hook: "beforeTurn"
+        })
+      })
+    );
+  });
+
   it("replies through the persona in the live identity file", async () => {
     const agent = await freshAgent("turn-basic");
     const reply = await agent.prompt("hello there");

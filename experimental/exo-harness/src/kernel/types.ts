@@ -62,6 +62,52 @@ export interface HarnessToolManifest {
   inputSchema: Record<string, unknown>;
 }
 
+/** Control points implemented by the self-editable /harness/runtime.js. */
+export const HARNESS_RUNTIME_HOOK_NAMES = [
+  "beforeTurn",
+  "beforeStep",
+  "beforeToolCall",
+  "afterToolCall",
+  "transformOutput",
+  "afterTurn"
+] as const;
+
+/** One control point in the evolvable turn runtime. */
+export type HarnessRuntimeHookName =
+  (typeof HARNESS_RUNTIME_HOOK_NAMES)[number];
+
+/** Validated hook surface loaded from /harness/runtime.js. */
+export interface HarnessRuntimeManifest {
+  file: "runtime.js";
+  hooks: HarnessRuntimeHookName[];
+}
+
+/** Origin of a main agent turn. */
+export type TurnSource = "chat" | "prompt" | "task";
+
+/** Every model request origin counted by the per-user circuit breaker. */
+export type ModelInvocationSource = TurnSource | "runtime";
+
+/** A decision returned by the evolvable runtime before tool execution. */
+export type HarnessRuntimeToolDecision =
+  | { action: "allow"; input?: unknown }
+  | { action: "block"; reason: string }
+  | { action: "substitute"; output: unknown };
+
+/** Input visible to /harness/runtime.js before a tool executes. */
+export interface HarnessRuntimeToolCall {
+  source: TurnSource;
+  tool: string;
+  toolCallId: string;
+  input: unknown;
+  messages: unknown;
+}
+
+/** Input visible to /harness/runtime.js after a tool executes. */
+export interface HarnessRuntimeToolResult extends HarnessRuntimeToolCall {
+  output: unknown;
+}
+
 /** The activated self a fork was taken from. */
 export interface ForkParent {
   name: string;
@@ -165,6 +211,7 @@ export interface LoadedHarness {
   /** Clamped context policy (defaults when /harness/context.json is absent). */
   context: ContextPolicy;
   tools: HarnessToolManifest[];
+  runtime: HarnessRuntimeManifest | null;
   /** All /harness file contents, keyed by absolute path. */
   files: Record<string, string>;
 }
@@ -181,7 +228,7 @@ export interface HarnessFileInfo {
  */
 export interface ContextSnapshot {
   ts: number;
-  source: "chat" | "prompt" | "task";
+  source: TurnSource;
   model: string;
   system: string;
   /** The pruned ModelMessage[] exactly as passed to the model. */

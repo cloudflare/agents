@@ -1,5 +1,9 @@
 import { callable, getAgentByName } from "agents";
-import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
+import {
+  AIChatAgent,
+  type ChatResponseResult,
+  type OnChatMessageOptions
+} from "@cloudflare/ai-chat";
 import {
   Workspace,
   WorkspaceProxy,
@@ -24,11 +28,17 @@ import {
   convertToModelMessages,
   pruneMessages,
   isStepCount,
+  modelMessageSchema,
+  validateUIMessages,
   type LanguageModel,
   type ModelMessage,
+  type PrepareStepFunction,
+  type StreamTextTransform,
+  type TextStreamPart,
   type ToolSet,
   type UIMessage
 } from "ai";
+import { z } from "zod";
 import {
   accessSubjectAgentName,
   createAccessRequestAuthenticator,
@@ -54,10 +64,15 @@ import {
   type ExoState,
   type ForkOrigin,
   type HarnessPolicy,
+  type HarnessRuntimeHookName,
+  type HarnessRuntimeToolCall,
+  type HarnessRuntimeToolDecision,
+  type HarnessRuntimeToolResult,
   type JournalEntry,
   type Json,
   type LoadedHarness,
   type TaskInfo,
+  type TurnSource,
   type VersionInfo
 } from "./kernel/types";
 
@@ -67,6 +82,87 @@ import {
  */
 interface AdoptableKernel {
   adoptGenesis(origin: ForkOrigin): Promise<{ version: number; sha: string }>;
+}
+
+const RUNTIME_TURN_PATCH_SCHEMA = z
+  .object({
+    system: z.string().max(100_000).optional(),
+    appendSystem: z.string().max(16_000).optional(),
+    messages: z.array(modelMessageSchema).max(200).optional(),
+    appendMessages: z.array(modelMessageSchema).max(50).optional(),
+    model: z.string().min(1).max(200).optional(),
+    activeTools: z.array(z.string()).max(100).optional(),
+    toolChoice: z.enum(["auto", "none", "required"]).optional(),
+    maxSteps: z.number().int().min(1).max(50).optional()
+  })
+  .strict();
+
+const RUNTIME_TOOL_DECISION_SCHEMA = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("allow"), input: z.unknown().optional() }),
+  z.object({ action: z.literal("block"), reason: z.string().max(2000) }),
+  z.object({ action: z.literal("substitute"), output: z.unknown() })
+]);
+
+const RUNTIME_TOOL_RESULT_PATCH_SCHEMA = z
+  .object({ output: z.unknown() })
+  .strict();
+const RUNTIME_OUTPUT_PATCH_SCHEMA = z
+  .object({ text: z.string().max(100_000) })
+  .strict();
+const RUNTIME_EXECUTE_TOOL_SCHEMA = z
+  .object({
+    name: z.string().min(1).max(100),
+    input: z.unknown()
+  })
+  .strict();
+const RUNTIME_INFER_SCHEMA = z
+  .object({
+    prompt: z.string().min(1).max(100_000),
+    system: z.string().max(32_000).optional(),
+    maxOutputTokens: z.number().int().min(1).max(4000).optional()
+  })
+  .strict();
+const RUNTIME_SCHEDULE_SCHEMA = z
+  .object({
+    instruction: z.string().min(1).max(4000),
+    delaySeconds: z
+      .number()
+      .int()
+      .min(30)
+      .max(30 * 24 * 3600)
+      .optional(),
+    at: z.string().optional(),
+    cron: z.string().optional()
+  })
+  .strict()
+  .refine(
+    ({ delaySeconds, at, cron }) =>
+      [delaySeconds, at, cron].filter((value) => value !== undefined).length ===
+      1,
+    { message: "provide exactly one of delaySeconds, at, or cron" }
+  );
+
+const MAX_RUNTIME_INFERENCES_PER_HOOK = 4;
+
+type RuntimeTurnPatch = z.infer<typeof RUNTIME_TURN_PATCH_SCHEMA>;
+type ExoPrepareStepContext = Parameters<PrepareStepFunction<ToolSet>>[0];
+
+interface RuntimeCapabilityContext {
+  hook: HarnessRuntimeHookName;
+  loaded: LoadedHarness;
+  source: TurnSource;
+  allowScheduling: boolean;
+  sideInferenceCount: number;
+}
+
+interface RuntimeTurnConfig {
+  system: string;
+  messages: ModelMessage[];
+  model: LanguageModel;
+  modelSpec: string;
+  activeTools?: string[];
+  toolChoice?: "auto" | "none" | "required";
+  maxSteps: number;
 }
 
 /** Runtime bindings plus the managed team AI Gateway secret. */
@@ -98,9 +194,9 @@ export { WorkspaceProxy, WorkspaceServiceProxy };
 /**
  * ExoKernel — the stable, non-self-modifiable layer of an exo-style agent.
  *
- * It owns the append-only journal, the version ledger, the Workspace, and
- * the turn loop. Everything the agent "is" (identity prompt, model policy,
- * tools) lives as files under /harness in the Workspace and is hot-loaded
+ * It owns the append-only journal, version ledger, Workspace, and protected
+ * turn rails. Everything the agent "is" (identity, model policy, tools, and
+ * runtime orchestration) lives under /harness and is hot-loaded
  * on every turn — see src/kernel/harness.ts.
  */
 export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
@@ -113,6 +209,8 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
   #store: KernelStore | undefined;
   #core: ExoCore | undefined;
   #workersai: ReturnType<typeof createWorkersAI> | undefined;
+  #runtimeCapabilities = new Map<string, RuntimeCapabilityContext>();
+  #chatHarnessByRequest = new Map<string, LoadedHarness>();
 
   /**
    * The agent's computer: a SQLite-backed virtual filesystem with two
@@ -170,6 +268,14 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
                 this.refreshSyncedState();
                 return { ok: true };
               }
+            },
+            "ws:kernel": {
+              call: async (method, args) => {
+                const value = await this.#callRuntimeCapability(method, args);
+                // SAFETY: every capability result is structured-clone data;
+                // the backend's recursive value type is not exported.
+                return value as never;
+              }
             }
           }
         })
@@ -187,6 +293,123 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
     const workspace = this.ws();
     await workspace.ready();
     return workspace.stub();
+  }
+
+  /** Dispatch one call from a hook-scoped ws:kernel capability. */
+  async #callRuntimeCapability(
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const capabilityToken = z.string().parse(args[0]);
+    const context = this.#runtimeCapabilities.get(capabilityToken);
+    if (!context) throw new Error("runtime capability expired");
+    const value = args[1];
+
+    switch (method) {
+      case "infer": {
+        const input = RUNTIME_INFER_SCHEMA.parse(value);
+        if (context.sideInferenceCount >= MAX_RUNTIME_INFERENCES_PER_HOOK) {
+          throw new Error(
+            `runtime hooks may start at most ${MAX_RUNTIME_INFERENCES_PER_HOOK} side inferences`
+          );
+        }
+        context.sideInferenceCount += 1;
+        const limit = this.store().reserveModelInvocation("runtime", 0);
+        if (limit) throw limit;
+        const result = await generateText({
+          model: this.resolveModel(context.loaded.policy),
+          system: input.system,
+          prompt: input.prompt,
+          maxOutputTokens: input.maxOutputTokens ?? 1200
+        });
+        return { text: result.text, finishReason: result.finishReason };
+      }
+      case "readMessages":
+        return this.messages;
+      case "appendMessages": {
+        if (context.hook !== "beforeTurn" && context.hook !== "afterTurn") {
+          throw new Error(
+            "appendMessages is available only during beforeTurn and afterTurn"
+          );
+        }
+        const messages = await validateUIMessages<UIMessage>({
+          messages: value
+        });
+        const messageIds = new Set(this.messages.map((message) => message.id));
+        for (const message of messages) {
+          if (messageIds.has(message.id)) {
+            throw new Error("appendMessages requires new message ids");
+          }
+          messageIds.add(message.id);
+        }
+        await this.persistMessages([...this.messages, ...messages]);
+        return { ok: true, count: messages.length };
+      }
+      case "executeTool": {
+        const input = RUNTIME_EXECUTE_TOOL_SCHEMA.parse(value);
+        const tools = this.core().buildTools(context.loaded, {
+          source: context.source,
+          allowScheduling: context.allowScheduling
+        });
+        const selected = tools[input.name];
+        if (!selected?.execute) {
+          throw new Error(`unknown or non-executable tool "${input.name}"`);
+        }
+        // SAFETY: runtime-requested tool inputs are deliberately dynamic; the
+        // journal wrapper converts schema/implementation failures to output.
+        return selected.execute(
+          input.input as never,
+          {
+            toolCallId: `runtime-${crypto.randomUUID()}`,
+            messages: [],
+            context: undefined
+          } as never
+        );
+      }
+      case "journal": {
+        const text = z.string().min(1).max(8000).parse(value);
+        this.store().appendJournal("note", { text, source: "runtime" });
+        this.refreshSyncedState();
+        return { ok: true };
+      }
+      case "readJournal": {
+        const limit = z.number().int().min(1).max(200).default(50).parse(value);
+        return this.store().journalTail(limit);
+      }
+      case "scheduleTask": {
+        if (!context.allowScheduling) {
+          throw new Error("scheduled turns cannot create more schedules");
+        }
+        const input = RUNTIME_SCHEDULE_SCHEMA.parse(value);
+        if (input.delaySeconds !== undefined) {
+          return this.scheduleTaskImpl({
+            instruction: input.instruction,
+            when: { kind: "delay", seconds: input.delaySeconds }
+          });
+        }
+        if (input.at !== undefined) {
+          const timestamp = Date.parse(input.at);
+          if (!Number.isFinite(timestamp)) {
+            throw new Error("at must be an ISO-8601 timestamp");
+          }
+          return this.scheduleTaskImpl({
+            instruction: input.instruction,
+            when: { kind: "at", time: new Date(timestamp) }
+          });
+        }
+        if (input.cron !== undefined) {
+          return this.scheduleTaskImpl({
+            instruction: input.instruction,
+            when: { kind: "cron", cron: input.cron }
+          });
+        }
+        throw new Error("schedule is missing a time selector");
+      }
+      case "cancelTask":
+        return this.cancelTaskById(z.string().min(1).parse(value));
+      default:
+        throw new Error(`unknown ws:kernel method "${method}"`);
+    }
   }
 
   store(): KernelStore {
@@ -239,30 +462,46 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
       toolCalls: "before-last-2-messages",
       reasoning: "before-last-message"
     }).slice(-loaded.context.keepMessages);
-    const { system, estimatedTokens } = this.assembleSystem(
+    const { system } = this.assembleSystem(loaded, memory, messages);
+    const tools = core.buildTools(loaded, {
+      source: "chat",
+      beforeToolCall: (call) => this.#runtimeBeforeToolCall(loaded, call),
+      afterToolCall: (result) => this.#runtimeAfterToolCall(loaded, result)
+    });
+    const turn = await this.#runtimeBeforeTurn(
       loaded,
-      memory,
-      messages
+      "chat",
+      system,
+      messages,
+      tools
     );
-    const tools = core.buildTools(loaded);
     this.captureContext(
       "chat",
       loaded,
-      system,
-      messages,
+      turn.system,
+      turn.messages,
       tools,
-      estimatedTokens,
-      memory?.length ?? 0
+      Math.round(
+        (turn.system.length + JSON.stringify(turn.messages).length) / 4
+      ),
+      memory?.length ?? 0,
+      turn.modelSpec
     );
 
+    if (options?.requestId) {
+      this.#chatHarnessByRequest.set(options.requestId, loaded);
+    }
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: this.resolveModel(loaded.policy),
-      system,
-      messages,
+      model: turn.model,
+      system: turn.system,
+      messages: turn.messages,
       tools,
-      stopWhen: isStepCount(loaded.policy.maxSteps ?? 8),
-      prepareStep: this.#modelInvocationReservation("chat"),
+      activeTools: turn.activeTools,
+      toolChoice: turn.toolChoice,
+      stopWhen: isStepCount(turn.maxSteps),
+      prepareStep: this.#runtimePrepareStep(loaded, "chat", tools),
+      experimental_transform: this.#runtimeStreamTransform(loaded, "chat"),
       onFinish: () => {
         store.appendJournal("turn_end", { source: "chat" });
         this.refreshSyncedState();
@@ -274,6 +513,23 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
 
     return result.toUIMessageStreamResponse({
       onError: publicModelError
+    });
+  }
+
+  /** Run the evolvable post-turn hook after AIChatAgent persists the reply. */
+  protected async onChatResponse(result: ChatResponseResult): Promise<void> {
+    const loaded =
+      this.#chatHarnessByRequest.get(result.requestId) ??
+      (await this.core().loadHarness());
+    this.#chatHarnessByRequest.delete(result.requestId);
+    await this.#runtimeAfterTurn(loaded, "chat", {
+      status: result.status,
+      requestId: result.requestId,
+      continuation: result.continuation,
+      message: result.message,
+      ...(result.error !== undefined && {
+        error: publicModelError(result.error)
+      })
     });
   }
 
@@ -310,41 +566,49 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
 
     const memory = await core.readMemory(loaded.context);
     const messages: ModelMessage[] = [{ role: "user", content: text }];
-    const { system, estimatedTokens } = this.assembleSystem(
-      loaded,
-      memory,
-      messages
-    );
+    const { system } = this.assembleSystem(loaded, memory, messages);
     const tools = core.buildTools(loaded, {
-      allowScheduling: source !== "task"
+      source,
+      allowScheduling: source !== "task",
+      beforeToolCall: (call) => this.#runtimeBeforeToolCall(loaded, call),
+      afterToolCall: (result) => this.#runtimeAfterToolCall(loaded, result)
     });
+    const turn = await this.#runtimeBeforeTurn(
+      loaded,
+      source,
+      system,
+      messages,
+      tools
+    );
     this.captureContext(
       source,
       loaded,
-      system,
-      messages,
+      turn.system,
+      turn.messages,
       tools,
-      estimatedTokens,
-      memory?.length ?? 0
+      Math.round(
+        (turn.system.length + JSON.stringify(turn.messages).length) / 4
+      ),
+      memory?.length ?? 0,
+      turn.modelSpec
     );
 
     let result;
     try {
       result = await generateText({
-        model: this.resolveModel(loaded.policy),
-        system,
-        messages,
+        model: turn.model,
+        system: turn.system,
+        messages: turn.messages,
         tools,
-        stopWhen: isStepCount(loaded.policy.maxSteps ?? 8),
-        prepareStep: this.#modelInvocationReservation(source)
+        activeTools: turn.activeTools,
+        toolChoice: turn.toolChoice,
+        stopWhen: isStepCount(turn.maxSteps),
+        prepareStep: this.#runtimePrepareStep(loaded, source, tools)
       });
     } catch (error) {
       this.#journalTurnError(source, publicModelError(error));
       throw error;
     }
-
-    store.appendJournal("turn_end", { source });
-    this.refreshSyncedState();
 
     const toolCalls = result.steps.flatMap((step) =>
       step.toolCalls.map((call) => ({
@@ -352,7 +616,19 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
         input: call.input as Json
       }))
     );
-    return { text: result.text, toolCalls };
+    const outputText = await this.#runtimeTransformOutput(
+      loaded,
+      source,
+      result.text
+    );
+    store.appendJournal("turn_end", { source });
+    await this.#runtimeAfterTurn(loaded, source, {
+      status: "completed",
+      text: outputText,
+      toolCalls
+    });
+    this.refreshSyncedState();
+    return { text: outputText, toolCalls };
   }
 
   /** Create a persistent self-scheduled task (kernel rails enforced). */
@@ -515,13 +791,14 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
     messages: ModelMessage[],
     tools: ToolSet,
     estimatedTokens: number,
-    memoryChars: number
+    memoryChars: number,
+    modelSpec = this.env.MODEL_OVERRIDE || loaded.policy.model
   ): void {
     try {
       this.store().saveContextSnapshot({
         ts: Date.now(),
         source,
-        model: this.env.MODEL_OVERRIDE || loaded.policy.model,
+        model: modelSpec,
         system,
         messages: messages as unknown as Json,
         tools: Object.entries(tools).map(([name, t]) => ({
@@ -609,6 +886,315 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
     return { system, estimatedTokens };
   }
 
+  async #runtimeBeforeTurn(
+    loaded: LoadedHarness,
+    source: TurnSource,
+    system: string,
+    messages: ModelMessage[],
+    tools: ToolSet
+  ): Promise<RuntimeTurnConfig> {
+    const hasHook = loaded.runtime?.hooks.includes("beforeTurn") ?? false;
+    const raw = await this.#runRuntimeHook(loaded, "beforeTurn", source, {
+      source,
+      system,
+      messages,
+      tools: Object.keys(tools),
+      model: this.env.MODEL_OVERRIDE || loaded.policy.model,
+      maxSteps: loaded.policy.maxSteps ?? 8
+    });
+    const patch = this.#parseRuntimeTurnPatch("beforeTurn", raw);
+    const baseMessages =
+      source === "chat" && hasHook
+        ? pruneMessages({
+            messages: await convertToModelMessages(this.messages),
+            toolCalls: "before-last-2-messages",
+            reasoning: "before-last-message"
+          }).slice(-loaded.context.keepMessages)
+        : messages;
+    const { model, modelSpec } = this.#runtimeModelSelection(
+      loaded,
+      patch?.model,
+      "beforeTurn"
+    );
+    return {
+      system:
+        patch?.system ??
+        (patch?.appendSystem ? `${system}\n\n${patch.appendSystem}` : system),
+      messages: [
+        ...(patch?.messages ?? baseMessages),
+        ...(patch?.appendMessages ?? [])
+      ],
+      model,
+      modelSpec,
+      activeTools: patch?.activeTools?.filter((name) => name in tools),
+      toolChoice: patch?.toolChoice,
+      maxSteps: patch?.maxSteps ?? loaded.policy.maxSteps ?? 8
+    };
+  }
+
+  #runtimePrepareStep(
+    loaded: LoadedHarness,
+    source: TurnSource,
+    tools: ToolSet
+  ): PrepareStepFunction<ToolSet> {
+    return async (step: ExoPrepareStepContext) => {
+      const error = this.store().reserveModelInvocation(
+        source,
+        step.stepNumber
+      );
+      if (error) throw error;
+      const raw = await this.#runRuntimeHook(loaded, "beforeStep", source, {
+        source,
+        stepNumber: step.stepNumber,
+        instructions: step.instructions,
+        messages: step.messages,
+        steps: step.steps.map((previous) => ({
+          text: previous.text,
+          finishReason: previous.finishReason,
+          toolCalls: previous.toolCalls,
+          toolResults: previous.toolResults
+        }))
+      });
+      const patch = this.#parseRuntimeTurnPatch("beforeStep", raw);
+      if (!patch) return {};
+      const instructions =
+        patch.system ??
+        (patch.appendSystem
+          ? `${typeof step.instructions === "string" ? step.instructions : ""}\n\n${patch.appendSystem}`
+          : undefined);
+      const model = patch.model
+        ? this.#runtimeModelSelection(loaded, patch.model, "beforeStep").model
+        : undefined;
+      return {
+        ...(model && { model }),
+        ...(instructions !== undefined && { instructions }),
+        ...(patch.messages && { messages: patch.messages }),
+        ...(patch.appendMessages && {
+          messages: [
+            ...(patch.messages ?? step.messages),
+            ...patch.appendMessages
+          ]
+        }),
+        ...(patch.activeTools && {
+          activeTools: patch.activeTools.filter((name) => name in tools)
+        }),
+        ...(patch.toolChoice && { toolChoice: patch.toolChoice })
+      };
+    };
+  }
+
+  async #runtimeBeforeToolCall(
+    loaded: LoadedHarness,
+    call: HarnessRuntimeToolCall
+  ): Promise<HarnessRuntimeToolDecision | undefined> {
+    const raw = await this.#runRuntimeHook(
+      loaded,
+      "beforeToolCall",
+      call.source,
+      call
+    );
+    if (raw === undefined || raw === null) return undefined;
+    const parsed = RUNTIME_TOOL_DECISION_SCHEMA.safeParse(raw);
+    if (!parsed.success) {
+      this.#recordRuntimeError("beforeToolCall", parsed.error.message);
+      return undefined;
+    }
+    return parsed.data;
+  }
+
+  async #runtimeAfterToolCall(
+    loaded: LoadedHarness,
+    result: HarnessRuntimeToolResult
+  ): Promise<{ output: unknown } | undefined> {
+    const raw = await this.#runRuntimeHook(
+      loaded,
+      "afterToolCall",
+      result.source,
+      result
+    );
+    if (raw === undefined || raw === null) return undefined;
+    const parsed = RUNTIME_TOOL_RESULT_PATCH_SCHEMA.safeParse(raw);
+    if (!parsed.success) {
+      this.#recordRuntimeError("afterToolCall", parsed.error.message);
+      return undefined;
+    }
+    return parsed.data;
+  }
+
+  async #runtimeTransformOutput(
+    loaded: LoadedHarness,
+    source: TurnSource,
+    text: string
+  ): Promise<string> {
+    const raw = await this.#runRuntimeHook(loaded, "transformOutput", source, {
+      source,
+      text
+    });
+    if (raw === undefined || raw === null) return text;
+    const parsed = RUNTIME_OUTPUT_PATCH_SCHEMA.safeParse(raw);
+    if (!parsed.success) {
+      this.#recordRuntimeError("transformOutput", parsed.error.message);
+      return text;
+    }
+    return parsed.data.text;
+  }
+
+  #runtimeStreamTransform(
+    loaded: LoadedHarness,
+    source: TurnSource
+  ): StreamTextTransform<ToolSet> | undefined {
+    if (!loaded.runtime?.hooks.includes("transformOutput")) return undefined;
+    return () => {
+      let buffered: TextStreamPart<ToolSet>[] | null = null;
+      let text = "";
+      return new TransformStream<
+        TextStreamPart<ToolSet>,
+        TextStreamPart<ToolSet>
+      >({
+        transform: async (chunk, controller) => {
+          if (chunk.type === "text-start" && buffered === null) {
+            buffered = [chunk];
+            text = "";
+            return;
+          }
+          if (buffered === null) {
+            controller.enqueue(chunk);
+            return;
+          }
+          buffered.push(chunk);
+          if (chunk.type === "text-delta") text += chunk.text;
+          if (chunk.type !== "text-end") return;
+
+          const transformed = await this.#runtimeTransformOutput(
+            loaded,
+            source,
+            text
+          );
+          let emittedText = false;
+          for (const part of buffered) {
+            if (part.type === "text-delta") {
+              if (!emittedText) {
+                emittedText = true;
+                if (transformed) {
+                  controller.enqueue({ ...part, text: transformed });
+                }
+              }
+            } else {
+              if (part.type === "text-end" && !emittedText && transformed) {
+                controller.enqueue({
+                  type: "text-delta",
+                  id: part.id,
+                  providerMetadata: part.providerMetadata,
+                  text: transformed
+                });
+              }
+              controller.enqueue(part);
+            }
+          }
+          buffered = null;
+          text = "";
+        },
+        flush: (controller) => {
+          for (const part of buffered ?? []) controller.enqueue(part);
+        }
+      });
+    };
+  }
+
+  async #runtimeAfterTurn(
+    loaded: LoadedHarness,
+    source: TurnSource,
+    event: Record<string, unknown>
+  ): Promise<void> {
+    await this.#runRuntimeHook(loaded, "afterTurn", source, {
+      source,
+      ...event
+    });
+  }
+
+  async #runRuntimeHook(
+    loaded: LoadedHarness,
+    hook: HarnessRuntimeHookName,
+    source: TurnSource,
+    event: unknown
+  ): Promise<unknown> {
+    if (!loaded.runtime?.hooks.includes(hook)) return undefined;
+    const capabilityToken = crypto.randomUUID();
+    this.#runtimeCapabilities.set(capabilityToken, {
+      hook,
+      loaded,
+      source,
+      allowScheduling: source !== "task",
+      sideInferenceCount: 0
+    });
+    try {
+      return await this.core().runRuntimeHook(
+        loaded.runtime,
+        hook,
+        event,
+        capabilityToken
+      );
+    } catch (error) {
+      this.#recordRuntimeError(
+        hook,
+        error instanceof Error ? error.message : String(error)
+      );
+      return undefined;
+    } finally {
+      this.#runtimeCapabilities.delete(capabilityToken);
+    }
+  }
+
+  #runtimeModelSelection(
+    loaded: LoadedHarness,
+    requested: string | undefined,
+    hook: "beforeTurn" | "beforeStep"
+  ): { model: LanguageModel; modelSpec: string } {
+    const defaultSpec = this.env.MODEL_OVERRIDE || loaded.policy.model;
+    if (!requested || this.env.MODEL_OVERRIDE) {
+      return {
+        model: this.resolveModel(loaded.policy),
+        modelSpec: defaultSpec
+      };
+    }
+    try {
+      return {
+        model: this.resolveModel({ ...loaded.policy, model: requested }),
+        modelSpec: requested
+      };
+    } catch (error) {
+      this.#recordRuntimeError(
+        hook,
+        `invalid model override: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return {
+        model: this.resolveModel(loaded.policy),
+        modelSpec: defaultSpec
+      };
+    }
+  }
+
+  #parseRuntimeTurnPatch(
+    hook: "beforeTurn" | "beforeStep",
+    raw: unknown
+  ): RuntimeTurnPatch | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    const parsed = RUNTIME_TURN_PATCH_SCHEMA.safeParse(raw);
+    if (!parsed.success) {
+      this.#recordRuntimeError(hook, parsed.error.message);
+      return undefined;
+    }
+    return parsed.data;
+  }
+
+  #recordRuntimeError(hook: HarnessRuntimeHookName, message: string): void {
+    this.store().appendJournal("error", {
+      source: "runtime",
+      hook,
+      message: message.slice(0, 2000)
+    });
+  }
+
   resolveModel(policy: HarnessPolicy): LanguageModel {
     const spec = this.env.MODEL_OVERRIDE || policy.model;
     const parsed = parseModelSpec(spec);
@@ -642,14 +1228,6 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
     return createExoGatewayOpenAIModel(modelId, this.env.CLOUDFLARE_AIG_TOKEN);
   }
 
-  #modelInvocationReservation(source: ContextSnapshot["source"]) {
-    return ({ stepNumber }: { stepNumber: number }) => {
-      const error = this.store().reserveModelInvocation(source, stepNumber);
-      if (error) throw error;
-      return {};
-    };
-  }
-
   #journalTurnError(source: string, message: string): void {
     this.store().appendJournal("error", { source, message });
     this.refreshSyncedState();
@@ -680,6 +1258,9 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
       '- /harness/policy.json — model policy, e.g. {"model": "openai/gpt-5.6-terra", "maxSteps": 8} (Workers AI: "workers-ai:@cf/<id>"; openai/* uses the managed Responses API)',
       contextLine,
       "- /harness/tools/*.js — your harness tools (ES modules; see tools/echo.js for the format)",
+      "- /harness/runtime.js — optional default-export object controlling beforeTurn, beforeStep, beforeToolCall, afterToolCall, transformOutput, and afterTurn",
+      "  Hooks receive (event, host). host supports infer (up to four calls per hook), executeTool, readMessages, appendMessages, journal, readJournal, scheduleTask, and cancelTask; runtime.js can import node:fs for its own files.",
+      "  beforeTurn/beforeStep may return system/messages/appendMessages/model/activeTools/toolChoice; beforeTurn may also set maxSteps. Tool hooks may block, substitute, or replace output; transformOutput returns { text }.",
       "",
       "To change yourself: edit those files with write_file, then call",
       "activate_harness to validate and commit a new version. If a broken edit",
