@@ -102,7 +102,13 @@ class ServiceCapability extends LifecycleCapability {
   probe(): void {
     expectTypeOf(this.lifecycle).toEqualTypeOf<LifecycleServices>();
     expectTypeOf(this.lifecycle.storage).toEqualTypeOf<DurableObjectStorage>();
+    expectTypeOf(this.lifecycle.starting()).toEqualTypeOf<boolean>();
     expectTypeOf(this.lifecycle.alarms.rearm()).toEqualTypeOf<Promise<void>>();
+    expectTypeOf(this.lifecycle.alarms.disabled()).toEqualTypeOf<boolean>();
+    expectTypeOf(this.lifecycle.callbacks.has("tick")).toEqualTypeOf<boolean>();
+    expectTypeOf(this.lifecycle.callbacks.invoke("tick", [1, 2])).toEqualTypeOf<
+      Promise<unknown>
+    >();
     this.lifecycle.events.emit("probe:started", { ready: true });
     this.lifecycle.routes.toRoot({ ready: true });
   }

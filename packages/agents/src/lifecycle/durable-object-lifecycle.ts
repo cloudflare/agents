@@ -177,8 +177,25 @@ type LifecycleHost<
   readonly constructor: { readonly name: string };
 };
 
+/**
+ * Boundary wrapping host callbacks that capabilities invoke through
+ * `LifecycleServices.callbacks`. The default boundary is
+ * {@link runInLifecycleHostContext}; a host composition root may substitute
+ * its own invocation wrapper (Agent adds tracing span scope).
+ */
+export type LifecycleHostInvoker = <T>(run: () => T) => T;
+
 const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
 const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
+const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
+
+/** @internal Adapt the capability host-callback boundary at a composition root. */
+export function setLifecycleHostInvoker<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, invoker: LifecycleHostInvoker): void {
+  lifecycleHostInvokers.set(lifecycle, invoker);
+}
 
 /** @internal Supply a host's routed Lifecycle transport. */
 export function setLifecycleRouteTransport<
@@ -317,17 +334,33 @@ export class Lifecycle<
   }
 
   #servicesForCapability(capabilityId: string): LifecycleServices {
+    const lifecycle = this;
     const envelope = (payload: unknown): LifecycleRouteEnvelope => ({
       capability: capabilityId,
-      source: lifecycleRouteTransports.get(this)?.source,
+      source: lifecycleRouteTransports.get(lifecycle)?.source,
       payload
     });
-    const owner = this;
     return Object.freeze({
       storage: this.#ctx.storage,
       ready: () => this.#readyForCapabilityOperation(),
+      starting: () => this.#status === "starting",
       alarms: Object.freeze({
-        rearm: () => this.rearmAlarm()
+        rearm: () => this.rearmAlarm(),
+        disabled: () => this.#alarmsDisabled
+      }),
+      callbacks: Object.freeze({
+        has: (name: string) => this.#hostCallback(name) !== undefined,
+        invoke: async (name: string, args: readonly unknown[]) => {
+          const method = this.#hostCallback(name);
+          if (!method) {
+            throw new Error(`this.${name} is not a function`);
+          }
+          const run = () => method.apply(this.#host, [...args]);
+          const boundary = lifecycleHostInvokers.get(lifecycle);
+          return boundary
+            ? boundary(run)
+            : runInLifecycleHostContext({ host: this.#host }, run);
+        }
       }),
       events: Object.freeze({
         emit: (type: string, payload: unknown) =>
@@ -335,24 +368,35 @@ export class Lifecycle<
       }),
       routes: Object.freeze({
         get source() {
-          return lifecycleRouteTransports.get(owner)?.source;
+          return lifecycleRouteTransports.get(lifecycle)?.source;
         },
         toRoot: (payload: unknown) => {
-          const current = lifecycleRouteTransports.get(this);
-          return current
-            ? current.toRoot(envelope(payload))
+          const transport = lifecycleRouteTransports.get(lifecycle);
+          return transport
+            ? transport.toRoot(envelope(payload))
             : this.#dispatchRoute(envelope(payload));
         },
         to: (target: LifecycleRouteAddress, payload: unknown) => {
-          const current = lifecycleRouteTransports.get(this);
-          if (current) return current.to(target, envelope(payload));
-          if (lifecycleRouteTransports.get(this)?.source?.key === target.key) {
-            return this.#dispatchRoute(envelope(payload));
+          const transport = lifecycleRouteTransports.get(lifecycle);
+          if (!transport) {
+            throw new Error(
+              "Lifecycle has no transport for routed capabilities"
+            );
           }
-          throw new Error("Lifecycle has no transport for routed capabilities");
+          return transport.to(target, envelope(payload));
         }
       })
     });
+  }
+
+  #hostCallback(name: string): ((...args: unknown[]) => unknown) | undefined {
+    // SAFETY: host callback names are persisted strings supplied by
+    // capabilities. The typeof check narrows the dynamic lookup to a function
+    // before any invocation.
+    const method = (this.#host as unknown as Record<string, unknown>)[name];
+    return typeof method === "function"
+      ? (method as (...args: unknown[]) => unknown)
+      : undefined;
   }
 
   async #readyForCapabilityOperation(): Promise<void> {

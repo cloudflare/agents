@@ -23,6 +23,25 @@ export type LifecycleRouteContext = {
 export type LifecycleAlarms = {
   /** Recompute the physical alarm from installed capability state. */
   readonly rearm: () => Promise<void>;
+  /**
+   * True once explicit host teardown permanently disabled alarm arming.
+   * Capabilities stop dispatching durable work when this reports true.
+   */
+  readonly disabled: () => boolean;
+};
+
+/**
+ * Named host-callback dispatch available to every Lifecycle capability.
+ *
+ * User callbacks run inside the host invocation context, unlike capability
+ * hooks. Lifecycle owns that transition so every capability invokes host
+ * methods through one boundary.
+ */
+export type LifecycleHostCallbacks = {
+  /** True when the host exposes a callable method with this name. */
+  readonly has: (name: string) => boolean;
+  /** Invoke a named host callback inside the host invocation context. */
+  readonly invoke: (name: string, args: readonly unknown[]) => Promise<unknown>;
 };
 
 /** Best-effort telemetry available to every Lifecycle capability. */
@@ -48,7 +67,10 @@ export type LifecycleRoutes = {
 export type LifecycleServices = {
   readonly storage: DurableObjectStorage;
   readonly ready: () => Promise<void>;
+  /** True while capability and host startup hooks are still running. */
+  readonly starting: () => boolean;
   readonly alarms: LifecycleAlarms;
+  readonly callbacks: LifecycleHostCallbacks;
   readonly events: LifecycleEvents;
   readonly routes: LifecycleRoutes;
 };
@@ -86,7 +108,16 @@ export abstract class LifecycleCapability<Props extends object = object> {
   }
 }
 
-/** @internal Bind the standard service surface to one capability instance. */
+/**
+ * Bind the standard service surface to one capability instance.
+ *
+ * `Lifecycle.use()` calls this during installation. Unit tests for a
+ * capability call it directly with fake services so the capability can be
+ * exercised without constructing a Lifecycle.
+ *
+ * @param capability - The capability receiving standard services.
+ * @param services - The services the capability reads through `this.lifecycle`.
+ */
 export function bindLifecycleCapability(
   capability: LifecycleCapability,
   services: LifecycleServices

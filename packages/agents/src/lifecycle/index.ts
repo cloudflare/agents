@@ -1,8 +1,10 @@
 /** Durable Object lifecycle composition. */
 export {
+  bindLifecycleCapability,
   LifecycleCapability,
   type LifecycleAlarms,
   type LifecycleEvents,
+  type LifecycleHostCallbacks,
   type LifecycleRouteAddress,
   type LifecycleRouteContext,
   type LifecycleRoutes,
