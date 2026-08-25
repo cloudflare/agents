@@ -110,22 +110,47 @@ export class TestDestroyScheduleAgent extends Agent<
 }
 
 /**
+ * Capture console.warn output emitted while `run` executes, so onStart
+ * scheduling warnings can be asserted through their observable behavior
+ * instead of Scheduler internals.
+ */
+async function captureWarnings(
+  sink: string[],
+  run: () => Promise<void>
+): Promise<void> {
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    sink.push(String(args[0]));
+    original.apply(console, args);
+  };
+  try {
+    await run();
+  } finally {
+    console.warn = original;
+  }
+}
+
+/**
  * Agent that calls schedule() in onStart() without idempotent — should warn.
  */
 export class TestOnStartScheduleWarnAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback");
+    await captureWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback");
+    });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`schedule("${cb}")`)
+    );
   }
 
   @callable()
@@ -141,21 +166,25 @@ export class TestOnStartScheduleWarnAgent extends Agent {
  * Agent that calls schedule() in onStart() WITH idempotent — should not warn.
  */
 export class TestOnStartScheduleNoWarnAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback", undefined, {
-      idempotent: true
+    await captureWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback", undefined, {
+        idempotent: true
+      });
     });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`schedule("${cb}")`)
+    );
   }
 
   @callable()
@@ -172,21 +201,25 @@ export class TestOnStartScheduleNoWarnAgent extends Agent {
  * NOT warn because the user explicitly opted out.
  */
 export class TestOnStartScheduleExplicitFalseAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback", undefined, {
-      idempotent: false
+    await captureWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback", undefined, {
+        idempotent: false
+      });
     });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`schedule("${cb}")`)
+    );
   }
 }
 

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../worker";
 import { MCPClientManager } from "../../mcp/client";
 import type { MCPServerRow } from "../../mcp/client-storage";
+import { bindTestLifecycleServices } from "../shared/lifecycle-test-services";
 
 type RecordedRequest = {
   method: string;
@@ -124,9 +125,8 @@ afterEach(() => {
 describe("MCP streamable-http session lifecycle integration", () => {
   it("persists a real session id, opens the background SSE GET, and sends DELETE on close", async () => {
     const { rows, storage } = createManagerStorage();
-    const manager = new MCPClientManager("test-client", "1.0.0", {
-      storage
-    });
+    const manager = new MCPClientManager("test-client", "1.0.0");
+    bindTestLifecycleServices(manager, storage);
     const { fetch, requests } = createRecordedFetch();
     const serverId = "integration-session-close";
 
@@ -183,9 +183,8 @@ describe("MCP streamable-http session lifecycle integration", () => {
 
   it("terminates every real streamable-http session during closeAllConnections", async () => {
     const { rows, storage } = createManagerStorage();
-    const manager = new MCPClientManager("test-client", "1.0.0", {
-      storage
-    });
+    const manager = new MCPClientManager("test-client", "1.0.0");
+    bindTestLifecycleServices(manager, storage);
     const { fetch, requests } = createRecordedFetch();
     const serverIds = ["integration-close-all-1", "integration-close-all-2"];
 
@@ -234,9 +233,8 @@ describe("MCP streamable-http session lifecycle integration", () => {
 
   it("reuses a persisted real session id during restore and discovers tools without reinitializing", async () => {
     const { rows, storage } = createManagerStorage();
-    const manager1 = new MCPClientManager("test-client", "1.0.0", {
-      storage
-    });
+    const manager1 = new MCPClientManager("test-client", "1.0.0");
+    bindTestLifecycleServices(manager1, storage);
     const initialFetch = createRecordedFetch();
     const serverId = "integration-session-restore";
     let manager2: MCPClientManager | undefined;
@@ -270,9 +268,9 @@ describe("MCP streamable-http session lifecycle integration", () => {
       await manager1.mcpConnections[serverId].client.close();
       delete manager1.mcpConnections[serverId];
 
-      manager2 = new MCPClientManager("test-client", "1.0.0", {
-        storage
-      });
+      manager2 = new MCPClientManager("test-client", "1.0.0");
+
+      bindTestLifecycleServices(manager2, storage);
       const restoredFetch = createRecordedFetch();
       vi.stubGlobal("fetch", restoredFetch.fetch);
 
@@ -307,9 +305,8 @@ describe("MCP streamable-http session lifecycle integration", () => {
     const { rows, storage } = createManagerStorage();
     const staleSessionId = "expired-session";
     const serverId = "integration-stale-session";
-    const manager1 = new MCPClientManager("test-client", "1.0.0", {
-      storage
-    });
+    const manager1 = new MCPClientManager("test-client", "1.0.0");
+    bindTestLifecycleServices(manager1, storage);
     let manager2: MCPClientManager | undefined;
 
     try {
@@ -323,7 +320,9 @@ describe("MCP streamable-http session lifecycle integration", () => {
         }
       });
 
-      manager2 = new MCPClientManager("test-client", "1.0.0", { storage });
+      manager2 = new MCPClientManager("test-client", "1.0.0");
+
+      bindTestLifecycleServices(manager2, storage);
       const restoredFetch = createRecordedFetch({
         rejectSessionId: staleSessionId
       });

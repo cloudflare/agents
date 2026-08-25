@@ -11,6 +11,7 @@ import type { Tool } from "@modelcontextprotocol/client";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import { bindTestLifecycleServices } from "../shared/lifecycle-test-services";
 
 function createMockStateStorage() {
   const storage = new Map<string, { serverId: string; createdAt: number }>();
@@ -126,6 +127,7 @@ class TestMCPClientManager extends MCPClientManager {
 
 describe("MCPClientManager OAuth Integration", () => {
   let manager: TestMCPClientManager;
+  let managerStorage: DurableObjectStorage;
   let mockStorageData: Map<string, MCPServerRow>;
   let mockKVData: Map<string, unknown>;
 
@@ -233,9 +235,9 @@ describe("MCPClientManager OAuth Integration", () => {
       }
     } as unknown as DurableObjectStorage;
 
-    manager = new TestMCPClientManager("test-client", "1.0.0", {
-      storage: mockDOStorage
-    });
+    managerStorage = mockDOStorage;
+    manager = new TestMCPClientManager("test-client", "1.0.0");
+    bindTestLifecycleServices(manager, managerStorage);
   });
 
   describe("Connection Reuse During OAuth", () => {
@@ -3943,9 +3945,10 @@ describe("MCPClientManager OAuth Integration", () => {
       const factory = vi.fn().mockReturnValue(mockProvider);
 
       const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
         createAuthProvider: factory
       });
+
+      bindTestLifecycleServices(factoryManager, managerStorage);
 
       vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
         state: "connected"
@@ -3978,9 +3981,10 @@ describe("MCPClientManager OAuth Integration", () => {
       const factory = vi.fn().mockReturnValue(mockProvider);
 
       const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
         createAuthProvider: factory
       });
+
+      bindTestLifecycleServices(factoryManager, managerStorage);
 
       vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
         state: "connected"
@@ -4037,9 +4041,10 @@ describe("MCPClientManager OAuth Integration", () => {
       const factory = vi.fn().mockReturnValue(mockProvider);
 
       const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
         createAuthProvider: factory
       });
+
+      bindTestLifecycleServices(factoryManager, managerStorage);
 
       await factoryManager.restoreConnectionsFromStorage("test-agent");
 
@@ -4069,9 +4074,10 @@ describe("MCPClientManager OAuth Integration", () => {
       const factory = vi.fn().mockReturnValue(mockProvider);
 
       const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
         createAuthProvider: factory
       });
+
+      bindTestLifecycleServices(factoryManager, managerStorage);
 
       // Pre-populate with a failed connection
       const failedConnection = new MCPClientConnection(
@@ -4127,9 +4133,10 @@ describe("MCPClientManager OAuth Integration", () => {
         .mockReturnValueOnce(mockProvider2);
 
       const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
-        storage: manager["_storage"],
         createAuthProvider: factory
       });
+
+      bindTestLifecycleServices(factoryManager, managerStorage);
 
       vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
         state: "connected"
