@@ -1,3 +1,4 @@
+import type { LanguageModelV4Prompt } from "@ai-sdk/provider";
 import { describe, expect, it, vi } from "vitest";
 import {
   createExoGatewayOpenAIModel,
@@ -211,6 +212,69 @@ describe("createExoGatewayOpenAIModel", () => {
         toolCallId: "call-echo",
         toolName: "echo",
         input: '{"message":"hi"}'
+      })
+    );
+  });
+
+  it("sends encrypted reasoning instead of persisted item references for ZDR continuations", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json(completion)
+    );
+    const model = createExoGatewayOpenAIModel(
+      "gpt-5.6-terra",
+      "team-token",
+      fetch
+    );
+    const continuationPrompt: LanguageModelV4Prompt = [
+      ...prompt,
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "",
+            providerOptions: {
+              openai: {
+                itemId: "rs-test",
+                reasoningEncryptedContent: "encrypted-reasoning"
+              }
+            }
+          },
+          {
+            type: "tool-call",
+            toolCallId: "call-echo",
+            toolName: "echo",
+            input: '{"message":"hi"}',
+            providerOptions: { openai: { itemId: "fc-echo" } }
+          }
+        ]
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-echo",
+            toolName: "echo",
+            output: { type: "json", value: { echoed: "hi" } }
+          }
+        ]
+      }
+    ];
+
+    await model.doGenerate({ prompt: continuationPrompt });
+
+    const [, init] = fetch.mock.calls[0];
+    const body = JSON.parse(String(init?.body)) as {
+      store?: unknown;
+      input?: unknown;
+    };
+    expect(body.store).toBe(false);
+    expect(JSON.stringify(body.input)).not.toContain("item_reference");
+    expect(body.input).toContainEqual(
+      expect.objectContaining({
+        type: "reasoning",
+        encrypted_content: "encrypted-reasoning"
       })
     );
   });

@@ -1,12 +1,13 @@
 // Local dev config with REAL remote bindings (AI + Artifacts). Identical to
 // wrangler.jsonc except for the worker name: the remote-bindings tunnel
 // rides the worker's own workers.dev host, and the production host
-// (exo-harness.<subdomain>.workers.dev) is protected by Cloudflare Access —
+// (self-modifying.<subdomain>.workers.dev) is protected by Cloudflare Access —
 // which would 302 every binding call. A separate dev name keeps the tunnel
 // on an unprotected host. Keep the three configs in sync.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "exo-harness-dev",
+  "name": "self-modifying-dev",
+  "account_id": "b8afc92c7a87f699592038b756153d22",
   "main": "src/server.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat", "experimental"],
@@ -41,18 +42,6 @@
     {
       "new_sqlite_classes": ["ExoKernel"],
       "tag": "v1"
-    },
-    {
-      // Fresh start for the @cloudflare/computer substrate swap: v2
-      // deleted the class (applied via an intermediate deploy with the
-      // binding removed — the API refuses a delete while a binding
-      // references the class) and v3 recreated it empty.
-      "deleted_classes": ["ExoKernel"],
-      "tag": "v2"
-    },
-    {
-      "new_sqlite_classes": ["ExoKernel"],
-      "tag": "v3"
     }
   ]
 }

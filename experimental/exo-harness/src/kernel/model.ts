@@ -1,4 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { defaultSettingsMiddleware, wrapLanguageModel } from "ai";
 
 const EXO_MANAGED_OPENAI_BASE_URL =
   "https://gateway.ai.cloudflare.com/v1/27b146402af2103944379f33841b6234/project-gateway/openai/v1";
@@ -55,9 +56,7 @@ export function parseModelSpec(spec: string): ParsedModelSpec {
   );
 }
 
-type ExoGatewayOpenAIModel = ReturnType<
-  ReturnType<typeof createOpenAI>["responses"]
->;
+type ExoGatewayOpenAIModel = ReturnType<typeof wrapLanguageModel>;
 
 /**
  * Create an OpenAI Responses model routed through the authenticated team AI
@@ -82,11 +81,18 @@ export function createExoGatewayOpenAIModel(
     return fetchImpl(input, { ...init, headers });
   };
 
-  return createOpenAI({
+  const model = createOpenAI({
     apiKey: "unused",
     baseURL: EXO_MANAGED_OPENAI_BASE_URL,
     fetch: gatewayFetch
   }).responses(modelId);
+
+  return wrapLanguageModel({
+    model,
+    middleware: defaultSettingsMiddleware({
+      settings: { providerOptions: { openai: { store: false } } }
+    })
+  });
 }
 
 /** Return a bounded, one-line model error safe for the client and journal. */

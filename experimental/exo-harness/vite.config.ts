@@ -5,6 +5,7 @@ import agents from "agents/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig(({ command }) => ({
+  resolve: { dedupe: ["react", "react-dom"] },
   plugins: [
     agents(),
     react(),

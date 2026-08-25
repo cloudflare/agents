@@ -4,7 +4,8 @@
 // (wrangler.jsonc / wrangler.dev.jsonc / this one) in sync.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "exo-harness",
+  "name": "self-modifying-offline",
+  "account_id": "b8afc92c7a87f699592038b756153d22",
   "main": "src/server.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat", "experimental"],
@@ -34,18 +35,6 @@
     {
       "new_sqlite_classes": ["ExoKernel"],
       "tag": "v1"
-    },
-    {
-      // Fresh start for the @cloudflare/computer substrate swap: v2
-      // deleted the class (applied via an intermediate deploy with the
-      // binding removed — the API refuses a delete while a binding
-      // references the class) and v3 recreated it empty.
-      "deleted_classes": ["ExoKernel"],
-      "tag": "v2"
-    },
-    {
-      "new_sqlite_classes": ["ExoKernel"],
-      "tag": "v3"
     }
   ]
 }
