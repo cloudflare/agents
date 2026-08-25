@@ -1,7 +1,7 @@
-import type { MCPClientManager } from "./client";
-import { MCPConnectionState } from "./client-connection";
-import { decodeMcpServerOptions, type MCPServerRow } from "./client-storage";
-import { isDurableObjectNamespace, RPC_DO_PREFIX } from "./rpc";
+import type { MCPClientManager } from "./index";
+import { MCPConnectionState } from "./connection";
+import { decodeMcpServerOptions, type MCPServerRow } from "./storage";
+import { isDurableObjectNamespace, RPC_DO_PREFIX } from "../rpc";
 
 type RpcRestorationManager = Pick<
   MCPClientManager,

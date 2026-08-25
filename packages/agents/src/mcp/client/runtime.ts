@@ -9,7 +9,7 @@ import {
   type Tool
 } from "@modelcontextprotocol/client";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
-import type { McpClientOptions } from "./types";
+import type { McpClientOptions } from "../types";
 
 class CompatibleWorkerJsonSchemaValidator
   extends CfWorkerJsonSchemaValidator

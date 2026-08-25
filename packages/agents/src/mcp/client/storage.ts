@@ -3,8 +3,8 @@ import type {
   DiscoverResult,
   StreamableHTTPReconnectionOptions
 } from "@modelcontextprotocol/client";
-import type { RetryOptions } from "../retries";
-import type { McpClientOptions, TransportType } from "./types";
+import type { RetryOptions } from "../../retries";
+import type { McpClientOptions, TransportType } from "../types";
 
 /**
  * Represents a row in the cf_agents_mcp_servers table.

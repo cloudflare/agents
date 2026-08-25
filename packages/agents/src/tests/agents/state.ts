@@ -1,5 +1,5 @@
 import { Agent, type AgentContext, type Connection } from "../../index.ts";
-import { MCPConnectionState } from "../../mcp/client-connection.ts";
+import { MCPConnectionState } from "../../mcp/client/connection.ts";
 
 // Test Agent for state management tests
 export type TestState = {

@@ -17,33 +17,30 @@ import {
   type StreamableHTTPClientTransportOptions,
   type Tool
 } from "@modelcontextprotocol/client";
-import { Emitter, type Event } from "../core/events";
-import type { MCPObservabilityEvent } from "../observability/mcp";
-import { raceWithSignal } from "./abort";
+import { Emitter, type Event } from "../../core/events";
+import type { MCPObservabilityEvent } from "../../observability/mcp";
+import { raceWithSignal } from "../abort";
 import {
   fetchMcpPrompts,
   fetchMcpResources,
   fetchMcpResourceTemplates,
   fetchMcpTools
-} from "./client-catalog";
+} from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
-import {
-  createMcpSdkClient,
-  normalizeMcpClientOptions
-} from "./client-runtime";
-export { elicitationCapabilitiesFromHandlers } from "./client-runtime";
+import { createMcpSdkClient, normalizeMcpClientOptions } from "./runtime";
+export { elicitationCapabilitiesFromHandlers } from "./runtime";
 import {
   isTransportNotImplemented,
   isUnauthorized,
   toErrorMessage
 } from "./errors";
-import { RPCClientTransport, type RPCClientTransportOptions } from "./rpc";
+import { RPCClientTransport, type RPCClientTransportOptions } from "../rpc";
 import type {
   BaseTransportType,
   HttpTransportType,
   TransportType,
   McpClientOptions
-} from "./types";
+} from "../types";
 
 /**
  * Connection state machine for MCP client connections.

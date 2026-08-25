@@ -15,8 +15,8 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
 | `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
 | `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
-| `agents/mcp/server`          | `src/mcp/server.ts`          | Isolated Agents wrapper for SDK v2 stateless servers                         |
-| `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
+| `agents/mcp/server`          | `src/mcp/server/index.ts`    | Isolated Agents wrapper for SDK v2 stateless servers                         |
+| `agents/mcp/client`          | `src/mcp/client/index.ts`    | MCP client manager (connect to remote MCP servers from an Agent)             |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
 | `agents/schedule`            | `src/schedule.ts`            | Deprecated scheduling-parser compatibility entry point                       |
@@ -69,25 +69,34 @@ src/
 
   mcp/                  # MCP (Model Context Protocol) subsystem
     index.ts            # Compatibility barrel; public legacy imports stay stable
-    server.ts           # Isolated SDK v2 stateless server entry
-    handler-stateless.ts # SDK v2 Worker wrapper (Stateless + Legacy compatibility)
-    handler-legacy-compat.ts # SDK v2 transport for Legacy compatibility
-    handler-compat.ts   # v1/v2 compatibility overload retained on agents/mcp
-    legacy-agent.ts     # Deprecated SDK v1 McpAgent implementation
-    handler-legacy.ts   # Explicit SDK v1 handler
-    transport.ts        # McpAgent SSE + Streamable HTTP transports
-    client.ts           # MCPClientManager for connecting to remote MCP servers
-    client-connection.ts
-    client-rpc.ts       # Persisted RPC binding restoration
-    client-storage.ts
-    client-transports.ts
-    do-oauth-client-provider.ts
-    x402.ts             # x402 payment protocol for MCP
-    types.ts
-    utils.ts
-    errors.ts
-    auth-context.ts
-    worker-transport.ts
+    types.ts            # Shared MCP types
+    rpc.ts              # RPC transports shared by client + server
+    abort.ts            # Shared abort/race helper
+    client/             # MCP client submodule (agents/mcp/client)
+      index.ts          # MCPClientManager for connecting to remote MCP servers
+      connection.ts
+      rpc.ts            # Persisted RPC binding restoration
+      storage.ts
+      catalog.ts
+      invoker.ts
+      runtime.ts
+      transports.ts
+      errors.ts
+      do-oauth-client-provider.ts
+      x402.ts           # x402 payment protocol for MCP
+    server/             # MCP server submodule (agents/mcp/server)
+      index.ts          # Isolated SDK v2 stateless server entry
+      handler-stateless.ts # SDK v2 Worker wrapper (Stateless + Legacy compatibility)
+      handler-legacy-compat.ts # SDK v2 transport for Legacy compatibility
+      handler-compat.ts # v1/v2 compatibility overload retained on agents/mcp
+      legacy-agent.ts   # Deprecated SDK v1 McpAgent implementation
+      handler-legacy.ts # Explicit SDK v1 handler
+      transport.ts      # McpAgent SSE + Streamable HTTP transports
+      worker-transport.ts
+      auth-context.ts
+      event-store.ts
+      sse-keepalive.ts
+      utils.ts
 
   observability/        # Observability event system
     index.ts
@@ -249,7 +258,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
 - **Lifecycle owns the physical alarm** — capabilities and the host contribute wake times; Lifecycle chooses the earliest, runs alarm hooks, and rearms. Each capability keeps its own durable work rather than depending on Scheduler.
 - **Scheduling uses cron-schedule** — `Scheduler` is a plain Lifecycle primitive that owns schedule rows, callback execution, and its alarm contribution. `Agent` installs the same primitive and delegates `this.schedule()` and related APIs to it. Schedules persist in SQLite and survive hibernation.
-- **MCP has separate package boundaries** — `mcp/server.ts` is the Stateless Worker wrapper; `mcp/client.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/legacy-agent.ts`.
+- **MCP has separate package boundaries** — `mcp/server/index.ts` is the Stateless Worker wrapper; `mcp/client/index.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/server/legacy-agent.ts`.
 - **Telemetry has an independent schema version** — `instrumentation_scope.version` is hardcoded to `"1"`; it is not the package version. Notify Workers Observability and any other downstream consumers before bumping it.
 
 ## Boundaries

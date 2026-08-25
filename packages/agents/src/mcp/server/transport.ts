@@ -15,9 +15,9 @@ import type {
   StreamId,
   EventId
 } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { getCurrentAgent, type Connection } from "..";
-import type { McpAgent } from ".";
-import { MessageType } from "../types";
+import { getCurrentAgent, type Connection } from "../..";
+import type { McpAgent } from "..";
+import { MessageType } from "../../types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
 export type { EventStore, StreamId, EventId };

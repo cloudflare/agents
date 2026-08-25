@@ -16,9 +16,9 @@ import {
   isJSONRPCResultResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Connection, ConnectionContext } from "../";
-import { Agent } from "../index";
-import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
+import type { Connection, ConnectionContext } from "../../";
+import { Agent } from "../../index";
+import type { BaseTransportType, MaybePromise, ServeOptions } from "../types";
 import {
   createAutoHandler,
   createLegacySseHandler,
@@ -34,7 +34,7 @@ import {
   isDurableObjectNamespace,
   RPCServerTransport,
   type RPCServerTransportOptions
-} from "./rpc";
+} from "../rpc";
 
 /**
  * @deprecated McpAgent is feature-frozen. Migrate to an SDK v2 factory with
@@ -643,14 +643,14 @@ export abstract class McpAgent<
 export {
   SSEEdgeClientTransport,
   StreamableHTTPEdgeClientTransport
-} from "./client-transports";
+} from "../client/transports";
 export {
   RPC_DO_PREFIX,
   RPCClientTransport,
   RPCServerTransport,
   type RPCClientTransportOptions,
   type RPCServerTransportOptions
-} from "./rpc";
+} from "../rpc";
 
 export { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
@@ -663,16 +663,16 @@ export type {
   MCPServerOptions,
   MCPConnectionResult,
   MCPDiscoverResult
-} from "./client";
+} from "../client";
 
 export type {
   MCPElicitationHandler,
   MCPElicitationHandlers
-} from "./client-connection";
+} from "../client/connection";
 
-export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./client";
+export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "../client";
 
-export type { McpClientOptions } from "./types";
+export type { McpClientOptions } from "../types";
 
 export {
   createLegacyMcpHandler,

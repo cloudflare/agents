@@ -4,8 +4,8 @@ import {
   getAgentByName,
   routeAgentRequest
 } from "../src/index.ts";
-import { MCPConnectionState } from "../src/mcp/client-connection.ts";
-import { isUnauthorized, toErrorMessage } from "../src/mcp/errors.ts";
+import { MCPConnectionState } from "../src/mcp/client/connection.ts";
+import { isUnauthorized, toErrorMessage } from "../src/mcp/client/errors.ts";
 import {
   createLegacyMcpHandler,
   createMcpHandler,

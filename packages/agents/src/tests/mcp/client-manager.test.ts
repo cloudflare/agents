@@ -7,8 +7,8 @@ import {
 import {
   MCPClientConnection,
   type MCPConnectionState
-} from "../../mcp/client-connection";
-import type { MCPServerRow } from "../../mcp/client-storage";
+} from "../../mcp/client/connection";
+import type { MCPServerRow } from "../../mcp/client/storage";
 import type { ToolExecutionOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/client";
 import type { MCPObservabilityEvent } from "../../observability/mcp";

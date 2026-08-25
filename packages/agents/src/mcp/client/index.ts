@@ -16,11 +16,11 @@ import type {
   Tool
 } from "@modelcontextprotocol/client";
 export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
-import { type RetryOptions, tryN } from "../retries";
+import { type RetryOptions, tryN } from "../../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";
-import { Emitter, type Event, DisposableStore } from "../core/events";
-import type { MCPObservabilityEvent } from "../observability/mcp";
+import { Emitter, type Event, DisposableStore } from "../../core/events";
+import type { MCPObservabilityEvent } from "../../observability/mcp";
 import {
   elicitationCapabilitiesFromHandlers,
   MCPClientConnection,
@@ -28,16 +28,16 @@ import {
   type MCPDiscoveryResult,
   type MCPElicitationHandlers,
   type MCPTransportOptions
-} from "./client-connection";
+} from "./connection";
 import {
   callV2Tool,
   type CallToolSchemaOrOptions,
   type LegacyCallToolResultSchema
-} from "./client-invoker";
+} from "./invoker";
 import { toErrorMessage } from "./errors";
-import { restoreRpcConnections } from "./client-rpc";
-import { RPC_DO_PREFIX } from "./rpc";
-import type { McpClientOptions, TransportType } from "./types";
+import { restoreRpcConnections } from "./rpc";
+import { RPC_DO_PREFIX } from "../rpc";
+import type { McpClientOptions, TransportType } from "../types";
 import {
   decodeMcpServerOptions,
   encodeMcpServerOptions,
@@ -45,9 +45,9 @@ import {
   withMcpSession,
   type MCPServerRow,
   type PersistedMcpServerOptions
-} from "./client-storage";
-import { LifecycleCapability } from "../lifecycle/capability";
-import type { CapabilityRequestContext } from "../lifecycle/capability-runner";
+} from "./storage";
+import { LifecycleCapability } from "../../lifecycle/capability";
+import type { CapabilityRequestContext } from "../../lifecycle/capability-runner";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 

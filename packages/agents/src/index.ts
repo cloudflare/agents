@@ -98,11 +98,11 @@ import type {
   WorkflowPage,
   AgentWorkflowOrigin
 } from "./workflow-types";
-import { MCPConnectionState } from "./mcp/client-connection";
+import { MCPConnectionState } from "./mcp/client/connection";
 import {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider
-} from "./mcp/do-oauth-client-provider";
+} from "./mcp/client/do-oauth-client-provider";
 import type { McpClientOptions, TransportType } from "./mcp/types";
 import {
   genericObservability,
@@ -120,7 +120,7 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
-import { ensureMcpServerTable } from "./mcp/client-storage";
+import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
 import { Scheduler } from "./schedules/scheduler";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
@@ -881,7 +881,7 @@ export {
   type AgentMcpOAuthProvider,
   /** @deprecated Use {@link AgentMcpOAuthProvider} instead. */
   type AgentsOAuthProvider
-} from "./mcp/do-oauth-client-provider";
+} from "./mcp/client/do-oauth-client-provider";
 
 /**
  * MCP Server state update message from server -> Client

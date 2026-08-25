@@ -7,10 +7,10 @@ import {
   isJSONRPCResultResponse,
   isJSONRPCNotification
 } from "@modelcontextprotocol/sdk/types.js";
-import type { McpAgent } from ".";
-import { getAgentByName } from "..";
-import type { CORSOptions } from "./types";
-import { MessageType } from "../types";
+import type { McpAgent } from "..";
+import { getAgentByName } from "../..";
+import type { CORSOptions } from "../types";
+import { MessageType } from "../../types";
 import { startKeepalive } from "./sse-keepalive";
 
 /**

@@ -4,7 +4,7 @@ import {
   decodeMcpServerOptions,
   encodeMcpServerOptions,
   withMcpSession
-} from "../../mcp/client-storage";
+} from "../../mcp/client/storage";
 
 const statelessDiscovery = {
   supportedVersions: ["2026-07-28"],

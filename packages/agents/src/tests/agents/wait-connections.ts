@@ -1,6 +1,6 @@
 import { Agent } from "../../index.ts";
 import type { AgentContext } from "../../index.ts";
-import { MCPConnectionState } from "../../mcp/client-connection.ts";
+import { MCPConnectionState } from "../../mcp/client/connection.ts";
 
 /**
  * Test Agent that exposes waitForConnections() for E2E testing.

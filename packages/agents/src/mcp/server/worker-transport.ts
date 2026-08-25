@@ -37,7 +37,7 @@ import {
   type JSONRPCMessage,
   type RequestId
 } from "@modelcontextprotocol/sdk/types.js";
-import type { CORSOptions } from "./types";
+import type { CORSOptions } from "../types";
 
 /** Sentinel id used when replaying the persisted initialize request. */
 const RESTORE_REQUEST_ID = "__worker_transport_restore__";

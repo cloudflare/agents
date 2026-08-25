@@ -18,7 +18,7 @@ import {
 } from "./auth-context";
 import { internalErrorResponse, reportHandlerError } from "./handler-errors";
 import { createLegacyCompatibilityRequestHandler } from "./handler-legacy-compat";
-import type { CORSOptions } from "./types";
+import type { CORSOptions } from "../types";
 
 export interface CreateStatelessMcpHandlerOptions extends Omit<
   SdkCreateMcpHandlerOptions,

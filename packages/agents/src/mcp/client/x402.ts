@@ -25,7 +25,7 @@ import {
   type CallToolSchemaOrOptions,
   type CompatibleMcpClient,
   type LegacyCallToolResultSchema
-} from "./client-invoker";
+} from "./invoker";
 import type { ZodRawShape } from "zod";
 
 // v2 imports from @x402/core

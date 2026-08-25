@@ -1,11 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { MCPClientManager } from "../../mcp/client";
-import { MCPConnectionState } from "../../mcp/client-connection";
+import { MCPConnectionState } from "../../mcp/client/connection";
 import {
   ensureMcpServerTable,
   type MCPServerRow
-} from "../../mcp/client-storage";
+} from "../../mcp/client/storage";
 import type { MCPClientManagerOptions } from "../../mcp/client";
 import { withCapabilityHarness } from "./harness";
 

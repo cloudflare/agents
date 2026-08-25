@@ -138,19 +138,19 @@
       "require": "./dist/mcp/index.js"
     },
     "./mcp/client": {
-      "types": "./dist/mcp/client.d.ts",
-      "import": "./dist/mcp/client.js",
-      "require": "./dist/mcp/client.js"
+      "types": "./dist/mcp/client/index.d.ts",
+      "import": "./dist/mcp/client/index.js",
+      "require": "./dist/mcp/client/index.js"
     },
     "./mcp/server": {
-      "types": "./dist/mcp/server.d.ts",
-      "import": "./dist/mcp/server.js",
-      "require": "./dist/mcp/server.js"
+      "types": "./dist/mcp/server/index.d.ts",
+      "import": "./dist/mcp/server/index.js",
+      "require": "./dist/mcp/server/index.js"
     },
     "./mcp/do-oauth-client-provider": {
-      "types": "./dist/mcp/do-oauth-client-provider.d.ts",
-      "import": "./dist/mcp/do-oauth-client-provider.js",
-      "require": "./dist/mcp/do-oauth-client-provider.js"
+      "types": "./dist/mcp/client/do-oauth-client-provider.d.ts",
+      "import": "./dist/mcp/client/do-oauth-client-provider.js",
+      "require": "./dist/mcp/client/do-oauth-client-provider.js"
     },
     "./observability": {
       "types": "./dist/observability/index.d.ts",
@@ -203,9 +203,9 @@
       "require": "./dist/experimental/webmcp.js"
     },
     "./x402": {
-      "types": "./dist/mcp/x402.d.ts",
-      "import": "./dist/mcp/x402.js",
-      "require": "./dist/mcp/x402.js"
+      "types": "./dist/mcp/client/x402.d.ts",
+      "import": "./dist/mcp/client/x402.js",
+      "require": "./dist/mcp/client/x402.js"
     },
     "./chat": {
       "types": "./dist/chat/index.d.ts",
