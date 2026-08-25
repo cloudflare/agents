@@ -24,6 +24,7 @@ import {
 } from "../retries";
 import type { RetryOptions } from "../retries";
 import type {
+  SchedulerEventType,
   SchedulerIntegration,
   SchedulerOptions,
   SchedulerOwner
@@ -59,6 +60,7 @@ function getNextCronTime(cron: string, now: number) {
 
 /** @internal Scheduler operations consumed by host adapters. */
 export interface SchedulerInternals {
+  emit(type: SchedulerEventType, payload: Record<string, unknown>): void;
   ensureSchema(): void;
   dropStorage(): void;
   takeExecutingScheduleRowId(): string | undefined;
@@ -160,7 +162,6 @@ function createStandaloneIntegration<Host extends LifecycleObject>(
       ...values: (string | number | boolean | null)[]
     ) => executeSql<T>(options.storage, strings, values),
     rawSql: (query, ...params) => options.storage.sql.exec(query, ...params),
-    emit: (type, payload) => options.onEvent?.({ type, payload }),
     retryDefaults: () => retryDefaults,
     hungScheduleTimeoutSeconds: () => options.hungScheduleTimeoutSeconds ?? 30,
     validateSchedule: (when, callback, scheduleOptions) => {
@@ -239,6 +240,7 @@ export class Scheduler<
 
     const scheduler = this;
     const internals: SchedulerInternals = {
+      emit: (type, payload) => scheduler.#emit(type, payload),
       ensureSchema: () => scheduler.ensureSchema(),
       dropStorage: () => scheduler.dropStorage(),
       takeExecutingScheduleRowId: () => scheduler.takeExecutingScheduleRowId(),
@@ -295,9 +297,19 @@ export class Scheduler<
     schedulerInternals.set(this, internals);
   }
 
-  /** Attach the Lifecycle alarm controller. */
+  /** Attach Lifecycle coordination and event services. */
   onInstall(controller: CapabilityController): void {
     this._controller = controller;
+  }
+
+  #emit(type: SchedulerEventType, payload: Record<string, unknown>): void {
+    const controller = this._controller;
+    if (!controller) {
+      throw new Error(
+        "Scheduler must be installed with Lifecycle.use() before emitting events"
+      );
+    }
+    controller.emit({ source: "scheduler", type, payload });
   }
 
   /** Initialize and migrate schedule storage during Lifecycle startup. */
@@ -499,7 +511,7 @@ export class Scheduler<
       options
     );
     if (result.created) {
-      this._host.emit("schedule:create", {
+      this.#emit("schedule:create", {
         callback: result.schedule.callback,
         id: result.schedule.id
       });
@@ -523,7 +535,7 @@ export class Scheduler<
       options
     );
     if (result.created) {
-      this._host.emit("schedule:create", {
+      this.#emit("schedule:create", {
         callback: result.schedule.callback,
         id: result.schedule.id
       });
@@ -557,7 +569,7 @@ export class Scheduler<
   async cancelSchedule(id: string): Promise<boolean> {
     const result = await this.cancelForOwner(null, id);
     if (result.ok && result.callback) {
-      this._host.emit("schedule:cancel", {
+      this.#emit("schedule:cancel", {
         callback: result.callback,
         id
       });
@@ -888,7 +900,7 @@ export class Scheduler<
     `;
     for (const row of rows) {
       if (!row.owner_path || !matches(row.owner_path)) continue;
-      this._host.emit("schedule:cancel", {
+      this.#emit("schedule:cancel", {
         callback: row.callback,
         id: row.id
       });
@@ -1016,7 +1028,7 @@ export class Scheduler<
         `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
         error
       );
-      this._host.emit("schedule:error", {
+      this.#emit("schedule:error", {
         callback: row.callback,
         id: row.id,
         error: error instanceof Error ? error.message : String(error),
@@ -1044,7 +1056,7 @@ export class Scheduler<
     const schedule = this.rowToSchedule<unknown>(row);
 
     try {
-      this._host.emit("schedule:execute", {
+      this.#emit("schedule:execute", {
         callback: row.callback,
         id: row.id
       });
@@ -1053,7 +1065,7 @@ export class Scheduler<
         maxAttempts,
         async (attempt) => {
           if (attempt > 1) {
-            this._host.emit("schedule:retry", {
+            this.#emit("schedule:retry", {
               callback: row.callback,
               id: row.id,
               attempt,
@@ -1095,7 +1107,7 @@ export class Scheduler<
         `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
         error
       );
-      this._host.emit("schedule:error", {
+      this.#emit("schedule:error", {
         callback: row.callback,
         id: row.id,
         error: error instanceof Error ? error.message : String(error),
@@ -1141,7 +1153,7 @@ export class Scheduler<
                 `the idempotent option. Consider using scheduleEvery() for recurring ` +
                 `tasks or passing { idempotent: true } to schedule().`
             );
-            this._host.emit("schedule:duplicate_warning", {
+            this.#emit("schedule:duplicate_warning", {
               callback: cb,
               count,
               type: "one-shot"
@@ -1195,7 +1207,7 @@ export class Scheduler<
               `error dispatching scheduled callback "${row.callback}"`,
               e
             );
-            this._host.emit("schedule:error", {
+            this.#emit("schedule:error", {
               callback: row.callback,
               id: row.id,
               error: e instanceof Error ? e.message : String(e),

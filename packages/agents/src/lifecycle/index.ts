@@ -15,5 +15,6 @@ export {
   type DurableObjectCapability,
   type CapabilityRequestContext,
   type CapabilityStartContext,
+  type LifecycleEvent,
   type WSMessage
 } from "./durable-object-lifecycle";

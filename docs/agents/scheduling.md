@@ -839,7 +839,6 @@ new Scheduler({
   createId,
   retry?,
   hungScheduleTimeoutSeconds?,
-  onEvent?,
   onError?
 });
 ```
@@ -852,10 +851,12 @@ new Scheduler({
 - `retry` supplies callback retry defaults. The defaults are three attempts,
   100 ms base delay, and 3,000 ms maximum delay.
 - `hungScheduleTimeoutSeconds` defaults to 30 seconds.
-- `onEvent` observes scheduling events outside ambient host context.
 - `onError` observes terminal callback failures outside ambient host context.
 
-Install the constructed object with `Lifecycle.use()` before startup.
+Install the constructed object with `Lifecycle.use()` before startup. Scheduler
+publishes `schedule:*` events through Lifecycle's best-effort event bus. A plain
+Lifecycle Object writes them to the existing `agents:schedule` diagnostics
+channel; `Agent` sends them through its existing observability implementation.
 
 ### schedule()
 

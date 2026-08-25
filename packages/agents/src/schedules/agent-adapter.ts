@@ -42,10 +42,6 @@ type SchedulerAgentAdapterOptions = {
   readonly isFacet: () => boolean;
   readonly selfPath: () => ReadonlyArray<AgentPathStep>;
   readonly rootAlarmOwner: () => Promise<SchedulerRootRpc>;
-  readonly emit: (
-    type: "schedule:create" | "schedule:cancel",
-    payload: Record<string, unknown>
-  ) => void;
   readonly isSamePathPrefix: (
     prefix: ReadonlyArray<AgentPathStep>,
     path: ReadonlyArray<AgentPathStep>
@@ -83,7 +79,7 @@ export class SchedulerAgentAdapter {
       options
     );
     if (result.created) {
-      this.#options.emit("schedule:create", {
+      this.#scheduler.emit("schedule:create", {
         callback: result.schedule.callback,
         id: result.schedule.id
       });
@@ -124,7 +120,7 @@ export class SchedulerAgentAdapter {
       options
     );
     if (result.created) {
-      this.#options.emit("schedule:create", {
+      this.#scheduler.emit("schedule:create", {
         callback: result.schedule.callback,
         id: result.schedule.id
       });
@@ -182,7 +178,7 @@ export class SchedulerAgentAdapter {
       await this.#options.rootAlarmOwner()
     )._cf_cancelScheduleForFacet(this.#options.selfPath(), id);
     if (result.ok && result.callback) {
-      this.#options.emit("schedule:cancel", {
+      this.#scheduler.emit("schedule:cancel", {
         callback: result.callback,
         id
       });

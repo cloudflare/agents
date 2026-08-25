@@ -1,11 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 import { nanoid } from "nanoid";
 
+import { publishDiagnosticsEvent } from "../observability/diagnostics";
 import {
   type AlarmContribution,
   CapabilityRunner,
   type CapabilityController,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type LifecycleEvent,
+  type LifecycleEventSink
 } from "./capability-runner";
 import {
   createConnection,
@@ -30,6 +33,7 @@ export {
   type AlarmContribution,
   type CapabilityController,
   type CapabilityRequestContext,
+  type LifecycleEvent,
   type CapabilityStartContext,
   type DurableObjectCapability
 } from "./capability-runner";
@@ -151,6 +155,16 @@ type LifecycleHost<
   readonly constructor: { readonly name: string };
 };
 
+const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
+
+/** @internal Adapt Lifecycle's default diagnostics sink at a composition root. */
+export function setLifecycleEventSink<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, sink: LifecycleEventSink): void {
+  lifecycleEventSinks.set(lifecycle, sink);
+}
+
 /**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
@@ -171,12 +185,14 @@ export class Lifecycle<
   );
   readonly #connectionManager: ConnectionManager;
   readonly #capabilityController: CapabilityController = Object.freeze({
-    rearmAlarm: () => this.rearmAlarm()
+    rearmAlarm: () => this.rearmAlarm(),
+    emit: (event: LifecycleEvent) => this.#emitCapabilityEvent(event)
   });
 
   #status: "zero" | "starting" | "started" = "zero";
   #alarmRearmQueue: Promise<void> = Promise.resolve();
   #rearmRequestedDuringStart = false;
+  #pendingEvents: LifecycleEvent[] = [];
   #alarmsDisabled = false;
   #capabilitiesLocked = false;
   #handlersInstalled = false;
@@ -253,13 +269,68 @@ export class Lifecycle<
       throw new Error("Lifecycle capabilities must be added before startup");
     }
     this.#capabilities.push(capability);
+    const pendingEventCount = this.#pendingEvents.length;
     try {
       capability.onInstall?.(this.#capabilityController);
     } catch (error) {
       this.#capabilities.pop();
+      this.#pendingEvents.length = pendingEventCount;
       throw error;
     }
     return this;
+  }
+
+  #emitCapabilityEvent(event: LifecycleEvent): void {
+    if (event.source.trim() === "" || event.type.trim() === "") {
+      throw new Error("Lifecycle events require non-empty source and type");
+    }
+    if (this.#status !== "started") {
+      this.#pendingEvents.push(event);
+      return;
+    }
+    this.#publishCapabilityEvent(event);
+  }
+
+  #publishCapabilityEvent(event: LifecycleEvent): void {
+    runWithoutCurrentAgent(() => {
+      const sink = lifecycleEventSinks.get(this);
+      try {
+        if (!sink) {
+          publishDiagnosticsEvent({
+            source: event.source,
+            type: event.type,
+            agent: this.#parentClassName,
+            name: this.name,
+            payload: event.payload,
+            timestamp: Date.now()
+          });
+          return;
+        }
+        const pending = sink(event);
+        if (pending !== undefined) {
+          this.#ctx.waitUntil(
+            Promise.resolve(pending).catch((error) => {
+              this.#reportEventSinkFailure(event, error);
+            })
+          );
+        }
+      } catch (error) {
+        this.#reportEventSinkFailure(event, error);
+      }
+    });
+  }
+
+  #reportEventSinkFailure(event: LifecycleEvent, error: unknown): void {
+    console.error(
+      `Lifecycle event sink failed for ${event.source}:${event.type}`,
+      error
+    );
+  }
+
+  #deliverPendingEvents(): void {
+    for (const event of this.#pendingEvents.splice(0)) {
+      this.#publishCapabilityEvent(event);
+    }
   }
 
   /**
@@ -519,8 +590,10 @@ export class Lifecycle<
     // permanently broken and a later invocation can retry startup.
     if (error) {
       this.#rearmRequestedDuringStart = false;
+      this.#pendingEvents.length = 0;
       throw error;
     }
+    this.#deliverPendingEvents();
     if (this.#rearmRequestedDuringStart) {
       this.#rearmRequestedDuringStart = false;
       await this.rearmAlarm();

@@ -11,14 +11,6 @@ export type SchedulerEventType =
   | "schedule:error"
   | "schedule:duplicate_warning";
 
-/** One event emitted by a Scheduler. */
-export type SchedulerEvent = {
-  /** Stable event name. */
-  readonly type: SchedulerEventType;
-  /** Event-specific fields such as schedule ID, callback, or retry attempt. */
-  readonly payload: Readonly<Record<string, unknown>>;
-};
-
 /** Dependencies and policy required by a standalone Scheduler primitive. */
 export interface SchedulerOptions<Host extends LifecycleObject> {
   /** Lifecycle Object whose named methods receive scheduled callbacks. */
@@ -38,9 +30,6 @@ export interface SchedulerOptions<Host extends LifecycleObject> {
 
   /** Seconds before an in-flight interval is treated as abandoned. Default: 30. */
   readonly hungScheduleTimeoutSeconds?: number;
-
-  /** Observe Scheduler events. Runs as capability code without host context. */
-  readonly onEvent?: (event: SchedulerEvent) => void;
 
   /** Observe terminal callback errors. Runs as capability code without host context. */
   readonly onError?: (error: unknown) => void | Promise<void>;
@@ -63,10 +52,6 @@ export interface SchedulerIntegration<Host extends LifecycleObject> {
     ...values: (string | number | boolean | null)[]
   ) => T[];
   readonly rawSql: SqlStorage["exec"];
-  readonly emit: (
-    type: SchedulerEventType,
-    payload: Record<string, unknown>
-  ) => void;
   readonly retryDefaults: () => Required<RetryOptions>;
   readonly hungScheduleTimeoutSeconds: () => number;
   readonly validateSchedule: (

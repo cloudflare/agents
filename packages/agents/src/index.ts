@@ -51,6 +51,7 @@ import {
   type Connection,
   type ConnectionContext,
   Lifecycle,
+  setLifecycleEventSink,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 import {
@@ -2221,6 +2222,18 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    setLifecycleEventSink(this.lifecycle, (event) => {
+      const payload =
+        event.payload !== null &&
+        typeof event.payload === "object" &&
+        !Array.isArray(event.payload)
+          ? (event.payload as Record<string, unknown>)
+          : { value: event.payload };
+      // Lifecycle events are open-ended; Agent's installed capabilities emit
+      // event names represented by the observability union.
+      this._emit(event.type as ObservabilityEvent["type"], payload);
+    });
+
     this.scheduler = createScheduler(
       {
         callbacks: this,
@@ -2238,7 +2251,6 @@ export class Agent<
         sql: this.sql.bind(this),
         rawSql: (query, ...params) =>
           this.ctx.storage.sql.exec(query, ...params),
-        emit: (type, payload) => this._emit(type, payload),
         retryDefaults: () => this._resolvedOptions.retry,
         hungScheduleTimeoutSeconds: () =>
           this._resolvedOptions.hungScheduleTimeoutSeconds,
@@ -2294,7 +2306,6 @@ export class Agent<
       isFacet: () => this._isFacet,
       selfPath: () => this.selfPath,
       rootAlarmOwner: () => this._rootAlarmOwner(),
-      emit: (type, payload) => this._emit(type, payload),
       isSamePathPrefix: (prefix, path) =>
         this._isSameAgentPathPrefix(prefix, path)
     });

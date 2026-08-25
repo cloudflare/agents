@@ -177,6 +177,35 @@ host. It runs all capability `onAlarm()` hooks, then host `onAlarm()`, then
 recalculates the physical alarm. Capabilities do not depend on Scheduler or on
 each other merely to receive alarm wakes.
 
+## Capability events
+
+The controller passed to `onInstall()` also exposes `emit()`. Capabilities use
+it for best-effort telemetry rather than accepting host observability objects:
+
+```ts
+class Cleanup implements DurableObjectCapability {
+  #controller: CapabilityController | undefined;
+
+  onInstall(controller: CapabilityController): void {
+    this.#controller = controller;
+  }
+
+  reportRemoval(key: string): void {
+    this.#controller?.emit({
+      source: "cleanup",
+      type: "cleanup:remove",
+      payload: { key }
+    });
+  }
+}
+```
+
+Lifecycle publishes events from a plain Lifecycle Object to the existing
+`agents:*` diagnostics channels according to the event type. Delivery is
+best-effort, runs outside ambient host context, and does not fail the emitting
+capability when a telemetry sink throws. Persist an outbox in the capability
+when delivery is part of the durable business operation.
+
 A contribution can be `{ time, exclusive: true }` when its wake time must
 replace ordinary wake candidates, such as a pending teardown. This changes only
 which physical alarm is armed; when that alarm fires, normal capability and host

@@ -56,8 +56,12 @@ Agent-specific behavior:
 
 - sub-agent owner encoding and callback routing;
 - Agent callback and `onError` context;
-- Agent observability events and retry defaults;
+- Agent retry defaults;
 - schedule-row operations used by Agent's OOM circuit breaker.
+
+Scheduler publishes telemetry through Lifecycle's event bus. Plain Lifecycle
+Objects use the existing diagnostics-channel sink; Agent adapts the same bus to
+its existing observability implementation at its composition root.
 
 Agent's host contribution currently covers deferred destruction, keep-alive,
 fiber recovery, facet-run checks, and Think's transitional workflow-notification

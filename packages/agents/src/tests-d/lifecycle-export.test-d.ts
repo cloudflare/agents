@@ -12,6 +12,7 @@ import {
   Lifecycle,
   type AlarmContribution,
   type CapabilityController,
+  type LifecycleEvent,
   type LifecycleObject,
   type Connection,
   type ConnectionContext,
@@ -96,6 +97,11 @@ const capability: DurableObjectCapability = {
   onInstall: (controller) => {
     expectTypeOf(controller).toEqualTypeOf<CapabilityController>();
     expectTypeOf(controller.rearmAlarm()).toEqualTypeOf<Promise<void>>();
+    controller.emit({
+      source: "type-probe",
+      type: "probe:started",
+      payload: { ready: true }
+    } satisfies LifecycleEvent);
   },
   onStart: ({ props }) => {
     expectTypeOf(props).toEqualTypeOf<object | undefined>();

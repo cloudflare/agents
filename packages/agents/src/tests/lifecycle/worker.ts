@@ -12,6 +12,7 @@ import {
   type DurableObjectCapability,
   type WSMessage
 } from "../../lifecycle";
+import { setLifecycleEventSink } from "../../lifecycle/durable-object-lifecycle";
 import { MCPClientManager } from "../../mcp/client";
 import { MCPConnectionState } from "../../mcp/client-connection";
 import { Scheduler, type Schedule } from "../../schedules";
@@ -58,6 +59,23 @@ class StartupAlarmProbe implements DurableObjectCapability<StartupProps> {
 
   getNextAlarm(): number | null {
     return this.#nextAlarm;
+  }
+}
+
+class StartupEventProbe implements DurableObjectCapability<StartupProps> {
+  #controller: CapabilityController | undefined;
+
+  onInstall(controller: CapabilityController): void {
+    this.#controller = controller;
+  }
+
+  onStart({ props }: { props: StartupProps | undefined }): void {
+    if (props?.label !== "startup-event") return;
+    this.#controller?.emit({
+      source: "startup-probe",
+      type: "lifecycle:startup-probe",
+      payload: { label: props.label }
+    });
   }
 }
 
@@ -115,6 +133,7 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #events: string[] = [];
   readonly #capabilityContexts = new CapabilityContextProbe();
   readonly #startupAlarm = new StartupAlarmProbe();
+  readonly #startupEvent = new StartupEventProbe();
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
   #firstAlarm: number | null = null;
@@ -127,6 +146,7 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   readonly lifecycle = Lifecycle.install<Env, StartupProps>(this)
     .use(this.#capabilityContexts)
     .use(this.#startupAlarm)
+    .use(this.#startupEvent)
     .use({
       onStart: ({ props }) => {
         this.#events.push(`capability:start:${props?.label ?? "none"}`);
@@ -320,15 +340,7 @@ export class ScheduledLifecycleObject extends DurableObject<Env> {
     callbacks: this,
     storage: this.ctx.storage,
     now: Date.now,
-    createId: () => crypto.randomUUID(),
-    onEvent: ({ type }) => {
-      if (type !== "schedule:execute") return;
-      this.#events.push(
-        getCurrentAgent().agent === undefined
-          ? "scheduler:no-context"
-          : "scheduler:context"
-      );
-    }
+    createId: () => crypto.randomUUID()
   });
 
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
@@ -353,6 +365,13 @@ export class ScheduledLifecycleObject extends DurableObject<Env> {
         ? "host:context"
         : "host:missing-context"
     );
+  }
+
+  async scheduleReminderWithFailingEventSink(message: string): Promise<string> {
+    setLifecycleEventSink(this.lifecycle, () => {
+      throw new Error("intentional Lifecycle event sink failure");
+    });
+    return this.scheduleReminder(message);
   }
 
   async scheduleReminder(message: string): Promise<string> {

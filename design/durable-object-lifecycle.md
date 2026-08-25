@@ -54,10 +54,18 @@ alarm selection.
 schema migration, `onAlarm` owns due-row processing, and `getNextAlarm`
 contributes its earliest runnable row or hung-interval recheck. Agent constructs
 the same Scheduler exposed at `Agent.this.scheduler`; an internal adapter adds
-sub-agent ownership/routing, Agent observability and callback context, and OOM
-policy while existing Agent scheduling methods remain delegators.
+sub-agent ownership/routing, Agent callback context, and OOM policy while
+existing Agent scheduling methods remain delegators.
 
-Alarm contribution and capability hooks run outside ambient host context.
+Capabilities publish best-effort telemetry through `CapabilityController.emit()`.
+Lifecycle owns that event bus and sends plain Lifecycle Object events to the
+existing diagnostics channels. Agent adapts the bus's terminal sink to its
+existing observability implementation, preserving custom sinks without making
+observability a capability or a Scheduler dependency. The bus is not durable;
+a capability that requires guaranteed delivery owns an outbox.
+
+Alarm contribution, capability hooks, and capability-event delivery run outside
+ambient host context.
 Scheduled methods are user callbacks, so Scheduler invokes them in Lifecycle
 Object context. Agent's adapter preserves its richer callback and `onError`
 context.

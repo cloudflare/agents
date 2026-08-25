@@ -11,10 +11,28 @@ export type AlarmContribution =
     }
   | null;
 
+/** One best-effort event published by a Lifecycle capability. */
+export type LifecycleEvent = {
+  /** Stable capability or subsystem name. */
+  readonly source: string;
+  /** Stable event name within that source. */
+  readonly type: string;
+  /** Event-specific data. */
+  readonly payload: unknown;
+};
+
+/** Terminal sink for best-effort Lifecycle events. */
+export type LifecycleEventSink = (
+  event: LifecycleEvent
+) => void | Promise<void>;
+
 /** Lifecycle services available to an installed capability. */
 export interface CapabilityController {
   /** Recompute the physical alarm from every installed capability. */
   rearmAlarm(): Promise<void>;
+
+  /** Publish a best-effort event through the Lifecycle event bus. */
+  emit(event: LifecycleEvent): void;
 }
 
 /** Context supplied when durable capabilities start. */
