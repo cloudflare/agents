@@ -1,3 +1,4 @@
+import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
@@ -29,6 +30,7 @@ describe("schema migration: CHECK constraint on schedules type", () => {
     await agent.simulateOldSchema();
 
     // Run the migration
+    await evictDurableObject(agent);
     await agent.runMigration();
 
     // Now interval inserts should succeed
@@ -47,6 +49,7 @@ describe("schema migration: CHECK constraint on schedules type", () => {
     expect(await agent.getScheduleCount()).toBe(1);
 
     // Run the migration
+    await evictDurableObject(agent);
     await agent.runMigration();
 
     // Old row should still be there with correct data
@@ -74,6 +77,7 @@ describe("schema migration: CHECK constraint on schedules type", () => {
     expect(oldDDL).not.toContain("'interval'");
 
     // Run the migration
+    await evictDurableObject(agent);
     await agent.runMigration();
 
     const newDDL = await agent.getSchedulesDDL();
@@ -98,6 +102,7 @@ describe("schema migration: CHECK constraint on schedules type", () => {
     expect(before.error).toContain("CHECK constraint failed");
 
     // Run migration — should detect missing 'interval' and recreate table
+    await evictDurableObject(agent);
     await agent.runMigration();
 
     // Now interval inserts should work
@@ -124,6 +129,7 @@ describe("schema migration: CHECK constraint on schedules type", () => {
     await agent.simulateLeftoverNewTable();
 
     // Migration should clean up the leftover and complete successfully
+    await evictDurableObject(agent);
     await agent.runMigration();
 
     const result = await agent.tryInsertInterval();
@@ -148,6 +154,7 @@ describe("schema migration: CHECK constraint on schedules type", () => {
     await agent.insertMultipleTypes();
 
     // Run migration
+    await evictDurableObject(agent);
     await agent.runMigration();
 
     // All three types should survive
@@ -172,7 +179,9 @@ describe("schema migration: CHECK constraint on schedules type", () => {
     await agent.simulateOldSchema();
 
     // Run migration twice — second run should be a no-op
+    await evictDurableObject(agent);
     await agent.runMigration();
+    await evictDurableObject(agent);
     await agent.runMigration();
 
     // Everything should still work

@@ -26,19 +26,12 @@ import { Lifecycle } from "agents/lifecycle";
 import { Scheduler, type Schedule } from "agents/schedules";
 
 export class ReminderObject extends DurableObject<Env> {
-  readonly scheduler = new Scheduler({
-    callbacks: this,
-    storage: this.ctx.storage,
-    now: Date.now,
-    createId: () => crypto.randomUUID()
-  });
+  readonly scheduler = new Scheduler(this);
 
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
 
   async createReminder(message: string): Promise<string> {
-    // Native Durable Object RPC does not pass through Lifecycle handlers.
-    await this.lifecycle.start();
-    const schedule = await this.scheduler.schedule(300, "sendReminder", {
+    const schedule = await this.scheduler.set(300, "sendReminder", {
       message
     });
     return schedule.id;
@@ -829,31 +822,27 @@ When using this schema with OpenAI models via the AI SDK, you must pass `provide
 
 ## API Reference
 
-### `new Scheduler(options)`
+### `new Scheduler(target, options?)`
 
 ```typescript
-new Scheduler({
-  callbacks,
-  storage,
-  now,
-  createId,
+new Scheduler(this, {
   retry?,
   hungScheduleTimeoutSeconds?,
   onError?
 });
 ```
 
-- `callbacks` is the Lifecycle Object containing the named scheduled methods.
-- `storage` is that object's `DurableObjectStorage`.
-- `now` returns epoch milliseconds. Pass `Date.now` or an injected clock.
-- `createId` returns a unique string. Wrap Workers APIs that require their
-  receiver, for example `() => crypto.randomUUID()`.
+- `target` is the Lifecycle Object containing the named scheduled methods and
+  provides the type information used by `set()` and `every()`.
+- Lifecycle supplies storage, readiness, alarm coordination, events, and
+  routing.
 - `retry` supplies callback retry defaults. The defaults are three attempts,
   100 ms base delay, and 3,000 ms maximum delay.
 - `hungScheduleTimeoutSeconds` defaults to 30 seconds.
 - `onError` observes terminal callback failures outside ambient host context.
 
-Install the constructed object with `Lifecycle.use()` before startup. Scheduler
+Install the constructed object with `Lifecycle.use()` before use. Scheduler
+starts Lifecycle automatically when its asynchronous API is entered. It
 publishes `schedule:*` events through Lifecycle's best-effort event bus. A plain
 Lifecycle Object writes them to the existing `agents:schedule` diagnostics
 channel; `Agent` sends them through its existing observability implementation.

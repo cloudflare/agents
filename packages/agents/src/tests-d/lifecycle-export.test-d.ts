@@ -10,9 +10,10 @@ import {
 import {
   getCurrentAgent,
   Lifecycle,
+  LifecycleCapability,
   type AlarmContribution,
-  type CapabilityController,
   type LifecycleEvent,
+  type LifecycleServices,
   type LifecycleObject,
   type Connection,
   type ConnectionContext,
@@ -93,16 +94,30 @@ expectTypeOf(getCurrentRootAgent<LifecycleTypeProbe>().agent).toEqualTypeOf<
   LifecycleTypeProbe | undefined
 >();
 
+class ServiceCapability extends LifecycleCapability {
+  constructor() {
+    super("type-probe");
+  }
+
+  probe(): void {
+    expectTypeOf(this.lifecycle).toEqualTypeOf<LifecycleServices>();
+    expectTypeOf(this.lifecycle.storage).toEqualTypeOf<DurableObjectStorage>();
+    expectTypeOf(this.lifecycle.alarms.rearm()).toEqualTypeOf<Promise<void>>();
+    this.lifecycle.events.emit("probe:started", { ready: true });
+    this.lifecycle.routes.toRoot({ ready: true });
+  }
+}
+
+new ServiceCapability() satisfies DurableObjectCapability;
+
+const event = {
+  source: "type-probe",
+  type: "probe:started",
+  payload: { ready: true }
+} satisfies LifecycleEvent;
+expectTypeOf(event).toMatchTypeOf<LifecycleEvent>();
+
 const capability: DurableObjectCapability = {
-  onInstall: (controller) => {
-    expectTypeOf(controller).toEqualTypeOf<CapabilityController>();
-    expectTypeOf(controller.rearmAlarm()).toEqualTypeOf<Promise<void>>();
-    controller.emit({
-      source: "type-probe",
-      type: "probe:started",
-      payload: { ready: true }
-    } satisfies LifecycleEvent);
-  },
   onStart: ({ props }) => {
     expectTypeOf(props).toEqualTypeOf<object | undefined>();
   },

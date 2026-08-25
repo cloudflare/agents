@@ -7,7 +7,7 @@ import {
 import {
   getCurrentAgent,
   Lifecycle,
-  type CapabilityController,
+  LifecycleCapability,
   type Connection,
   type DurableObjectCapability,
   type WSMessage
@@ -43,18 +43,17 @@ type WebSocketContextEvent = {
   readonly requestUrl: string | null;
 };
 
-class StartupAlarmProbe implements DurableObjectCapability<StartupProps> {
-  #controller: CapabilityController | undefined;
+class StartupAlarmProbe extends LifecycleCapability<StartupProps> {
   #nextAlarm: number | null = null;
 
-  onInstall(controller: CapabilityController): void {
-    this.#controller = controller;
+  constructor() {
+    super("startup-alarm-probe");
   }
 
   async onStart({ props }: { props: StartupProps | undefined }): Promise<void> {
     if (props?.label !== "startup-alarm") return;
     this.#nextAlarm = Date.now() + 60_000;
-    await this.#controller?.rearmAlarm();
+    await this.lifecycle.alarms.rearm();
   }
 
   getNextAlarm(): number | null {
@@ -62,20 +61,36 @@ class StartupAlarmProbe implements DurableObjectCapability<StartupProps> {
   }
 }
 
-class StartupEventProbe implements DurableObjectCapability<StartupProps> {
-  #controller: CapabilityController | undefined;
-
-  onInstall(controller: CapabilityController): void {
-    this.#controller = controller;
+class StartupEventProbe extends LifecycleCapability<StartupProps> {
+  constructor() {
+    super("startup-probe");
   }
 
   onStart({ props }: { props: StartupProps | undefined }): void {
     if (props?.label !== "startup-event") return;
-    this.#controller?.emit({
-      source: "startup-probe",
-      type: "lifecycle:startup-probe",
-      payload: { label: props.label }
+    this.lifecycle.events.emit("lifecycle:startup-probe", {
+      label: props.label
     });
+  }
+}
+
+class RoutedCapabilityProbe extends LifecycleCapability {
+  constructor() {
+    super("route-probe");
+  }
+
+  send(payload: unknown): Promise<unknown> {
+    return this.lifecycle.routes.toRoot(payload);
+  }
+
+  onRoute(context: {
+    source: { key: string; data: string } | undefined;
+    payload: unknown;
+  }): unknown {
+    return {
+      payload: context.payload,
+      source: context.source ?? null
+    };
   }
 }
 
@@ -134,6 +149,7 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #capabilityContexts = new CapabilityContextProbe();
   readonly #startupAlarm = new StartupAlarmProbe();
   readonly #startupEvent = new StartupEventProbe();
+  readonly #routedCapability = new RoutedCapabilityProbe();
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
   #firstAlarm: number | null = null;
@@ -147,6 +163,7 @@ export class PlainLifecycleObject extends DurableObject<Env> {
     .use(this.#capabilityContexts)
     .use(this.#startupAlarm)
     .use(this.#startupEvent)
+    .use(this.#routedCapability)
     .use({
       onStart: ({ props }) => {
         this.#events.push(`capability:start:${props?.label ?? "none"}`);
@@ -177,6 +194,16 @@ export class PlainLifecycleObject extends DurableObject<Env> {
         this.#exclusiveAlarm === null
           ? null
           : { time: this.#exclusiveAlarm, exclusive: true }
+    })
+    .use({
+      dispose: () => {
+        this.#events.push("dispose:first");
+      }
+    })
+    .use({
+      dispose: () => {
+        this.#events.push("dispose:second");
+      }
     });
 
   onStart(props?: StartupProps): void {
@@ -263,9 +290,19 @@ export class PlainLifecycleObject extends DurableObject<Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  async routeCapability(payload: unknown): Promise<unknown> {
+    return this.#routedCapability.send(payload);
+  }
+
   async getEvents(): Promise<readonly string[]> {
     await this.lifecycle.start();
     return this.#events;
+  }
+
+  async disposeCapabilities(): Promise<readonly string[]> {
+    await this.lifecycle.start();
+    await this.lifecycle.dispose();
+    return this.#events.filter((event) => event.startsWith("dispose:"));
   }
 
   contextAccessorsAreAliases(): boolean {
@@ -336,12 +373,7 @@ export class ScheduledLifecycleObject extends DurableObject<Env> {
   #callbackScheduleId: string | null = null;
   #callbackScheduleMessage: string | null = null;
 
-  readonly scheduler = new Scheduler({
-    callbacks: this,
-    storage: this.ctx.storage,
-    now: Date.now,
-    createId: () => crypto.randomUUID()
-  });
+  readonly scheduler = new Scheduler(this);
 
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
 
@@ -403,9 +435,7 @@ export class ScheduledLifecycleObject extends DurableObject<Env> {
 }
 
 export class PlainMcpClientObject extends DurableObject<Env> {
-  readonly mcp = new MCPClientManager("plain-lifecycle-object", "1.0.0", {
-    storage: this.ctx.storage
-  });
+  readonly mcp = new MCPClientManager("plain-lifecycle-object", "1.0.0");
 
   readonly lifecycle = Lifecycle.install(this).use(this.mcp);
 

@@ -19,8 +19,8 @@ resource so capabilities do not overwrite one another's wake-ups.
 ## How it works
 
 A capability that needs future work implements `getNextAlarm()` and `onAlarm()`.
-When it changes durable state, it calls `rearmAlarm()` on the controller received
-through `onInstall()`.
+When it changes durable state, it calls `this.lifecycle.alarms.rearm()` through
+the standard service surface supplied by `LifecycleCapability`.
 
 Lifecycle serializes recalculation, reads every capability contribution plus the
 host contribution, and sets the physical alarm to the earliest requested time.
@@ -51,13 +51,11 @@ one. Sharing the physical alarm is not such a dependency.
 
 ## Agent integration
 
-Agent installs the public Scheduler primitive. A package-internal adapter adds
-Agent-specific behavior:
-
-- sub-agent owner encoding and callback routing;
-- Agent callback and `onError` context;
-- Agent retry defaults;
-- schedule-row operations used by Agent's OOM circuit breaker.
+Agent installs the public Scheduler primitive. Lifecycle's generic routing
+surface carries owner-scoped Scheduler messages to the root and dispatches due
+callbacks to facets through one internal Agent transport aperture. Existing
+facet schedule rows remain in the root Scheduler table; no data migration or
+Scheduler-specific Agent RPC methods are required.
 
 Scheduler publishes telemetry through Lifecycle's event bus. Plain Lifecycle
 Objects use the existing diagnostics-channel sink; Agent adapts the same bus to

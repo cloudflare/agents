@@ -1,5 +1,14 @@
 /** Durable Object lifecycle composition. */
 export {
+  LifecycleCapability,
+  type LifecycleAlarms,
+  type LifecycleEvents,
+  type LifecycleRouteAddress,
+  type LifecycleRouteContext,
+  type LifecycleRoutes,
+  type LifecycleServices
+} from "./capability";
+export {
   getCurrentAgent,
   type CurrentAgentContext,
   type LifecycleObject
@@ -7,7 +16,6 @@ export {
 export {
   Lifecycle,
   type AlarmContribution,
-  type CapabilityController,
   type Connection,
   type ConnectionContext,
   type ConnectionSetStateFn,

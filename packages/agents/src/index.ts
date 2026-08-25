@@ -52,8 +52,11 @@ import {
   type ConnectionContext,
   Lifecycle,
   setLifecycleEventSink,
+  setLifecycleRouteTransport,
+  type LifecycleRouteEnvelope,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
+import type { LifecycleRouteAddress } from "./lifecycle/capability";
 import {
   getCurrentAgent as getCurrentLifecycleAgent,
   type CurrentAgentContext
@@ -118,16 +121,7 @@ import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
 import { Scheduler, createScheduler } from "./schedules/scheduler";
-import {
-  SchedulerAgentAdapter,
-  scheduleOwnerPathKey
-} from "./schedules/agent-adapter";
-import type { SchedulerRootRpc } from "./schedules/agent-rpc";
-import type {
-  Schedule,
-  ScheduleCriteria,
-  ScheduleStorageRow
-} from "./schedules/types";
+import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
   AGENT_TOOL_PROGRESS_PART,
@@ -685,12 +679,28 @@ type AgentToolRunStorageRow = {
 type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
 
+function agentPathKey(
+  path: ReadonlyArray<AgentPathStep> | null
+): string | null {
+  if (!path) return null;
+  return path
+    .map(
+      (step) =>
+        `${encodeURIComponent(step.className)}:${encodeURIComponent(step.name)}`
+    )
+    .join("/");
+}
+
 /**
  * Internal RPC surface exposed by the root agent for facets to
  * delegate alarm-owning operations (schedules + facet teardown).
  * @internal
  */
-type RootFacetRpcSurface = SchedulerRootRpc & {
+type RootFacetRpcSurface = {
+  _cf_routeLifecycle(
+    target: LifecycleRouteAddress | undefined,
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown>;
   _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
@@ -1704,7 +1714,6 @@ export class Agent<
 
   /** Durable scheduling capability installed into this Agent's Lifecycle. */
   readonly scheduler: Scheduler;
-  private readonly _schedulerAdapter: SchedulerAgentAdapter;
 
   readonly mcp: MCPClientManager;
 
@@ -2222,6 +2231,14 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    const routeHost = this;
+    setLifecycleRouteTransport(this.lifecycle, {
+      get source() {
+        return routeHost._lifecycleRouteAddress();
+      },
+      toRoot: (envelope) => this._routeLifecycleToRoot(envelope),
+      to: (target, envelope) => this._routeLifecycleToTarget(target, envelope)
+    });
     setLifecycleEventSink(this.lifecycle, (event) => {
       const payload =
         event.payload !== null &&
@@ -2235,11 +2252,8 @@ export class Agent<
     });
 
     this.scheduler = createScheduler(
+      this,
       {
-        callbacks: this,
-        storage: this.ctx.storage,
-        now: Date.now,
-        createId: () => nanoid(9),
         hungScheduleTimeoutSeconds:
           this._resolvedOptions.hungScheduleTimeoutSeconds
       },
@@ -2279,11 +2293,6 @@ export class Agent<
               ).call(this, payload, schedule)
           );
         },
-        dispatchOwnedCallback: (ownerData, row) =>
-          this._cf_dispatchScheduledCallback(
-            JSON.parse(ownerData) as AgentPathStep[],
-            row
-          ),
         rearm: () => this.lifecycle.rearmAlarm(),
         isDestroyed: () => this._destroyed,
         onError: (error) =>
@@ -2298,17 +2307,6 @@ export class Agent<
           )
       }
     );
-
-    this._schedulerAdapter = new SchedulerAgentAdapter({
-      scheduler: this.scheduler,
-      validateSchedule: (when, callback, options) =>
-        this._validateScheduleCallback(when, callback as keyof this, options),
-      isFacet: () => this._isFacet,
-      selfPath: () => this.selfPath,
-      rootAlarmOwner: () => this._rootAlarmOwner(),
-      isSamePathPrefix: (prefix, path) =>
-        this._isSameAgentPathPrefix(prefix, path)
-    });
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -2327,12 +2325,6 @@ export class Agent<
           {},
           (updateStorage) => {
             this._ensureSchema();
-            // Fresh/pre-versioned Agents need schedule storage before native
-            // RPC can enter. Established Agents already have the table; the
-            // capability's own versioned onStart handles future migrations.
-            if (this._schemaInitialization?.migrated) {
-              this._schedulerAdapter.ensureSchema();
-            }
             const schemaAttributes = {
               "cloudflare.agents.schema.version.previous":
                 this._schemaInitialization?.previousVersion,
@@ -2349,7 +2341,6 @@ export class Agent<
         // Initialize MCPClientManager AFTER tables are created.
         return new MCPClientManager(this._ParentClass.name, "0.0.1", {
           env: this.env,
-          storage: this.ctx.storage,
           createAuthProvider: (callbackUrl) =>
             this.createMcpOAuthProvider(callbackUrl)
         });
@@ -3849,10 +3840,79 @@ export class Agent<
     }
   }
 
+  private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
+    if (!this._isFacet) return undefined;
+    const key = agentPathKey(this.selfPath);
+    return key ? { key, data: JSON.stringify(this.selfPath) } : undefined;
+  }
+
+  private async _routeLifecycleToRoot(
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown> {
+    if (!this._isFacet) return this.lifecycle.route(envelope);
+    return (await this._rootAlarmOwner())._cf_routeLifecycle(
+      undefined,
+      envelope
+    );
+  }
+
+  private async _routeLifecycleToTarget(
+    target: LifecycleRouteAddress,
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown> {
+    let targetPath: AgentPathStep[];
+    try {
+      targetPath = JSON.parse(target.data) as AgentPathStep[];
+    } catch {
+      throw new Error("Lifecycle route target is not a valid Agent path");
+    }
+
+    const selfPath = this.selfPath;
+    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
+      throw new Error(
+        `Lifecycle route does not descend from ${JSON.stringify(selfPath)}.`
+      );
+    }
+    if (selfPath.length === targetPath.length) {
+      return this.lifecycle.route(envelope);
+    }
+
+    const next = targetPath[selfPath.length];
+    if (!this.hasSubAgent(next.className, next.name)) {
+      const stalePath = targetPath.slice(0, selfPath.length + 1);
+      if (this._isFacet) {
+        await (await this._rootAlarmOwner())._cf_cleanupFacetPrefix(stalePath);
+      } else {
+        await this._cf_cleanupFacetPrefix(stalePath);
+      }
+      return false;
+    }
+
+    const child = await this._cf_resolveSubAgent(next.className, next.name);
+    return (
+      child as unknown as {
+        _cf_routeLifecycle(
+          target: LifecycleRouteAddress,
+          envelope: LifecycleRouteEnvelope
+        ): Promise<unknown>;
+      }
+    )._cf_routeLifecycle(target, envelope);
+  }
+
+  /** Single native-RPC aperture for routed Lifecycle capabilities. */
+  _cf_routeLifecycle(
+    target: LifecycleRouteAddress | undefined,
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown> {
+    return target
+      ? this._routeLifecycleToTarget(target, envelope)
+      : this.lifecycle.route(envelope);
+  }
+
   private async _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
     const root = this._parentPath[0];
     if (!root) {
-      throw new Error("Facet scheduler delegation requires a root parent.");
+      throw new Error("Facet routing requires a root parent.");
     }
 
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
@@ -3861,7 +3921,7 @@ export class Agent<
       | undefined;
     if (!binding) {
       throw new Error(
-        `Unable to resolve root scheduler "${root.className}" for sub-agent schedule delegation.`
+        `Unable to resolve root "${root.className}" for facet routing.`
       );
     }
 
@@ -3920,69 +3980,6 @@ export class Agent<
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
 
   /**
-   * Insert a schedule row owned by a descendant facet. Called via RPC
-   * from the facet's `schedule()`. Returns `{ schedule, created }`
-   * so the originating facet can suppress `schedule:create` on
-   * idempotent dedup. This method does not emit observability
-   * events itself.
-   * @internal
-   */
-  _cf_scheduleForFacet<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    when: Date | string | number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    return this._schedulerAdapter.insertForOwner(
-      ownerPath,
-      when,
-      callback,
-      payload,
-      options
-    );
-  }
-
-  /**
-   * Insert an interval schedule row owned by a descendant facet.
-   * Called via RPC from the facet's `scheduleEvery()`. Returns
-   * `{ schedule, created }` so the originating facet can suppress
-   * `schedule:create` on idempotent dedup. This method does not
-   * emit observability events itself.
-   * @internal
-   */
-  _cf_scheduleEveryForFacet<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; _idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    return this._schedulerAdapter.insertIntervalForOwner(
-      ownerPath,
-      intervalSeconds,
-      callback,
-      payload,
-      options
-    );
-  }
-
-  /**
-   * Cancel a schedule row owned by a descendant facet, scoped by
-   * `owner_path_key` so siblings can't reach each other's rows.
-   * Returns the canceled row's callback name so the originating
-   * facet can emit `schedule:cancel`. This method does not emit
-   * observability events itself.
-   * @internal
-   */
-  _cf_cancelScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<{ ok: boolean; callback?: string }> {
-    return this._schedulerAdapter.cancelForOwner(ownerPath, id);
-  }
-
-  /**
    * Clean root-owned bookkeeping for a sub-tree of facets. This
    * bulk-cancels schedules whose `owner_path` starts with the given
    * prefix and deletes root-side facet fiber recovery leases for the
@@ -3995,32 +3992,10 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    this._schedulerAdapter.cancelOwnerPrefix(ownerPath);
+    const prefix = agentPathKey(ownerPath);
+    if (prefix) this.scheduler.cleanupRoutePrefix(prefix);
     this._deleteFacetRunRowsForPrefix(ownerPath);
     await this._rearmAlarm();
-  }
-
-  /**
-   * Read a single schedule row owned by a descendant facet.
-   * @internal
-   */
-  async _cf_getScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<Schedule<unknown> | undefined> {
-    return this._schedulerAdapter.getForOwner(ownerPath, id);
-  }
-
-  /**
-   * List schedule rows owned by a descendant facet, scoped by
-   * `owner_path_key` so siblings remain isolated from each other.
-   * @internal
-   */
-  async _cf_listSchedulesForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    criteria: ScheduleCriteria = {}
-  ): Promise<Schedule<unknown>[]> {
-    return this._schedulerAdapter.listForOwner(ownerPath, criteria);
   }
 
   /**
@@ -4032,7 +4007,7 @@ export class Agent<
   async _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
-    const ownerPathKey = scheduleOwnerPathKey(ownerPath);
+    const ownerPathKey = agentPathKey(ownerPath);
     const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
     this._facetKeepAliveTokens.add(token);
     this._keepAliveRefs++;
@@ -4064,7 +4039,7 @@ export class Agent<
     runId: string
   ): Promise<void> {
     const ownerPathJson = JSON.stringify(ownerPath);
-    const ownerPathKey = scheduleOwnerPathKey(ownerPath);
+    const ownerPathKey = agentPathKey(ownerPath);
     if (!ownerPathKey) {
       throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
     }
@@ -4085,7 +4060,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathKey = scheduleOwnerPathKey(ownerPath);
+    const ownerPathKey = agentPathKey(ownerPath);
     this.sql`
       DELETE FROM cf_agents_facet_runs
       WHERE owner_path_key IS ${ownerPathKey}
@@ -4122,7 +4097,7 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    return this._schedulerAdapter.schedule<T>(
+    return this.scheduler.schedule<T>(
       when,
       callback as string,
       payload,
@@ -4162,11 +4137,14 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    return this._schedulerAdapter.scheduleEvery<T>(
+    return this.scheduler.scheduleEvery<T>(
       intervalSeconds,
       callback as string,
       payload,
-      options
+      {
+        retry: options?.retry,
+        idempotent: options?._idempotent
+      }
     );
   }
 
@@ -4179,7 +4157,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
-    return this._schedulerAdapter.getSchedule<T>(id);
+    return this.scheduler.getSchedule<T>(id);
   }
 
   /**
@@ -4193,7 +4171,7 @@ export class Agent<
    * @returns The Schedule object or undefined if not found
    */
   getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
-    return this._schedulerAdapter.getScheduleById(id);
+    return this.scheduler.getScheduleById(id);
   }
 
   /**
@@ -4205,7 +4183,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
-    return this._schedulerAdapter.getSchedules<T>(criteria);
+    return this.scheduler.getSchedules<T>(criteria);
   }
 
   /**
@@ -4219,7 +4197,7 @@ export class Agent<
    * @returns Array of matching Schedule objects
    */
   listSchedules(criteria: ScheduleCriteria = {}): Promise<Schedule<unknown>[]> {
-    return this._schedulerAdapter.listSchedules(criteria);
+    return this.scheduler.listSchedules(criteria);
   }
 
   /**
@@ -4237,7 +4215,7 @@ export class Agent<
    * @returns true if the task was cancelled, false if the task was not found
    */
   cancelSchedule(id: string): Promise<boolean> {
-    return this._schedulerAdapter.cancelSchedule(id);
+    return this.scheduler.cancelSchedule(id);
   }
 
   /**
@@ -5536,59 +5514,6 @@ export class Agent<
   }
 
   /**
-   * Dispatch a scheduled callback into the facet identified by
-   * `ownerPath`. Walks one step at a time: if `ownerPath` matches
-   * `selfPath`, executes the callback locally; otherwise resolves
-   * the next descendant facet and recurses through its own RPC.
-   *
-   * Called by the root's `alarm()` (which owns the physical alarm
-   * for facet-owned schedules) and by intermediate facets while
-   * walking down the chain.
-   * @internal
-   */
-  async _cf_dispatchScheduledCallback(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    row: ScheduleStorageRow
-  ): Promise<boolean> {
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
-      throw new Error(
-        `Schedule owner path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === ownerPath.length) {
-      await this._schedulerAdapter.executeCallback(row);
-      return true;
-    }
-
-    const next = ownerPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      // The target facet was deleted or its registry entry was lost. Since
-      // this schedule can no longer be dispatched through the public registry,
-      // prune root-side bookkeeping for the stale sub-tree instead of
-      // repeatedly re-arming the same impossible alarm.
-      const stalePath = ownerPath.slice(0, selfPath.length + 1);
-      if (this._isFacet) {
-        const root = await this._rootAlarmOwner();
-        await root._cf_cleanupFacetPrefix(stalePath);
-      } else {
-        await this._cf_cleanupFacetPrefix(stalePath);
-      }
-      return false;
-    }
-
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_dispatchScheduledCallback(
-        ownerPath: ReadonlyArray<AgentPathStep>,
-        row: ScheduleStorageRow
-      ): Promise<boolean>;
-    };
-    return handle._cf_dispatchScheduledCallback(ownerPath, row);
-  }
-
-  /**
    * Invoke an RPC method on this Agent or a descendant facet identified
    * by a root-first path. Used by AgentWorkflow to route callbacks and
    * `this.agent` calls back to the exact sub-agent that started a workflow.
@@ -5949,8 +5874,6 @@ export class Agent<
     const limit = this._resolvedOptions.maxAlarmMemoryLimitStrikes;
     const sealed = strikes >= limit;
     const recoveryCallbacks = this._cf_recoveryAlarmCallbacks();
-    const executingRowId = this._schedulerAdapter.takeExecutingScheduleRowId();
-
     console.error(
       `Alarm hit a Durable Object memory-limit reset (strike ${strikes}/${limit}` +
         `${sealed ? ", sealing recovery" : ", will retry with backoff"}). ` +
@@ -5961,10 +5884,10 @@ export class Agent<
     if (sealed) {
       // Surgical purge: remove ONLY the looping rows (the recovery callbacks
       // and the exact row that was executing) so unrelated schedules survive.
-      this._schedulerAdapter.purgeMemoryLimitedRows(
-        recoveryCallbacks,
-        executingRowId
-      );
+      this.scheduler.handleAlarmMemoryLimit({
+        callbacks: recoveryCallbacks,
+        sealed: true
+      });
       try {
         await this._cf_sealMemoryLimitedRecovery();
       } catch {
@@ -5981,11 +5904,11 @@ export class Agent<
       // A genuinely transient spike can clear in the meantime.
       const backoffSeconds = Math.min(300, 30 * strikes);
       const nextTime = Math.floor(Date.now() / 1000) + backoffSeconds;
-      this._schedulerAdapter.backoffMemoryLimitedRows(
-        recoveryCallbacks,
-        executingRowId,
+      this.scheduler.handleAlarmMemoryLimit({
+        callbacks: recoveryCallbacks,
+        sealed: false,
         nextTime
-      );
+      });
     }
 
     try {
@@ -10068,15 +9991,13 @@ export class Agent<
     // instead of leaving a half-deleted agent whose tables get silently
     // recreated by the constructor. The marker is removed by the
     // `deleteAll()` below, which is also why it is a KV record rather than a
-    // SQL row: it must outlive `_dropInternalTablesForDestroy`.
+    // SQL row: it must outlive live-resource disposal.
     await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
     await this.lifecycle.disableAlarms();
 
-    this._dropInternalTablesForDestroy();
-    await this.ctx.storage.deleteAll();
-
+    await this.lifecycle.dispose();
     this._disposables.dispose();
-    await this.mcp.dispose();
+    await this.ctx.storage.deleteAll();
 
     this._destroyed = true;
 
@@ -10150,20 +10071,6 @@ export class Agent<
 
   private async _hasPendingDestroy(): Promise<boolean> {
     return (await this._pendingDestroyAlarm()) !== null;
-  }
-
-  /** @internal Drop every internal Agents SDK table during top-level destroy. */
-  protected _dropInternalTablesForDestroy(): void {
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
-    this._schedulerAdapter.dropStorage();
-    this.sql`DROP TABLE IF EXISTS cf_agents_state`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_runs`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_fibers`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_facet_runs`;
-    this.sql`DROP TABLE IF EXISTS cf_agent_tool_runs`;
   }
 
   /**

@@ -33,7 +33,7 @@ RPC bypasses Lifecycle handlers.
 
 Lifecycle owns the one physical Durable Object alarm. A capability can return
 its next requested epoch time from `getNextAlarm()` and request recalculation
-through the controller received by `onInstall()`. Lifecycle serializes
+through `this.lifecycle.alarms.rearm()`. Lifecycle serializes
 recalculation, chooses the earliest contribution, runs every capability's
 `onAlarm()` followed by the host's `onAlarm()`, then recalculates once more.
 
@@ -53,22 +53,26 @@ alarm selection.
 `Scheduler` is a plain Lifecycle primitive. Its `onStart` hook owns schedule
 schema migration, `onAlarm` owns due-row processing, and `getNextAlarm`
 contributes its earliest runnable row or hung-interval recheck. Agent constructs
-the same Scheduler exposed at `Agent.this.scheduler`; an internal adapter adds
-sub-agent ownership/routing, Agent callback context, and OOM policy while
-existing Agent scheduling methods remain delegators.
+the same Scheduler exposed at `Agent.this.scheduler`; existing Agent scheduling
+methods remain compatibility delegators.
 
-Capabilities publish best-effort telemetry through `CapabilityController.emit()`.
-Lifecycle owns that event bus and sends plain Lifecycle Object events to the
-existing diagnostics channels. Agent adapts the bus's terminal sink to its
-existing observability implementation, preserving custom sinks without making
-observability a capability or a Scheduler dependency. The bus is not durable;
-a capability that requires guaranteed delivery owns an outbox.
+Capabilities extending `LifecycleCapability` receive storage, readiness, alarm
+coordination, events, and generic capability routing. Lifecycle routes an
+envelope to the matching capability ID at the destination. Agent supplies an
+internal facet transport through one generic RPC aperture, so Scheduler routes
+owner-scoped CRUD and callbacks without facet-specific methods or an Agent
+adapter. Existing facet rows stay in the root Scheduler table.
+
+Capabilities publish best-effort telemetry through
+`this.lifecycle.events.emit()`. Lifecycle sends plain Lifecycle Object events to
+the existing diagnostics channels. Agent adapts the terminal sink to its
+existing observability implementation. The bus is not durable; a capability
+that requires guaranteed delivery owns an outbox.
 
 Alarm contribution, capability hooks, and capability-event delivery run outside
 ambient host context.
 Scheduled methods are user callbacks, so Scheduler invokes them in Lifecycle
-Object context. Agent's adapter preserves its richer callback and `onError`
-context.
+Object or Agent context as appropriate.
 
 ## Host context
 

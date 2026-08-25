@@ -5,11 +5,17 @@ import { publishDiagnosticsEvent } from "../observability/diagnostics";
 import {
   type AlarmContribution,
   CapabilityRunner,
-  type CapabilityController,
   type DurableObjectCapability,
   type LifecycleEvent,
   type LifecycleEventSink
 } from "./capability-runner";
+import {
+  bindLifecycleCapability,
+  lifecycleCapabilityId,
+  LifecycleCapability,
+  type LifecycleRouteAddress,
+  type LifecycleServices
+} from "./capability";
 import {
   createConnection,
   ConnectionManager,
@@ -31,7 +37,6 @@ import type {
 
 export {
   type AlarmContribution,
-  type CapabilityController,
   type CapabilityRequestContext,
   type LifecycleEvent,
   type CapabilityStartContext,
@@ -147,6 +152,23 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+/** Internal envelope transported between routed Lifecycle instances. */
+export type LifecycleRouteEnvelope = {
+  readonly capability: string;
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly payload: unknown;
+};
+
+/** Internal transport supplied by a host with routed child Lifecycles. */
+export type LifecycleRouteTransport = {
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly toRoot: (envelope: LifecycleRouteEnvelope) => Promise<unknown>;
+  readonly to: (
+    target: LifecycleRouteAddress,
+    envelope: LifecycleRouteEnvelope
+  ) => Promise<unknown>;
+};
+
 type LifecycleHost<
   Env extends object,
   Props extends Record<string, unknown>
@@ -156,6 +178,15 @@ type LifecycleHost<
 };
 
 const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
+const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
+
+/** @internal Supply a host's routed Lifecycle transport. */
+export function setLifecycleRouteTransport<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, transport: LifecycleRouteTransport): void {
+  lifecycleRouteTransports.set(lifecycle, transport);
+}
 
 /** @internal Adapt Lifecycle's default diagnostics sink at a composition root. */
 export function setLifecycleEventSink<
@@ -184,10 +215,6 @@ export class Lifecycle<
     () => this.#capabilities
   );
   readonly #connectionManager: ConnectionManager;
-  readonly #capabilityController: CapabilityController = Object.freeze({
-    rearmAlarm: () => this.rearmAlarm(),
-    emit: (event: LifecycleEvent) => this.#emitCapabilityEvent(event)
-  });
 
   #status: "zero" | "starting" | "started" = "zero";
   #alarmRearmQueue: Promise<void> = Promise.resolve();
@@ -268,16 +295,84 @@ export class Lifecycle<
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
+    const capabilityId = lifecycleCapabilityId(capability);
+    if (
+      capabilityId &&
+      this.#capabilities.some(
+        (candidate) => lifecycleCapabilityId(candidate) === capabilityId
+      )
+    ) {
+      throw new Error(
+        `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
+      );
+    }
     this.#capabilities.push(capability);
-    const pendingEventCount = this.#pendingEvents.length;
-    try {
-      capability.onInstall?.(this.#capabilityController);
-    } catch (error) {
-      this.#capabilities.pop();
-      this.#pendingEvents.length = pendingEventCount;
-      throw error;
+    if (capability instanceof LifecycleCapability) {
+      bindLifecycleCapability(
+        capability,
+        this.#servicesForCapability(capability.capabilityId)
+      );
     }
     return this;
+  }
+
+  #servicesForCapability(capabilityId: string): LifecycleServices {
+    const envelope = (payload: unknown): LifecycleRouteEnvelope => ({
+      capability: capabilityId,
+      source: lifecycleRouteTransports.get(this)?.source,
+      payload
+    });
+    const owner = this;
+    return Object.freeze({
+      storage: this.#ctx.storage,
+      ready: () => this.#readyForCapabilityOperation(),
+      alarms: Object.freeze({
+        rearm: () => this.rearmAlarm()
+      }),
+      events: Object.freeze({
+        emit: (type: string, payload: unknown) =>
+          this.#emitCapabilityEvent({ source: capabilityId, type, payload })
+      }),
+      routes: Object.freeze({
+        get source() {
+          return lifecycleRouteTransports.get(owner)?.source;
+        },
+        toRoot: (payload: unknown) => {
+          const current = lifecycleRouteTransports.get(this);
+          return current
+            ? current.toRoot(envelope(payload))
+            : this.#dispatchRoute(envelope(payload));
+        },
+        to: (target: LifecycleRouteAddress, payload: unknown) => {
+          const current = lifecycleRouteTransports.get(this);
+          if (current) return current.to(target, envelope(payload));
+          if (lifecycleRouteTransports.get(this)?.source?.key === target.key) {
+            return this.#dispatchRoute(envelope(payload));
+          }
+          throw new Error("Lifecycle has no transport for routed capabilities");
+        }
+      })
+    });
+  }
+
+  async #readyForCapabilityOperation(): Promise<void> {
+    if (this.#status === "starting" || this.#status === "started") return;
+    await this.start();
+  }
+
+  async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    await this.#ensureInitialized();
+    return runWithoutCurrentAgent(() =>
+      this.#capabilityRunner.route(envelope.capability, {
+        source: envelope.source,
+        payload: envelope.payload
+      })
+    );
+  }
+
+  /** @internal Deliver a generic capability envelope to this Lifecycle. */
+  route(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    return this.#dispatchRoute(envelope);
   }
 
   #emitCapabilityEvent(event: LifecycleEvent): void {
@@ -693,6 +788,11 @@ export class Lifecycle<
       });
     this.#alarmRearmQueue = next;
     await next;
+  }
+
+  /** Dispose installed capabilities in reverse registration order. */
+  async dispose(): Promise<void> {
+    await runWithoutCurrentAgent(() => this.#capabilityRunner.dispose());
   }
 
   /** Permanently disable and clear alarms during explicit object teardown. */

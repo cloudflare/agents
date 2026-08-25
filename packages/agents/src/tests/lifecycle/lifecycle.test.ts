@@ -110,6 +110,15 @@ describe("Lifecycle", () => {
     expect(alarm as number).toBeLessThanOrEqual(Date.now() + 61_000);
   });
 
+  it("routes messages to the matching local capability", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+
+    expect(await stub.routeCapability({ value: "routed" })).toEqual({
+      payload: { value: "routed" },
+      source: null
+    });
+  });
+
   it("buffers capability events emitted during startup", async () => {
     const name = crypto.randomUUID();
     const stub = env.PlainLifecycleObject.getByName(name);
@@ -201,6 +210,15 @@ describe("Lifecycle", () => {
 
     expect(scheduleId).not.toBe("");
     expect((await stub.getSchedulerResult()).scheduleCount).toBe(1);
+  });
+
+  it("disposes live capability resources in reverse registration order", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+
+    expect(await stub.disposeCapabilities()).toEqual([
+      "dispose:second",
+      "dispose:first"
+    ]);
   });
 
   it("scopes current context to Lifecycle Object host hooks", async () => {

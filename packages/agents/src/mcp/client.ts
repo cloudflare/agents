@@ -46,10 +46,8 @@ import {
   type MCPServerRow,
   type PersistedMcpServerOptions
 } from "./client-storage";
-import type {
-  CapabilityRequestContext,
-  DurableObjectCapability
-} from "../lifecycle/capability-runner";
+import { LifecycleCapability } from "../lifecycle/capability";
+import type { CapabilityRequestContext } from "../lifecycle/capability-runner";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 
@@ -367,9 +365,6 @@ export type MCPClientManagerOptions = {
    */
   readonly env?: Cloudflare.Env;
 
-  /** Durable storage that owns the MCP server catalog. */
-  readonly storage: DurableObjectStorage;
-
   /** Construct the OAuth provider used for a persisted HTTP server. */
   readonly createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
 };
@@ -391,7 +386,7 @@ export type MCPServerFilter = {
  * A Durable Object capability that persists and aggregates MCP client
  * connections.
  */
-export class MCPClientManager implements DurableObjectCapability {
+export class MCPClientManager extends LifecycleCapability {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   /** Cache only the current catalog so old schema graphs are not retained. */
   private readonly _aiToolSchemas = new WeakMap<
@@ -402,7 +397,6 @@ export class MCPClientManager implements DurableObjectCapability {
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
   private readonly _env: Cloudflare.Env | undefined;
-  private readonly _storage: DurableObjectStorage;
   private readonly _createAuthProviderFn:
     | ((callbackUrl: string) => AgentMcpOAuthProvider)
     | undefined;
@@ -429,30 +423,25 @@ export class MCPClientManager implements DurableObjectCapability {
    *
    * @param _name - MCP client implementation name sent during negotiation.
    * @param _version - MCP client implementation version sent during negotiation.
-   * @param options - Explicit runtime, storage, and OAuth dependencies.
+   * @param options - Optional runtime bindings and OAuth configuration.
    */
   constructor(
     private readonly _name: string,
     private readonly _version: string,
-    options: MCPClientManagerOptions
+    options: MCPClientManagerOptions = {}
   ) {
-    if (!options.storage) {
-      throw new Error(
-        "MCPClientManager requires a valid DurableObjectStorage instance"
-      );
-    }
+    super("mcp");
     this._env = options.env;
-    this._storage = options.storage;
     this._createAuthProviderFn = options.createAuthProvider;
   }
 
   /** Restore persisted HTTP and RPC connections before the host handles work. */
   async onStart(): Promise<void> {
     const schemaVersion =
-      (await this._storage.get<number>(MCP_SCHEMA_VERSION_KEY)) ?? 0;
+      (await this.lifecycle.storage.get<number>(MCP_SCHEMA_VERSION_KEY)) ?? 0;
     if (schemaVersion < CURRENT_MCP_SCHEMA_VERSION) {
-      ensureMcpServerTable(this._storage);
-      await this._storage.put(
+      ensureMcpServerTable(this.lifecycle.storage);
+      await this.lifecycle.storage.put(
         MCP_SCHEMA_VERSION_KEY,
         CURRENT_MCP_SCHEMA_VERSION
       );
@@ -541,7 +530,7 @@ export class MCPClientManager implements DurableObjectCapability {
     query: string,
     ...bindings: SqlStorageValue[]
   ): T[] {
-    return [...this._storage.sql.exec<T>(query, ...bindings)];
+    return [...this.lifecycle.storage.sql.exec<T>(query, ...bindings)];
   }
 
   // Storage operations
@@ -632,7 +621,7 @@ export class MCPClientManager implements DurableObjectCapability {
     const oldPrefix = `/${clientName}/${oldId}/`;
     const newPrefix = `/${clientName}/${newId}/`;
     try {
-      const keys = await this._storage.list({ prefix: oldPrefix });
+      const keys = await this.lifecycle.storage.list({ prefix: oldPrefix });
       if (keys.size > 0) {
         const writes: Record<string, unknown> = {};
         const deletes: string[] = [];
@@ -641,8 +630,8 @@ export class MCPClientManager implements DurableObjectCapability {
           writes[newKey] = value;
           deletes.push(oldKey);
         }
-        await this._storage.put(writes);
-        await this._storage.delete(deletes);
+        await this.lifecycle.storage.put(writes);
+        await this.lifecycle.storage.delete(deletes);
       }
     } catch (error) {
       // Best-effort: storage rename failures shouldn't break the SQL-level
@@ -953,13 +942,13 @@ export class MCPClientManager implements DurableObjectCapability {
     clientName: string,
     clientId?: string
   ): AgentMcpOAuthProvider {
-    if (!this._storage) {
+    if (!this.lifecycle.storage) {
       throw new Error(
         "Cannot create auth provider: storage is not initialized"
       );
     }
     const authProvider = new DurableObjectOAuthClientProvider(
-      this._storage,
+      this.lifecycle.storage,
       clientName,
       callbackUrl
     );
@@ -2299,7 +2288,7 @@ export class MCPClientManager implements DurableObjectCapability {
     try {
       await this.closeAllConnections();
     } finally {
-      // Dispose manager-level emitters
+      // Dispose manager-level emitters.
       this._onServerStateChanged.dispose();
       this._onObservabilityEvent.dispose();
     }

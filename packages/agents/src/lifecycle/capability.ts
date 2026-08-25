@@ -1,0 +1,104 @@
+import type {
+  CapabilityStartContext,
+  DurableObjectCapability
+} from "./capability-runner";
+
+/** Opaque address understood by a Lifecycle routing transport. */
+export type LifecycleRouteAddress = {
+  /** Stable equality and storage key. */
+  readonly key: string;
+  /** Transport-owned serialized address. */
+  readonly data: string;
+};
+
+/** Context supplied with a routed capability message. */
+export type LifecycleRouteContext = {
+  /** Address of the sending Lifecycle, or undefined for an unrouted root. */
+  readonly source: LifecycleRouteAddress | undefined;
+  /** Capability-owned message payload. */
+  readonly payload: unknown;
+};
+
+/** Alarm coordination available to every Lifecycle capability. */
+export type LifecycleAlarms = {
+  /** Recompute the physical alarm from installed capability state. */
+  readonly rearm: () => Promise<void>;
+};
+
+/** Best-effort telemetry available to every Lifecycle capability. */
+export type LifecycleEvents = {
+  /** Publish an event under this capability's stable identity. */
+  readonly emit: (type: string, payload: unknown) => void;
+};
+
+/** Routing available to every Lifecycle capability. */
+export type LifecycleRoutes = {
+  /** This Lifecycle's transport address, or undefined at the route root. */
+  readonly source: LifecycleRouteAddress | undefined;
+  /** Route a capability-owned message to the root Lifecycle. */
+  readonly toRoot: (payload: unknown) => Promise<unknown>;
+  /** Route a capability-owned message to another Lifecycle. */
+  readonly to: (
+    target: LifecycleRouteAddress,
+    payload: unknown
+  ) => Promise<unknown>;
+};
+
+/** Standard services granted to every installed Lifecycle capability. */
+export type LifecycleServices = {
+  readonly storage: DurableObjectStorage;
+  readonly ready: () => Promise<void>;
+  readonly alarms: LifecycleAlarms;
+  readonly events: LifecycleEvents;
+  readonly routes: LifecycleRoutes;
+};
+
+const installedServices = new WeakMap<object, LifecycleServices>();
+
+/** Base class for capabilities that consume standard Lifecycle services. */
+export abstract class LifecycleCapability<Props extends object = object> {
+  readonly capabilityId: string;
+
+  protected constructor(capabilityId: string) {
+    if (capabilityId.trim() === "") {
+      throw new Error("Lifecycle capability IDs must be non-empty");
+    }
+    this.capabilityId = capabilityId;
+  }
+
+  /** Default startup hook; capabilities override when they own startup work. */
+  onStart(_context: CapabilityStartContext<Props>): void {}
+
+  /** Standard services when installed, or undefined in isolated unit tests. */
+  protected get lifecycleServices(): LifecycleServices | undefined {
+    return installedServices.get(this);
+  }
+
+  /** Standard services supplied when Lifecycle installs this capability. */
+  protected get lifecycle(): LifecycleServices {
+    const services = this.lifecycleServices;
+    if (!services) {
+      throw new Error(
+        `${this.constructor.name} must be installed with Lifecycle.use() before use`
+      );
+    }
+    return services;
+  }
+}
+
+/** @internal Bind the standard service surface to one capability instance. */
+export function bindLifecycleCapability(
+  capability: LifecycleCapability,
+  services: LifecycleServices
+): void {
+  installedServices.set(capability, services);
+}
+
+/** @internal Read a capability ID without exposing installation internals. */
+export function lifecycleCapabilityId(
+  capability: DurableObjectCapability
+): string | undefined {
+  return capability instanceof LifecycleCapability
+    ? capability.capabilityId
+    : undefined;
+}

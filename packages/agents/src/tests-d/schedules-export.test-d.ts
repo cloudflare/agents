@@ -13,15 +13,12 @@ import {
 } from "../schedule";
 
 class ScheduledObject extends DurableObject {
-  readonly scheduler = new Scheduler({
-    callbacks: this,
-    storage: this.ctx.storage,
-    now: Date.now,
-    createId: () => crypto.randomUUID()
-  });
+  readonly scheduler = new Scheduler(this);
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
 
-  reminder(): void {}
+  reminder(payload: { message: string }): void {
+    void payload;
+  }
 }
 
 class SchedulerAgent extends Agent {
@@ -31,10 +28,21 @@ class SchedulerAgent extends Agent {
 declare const object: ScheduledObject;
 object.scheduler satisfies Scheduler;
 object.scheduler satisfies DurableObjectCapability;
-object.scheduler.schedule(1, "reminder") satisfies Promise<Schedule<string>>;
-object.scheduler.scheduleEvery(60, "reminder", undefined, {
-  idempotent: false
-});
+object.scheduler.set(1, "reminder", {
+  message: "hello"
+}) satisfies Promise<Schedule<{ message: string }>>;
+object.scheduler.every(
+  60,
+  "reminder",
+  { message: "hello" },
+  {
+    idempotent: false
+  }
+);
+// @ts-expect-error reminder requires a string message.
+object.scheduler.set(1, "reminder", { message: 123 });
+// @ts-expect-error missingCallback is not a method on the target.
+object.scheduler.set(1, "missingCallback", {});
 
 declare const agent: SchedulerAgent;
 agent.scheduler satisfies Scheduler;
@@ -54,5 +62,5 @@ type _LegacyParserCompatibility = LegacyParsedSchedule extends ParsedSchedule
   ? true
   : false;
 
-// @ts-expect-error Scheduler requires explicit host, storage, clock, and ID dependencies.
+// @ts-expect-error Scheduler requires a Lifecycle Object callback target.
 new Scheduler({});

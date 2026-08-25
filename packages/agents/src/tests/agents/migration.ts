@@ -1,5 +1,6 @@
 import { Agent } from "../../index.ts";
-import { getSchedulerInternals } from "../../schedules/scheduler";
+
+const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
 
 /**
  * Test agent for verifying SQL schema migrations.
@@ -37,6 +38,7 @@ export class TestMigrationAgent extends Agent {
       INSERT INTO cf_agents_schedules (id, callback, payload, type, time, delayInSeconds)
       VALUES ('test-old-row', 'testCallback', '"hello"', 'delayed', 1000, 5)
     `);
+    await this.ctx.storage.delete(SCHEDULE_SCHEMA_VERSION_KEY);
   }
 
   /**
@@ -70,13 +72,12 @@ export class TestMigrationAgent extends Agent {
       INSERT INTO cf_agents_schedules (id, callback, payload, type, time, delayInSeconds)
       VALUES ('test-old-row', 'testCallback', '"hello"', 'delayed', 1000, 5)
     `);
+    await this.ctx.storage.delete(SCHEDULE_SCHEMA_VERSION_KEY);
   }
 
-  /**
-   * Run the canonical schedule capability migration after manipulating schema.
-   */
+  /** Enter Scheduler's real async API, which starts Lifecycle and migrates. */
   async runMigration(): Promise<void> {
-    getSchedulerInternals(this.scheduler).ensureSchema();
+    await this.scheduler.list();
   }
 
   /**
