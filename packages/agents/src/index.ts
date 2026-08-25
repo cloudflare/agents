@@ -72,6 +72,7 @@ export {
 } from "./agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
+import { SqlError } from "./sql-error";
 import {
   type RetryOptions,
   tryN,
@@ -390,20 +391,7 @@ export type CallableMetadata = {
 
 const callableMetadata = new WeakMap<Function, CallableMetadata>();
 
-/**
- * Error class for SQL execution failures, containing the query that failed
- */
-export class SqlError extends Error {
-  /** The SQL query that failed */
-  readonly query: string;
-
-  constructor(query: string, cause: unknown) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    super(`SQL query failed: ${message}`, { cause });
-    this.name = "SqlError";
-    this.query = query;
-  }
-}
+export { SqlError } from "./sql-error";
 
 // ── Sub-agent (facet) types ──────────────────────────────────────────
 
@@ -7822,7 +7810,10 @@ export class Agent<
     await this.schedule(
       DETACHED_BACKBONE_CADENCE_S[0],
       DETACHED_RECONCILE_CALLBACK as keyof this,
-      { cadenceIndex: 0 } satisfies DetachedReconcilePayload
+      { cadenceIndex: 0 } satisfies DetachedReconcilePayload,
+      // Armed during startup recovery; the explicit choice keeps the
+      // non-idempotent-startup-schedule warning for user code only.
+      { idempotent: true }
     );
   }
 

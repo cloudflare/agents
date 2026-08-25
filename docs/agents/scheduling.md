@@ -841,8 +841,8 @@ new Scheduler(this, {
 
 - `target` is the Lifecycle Object containing the named scheduled methods and
   provides the type information used by `set()` and `every()`.
-- Lifecycle supplies storage, readiness, alarm coordination, events, and
-  routing.
+- Lifecycle supplies storage, readiness, startup state, alarm coordination,
+  host-callback dispatch, events, and routing.
 - `retry` supplies callback retry defaults. The defaults are three attempts,
   100 ms base delay, and 3,000 ms maximum delay.
 - `hungScheduleTimeoutSeconds` defaults to 30 seconds.

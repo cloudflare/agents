@@ -259,9 +259,11 @@ describe("Scheduler capability", () => {
           expect(remaining.map((row) => row.id).sort()).toEqual(
             [ids.interval, ids.cron].sort()
           );
+          // >= rather than >: a cron row advanced at a minute boundary can
+          // land exactly on the current second.
           const nowSeconds = Math.floor(Date.now() / 1000);
           for (const row of remaining) {
-            expect(row.time).toBeGreaterThan(nowSeconds);
+            expect(row.time).toBeGreaterThanOrEqual(nowSeconds);
           }
           expect(await state.storage.getAlarm()).not.toBeNull();
         }
@@ -444,9 +446,6 @@ describe("Scheduler capability", () => {
     );
     expect(scheduleWarnings).toHaveLength(1);
     expect(scheduleWarnings[0]).toContain('schedule("maintenance")');
-    expect(warnings.some((warning) => warning.includes("_internalTick"))).toBe(
-      false
-    );
 
     // Outside startup the same call does not warn.
     expect(await stub.scheduleOutsideStartup()).toBe(0);

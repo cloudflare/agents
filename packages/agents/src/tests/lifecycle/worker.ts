@@ -512,13 +512,10 @@ export class SchedulerStartupWarnObject extends DurableObject<Env> {
 
   maintenance(): void {}
 
-  _internalTick(): void {}
-
   async onStart(): Promise<void> {
     await this.#captureWarnings(async () => {
       await this.scheduler.schedule(60, "maintenance", "a");
       await this.scheduler.schedule(60, "maintenance", "b");
-      await this.scheduler.schedule(60, "_internalTick");
       await this.scheduler.schedule(120, "maintenance", "c", {
         idempotent: true
       });

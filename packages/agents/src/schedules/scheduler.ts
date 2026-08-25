@@ -23,6 +23,7 @@ import {
   validateRetryOptions
 } from "../retries";
 import type { RetryOptions } from "../retries";
+import { SqlError } from "../sql-error";
 import type { SchedulerEventType, SchedulerOptions } from "./options";
 import {
   isRecurring,
@@ -118,7 +119,11 @@ export class Scheduler<
    */
   constructor(_host: Host, options: SchedulerOptions = {}) {
     super("scheduler");
-    if (options.retry) validateRetryOptions(options.retry, DEFAULT_RETRY);
+    // Retry defaults are resolved, not validated, here: a host whose
+    // historically tolerated invalid retry config throws at construction
+    // would brick every entry point of its Durable Object. Invalid defaults
+    // surface per execution as schedule:error instead, and per-schedule
+    // retry overrides are still validated when each schedule is created.
     this.#retryDefaults = resolveRetryConfig(options.retry, DEFAULT_RETRY);
     this.#hungScheduleTimeoutSeconds = options.hungScheduleTimeoutSeconds ?? 30;
     this.#onError = options.onError;
@@ -434,8 +439,9 @@ export class Scheduler<
 
   /**
    * A non-idempotent one-shot created during startup accumulates one row per
-   * Durable Object wake. Warn once per callback; `_`-prefixed callbacks are
-   * framework-internal and manage their own idempotency.
+   * Durable Object wake, whether it came from the host's onStart or another
+   * startup hook. Warn once per callback; an explicit `idempotent` choice
+   * (either value) opts out.
    */
   #warnWhenScheduledDuringStartup(
     when: Date | string | number,
@@ -445,14 +451,13 @@ export class Scheduler<
     if (!this.lifecycle.starting()) return;
     if (options?.idempotent !== undefined) return;
     if (typeof when === "string") return;
-    if (callback.startsWith("_")) return;
     if (this.#warnedStartupCallbacks.has(callback)) return;
     this.#warnedStartupCallbacks.add(callback);
     console.warn(
-      `schedule("${callback}") called inside onStart() without { idempotent: true }. ` +
-        `This creates a new row on every Durable Object restart, which can cause ` +
-        `duplicate executions. Pass { idempotent: true } to deduplicate, or use ` +
-        `scheduleEvery() for recurring tasks.`
+      `schedule("${callback}") called during startup (e.g. onStart()) without ` +
+        `{ idempotent: true }. This creates a new row on every Durable Object ` +
+        `restart, which can cause duplicate executions. Pass { idempotent: true } ` +
+        `to deduplicate, or use scheduleEvery() for recurring tasks.`
     );
   }
 
@@ -467,9 +472,13 @@ export class Scheduler<
         result + part + (index < values.length ? "?" : ""),
       ""
     );
-    // SAFETY: Scheduler queries select from its own schema; T describes the
-    // projected columns of the accompanying query text.
-    return [...this.lifecycle.storage.sql.exec(query, ...values)] as T[];
+    try {
+      // SAFETY: Scheduler queries select from its own schema; T describes the
+      // projected columns of the accompanying query text.
+      return [...this.lifecycle.storage.sql.exec(query, ...values)] as T[];
+    } catch (cause) {
+      throw new SqlError(query, cause);
+    }
   }
 
   #migrateSchema(): void {
@@ -584,9 +593,11 @@ export class Scheduler<
     options?: ScheduleOptions
   ): Promise<InsertResult<T>> {
     const payloadJson = JSON.stringify(payload);
+    // Recurring timings deduplicate unless explicitly opted out; one-shot
+    // timings deduplicate on any truthy value (historic Agent behavior).
     const idempotent = isRecurring(timing)
       ? options?.idempotent !== false
-      : options?.idempotent === true;
+      : Boolean(options?.idempotent);
 
     if (idempotent) {
       const existing = this.#findMatchingRow(
@@ -655,9 +666,14 @@ export class Scheduler<
       query += " AND intervalSeconds = ?";
       params.push(timing.intervalSeconds);
     }
-    const rows = this.lifecycle.storage.sql.exec(query, ...params).toArray();
+    let rows: unknown[];
+    try {
+      rows = this.lifecycle.storage.sql.exec(query, ...params).toArray();
+    } catch (cause) {
+      throw new SqlError(query, cause);
+    }
     // SAFETY: the query selects * from Scheduler's own schema.
-    return rows[0] as unknown as ScheduleStorageRow | undefined;
+    return rows[0] as ScheduleStorageRow | undefined;
   }
 
   #rowToSchedule<T>(row: ScheduleStorageRow): Schedule<T> {
