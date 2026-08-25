@@ -1,11 +1,10 @@
 # Durable Object lifecycle
 
-`agents/lifecycle` turns a Cloudflare Durable Object into an Agent through
-composition. Your class extends the platform `DurableObject`, then installs a
-lifecycle with `this`. Reusable capabilities work in both these composable
-Agents and the batteries-included `Agent` class exported from `agents`.
+`agents/lifecycle` lets reusable durable capabilities work in both `Agent` and a
+plain Cloudflare Durable Object. It uses composition: your class extends the
+platform `DurableObject`, then constructs a lifecycle with `this`.
 
-## Composable Agent
+## Plain Durable Object
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
@@ -128,58 +127,54 @@ Capabilities run in registration order. Startup and alarms run every hook
 sequentially. Request handling stops at the first returned `Response`. A phase
 failure propagates, and failed startup can be retried.
 
-Pass durable dependencies to a capability explicitly. A capability should not
-use ambient context merely to reach storage, bindings, authentication,
+Pass dependencies to a capability explicitly. A capability should not receive
+the entire host merely to reach storage, bindings, authentication,
 observability, or protocol methods.
 
-## Current Agent context
+## Lifecycle Object context
 
-Lifecycle runs capability hooks and Agent user hooks in the context of the
-current Agent. Capability `onStart` hooks still run before the Agent's
-`onStart`; ambient context identifies the host but does not imply that host
-startup has completed. Each capability restores the state it owns.
+`agents/lifecycle` exports the `LifecycleObject` interface for a
+`DurableObject` with an installed `Lifecycle` and the semantic hooks Lifecycle
+dispatches. This is a host type, not the batteries-included `Agent` class
+exported from `agents`.
 
-Shared code that cannot capture a particular instance can read the current
-context from `agents/lifecycle`:
+Lifecycle establishes the `getCurrentAgent()` context only while it invokes
+host hooks. Capability hooks run outside that ambient context and use their own
+`this`, hook arguments, and explicitly supplied dependencies.
 
 ```ts
-import {
-  getCurrentAgent,
-  type DurableObjectCapability
-} from "agents/lifecycle";
+import { getCurrentAgent } from "agents/lifecycle";
 
 function currentRequestOrigin(): string | undefined {
   const { request } = getCurrentAgent();
   return request ? new URL(request.url).origin : undefined;
 }
 
-class RequestAudit implements DurableObjectCapability {
-  onRequest(): void {
-    console.log(currentRequestOrigin());
+export class MyObject extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this);
+
+  onRequest(): Response {
+    return Response.json({ origin: currentRequestOrigin() });
   }
 }
 ```
 
-`getCurrentAgent().agent` defaults to `ComposableAgent`: a `DurableObject`
-with an installed `Lifecycle` and its semantic hooks. Pass your concrete class
-when shared code needs its additional APIs:
+Pass the concrete host class when shared host code needs its additional APIs:
 
 ```ts
-const { agent } = getCurrentAgent<MyAgent>();
+const { agent: object } = getCurrentAgent<MyObject>();
 ```
 
-Context values follow the invocation:
+Host context values follow the invocation:
 
-- `onStart` and `onAlarm`: `agent`;
-- `onRequest`: `agent` and `request`;
-- `onConnect`: `agent`, `connection`, and the upgrade `request`;
-- `onMessage`, `onClose`, and `onError`: `agent` and `connection`.
+- `onStart` and `onAlarm`: object;
+- `onRequest`: object and request;
+- `onConnect`: object, connection, and upgrade request;
+- `onMessage`, `onClose`, and `onError`: object and connection.
 
 `getConnectionTags(connection, { request })` remains argument-driven because it
-already receives both values explicitly. The batteries-included `Agent` class
-adds context for callables, chat turns, email, schedules, fibers, and detached
-work. The root `agents` package continues to export `getCurrentAgent` as an
-alias for compatibility.
+already receives both values explicitly. The root `agents` package continues
+to export `getCurrentAgent()` for the `Agent` class as a compatibility alias.
 
 ## WebSockets always hibernate
 

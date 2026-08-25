@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-next-lifecycle-example",
-  "description": "Next: composable Agent built with agents/lifecycle capabilities",
+  "description": "Next: plain Durable Object composed with agents/lifecycle capabilities",
   "private": true,
   "type": "module",
   "version": "0.0.0",

@@ -1,8 +1,8 @@
 # Next: Durable Object lifecycle
 
-An early-access, server-only example showing a composable Agent built by
-extending Cloudflare's `DurableObject` and installing `Lifecycle`. It does not
-extend the batteries-included `Agent` class or another SDK base class.
+An early-access, server-only example showing that `agents/lifecycle` works with
+a plain Cloudflare `DurableObject`. It does not extend `Agent` or another SDK
+base class.
 
 ```ts
 export class DoAgent extends DurableObject<Env> {
@@ -29,7 +29,7 @@ export class DoAgent extends DurableObject<Env> {
 }
 ```
 
-The lifecycle starts `ActivityCapability` first, then calls the Agent's
+The lifecycle starts `ActivityCapability` first, then calls the Durable Object's
 `onStart()`. `onStart()` creates a per-wake identifier so HTTP and WebSocket
 responses show which in-memory lifetime handled them.
 

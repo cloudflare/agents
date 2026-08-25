@@ -16,9 +16,9 @@ export type CapabilityRequestContext = {
  * A capability installed into a Durable Object lifecycle.
  *
  * Dependencies such as storage, bindings, clocks, and protocol adapters should
- * be supplied explicitly when constructing the capability. Hooks run in the
- * current Lifecycle Agent context, while hook parameters carry data specific
- * to the current phase.
+ * be supplied explicitly when constructing the capability. Hook parameters
+ * carry only data specific to the current phase; capability hooks do not run in
+ * the host's ambient `getCurrentAgent()` context.
  */
 export interface DurableObjectCapability<Props extends object = object> {
   /** Initialize or recover the capability before the host handles work. */

@@ -1,8 +1,8 @@
-/** Durable Object lifecycle composition for Agents. */
+/** Durable Object lifecycle composition. */
 export {
   getCurrentAgent,
-  type ComposableAgent,
-  type CurrentAgentContext
+  type CurrentAgentContext,
+  type LifecycleObject
 } from "./current-agent";
 export {
   Lifecycle,

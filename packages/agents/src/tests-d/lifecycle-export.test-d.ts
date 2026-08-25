@@ -10,7 +10,7 @@ import {
 import {
   getCurrentAgent,
   Lifecycle,
-  type ComposableAgent,
+  type LifecycleObject,
   type Connection,
   type ConnectionContext,
   type DurableObjectCapability,
@@ -30,32 +30,32 @@ class LifecycleTypeProbe extends DurableObject {
 }
 
 expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<DurableObject>();
-expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<ComposableAgent>();
+expectTypeOf<LifecycleTypeProbe>().toMatchTypeOf<LifecycleObject>();
 expectTypeOf<LifecycleTypeProbe["lifecycle"]>().toEqualTypeOf<Lifecycle>();
 
 type ProbeProps = { readonly label: string };
-type ProbeAgent = ComposableAgent<Cloudflare.Env, ProbeProps>;
-expectTypeOf<ProbeAgent["onStart"]>().toEqualTypeOf<
+type ProbeLifecycleObject = LifecycleObject<Cloudflare.Env, ProbeProps>;
+expectTypeOf<ProbeLifecycleObject["onStart"]>().toEqualTypeOf<
   ((props?: ProbeProps) => void | Promise<void>) | undefined
 >();
-expectTypeOf<ProbeAgent["onRequest"]>().toEqualTypeOf<
+expectTypeOf<ProbeLifecycleObject["onRequest"]>().toEqualTypeOf<
   ((request: Request) => Response | Promise<Response>) | undefined
 >();
-expectTypeOf<ProbeAgent["onAlarm"]>().toEqualTypeOf<
+expectTypeOf<ProbeLifecycleObject["onAlarm"]>().toEqualTypeOf<
   (() => void | Promise<void>) | undefined
 >();
-expectTypeOf<ProbeAgent["onConnect"]>().toEqualTypeOf<
+expectTypeOf<ProbeLifecycleObject["onConnect"]>().toEqualTypeOf<
   | ((
       connection: Connection,
       context: ConnectionContext
     ) => void | Promise<void>)
   | undefined
 >();
-expectTypeOf<ProbeAgent["onMessage"]>().toEqualTypeOf<
+expectTypeOf<ProbeLifecycleObject["onMessage"]>().toEqualTypeOf<
   | ((connection: Connection, message: WSMessage) => void | Promise<void>)
   | undefined
 >();
-expectTypeOf<ProbeAgent["onClose"]>().toEqualTypeOf<
+expectTypeOf<ProbeLifecycleObject["onClose"]>().toEqualTypeOf<
   | ((
       connection: Connection,
       code: number,
@@ -64,10 +64,10 @@ expectTypeOf<ProbeAgent["onClose"]>().toEqualTypeOf<
     ) => void | Promise<void>)
   | undefined
 >();
-expectTypeOf<ProbeAgent["onError"]>().toEqualTypeOf<
+expectTypeOf<ProbeLifecycleObject["onError"]>().toEqualTypeOf<
   ((connection: Connection, error: unknown) => void | Promise<void>) | undefined
 >();
-expectTypeOf<ProbeAgent["getConnectionTags"]>().toEqualTypeOf<
+expectTypeOf<ProbeLifecycleObject["getConnectionTags"]>().toEqualTypeOf<
   | ((
       connection: Connection,
       context: ConnectionContext
@@ -75,7 +75,7 @@ expectTypeOf<ProbeAgent["getConnectionTags"]>().toEqualTypeOf<
   | undefined
 >();
 expectTypeOf(getCurrentAgent().agent).toEqualTypeOf<
-  ComposableAgent | undefined
+  LifecycleObject | undefined
 >();
 expectTypeOf(getCurrentAgent<LifecycleTypeProbe>().agent).toEqualTypeOf<
   LifecycleTypeProbe | undefined

@@ -69,7 +69,7 @@ describe("Lifecycle", () => {
     ]);
   });
 
-  it("runs capability and user hooks in the Lifecycle Agent context", async () => {
+  it("scopes current context to Lifecycle Object host hooks", async () => {
     const name = crypto.randomUUID();
     const requestUrl = `https://example.com/agents/plain-lifecycle-object/${name}`;
     await worker.fetch(new Request(requestUrl), env);
@@ -80,8 +80,11 @@ describe("Lifecycle", () => {
       { hostName: name, phase: "start", requestUrl: null },
       { hostName: name, phase: "request", requestUrl }
     ];
-    expect(await stub.getCapabilityContextEvents()).toEqual(requestContexts);
     expect(await stub.getHostContextEvents()).toEqual(requestContexts);
+    expect(await stub.getCapabilityContextEvents()).toEqual([
+      { hasCurrentHost: false, phase: "start" },
+      { hasCurrentHost: false, phase: "request" }
+    ]);
 
     await stub.scheduleAlarm();
     expect(await runDurableObjectAlarm(stub)).toBe(true);
@@ -89,8 +92,22 @@ describe("Lifecycle", () => {
       ...requestContexts,
       { hostName: name, phase: "alarm", requestUrl: null }
     ];
-    expect(await stub.getCapabilityContextEvents()).toEqual(alarmContexts);
     expect(await stub.getHostContextEvents()).toEqual(alarmContexts);
+    expect(await stub.getCapabilityContextEvents()).toEqual([
+      { hasCurrentHost: false, phase: "start" },
+      { hasCurrentHost: false, phase: "request" },
+      { hasCurrentHost: false, phase: "alarm" }
+    ]);
+  });
+
+  it("does not leak an inherited Agent context into capabilities", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PlainLifecycleObject.getByName(name);
+
+    expect(await stub.startFromForeignContext({ label: "foreign" })).toEqual({
+      capability: [{ hasCurrentHost: false, phase: "start" }],
+      host: [{ hostName: name, phase: "start", requestUrl: null }]
+    });
   });
 
   it("installs always-hibernating WebSocket handlers", async () => {

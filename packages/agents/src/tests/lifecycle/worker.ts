@@ -1,7 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   getCurrentAgent as getCurrentRootAgent,
-  routeAgentRequest
+  routeAgentRequest,
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "../../index";
 import {
   getCurrentAgent,
@@ -21,6 +22,11 @@ export type Env = {
 type StartupProps = { label: string };
 
 type CapabilityContextEvent = {
+  readonly hasCurrentHost: boolean;
+  readonly phase: "alarm" | "request" | "start";
+};
+
+type HostContextEvent = {
   readonly hostName: string | null;
   readonly phase: "alarm" | "request" | "start";
   readonly requestUrl: string | null;
@@ -33,9 +39,32 @@ type WebSocketContextEvent = {
   readonly requestUrl: string | null;
 };
 
+class CapabilityContextProbe implements DurableObjectCapability<StartupProps> {
+  readonly events: CapabilityContextEvent[] = [];
+
+  onStart(): void {
+    this.#capture("start");
+  }
+
+  onRequest(): void {
+    this.#capture("request");
+  }
+
+  onAlarm(): void {
+    this.#capture("alarm");
+  }
+
+  #capture(phase: CapabilityContextEvent["phase"]): void {
+    this.events.push({
+      hasCurrentHost: getCurrentAgent().agent !== undefined,
+      phase
+    });
+  }
+}
+
 function currentLifecycleContext(
-  phase: CapabilityContextEvent["phase"]
-): CapabilityContextEvent {
+  phase: HostContextEvent["phase"]
+): HostContextEvent {
   const { agent: host, request } = getCurrentAgent<PlainLifecycleObject>();
   return {
     hostName: host?.lifecycle.name ?? null,
@@ -60,30 +89,10 @@ function currentWebSocketContext(
   };
 }
 
-class CapabilityContextProbe implements DurableObjectCapability<StartupProps> {
-  readonly events: CapabilityContextEvent[] = [];
-
-  onStart(): void {
-    this.#capture("start");
-  }
-
-  onRequest(): void {
-    this.#capture("request");
-  }
-
-  onAlarm(): void {
-    this.#capture("alarm");
-  }
-
-  #capture(phase: CapabilityContextEvent["phase"]): void {
-    this.events.push(currentLifecycleContext(phase));
-  }
-}
-
 export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #events: string[] = [];
   readonly #capabilityContexts = new CapabilityContextProbe();
-  readonly #hostContexts: CapabilityContextEvent[] = [];
+  readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
 
   readonly lifecycle = Lifecycle.install<Env, StartupProps>(this)
@@ -171,7 +180,7 @@ export class PlainLifecycleObject extends DurableObject<Env> {
     return this.#capabilityContexts.events;
   }
 
-  async getHostContextEvents(): Promise<readonly CapabilityContextEvent[]> {
+  async getHostContextEvents(): Promise<readonly HostContextEvent[]> {
     await this.lifecycle.start();
     return this.#hostContexts;
   }
@@ -184,6 +193,27 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   async startFromRpc(props: StartupProps): Promise<readonly string[]> {
     await this.lifecycle.start(props);
     return this.#events;
+  }
+
+  async startFromForeignContext(props: StartupProps): Promise<{
+    readonly capability: readonly CapabilityContextEvent[];
+    readonly host: readonly HostContextEvent[];
+  }> {
+    return agentContext.run(
+      {
+        agent: { foreign: true },
+        connection: undefined,
+        request: new Request("https://foreign.example.com/request"),
+        email: undefined
+      },
+      async () => {
+        await this.lifecycle.start(props);
+        return {
+          capability: this.#capabilityContexts.events,
+          host: this.#hostContexts
+        };
+      }
+    );
   }
 }
 

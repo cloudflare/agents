@@ -262,7 +262,7 @@ function App() {
             <div>
               <h1 className="text-lg font-semibold">MCP client capability</h1>
               <p className="text-xs text-kumo-subtle">
-                Composable Agent + MCPClientManager
+                Plain Durable Object + Lifecycle + MCPClientManager
               </p>
             </div>
           </div>

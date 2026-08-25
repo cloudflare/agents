@@ -1,9 +1,8 @@
 # Next: MCP client capability
 
-A Vite + React demo that installs `MCPClientManager` into a composable Agent
-that extends Cloudflare's `DurableObject` and installs `Lifecycle`. The UI
-accepts any Streamable HTTP MCP endpoint, completes OAuth in a popup, and
-invokes discovered tools with JSON arguments.
+A Vite + React demo that installs `MCPClientManager` into a plain Cloudflare
+`DurableObject`. The UI accepts any Streamable HTTP MCP endpoint, completes
+OAuth in a popup, and invokes discovered tools with JSON arguments.
 
 ```ts
 export class McpClientObject extends DurableObject<Env> {

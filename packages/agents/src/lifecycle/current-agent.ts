@@ -7,10 +7,10 @@ import type { Connection, ConnectionContext } from "./types";
 /**
  * A Durable Object that has installed the Agents SDK Lifecycle.
  *
- * Pass a more specific composable Agent type to {@link getCurrentAgent} when
- * shared code needs APIs implemented by a particular Agent.
+ * Pass a more specific Lifecycle Object type to {@link getCurrentAgent} when
+ * shared host code needs APIs implemented by a particular object.
  */
-export interface ComposableAgent<
+export interface LifecycleObject<
   Env extends object = Cloudflare.Env,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
@@ -50,7 +50,7 @@ export type AgentContextStore = {
 
 /** Values returned by {@link getCurrentAgent}. */
 export type CurrentAgentContext<
-  Host extends DurableObject = ComposableAgent,
+  Host extends DurableObject = LifecycleObject,
   Email = unknown
 > = {
   agent: Host | undefined;
@@ -69,16 +69,17 @@ export const __DO_NOT_USE_WILL_BREAK__agentContext =
   new AsyncLocalStorage<AgentContextStore>();
 
 /**
- * Return the current Lifecycle Agent and invocation-specific values.
+ * Return the current Agent or Lifecycle Object and invocation-specific values.
  *
- * Startup and alarm hooks receive the current Agent with no request. Request
- * hooks additionally receive the request being handled. Lifecycle-managed
- * WebSocket hooks receive their connection and, during connect, its upgrade
- * request. Agent extensions may also establish context for email, chat turns,
- * callable methods, and detached work.
+ * Lifecycle host startup and alarm hooks receive the current object with no
+ * request. Request hooks additionally receive the request being handled.
+ * Lifecycle-managed WebSocket hooks receive their connection and, during
+ * connect, its upgrade request. Agent extensions may also establish context
+ * for email, chat turns, callable methods, and detached work. Capability hooks
+ * do not run in this ambient context.
  */
 export function getCurrentAgent<
-  Host extends DurableObject = ComposableAgent
+  Host extends DurableObject = LifecycleObject
 >(): CurrentAgentContext<Host> {
   const store = __DO_NOT_USE_WILL_BREAK__agentContext.getStore();
   if (!store) {
@@ -98,21 +99,21 @@ export function getCurrentAgent<
   };
 }
 
-type LifecycleInvocationContext<
+type LifecycleHostContext<
   Env extends object,
   Props extends Record<string, unknown>
 > = {
-  readonly host: ComposableAgent<Env, Props>;
+  readonly host: LifecycleObject<Env, Props>;
   readonly connection?: Connection;
   readonly request?: Request;
 };
 
-/** Run one semantic phase in the invocation context of its Lifecycle Agent. */
-export function runInLifecycleInvocation<
+/** Run one host hook in the context of its Lifecycle Object. */
+export function runInLifecycleHostContext<
   Env extends object,
   Props extends Record<string, unknown>,
   T
->(context: LifecycleInvocationContext<Env, Props>, operation: () => T): T {
+>(context: LifecycleHostContext<Env, Props>, operation: () => T): T {
   return __DO_NOT_USE_WILL_BREAK__agentContext.run(
     {
       agent: context.host,
@@ -122,4 +123,9 @@ export function runInLifecycleInvocation<
     },
     operation
   );
+}
+
+/** Run a capability hook without inheriting a current Agent or host context. */
+export function runWithoutCurrentAgent<T>(operation: () => T): T {
+  return __DO_NOT_USE_WILL_BREAK__agentContext.exit(operation);
 }

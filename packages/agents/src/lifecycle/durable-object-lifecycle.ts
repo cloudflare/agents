@@ -12,8 +12,9 @@ import {
 } from "./connection";
 
 import {
-  runInLifecycleInvocation,
-  type ComposableAgent
+  runInLifecycleHostContext,
+  runWithoutCurrentAgent,
+  type LifecycleObject
 } from "./current-agent";
 import { isBenignTeardownError } from "./transport-errors";
 
@@ -120,7 +121,7 @@ function decodeProps(header: string): unknown {
 type LifecycleHost<
   Env extends object,
   Props extends Record<string, unknown>
-> = ComposableAgent<Env, Props> & {
+> = LifecycleObject<Env, Props> & {
   readonly ctx: DurableObjectState;
   readonly constructor: { readonly name: string };
 };
@@ -268,19 +269,17 @@ export class Lifecycle<
       const url = new URL(request.url);
 
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-        return await runInLifecycleInvocation(
-          { host: this.#host, request },
-          async () => {
-            const capabilityResponse = await this.#capabilityRunner.request({
-              request
-            });
-            if (capabilityResponse !== undefined) return capabilityResponse;
-            if (this.#host.onRequest) {
-              return await this.#host.onRequest(request);
-            }
-            return new Response("Not implemented", { status: 404 });
-          }
+        const capabilityResponse = await runWithoutCurrentAgent(() =>
+          this.#capabilityRunner.request({ request })
         );
+        if (capabilityResponse !== undefined) return capabilityResponse;
+        if (this.#host.onRequest) {
+          return await runInLifecycleHostContext(
+            { host: this.#host, request },
+            () => this.#host.onRequest!(request)
+          );
+        }
+        return new Response("Not implemented", { status: 404 });
       } else {
         // Create the websocket pair for the client
         const { 0: clientWebSocket, 1: serverWebSocket } = new WebSocketPair();
@@ -311,7 +310,7 @@ export class Lifecycle<
         const ctx = { request };
 
         // getConnectionTags already receives both connection and request
-        // explicitly. TODO: run it in Agent context if shared callback code
+        // explicitly. TODO: run it in host context if shared callback code
         // develops a concrete need for getCurrentAgent() in this hook.
         const tags = this.#host.getConnectionTags
           ? await this.#host.getConnectionTags(connection, ctx)
@@ -319,7 +318,7 @@ export class Lifecycle<
 
         // Hibernating WebSockets remain connected while the object is evicted.
         connection = this.#connectionManager.accept(connection, { tags });
-        await runInLifecycleInvocation(
+        await runInLifecycleHostContext(
           { host: this.#host, connection, request },
           () => this.#host.onConnect?.(connection, ctx)
         );
@@ -360,7 +359,7 @@ export class Lifecycle<
       const connection = createConnection(ws);
 
       await this.#ensureInitialized();
-      return runInLifecycleInvocation({ host: this.#host, connection }, () =>
+      return runInLifecycleHostContext({ host: this.#host, connection }, () =>
         this.#host.onMessage?.(connection, message)
       );
     } catch (e) {
@@ -386,7 +385,7 @@ export class Lifecycle<
       const connection = createConnection(ws);
 
       await this.#ensureInitialized();
-      await runInLifecycleInvocation({ host: this.#host, connection }, () =>
+      await runInLifecycleHostContext({ host: this.#host, connection }, () =>
         this.#host.onClose?.(connection, code, reason, wasClean)
       );
     } catch (e) {
@@ -427,7 +426,7 @@ export class Lifecycle<
       const connection = createConnection(ws);
 
       await this.#ensureInitialized();
-      return runInLifecycleInvocation({ host: this.#host, connection }, () =>
+      return runInLifecycleHostContext({ host: this.#host, connection }, () =>
         this.#host.onError?.(connection, error)
       );
     } catch (e) {
@@ -467,10 +466,12 @@ export class Lifecycle<
     await this.#ctx.blockConcurrencyWhile(async () => {
       this.#status = "starting";
       try {
-        await runInLifecycleInvocation({ host: this.#host }, async () => {
-          await this.#capabilityRunner.start({ props: this.#props });
-          await this.#host.onStart?.(this.#props);
-        });
+        await runWithoutCurrentAgent(() =>
+          this.#capabilityRunner.start({ props: this.#props })
+        );
+        await runInLifecycleHostContext({ host: this.#host }, () =>
+          this.#host.onStart?.(this.#props)
+        );
         this.#status = "started";
       } catch (cause) {
         this.#status = "zero";
@@ -540,9 +541,9 @@ export class Lifecycle<
   /** Dispatch lifecycle and host alarm callbacks after startup. */
   async alarm(): Promise<void> {
     await this.#ensureInitialized();
-    await runInLifecycleInvocation({ host: this.#host }, async () => {
-      await this.#capabilityRunner.alarm();
-      await this.#host.onAlarm?.();
-    });
+    await runWithoutCurrentAgent(() => this.#capabilityRunner.alarm());
+    await runInLifecycleHostContext({ host: this.#host }, () =>
+      this.#host.onAlarm?.()
+    );
   }
 }
