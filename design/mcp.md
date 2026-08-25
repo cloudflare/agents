@@ -35,22 +35,26 @@ The tradeoff is one additional import and direct peer installation. That is pref
 
 ## Source boundaries
 
+All server-side modules live in `src/mcp/server/`; the client manager and its
+supporting modules live in `src/mcp/client/`; `types.ts`, `rpc.ts`, and
+`abort.ts` are shared at the module root.
+
 ### Stateless
 
-- `server.ts` — public, tree-shakeable entry.
-- `handler-stateless.ts` — Worker route, CORS, Host/Origin policy, auth context, and dispatch between Stateless and Legacy compatibility requests.
-- `handler-legacy-compat.ts` — per-request SDK v2 transport for Legacy compatibility, including fail-fast reverse requests and close tracking. SSE keepalives are owned by the SDK transport.
+- `server/index.ts` — public, tree-shakeable entry (`agents/mcp/server`).
+- `server/handler-stateless.ts` — Worker route, CORS, Host/Origin policy, auth context, and dispatch between Stateless and Legacy compatibility requests.
+- `server/handler-legacy-compat.ts` — per-request SDK v2 transport for Legacy compatibility, including fail-fast reverse requests and close tracking. SSE keepalives are owned by the SDK transport.
 
 ### Legacy
 
-- `legacy-agent.ts` — deprecated, feature-frozen `McpAgent` implementation.
-- `handler-legacy.ts` — explicit SDK v1 handler.
-- `worker-transport.ts` — SDK v1 Worker transport with session persistence; SDK v1 owns its SSE keepalives.
-- `transport.ts` and `event-store.ts` — sessionful McpAgent transport and replay support. The WebSocket-to-SSE bridge retains the only Agents-owned MCP keepalive timer.
+- `server/legacy-agent.ts` — deprecated, feature-frozen `McpAgent` implementation.
+- `server/handler-legacy.ts` — explicit SDK v1 handler.
+- `server/worker-transport.ts` — SDK v1 Worker transport with session persistence; SDK v1 owns its SSE keepalives.
+- `server/transport.ts` and `server/event-store.ts` — sessionful McpAgent transport and replay support. The WebSocket-to-SSE bridge retains the only Agents-owned MCP keepalive timer.
 
 ### Compatibility
 
-- `handler-compat.ts` — historical overloaded `createMcpHandler`; functions remain available from `agents/mcp` without making the Stateless entry retain Legacy modules.
+- `server/handler-compat.ts` — historical overloaded `createMcpHandler`; functions remain available from `agents/mcp` without making the Stateless entry retain Legacy modules.
 - `index.ts` — compatibility barrel. It contains no implementation.
 
 ## Lifecycles
