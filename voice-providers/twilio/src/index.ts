@@ -34,6 +34,8 @@
  * ```
  */
 
+import { logVoiceError } from "@cloudflare/voice/errors";
+
 // --- Audio conversion utilities ---
 
 /**
@@ -217,9 +219,12 @@ export class TwilioAdapter {
     const connectToAgent = async (instanceId: string) => {
       const namespace = env[agentName] as DurableObjectNamespace | undefined;
       if (!namespace) {
-        console.error(
-          `[TwilioAdapter] DO namespace "${agentName}" not found in env`
-        );
+        logVoiceError({
+          component: "TwilioAdapter",
+          stage: "configuration",
+          message: "VoiceAgent Durable Object namespace not found",
+          error: new Error(`Durable Object namespace "${agentName}" not found`)
+        });
         return;
       }
 
@@ -239,7 +244,12 @@ export class TwilioAdapter {
 
       const ws = agentResp.webSocket;
       if (!ws) {
-        console.error("[TwilioAdapter] Failed to get WebSocket from agent");
+        logVoiceError({
+          component: "TwilioAdapter",
+          stage: "connection",
+          message: "Failed to get WebSocket from VoiceAgent",
+          error: new Error("VoiceAgent did not return a WebSocket")
+        });
         return;
       }
 

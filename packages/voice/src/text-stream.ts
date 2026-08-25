@@ -1,4 +1,6 @@
 import { TextSegmentJoiner } from "agents/chat";
+import type { TextSegmentChunk } from "agents/chat";
+import type { VoiceModelFinishReason } from "./types";
 
 /**
  * Utilities for normalising various text-producing sources into a uniform
@@ -17,9 +19,13 @@ import { TextSegmentJoiner } from "agents/chat";
 /** Union of every source type that {@link iterateText} accepts. */
 export type TextSource = string | TextReadableStream | AsyncIterable<unknown>;
 
+/** @internal Semantic events retained while normalizing model streams. */
 export type TextStreamEvent =
   | { type: "text"; text: string }
   | { type: "boundary" }
+  | { type: "reasoning-start" }
+  | { type: "reasoning-end" }
+  | { type: "finish"; finishReason: VoiceModelFinishReason }
   | { type: "error"; error: Error };
 
 type TextReadableStreamReader = {
@@ -36,6 +42,12 @@ interface AIStreamChunk {
   choices?: {
     delta?: { content?: string; role?: string };
   }[];
+}
+
+interface StructuredStreamChunk extends TextSegmentChunk {
+  type?: string;
+  error?: unknown;
+  finishReason?: VoiceModelFinishReason;
 }
 
 const warnedTextStreamSources = new WeakSet<object>();
@@ -170,28 +182,34 @@ async function* iterateAsyncTextEvents(
   source: AsyncIterable<unknown>
 ): AsyncGenerator<TextStreamEvent> {
   const textSegmentJoiner = new TextSegmentJoiner();
-  let hasYieldedText = false;
 
-  for await (const chunk of source) {
-    if (typeof chunk === "string") {
+  for await (const value of source) {
+    if (typeof value === "string") {
       warnDeprecatedTextStream(source);
-      if (chunk) yield textEvent(chunk);
+      if (value) yield textEvent(value);
       continue;
     }
 
-    if (!isRecord(chunk)) continue;
-
-    if (chunk.type === "error") {
-      if (hasYieldedText) {
-        yield { type: "boundary" };
-      }
-      yield { type: "error", error: toError(chunk.error) };
-      return;
-    }
+    if (!isRecord(value)) continue;
+    const chunk = value as StructuredStreamChunk;
 
     for (const event of textSegmentJoiner.pushChunk(chunk)) {
       yield event;
-      if (event.type === "text") hasYieldedText = true;
+    }
+
+    switch (chunk.type) {
+      case "reasoning-start":
+      case "reasoning-end":
+        yield chunk as TextStreamEvent;
+        break;
+      case "reasoning-delta":
+        break;
+      case "finish":
+        yield chunk as TextStreamEvent;
+        break;
+      case "error":
+        yield { type: "error", error: toError(chunk.error) };
+        return;
     }
   }
 }
@@ -213,7 +231,7 @@ function warnDeprecatedTextStream(source?: object): void {
 function toError(error: unknown): Error {
   if (error instanceof Error) return error;
   if (typeof error === "string") return new Error(error);
-  return new Error("AI SDK stream error");
+  return new Error("AI SDK stream error", { cause: error });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

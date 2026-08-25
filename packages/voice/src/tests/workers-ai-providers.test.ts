@@ -109,10 +109,15 @@ describe("WorkersAIFluxSTT", () => {
     const ai = new MockAi();
     ai.mode = "throw";
     try {
-      const session = new WorkersAIFluxSTT(ai).createSession();
+      const fatalErrors: unknown[] = [];
+      const session = new WorkersAIFluxSTT(ai).createSession({
+        onFatalError: (error) => fatalErrors.push(error)
+      });
       if (!session.waitUntilReady) throw new Error("expected readiness method");
 
       await expect(session.waitUntilReady()).rejects.toThrow("run failed");
+      expect(fatalErrors).toHaveLength(1);
+      expect((fatalErrors[0] as Error).message).toBe("run failed");
     } finally {
       errorLog.mockRestore();
     }
@@ -123,10 +128,17 @@ describe("WorkersAIFluxSTT", () => {
     const ai = new MockAi();
     ai.mode = "no_socket";
     try {
-      const session = new WorkersAIFluxSTT(ai).createSession();
+      const fatalErrors: unknown[] = [];
+      const session = new WorkersAIFluxSTT(ai).createSession({
+        onFatalError: (error) => fatalErrors.push(error)
+      });
       if (!session.waitUntilReady) throw new Error("expected readiness method");
 
       await expect(session.waitUntilReady()).rejects.toThrow(
+        "Workers AI Flux STT did not return a WebSocket"
+      );
+      expect(fatalErrors).toHaveLength(1);
+      expect((fatalErrors[0] as Error).message).toBe(
         "Workers AI Flux STT did not return a WebSocket"
       );
     } finally {
@@ -137,7 +149,10 @@ describe("WorkersAIFluxSTT", () => {
   it("settles readiness when closed before the WebSocket connects", async () => {
     const ai = new MockAi();
     ai.deferRun = true;
-    const session = new WorkersAIFluxSTT(ai).createSession();
+    const fatalErrors: unknown[] = [];
+    const session = new WorkersAIFluxSTT(ai).createSession({
+      onFatalError: (error) => fatalErrors.push(error)
+    });
     if (!session.waitUntilReady) throw new Error("expected readiness method");
 
     const ready = session.waitUntilReady();
@@ -150,6 +165,7 @@ describe("WorkersAIFluxSTT", () => {
     const socket = await waitForConnect(ai);
     expect(socket.accepted).toBe(true);
     expect(socket.closed).toBe(true);
+    expect(fatalErrors).toEqual([]);
   });
 
   it("uses the latest interim transcript when EndOfTurn transcript is empty", async () => {
@@ -270,6 +286,31 @@ describe("WorkersAIFluxSTT", () => {
     expect(utterances).toEqual(["not done yet"]);
   });
 
+  it("reports one fatal error for an unexpected socket error and close", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    const fatalErrors: unknown[] = [];
+    try {
+      const session = new WorkersAIFluxSTT(ai).createSession({
+        onFatalError: (error) => fatalErrors.push(error)
+      });
+      await session.waitUntilReady?.();
+      const socket = ai.sockets[0];
+
+      socket.dispatch("error", {});
+      socket.close();
+      session.close();
+
+      expect(fatalErrors).toHaveLength(1);
+      expect(fatalErrors[0]).toBeInstanceOf(Error);
+      expect((fatalErrors[0] as Error).message).toBe(
+        "Workers AI Flux STT WebSocket error"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("forwards the full keyterms array to ai.run", async () => {
     const ai = new MockAi();
     const keyterms = ["BrokerBot", "SkySlope", "MLS", "CMA", "BPO"];
@@ -284,6 +325,29 @@ describe("WorkersAIFluxSTT", () => {
 });
 
 describe("WorkersAINova3STT", () => {
+  it("rejects readiness and reports a fatal startup error without a WebSocket", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    ai.mode = "no_socket";
+    const fatalErrors: unknown[] = [];
+    try {
+      const session = new WorkersAINova3STT(ai).createSession({
+        onFatalError: (error) => fatalErrors.push(error)
+      });
+      if (!session.waitUntilReady) throw new Error("expected readiness method");
+
+      await expect(session.waitUntilReady()).rejects.toThrow(
+        "Workers AI Nova-3 STT did not return a WebSocket"
+      );
+      expect(fatalErrors).toHaveLength(1);
+      expect((fatalErrors[0] as Error).message).toBe(
+        "Workers AI Nova-3 STT did not return a WebSocket"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("combines finalized segments and interim text without changing normal behavior", async () => {
     const ai = new MockAi();
     const utterances: string[] = [];
@@ -346,6 +410,31 @@ describe("WorkersAINova3STT", () => {
     expect(utterances).toEqual([]);
   });
 
+  it("reports one fatal error for an unexpected socket error and close", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    const fatalErrors: unknown[] = [];
+    try {
+      const session = new WorkersAINova3STT(ai).createSession({
+        onFatalError: (error) => fatalErrors.push(error)
+      });
+      await session.waitUntilReady?.();
+      const socket = ai.sockets[0];
+
+      socket.dispatch("error", {});
+      socket.close();
+      session.close();
+
+      expect(fatalErrors).toHaveLength(1);
+      expect(fatalErrors[0]).toBeInstanceOf(Error);
+      expect((fatalErrors[0] as Error).message).toBe(
+        "Workers AI Nova-3 STT WebSocket error"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("handles late Results messages after websocket close", async () => {
     const ai = new MockAi();
     const utterances: string[] = [];
@@ -403,18 +492,31 @@ describe("WorkersAITTS", () => {
     expect(new Uint8Array(result!)).toEqual(new Uint8Array([1, 2, 3, 4]));
   });
 
-  it("returns null and logs instead of forwarding an error body as audio", async () => {
+  it("returns null and logs status without reading an error body", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const ai = {
-      run: async () =>
-        new Response(JSON.stringify({ name: "AiError", httpCode: 429 }), {
-          status: 429
-        })
-    };
+    const response = new Response(
+      JSON.stringify({ name: "AiError", secret: "must-not-leak" }),
+      { status: 429 }
+    );
+    const readBody = vi.spyOn(response, "text");
+    const ai = { run: async () => response };
     const tts = new WorkersAITTS(ai as never);
+
     const result = await tts.synthesize("hello");
+
     expect(result).toBeNull();
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("429"));
+    expect(readBody).not.toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalledWith({
+      component: "WorkersAITTS",
+      stage: "synthesize",
+      message: "Workers AI TTS request failed",
+      error: expect.objectContaining({
+        name: "VoiceProviderError",
+        message: "Workers AI TTS request failed",
+        status: 429
+      })
+    });
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain("must-not-leak");
     errSpy.mockRestore();
   });
 });

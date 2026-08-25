@@ -6,6 +6,7 @@
  * satisfying the provider interfaces works.
  */
 
+import { logVoiceError, toVoiceError, VoiceProviderError } from "./errors";
 import type {
   TTSProvider,
   Transcriber,
@@ -67,10 +68,14 @@ export class WorkersAITTS implements TTSProvider {
     // Without this check an error body (e.g. a 429 quota JSON) would be
     // forwarded to the client as audio bytes and fail to decode silently.
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      console.error(
-        `[WorkersAITTS] TTS request failed: HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`
-      );
+      logVoiceError({
+        component: "WorkersAITTS",
+        stage: "synthesize",
+        message: "Workers AI TTS request failed",
+        error: new VoiceProviderError("Workers AI TTS request failed", {
+          status: response.status
+        })
+      });
       return null;
     }
 
@@ -168,8 +173,8 @@ interface FluxEvent {
     | "EagerEndOfTurn"
     | "TurnResumed"
     | "EndOfTurn";
+  sequence_id?: number;
   transcript?: string;
-  end_of_turn_confidence?: number;
 }
 
 /**
@@ -181,13 +186,15 @@ interface FluxEvent {
  * and is only closed on end_call or disconnect.
  */
 class FluxSession implements TranscriberSession {
-  #onInterim: ((text: string) => void) | undefined;
-  #onSpeechStart: ((text?: string) => void) | undefined;
-  #onUtterance: ((text: string) => void) | undefined;
+  #onInterim: TranscriberSessionOptions["onInterim"];
+  #onSpeechStart: TranscriberSessionOptions["onSpeechStart"];
+  #onUtterance: TranscriberSessionOptions["onUtterance"];
+  #onFatalError: TranscriberSessionOptions["onFatalError"];
 
   #ws: WebSocket | null = null;
   #connected = false;
   #closed = false;
+  #fatalReported = false;
 
   #pendingChunks: ArrayBuffer[] = [];
   #currentTranscript = "";
@@ -204,6 +211,7 @@ class FluxSession implements TranscriberSession {
     this.#onInterim = options?.onInterim;
     this.#onSpeechStart = options?.onSpeechStart;
     this.#onUtterance = options?.onUtterance;
+    this.#onFatalError = options?.onFatalError;
     this.#ready = new Promise<void>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
@@ -249,7 +257,13 @@ class FluxSession implements TranscriberSession {
         const error = new Error(
           "Workers AI Flux STT did not return a WebSocket"
         );
-        console.error("[FluxSTT] Failed to establish WebSocket connection");
+        logVoiceError({
+          component: "FluxSTT",
+          stage: "connection",
+          message: "Flux STT WebSocket upgrade failed",
+          error
+        });
+        this.#reportFatal(error);
         this.#rejectReadiness(error);
         return;
       }
@@ -264,11 +278,31 @@ class FluxSession implements TranscriberSession {
 
       ws.addEventListener("close", () => {
         this.#connected = false;
+        if (this.#closed) return;
+        const error = new Error(
+          "Workers AI Flux STT WebSocket closed unexpectedly"
+        );
+        logVoiceError({
+          component: "FluxSTT",
+          stage: "websocket_close",
+          message: "Flux STT WebSocket closed unexpectedly",
+          error
+        });
+        this.#reportFatal(error);
       });
 
       ws.addEventListener("error", (event: Event) => {
-        console.error("[FluxSTT] WebSocket error:", event);
+        const error = new Error("Workers AI Flux STT WebSocket error", {
+          cause: event
+        });
+        logVoiceError({
+          component: "FluxSTT",
+          stage: "websocket",
+          message: "Flux STT WebSocket error",
+          error
+        });
         this.#connected = false;
+        this.#reportFatal(error);
       });
 
       for (const chunk of this.#pendingChunks) {
@@ -276,9 +310,16 @@ class FluxSession implements TranscriberSession {
       }
       this.#pendingChunks = [];
       this.#resolveReadiness();
-    } catch (err) {
-      console.error("[FluxSTT] Connection error:", err);
-      this.#rejectReadiness(err);
+    } catch (error) {
+      const voiceError = toVoiceError(error, "Flux STT connection failed");
+      logVoiceError({
+        component: "FluxSTT",
+        stage: "connection",
+        message: "Flux STT connection failed",
+        error: voiceError
+      });
+      this.#reportFatal(voiceError);
+      this.#rejectReadiness(voiceError);
     }
   }
 
@@ -322,6 +363,12 @@ class FluxSession implements TranscriberSession {
     this.#resolveReady = null;
     this.#rejectReady = null;
     reject(reason);
+  }
+
+  #reportFatal(error: Error): void {
+    if (this.#closed || this.#fatalReported) return;
+    this.#fatalReported = true;
+    this.#onFatalError?.(error);
   }
 
   #handleMessage(event: MessageEvent): void {
@@ -492,12 +539,17 @@ interface Nova3Result {
 class Nova3Session implements TranscriberSession {
   #onInterim: ((text: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
+  #onFatalError: TranscriberSessionOptions["onFatalError"];
 
   #ws: WebSocket | null = null;
   #connected = false;
   #closed = false;
+  #fatalReported = false;
 
   #pendingChunks: ArrayBuffer[] = [];
+  #ready: Promise<void>;
+  #resolveReady: (() => void) | null = null;
+  #rejectReady: ((reason: unknown) => void) | null = null;
 
   #finalizedSegments: string[] = [];
 
@@ -508,7 +560,17 @@ class Nova3Session implements TranscriberSession {
   ) {
     this.#onInterim = options?.onInterim;
     this.#onUtterance = options?.onUtterance;
+    this.#onFatalError = options?.onFatalError;
+    this.#ready = new Promise<void>((resolve, reject) => {
+      this.#resolveReady = resolve;
+      this.#rejectReady = reject;
+    });
+    this.#ready.catch(() => {});
     this.#connect(ai, config);
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.#ready;
   }
 
   async #connect(ai: AiLike, config: Nova3SessionConfig): Promise<void> {
@@ -536,12 +598,23 @@ class Nova3Session implements TranscriberSession {
           ws.accept();
           ws.close();
         }
+        this.#resolveReadiness();
         return;
       }
 
       const ws = (resp as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
-        console.error("[Nova3STT] Failed to establish WebSocket connection");
+        const error = new Error(
+          "Workers AI Nova-3 STT did not return a WebSocket"
+        );
+        logVoiceError({
+          component: "Nova3STT",
+          stage: "connection",
+          message: "Nova-3 STT WebSocket upgrade failed",
+          error
+        });
+        this.#reportFatal(error);
+        this.#rejectReadiness(error);
         return;
       }
 
@@ -555,19 +628,48 @@ class Nova3Session implements TranscriberSession {
 
       ws.addEventListener("close", () => {
         this.#connected = false;
+        if (this.#closed) return;
+        const error = new Error(
+          "Workers AI Nova-3 STT WebSocket closed unexpectedly"
+        );
+        logVoiceError({
+          component: "Nova3STT",
+          stage: "websocket_close",
+          message: "Nova-3 STT WebSocket closed unexpectedly",
+          error
+        });
+        this.#reportFatal(error);
       });
 
       ws.addEventListener("error", (event: Event) => {
-        console.error("[Nova3STT] WebSocket error:", event);
+        const error = new Error("Workers AI Nova-3 STT WebSocket error", {
+          cause: event
+        });
+        logVoiceError({
+          component: "Nova3STT",
+          stage: "websocket",
+          message: "Nova-3 STT WebSocket error",
+          error
+        });
         this.#connected = false;
+        this.#reportFatal(error);
       });
 
       for (const chunk of this.#pendingChunks) {
         ws.send(chunk);
       }
       this.#pendingChunks = [];
-    } catch (err) {
-      console.error("[Nova3STT] Connection error:", err);
+      this.#resolveReadiness();
+    } catch (error) {
+      const voiceError = toVoiceError(error, "Nova-3 STT connection failed");
+      logVoiceError({
+        component: "Nova3STT",
+        stage: "connection",
+        message: "Nova-3 STT connection failed",
+        error: voiceError
+      });
+      this.#reportFatal(voiceError);
+      this.#rejectReadiness(voiceError);
     }
   }
 
@@ -594,6 +696,29 @@ class Nova3Session implements TranscriberSession {
       this.#ws = null;
     }
     this.#connected = false;
+    this.#resolveReadiness();
+  }
+
+  #resolveReadiness(): void {
+    const resolve = this.#resolveReady;
+    if (!resolve) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    resolve();
+  }
+
+  #rejectReadiness(reason: unknown): void {
+    const reject = this.#rejectReady;
+    if (!reject) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    reject(reason);
+  }
+
+  #reportFatal(error: Error): void {
+    if (this.#closed || this.#fatalReported) return;
+    this.#fatalReported = true;
+    this.#onFatalError?.(error);
   }
 
   #handleMessage(event: MessageEvent): void {
@@ -606,11 +731,6 @@ class Nova3Session implements TranscriberSession {
       if (!data) return;
 
       if (data.type === "Results") {
-        // Defensive re-init: stale messages after abnormal teardown can observe
-        // this field as undefined in some runtime edge cases. Keep normal
-        // behavior unchanged while avoiding throws on late Results events.
-        if (!this.#finalizedSegments) this.#finalizedSegments = [];
-
         const transcript = data.channel?.alternatives?.[0]?.transcript ?? "";
 
         if (data.is_final && transcript) {
@@ -618,18 +738,15 @@ class Nova3Session implements TranscriberSession {
         }
 
         if (data.speech_final) {
-          const fullTranscript = (this.#finalizedSegments ?? [])
-            .join(" ")
-            .trim();
+          const fullTranscript = this.#finalizedSegments.join(" ").trim();
           this.#finalizedSegments = [];
           if (fullTranscript) {
             this.#onUtterance?.(fullTranscript);
           }
         } else if (!data.is_final && transcript) {
-          const finalizedSegments = this.#finalizedSegments ?? [];
           const display =
-            finalizedSegments.length > 0
-              ? finalizedSegments.join(" ") + " " + transcript
+            this.#finalizedSegments.length > 0
+              ? this.#finalizedSegments.join(" ") + " " + transcript
               : transcript;
           this.#onInterim?.(display);
         }

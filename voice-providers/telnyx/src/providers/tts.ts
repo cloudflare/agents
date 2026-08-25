@@ -18,6 +18,11 @@
  */
 
 import type { TTSProvider, StreamingTTSProvider } from "@cloudflare/voice";
+import {
+  logVoiceError,
+  toVoiceError,
+  VoiceProviderError
+} from "@cloudflare/voice/errors";
 import { TelnyxClient, type TelnyxClientConfig } from "../client.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -92,7 +97,12 @@ export class TelnyxTTS implements TTSProvider, StreamingTTSProvider {
       return await this.synthesizeViaREST(text, signal);
     } catch (error) {
       if (signal?.aborted) return null;
-      console.error("[TelnyxTTS] synthesize error:", error);
+      logVoiceError({
+        component: "TelnyxTTS",
+        stage: "synthesize",
+        message: "Telnyx TTS synthesis failed",
+        error: toVoiceError(error, "Telnyx TTS synthesis failed")
+      });
       return null;
     }
   }
@@ -121,7 +131,12 @@ export class TelnyxTTS implements TTSProvider, StreamingTTSProvider {
       }
     } catch (error) {
       if (signal?.aborted) return;
-      console.error("[TelnyxTTS] synthesizeStream error:", error);
+      logVoiceError({
+        component: "TelnyxTTS",
+        stage: "synthesize_stream",
+        message: "Telnyx TTS streaming failed",
+        error: toVoiceError(error, "Telnyx TTS streaming failed")
+      });
     }
   }
 
@@ -145,8 +160,14 @@ export class TelnyxTTS implements TTSProvider, StreamingTTSProvider {
     });
 
     if (!response.ok) {
-      const err = await response.text().catch(() => "unknown");
-      console.error(`[TelnyxTTS] REST error: ${response.status} — ${err}`);
+      logVoiceError({
+        component: "TelnyxTTS",
+        stage: "synthesize",
+        message: "Telnyx TTS request failed",
+        error: new VoiceProviderError("Telnyx TTS request failed", {
+          status: response.status
+        })
+      });
       return null;
     }
 
@@ -205,15 +226,12 @@ export class TelnyxTTS implements TTSProvider, StreamingTTSProvider {
 
       ws = pair;
     } catch (error) {
-      // Distinguish between Workers-missing and other failures
-      if (
-        error instanceof Error &&
-        error.message.includes("Cloudflare Workers")
-      ) {
-        console.error(`[TelnyxTTS] ${error.message}`);
-      } else {
-        console.error("[TelnyxTTS] WebSocket connection failed:", error);
-      }
+      logVoiceError({
+        component: "TelnyxTTS",
+        stage: "connection",
+        message: "Telnyx TTS WebSocket connection failed",
+        error: toVoiceError(error, "Telnyx TTS WebSocket connection failed")
+      });
       return;
     }
 
@@ -320,7 +338,14 @@ export class TelnyxTTS implements TTSProvider, StreamingTTSProvider {
         if (done) break;
       }
 
-      if (wsError) console.error(`[TelnyxTTS] ${wsError}`);
+      if (wsError) {
+        logVoiceError({
+          component: "TelnyxTTS",
+          stage: "websocket",
+          message: "Telnyx TTS WebSocket error",
+          error: new Error(wsError)
+        });
+      }
     } finally {
       signal?.removeEventListener("abort", onAbort);
       try {

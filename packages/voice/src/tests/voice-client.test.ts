@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VoiceClient } from "../voice-client";
+import {
+  VoiceClient,
+  type VoiceCompletionOutcome,
+  type VoiceConnectionDiagnostic,
+  type VoiceError,
+  type VoiceTurnMetrics
+} from "../voice-client";
 import type { VoiceAudioInput, VoiceTransport } from "../types";
 
 class MockTransport implements VoiceTransport {
@@ -31,6 +37,10 @@ class MockTransport implements VoiceTransport {
 
   receive(data: string | ArrayBuffer | Blob): void {
     this.onmessage?.(data);
+  }
+
+  fail(cause?: unknown): void {
+    this.onerror?.(cause);
   }
 }
 
@@ -278,6 +288,313 @@ afterEach(() => {
   Object.defineProperty(globalThis, "Audio", {
     configurable: true,
     value: originalAudio
+  });
+});
+
+describe("VoiceClient diagnostics", () => {
+  it("logs forwarded server and local client events with origin prefixes", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const transport = new MockTransport();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput: new FakeAudioInput()
+    });
+    const customMessages: unknown[] = [];
+    client.addEventListener("custommessage", (message) =>
+      customMessages.push(message)
+    );
+
+    try {
+      client.connect();
+      expect(info).not.toHaveBeenCalled();
+
+      transport.receive(
+        JSON.stringify({
+          type: "welcome",
+          protocol_version: 1,
+          diagnostics: { browser_console: true }
+        })
+      );
+      transport.receive(
+        JSON.stringify({
+          type: "diagnostic",
+          event: "stt.ready",
+          timestamp: 123,
+          data: { duration_ms: 12 }
+        })
+      );
+      await client.startCall();
+      transport.receive(
+        JSON.stringify({ type: "audio_config", format: "mp3" })
+      );
+      transport.receive(JSON.stringify({ type: "status", status: "speaking" }));
+      transport.receive(
+        JSON.stringify({
+          type: "diagnostic",
+          event: "audio.first_sent",
+          timestamp: 456,
+          data: { turn_id: "turn_audio", elapsed_ms: 99 }
+        })
+      );
+      transport.receive(new ArrayBuffer(8));
+      const source = await waitForConnectedSource();
+      source.onended?.();
+
+      expect(info).toHaveBeenCalledWith(
+        "[voice:server] stt.ready",
+        expect.objectContaining({ timestamp: 123, duration_ms: 12 })
+      );
+      expect(info).toHaveBeenCalledWith(
+        "[voice:client] call.starting",
+        expect.any(Object)
+      );
+      expect(info).toHaveBeenCalledWith(
+        "[voice:client] microphone.ready",
+        expect.objectContaining({ source: "custom" })
+      );
+      expect(info).toHaveBeenCalledWith(
+        "[voice:client] audio.received",
+        expect.objectContaining({ bytes: 8, turn_id: "turn_audio" })
+      );
+      const receivedEvent = info.mock.calls.find(
+        ([label]) => label === "[voice:client] audio.received"
+      )?.[1] as Record<string, unknown>;
+      expect(receivedEvent).not.toHaveProperty("elapsed_ms");
+      expect(info).toHaveBeenCalledWith(
+        "[voice:client] playback.started",
+        expect.objectContaining({ chunks: 1 })
+      );
+      expect(info).toHaveBeenCalledWith(
+        "[voice:client] playback.completed",
+        expect.any(Object)
+      );
+      expect(customMessages).toEqual([]);
+    } finally {
+      client.disconnect();
+      info.mockRestore();
+    }
+  });
+
+  it("consumes reserved diagnostics without logging when welcome opts out", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    const customMessages: unknown[] = [];
+    client.addEventListener("custommessage", (message) =>
+      customMessages.push(message)
+    );
+
+    try {
+      client.connect();
+      transport.receive(
+        JSON.stringify({ type: "welcome", protocol_version: 1 })
+      );
+      transport.receive(
+        JSON.stringify({
+          type: "diagnostic",
+          event: "call.ready",
+          timestamp: 123
+        })
+      );
+
+      expect(info).not.toHaveBeenCalled();
+      expect(customMessages).toEqual([]);
+    } finally {
+      client.disconnect();
+      info.mockRestore();
+    }
+  });
+
+  it("isolates console logger failures from client behavior", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {
+      throw new Error("console unavailable");
+    });
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    try {
+      client.connect();
+      expect(() =>
+        transport.receive(
+          JSON.stringify({
+            type: "welcome",
+            protocol_version: 1,
+            diagnostics: { browser_console: true }
+          })
+        )
+      ).not.toThrow();
+      await expect(client.startCall()).resolves.toBeUndefined();
+      expect(audioInput.started).toBe(true);
+    } finally {
+      client.disconnect();
+      info.mockRestore();
+    }
+  });
+});
+
+describe("VoiceClient stable turn metrics", () => {
+  it("updates the last-value getter and emits one typed terminal event", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    const events: VoiceTurnMetrics[] = [];
+    client.addEventListener("turnmetrics", (metrics) => events.push(metrics));
+    client.connect();
+
+    transport.receive(
+      JSON.stringify({
+        type: "turn_metrics",
+        turnId: "turn_client",
+        source: "text",
+        outcome: "output_limit",
+        turnTotalMs: 25,
+        modelStreamConsumptionMs: 20
+      })
+    );
+
+    expect(client.turnMetrics).toEqual({
+      turnId: "turn_client",
+      source: "text",
+      outcome: "output_limit",
+      turnTotalMs: 25,
+      modelStreamConsumptionMs: 20
+    });
+    expect(events).toEqual([client.turnMetrics]);
+    client.disconnect();
+  });
+});
+
+describe("VoiceClient interim transcript lifecycle", () => {
+  it("clears interim transcript when the call explicitly ends", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput: new FakeAudioInput()
+    });
+    const interimUpdates: Array<string | null> = [];
+    client.addEventListener("interimtranscript", (text) =>
+      interimUpdates.push(text)
+    );
+
+    client.connect();
+    await client.startCall();
+    interimUpdates.length = 0;
+    transport.receive(
+      JSON.stringify({ type: "transcript_interim", text: "unfinished phrase" })
+    );
+    expect(client.interimTranscript).toBe("unfinished phrase");
+
+    client.endCall();
+
+    expect(client.interimTranscript).toBeNull();
+    expect(interimUpdates).toEqual(["unfinished phrase", null]);
+  });
+
+  it("clears stale interim transcript when a new call starts", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput: new FakeAudioInput()
+    });
+    const interimUpdates: Array<string | null> = [];
+    client.addEventListener("interimtranscript", (text) =>
+      interimUpdates.push(text)
+    );
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "transcript_interim", text: "stale phrase" })
+    );
+
+    await client.startCall();
+
+    expect(client.interimTranscript).toBeNull();
+    expect(interimUpdates).toEqual(["stale phrase", null]);
+  });
+
+  it("clears interim transcript when the client disconnects", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "transcript_interim", text: "unfinished phrase" })
+    );
+
+    client.disconnect();
+
+    expect(client.interimTranscript).toBeNull();
+  });
+
+  it("clears interim transcript when the transport closes", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    const interimUpdates: Array<string | null> = [];
+    client.addEventListener("interimtranscript", (text) =>
+      interimUpdates.push(text)
+    );
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "transcript_interim", text: "unfinished phrase" })
+    );
+
+    transport.disconnect();
+
+    expect(client.interimTranscript).toBeNull();
+    expect(interimUpdates).toEqual(["unfinished phrase", null]);
+  });
+
+  it("preserves live interim transcript on playback interruption", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "transcript_interim", text: "new live utterance" })
+    );
+
+    transport.receive(JSON.stringify({ type: "playback_interrupt" }));
+
+    expect(client.interimTranscript).toBe("new live utterance");
+  });
+
+  it("clears interim transcript when startup fails", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput: new FakeAudioInput()
+    });
+    const interimUpdates: Array<string | null> = [];
+    client.addEventListener("interimtranscript", (text) =>
+      interimUpdates.push(text)
+    );
+
+    client.connect();
+    await client.startCall();
+    interimUpdates.length = 0;
+    transport.receive(
+      JSON.stringify({ type: "transcript_interim", text: "unfinished phrase" })
+    );
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition failed to start"
+      })
+    );
+
+    transport.receive(JSON.stringify({ type: "status", status: "idle" }));
+
+    expect(client.interimTranscript).toBeNull();
+    expect(interimUpdates).toEqual(["unfinished phrase", null]);
   });
 });
 
@@ -687,6 +1004,94 @@ describe("VoiceClient playback interrupt", () => {
 });
 
 describe("VoiceClient errors", () => {
+  it("emits typed LLM completion outcomes without changing the string error event", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    const outcomes: VoiceCompletionOutcome[] = [];
+    const errors: Array<string | null> = [];
+    client.addEventListener("completionoutcome", (outcome) =>
+      outcomes.push(outcome)
+    );
+    client.addEventListener("error", (error) => errors.push(error));
+
+    client.connect();
+    errors.length = 0;
+    transport.receive(
+      JSON.stringify({
+        type: "completion_outcome",
+        code: "output_limit",
+        stage: "llm",
+        finishReason: "length",
+        partialOutput: true
+      })
+    );
+
+    expect(outcomes).toEqual([
+      {
+        code: "output_limit",
+        stage: "llm",
+        finishReason: "length",
+        partialOutput: true
+      }
+    ]);
+    expect(errors).toEqual([]);
+    expect(client.error).toBeNull();
+  });
+
+  it("emits structured server errors without changing the string error event", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    const voiceErrors: VoiceError[] = [];
+    const errors: Array<string | null> = [];
+    client.addEventListener("voiceerror", (error) => voiceErrors.push(error));
+    client.addEventListener("error", (error) => errors.push(error));
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({
+        type: "error",
+        message: "Speech recognition connection was lost",
+        code: "stt_connection_lost",
+        stage: "stt",
+        retryable: true
+      })
+    );
+
+    expect(voiceErrors).toEqual([
+      {
+        message: "Speech recognition connection was lost",
+        code: "stt_connection_lost",
+        stage: "stt",
+        retryable: true
+      }
+    ]);
+    expect(client.error).toBe("Speech recognition connection was lost");
+    expect(errors.at(-1)).toBe("Speech recognition connection was lost");
+  });
+
+  it("emits a custom transport error cause as a connection diagnostic", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    const cause = { code: "AUTH_FAILED", message: "expired token" };
+    const diagnostics: VoiceConnectionDiagnostic[] = [];
+    const errors: Array<string | null> = [];
+    client.addEventListener("connectiondiagnostic", (diagnostic) =>
+      diagnostics.push(diagnostic)
+    );
+    client.addEventListener("error", (error) => errors.push(error));
+
+    client.connect();
+    transport.fail(cause);
+
+    expect(diagnostics).toEqual([{ type: "error", cause }]);
+    const diagnostic = diagnostics[0];
+    expect(diagnostic?.type).toBe("error");
+    if (diagnostic?.type !== "error") throw new Error("expected error");
+    expect(diagnostic.cause).toBe(cause);
+    expect(client.error).toBe("Connection lost. Reconnecting...");
+    expect(errors.at(-1)).toBe("Connection lost. Reconnecting...");
+  });
+
   it("preserves a server error when an idle status follows it", () => {
     const transport = new MockTransport();
     const errors: Array<string | null> = [];
