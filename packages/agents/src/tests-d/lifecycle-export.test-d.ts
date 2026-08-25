@@ -10,6 +10,8 @@ import {
 import {
   getCurrentAgent,
   Lifecycle,
+  type AlarmContribution,
+  type CapabilityController,
   type LifecycleObject,
   type Connection,
   type ConnectionContext,
@@ -43,6 +45,9 @@ expectTypeOf<ProbeLifecycleObject["onRequest"]>().toEqualTypeOf<
 >();
 expectTypeOf<ProbeLifecycleObject["onAlarm"]>().toEqualTypeOf<
   (() => void | Promise<void>) | undefined
+>();
+expectTypeOf<ProbeLifecycleObject["getNextAlarm"]>().toEqualTypeOf<
+  (() => AlarmContribution | Promise<AlarmContribution>) | undefined
 >();
 expectTypeOf<ProbeLifecycleObject["onConnect"]>().toEqualTypeOf<
   | ((
@@ -88,10 +93,15 @@ expectTypeOf(getCurrentRootAgent<LifecycleTypeProbe>().agent).toEqualTypeOf<
 >();
 
 const capability: DurableObjectCapability = {
+  onInstall: (controller) => {
+    expectTypeOf(controller).toEqualTypeOf<CapabilityController>();
+    expectTypeOf(controller.rearmAlarm()).toEqualTypeOf<Promise<void>>();
+  },
   onStart: ({ props }) => {
     expectTypeOf(props).toEqualTypeOf<object | undefined>();
   },
-  onRequest: ({ request }) => new Response(request.url)
+  onRequest: ({ request }) => new Response(request.url),
+  getNextAlarm: () => ({ time: Date.now(), exclusive: true })
 };
 
 expectTypeOf(capability).toMatchTypeOf<DurableObjectCapability>();

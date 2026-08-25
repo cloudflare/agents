@@ -131,6 +131,58 @@ Pass dependencies to a capability explicitly. A capability should not receive
 the entire host merely to reach storage, bindings, authentication,
 observability, or protocol methods.
 
+## Shared alarm ownership
+
+Lifecycle owns the Durable Object's single physical alarm. A capability that
+needs a future wake-up keeps its work in its own durable storage and implements
+`getNextAlarm()`:
+
+```ts
+import type {
+  AlarmContribution,
+  CapabilityController,
+  DurableObjectCapability
+} from "agents/lifecycle";
+
+class Cleanup implements DurableObjectCapability {
+  #controller: CapabilityController | undefined;
+
+  constructor(private readonly storage: DurableObjectStorage) {}
+
+  onInstall(controller: CapabilityController): void {
+    this.#controller = controller;
+  }
+
+  async getNextAlarm(): Promise<AlarmContribution> {
+    return (await this.storage.get<number>("cleanup:next")) ?? null;
+  }
+
+  async onAlarm(): Promise<void> {
+    const next = await this.storage.get<number>("cleanup:next");
+    if (next === undefined || next > Date.now()) return;
+    // Clean capability-owned state.
+    await this.storage.delete("cleanup:next");
+  }
+
+  async scheduleCleanup(time: number): Promise<void> {
+    // Persist capability-owned work first, then request alarm recalculation.
+    await this.storage.put("cleanup:next", time);
+    await this.#controller?.rearmAlarm();
+  }
+}
+```
+
+Lifecycle selects the earliest contribution from every capability and the
+host. It runs all capability `onAlarm()` hooks, then host `onAlarm()`, then
+recalculates the physical alarm. Capabilities do not depend on Scheduler or on
+each other merely to receive alarm wakes.
+
+A contribution can be `{ time, exclusive: true }` when its wake time must
+replace ordinary wake candidates, such as a pending teardown. This changes only
+which physical alarm is armed; when that alarm fires, normal capability and host
+hook order still applies. Hosts can implement `getNextAlarm()` for alarm work
+that has not yet been extracted into a capability.
+
 ## Lifecycle Object context
 
 `agents/lifecycle` exports the `LifecycleObject` interface for a

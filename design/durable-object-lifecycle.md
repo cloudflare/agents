@@ -29,6 +29,39 @@ Failures stop the phase and propagate. Failed startup remains retryable. Native
 RPC methods explicitly call `lifecycle.start()` because native Durable Object
 RPC bypasses Lifecycle handlers.
 
+## Alarm ownership and scheduling
+
+Lifecycle owns the one physical Durable Object alarm. A capability can return
+its next requested epoch time from `getNextAlarm()` and request recalculation
+through the controller received by `onInstall()`. Lifecycle serializes
+recalculation, chooses the earliest contribution, runs every capability's
+`onAlarm()` followed by the host's `onAlarm()`, then recalculates once more.
+
+Capabilities own their durable work. Scheduler stores named callback rows in
+its table; a future Fiber capability can store resumable jobs in its own table;
+an MCP capability can store reconnect state in its own table. They coordinate
+only through Lifecycle's alarm contract and do not depend on Scheduler.
+
+A host can also implement `getNextAlarm()` for work not yet extracted into a
+capability. Exclusive contributions replace ordinary wake-time candidates,
+which supports teardown without teaching other capabilities about destroy
+semantics; they do not alter alarm hook order. Agent currently uses the host
+contribution for deferred destruction, keep-alive, fiber recovery, and facet-run
+checks. These can move into separate capabilities without changing Scheduler or
+alarm selection.
+
+`Scheduler` is a plain Lifecycle primitive. Its `onStart` hook owns schedule
+schema migration, `onAlarm` owns due-row processing, and `getNextAlarm`
+contributes its earliest runnable row or hung-interval recheck. Agent constructs
+the same Scheduler exposed at `Agent.this.scheduler`; an internal adapter adds
+sub-agent ownership/routing, Agent observability and callback context, and OOM
+policy while existing Agent scheduling methods remain delegators.
+
+Alarm contribution and capability hooks run outside ambient host context.
+Scheduled methods are user callbacks, so Scheduler invokes them in Lifecycle
+Object context. Agent's adapter preserves its richer callback and `onError`
+context.
+
 ## Host context
 
 Lifecycle owns the AsyncLocalStorage read by `getCurrentAgent()`. The accessor
@@ -79,4 +112,5 @@ a migration fallback. It never writes a duplicate name.
 
 ## History
 
+- [Alarm coordination](./alarm-coordination.md)
 - [Durable Object lifecycle composition](./rfc-durable-object-lifecycle.md)

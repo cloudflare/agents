@@ -1,5 +1,22 @@
 type MaybePromise<T> = T | Promise<T>;
 
+/** One capability's requested physical alarm. */
+export type AlarmContribution =
+  | number
+  | {
+      /** Epoch time in milliseconds. */
+      readonly time: number;
+      /** Ignore ordinary wake-time candidates while this request exists. */
+      readonly exclusive: true;
+    }
+  | null;
+
+/** Lifecycle services available to an installed capability. */
+export interface CapabilityController {
+  /** Recompute the physical alarm from every installed capability. */
+  rearmAlarm(): Promise<void>;
+}
+
 /** Context supplied when durable capabilities start. */
 export type CapabilityStartContext<Props extends object = object> = {
   /** Properties supplied while resolving the Durable Object. */
@@ -21,6 +38,9 @@ export type CapabilityRequestContext = {
  * the host's ambient `getCurrentAgent()` context.
  */
 export interface DurableObjectCapability<Props extends object = object> {
+  /** Attach Lifecycle-owned services when the capability is installed. */
+  onInstall?(controller: CapabilityController): void;
+
   /** Initialize or recover the capability before the host handles work. */
   onStart?(context: CapabilityStartContext<Props>): MaybePromise<void>;
 
@@ -35,6 +55,9 @@ export interface DurableObjectCapability<Props extends object = object> {
 
   /** Run work assigned to the capability when the host's alarm fires. */
   onAlarm?(): MaybePromise<void>;
+
+  /** Return this capability's next requested physical alarm. */
+  getNextAlarm?(): MaybePromise<AlarmContribution>;
 }
 
 /**
@@ -107,6 +130,17 @@ export class CapabilityRunner<Props extends object = object> {
       if (response !== undefined) return response;
     }
     return undefined;
+  }
+
+  /** Return alarm requests from every installed capability. */
+  async getAlarmContributions(): Promise<AlarmContribution[]> {
+    await this.#ensureReady("contribute an alarm");
+    const contributions: AlarmContribution[] = [];
+    for (const capability of this.#getCapabilities()) {
+      const contribution = await capability.getNextAlarm?.();
+      if (contribution !== undefined) contributions.push(contribution);
+    }
+    return contributions;
   }
 
   /** Run every capability's alarm hook in declaration order. */

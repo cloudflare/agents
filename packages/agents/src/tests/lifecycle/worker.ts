@@ -7,16 +7,19 @@ import {
 import {
   getCurrentAgent,
   Lifecycle,
+  type CapabilityController,
   type Connection,
   type DurableObjectCapability,
   type WSMessage
 } from "../../lifecycle";
 import { MCPClientManager } from "../../mcp/client";
 import { MCPConnectionState } from "../../mcp/client-connection";
+import { Scheduler, type Schedule } from "../../schedules";
 
 export type Env = {
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
+  ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
 };
 
 type StartupProps = { label: string };
@@ -38,6 +41,25 @@ type WebSocketContextEvent = {
   readonly phase: "close" | "connect" | "message";
   readonly requestUrl: string | null;
 };
+
+class StartupAlarmProbe implements DurableObjectCapability<StartupProps> {
+  #controller: CapabilityController | undefined;
+  #nextAlarm: number | null = null;
+
+  onInstall(controller: CapabilityController): void {
+    this.#controller = controller;
+  }
+
+  async onStart({ props }: { props: StartupProps | undefined }): Promise<void> {
+    if (props?.label !== "startup-alarm") return;
+    this.#nextAlarm = Date.now() + 60_000;
+    await this.#controller?.rearmAlarm();
+  }
+
+  getNextAlarm(): number | null {
+    return this.#nextAlarm;
+  }
+}
 
 class CapabilityContextProbe implements DurableObjectCapability<StartupProps> {
   readonly events: CapabilityContextEvent[] = [];
@@ -92,11 +114,19 @@ function currentWebSocketContext(
 export class PlainLifecycleObject extends DurableObject<Env> {
   readonly #events: string[] = [];
   readonly #capabilityContexts = new CapabilityContextProbe();
+  readonly #startupAlarm = new StartupAlarmProbe();
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
+  #firstAlarm: number | null = null;
+  #secondAlarm: number | null = null;
+  #exclusiveAlarm: number | null = null;
+  #hostAlarm: number | null = null;
+  readonly #capabilityAlarmContexts: boolean[] = [];
+  readonly #hostAlarmContexts: boolean[] = [];
 
   readonly lifecycle = Lifecycle.install<Env, StartupProps>(this)
     .use(this.#capabilityContexts)
+    .use(this.#startupAlarm)
     .use({
       onStart: ({ props }) => {
         this.#events.push(`capability:start:${props?.label ?? "none"}`);
@@ -110,7 +140,24 @@ export class PlainLifecycleObject extends DurableObject<Env> {
       onAlarm: () => {
         this.#events.push("capability:alarm");
       }
-    } satisfies DurableObjectCapability<StartupProps>);
+    } satisfies DurableObjectCapability<StartupProps>)
+    .use({
+      getNextAlarm: () => {
+        this.#capabilityAlarmContexts.push(
+          getCurrentAgent().agent !== undefined
+        );
+        return this.#firstAlarm;
+      }
+    })
+    .use({
+      getNextAlarm: () => this.#secondAlarm
+    })
+    .use({
+      getNextAlarm: () =>
+        this.#exclusiveAlarm === null
+          ? null
+          : { time: this.#exclusiveAlarm, exclusive: true }
+    });
 
   onStart(props?: StartupProps): void {
     this.#hostContexts.push(currentLifecycleContext("start"));
@@ -130,6 +177,13 @@ export class PlainLifecycleObject extends DurableObject<Env> {
   onAlarm(): void {
     this.#hostContexts.push(currentLifecycleContext("alarm"));
     this.#events.push("host:alarm");
+  }
+
+  getNextAlarm(): number | null {
+    this.#hostAlarmContexts.push(
+      getCurrentAgent<PlainLifecycleObject>().agent === this
+    );
+    return this.#hostAlarm;
   }
 
   onConnect(connection: Connection): void {
@@ -164,6 +218,31 @@ export class PlainLifecycleObject extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + 60_000);
   }
 
+  getAlarmContributionContexts(): {
+    readonly capability: readonly boolean[];
+    readonly host: readonly boolean[];
+  } {
+    return {
+      capability: this.#capabilityAlarmContexts,
+      host: this.#hostAlarmContexts
+    };
+  }
+
+  async setAlarmContributions(
+    first: number | null,
+    second: number | null,
+    host: number | null,
+    exclusive: number | null = null
+  ): Promise<number | null> {
+    await this.lifecycle.start();
+    this.#firstAlarm = first;
+    this.#secondAlarm = second;
+    this.#hostAlarm = host;
+    this.#exclusiveAlarm = exclusive;
+    await this.lifecycle.rearmAlarm();
+    return this.ctx.storage.getAlarm();
+  }
+
   async getEvents(): Promise<readonly string[]> {
     await this.lifecycle.start();
     return this.#events;
@@ -195,6 +274,11 @@ export class PlainLifecycleObject extends DurableObject<Env> {
     return this.#events;
   }
 
+  async startWithAlarmContribution(): Promise<number | null> {
+    await this.lifecycle.start({ label: "startup-alarm" });
+    return this.ctx.storage.getAlarm();
+  }
+
   async startFromForeignContext(props: StartupProps): Promise<{
     readonly capability: readonly CapabilityContextEvent[];
     readonly host: readonly HostContextEvent[];
@@ -214,6 +298,88 @@ export class PlainLifecycleObject extends DurableObject<Env> {
         };
       }
     );
+  }
+}
+
+type ScheduledLifecycleResult = {
+  readonly events: readonly string[];
+  readonly message: string | null;
+  readonly callbackScheduleId: string | null;
+  readonly callbackScheduleMessage: string | null;
+  readonly alarm: number | null;
+  readonly scheduleCount: number;
+};
+
+export class ScheduledLifecycleObject extends DurableObject<Env> {
+  readonly #events: string[] = [];
+  #message: string | null = null;
+  #callbackScheduleId: string | null = null;
+  #callbackScheduleMessage: string | null = null;
+
+  readonly scheduler = new Scheduler({
+    callbacks: this,
+    storage: this.ctx.storage,
+    now: Date.now,
+    createId: () => crypto.randomUUID(),
+    onEvent: ({ type }) => {
+      if (type !== "schedule:execute") return;
+      this.#events.push(
+        getCurrentAgent().agent === undefined
+          ? "scheduler:no-context"
+          : "scheduler:context"
+      );
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
+
+  reminder(
+    payload: { message: string },
+    schedule: Schedule<{ message: string }>
+  ): void {
+    this.#events.push(
+      getCurrentAgent<ScheduledLifecycleObject>().agent === this
+        ? "callback:context"
+        : "callback:missing-context"
+    );
+    this.#message = payload.message;
+    this.#callbackScheduleId = schedule.id;
+    this.#callbackScheduleMessage = schedule.payload.message;
+  }
+
+  onAlarm(): void {
+    this.#events.push(
+      getCurrentAgent<ScheduledLifecycleObject>().agent === this
+        ? "host:context"
+        : "host:missing-context"
+    );
+  }
+
+  async scheduleReminder(message: string): Promise<string> {
+    await this.lifecycle.start();
+    const schedule = await this.scheduler.schedule(86_400, "reminder", {
+      message
+    });
+    const past = Math.floor(Date.now() / 1000) - 1;
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_schedules SET time = ? WHERE id = ?",
+      past,
+      schedule.id
+    );
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+    return schedule.id;
+  }
+
+  async getSchedulerResult(): Promise<ScheduledLifecycleResult> {
+    await this.lifecycle.start();
+    return {
+      events: this.#events,
+      message: this.#message,
+      callbackScheduleId: this.#callbackScheduleId,
+      callbackScheduleMessage: this.#callbackScheduleMessage,
+      alarm: await this.ctx.storage.getAlarm(),
+      scheduleCount: this.scheduler.getSchedules().length
+    };
   }
 }
 

@@ -2,7 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { nanoid } from "nanoid";
 
 import {
+  type AlarmContribution,
   CapabilityRunner,
+  type CapabilityController,
   type DurableObjectCapability
 } from "./capability-runner";
 import {
@@ -25,6 +27,8 @@ import type {
 } from "./types";
 
 export {
+  type AlarmContribution,
+  type CapabilityController,
   type CapabilityRequestContext,
   type CapabilityStartContext,
   type DurableObjectCapability
@@ -97,6 +101,27 @@ function mutableRequest(request: Request): Request {
   return new Request(request);
 }
 
+function selectAlarm(
+  contributions: ReadonlyArray<AlarmContribution>
+): number | null {
+  let ordinary: number | null = null;
+  let exclusive: number | null = null;
+  for (const contribution of contributions) {
+    if (contribution === null) continue;
+    const time =
+      typeof contribution === "number" ? contribution : contribution.time;
+    if (!Number.isFinite(time) || time < 0) {
+      throw new Error(`Invalid alarm contribution: ${String(time)}`);
+    }
+    if (typeof contribution === "object" && contribution.exclusive) {
+      exclusive = exclusive === null ? time : Math.min(exclusive, time);
+    } else {
+      ordinary = ordinary === null ? time : Math.min(ordinary, time);
+    }
+  }
+  return exclusive ?? ordinary;
+}
+
 /**
  * Decode props from the internal lifecycle props header.
  *
@@ -145,8 +170,14 @@ export class Lifecycle<
     () => this.#capabilities
   );
   readonly #connectionManager: ConnectionManager;
+  readonly #capabilityController: CapabilityController = Object.freeze({
+    rearmAlarm: () => this.rearmAlarm()
+  });
 
   #status: "zero" | "starting" | "started" = "zero";
+  #alarmRearmQueue: Promise<void> = Promise.resolve();
+  #rearmRequestedDuringStart = false;
+  #alarmsDisabled = false;
   #capabilitiesLocked = false;
   #handlersInstalled = false;
 
@@ -222,6 +253,12 @@ export class Lifecycle<
       throw new Error("Lifecycle capabilities must be added before startup");
     }
     this.#capabilities.push(capability);
+    try {
+      capability.onInstall?.(this.#capabilityController);
+    } catch (error) {
+      this.#capabilities.pop();
+      throw error;
+    }
     return this;
   }
 
@@ -480,7 +517,14 @@ export class Lifecycle<
     });
     // Re-throw outside blockConcurrencyWhile so the input gate is not
     // permanently broken and a later invocation can retry startup.
-    if (error) throw error;
+    if (error) {
+      this.#rearmRequestedDuringStart = false;
+      throw error;
+    }
+    if (this.#rearmRequestedDuringStart) {
+      this.#rearmRequestedDuringStart = false;
+      await this.rearmAlarm();
+    }
   }
 
   #legacyName: string | undefined;
@@ -538,6 +582,53 @@ export class Lifecycle<
 
   #props?: Props;
 
+  /**
+   * Recompute the physical Durable Object alarm from every capability.
+   *
+   * Concurrent requests are serialized so a later durable-state change cannot
+   * be overwritten by an earlier alarm calculation.
+   */
+  async rearmAlarm(): Promise<void> {
+    if (this.#alarmsDisabled) return;
+    if (this.#status === "starting") {
+      this.#rearmRequestedDuringStart = true;
+      return;
+    }
+    if (this.#status === "zero") await this.start();
+
+    const prior = this.#alarmRearmQueue;
+    const next = prior
+      .catch(() => {})
+      .then(async () => {
+        if (this.#alarmsDisabled) return;
+        const contributions = await runWithoutCurrentAgent(() =>
+          this.#capabilityRunner.getAlarmContributions()
+        );
+        const hostContribution = await runInLifecycleHostContext(
+          { host: this.#host },
+          () => this.#host.getNextAlarm?.()
+        );
+        if (hostContribution !== undefined) {
+          contributions.push(hostContribution);
+        }
+        const alarm = selectAlarm(contributions);
+        if (alarm === null) {
+          await this.#ctx.storage.deleteAlarm();
+        } else {
+          await this.#ctx.storage.setAlarm(alarm);
+        }
+      });
+    this.#alarmRearmQueue = next;
+    await next;
+  }
+
+  /** Permanently disable and clear alarms during explicit object teardown. */
+  async disableAlarms(): Promise<void> {
+    this.#alarmsDisabled = true;
+    await this.#alarmRearmQueue.catch(() => {});
+    await this.#ctx.storage.deleteAlarm();
+  }
+
   /** Dispatch lifecycle and host alarm callbacks after startup. */
   async alarm(): Promise<void> {
     await this.#ensureInitialized();
@@ -545,5 +636,6 @@ export class Lifecycle<
     await runInLifecycleHostContext({ host: this.#host }, () =>
       this.#host.onAlarm?.()
     );
+    await this.rearmAlarm();
   }
 }

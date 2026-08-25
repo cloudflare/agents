@@ -1,4 +1,9 @@
-import { Agent, callable, type Schedule } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  getCurrentAgent,
+  type Schedule
+} from "../../index.ts";
 
 /**
  * Test agent that verifies this.name is accessible during scheduled callback
@@ -11,9 +16,26 @@ export class TestAlarmInitAgent extends Agent {
   _capturedName: string | null = null;
   _onStartCalled = false;
   _callbackError: string | null = null;
+  _scheduleContextEvents: string[] = [];
+
+  override observability = {
+    emit: (event: { type: string }) => {
+      if (event.type !== "schedule:execute") return;
+      const current = getCurrentAgent().agent;
+      this._scheduleContextEvents.push(
+        current === undefined ? "capability:no-context" : "capability:context"
+      );
+    }
+  };
 
   async onStart() {
     this._onStartCalled = true;
+  }
+
+  onAlarm(): void {
+    this._scheduleContextEvents.push(
+      getCurrentAgent().agent === this ? "host:context" : "host:missing-context"
+    );
   }
 
   // Callback that reads this.name — would throw before the fix if
@@ -28,6 +50,20 @@ export class TestAlarmInitAgent extends Agent {
 
   async scheduleNameCheck(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "nameCheckCallback");
+    return schedule.id;
+  }
+
+  contextCheckCallback(): void {
+    this._scheduleContextEvents.push(
+      getCurrentAgent().agent === this
+        ? "callback:context"
+        : "callback:missing-context"
+    );
+  }
+
+  async scheduleContextCheck(delaySeconds: number): Promise<string> {
+    this._scheduleContextEvents = [];
+    const schedule = await this.schedule(delaySeconds, "contextCheckCallback");
     return schedule.id;
   }
 
@@ -56,8 +92,20 @@ export class TestDestroyScheduleAgent extends Agent<
     return this.state.status;
   }
 
+  async makeSelfDestructingAlarmDue(): Promise<void> {
+    const past = Math.floor(Date.now() / 1000) - 1;
+    this.sql`
+      UPDATE cf_agents_schedules SET time = ${past} WHERE callback = 'destroy'
+    `;
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+  }
+
   getStatus() {
     return this.state.status;
+  }
+
+  onAlarm(): void {
+    throw new Error("onAlarm must not run after a scheduled destroy");
   }
 }
 

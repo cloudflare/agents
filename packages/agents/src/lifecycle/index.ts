@@ -6,6 +6,8 @@ export {
 } from "./current-agent";
 export {
   Lifecycle,
+  type AlarmContribution,
+  type CapabilityController,
   type Connection,
   type ConnectionContext,
   type ConnectionSetStateFn,

@@ -172,6 +172,16 @@
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./schedules": {
+      "types": "./dist/schedules/index.d.ts",
+      "import": "./dist/schedules/index.js",
+      "require": "./dist/schedules/index.js"
+    },
+    "./schedules/parser": {
+      "types": "./dist/schedules/parser.d.ts",
+      "import": "./dist/schedules/parser.js",
+      "require": "./dist/schedules/parser.js"
+    },
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js",

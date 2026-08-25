@@ -78,11 +78,11 @@ export class MyDurableObject extends DurableObject {
 }
 ```
 
-### `alarm()`
+### Alarms
 
-HTTP and RPC requests are not the only entrypoints for a DO. Alarms allow developers to schedule an event to trigger at a later time. Whenever the next alarm is due, the runtime will call the `alarm()` method, which is left to the developer to implement.
+`Lifecycle` owns the Agent's physical Durable Object alarm because schedules, keep-alive, fibers, sub-agents, and other capabilities share the same alarm slot. Do not override `alarm()` or call `this.ctx.storage.setAlarm()` from an Agent feature; one caller could overwrite another feature's wake-up.
 
-To schedule an alarm, you can use the `this.ctx.storage.setAlarm()` method. For more information, check [the documentation](https://developers.cloudflare.com/durable-objects/api/alarms/).
+Use `this.schedule()` for named Agent callbacks. A reusable capability with its own durable work implements `getNextAlarm()` and `onAlarm()`, then asks its Lifecycle controller to recalculate after its state changes. See [Durable Object lifecycle](./lifecycle.md#shared-alarm-ownership) and [Scheduling](./scheduling.md).
 
 ### `this.ctx`
 

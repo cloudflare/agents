@@ -15,6 +15,84 @@ The scheduling system supports four modes:
 
 Under the hood, scheduling uses [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/) to wake the agent at the right time. Tasks are stored in a SQLite table and executed in order.
 
+## Scheduler Lifecycle primitive
+
+`Scheduler` is a reusable Lifecycle capability. A plain Lifecycle Object can
+install it without extending `Agent`:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { Scheduler, type Schedule } from "agents/schedules";
+
+export class ReminderObject extends DurableObject<Env> {
+  readonly scheduler = new Scheduler({
+    callbacks: this,
+    storage: this.ctx.storage,
+    now: Date.now,
+    createId: () => crypto.randomUUID()
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
+
+  async createReminder(message: string): Promise<string> {
+    // Native Durable Object RPC does not pass through Lifecycle handlers.
+    await this.lifecycle.start();
+    const schedule = await this.scheduler.schedule(300, "sendReminder", {
+      message
+    });
+    return schedule.id;
+  }
+
+  sendReminder(
+    payload: { message: string },
+    schedule: Schedule<{ message: string }>
+  ): void {
+    console.log(schedule.id, payload.message);
+  }
+}
+```
+
+Lifecycle owns the physical Durable Object alarm. Scheduler contributes its
+earliest pending task or hung-interval recheck. Lifecycle selects the earliest
+contribution from Scheduler, other capabilities, and the host, then rearms after
+every alarm phase. A future Fiber or MCP capability can contribute its own wake
+time without storing work in Scheduler or depending on it.
+
+Scheduler Lifecycle hooks run without ambient host context. Scheduled methods
+are user callbacks, so they run with the Lifecycle Object as `this` and with
+that object available through `getCurrentAgent()`.
+
+## Using Scheduler through Agent
+
+Every `Agent` constructs and installs the same primitive at `this.scheduler`.
+Existing Agent applications continue to use the established methods:
+
+- `this.schedule()` and `this.scheduleEvery()` create schedules.
+- `this.getScheduleById()` and `this.listSchedules()` read schedules.
+- `this.cancelSchedule()` removes a schedule.
+
+These methods delegate to `this.scheduler`; no setup or migration is required.
+Sub-agent ownership, Agent observability, retry defaults, and OOM handling are
+supplied by the Agent integration. Scheduler contributes its next wake time to
+the same Lifecycle alarm selection as Agent keep-alive, fibers, sub-agent work,
+and deferred destruction.
+
+Import `Scheduler` and runtime schedule types from the dependency-light entry
+point:
+
+```typescript
+import {
+  Scheduler,
+  type Schedule,
+  type ScheduleCriteria
+} from "agents/schedules";
+```
+
+Natural-language parsing helpers use Zod and live under
+`agents/schedules/parser`. The previous `agents/schedule` path remains as a
+deprecated compatibility alias.
+
 ## Quick Start
 
 ```typescript
@@ -299,9 +377,9 @@ This is the recommended approach since you cannot forget to dispose the heartbea
 
 ### How it works
 
-`keepAlive()` uses an in-memory reference count and the Durable Object alarm system directly. Each call increments the count; the disposer decrements it. While the count is above zero, `_scheduleNextAlarm()` ensures an alarm fires every 30 seconds, which resets the inactivity timer. No schedule rows are created and no observability events are emitted — the heartbeat is invisible to `listSchedules()` and the `agents:schedule` diagnostics channel.
+`keepAlive()` uses an in-memory reference count. Each call increments the count; the disposer decrements it. While the count is above zero, Agent contributes a wake time every 30 seconds to Lifecycle. No schedule rows are created and no observability events are emitted, so the heartbeat is invisible to `listSchedules()` and the scheduling diagnostics channel.
 
-The heartbeat does not conflict with your own schedules — the alarm system multiplexes all schedules and the keepAlive heartbeat through a single alarm slot.
+The heartbeat does not conflict with scheduled work. Lifecycle selects one physical alarm from both contributions.
 
 Inside sub-agents, `keepAlive()` delegates that heartbeat ref to the top-level parent because facets do not have independent alarm slots. `keepAliveWhile()` works the same way because it calls `keepAlive()` and automatically disposes the delegated ref when the scoped work completes.
 
@@ -642,14 +720,14 @@ class TimezoneAgent extends Agent {
 
 ## AI-Assisted Scheduling
 
-The SDK includes utilities for parsing natural language scheduling requests with AI.
+The SDK includes utilities for parsing natural language scheduling requests with AI. Import them from `agents/schedules/parser`.
 
 ### getSchedulePrompt()
 
 Returns a system prompt for parsing natural language into scheduling parameters:
 
 ```typescript
-import { getSchedulePrompt, scheduleSchema } from "agents";
+import { getSchedulePrompt, scheduleSchema } from "agents/schedules/parser";
 import { generateObject } from "ai";
 import { openai } from "@ai-sdk/openai";
 
@@ -703,7 +781,7 @@ class SmartScheduler extends Agent {
 A Zod schema for validating parsed scheduling data:
 
 ```typescript
-import { scheduleSchema } from "agents";
+import { scheduleSchema } from "agents/schedules/parser";
 
 // The schema uses a discriminated union on `when.type`:
 // {
@@ -750,6 +828,34 @@ When using this schema with OpenAI models via the AI SDK, you must pass `provide
 - Long-running tasks (minutes to hours)
 
 ## API Reference
+
+### `new Scheduler(options)`
+
+```typescript
+new Scheduler({
+  callbacks,
+  storage,
+  now,
+  createId,
+  retry?,
+  hungScheduleTimeoutSeconds?,
+  onEvent?,
+  onError?
+});
+```
+
+- `callbacks` is the Lifecycle Object containing the named scheduled methods.
+- `storage` is that object's `DurableObjectStorage`.
+- `now` returns epoch milliseconds. Pass `Date.now` or an injected clock.
+- `createId` returns a unique string. Wrap Workers APIs that require their
+  receiver, for example `() => crypto.randomUUID()`.
+- `retry` supplies callback retry defaults. The defaults are three attempts,
+  100 ms base delay, and 3,000 ms maximum delay.
+- `hungScheduleTimeoutSeconds` defaults to 30 seconds.
+- `onEvent` observes scheduling events outside ambient host context.
+- `onError` observes terminal callback failures outside ambient host context.
+
+Install the constructed object with `Lifecycle.use()` before startup.
 
 ### schedule()
 
@@ -800,7 +906,9 @@ async scheduleEvery<T = string>(
 ): Promise<Schedule<T>>
 ```
 
-Schedule a task to run repeatedly at a fixed interval.
+Schedule a task to run repeatedly at a fixed interval. Calling
+`Scheduler.scheduleEvery()` directly also accepts `options.idempotent`; Agent's
+`this.scheduleEvery()` remains idempotent by design.
 
 **Parameters:**
 

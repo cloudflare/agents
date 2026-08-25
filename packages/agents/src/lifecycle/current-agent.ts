@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DurableObject } from "cloudflare:workers";
 
+import type { AlarmContribution } from "./capability-runner";
 import type { Lifecycle, WSMessage } from "./durable-object-lifecycle";
 import type { Connection, ConnectionContext } from "./types";
 
@@ -18,6 +19,7 @@ export interface LifecycleObject<
   onStart?(props?: Props): void | Promise<void>;
   onRequest?(request: Request): Response | Promise<Response>;
   onAlarm?(): void | Promise<void>;
+  getNextAlarm?(): AlarmContribution | Promise<AlarmContribution>;
   onConnect?(
     connection: Connection,
     context: ConnectionContext

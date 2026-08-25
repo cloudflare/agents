@@ -71,6 +71,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 | File                                    | Type       | Scope                                                                                                                                                                           |
 | --------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `alarm-coordination.md`                 | design doc | Lifecycle-owned physical alarm, capability contributions, Scheduler, and Agent adaptation                                                                                       |
 | `chat-shared-layer.md`                  | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat                                                                                             |
 | `durable-streams-comparison.md`         | analysis   | Durable Streams (ElectricSQL) vs the Agents SDK — layer mapping, what each has, strategic takeaways                                                                             |
 | `think.md`                              | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions                                                                                           |
@@ -99,7 +100,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-coding-agent.md`                   | RFC        | `CodingAgent` — new `@cloudflare/coding-agent` package (extends AIChatAgent), CLI coding agents in Sandbox, pluggable engine (Cli/Harness), two-lifecycle durability (proposed) |
 | `test-coverage-matrix.md`               | design doc | Feature × test-layer coverage rollup, CI→layer mapping, skipped-test debt, nightly hygiene                                                                                      |
 | `mcp.md`                                | design doc | Stateless, Legacy compatibility, Legacy sessionful, client, package boundary, and conformance architecture                                                                      |
-| `durable-object-lifecycle.md`           | design doc | Lifecycle Objects, capability and host phases, host context, identity, and always-hibernating WebSockets                                                                        |
+| `durable-object-lifecycle.md`           | design doc | Lifecycle Objects, capability and host phases, Scheduler/alarm ownership, host context, identity, and always-hibernating WebSockets                                             |
 | `rfc-durable-object-lifecycle.md`       | RFC        | Constructor-composed Durable Object lifecycle with reusable components and always-hibernating WebSockets                                                                        |
 
 ## Relationship to `/docs`

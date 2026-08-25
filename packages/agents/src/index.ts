@@ -39,7 +39,6 @@ export type {
 import { signAgentHeaders, type SendEmailOptions } from "./email";
 import { sendAgentEmail } from "./email-send";
 export type { EmailSendBinding, SendEmailOptions } from "./email";
-import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
 import {
@@ -48,6 +47,7 @@ import {
   exports as workerExports
 } from "cloudflare:workers";
 import {
+  type AlarmContribution,
   type Connection,
   type ConnectionContext,
   Lifecycle,
@@ -70,10 +70,8 @@ export { camelCaseToKebabCase } from "./utils";
 import {
   type RetryOptions,
   tryN,
-  isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isErrorRetryable,
-  isPlatformTransientError,
   validateRetryOptions
 } from "./retries";
 export {
@@ -118,6 +116,18 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
+import { Scheduler, createScheduler } from "./schedules/scheduler";
+import {
+  SchedulerAgentAdapter,
+  scheduleOwnerPathKey
+} from "./schedules/agent-adapter";
+import type { SchedulerRootRpc } from "./schedules/agent-rpc";
+import type {
+  Schedule,
+  ScheduleCriteria,
+  ScheduleStorageRow
+} from "./schedules/types";
+export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
@@ -635,69 +645,6 @@ export type QueueItem<T = string> = {
   retry?: RetryOptions;
 };
 
-/**
- * Represents a scheduled task within an Agent
- * @template T Type of the payload data
- */
-export type Schedule<T = string> = {
-  /** Unique identifier for the schedule */
-  id: string;
-  /** Name of the method to be called */
-  callback: string;
-  /** Data to be passed to the callback */
-  payload: T;
-  /** Retry options for callback execution */
-  retry?: RetryOptions;
-} & (
-  | {
-      /** Type of schedule for one-time execution at a specific time */
-      type: "scheduled";
-      /** Timestamp when the task should execute */
-      time: number;
-    }
-  | {
-      /** Type of schedule for delayed execution */
-      type: "delayed";
-      /** Timestamp when the task should execute */
-      time: number;
-      /** Number of seconds to delay execution */
-      delayInSeconds: number;
-    }
-  | {
-      /** Type of schedule for recurring execution based on cron expression */
-      type: "cron";
-      /** Timestamp for the next execution */
-      time: number;
-      /** Cron expression defining the schedule */
-      cron: string;
-    }
-  | {
-      /** Type of schedule for recurring execution at fixed intervals */
-      type: "interval";
-      /** Timestamp for the next execution */
-      time: number;
-      /** Number of seconds between executions */
-      intervalSeconds: number;
-    }
-);
-
-type ScheduleStorageRow = {
-  id: string;
-  callback: string;
-  payload: string;
-  type: "scheduled" | "delayed" | "cron" | "interval";
-  time: number;
-  delayInSeconds?: number;
-  cron?: string;
-  intervalSeconds?: number;
-  retry?: RetryOptions;
-  running?: number;
-  execution_started_at?: number | null;
-  retry_options?: string | null;
-  owner_path?: string | null;
-  owner_path_key?: string | null;
-};
-
 type FacetRunStorageRow = {
   owner_path: string;
   owner_path_key: string;
@@ -737,47 +684,15 @@ type AgentToolRunStorageRow = {
 type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
 
-export type ScheduleCriteria = {
-  id?: string;
-  type?: "scheduled" | "delayed" | "cron" | "interval";
-  timeRange?: { start?: Date; end?: Date };
-};
-
 /**
  * Internal RPC surface exposed by the root agent for facets to
  * delegate alarm-owning operations (schedules + facet teardown).
  * @internal
  */
-type RootFacetRpcSurface = {
-  _cf_scheduleForFacet<T>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    when: Date | string | number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }>;
-  _cf_cancelScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<{ ok: boolean; callback?: string }>;
-  _cf_scheduleEveryForFacet<T>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; _idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }>;
+type RootFacetRpcSurface = SchedulerRootRpc & {
   _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
-  _cf_getScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<Schedule<unknown> | undefined>;
-  _cf_listSchedulesForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    criteria?: ScheduleCriteria
-  ): Promise<Schedule<unknown>[]>;
   _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
@@ -953,11 +868,6 @@ type InternalFiberOptions = {
   ) => void;
 };
 
-function getNextCronTime(cron: string) {
-  const interval = parseCronExpression(cron);
-  return interval.getNextDate();
-}
-
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
 export {
@@ -1077,7 +987,7 @@ const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // next wake must complete instead of resuming normal work.
 //
 // Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
-// `_scheduleNextAlarm()`). It deliberately does NOT gate request entrypoints
+// `_rearmAlarm()`). It deliberately does NOT gate request entrypoints
 // (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
 // the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
 // the MCP session-DELETE use case this is benign: the session id is unique and
@@ -1573,11 +1483,9 @@ function resolveRetryConfig(
   };
 }
 
-// `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` (used by the
-// scheduler's defer-vs-abandon decisions below) live in ./retries next to
-// `isErrorRetryable`, and are re-exported from the package root so higher
-// layers (e.g. `@cloudflare/think`) classify with the SAME matcher instead of
-// drifting copies.
+// `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` live in
+// ./retries and remain re-exported from the package root so higher layers
+// classify platform failures with the same matcher instead of drifting copies.
 
 /** Compatibility alias for the lifecycle-owned current Agent accessor. */
 export const getCurrentAgent = getCurrentLifecycleAgent as <
@@ -1750,7 +1658,7 @@ export class Agent<
   private _warnedChatRecoveryInOnStart = false;
 
   /**
-   * Number of active keepAlive() callers. When > 0, `_scheduleNextAlarm()`
+   * Number of active keepAlive() callers. When > 0, `_rearmAlarm()`
    * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
    * Purely in-memory — lost on eviction, which is correct because the
    * in-memory work keepAlive was protecting is also lost.
@@ -1792,6 +1700,10 @@ export class Agent<
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
+
+  /** Durable scheduling capability installed into this Agent's Lifecycle. */
+  readonly scheduler: Scheduler;
+  private readonly _schedulerAdapter: SchedulerAgentAdapter;
 
   readonly mcp: MCPClientManager;
 
@@ -2085,112 +1997,23 @@ export class Agent<
         )
       `;
 
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          intervalSeconds INTEGER,
-          running INTEGER DEFAULT 0,
-          created_at INTEGER DEFAULT (unixepoch()),
-          execution_started_at INTEGER,
-          retry_options TEXT,
-          owner_path TEXT,
-          owner_path_key TEXT
-        )
-      `;
-
-      // Migration: Add columns for interval scheduling (for existing agents)
-      // Use raw exec to avoid error logging through onError for expected failures
+      // Migration: add queue retry options for existing agents.
+      // Schedule schema and migrations are owned by Scheduler.
       const addColumnIfNotExists = (sql: string) => {
         try {
           this.ctx.storage.sql.exec(sql);
-        } catch (e) {
-          // Only ignore "duplicate column" errors, re-throw unexpected errors
-          const message = e instanceof Error ? e.message : String(e);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
           if (!message.toLowerCase().includes("duplicate column")) {
-            throw e;
+            throw error;
           }
         }
       };
 
       addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path_key TEXT"
-      );
-      addColumnIfNotExists(
         "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
       );
-
-      // Migration: Update CHECK constraint on type column to include 'interval'.
-      // SQLite doesn't support ALTER TABLE to modify constraints, so we recreate
-      // the table when the old constraint is detected.
-      {
-        const rows = this.ctx.storage.sql
-          .exec(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-          )
-          .toArray();
-        if (rows.length > 0) {
-          const ddl = String(rows[0].sql);
-          if (!ddl.includes("'interval'")) {
-            // Drop any leftover temp table from a previous partial migration
-            this.ctx.storage.sql.exec(
-              "DROP TABLE IF EXISTS cf_agents_schedules_new"
-            );
-            this.ctx.storage.sql.exec(`
-              CREATE TABLE cf_agents_schedules_new (
-                id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-                callback TEXT,
-                payload TEXT,
-                type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-                time INTEGER,
-                delayInSeconds INTEGER,
-                cron TEXT,
-                intervalSeconds INTEGER,
-                running INTEGER DEFAULT 0,
-                created_at INTEGER DEFAULT (unixepoch()),
-                execution_started_at INTEGER,
-                retry_options TEXT,
-                owner_path TEXT,
-                owner_path_key TEXT
-              )
-            `);
-            this.ctx.storage.sql.exec(`
-              INSERT INTO cf_agents_schedules_new
-                (id, callback, payload, type, time, delayInSeconds, cron,
-                 intervalSeconds, running, created_at, execution_started_at, retry_options,
-                 owner_path, owner_path_key)
-              SELECT id, callback, payload, type, time, delayInSeconds, cron,
-                     intervalSeconds, running, created_at, execution_started_at, retry_options,
-                     owner_path, owner_path_key
-              FROM cf_agents_schedules
-            `);
-            this.ctx.storage.sql.exec("DROP TABLE cf_agents_schedules");
-            this.ctx.storage.sql.exec(
-              "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
-            );
-          }
-        }
-      }
 
       // Workflow tracking table for Agent-Workflow integration
       this.sql`
@@ -2225,14 +2048,6 @@ export class Agent<
         "DELETE FROM cf_agents_state WHERE id = ?",
         STATE_WAS_CHANGED
       );
-
-      // v2: keepAlive no longer uses schedule rows. Remove any orphaned
-      // heartbeat schedules left over from the previous implementation.
-      if (schemaVersion < 2) {
-        this.ctx.storage.sql.exec(
-          "DELETE FROM cf_agents_schedules WHERE callback = '_cf_keepAliveHeartbeat'"
-        );
-      }
 
       // v3: durable fibers table for runFiber
       this.sql`
@@ -2406,6 +2221,84 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    this.scheduler = createScheduler(
+      {
+        callbacks: this,
+        storage: this.ctx.storage,
+        now: Date.now,
+        createId: () => nanoid(9),
+        hungScheduleTimeoutSeconds:
+          this._resolvedOptions.hungScheduleTimeoutSeconds
+      },
+      {
+        host: this,
+        storage: this.ctx.storage,
+        now: Date.now,
+        createId: () => nanoid(9),
+        sql: this.sql.bind(this),
+        rawSql: (query, ...params) =>
+          this.ctx.storage.sql.exec(query, ...params),
+        emit: (type, payload) => this._emit(type, payload),
+        retryDefaults: () => this._resolvedOptions.retry,
+        hungScheduleTimeoutSeconds: () =>
+          this._resolvedOptions.hungScheduleTimeoutSeconds,
+        validateSchedule: (when, callback, options) =>
+          this._validateScheduleCallback(when, callback as keyof this, options),
+        hasCallback: (callback) =>
+          typeof this[callback as keyof this] === "function",
+        invokeCallback: (callback, payload, schedule) => {
+          const method = this[callback as keyof this];
+          if (typeof method !== "function") {
+            throw new Error(`this.${callback} is not a function`);
+          }
+          return runInInvocation(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            () =>
+              (
+                method as (
+                  payload: unknown,
+                  schedule: Schedule<unknown>
+                ) => void | Promise<void>
+              ).call(this, payload, schedule)
+          );
+        },
+        dispatchOwnedCallback: (ownerData, row) =>
+          this._cf_dispatchScheduledCallback(
+            JSON.parse(ownerData) as AgentPathStep[],
+            row
+          ),
+        rearm: () => this.lifecycle.rearmAlarm(),
+        isDestroyed: () => this._destroyed,
+        onError: (error) =>
+          runInInvocation(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            () => this.onError(error)
+          )
+      }
+    );
+
+    this._schedulerAdapter = new SchedulerAgentAdapter({
+      scheduler: this.scheduler,
+      validateSchedule: (when, callback, options) =>
+        this._validateScheduleCallback(when, callback as keyof this, options),
+      isFacet: () => this._isFacet,
+      selfPath: () => this.selfPath,
+      rootAlarmOwner: () => this._rootAlarmOwner(),
+      emit: (type, payload) => this._emit(type, payload),
+      isSamePathPrefix: (prefix, path) =>
+        this._isSameAgentPathPrefix(prefix, path)
+    });
+
     this.mcp = this._withAgentSpan(
       "agent_initialization",
       "initialization",
@@ -2423,6 +2316,12 @@ export class Agent<
           {},
           (updateStorage) => {
             this._ensureSchema();
+            // Fresh/pre-versioned Agents need schedule storage before native
+            // RPC can enter. Established Agents already have the table; the
+            // capability's own versioned onStart handles future migrations.
+            if (this._schemaInitialization?.migrated) {
+              this._schedulerAdapter.ensureSchema();
+            }
             const schemaAttributes = {
               "cloudflare.agents.schema.version.previous":
                 this._schemaInitialization?.previousVersion,
@@ -2446,7 +2345,7 @@ export class Agent<
       }
     );
 
-    this.lifecycle.use(this.mcp);
+    this.lifecycle.use(this.scheduler).use(this.mcp);
 
     // MCP starts before Agent restores facet routing state. Defer its initial
     // publication until broadcasts can be routed to the correct owner.
@@ -2505,6 +2404,14 @@ export class Agent<
       }
       // default "none" already set in field initializer
     }
+
+    const _onAlarm = this.onAlarm.bind(this);
+    this.onAlarm = async () => {
+      if (this._destroyed) return;
+      await _onAlarm();
+      if (this._destroyed) return;
+      await this._onAlarmHousekeeping();
+    };
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
@@ -3902,18 +3809,6 @@ export class Agent<
       }));
   }
 
-  private _scheduleOwnerPathKey(
-    path: ReadonlyArray<AgentPathStep> | null
-  ): string | null {
-    if (!path) return null;
-    return path
-      .map(
-        (step) =>
-          `${encodeURIComponent(step.className)}:${encodeURIComponent(step.name)}`
-      )
-      .join("/");
-  }
-
   private _facetRunRowsForPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): FacetRunStorageRow[] {
@@ -4011,199 +3906,7 @@ export class Agent<
     }
   }
 
-  /**
-   * Insert (or, for idempotent calls, return the existing row for) a
-   * schedule owned by either this top-level agent (`ownerPath === null`)
-   * or a descendant facet. Returns `{ schedule, created }` — `created`
-   * is `false` when an idempotent insert deduplicates onto an existing
-   * row, so callers can suppress the `schedule:create` event in that
-   * case to match historic semantics.
-   * @internal
-   */
-  private async _insertScheduleForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    when: Date | string | number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    const ownerPathJson = ownerPath ? JSON.stringify(ownerPath) : null;
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-    const payloadJson = JSON.stringify(payload);
-
-    if (when instanceof Date) {
-      const timestamp = Math.floor(when.getTime() / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'scheduled'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            schedule: {
-              callback: row.callback,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "scheduled"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'scheduled', ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this._scheduleNextAlarm();
-      return {
-        schedule: {
-          callback,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "scheduled"
-        },
-        created: true
-      };
-    }
-
-    if (typeof when === "number") {
-      const timestamp = Math.floor((Date.now() + when * 1000) / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'delayed'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            schedule: {
-              callback: row.callback,
-              delayInSeconds: row.delayInSeconds ?? 0,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "delayed"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, delayInSeconds, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'delayed', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this._scheduleNextAlarm();
-      return {
-        schedule: {
-          callback,
-          delayInSeconds: when,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "delayed"
-        },
-        created: true
-      };
-    }
-
-    if (typeof when === "string") {
-      const timestamp = Math.floor(getNextCronTime(when).getTime() / 1000);
-      const idempotent = options?.idempotent !== false;
-
-      if (idempotent) {
-        const existing = this.sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'cron'
-            AND callback = ${callback}
-            AND cron = ${when}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            schedule: {
-              callback: row.callback,
-              cron: row.cron ?? when,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "cron"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, cron, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'cron', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this._scheduleNextAlarm();
-      return {
-        schedule: {
-          callback,
-          cron: when,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "cron"
-        },
-        created: true
-      };
-    }
-
-    throw new Error(
-      `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
-    );
-  }
+  // ── Scheduling (delegates to agents/schedules) ─────────────────────────
 
   /**
    * Insert a schedule row owned by a descendant facet. Called via RPC
@@ -4213,94 +3916,20 @@ export class Agent<
    * events itself.
    * @internal
    */
-  async _cf_scheduleForFacet<T = string>(
+  _cf_scheduleForFacet<T = string>(
     ownerPath: ReadonlyArray<AgentPathStep>,
     when: Date | string | number,
     callback: string,
     payload?: T,
     options?: { retry?: RetryOptions; idempotent?: boolean }
   ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    return this._insertScheduleForOwner(
+    return this._schedulerAdapter.insertForOwner(
       ownerPath,
       when,
       callback,
       payload,
       options
     );
-  }
-
-  /**
-   * Insert (or, for idempotent calls, return the existing row for) an
-   * interval schedule. Mirrors {@link _insertScheduleForOwner} —
-   * returns `{ schedule, created }` so callers can suppress
-   * `schedule:create` on dedup.
-   * @internal
-   */
-  private async _insertIntervalScheduleForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; _idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    const ownerPathJson = ownerPath ? JSON.stringify(ownerPath) : null;
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const idempotent = options?._idempotent !== false;
-    const payloadJson = JSON.stringify(payload);
-
-    if (idempotent) {
-      const existing = this.sql<ScheduleStorageRow>`
-        SELECT * FROM cf_agents_schedules
-        WHERE type = 'interval'
-          AND callback = ${callback}
-          AND intervalSeconds = ${intervalSeconds}
-          AND payload IS ${payloadJson}
-          AND owner_path_key IS ${ownerPathKey}
-        LIMIT 1
-      `;
-
-      if (existing.length > 0) {
-        const row = existing[0];
-        await this._scheduleNextAlarm();
-        return {
-          schedule: {
-            callback: row.callback,
-            id: row.id,
-            intervalSeconds: row.intervalSeconds ?? intervalSeconds,
-            payload: JSON.parse(row.payload) as T,
-            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
-            time: row.time,
-            type: "interval"
-          },
-          created: false
-        };
-      }
-    }
-
-    const id = nanoid(9);
-    const timestamp = Math.floor((Date.now() + intervalSeconds * 1000) / 1000);
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_schedules
-        (id, callback, payload, type, intervalSeconds, time, running, retry_options, owner_path, owner_path_key)
-      VALUES
-        (${id}, ${callback}, ${payloadJson}, 'interval', ${intervalSeconds}, ${timestamp}, 0, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-    `;
-
-    await this._scheduleNextAlarm();
-    return {
-      schedule: {
-        callback,
-        id,
-        intervalSeconds,
-        payload: payload as T,
-        retry: options?.retry,
-        time: timestamp,
-        type: "interval"
-      },
-      created: true
-    };
   }
 
   /**
@@ -4311,14 +3940,14 @@ export class Agent<
    * emit observability events itself.
    * @internal
    */
-  async _cf_scheduleEveryForFacet<T = string>(
+  _cf_scheduleEveryForFacet<T = string>(
     ownerPath: ReadonlyArray<AgentPathStep>,
     intervalSeconds: number,
     callback: string,
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    return this._insertIntervalScheduleForOwner(
+    return this._schedulerAdapter.insertIntervalForOwner(
       ownerPath,
       intervalSeconds,
       callback,
@@ -4335,24 +3964,11 @@ export class Agent<
    * observability events itself.
    * @internal
    */
-  async _cf_cancelScheduleForFacet(
+  _cf_cancelScheduleForFacet(
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<{ ok: boolean; callback?: string }> {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const result = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules
-      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
-    `;
-    if (result.length === 0) return { ok: false };
-
-    const callback = result[0].callback;
-    this.sql`
-      DELETE FROM cf_agents_schedules
-      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
-    `;
-    await this._scheduleNextAlarm();
-    return { ok: true, callback };
+    return this._schedulerAdapter.cancelForOwner(ownerPath, id);
   }
 
   /**
@@ -4368,120 +3984,9 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const rows = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules
-      WHERE owner_path IS NOT NULL
-    `;
-    const rowsToDelete = rows.filter((row) => {
-      if (!row.owner_path) return false;
-      try {
-        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-        return this._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
-      } catch {
-        return false;
-      }
-    });
-
-    for (const row of rowsToDelete) {
-      this._emit("schedule:cancel", {
-        callback: row.callback,
-        id: row.id
-      });
-      this.sql`DELETE FROM cf_agents_schedules WHERE id = ${row.id}`;
-    }
-
+    this._schedulerAdapter.cancelOwnerPrefix(ownerPath);
     this._deleteFacetRunRowsForPrefix(ownerPath);
-    await this._scheduleNextAlarm();
-  }
-
-  private _scheduleRowToSchedule<T>(row: ScheduleStorageRow): Schedule<T> {
-    const base = {
-      callback: row.callback,
-      id: row.id,
-      payload: JSON.parse(row.payload) as T,
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
-
-    switch (row.type) {
-      case "scheduled":
-        return {
-          ...base,
-          time: row.time,
-          type: "scheduled"
-        };
-      case "delayed":
-        return {
-          ...base,
-          delayInSeconds: row.delayInSeconds ?? 0,
-          time: row.time,
-          type: "delayed"
-        };
-      case "cron":
-        return {
-          ...base,
-          cron: row.cron ?? "",
-          time: row.time,
-          type: "cron"
-        };
-      case "interval":
-        return {
-          ...base,
-          intervalSeconds: row.intervalSeconds ?? 0,
-          time: row.time,
-          type: "interval"
-        };
-    }
-  }
-
-  private _getScheduleForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    id: string
-  ): Schedule<T> | undefined {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const result = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules
-      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
-    `;
-    if (!result || result.length === 0) {
-      return undefined;
-    }
-    return this._scheduleRowToSchedule<T>(result[0]);
-  }
-
-  private _listSchedulesForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    criteria: ScheduleCriteria = {}
-  ): Schedule<T>[] {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    let query = "SELECT * FROM cf_agents_schedules WHERE owner_path_key IS ?";
-    const params: Array<string | number | null> = [ownerPathKey];
-
-    if (criteria.id) {
-      query += " AND id = ?";
-      params.push(criteria.id);
-    }
-
-    if (criteria.type) {
-      query += " AND type = ?";
-      params.push(criteria.type);
-    }
-
-    if (criteria.timeRange) {
-      query += " AND time >= ? AND time <= ?";
-      const start = criteria.timeRange.start || new Date(0);
-      const end = criteria.timeRange.end || new Date(999999999999999);
-      params.push(
-        Math.floor(start.getTime() / 1000),
-        Math.floor(end.getTime() / 1000)
-      );
-    }
-
-    return this.ctx.storage.sql
-      .exec(query, ...params)
-      .toArray()
-      .map((row) =>
-        this._scheduleRowToSchedule<T>(row as unknown as ScheduleStorageRow)
-      );
+    await this._rearmAlarm();
   }
 
   /**
@@ -4492,7 +3997,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     id: string
   ): Promise<Schedule<unknown> | undefined> {
-    return this._getScheduleForOwner(ownerPath, id);
+    return this._schedulerAdapter.getForOwner(ownerPath, id);
   }
 
   /**
@@ -4504,7 +4009,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     criteria: ScheduleCriteria = {}
   ): Promise<Schedule<unknown>[]> {
-    return this._listSchedulesForOwner(ownerPath, criteria);
+    return this._schedulerAdapter.listForOwner(ownerPath, criteria);
   }
 
   /**
@@ -4516,12 +4021,12 @@ export class Agent<
   async _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const ownerPathKey = scheduleOwnerPathKey(ownerPath);
     const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
     this._facetKeepAliveTokens.add(token);
     this._keepAliveRefs++;
     if (this._keepAliveRefs === 1) {
-      await this._scheduleNextAlarm();
+      await this._rearmAlarm();
     }
     return token;
   }
@@ -4534,7 +4039,7 @@ export class Agent<
   async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
     if (!this._facetKeepAliveTokens.delete(token)) return;
     this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    await this._scheduleNextAlarm();
+    await this._rearmAlarm();
   }
 
   /**
@@ -4548,7 +4053,7 @@ export class Agent<
     runId: string
   ): Promise<void> {
     const ownerPathJson = JSON.stringify(ownerPath);
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const ownerPathKey = scheduleOwnerPathKey(ownerPath);
     if (!ownerPathKey) {
       throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
     }
@@ -4558,7 +4063,7 @@ export class Agent<
       VALUES
         (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
     `;
-    await this._scheduleNextAlarm();
+    await this._rearmAlarm();
   }
 
   /**
@@ -4569,13 +4074,13 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const ownerPathKey = scheduleOwnerPathKey(ownerPath);
     this.sql`
       DELETE FROM cf_agents_facet_runs
       WHERE owner_path_key IS ${ownerPathKey}
         AND run_id = ${runId}
     `;
-    await this._scheduleNextAlarm();
+    await this._rearmAlarm();
   }
 
   /**
@@ -4600,39 +4105,18 @@ export class Agent<
    * @param options.idempotent Dedup by callback+payload. Defaults to `true` for cron, `false` otherwise.
    * @returns Schedule object representing the scheduled task
    */
-  async schedule<T = string>(
+  schedule<T = string>(
     when: Date | string | number,
     callback: keyof this,
     payload?: T,
     options?: { retry?: RetryOptions; idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    this._validateScheduleCallback(when, callback, options);
-
-    const result = this._isFacet
-      ? await (
-          await this._rootAlarmOwner()
-        )._cf_scheduleForFacet<T>(
-          this.selfPath,
-          when,
-          callback,
-          payload,
-          options
-        )
-      : await this._insertScheduleForOwner(
-          null,
-          when,
-          callback,
-          payload,
-          options
-        );
-
-    if (result.created) {
-      this._emit("schedule:create", {
-        callback: result.schedule.callback,
-        id: result.schedule.id
-      });
-    }
-    return result.schedule;
+    return this._schedulerAdapter.schedule<T>(
+      when,
+      callback as string,
+      payload,
+      options
+    );
   }
 
   /**
@@ -4661,62 +4145,18 @@ export class Agent<
    * @param options.retry Retry options for the callback execution
    * @returns Schedule object representing the scheduled task
    */
-  async scheduleEvery<T = string>(
+  scheduleEvery<T = string>(
     intervalSeconds: number,
     callback: keyof this,
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    // DO alarms have a max schedule time of 30 days
-    const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60; // 30 days in seconds
-
-    if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
-      throw new Error("intervalSeconds must be a positive number");
-    }
-
-    if (intervalSeconds > MAX_INTERVAL_SECONDS) {
-      throw new Error(
-        `intervalSeconds cannot exceed ${MAX_INTERVAL_SECONDS} seconds (30 days)`
-      );
-    }
-
-    if (typeof callback !== "string") {
-      throw new Error("Callback must be a string");
-    }
-
-    if (typeof this[callback] !== "function") {
-      throw new Error(`this.${callback} is not a function`);
-    }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const result = this._isFacet
-      ? await (
-          await this._rootAlarmOwner()
-        )._cf_scheduleEveryForFacet<T>(
-          this.selfPath,
-          intervalSeconds,
-          callback,
-          payload,
-          options
-        )
-      : await this._insertIntervalScheduleForOwner(
-          null,
-          intervalSeconds,
-          callback,
-          payload,
-          options
-        );
-
-    if (result.created) {
-      this._emit("schedule:create", {
-        callback: result.schedule.callback,
-        id: result.schedule.id
-      });
-    }
-    return result.schedule;
+    return this._schedulerAdapter.scheduleEvery<T>(
+      intervalSeconds,
+      callback as string,
+      payload,
+      options
+    );
   }
 
   /**
@@ -4728,13 +4168,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
-    if (this._isFacet) {
-      throw new Error(
-        "getSchedule() is synchronous and cannot read parent-owned sub-agent schedules. " +
-          "Use await this.getScheduleById(id) instead."
-      );
-    }
-    return this._getScheduleForOwner(null, id);
+    return this._schedulerAdapter.getSchedule<T>(id);
   }
 
   /**
@@ -4747,12 +4181,8 @@ export class Agent<
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
    */
-  async getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      return root._cf_getScheduleForFacet(this.selfPath, id);
-    }
-    return this._getScheduleForOwner(null, id);
+  getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
+    return this._schedulerAdapter.getScheduleById(id);
   }
 
   /**
@@ -4764,14 +4194,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
-    if (this._isFacet) {
-      throw new Error(
-        "getSchedules() is synchronous and cannot read parent-owned sub-agent schedules. " +
-          "Use await this.listSchedules(criteria) instead."
-      );
-    }
-
-    return this._listSchedulesForOwner(null, criteria);
+    return this._schedulerAdapter.getSchedules<T>(criteria);
   }
 
   /**
@@ -4784,14 +4207,8 @@ export class Agent<
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects
    */
-  async listSchedules(
-    criteria: ScheduleCriteria = {}
-  ): Promise<Schedule<unknown>[]> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      return root._cf_listSchedulesForFacet(this.selfPath, criteria);
-    }
-    return this._listSchedulesForOwner(null, criteria);
+  listSchedules(criteria: ScheduleCriteria = {}): Promise<Schedule<unknown>[]> {
+    return this._schedulerAdapter.listSchedules(criteria);
   }
 
   /**
@@ -4808,29 +4225,8 @@ export class Agent<
    * @param id ID of the task to cancel
    * @returns true if the task was cancelled, false if the task was not found
    */
-  async cancelSchedule(id: string): Promise<boolean> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      const result = await root._cf_cancelScheduleForFacet(this.selfPath, id);
-      if (result.ok && result.callback) {
-        this._emit("schedule:cancel", { callback: result.callback, id });
-      }
-      return result.ok;
-    }
-    const schedule = this._getScheduleForOwner(null, id);
-    if (!schedule) {
-      return false;
-    }
-
-    this._emit("schedule:cancel", {
-      callback: schedule.callback,
-      id: schedule.id
-    });
-
-    this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
-
-    await this._scheduleNextAlarm();
-    return true;
+  cancelSchedule(id: string): Promise<boolean> {
+    return this._schedulerAdapter.cancelSchedule(id);
   }
 
   /**
@@ -4874,7 +4270,7 @@ export class Agent<
     this._keepAliveRefs++;
 
     if (this._keepAliveRefs === 1) {
-      await this._scheduleNextAlarm();
+      await this._rearmAlarm();
     }
 
     let disposed = false;
@@ -4889,7 +4285,7 @@ export class Agent<
       // (mirrors `_cf_releaseFacetKeepAlive`).
       if (this._keepAliveRefs === 0) {
         this.ctx.waitUntil(
-          this._scheduleNextAlarm().catch((e) => {
+          this._rearmAlarm().catch((e) => {
             console.error(
               "[Agent] Failed to reschedule alarm after keepAlive dispose:",
               e
@@ -5841,7 +5237,7 @@ export class Agent<
     const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
     // Forward progress this scan = at least one fiber was resolved (orphan row
     // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
-    // fiber finalized). Drives the recovery-alarm backoff in `_scheduleNextAlarm`.
+    // fiber finalized). Drives the recovery-alarm backoff in `_rearmAlarm`.
     let madeProgress = false;
 
     try {
@@ -6001,7 +5397,7 @@ export class Agent<
       this._runFiberRecoveryInProgress = false;
       // Update the recovery-alarm backoff streak: reset on any forward progress,
       // otherwise grow it only while work is still pending (a repeatedly-failing
-      // poison hook). `_scheduleNextAlarm` reads this to space out retries.
+      // poison hook). `_rearmAlarm` reads this to space out retries.
       if (madeProgress) {
         this._recoveryNoProgressScans = 0;
       } else {
@@ -6151,7 +5547,7 @@ export class Agent<
     }
 
     if (selfPath.length === ownerPath.length) {
-      await this._executeScheduleCallback(row);
+      await this._schedulerAdapter.executeCallback(row);
       return true;
     }
 
@@ -6321,163 +5717,13 @@ export class Agent<
     await handle._cf_destroyDescendantFacet(targetPath);
   }
 
-  private async _executeScheduleCallback(
-    row: ScheduleStorageRow
-  ): Promise<void> {
-    const callback = this[row.callback as keyof Agent<Env>];
-    if (!callback) {
-      console.error(`callback ${row.callback} not found`);
-      return;
-    }
-
-    await runInInvocation(
-      {
-        agent: this,
-        connection: undefined,
-        request: undefined,
-        email: undefined
-      },
-      async () => {
-        const retryOpts = parseRetryOptions(
-          row as unknown as Record<string, unknown>
-        );
-        const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-          retryOpts,
-          this._resolvedOptions.retry
-        );
-
-        let parsedPayload: unknown;
-        try {
-          parsedPayload = JSON.parse(row.payload as string);
-        } catch (e) {
-          console.error(
-            `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
-            e
-          );
-          this._emit("schedule:error", {
-            callback: row.callback,
-            id: row.id,
-            error: e instanceof Error ? e.message : String(e),
-            attempts: 0
-          });
-          return;
-        }
-
-        // A one-shot row is deleted by `alarm()` once this returns normally.
-        // If it fails with a superseded-isolate error (a deploy / code update
-        // replaced the isolate — "reset because its code was updated" or "this
-        // script has been upgraded"), burning in-process retries is futile
-        // (code never reloads mid-invocation) and swallowing the error would
-        // let `alarm()` delete the row — permanently abandoning the work (e.g.
-        // an interrupted chat-recovery continuation, or a queued submission's
-        // drain alarm, leaving the submission orphaned with no driver). For
-        // that transient we skip the doomed retries and re-throw so `alarm()`
-        // rejects, the one-shot row survives, and the platform re-runs it on a
-        // fresh isolate (= new code) under the at-least-once alarm guarantee.
-        //
-        // Other platform transients ("Network connection lost." / errors the
-        // platform flags `retryable`) MAY succeed on an in-process retry (a
-        // momentary blip), so they keep the normal retry budget — but if the
-        // budget drains while the platform is still unhealthy (#1730: a
-        // deploy-reset window outlasts the few-seconds retry schedule by
-        // design), the row is deferred on exhaustion instead of consumed: the
-        // platform failed, not the callback, and the same work succeeds when
-        // the alarm re-fires in the healthy window that follows. A genuinely
-        // failing callback throws application-shaped errors (none of the
-        // platform signals) and is still abandoned after `maxAttempts` exactly
-        // as before.
-        const isOneShotSchedule =
-          row.type === "delayed" || row.type === "scheduled";
-        const shouldDeferReset = (error: unknown): boolean =>
-          isOneShotSchedule && isDurableObjectCodeUpdateReset(error);
-        const shouldDeferOnExhaustion = (error: unknown): boolean =>
-          isOneShotSchedule && isPlatformTransientError(error);
-        // A memory-limit reset is re-thrown (not swallowed) so the one-shot row
-        // is preserved and the error reaches the alarm-boundary circuit breaker
-        // (#1825), which bounds it: it tolerates a few strikes (a transient
-        // spike may clear on a fresh isolate) and then seals + purges the
-        // looping row. Deferral is only SAFE because that breaker bounds it —
-        // re-running a deterministic OOM forever is exactly what we must avoid,
-        // and without the breaker this would amplify the loop (see retries.ts).
-        const shouldDeferMemoryLimit = (error: unknown): boolean =>
-          isOneShotSchedule && isDurableObjectMemoryLimitReset(error);
-
-        try {
-          this._emit("schedule:execute", {
-            callback: row.callback,
-            id: row.id
-          });
-
-          await tryN(
-            maxAttempts,
-            async (attempt) => {
-              if (attempt > 1) {
-                this._emit("schedule:retry", {
-                  callback: row.callback,
-                  id: row.id,
-                  attempt,
-                  maxAttempts
-                });
-              }
-              await (
-                callback as (
-                  payload: unknown,
-                  schedule: Schedule<unknown>
-                ) => Promise<void>
-              ).bind(this)(parsedPayload, row as unknown as Schedule<unknown>);
-            },
-            {
-              baseDelayMs,
-              maxDelayMs,
-              shouldRetry: (error) => !shouldDeferReset(error)
-            }
-          );
-        } catch (e) {
-          if (shouldDeferReset(e)) {
-            console.warn(
-              `Deferring scheduled callback "${row.callback}" to a fresh invocation after a Durable Object code-update reset; the one-shot row is preserved and the alarm will re-run on new code.`
-            );
-            throw e;
-          }
-          if (shouldDeferOnExhaustion(e)) {
-            console.warn(
-              `Deferring scheduled callback "${row.callback}" after exhausting in-process retries on a transient platform error; the one-shot row is preserved and the alarm will re-run once the platform recovers.`
-            );
-            throw e;
-          }
-          if (shouldDeferMemoryLimit(e)) {
-            console.warn(
-              `Deferring scheduled callback "${row.callback}" to the alarm memory-limit circuit breaker after a Durable Object memory-limit reset; the one-shot row is preserved so the breaker can bound the retry loop and seal it (#1825).`
-            );
-            throw e;
-          }
-          console.error(
-            `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
-            e
-          );
-          this._emit("schedule:error", {
-            callback: row.callback,
-            id: row.id,
-            error: e instanceof Error ? e.message : String(e),
-            attempts: maxAttempts
-          });
-          try {
-            await this.onError(e);
-          } catch {
-            // swallow onError errors
-          }
-        }
-      }
-    );
-  }
-
   /**
    * Whether any runFiber recovery work is still outstanding: orphaned
    * `cf_agents_runs` rows left by a dead process (excluding fibers currently
    * executing in memory, which already hold a keepAlive ref) or managed
    * ledger fibers stuck in a non-terminal state with no live run row.
    *
-   * Used by `_scheduleNextAlarm` to arm a follow-up alarm so multi-pass
+   * Used by `_rearmAlarm` to arm a follow-up alarm so multi-pass
    * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
    * recovery hook) resumes instead of starving.
    * @internal
@@ -6500,94 +5746,30 @@ export class Agent<
     return (ledgerOnly[0]?.count ?? 0) > 0;
   }
 
-  private async _scheduleNextAlarm(): Promise<void> {
+  private async _rearmAlarm(): Promise<void> {
     await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, () =>
-      this._scheduleNextAlarmBody()
+      this.lifecycle.rearmAlarm()
     );
   }
 
-  private async _scheduleNextAlarmBody(): Promise<void> {
-    // A pending destroy (#1625) owns the alarm: keep it armed immediately so
-    // teardown lands, and never let the "no work pending" branch below
-    // delete it out from under `_cf_scheduleDestroy`.
-    if (await this._hasPendingDestroy()) {
-      await this.ctx.storage.setAlarm(Date.now());
-      return;
+  /**
+   * Contribute Agent-owned alarm work that has not yet been extracted into its
+   * own capability. Scheduler contributes independently.
+   * @internal
+   */
+  async getNextAlarm(): Promise<AlarmContribution> {
+    const pendingDestroy = await this._pendingDestroyAlarm();
+    if (pendingDestroy !== null) {
+      return { time: pendingDestroy, exclusive: true };
     }
 
     const nowMs = Date.now();
-    const nowSeconds = Math.floor(nowMs / 1000);
-    const hungCutoffSeconds =
-      nowSeconds - this._resolvedOptions.hungScheduleTimeoutSeconds;
-
-    // Find the earliest schedule row that is safe to execute now, even if it
-    // is already overdue. Overdue schedules can happen after a DO restart
-    // because the SQLite row survives but the in-memory alarm does not.
-    const readySchedules = this.sql<{
-      time: number;
-    }>`
-      SELECT time FROM cf_agents_schedules
-      WHERE type != 'interval'
-        OR running = 0
-        OR coalesce(execution_started_at, 0) <= ${hungCutoffSeconds}
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-
-    // Running interval schedules that are not hung yet still need a future
-    // alarm so the runtime can re-check them once they cross the hung timeout.
-    const recoveringIntervals = this.sql<{
-      execution_started_at: number | null;
-    }>`
-      SELECT execution_started_at FROM cf_agents_schedules
-      WHERE type = 'interval'
-        AND running = 1
-        AND coalesce(execution_started_at, 0) > ${hungCutoffSeconds}
-      ORDER BY execution_started_at ASC
-      LIMIT 1
-    `;
-
     let nextTimeMs: number | null = null;
-    if (readySchedules.length > 0 && "time" in readySchedules[0]) {
-      nextTimeMs = Math.max(
-        (readySchedules[0].time as number) * 1000,
-        nowMs + 1
-      );
-    }
-
-    if (
-      recoveringIntervals.length > 0 &&
-      recoveringIntervals[0].execution_started_at !== null
-    ) {
-      const recoveryTimeMs =
-        (recoveringIntervals[0].execution_started_at +
-          this._resolvedOptions.hungScheduleTimeoutSeconds) *
-        1000;
-      nextTimeMs =
-        nextTimeMs === null
-          ? recoveryTimeMs
-          : Math.min(nextTimeMs, recoveryTimeMs);
-    }
 
     if (this._keepAliveRefs > 0) {
-      const keepAliveMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
-      nextTimeMs =
-        nextTimeMs === null ? keepAliveMs : Math.min(nextTimeMs, keepAliveMs);
+      nextTimeMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
     }
 
-    // Fibers left behind by a dead process (orphaned `cf_agents_runs` rows or
-    // interrupted/pending managed ledger rows) are recovered by the alarm-
-    // driven scan. A single scan can leave work behind — it yields once it
-    // crosses `fiberRecoveryScanDeadlineMs`, and a repeatedly-throwing
-    // unmanaged recovery hook keeps its row until it ages out. Without a
-    // follow-up alarm those leftovers would starve, since the orphans hold no
-    // keepAlive ref. Arm one so recovery resumes.
-    //
-    // The delay backs off exponentially while scans make no forward progress
-    // (a poison hook that keeps throwing, or a `fiberRecoveryMaxAgeMs: 0`
-    // retain-forever row) so the DO is not woken every `keepAliveIntervalMs`
-    // indefinitely. A scan that recovers anything resets the streak (see
-    // `_checkRunFibers`), so legitimate multi-pass draining stays prompt.
     if (this._hasPendingFiberRecovery()) {
       const base = this._resolvedOptions.keepAliveIntervalMs;
       const exp = Math.min(
@@ -6614,25 +5796,29 @@ export class Agent<
           : Math.min(nextTimeMs, facetRecoveryMs);
     }
 
-    if (nextTimeMs !== null) {
-      await this.ctx.storage.setAlarm(nextTimeMs);
-    } else {
-      await this.ctx.storage.deleteAlarm();
+    const extensionAlarm = await this._getExtensionAlarm();
+    if (extensionAlarm !== null) {
+      nextTimeMs =
+        nextTimeMs === null
+          ? extensionAlarm
+          : Math.min(nextTimeMs, extensionAlarm);
     }
+    return nextTimeMs;
   }
 
-  /** Lifecycle alarm callback; Agent scheduling runs in the platform alarm. */
+  /** @internal Transitional alarm contribution for Agent subclasses. */
+  protected _getExtensionAlarm(): number | null | Promise<number | null> {
+    return null;
+  }
+
+  /** Lifecycle alarm callback; Agent housekeeping runs after user alarm work. */
   onAlarm(): void {}
 
   /**
-   * Method called when an alarm fires.
-   * Executes any scheduled tasks that are due.
+   * Run Lifecycle's alarm phase inside Agent's memory-limit circuit breaker.
    *
-   * Runs the lifecycle alarm phase before due schedules and housekeeping.
-   *
-   * @remarks
-   * To schedule a task, please use the `this.schedule` method instead.
-   * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
+   * @remarks Use `this.schedule()` for named Agent callbacks. Reusable durable
+   * work belongs in a capability with `getNextAlarm()` and `onAlarm()`.
    */
   async alarm() {
     // A pending destroy (#1625) pre-empts everything — including lifecycle
@@ -6667,161 +5853,9 @@ export class Agent<
     }
   }
 
-  /**
-   * The alarm body: lifecycle init + due-schedule processing + housekeeping +
-   * next-alarm arm. Extracted from {@link alarm} so the memory-limit circuit
-   * breaker can wrap it at the outermost frame (see {@link alarm}).
-   */
+  /** Run the Lifecycle alarm phase inside Agent's OOM circuit breaker. */
   private async _cf_runAlarmBody() {
-    // Initialize components and the Agent before processing scheduled tasks.
     await this.lifecycle.alarm();
-
-    const now = Math.floor(Date.now() / 1000);
-
-    // Get all schedules that should be executed now
-    const result = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules WHERE time <= ${now}
-    `;
-
-    if (result && Array.isArray(result)) {
-      // Warn when many stale one-shot rows share the same callback — this
-      // usually means schedule() was called repeatedly (e.g. in onStart)
-      // without idempotent:true and rows accumulated across restarts.
-      const DUPLICATE_SCHEDULE_THRESHOLD = 10;
-      const oneShotCounts = new Map<string, number>();
-      for (const row of result) {
-        if (row.type === "delayed" || row.type === "scheduled") {
-          oneShotCounts.set(
-            row.callback,
-            (oneShotCounts.get(row.callback) ?? 0) + 1
-          );
-        }
-      }
-      for (const [cb, count] of oneShotCounts) {
-        if (count >= DUPLICATE_SCHEDULE_THRESHOLD) {
-          try {
-            console.warn(
-              `Processing ${count} stale "${cb}" schedules in a single alarm cycle. ` +
-                `This usually means schedule() is being called repeatedly without ` +
-                `the idempotent option. Consider using scheduleEvery() for recurring ` +
-                `tasks or passing { idempotent: true } to schedule().`
-            );
-            this._emit("schedule:duplicate_warning", {
-              callback: cb,
-              count,
-              type: "one-shot"
-            });
-          } catch {
-            // Warning emission is non-critical — never block row processing.
-          }
-        }
-      }
-
-      for (const row of result as ScheduleStorageRow[]) {
-        let executed = false;
-
-        // Overlap prevention for interval schedules with hung callback detection
-        if (row.type === "interval" && row.running === 1) {
-          const executionStartedAt =
-            (row as { execution_started_at?: number }).execution_started_at ??
-            0;
-          const hungTimeoutSeconds =
-            this._resolvedOptions.hungScheduleTimeoutSeconds;
-          const elapsedSeconds = now - executionStartedAt;
-
-          if (elapsedSeconds < hungTimeoutSeconds) {
-            console.warn(
-              `Skipping interval schedule ${row.id}: previous execution still running`
-            );
-            continue;
-          }
-          // Previous execution appears hung, force reset and re-execute
-          console.warn(
-            `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
-          );
-        }
-
-        // Mark interval as running before execution
-        if (row.type === "interval") {
-          this
-            .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
-        }
-
-        if (row.owner_path) {
-          try {
-            const ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-            executed = await this._cf_dispatchScheduledCallback(ownerPath, row);
-          } catch (e) {
-            console.error(
-              `error dispatching scheduled callback "${row.callback}"`,
-              e
-            );
-            this._emit("schedule:error", {
-              callback: row.callback,
-              id: row.id,
-              error: e instanceof Error ? e.message : String(e),
-              attempts: 0
-            });
-            try {
-              await this.onError(e);
-            } catch {
-              // swallow onError errors
-            }
-            // Reset the in-flight flag for interval rows so the row
-            // doesn't stay stuck in `running=1` when dispatch fails
-            // (e.g. the facet's registry entry is missing). The next
-            // alarm cycle will retry.
-            if (row.type === "interval") {
-              this.sql`
-                UPDATE cf_agents_schedules SET running = 0 WHERE id = ${row.id}
-              `;
-            }
-            continue;
-          }
-        } else {
-          // Record the row id so the alarm-boundary circuit breaker can purge
-          // the exact looping row if this callback ends in a memory-limit reset
-          // (#1825). Cleared only on success; on a throw it propagates with the
-          // id still set, and the breaker clears it.
-          this._cf_executingScheduleRowId = row.id;
-          await this._executeScheduleCallback(row);
-          this._cf_executingScheduleRowId = undefined;
-          executed = true;
-        }
-
-        if (this._destroyed) return;
-        if (!executed) continue;
-
-        if (row.type === "cron") {
-          // Update next execution time for cron schedules
-          const nextExecutionTime = getNextCronTime(row.cron ?? "");
-          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
-
-          this.sql`
-            UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else if (row.type === "interval") {
-          // Reset running flag and schedule next interval execution
-          const nextTimestamp =
-            Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
-
-          this.sql`
-            UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else {
-          // Delete one-time schedules after execution
-          this.sql`
-            DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-          `;
-        }
-      }
-    }
-    if (this._destroyed) return;
-
-    await this._onAlarmHousekeeping();
-
-    // Schedule the next alarm
-    await this._scheduleNextAlarm();
   }
 
   /**
@@ -6829,13 +5863,6 @@ export class Agent<
    */
   private static readonly _CF_OOM_ALARM_STRIKES_KEY =
     "cf_agents:oom_alarm_strikes";
-
-  /**
-   * The schedule row id currently executing in the alarm loop, so the
-   * memory-limit circuit breaker can purge the exact looping row (#1825).
-   * `undefined` outside a callback (e.g. an OOM during lifecycle startup).
-   */
-  private _cf_executingScheduleRowId?: string;
 
   /**
    * The schedule-callback names whose alarm rows drive a recovery loop that can
@@ -6911,8 +5938,7 @@ export class Agent<
     const limit = this._resolvedOptions.maxAlarmMemoryLimitStrikes;
     const sealed = strikes >= limit;
     const recoveryCallbacks = this._cf_recoveryAlarmCallbacks();
-    const executingRowId = this._cf_executingScheduleRowId;
-    this._cf_executingScheduleRowId = undefined;
+    const executingRowId = this._schedulerAdapter.takeExecutingScheduleRowId();
 
     console.error(
       `Alarm hit a Durable Object memory-limit reset (strike ${strikes}/${limit}` +
@@ -6922,24 +5948,12 @@ export class Agent<
     );
 
     if (sealed) {
-      // Surgical purge: remove ONLY the looping rows (the recovery callbacks and
-      // the exact row that was executing) so they stop re-triggering; unrelated
-      // scheduled tasks survive.
-      for (const cb of recoveryCallbacks) {
-        try {
-          this.sql`DELETE FROM cf_agents_schedules WHERE callback = ${cb}`;
-        } catch {
-          // best-effort
-        }
-      }
-      if (executingRowId) {
-        try {
-          this
-            .sql`DELETE FROM cf_agents_schedules WHERE id = ${executingRowId}`;
-        } catch {
-          // best-effort
-        }
-      }
+      // Surgical purge: remove ONLY the looping rows (the recovery callbacks
+      // and the exact row that was executing) so unrelated schedules survive.
+      this._schedulerAdapter.purgeMemoryLimitedRows(
+        recoveryCallbacks,
+        executingRowId
+      );
       try {
         await this._cf_sealMemoryLimitedRecovery();
       } catch {
@@ -6956,22 +5970,11 @@ export class Agent<
       // A genuinely transient spike can clear in the meantime.
       const backoffSeconds = Math.min(300, 30 * strikes);
       const nextTime = Math.floor(Date.now() / 1000) + backoffSeconds;
-      for (const cb of recoveryCallbacks) {
-        try {
-          this
-            .sql`UPDATE cf_agents_schedules SET time = ${nextTime} WHERE callback = ${cb} AND time <= ${nextTime}`;
-        } catch {
-          // best-effort
-        }
-      }
-      if (executingRowId) {
-        try {
-          this
-            .sql`UPDATE cf_agents_schedules SET time = ${nextTime} WHERE id = ${executingRowId} AND time <= ${nextTime}`;
-        } catch {
-          // best-effort
-        }
-      }
+      this._schedulerAdapter.backoffMemoryLimitedRows(
+        recoveryCallbacks,
+        executingRowId,
+        nextTime
+      );
     }
 
     try {
@@ -6988,7 +5991,7 @@ export class Agent<
     // Re-arm so non-recovery schedules continue. Wrapped because it can itself
     // OOM; if it does, the next external wake re-arms.
     try {
-      await this._scheduleNextAlarm();
+      await this._rearmAlarm();
     } catch {
       // best-effort
     }
@@ -11056,11 +10059,9 @@ export class Agent<
     // `deleteAll()` below, which is also why it is a KV record rather than a
     // SQL row: it must outlive `_dropInternalTablesForDestroy`.
     await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+    await this.lifecycle.disableAlarms();
 
     this._dropInternalTablesForDestroy();
-
-    // delete all alarms
-    await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
 
     this._disposables.dispose();
@@ -11102,7 +10103,7 @@ export class Agent<
     // /facet bootstrap, and `destroy()` below branches on the in-memory
     // `_isFacet`. Without this, an RPC landing before init would see it as
     // `false`, fall through to `destroy()`'s top-level path, and write the
-    // destroy marker on a facet — which the `alarm()`/`_scheduleNextAlarm()`
+    // destroy marker on a facet — which the `alarm()`/`_rearmAlarm()`
     // guards forbid (only top-level agents write it; facet teardown is
     // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
     // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
@@ -11115,11 +10116,12 @@ export class Agent<
       await this.destroy();
       return;
     }
-    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
     // Future, not immediate: see DESTROY_ALARM_DELAY_MS — an immediate alarm
     // aborts the isolate fast enough to race this RPC's response back to the
     // DELETE handler, turning the intended 204 into a 500.
-    await this.ctx.storage.setAlarm(Date.now() + DESTROY_ALARM_DELAY_MS);
+    const destroyAt = Date.now() + DESTROY_ALARM_DELAY_MS;
+    await this.ctx.storage.put(DESTROY_PENDING_KEY, destroyAt);
+    await this.lifecycle.rearmAlarm();
   }
 
   /**
@@ -11127,15 +10129,23 @@ export class Agent<
    * durable marker directly — the in-memory `_isFacet` flag may not be
    * hydrated yet at the call sites, but facets never write the marker.
    */
+  private async _pendingDestroyAlarm(): Promise<number | null> {
+    const pending = await this.ctx.storage.get<boolean | number>(
+      DESTROY_PENDING_KEY
+    );
+    if (typeof pending === "number") return pending;
+    return pending === true ? Date.now() : null;
+  }
+
   private async _hasPendingDestroy(): Promise<boolean> {
-    return (await this.ctx.storage.get<boolean>(DESTROY_PENDING_KEY)) === true;
+    return (await this._pendingDestroyAlarm()) !== null;
   }
 
   /** @internal Drop every internal Agents SDK table during top-level destroy. */
   protected _dropInternalTablesForDestroy(): void {
     this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
+    this._schedulerAdapter.dropStorage();
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
     this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
     this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
