@@ -127,9 +127,54 @@ Capabilities run in registration order. Startup and alarms run every hook
 sequentially. Request handling stops at the first returned `Response`. A phase
 failure propagates, and failed startup can be retried.
 
-Pass dependencies to a capability explicitly. A capability should not receive an
-entire Agent merely to reach storage, bindings, authentication, observability,
-or protocol methods.
+Pass dependencies to a capability explicitly. A capability should not receive
+the entire host merely to reach storage, bindings, authentication,
+observability, or protocol methods.
+
+## Lifecycle Object context
+
+`agents/lifecycle` exports the `LifecycleObject` interface for a
+`DurableObject` with an installed `Lifecycle` and the semantic hooks Lifecycle
+dispatches. This is a host type, not the batteries-included `Agent` class
+exported from `agents`.
+
+Lifecycle establishes the `getCurrentAgent()` context only while it invokes
+host hooks. Capability hooks run outside that ambient context and use their own
+`this`, hook arguments, and explicitly supplied dependencies.
+
+```ts
+import { getCurrentAgent } from "agents/lifecycle";
+
+function currentRequestOrigin(): string | undefined {
+  const { request } = getCurrentAgent();
+  return request ? new URL(request.url).origin : undefined;
+}
+
+export class MyObject extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this);
+
+  onRequest(): Response {
+    return Response.json({ origin: currentRequestOrigin() });
+  }
+}
+```
+
+Pass the concrete host class when shared host code needs its additional APIs:
+
+```ts
+const { agent: object } = getCurrentAgent<MyObject>();
+```
+
+Host context values follow the invocation:
+
+- `onStart` and `onAlarm`: object;
+- `onRequest`: object and request;
+- `onConnect`: object, connection, and upgrade request;
+- `onMessage`, `onClose`, and `onError`: object and connection.
+
+`getConnectionTags(connection, { request })` remains argument-driven because it
+already receives both values explicitly. The root `agents` package continues
+to export `getCurrentAgent()` for the `Agent` class as a compatibility alias.
 
 ## WebSockets always hibernate
 

@@ -98,8 +98,8 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 
     // OAuth popup handler for MCP servers. The directory owns the MCP
     // state, so the OAuth redirect (`/chat/mcp-callback`) lands here
-    // and the Agent base class dispatches into `this.mcp` via
-    // `handleMcpOAuthCallback` on the base `Agent` class.
+    // and the lifecycle dispatches the callback through the installed
+    // `this.mcp` capability.
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {

@@ -69,6 +69,47 @@ describe("Lifecycle", () => {
     ]);
   });
 
+  it("scopes current context to Lifecycle Object host hooks", async () => {
+    const name = crypto.randomUUID();
+    const requestUrl = `https://example.com/agents/plain-lifecycle-object/${name}`;
+    await worker.fetch(new Request(requestUrl), env);
+
+    const stub = env.PlainLifecycleObject.getByName(name);
+    expect(await stub.contextAccessorsAreAliases()).toBe(true);
+    const requestContexts = [
+      { hostName: name, phase: "start", requestUrl: null },
+      { hostName: name, phase: "request", requestUrl }
+    ];
+    expect(await stub.getHostContextEvents()).toEqual(requestContexts);
+    expect(await stub.getCapabilityContextEvents()).toEqual([
+      { hasCurrentHost: false, phase: "start" },
+      { hasCurrentHost: false, phase: "request" }
+    ]);
+
+    await stub.scheduleAlarm();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const alarmContexts = [
+      ...requestContexts,
+      { hostName: name, phase: "alarm", requestUrl: null }
+    ];
+    expect(await stub.getHostContextEvents()).toEqual(alarmContexts);
+    expect(await stub.getCapabilityContextEvents()).toEqual([
+      { hasCurrentHost: false, phase: "start" },
+      { hasCurrentHost: false, phase: "request" },
+      { hasCurrentHost: false, phase: "alarm" }
+    ]);
+  });
+
+  it("does not leak an inherited Agent context into capabilities", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PlainLifecycleObject.getByName(name);
+
+    expect(await stub.startFromForeignContext({ label: "foreign" })).toEqual({
+      capability: [{ hasCurrentHost: false, phase: "start" }],
+      host: [{ hostName: name, phase: "start", requestUrl: null }]
+    });
+  });
+
   it("installs always-hibernating WebSocket handlers", async () => {
     const name = crypto.randomUUID();
     const response = await worker.fetch(
@@ -98,7 +139,38 @@ describe("Lifecycle", () => {
       );
     });
     expect(echoed).toBe("echo:hello");
+    const closed = new Promise<void>((resolve) => {
+      socket.addEventListener("close", () => resolve(), { once: true });
+    });
     socket.close(1000, "done");
+    await closed;
+
+    const contexts =
+      await env.PlainLifecycleObject.getByName(
+        name
+      ).getWebSocketContextEvents();
+    expect(contexts).toHaveLength(3);
+    expect(contexts).toEqual([
+      {
+        connectionId: contexts[0]?.connectionId,
+        hostName: name,
+        phase: "connect",
+        requestUrl: `https://example.com/agents/plain-lifecycle-object/${name}`
+      },
+      {
+        connectionId: contexts[0]?.connectionId,
+        hostName: name,
+        phase: "message",
+        requestUrl: null
+      },
+      {
+        connectionId: contexts[0]?.connectionId,
+        hostName: name,
+        phase: "close",
+        requestUrl: null
+      }
+    ]);
+    expect(contexts[0]?.connectionId).not.toBeNull();
   });
 
   it("reads an old __ps_name record without writing new fallback state", async () => {

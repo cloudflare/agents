@@ -53,6 +53,10 @@ import {
   Lifecycle,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
+import {
+  getCurrentAgent as getCurrentLifecycleAgent,
+  type CurrentAgentContext
+} from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 export {
   getAgentByName,
@@ -78,11 +82,7 @@ export {
   isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
-import {
-  MCPClientManager,
-  normalizeServerId,
-  type MCPClientOAuthResult
-} from "./mcp/client";
+import { MCPClientManager, normalizeServerId } from "./mcp/client";
 import type {
   WorkflowCallback,
   WorkflowTrackingRow,
@@ -116,6 +116,7 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
+import { ensureMcpServerTable } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
 export {
   AGENT_TOOL_PROGRESS_PART,
@@ -1578,38 +1579,15 @@ function resolveRetryConfig(
 // layers (e.g. `@cloudflare/think`) classify with the SAME matcher instead of
 // drifting copies.
 
-export function getCurrentAgent<
-  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
->(): {
-  agent: T | undefined;
-  connection: Connection | undefined;
-  request: Request | undefined;
-  email: AgentEmail | undefined;
-} {
-  const store = agentContext.getStore() as
-    | {
-        agent: T;
-        connection: Connection | undefined;
-        request: Request | undefined;
-        email: AgentEmail | undefined;
-      }
-    | undefined;
-  if (!store) {
-    return {
-      agent: undefined,
-      connection: undefined,
-      request: undefined,
-      email: undefined
-    };
-  }
-  return store;
-}
+/** Compatibility alias for the lifecycle-owned current Agent accessor. */
+export const getCurrentAgent = getCurrentLifecycleAgent as <
+  T extends DurableObject = Agent<Cloudflare.Env>
+>() => CurrentAgentContext<T, AgentEmail>;
 
 /**
- * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
- * @param agent The agent instance
- * @param method The method to wrap
- * @returns A wrapped method that runs within the agent context
+ * Restore Agent context when a public method is entered outside a Lifecycle
+ * hook, notably through native Durable Object RPC or cross-Agent re-entry.
+ * Lifecycle already owns context for its capability and semantic user hooks.
  */
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
@@ -2096,17 +2074,7 @@ export class Agent<
       versionRow.length > 0 ? Number(versionRow[0].state) : 0;
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
-      this.sql`
-          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )
-        `;
+      ensureMcpServerTable(this.ctx.storage);
 
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_queues (
@@ -2468,8 +2436,9 @@ export class Agent<
           }
         );
 
-        // Initialize MCPClientManager AFTER tables are created
+        // Initialize MCPClientManager AFTER tables are created.
         return new MCPClientManager(this._ParentClass.name, "0.0.1", {
+          env: this.env,
           storage: this.ctx.storage,
           createAuthProvider: (callbackUrl) =>
             this.createMcpOAuthProvider(callbackUrl)
@@ -2477,10 +2446,14 @@ export class Agent<
       }
     );
 
-    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
+    this.lifecycle.use(this.mcp);
+
+    // MCP starts before Agent restores facet routing state. Defer its initial
+    // publication until broadcasts can be routed to the correct owner.
+    let mcpBroadcastReady = false;
     this._disposables.add(
-      this.mcp.onServerStateChanged(async () => {
-        this.broadcastMcpServers();
+      this.mcp.onServerStateChanged(() => {
+        if (mcpBroadcastReady) this.broadcastMcpServers();
       })
     );
 
@@ -2537,26 +2510,22 @@ export class Agent<
     this.onRequest = (request: Request) => {
       return runInInvocation(
         { agent: this, connection: undefined, request, email: undefined },
-        async () => {
-          // Handle MCP OAuth callback if this is one
-          const oauthResponse = await this.handleMcpOAuthCallback(request);
-          if (oauthResponse) {
-            return oauthResponse;
-          }
-
-          return this._tryCatch(() => _onRequest(request));
-        }
+        () => this._tryCatch(() => _onRequest(request))
       );
     };
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       const replyBridge = subAgentRpcReplyContext.getStore()?.bridge;
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketMessage(
-          connection,
-          message,
-          replyBridge
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketMessage(
+            connection,
+            message,
+            replyBridge
+          )
         )
       ) {
         return;
@@ -2710,13 +2679,13 @@ export class Agent<
           subAgentOuterUrl
         );
       }
+      // Lifecycle establishes the root socket/request context before entering
+      // this wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketConnect(
-          connection,
-          ctx.request,
-          {
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketConnect(connection, ctx.request, {
             gate: false
-          }
+          })
         )
       ) {
         return;
@@ -2820,12 +2789,16 @@ export class Agent<
       reason: string,
       wasClean: boolean
     ) => {
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketClose(
-          connection,
-          code,
-          reason,
-          wasClean
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketClose(
+            connection,
+            code,
+            reason,
+            wasClean
+          )
         )
       ) {
         return;
@@ -2856,56 +2829,11 @@ export class Agent<
           email: undefined
         },
         async () => {
-          await this._withAgentSpan(
-            "restore_agent_state",
-            "startup",
-            {},
-            async () => {
-              // Hydrate _isFacet from persistent storage so the flag
-              // survives hibernation (the DO constructor resets it to false).
-              const isFacet =
-                await this.ctx.storage.get<boolean>("cf_agents_is_facet");
-              if (isFacet) this._isFacet = true;
-
-              const storedFacetName = await this.ctx.storage.get<string>(
-                "cf_agents_facet_name"
-              );
-              if (typeof storedFacetName === "string") {
-                this._facetName = storedFacetName;
-              }
-
-              const storedParentPath = await this.ctx.storage.get<
-                Array<{ className: string; name: string }>
-              >("cf_agents_parent_path");
-              if (isValidParentPath(storedParentPath)) {
-                this._parentPath = storedParentPath;
-              }
-              try {
-                await this._cf_hydrateSubAgentConnectionsFromRoot();
-              } catch (error) {
-                console.warn(
-                  "[Agent] Unable to hydrate sub-agent WebSocket connections:",
-                  error
-                );
-              }
-            }
-          );
+          await this._restoreAgentFacetContext();
 
           await this._tryCatch(async () => {
-            // Restore MCP connections before fiber/chat recovery so recovered
-            // turns see MCP tools. Restored connections re-advertise the
-            // capabilities persisted from the previous session; the handlers
-            // behind them attach when onStart() configures them.
-            await this._withAgentSpan(
-              "restore_mcp_connections",
-              "startup",
-              {},
-              async () => {
-                await this.mcp.restoreConnectionsFromStorage(this.name);
-                await this._restoreRpcMcpServers();
-                this.broadcastMcpServers();
-              }
-            );
+            mcpBroadcastReady = true;
+            this.broadcastMcpServers();
 
             const startupAgentToolRunIds = await this._withAgentSpan(
               "recover_agent_work",
@@ -2984,6 +2912,43 @@ export class Agent<
       this._withAgentSpan("agent_start", "startup", {}, (update) =>
         startAgent(props, update)
       );
+  }
+
+  private async _restoreAgentFacetContext(): Promise<void> {
+    await this._withAgentSpan(
+      "restore_agent_state",
+      "startup",
+      {},
+      async () => {
+        // Facet identity and bridges belong to Agent, not to any capability.
+        const isFacet =
+          await this.ctx.storage.get<boolean>("cf_agents_is_facet");
+        if (isFacet) this._isFacet = true;
+
+        const storedFacetName = await this.ctx.storage.get<string>(
+          "cf_agents_facet_name"
+        );
+        if (typeof storedFacetName === "string") {
+          this._facetName = storedFacetName;
+        }
+
+        const storedParentPath = await this.ctx.storage.get<
+          Array<{ className: string; name: string }>
+        >("cf_agents_parent_path");
+        if (isValidParentPath(storedParentPath)) {
+          this._parentPath = storedParentPath;
+        }
+
+        try {
+          await this._cf_hydrateSubAgentConnectionsFromRoot();
+        } catch (error) {
+          console.warn(
+            "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+            error
+          );
+        }
+      }
+    );
   }
 
   /**
@@ -3618,8 +3583,8 @@ export class Agent<
   }
 
   /**
-   * Automatically wrap custom methods with agent context
-   * This ensures getCurrentAgent() works in all custom methods without decorators
+   * Wrap public subclass methods that may be entered outside Lifecycle, such as
+   * native Durable Object RPC. Lifecycle hooks already have Agent context.
    */
   private _autoWrapCustomMethods() {
     // Agent.prototype traversal also covers the DurableObject base class.
@@ -12148,52 +12113,6 @@ export class Agent<
     return undefined;
   }
 
-  private async _restoreRpcMcpServers(): Promise<void> {
-    const rpcServers = this.mcp.getRpcServersFromStorage();
-    for (const server of rpcServers) {
-      if (this.mcp.mcpConnections[server.id]) {
-        continue;
-      }
-
-      const opts: { bindingName: string; props?: Record<string, unknown> } =
-        server.server_options ? JSON.parse(server.server_options) : {};
-
-      const namespace = (this.env as Record<string, unknown>)[
-        opts.bindingName
-      ] as DurableObjectNamespace<McpAgent> | undefined;
-      if (!namespace) {
-        console.warn(
-          `[Agent] Cannot restore RPC MCP server "${server.name}": binding "${opts.bindingName}" not found in env`
-        );
-        continue;
-      }
-
-      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-
-      try {
-        await this.mcp.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-          reconnect: { id: server.id },
-          transport: {
-            type: "rpc" as TransportType,
-            namespace,
-            name: normalizedName,
-            props: opts.props
-          }
-        });
-
-        const conn = this.mcp.mcpConnections[server.id];
-        if (conn && conn.connectionState === MCPConnectionState.CONNECTED) {
-          await this.mcp.discoverIfConnected(server.id);
-        }
-      } catch (error) {
-        console.error(
-          `[Agent] Error restoring RPC MCP server "${server.name}":`,
-          error
-        );
-      }
-    }
-  }
-
   // ==========================================
   // Workflow Lifecycle Callbacks
   // ==========================================
@@ -12876,100 +12795,6 @@ export class Agent<
         type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );
-  }
-
-  /**
-   * Handle MCP OAuth callback request if it's an OAuth callback.
-   *
-   * This method encapsulates the entire OAuth callback flow:
-   * 1. Checks if the request is an MCP OAuth callback
-   * 2. Processes the OAuth code exchange
-   * 3. Establishes the connection if successful
-   * 4. Broadcasts MCP server state updates
-   * 5. Returns the appropriate HTTP response
-   *
-   * @param request The incoming HTTP request
-   * @returns Response if this was an OAuth callback, null otherwise
-   */
-  private async handleMcpOAuthCallback(
-    request: Request
-  ): Promise<Response | null> {
-    // Check if this is an OAuth callback request
-    const isCallback = this.mcp.isCallbackRequest(request);
-    if (!isCallback) {
-      return null;
-    }
-
-    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
-    // This fires onServerStateChanged event which triggers broadcast
-    const result = await this.mcp.handleCallbackRequest(request);
-
-    // If auth was successful, establish the connection in the background
-    // (establishConnection handles retries internally using per-server retry config)
-    if (result.authSuccess) {
-      this.mcp.establishConnection(result.serverId).catch((error) => {
-        console.error(
-          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
-          error
-        );
-      });
-    }
-
-    this.broadcastMcpServers();
-
-    // Return the HTTP response for the OAuth callback
-    return this.handleOAuthCallbackResponse(result, request);
-  }
-
-  /**
-   * Handle OAuth callback response using MCPClientManager configuration
-   * @param result OAuth callback result
-   * @param request The original request (needed for base URL)
-   * @returns Response for the OAuth callback
-   */
-  private handleOAuthCallbackResponse(
-    result: MCPClientOAuthResult,
-    request: Request
-  ): Response {
-    const config = this.mcp.getOAuthCallbackConfig();
-
-    // Use custom handler if configured
-    if (config?.customHandler) {
-      return config.customHandler(result);
-    }
-
-    const baseOrigin = new URL(request.url).origin;
-
-    // Redirect to success URL if configured
-    if (config?.successRedirect && result.authSuccess) {
-      try {
-        return Response.redirect(
-          new URL(config.successRedirect, baseOrigin).href
-        );
-      } catch (e) {
-        console.error(
-          "Invalid successRedirect URL:",
-          config.successRedirect,
-          e
-        );
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    // Redirect to error URL if configured
-    if (config?.errorRedirect && !result.authSuccess) {
-      try {
-        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
-          result.authError || "Unknown error"
-        )}`;
-        return Response.redirect(new URL(errorUrl, baseOrigin).href);
-      } catch (e) {
-        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    return Response.redirect(baseOrigin);
   }
 }
 

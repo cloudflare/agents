@@ -47,11 +47,12 @@ src/
   serializable.ts       # RPC serialization types
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
-  internal_context.ts   # AsyncLocalStorage context for getCurrentAgent()
+  internal_context.ts   # Agent compatibility re-export of lifecycle host context
   agent-routing.ts      # Agent URL routing, named lookup, CORS, placement, retries
 
   lifecycle/            # Public Durable Object lifecycle composition
     index.ts            # Intentionally small public lifecycle surface
+    current-agent.ts    # LifecycleObject host context and getCurrentAgent()
     durable-object-lifecycle.ts # Runtime handlers and capabilities
     connection.ts       # Hibernating WebSocket connection management
 
@@ -74,6 +75,7 @@ src/
     transport.ts        # McpAgent SSE + Streamable HTTP transports
     client.ts           # MCPClientManager for connecting to remote MCP servers
     client-connection.ts
+    client-rpc.ts       # Persisted RPC binding restoration
     client-storage.ts
     client-transports.ts
     do-oauth-client-provider.ts
@@ -151,14 +153,15 @@ pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
-### Lifecycle tests (`src/lifecycle-tests/`)
+### Lifecycle tests (`src/tests/lifecycle/`)
 
 ```bash
 pnpm exec vitest --project lifecycle --run
 ```
 
 Proves constructor composition on a plain `DurableObject`, ordered capabilities,
-routing, native and migrated identity, alarms, and hibernating WebSockets.
+host-hook context, root accessor aliasing, routing, native and migrated identity,
+alarms, and hibernating WebSockets.
 
 ### React tests (`src/react-tests/`)
 
