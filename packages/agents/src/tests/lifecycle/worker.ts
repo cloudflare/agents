@@ -21,6 +21,8 @@ export type Env = {
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
+  SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
+  SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
 };
 
 type StartupProps = { label: string };
@@ -431,6 +433,124 @@ export class ScheduledLifecycleObject extends DurableObject<Env> {
       alarm: await this.ctx.storage.getAlarm(),
       scheduleCount: this.scheduler.getSchedules().length
     };
+  }
+}
+
+type SchedulerInvocation = {
+  readonly callback: string;
+  readonly payload: unknown;
+  readonly scheduleId: string;
+  readonly hadHostContext: boolean;
+};
+
+/**
+ * Minimal real host for capability-level Scheduler tests: a plain Durable
+ * Object with only the Scheduler installed, so tests can drive the capability
+ * through a real Lifecycle, real storage, and real platform alarms.
+ */
+export class SchedulerHarnessObject extends DurableObject<Env> {
+  readonly invocations: SchedulerInvocation[] = [];
+  readonly callbackErrors: string[] = [];
+  failuresBeforeSuccess = 0;
+  disableAlarmsOnNextCallback = false;
+
+  readonly scheduler = new Scheduler(this, {
+    retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 },
+    hungScheduleTimeoutSeconds: 60,
+    onError: (error) => {
+      this.callbackErrors.push(
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
+
+  #record(
+    callback: string,
+    payload: unknown,
+    schedule: Schedule<unknown>
+  ): void {
+    this.invocations.push({
+      callback,
+      payload,
+      scheduleId: schedule.id,
+      hadHostContext: getCurrentAgent<SchedulerHarnessObject>().agent === this
+    });
+  }
+
+  async remind(payload: unknown, schedule: Schedule<unknown>): Promise<void> {
+    if (this.disableAlarmsOnNextCallback) {
+      this.disableAlarmsOnNextCallback = false;
+      await this.lifecycle.disableAlarms();
+    }
+    this.#record("remind", payload, schedule);
+  }
+
+  flaky(payload: unknown, schedule: Schedule<unknown>): void {
+    if (this.failuresBeforeSuccess > 0) {
+      this.failuresBeforeSuccess -= 1;
+      throw new Error("flaky failure");
+    }
+    this.#record("flaky", payload, schedule);
+  }
+
+  broken(): void {
+    throw new Error("broken callback");
+  }
+}
+
+/**
+ * Captures the non-idempotent-schedule warning emitted while its own real
+ * onStart creates schedules, proving Lifecycle startup state drives it.
+ */
+export class SchedulerStartupWarnObject extends DurableObject<Env> {
+  readonly #capturedWarnings: string[] = [];
+
+  readonly scheduler = new Scheduler(this);
+  readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
+
+  maintenance(): void {}
+
+  _internalTick(): void {}
+
+  async onStart(): Promise<void> {
+    await this.#captureWarnings(async () => {
+      await this.scheduler.schedule(60, "maintenance", "a");
+      await this.scheduler.schedule(60, "maintenance", "b");
+      await this.scheduler.schedule(60, "_internalTick");
+      await this.scheduler.schedule(120, "maintenance", "c", {
+        idempotent: true
+      });
+      await this.scheduler.schedule("0 * * * *", "maintenance");
+    });
+  }
+
+  async warnings(): Promise<readonly string[]> {
+    await this.lifecycle.start();
+    return this.#capturedWarnings;
+  }
+
+  async scheduleOutsideStartup(): Promise<number> {
+    await this.lifecycle.start();
+    const before = this.#capturedWarnings.length;
+    await this.#captureWarnings(async () => {
+      await this.scheduler.schedule(60, "maintenance", "later");
+    });
+    return this.#capturedWarnings.length - before;
+  }
+
+  async #captureWarnings(run: () => Promise<void>): Promise<void> {
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      this.#capturedWarnings.push(String(args[0]));
+      original.apply(console, args);
+    };
+    try {
+      await run();
+    } finally {
+      console.warn = original;
+    }
   }
 }
 

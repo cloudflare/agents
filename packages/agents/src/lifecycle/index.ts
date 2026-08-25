@@ -1,6 +1,5 @@
 /** Durable Object lifecycle composition. */
 export {
-  bindLifecycleCapability,
   LifecycleCapability,
   type LifecycleAlarms,
   type LifecycleEvents,

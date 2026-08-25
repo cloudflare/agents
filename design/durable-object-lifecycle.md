@@ -86,18 +86,22 @@ Object or Agent context as appropriate.
 
 ## Testing capabilities
 
-Capabilities are testable at every layer without module mocks:
+Capabilities are testable at every layer without module mocks or fake
+services:
 
-1. **Pure domain logic** (timing parsers, selection rules) lives in dependency
-   free modules and is unit tested directly, e.g.
+1. **Pure domain logic** (timing parsers, selection rules) lives in
+   dependency-free modules and is unit tested directly, e.g.
    `tests/schedule-timing.test.ts`.
-2. **The capability itself** binds fake `LifecycleServices` through the public
-   `bindLifecycleCapability()` seam — real Durable Object storage, recorded
-   rearm/event/callback interactions, no Lifecycle instance — e.g.
-   `tests/lifecycle/scheduler-capability.test.ts`.
-3. **Lifecycle integration** uses real Durable Objects in the Workers pool to
-   prove alarm arbitration, phase order, context boundaries, and eviction
-   recovery — `tests/lifecycle/lifecycle.test.ts`.
+2. **The capability itself** is installed on a minimal real Durable Object
+   whose only capability is the one under test, then driven through real
+   Lifecycle startup, real storage, real platform alarms, and the real
+   diagnostics event sink — e.g. `SchedulerHarnessObject` and
+   `tests/lifecycle/scheduler-capability.test.ts`. The Workers vitest pool
+   makes real objects cheap, so there is no fake-services seam to keep in
+   sync with Lifecycle semantics.
+3. **Lifecycle integration** proves cross-capability behavior: alarm
+   arbitration across contributors, phase order, context boundaries, and
+   eviction recovery — `tests/lifecycle/lifecycle.test.ts`.
 4. **Host surface** tests exercise the batteries-included Agent API —
    `tests/schedule.test.ts` and friends.
 

@@ -1,15 +1,20 @@
 import {
   bindLifecycleCapability,
-  type LifecycleCapability,
-  type LifecycleServices
-} from "../../lifecycle";
+  type LifecycleCapability
+} from "../../lifecycle/capability";
+import type { LifecycleServices } from "../../lifecycle";
 
 /**
- * Bind minimal fake Lifecycle services to a capability so it can be exercised
- * standalone in unit tests. Storage is the only live dependency; readiness
- * resolves immediately, while alarm, host-callback, and routing services are
- * inert. Tests that assert on rearm requests, events, or callback dispatch
- * should bind their own recording services instead.
+ * Bind minimal fake Lifecycle services to a capability constructed outside a
+ * Durable Object. This exists for the legacy MCP manager suites built on
+ * hand-rolled mock storage; storage is the only live dependency, readiness
+ * resolves immediately, and the alarm, host-callback, and routing services
+ * are inert.
+ *
+ * New capability tests should not use this: install the capability on a
+ * minimal Durable Object with a real Lifecycle instead (see
+ * `tests/lifecycle/scheduler-capability.test.ts`), which exercises real
+ * storage, alarms, host context, and events.
  */
 export function bindTestLifecycleServices(
   capability: LifecycleCapability,

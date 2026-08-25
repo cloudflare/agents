@@ -161,9 +161,10 @@ pnpm exec vitest --project lifecycle --run
 Proves constructor composition on a plain `DurableObject`, ordered capabilities,
 host-hook context, root accessor aliasing, routing, native and migrated identity,
 alarms, and hibernating WebSockets. `scheduler-capability.test.ts` exercises the
-Scheduler capability in isolation: real Durable Object storage with fake
-Lifecycle services bound through `bindLifecycleCapability()` — the pattern for
-unit testing any capability.
+Scheduler capability in isolation on `SchedulerHarnessObject` — a minimal real
+Durable Object whose only capability is the Scheduler, driven through real
+Lifecycle startup, storage, and platform alarms. That harness-object pattern is
+how any capability should be unit tested.
 
 ### React tests (`src/react-tests/`)
 

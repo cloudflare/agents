@@ -109,14 +109,10 @@ export abstract class LifecycleCapability<Props extends object = object> {
 }
 
 /**
- * Bind the standard service surface to one capability instance.
- *
- * `Lifecycle.use()` calls this during installation. Unit tests for a
- * capability call it directly with fake services so the capability can be
- * exercised without constructing a Lifecycle.
- *
- * @param capability - The capability receiving standard services.
- * @param services - The services the capability reads through `this.lifecycle`.
+ * @internal Bind the standard service surface to one capability instance.
+ * `Lifecycle.use()` calls this during installation. Test a capability by
+ * installing it on a minimal Durable Object with a real Lifecycle rather
+ * than binding fake services.
  */
 export function bindLifecycleCapability(
   capability: LifecycleCapability,

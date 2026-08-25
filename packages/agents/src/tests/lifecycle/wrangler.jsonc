@@ -23,6 +23,14 @@
       {
         "name": "ScheduledLifecycleObject",
         "class_name": "ScheduledLifecycleObject"
+      },
+      {
+        "name": "SchedulerHarnessObject",
+        "class_name": "SchedulerHarnessObject"
+      },
+      {
+        "name": "SchedulerStartupWarnObject",
+        "class_name": "SchedulerStartupWarnObject"
       }
     ]
   },
@@ -32,7 +40,9 @@
       "new_sqlite_classes": [
         "PlainLifecycleObject",
         "PlainMcpClientObject",
-        "ScheduledLifecycleObject"
+        "ScheduledLifecycleObject",
+        "SchedulerHarnessObject",
+        "SchedulerStartupWarnObject"
       ]
     }
   ]

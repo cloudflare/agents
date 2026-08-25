@@ -1,143 +1,46 @@
-import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it, vi } from "vitest";
 import {
-  bindLifecycleCapability,
-  type LifecycleObject,
-  type LifecycleServices
-} from "../../lifecycle";
-import { Scheduler, type Schedule } from "../../schedules";
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
+import {
+  subscribe as subscribeDiagnostic,
+  unsubscribe as unsubscribeDiagnostic
+} from "node:diagnostics_channel";
+import { describe, expect, it } from "vitest";
+import type { SchedulerHarnessObject } from "./worker";
 
 /**
- * Capability-level Scheduler tests: real Durable Object storage, fake
- * Lifecycle services. This exercises Scheduler's own behavior — schema,
- * CRUD, idempotency, alarm contribution, due-row processing, retries —
- * without a Lifecycle, alarm arbitration, or an Agent. Context boundaries
- * and physical-alarm behavior are covered by lifecycle.test.ts, and the
- * full Agent surface by ../schedule.test.ts.
+ * Capability-level Scheduler tests: the capability installed on a minimal
+ * real Durable Object (`SchedulerHarnessObject`) whose only capability is the
+ * Scheduler. Tests drive real Lifecycle startup, real storage, real platform
+ * alarms, and the real diagnostics event sink — no fakes. Alarm arbitration
+ * across multiple capabilities and Agent's full surface are covered by
+ * lifecycle.test.ts and ../schedule.test.ts respectively.
  */
 
-class HarnessHost {
-  readonly invocations: Array<{
-    readonly callback: string;
-    readonly payload: unknown;
-    readonly scheduleId: string;
-  }> = [];
+type CapturedEvent = { readonly type: string; readonly payload: unknown };
 
-  failuresBeforeSuccess = 0;
-
-  remind(payload: unknown, schedule: Schedule<unknown>): void {
-    this.invocations.push({
-      callback: "remind",
-      payload,
-      scheduleId: schedule.id
-    });
-  }
-
-  flaky(payload: unknown, schedule: Schedule<unknown>): void {
-    if (this.failuresBeforeSuccess > 0) {
-      this.failuresBeforeSuccess -= 1;
-      throw new Error("flaky failure");
-    }
-    this.invocations.push({
-      callback: "flaky",
-      payload,
-      scheduleId: schedule.id
-    });
-  }
-
-  broken(): void {
-    throw new Error("broken callback");
-  }
-}
-
-type HarnessTarget = HarnessHost & LifecycleObject;
-
-type Harness = {
-  readonly scheduler: Scheduler<HarnessTarget>;
-  readonly host: HarnessHost;
-  readonly storage: DurableObjectStorage;
-  readonly events: Array<{ readonly type: string; readonly payload: unknown }>;
-  readonly errors: unknown[];
-  readonly flags: {
-    rearms: number;
-    starting: boolean;
-    alarmsDisabled: boolean;
+/** Collect `agents:schedule` diagnostics events for one named object. */
+function captureScheduleEvents(name: string): {
+  readonly events: CapturedEvent[];
+  readonly stop: () => void;
+} {
+  const events: CapturedEvent[] = [];
+  const handler = (message: unknown) => {
+    if (message === null || typeof message !== "object") return;
+    const record = message as Record<string, unknown>;
+    if (record.name !== name) return;
+    events.push({ type: String(record.type), payload: record.payload });
   };
-};
-
-function createHarness(
-  storage: DurableObjectStorage,
-  options: { hungScheduleTimeoutSeconds?: number } = {}
-): Harness {
-  const host = new HarnessHost();
-  const events: Array<{ type: string; payload: unknown }> = [];
-  const errors: unknown[] = [];
-  const flags = { rearms: 0, starting: false, alarmsDisabled: false };
-
-  // SAFETY: the harness supplies storage and callback dispatch through fake
-  // Lifecycle services below; the constructor argument only anchors callback
-  // typing for set()/every().
-  const scheduler = new Scheduler(host as unknown as HarnessTarget, {
-    retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 },
-    ...options,
-    onError: (error) => {
-      errors.push(error);
-    }
-  });
-
-  const hostRecord = host as unknown as Record<string, unknown>;
-  const services: LifecycleServices = {
-    storage,
-    ready: async () => {},
-    starting: () => flags.starting,
-    alarms: {
-      rearm: async () => {
-        flags.rearms += 1;
-      },
-      disabled: () => flags.alarmsDisabled
-    },
-    callbacks: {
-      has: (name) => typeof hostRecord[name] === "function",
-      invoke: async (name, args) => {
-        const method = hostRecord[name];
-        if (typeof method !== "function") {
-          throw new Error(`this.${name} is not a function`);
-        }
-        return method.apply(host, [...args]);
-      }
-    },
-    events: {
-      emit: (type, payload) => {
-        events.push({ type, payload });
-      }
-    },
-    routes: {
-      source: undefined,
-      toRoot: async () => {
-        throw new Error("harness has no route transport");
-      },
-      to: async () => {
-        throw new Error("harness has no route transport");
-      }
-    }
+  subscribeDiagnostic("agents:schedule", handler);
+  return {
+    events,
+    stop: () => unsubscribeDiagnostic("agents:schedule", handler)
   };
-  bindLifecycleCapability(scheduler, services);
-  return { scheduler, host, storage, events, errors, flags };
 }
 
-async function withHarness(
-  fn: (harness: Harness) => Promise<void>,
-  options: { hungScheduleTimeoutSeconds?: number } = {}
-): Promise<void> {
-  const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
-  await runInDurableObject(stub, async (_instance, state) => {
-    const harness = createHarness(state.storage, options);
-    await harness.scheduler.onStart();
-    await fn(harness);
-  });
-}
-
-function backdate(storage: DurableObjectStorage, id: string): void {
+function backdateRow(storage: DurableObjectStorage, id: string): void {
   storage.sql.exec(
     "UPDATE cf_agents_schedules SET time = ? WHERE id = ?",
     Math.floor(Date.now() / 1000) - 5,
@@ -146,254 +49,406 @@ function backdate(storage: DurableObjectStorage, id: string): void {
 }
 
 describe("Scheduler capability", () => {
-  it("creates, reads, lists, and cancels schedules", async () => {
-    await withHarness(async ({ scheduler, events, flags }) => {
-      const schedule = await scheduler.schedule(60, "remind", {
-        message: "hi"
-      });
-      expect(schedule.type).toBe("delayed");
-      expect(events.map((event) => event.type)).toEqual(["schedule:create"]);
-      expect(flags.rearms).toBeGreaterThan(0);
+  it("creates, reads, lists, and cancels schedules against the real alarm", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.SchedulerHarnessObject.getByName(name);
+    const capture = captureScheduleEvents(name);
 
-      expect(await scheduler.get(schedule.id)).toEqual(schedule);
-      expect(await scheduler.list()).toEqual([schedule]);
-      expect(await scheduler.list({ type: "cron" })).toEqual([]);
-      expect(scheduler.getSchedules()).toEqual([schedule]);
-      expect(scheduler.getSchedule(schedule.id)).toEqual(schedule);
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject, state) => {
+          const schedule = await instance.scheduler.schedule(60, "remind", {
+            message: "hi"
+          });
+          expect(schedule.type).toBe("delayed");
+          // Lifecycle armed the physical alarm from the row's execution time.
+          expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
 
-      expect(await scheduler.cancel(schedule.id)).toBe(true);
-      expect(events.map((event) => event.type)).toEqual([
+          expect(await instance.scheduler.get(schedule.id)).toEqual(schedule);
+          expect(await instance.scheduler.list()).toEqual([schedule]);
+          expect(await instance.scheduler.list({ type: "cron" })).toEqual([]);
+          expect(instance.scheduler.getSchedules()).toEqual([schedule]);
+          expect(instance.scheduler.getSchedule(schedule.id)).toEqual(schedule);
+
+          expect(await instance.scheduler.cancel(schedule.id)).toBe(true);
+          expect(await instance.scheduler.list()).toEqual([]);
+          expect(await instance.scheduler.cancel(schedule.id)).toBe(false);
+          // No rows left, so the physical alarm is cleared.
+          expect(await state.storage.getAlarm()).toBeNull();
+        }
+      );
+      expect(capture.events.map((event) => event.type)).toEqual([
         "schedule:create",
         "schedule:cancel"
       ]);
-      expect(await scheduler.list()).toEqual([]);
-      expect(await scheduler.cancel(schedule.id)).toBe(false);
-    });
+    } finally {
+      capture.stop();
+    }
   });
 
   it("deduplicates one-shot schedules only when idempotent is requested", async () => {
-    await withHarness(async ({ scheduler, events }) => {
-      const first = await scheduler.schedule(
-        60,
-        "remind",
-        { message: "same" },
-        { idempotent: true }
-      );
-      const second = await scheduler.schedule(
-        60,
-        "remind",
-        { message: "same" },
-        { idempotent: true }
-      );
-      expect(second.id).toBe(first.id);
-      expect(
-        events.filter((event) => event.type === "schedule:create")
-      ).toHaveLength(1);
+    const name = crypto.randomUUID();
+    const stub = env.SchedulerHarnessObject.getByName(name);
+    const capture = captureScheduleEvents(name);
 
-      const third = await scheduler.schedule(60, "remind", {
-        message: "same"
-      });
-      expect(third.id).not.toBe(first.id);
-    });
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject) => {
+          const first = await instance.scheduler.schedule(
+            60,
+            "remind",
+            { message: "same" },
+            { idempotent: true }
+          );
+          const second = await instance.scheduler.schedule(
+            60,
+            "remind",
+            { message: "same" },
+            { idempotent: true }
+          );
+          expect(second.id).toBe(first.id);
+
+          const third = await instance.scheduler.schedule(60, "remind", {
+            message: "same"
+          });
+          expect(third.id).not.toBe(first.id);
+        }
+      );
+      // The dedup hit does not emit a second create event.
+      expect(
+        capture.events.filter((event) => event.type === "schedule:create")
+      ).toHaveLength(2);
+    } finally {
+      capture.stop();
+    }
   });
 
   it("deduplicates recurring schedules unless idempotency is opted out", async () => {
-    await withHarness(async ({ scheduler }) => {
-      const cron = await scheduler.schedule("0 * * * *", "remind", "tick");
-      const cronAgain = await scheduler.schedule("0 * * * *", "remind", "tick");
+    const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
+      const cron = await instance.scheduler.schedule(
+        "0 * * * *",
+        "remind",
+        "tick"
+      );
+      const cronAgain = await instance.scheduler.schedule(
+        "0 * * * *",
+        "remind",
+        "tick"
+      );
       expect(cronAgain.id).toBe(cron.id);
-      const cronForced = await scheduler.schedule(
+      const cronForced = await instance.scheduler.schedule(
         "0 * * * *",
         "remind",
         "tick",
-        {
-          idempotent: false
-        }
+        { idempotent: false }
       );
       expect(cronForced.id).not.toBe(cron.id);
 
-      const interval = await scheduler.scheduleEvery(30, "remind", "tick");
-      const intervalAgain = await scheduler.scheduleEvery(30, "remind", "tick");
+      const interval = await instance.scheduler.scheduleEvery(
+        600,
+        "remind",
+        "tick"
+      );
+      const intervalAgain = await instance.scheduler.scheduleEvery(
+        600,
+        "remind",
+        "tick"
+      );
       expect(intervalAgain.id).toBe(interval.id);
     });
   });
 
   it("rejects unknown callbacks and invalid inputs", async () => {
-    await withHarness(async ({ scheduler }) => {
-      await expect(scheduler.schedule(60, "nope")).rejects.toThrow(
+    const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
+      await expect(instance.scheduler.schedule(60, "nope")).rejects.toThrow(
         "this.nope is not a function"
       );
       await expect(
-        scheduler.schedule(undefined as unknown as number, "remind")
+        instance.scheduler.schedule(undefined as unknown as number, "remind")
       ).rejects.toThrow(/Invalid schedule type/);
-      await expect(scheduler.scheduleEvery(0, "remind")).rejects.toThrow(
-        "intervalSeconds must be a positive number"
-      );
       await expect(
-        scheduler.scheduleEvery(31 * 24 * 60 * 60, "remind")
+        instance.scheduler.scheduleEvery(0, "remind")
+      ).rejects.toThrow("intervalSeconds must be a positive number");
+      await expect(
+        instance.scheduler.scheduleEvery(31 * 24 * 60 * 60, "remind")
       ).rejects.toThrow(/cannot exceed/);
     });
   });
 
   it("contributes the earliest pending schedule to alarm selection", async () => {
-    await withHarness(async ({ scheduler, storage }) => {
-      expect(scheduler.getNextAlarm()).toBeNull();
+    const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: SchedulerHarnessObject, state) => {
+        await instance.lifecycle.start();
+        expect(instance.scheduler.getNextAlarm()).toBeNull();
 
-      await scheduler.schedule(120, "remind", "later");
-      const sooner = await scheduler.schedule(60, "remind", "sooner");
-      const next = scheduler.getNextAlarm();
-      expect(next).not.toBeNull();
-      expect(next as number).toBeGreaterThanOrEqual(Date.now() + 55_000);
-      expect(next as number).toBeLessThanOrEqual(Date.now() + 61_000);
+        await instance.scheduler.schedule(120, "remind", "later");
+        const sooner = await instance.scheduler.schedule(
+          60,
+          "remind",
+          "sooner"
+        );
+        // The contribution and the armed physical alarm agree.
+        expect(instance.scheduler.getNextAlarm()).toBe(sooner.time * 1000);
+        expect(await state.storage.getAlarm()).toBe(sooner.time * 1000);
 
-      // An overdue row (restart lost the alarm) is clamped to the near future.
-      backdate(storage, sooner.id);
-      const before = Date.now();
-      const overdue = scheduler.getNextAlarm();
-      expect(overdue as number).toBeGreaterThan(before);
-      expect(overdue as number).toBeLessThanOrEqual(before + 1_000);
-    });
+        // An overdue row (a restart lost the alarm) is clamped to the future.
+        backdateRow(state.storage, sooner.id);
+        const before = Date.now();
+        const overdue = instance.scheduler.getNextAlarm();
+        expect(overdue as number).toBeGreaterThan(before);
+        expect(overdue as number).toBeLessThanOrEqual(before + 1_000);
+      }
+    );
   });
 
-  it("executes due rows and advances one-shot, interval, and cron rows", async () => {
-    await withHarness(async ({ scheduler, host, storage, events }) => {
-      const oneShot = await scheduler.schedule(60, "remind", { n: 1 });
-      const interval = await scheduler.scheduleEvery(600, "remind", { n: 2 });
-      const cron = await scheduler.schedule("* * * * *", "remind", { n: 3 });
-      backdate(storage, oneShot.id);
-      backdate(storage, interval.id);
-      backdate(storage, cron.id);
+  it("executes due rows via the real alarm and advances each row kind", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.SchedulerHarnessObject.getByName(name);
+    const capture = captureScheduleEvents(name);
 
-      await scheduler.onAlarm();
-
-      expect(host.invocations).toHaveLength(3);
-      expect(host.invocations).toContainEqual({
-        callback: "remind",
-        payload: { n: 1 },
-        scheduleId: oneShot.id
-      });
-      expect(
-        events.filter((event) => event.type === "schedule:execute")
-      ).toHaveLength(3);
-
-      // The one-shot row is consumed; recurring rows advance into the future.
-      const remaining = await scheduler.list();
-      expect(remaining.map((row) => row.id).sort()).toEqual(
-        [interval.id, cron.id].sort()
+    try {
+      const ids = await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject, state) => {
+          const oneShot = await instance.scheduler.schedule(60, "remind", {
+            n: 1
+          });
+          const interval = await instance.scheduler.scheduleEvery(
+            600,
+            "remind",
+            { n: 2 }
+          );
+          const cron = await instance.scheduler.schedule(
+            "* * * * *",
+            "remind",
+            { n: 3 }
+          );
+          backdateRow(state.storage, oneShot.id);
+          backdateRow(state.storage, interval.id);
+          backdateRow(state.storage, cron.id);
+          return { oneShot: oneShot.id, interval: interval.id, cron: cron.id };
+        }
       );
-      const nowSeconds = Math.floor(Date.now() / 1000);
-      for (const row of remaining) {
-        expect(row.time).toBeGreaterThan(nowSeconds);
-      }
-    });
+
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+      await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject, state) => {
+          expect(instance.invocations).toHaveLength(3);
+          expect(instance.invocations).toContainEqual({
+            callback: "remind",
+            payload: { n: 1 },
+            scheduleId: ids.oneShot,
+            hadHostContext: true
+          });
+          // Callbacks ran with the host as `this` and in host context.
+          expect(
+            instance.invocations.every((entry) => entry.hadHostContext)
+          ).toBe(true);
+
+          // One-shot consumed; recurring rows advanced into the future and
+          // the physical alarm re-armed for them.
+          const remaining = await instance.scheduler.list();
+          expect(remaining.map((row) => row.id).sort()).toEqual(
+            [ids.interval, ids.cron].sort()
+          );
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          for (const row of remaining) {
+            expect(row.time).toBeGreaterThan(nowSeconds);
+          }
+          expect(await state.storage.getAlarm()).not.toBeNull();
+        }
+      );
+      expect(
+        capture.events.filter((event) => event.type === "schedule:execute")
+      ).toHaveLength(3);
+    } finally {
+      capture.stop();
+    }
   });
 
   it("retries a failing callback before succeeding", async () => {
-    await withHarness(async ({ scheduler, host, storage, events }) => {
-      host.failuresBeforeSuccess = 1;
-      const schedule = await scheduler.schedule(60, "flaky", "payload");
-      backdate(storage, schedule.id);
+    const name = crypto.randomUUID();
+    const stub = env.SchedulerHarnessObject.getByName(name);
+    const capture = captureScheduleEvents(name);
 
-      await scheduler.onAlarm();
+    try {
+      const scheduleId = await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject, state) => {
+          instance.failuresBeforeSuccess = 1;
+          const schedule = await instance.scheduler.schedule(
+            60,
+            "flaky",
+            "payload"
+          );
+          backdateRow(state.storage, schedule.id);
+          return schedule.id;
+        }
+      );
 
-      expect(host.invocations).toEqual([
-        { callback: "flaky", payload: "payload", scheduleId: schedule.id }
-      ]);
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+      await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject) => {
+          expect(instance.invocations).toEqual([
+            {
+              callback: "flaky",
+              payload: "payload",
+              scheduleId,
+              hadHostContext: true
+            }
+          ]);
+          expect(await instance.scheduler.list()).toEqual([]);
+        }
+      );
       expect(
-        events.filter((event) => event.type === "schedule:retry")
+        capture.events.filter((event) => event.type === "schedule:retry")
       ).toHaveLength(1);
-      expect(await scheduler.list()).toEqual([]);
-    });
+    } finally {
+      capture.stop();
+    }
   });
 
   it("reports terminal callback errors and consumes the one-shot row", async () => {
-    await withHarness(async ({ scheduler, storage, events, errors }) => {
-      const schedule = await scheduler.schedule(60, "broken");
-      backdate(storage, schedule.id);
+    const name = crypto.randomUUID();
+    const stub = env.SchedulerHarnessObject.getByName(name);
+    const capture = captureScheduleEvents(name);
 
-      await scheduler.onAlarm();
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject, state) => {
+          const schedule = await instance.scheduler.schedule(60, "broken");
+          backdateRow(state.storage, schedule.id);
+        }
+      );
 
-      expect(errors).toHaveLength(1);
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+      await runInDurableObject(
+        stub,
+        async (instance: SchedulerHarnessObject) => {
+          expect(instance.callbackErrors).toEqual(["broken callback"]);
+          expect(await instance.scheduler.list()).toEqual([]);
+        }
+      );
       expect(
-        events.filter((event) => event.type === "schedule:error")
+        capture.events.filter((event) => event.type === "schedule:error")
       ).toHaveLength(1);
-      expect(await scheduler.list()).toEqual([]);
-    });
+    } finally {
+      capture.stop();
+    }
   });
 
   it("skips an in-flight interval and recovers a hung one", async () => {
-    await withHarness(
-      async ({ scheduler, host, storage }) => {
-        const interval = await scheduler.scheduleEvery(600, "remind", "tick");
-        const nowSeconds = Math.floor(Date.now() / 1000);
+    const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
 
-        // In flight and not yet hung: skipped, but a recheck is contributed.
-        storage.sql.exec(
+    const marks = await runInDurableObject(
+      stub,
+      async (instance: SchedulerHarnessObject, state) => {
+        const interval = await instance.scheduler.scheduleEvery(
+          600,
+          "remind",
+          "tick"
+        );
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        // In flight and not yet hung (harness hung timeout: 60s).
+        state.storage.sql.exec(
           "UPDATE cf_agents_schedules SET time = ?, running = 1, execution_started_at = ? WHERE id = ?",
           nowSeconds - 5,
           nowSeconds,
           interval.id
         );
-        await scheduler.onAlarm();
-        expect(host.invocations).toEqual([]);
-        const recheck = scheduler.getNextAlarm();
-        expect(recheck).toBe((nowSeconds + 60) * 1000);
-
-        // Past the hung timeout: force reset and re-execute.
-        storage.sql.exec(
-          "UPDATE cf_agents_schedules SET execution_started_at = ? WHERE id = ?",
-          nowSeconds - 120,
-          interval.id
-        );
-        await scheduler.onAlarm();
-        expect(host.invocations).toHaveLength(1);
-      },
-      { hungScheduleTimeoutSeconds: 60 }
+        return { id: interval.id, startedAt: nowSeconds };
+      }
     );
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    await runInDurableObject(
+      stub,
+      async (instance: SchedulerHarnessObject, state) => {
+        // Skipped, but a hung-interval recheck was contributed and armed.
+        expect(instance.invocations).toEqual([]);
+        const recheck = (marks.startedAt + 60) * 1000;
+        expect(instance.scheduler.getNextAlarm()).toBe(recheck);
+        expect(await state.storage.getAlarm()).toBe(recheck);
+
+        // Past the hung timeout: the next alarm cycle force-resets and runs.
+        state.storage.sql.exec(
+          "UPDATE cf_agents_schedules SET execution_started_at = ? WHERE id = ?",
+          marks.startedAt - 120,
+          marks.id
+        );
+      }
+    );
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
+      expect(instance.invocations).toHaveLength(1);
+    });
   });
 
   it("stops processing rows once teardown disables alarms", async () => {
-    await withHarness(async ({ scheduler, host, storage, flags }) => {
-      const first = await scheduler.schedule(60, "remind", { order: 1 });
-      const second = await scheduler.schedule(90, "remind", { order: 2 });
-      backdate(storage, first.id);
-      backdate(storage, second.id);
+    const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
 
-      // Simulate a callback destroying the host mid-phase.
-      host.remind = () => {
-        flags.alarmsDisabled = true;
-      };
-      await scheduler.onAlarm();
+    const ids = await runInDurableObject(
+      stub,
+      async (instance: SchedulerHarnessObject, state) => {
+        const first = await instance.scheduler.schedule(60, "remind", {
+          order: 1
+        });
+        const second = await instance.scheduler.schedule(90, "remind", {
+          order: 2
+        });
+        backdateRow(state.storage, first.id);
+        backdateRow(state.storage, second.id);
+        // Simulate a callback tearing the host down mid-phase.
+        instance.disableAlarmsOnNextCallback = true;
+        return [first.id, second.id];
+      }
+    );
 
-      // Processing halted before advancing or executing further rows.
-      expect((await scheduler.list()).map((row) => row.id).sort()).toEqual(
-        [first.id, second.id].sort()
-      );
-    });
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    await runInDurableObject(
+      stub,
+      async (instance: SchedulerHarnessObject, state) => {
+        // Processing halted after the disabling callback: nothing advanced,
+        // no further callbacks ran, and the physical alarm stayed cleared.
+        expect(instance.invocations).toHaveLength(1);
+        expect(
+          (await instance.scheduler.list()).map((row) => row.id).sort()
+        ).toEqual([...ids].sort());
+        expect(await state.storage.getAlarm()).toBeNull();
+      }
+    );
   });
 
-  it("warns once for non-idempotent one-shots created during startup", async () => {
-    await withHarness(async ({ scheduler, flags }) => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        flags.starting = true;
-        await scheduler.schedule(60, "remind", "a");
-        await scheduler.schedule(60, "remind", "b");
-        expect(warn).toHaveBeenCalledTimes(1);
-        expect(warn.mock.calls[0]?.[0]).toContain('schedule("remind")');
+  it("warns once for non-idempotent one-shots created during real startup", async () => {
+    const stub = env.SchedulerStartupWarnObject.getByName(crypto.randomUUID());
 
-        // Explicit idempotency choices and cron schedules do not warn.
-        await scheduler.schedule(60, "flaky", "c", { idempotent: true });
-        await scheduler.schedule("* * * * *", "flaky", "d");
-        expect(warn).toHaveBeenCalledTimes(1);
+    const warnings = await stub.warnings();
+    const scheduleWarnings = warnings.filter((warning) =>
+      warning.includes("without { idempotent: true }")
+    );
+    expect(scheduleWarnings).toHaveLength(1);
+    expect(scheduleWarnings[0]).toContain('schedule("maintenance")');
+    expect(warnings.some((warning) => warning.includes("_internalTick"))).toBe(
+      false
+    );
 
-        // Outside startup there is no warning.
-        flags.starting = false;
-        await scheduler.schedule(60, "broken", "e");
-        expect(warn).toHaveBeenCalledTimes(1);
-      } finally {
-        warn.mockRestore();
-      }
-    });
+    // Outside startup the same call does not warn.
+    expect(await stub.scheduleOutsideStartup()).toBe(0);
   });
 });
