@@ -4106,7 +4106,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
-    return this.scheduler.getSchedule<T>(id);
+    return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedule<T>(id);
   }
 
   /**
@@ -4132,7 +4132,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
-    return this.scheduler.getSchedules<T>(criteria);
+    return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedules<T>(criteria);
   }
 
   /**

@@ -202,7 +202,8 @@ export class ScheduledLifecycleObject extends DurableObject<Cloudflare.Env> {
       callbackScheduleId: this.#callbackScheduleId,
       callbackScheduleMessage: this.#callbackScheduleMessage,
       alarm: await this.ctx.storage.getAlarm(),
-      scheduleCount: this.scheduler.getSchedules().length
+      scheduleCount:
+        this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedules().length
     };
   }
 }

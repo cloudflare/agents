@@ -452,7 +452,9 @@ export class Scheduler<
    * Not part of the primitive's contract — use {@link get}. Cannot cross
    * Durable Object boundaries and throws inside routed sub-agents.
    */
-  getSchedule<T = string>(id: string): Schedule<T> | undefined {
+  __DO_NOT_USE_WILL_REMOVE__getSchedule<T = string>(
+    id: string
+  ): Schedule<T> | undefined {
     if (this.lifecycle.routes.source) {
       throw new Error(
         "getSchedule() is synchronous and cannot read routed schedule storage. " +
@@ -467,7 +469,9 @@ export class Scheduler<
    * Not part of the primitive's contract — use {@link list}. Cannot cross
    * Durable Object boundaries and throws inside routed sub-agents.
    */
-  getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
+  __DO_NOT_USE_WILL_REMOVE__getSchedules<T = string>(
+    criteria: ScheduleCriteria = {}
+  ): Schedule<T>[] {
     if (this.lifecycle.routes.source) {
       throw new Error(
         "getSchedules() is synchronous and cannot read routed schedule storage. " +

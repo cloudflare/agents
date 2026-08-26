@@ -41,8 +41,14 @@ describe("Scheduler capability", () => {
           expect(await instance.scheduler.get(schedule.id)).toEqual(schedule);
           expect(await instance.scheduler.list()).toEqual([schedule]);
           expect(await instance.scheduler.list({ type: "cron" })).toEqual([]);
-          expect(instance.scheduler.getSchedules()).toEqual([schedule]);
-          expect(instance.scheduler.getSchedule(schedule.id)).toEqual(schedule);
+          expect(
+            instance.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedules()
+          ).toEqual([schedule]);
+          expect(
+            instance.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedule(
+              schedule.id
+            )
+          ).toEqual(schedule);
 
           expect(await instance.scheduler.cancel(schedule.id)).toBe(true);
           expect(await instance.scheduler.list()).toEqual([]);
