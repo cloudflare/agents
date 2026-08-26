@@ -21,9 +21,9 @@ export interface SchedulerOptions<
   /**
    * Named callbacks this Scheduler can run. Each schedule row persists a
    * callback name; registration in a field initializer re-binds the names on
-   * every Durable Object wake, so register unconditionally. Names not in
-   * this map fall back to methods on the installed host, which is how
-   * `Agent`'s name-based scheduling API is implemented.
+   * every Durable Object wake, so register unconditionally. Names outside
+   * this map are rejected unless a composition-root resolver supplies them
+   * — the internal aperture behind `Agent`'s name-based scheduling API.
    */
   readonly callbacks?: Handlers;
 

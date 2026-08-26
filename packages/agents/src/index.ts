@@ -2254,9 +2254,10 @@ export class Agent<
       this._emit(event.type as ObservabilityEvent["type"], payload);
     });
 
-    // Capability-invoked host callbacks (scheduled methods and future
-    // capability callbacks) enter through Agent's invocation boundary so they
-    // get the same tracing span scope as every other Agent entry point.
+    // Capability-run user callbacks (scheduled callbacks today, future
+    // capability callbacks tomorrow) enter through Agent's invocation
+    // boundary so they get the same tracing span scope as every other Agent
+    // entry point.
     setLifecycleHostInvoker(this.lifecycle, (run) =>
       runInInvocation(
         {

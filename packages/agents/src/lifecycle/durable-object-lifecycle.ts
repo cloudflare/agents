@@ -178,8 +178,8 @@ type LifecycleHost<
 };
 
 /**
- * Boundary wrapping host callbacks that capabilities invoke through
- * `LifecycleServices.callbacks`. The default boundary is
+ * Boundary wrapping user callbacks that capabilities run through
+ * `LifecycleServices.runInHostContext`. The default boundary is
  * {@link runInLifecycleHostContext}; a host composition root may substitute
  * its own invocation wrapper (Agent adds tracing span scope).
  */
@@ -189,7 +189,7 @@ const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
 const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
 const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
 
-/** @internal Adapt the capability host-callback boundary at a composition root. */
+/** @internal Adapt the host invocation boundary at a composition root. */
 export function setLifecycleHostInvoker<
   Env extends object,
   Props extends Record<string, unknown>

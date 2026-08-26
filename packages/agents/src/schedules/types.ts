@@ -61,9 +61,10 @@ export type SchedulerHandlers = Record<
 
 /**
  * Default callback surface for a Scheduler constructed without registered
- * callbacks: any name compiles with an untyped payload, and names resolve at
- * runtime against the callbacks registered on (or the host methods of) the
- * object the Scheduler is installed on.
+ * callbacks: any name compiles with an untyped payload. At runtime a name
+ * must be registered or supplied by a composition-root resolver (the
+ * aperture behind Agent's name-based scheduling API); a bare Scheduler
+ * rejects it otherwise.
  */
 export type SchedulerCallbacks = Record<
   string,

@@ -7,7 +7,7 @@ export type CapabilityHarness = {
   readonly storage: DurableObjectStorage;
   /**
    * Bind a capability to this object through a real Lifecycle and return it.
-   * Services (storage, alarms, callbacks, events, routes) are live from this
+   * Services (storage, alarms, runInHostContext, events, routes) are live from this
    * point; startup hooks run only if the test starts the returned lifecycle.
    */
   readonly install: <Capability extends DurableObjectCapability>(
@@ -23,7 +23,7 @@ export type CapabilityHarness = {
  * runtime handlers — the test drives the capability's own API directly.
  * Tests that need real platform dispatch (alarms firing, fetch routing) use
  * a dedicated harness object with the capability installed as a field
- * instead (see `scheduler-harness.ts`).
+ * instead (see `../capabilities/scheduler.ts`).
  */
 export async function withCapabilityHarness<T>(
   fn: (harness: CapabilityHarness) => Promise<T> | T

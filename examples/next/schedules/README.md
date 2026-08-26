@@ -28,8 +28,9 @@ export class ReminderObject extends DurableObject<Env> {
 }
 ```
 
-The Scheduler takes no wiring: storage, alarm coordination, host-callback
-dispatch, and events all come from the Lifecycle it is installed on. It owns its
+The Scheduler takes no wiring: storage, alarm coordination, the host
+invocation boundary, and events all come from the Lifecycle it is installed
+on. It owns its
 own `cf_agents_schedules` table and contributes its earliest pending row to
 Lifecycle's shared physical alarm, so it composes with other capabilities that
 also need wake-ups.

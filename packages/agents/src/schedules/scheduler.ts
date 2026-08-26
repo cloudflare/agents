@@ -3,7 +3,7 @@
  * callback retry policy, and due-row processing.
  *
  * Scheduler consumes only the standard capability services: storage, alarm
- * coordination, host callbacks, events, and routing. Lifecycle combines
+ * coordination, the host invocation boundary, events, and routing. Lifecycle combines
  * Scheduler's next wake-up candidate with contributions from other
  * capabilities and the host before arming the Durable Object.
  */
@@ -913,8 +913,9 @@ export class Scheduler<
   /**
    * Execute a local schedule row with retry handling.
    *
-   * The capability remains outside ambient context. Lifecycle's host-callback
-   * boundary establishes host context only around user callback invocation.
+   * The capability remains outside ambient context. Lifecycle's host
+   * invocation boundary establishes host context only around the user
+   * callback itself.
    */
   async #executeCallback(row: ScheduleStorageRow): Promise<void> {
     if (!this.#hasCallback(row.callback)) {
