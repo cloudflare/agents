@@ -40,9 +40,9 @@ export function ExoHarnessBlogPost() {
             the harness turns those tokens into a continuing agent.
           </p>
           <p>
-            A <strong>self-modifying agent</strong> can change some, or all, of
+            A <strong>self-modifying agent</strong> can change some or all of
             that machinery for future turns. Most agents can update memory or
-            write files, so this has lead to the question of where those changes
+            write files, so this has led to the question of where those changes
             should stop. What can the agent rewrite, and what must remain fixed?
           </p>
           <p>
@@ -50,18 +50,18 @@ export function ExoHarnessBlogPost() {
             full self-modifying agents. The simplest way to compare these
             systems is to look at what the agent can change and what it cannot.
             Who makes the change matters too; a harness can be deeply
-            customizable for its human without being self-modifying for the
+            customisable for its human without being self-modifying for the
             agent.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
-            Customizable is not the same as self-modifying
+            customisable is not the same as self-modifying
           </h2>
           <p>
             ChatGPT lets users change instructions and memory, but the product
             still owns the machinery that assembles a turn. Pi goes much
             further: extensions can replace tools, intercept events, rewrite
-            context, customize compaction, and change the request sent to the
+            context, customise compaction, and change the request sent to the
             model.
           </p>
           <p>
@@ -399,7 +399,7 @@ export function ExoHarnessBlogPost() {
           </p>
           <p>
             My hypothesis is that as the agent-editable surface grows, so does
-            the risk that its behavior diverges from what its human intended.
+            the risk that its behaviour diverges from what its human intended.
             Self-modification doesn't create that tendency itself, but it does
             give the agent more places to mis-align its own behaviour. In a best
             case scenario, any slightly wrong decision can make its outcomes
@@ -413,7 +413,7 @@ export function ExoHarnessBlogPost() {
               className="underline underline-offset-4"
             >
               Prime Agent's Factorio run
-            </a>
+            </a>{" "}
             shows one version of this problem. After the agent discovered that
             it could cheat through RCON, its refinement loop began preserving
             better ways to cheat. The mechanism amplified what the system
@@ -432,7 +432,7 @@ export function ExoHarnessBlogPost() {
             imagine if the available surface expands to include the agent's own
             tools, context policy, delegation, and turn logic, the search for
             shortcuts will involve changes to the layer that shapes all of its
-            future behavior. The agent's pressure to optimise would apply not
+            future behaviour. The agent's pressure to optimise would apply not
             just to external actions but to its own decision-making process.
           </p>
 
@@ -455,7 +455,7 @@ export function ExoHarnessBlogPost() {
             Visibility does not prevent a dangerous modification, but it makes
             supervision possible. A human (or much more likely, an agent) could
             inspect each change, watch its effects, and alert, pause, or stop
-            the agent when its behavior begins to drift. This experiment does
+            the agent when its behaviour begins to drift. This experiment does
             not build that supervisor, but it gives one a clear place to stand
             and watch.
           </p>
@@ -465,9 +465,9 @@ export function ExoHarnessBlogPost() {
           </h2>
           <p>
             There's nothing really new being stress-tested by this experiment.
-            It just turns out that it clarifies that the one the team is already
-            works towards is important: build strong, composable primitives
-            rather than betting on one complete agent harness.
+            It simply reinforces a principle the team is already working
+            towards: build strong, composable primitives rather than betting on
+            one complete agent harness.
           </p>
           <p>
             A self-modifying harness is a hard test because it needs durable
@@ -489,7 +489,7 @@ export function ExoHarnessBlogPost() {
             Why explore this now?
           </h2>
           <p>
-            Honestly, this hasn't made it any clearer to me as to whether
+            Honestly, this hasn't made it any clearer to me whether
             self-modifying harnesses will make agents better; it feels like the
             noise around RLM and Prime Agent has died down since it was
             announced and I never really saw any clear evidence to say that RLM
