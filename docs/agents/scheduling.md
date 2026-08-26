@@ -836,7 +836,13 @@ When using this schema with OpenAI models via the AI SDK, you must pass `provide
 
 ## API Reference
 
-### `new Scheduler(options?)`
+Two surfaces share these semantics: the experimental `Scheduler` primitive
+(`agents/schedules`, methods on the scheduler instance) and the stable `Agent`
+methods (on the Agent class, delegating to `this.scheduler`).
+
+### Scheduler primitive
+
+#### `new Scheduler(options?)`
 
 ```typescript
 new Scheduler({
@@ -850,8 +856,7 @@ new Scheduler({
 - `callbacks` registers scheduled callbacks by name. `set()` and `every()`
   type both the name and the payload against this map, and dispatch runs the
   registered function — the typed scheduling surface and the runtime dispatch
-  target are the same object. `set()` and `every()` follow the semantics
-  documented for `schedule()` and `scheduleEvery()` below.
+  target are the same object.
 - Lifecycle supplies storage, readiness, startup state, alarm coordination,
   the host invocation boundary, events, and routing.
 - `retry` supplies callback retry defaults. The defaults are three attempts,
@@ -865,7 +870,47 @@ publishes `schedule:*` events through Lifecycle's best-effort event bus. A plain
 Lifecycle Object writes them to the existing `agents:schedule` diagnostics
 channel; `Agent` sends them through its existing observability implementation.
 
-### schedule()
+#### set()
+
+```typescript
+async set(when, callback, payload?, options?): Promise<Schedule<Payload>>
+```
+
+Create a one-shot or cron schedule. `when`, `options`, idempotency, and return
+value follow [`schedule()`](#schedule) below. `callback` must be a name
+registered in the constructor's `callbacks` map, and `payload` is typed
+against that callback's first parameter.
+
+#### every()
+
+```typescript
+async every(intervalSeconds, callback, payload?, options?): Promise<Schedule<Payload>>
+```
+
+Create a fixed-interval schedule. Semantics follow
+[`scheduleEvery()`](#scheduleevery) below, and `every()` also accepts
+`options.idempotent` to opt out of interval dedup.
+
+#### get() / list() / cancel()
+
+```typescript
+async get(id): Promise<Schedule<unknown> | undefined>
+async list(criteria?): Promise<Schedule<unknown>[]>
+async cancel(id): Promise<boolean>
+```
+
+Read and cancel schedules — the primitive's equivalents of
+[`getScheduleById()`](#getschedulebyid), [`listSchedules()`](#listschedules),
+and [`cancelSchedule()`](#cancelschedule) below. Deprecated synchronous
+`getSchedule()`/`getSchedules()` also exist on the Scheduler for Agent
+compatibility.
+
+### Agent methods
+
+Methods on the `Agent` class, delegating to `this.scheduler`. Callback names
+resolve to methods on the Agent.
+
+#### schedule()
 
 ```typescript
 async schedule<T = string>(
@@ -903,7 +948,7 @@ class MyAgent extends Agent {
 }
 ```
 
-### scheduleEvery()
+#### scheduleEvery()
 
 ```typescript
 async scheduleEvery<T = string>(
@@ -914,9 +959,8 @@ async scheduleEvery<T = string>(
 ): Promise<Schedule<T>>
 ```
 
-Schedule a task to run repeatedly at a fixed interval. Calling
-`Scheduler.every()` directly also accepts `options.idempotent`; Agent's
-`this.scheduleEvery()` remains idempotent by design.
+Schedule a task to run repeatedly at a fixed interval. Idempotent by design
+(the primitive's `every()` accepts `options.idempotent` to opt out).
 
 **Parameters:**
 
@@ -935,7 +979,7 @@ Schedule a task to run repeatedly at a fixed interval. Calling
 - If callback throws an error, the interval continues
 - Cancel with `cancelSchedule(id)` to stop the entire interval
 
-### getScheduleById()
+#### getScheduleById()
 
 ```typescript
 async getScheduleById(id: string): Promise<Schedule<unknown> | undefined>
@@ -943,7 +987,7 @@ async getScheduleById(id: string): Promise<Schedule<unknown> | undefined>
 
 Get a scheduled task by ID. This method works in both top-level agents and sub-agents.
 
-### listSchedules()
+#### listSchedules()
 
 ```typescript
 async listSchedules(criteria?: {
@@ -955,7 +999,7 @@ async listSchedules(criteria?: {
 
 Get scheduled tasks matching the criteria. This method works in both top-level agents and sub-agents.
 
-### getSchedule()
+#### getSchedule()
 
 ```typescript
 getSchedule<T = string>(id: string): Schedule<T> | undefined
@@ -963,7 +1007,7 @@ getSchedule<T = string>(id: string): Schedule<T> | undefined
 
 Deprecated. Get a scheduled task by ID synchronously. This method only works in top-level agents; use `await this.getScheduleById(id)` instead.
 
-### getSchedules()
+#### getSchedules()
 
 ```typescript
 getSchedules<T = string>(criteria?: {
@@ -975,7 +1019,7 @@ getSchedules<T = string>(criteria?: {
 
 Deprecated. Get scheduled tasks matching the criteria synchronously. This method only works in top-level agents; use `await this.listSchedules(criteria)` instead.
 
-### cancelSchedule()
+#### cancelSchedule()
 
 ```typescript
 async cancelSchedule(id: string): Promise<boolean>
@@ -983,7 +1027,7 @@ async cancelSchedule(id: string): Promise<boolean>
 
 Cancel a scheduled task. Returns `true` if cancelled, `false` if not found.
 
-### keepAlive()
+#### keepAlive()
 
 ```typescript
 async keepAlive(): Promise<() => void>
@@ -993,7 +1037,7 @@ Create an alarm-backed heartbeat that prevents the Durable Object from being evi
 
 See [Keeping the Agent Alive](#keeping-the-agent-alive) for usage details.
 
-### keepAliveWhile()
+#### keepAliveWhile()
 
 ```typescript
 async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>
