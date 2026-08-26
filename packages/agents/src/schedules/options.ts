@@ -1,4 +1,5 @@
 import type { RetryOptions } from "../retries";
+import type { SchedulerCallbacks, SchedulerHandlers } from "./types";
 
 /** Events emitted while a Scheduler creates, executes, retries, or cancels work. */
 export type SchedulerEventType =
@@ -9,8 +10,19 @@ export type SchedulerEventType =
   | "schedule:error"
   | "schedule:duplicate_warning";
 
-/** Optional policy for a Scheduler capability. */
-export interface SchedulerOptions {
+/** Optional callbacks and policy for a Scheduler capability. */
+export interface SchedulerOptions<
+  Handlers extends SchedulerHandlers = SchedulerCallbacks
+> {
+  /**
+   * Named callbacks this Scheduler can run. Each schedule row persists a
+   * callback name; registration in a field initializer re-binds the names on
+   * every Durable Object wake, so register unconditionally. Names not in
+   * this map fall back to methods on the installed host, which is how
+   * `Agent`'s name-based scheduling API is implemented.
+   */
+  readonly callbacks?: Handlers;
+
   /** Default callback retry policy. */
   readonly retry?: RetryOptions;
 

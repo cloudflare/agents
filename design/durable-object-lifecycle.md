@@ -57,12 +57,13 @@ the same Scheduler exposed at `Agent.this.scheduler`; existing Agent scheduling
 methods remain compatibility delegators.
 
 Capabilities extending `LifecycleCapability` receive storage, readiness,
-startup state, alarm coordination, host-callback dispatch, events, and generic
-capability routing. A capability constructed for a specific host declares it,
-and `Lifecycle.use()` verifies the identity at install time — compile-time
-host typing and the runtime dispatch target cannot diverge. That service surface is the whole contract: Scheduler
-consumes only standard services plus its own policy options, and a future
-capability composes the same way with no host adapter. Lifecycle routes an
+startup state, alarm coordination, a host invocation boundary, events, and
+generic capability routing. Scheduled callbacks are registered on the
+Scheduler itself, so the typed scheduling surface and the runtime dispatch
+target are the same object by construction. That service surface is the whole
+contract: Scheduler consumes only standard services plus its own callbacks and
+policy options, and a future capability composes the same way with no host
+adapter. Lifecycle routes an
 envelope to the matching capability ID at the destination. Agent supplies an
 internal facet transport through one generic RPC aperture, so Scheduler routes
 owner-scoped CRUD and callbacks without facet-specific methods or an Agent
@@ -70,10 +71,12 @@ adapter. Existing facet rows stay in the root Scheduler table.
 
 Host adaptation happens only at a composition root, through three internal
 apertures: the capability event sink, the routed-capability transport, and the
-host-callback invoker. Agent uses them to route events into its observability
-interface, carry envelopes between facets, and wrap capability-invoked user
-callbacks in its tracing invocation boundary. A plain Lifecycle Object uses
-the defaults and configures nothing.
+host invoker behind the host invocation boundary. Agent uses them to route
+events into its observability interface, carry envelopes between facets, and
+wrap capability-run user callbacks in its tracing invocation boundary. Agent
+adds one Scheduler-specific aperture — a callback-name resolver — so its
+historical name-based scheduling methods keep dispatching to Agent methods.
+A plain Lifecycle Object uses the defaults and configures nothing.
 
 Capabilities publish best-effort telemetry through
 `this.lifecycle.events.emit()`. Lifecycle sends plain Lifecycle Object events to
@@ -83,8 +86,9 @@ that requires guaranteed delivery owns an outbox.
 
 Alarm contribution, capability hooks, and capability-event delivery run outside
 ambient host context.
-Scheduled methods are user callbacks, so Scheduler invokes them in Lifecycle
-Object or Agent context as appropriate.
+Registered scheduled callbacks are user code, so Scheduler runs them through
+the host invocation boundary in Lifecycle Object or Agent context as
+appropriate.
 
 ## Testing capabilities
 
@@ -136,9 +140,9 @@ any inherited current-Agent context before invoking capability startup,
 request, or alarm hooks, so behavior does not depend on the entrypoint that
 triggered the phase.
 
-User callbacks are the exception: when a capability invokes a named host
-method through `this.lifecycle.callbacks.invoke()`, Lifecycle establishes the
-host invocation context around that call. This is the one boundary a host
+User callbacks are the exception: when a capability runs one through
+`this.lifecycle.runInHostContext()`, Lifecycle establishes the host
+invocation context around that call. This is the one boundary a host
 composition root may wrap — Agent substitutes its tracing invocation scope —
 so every capability that dispatches user callbacks inherits the host's
 invocation semantics without capability-specific hooks.

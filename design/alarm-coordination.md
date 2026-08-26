@@ -52,10 +52,11 @@ one. Sharing the physical alarm is not such a dependency.
 ## Agent integration
 
 Agent installs the public Scheduler primitive with policy options only —
-retry defaults, hung-interval timeout, and an error observer. Everything else
-Scheduler needs (storage, rearm, teardown state, startup state, host-callback
-dispatch) arrives through the standard capability services, so there is no
-Agent-specific Scheduler adapter. Lifecycle's generic routing surface carries
+retry defaults, hung-interval timeout, and an error observer — plus a
+composition-root callback resolver for its historical name-based scheduling
+methods. Everything else Scheduler needs (storage, rearm, teardown state,
+startup state, the host invocation boundary) arrives through the standard
+capability services, so there is no Agent-specific Scheduler adapter. Lifecycle's generic routing surface carries
 owner-scoped Scheduler messages to the root and dispatches due callbacks to
 facets through one internal Agent transport aperture. Existing facet schedule
 rows remain in the root Scheduler table; no data migration or

@@ -13,12 +13,18 @@ import {
 } from "../schedule";
 
 class ScheduledObject extends DurableObject {
-  readonly scheduler = new Scheduler(this);
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      reminder: (
+        payload: { message: string },
+        schedule: Schedule<{ message: string }>
+      ): void => {
+        void payload;
+        void schedule;
+      }
+    }
+  });
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
-
-  reminder(payload: { message: string }): void {
-    void payload;
-  }
 }
 
 class SchedulerAgent extends Agent {
@@ -26,8 +32,9 @@ class SchedulerAgent extends Agent {
 }
 
 declare const object: ScheduledObject;
-object.scheduler satisfies Scheduler;
 object.scheduler satisfies DurableObjectCapability;
+// Registered callbacks type both the name and the payload where they are
+// declared and where they are scheduled.
 object.scheduler.set(1, "reminder", {
   message: "hello"
 }) satisfies Promise<Schedule<{ message: string }>>;
@@ -41,8 +48,15 @@ object.scheduler.every(
 );
 // @ts-expect-error reminder requires a string message.
 object.scheduler.set(1, "reminder", { message: 123 });
-// @ts-expect-error missingCallback is not a method on the target.
+// @ts-expect-error missingCallback is not a registered callback.
 object.scheduler.set(1, "missingCallback", {});
+
+// A Scheduler constructed without callbacks is string-typed: any name
+// compiles, and names resolve at runtime against the installed host.
+const untypedScheduler = new Scheduler();
+untypedScheduler.set(1, "anyCallbackName", { free: true }) satisfies Promise<
+  Schedule<unknown>
+>;
 
 declare const agent: SchedulerAgent;
 agent.scheduler satisfies Scheduler;
@@ -61,13 +75,3 @@ legacyGetSchedulePrompt({ date: new Date() }) satisfies string;
 type _LegacyParserCompatibility = LegacyParsedSchedule extends ParsedSchedule
   ? true
   : false;
-
-// A Scheduler constructed without a host is string-typed: any callback name
-// compiles, and installation is what binds it to a concrete host.
-const untypedScheduler = new Scheduler();
-untypedScheduler.set(1, "anyCallbackName", { free: true }) satisfies Promise<
-  Schedule<unknown>
->;
-
-// Constructing with a host types set()/every() against that host's methods
-// (asserted above) and lets Lifecycle.use() verify the host's identity.

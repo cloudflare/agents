@@ -128,15 +128,15 @@ sequentially. Request handling stops at the first returned `Response`. A phase
 failure propagates, and failed startup can be retried.
 
 Capabilities extending `LifecycleCapability` receive one standard service
-surface: storage, readiness, startup state, alarm coordination, host-callback
-dispatch, best-effort events, and capability routing. Host-specific bindings,
-authentication, and protocol adapters remain explicit constructor
-dependencies. Lifecycle never grants a capability the complete host
-implicitly.
+surface: storage, readiness, startup state, alarm coordination, a host
+invocation boundary, best-effort events, and capability routing.
+Host-specific bindings, authentication, and protocol adapters remain explicit
+constructor dependencies. Lifecycle never grants a capability the complete
+host implicitly.
 
-Capability hooks run outside host context, but user callbacks invoked through
-`this.lifecycle.callbacks.invoke(name, args)` run inside the host invocation
-context. Scheduler dispatches scheduled methods through this boundary, and a
+Capability hooks run outside host context, but user callbacks run through
+`this.lifecycle.runInHostContext(fn)` inside the host invocation context.
+Scheduler dispatches its registered callbacks through this boundary, and a
 future capability that calls user code should do the same.
 
 ## Shared alarm ownership

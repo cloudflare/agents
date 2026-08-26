@@ -2,7 +2,6 @@ import { env } from "cloudflare:workers";
 
 import { describe, expect, it } from "vitest";
 import { LifecycleCapability, type LifecycleServices } from "../../lifecycle";
-import { Scheduler } from "../../schedules";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 class ServiceProbeCapability extends LifecycleCapability {
@@ -49,17 +48,6 @@ describe("Lifecycle startup", () => {
       const { lifecycle } = install(new ServiceProbeCapability());
       expect(() => lifecycle.use(new ServiceProbeCapability())).toThrow(
         'Lifecycle capability "service-probe" is already installed'
-      );
-    });
-  });
-
-  it("rejects installing a capability constructed for a different host", async () => {
-    await withCapabilityHarness(({ install }) => {
-      // Constructed against some other object: the typed-host anchor must be
-      // the same object the Lifecycle owns, or installation fails.
-      const foreign = new Scheduler({ tick: () => {} });
-      expect(() => install(foreign)).toThrow(
-        "Scheduler was constructed for a different host"
       );
     });
   });

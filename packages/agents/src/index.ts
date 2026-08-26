@@ -122,7 +122,11 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
-import { ensureScheduleTable, Scheduler } from "./schedules/scheduler";
+import {
+  ensureScheduleTable,
+  Scheduler,
+  setSchedulerCallbackResolver
+} from "./schedules/scheduler";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -2265,11 +2269,11 @@ export class Agent<
       )
     );
 
-    this.scheduler = new Scheduler(this, {
+    this.scheduler = new Scheduler({
       retry: this._resolvedOptions.retry,
       hungScheduleTimeoutSeconds:
         this._resolvedOptions.hungScheduleTimeoutSeconds,
-      onError: (error) =>
+      onError: (error: unknown) =>
         runInInvocation(
           {
             agent: this,
@@ -2279,6 +2283,19 @@ export class Agent<
           },
           () => this.onError(error)
         )
+    });
+
+    // Agent's historical name-based scheduling API: names outside the
+    // (empty) registered map resolve to methods on this Agent. The resolved
+    // handler still runs inside the Lifecycle host boundary, so it gets the
+    // tracing invocation scope installed above.
+    setSchedulerCallbackResolver(this.scheduler, (name) => {
+      const method = this[name as keyof this];
+      if (typeof method !== "function") return undefined;
+      return (payload, schedule) =>
+        (
+          method as (payload: unknown, schedule: Schedule<unknown>) => unknown
+        ).call(this, payload, schedule);
     });
 
     this.mcp = this._withAgentSpan(
@@ -4030,12 +4047,14 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    return this.scheduler.schedule<T>(
+    // SAFETY: Agent's historical generic promises Schedule<T>; the untyped
+    // scheduler default carries Schedule<unknown> for name-based calls.
+    return this.scheduler.set(
       when,
       callback as string,
       payload,
       options
-    );
+    ) as Promise<Schedule<T>>;
   }
 
   /**
@@ -4070,15 +4089,12 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    return this.scheduler.scheduleEvery<T>(
-      intervalSeconds,
-      callback as string,
-      payload,
-      {
-        retry: options?.retry,
-        idempotent: options?._idempotent
-      }
-    );
+    // SAFETY: Agent's historical generic promises Schedule<T>; the untyped
+    // scheduler default carries Schedule<unknown> for name-based calls.
+    return this.scheduler.every(intervalSeconds, callback as string, payload, {
+      retry: options?.retry,
+      idempotent: options?._idempotent
+    }) as Promise<Schedule<T>>;
   }
 
   /**

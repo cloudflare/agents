@@ -25,7 +25,26 @@ export class SchedulerHarnessObject extends DurableObject<Cloudflare.Env> {
   failuresBeforeSuccess = 0;
   disableAlarmsOnNextCallback = false;
 
-  readonly scheduler = new Scheduler(this, {
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      remind: async (payload: unknown, schedule: Schedule<unknown>) => {
+        if (this.disableAlarmsOnNextCallback) {
+          this.disableAlarmsOnNextCallback = false;
+          await this.lifecycle.disableAlarms();
+        }
+        this.#record("remind", payload, schedule);
+      },
+      flaky: (payload: unknown, schedule: Schedule<unknown>) => {
+        if (this.failuresBeforeSuccess > 0) {
+          this.failuresBeforeSuccess -= 1;
+          throw new Error("flaky failure");
+        }
+        this.#record("flaky", payload, schedule);
+      },
+      broken: () => {
+        throw new Error("broken callback");
+      }
+    },
     retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 },
     hungScheduleTimeoutSeconds: 60,
     onError: (error) => {
@@ -49,26 +68,6 @@ export class SchedulerHarnessObject extends DurableObject<Cloudflare.Env> {
       hadHostContext: getCurrentAgent<SchedulerHarnessObject>().agent === this
     });
   }
-
-  async remind(payload: unknown, schedule: Schedule<unknown>): Promise<void> {
-    if (this.disableAlarmsOnNextCallback) {
-      this.disableAlarmsOnNextCallback = false;
-      await this.lifecycle.disableAlarms();
-    }
-    this.#record("remind", payload, schedule);
-  }
-
-  flaky(payload: unknown, schedule: Schedule<unknown>): void {
-    if (this.failuresBeforeSuccess > 0) {
-      this.failuresBeforeSuccess -= 1;
-      throw new Error("flaky failure");
-    }
-    this.#record("flaky", payload, schedule);
-  }
-
-  broken(): void {
-    throw new Error("broken callback");
-  }
 }
 
 /**
@@ -78,19 +77,21 @@ export class SchedulerHarnessObject extends DurableObject<Cloudflare.Env> {
 export class SchedulerStartupWarnObject extends DurableObject<Cloudflare.Env> {
   readonly #capturedWarnings: string[] = [];
 
-  readonly scheduler = new Scheduler(this);
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      maintenance: () => {}
+    }
+  });
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
-
-  maintenance(): void {}
 
   async onStart(): Promise<void> {
     await captureConsoleWarnings(this.#capturedWarnings, async () => {
-      await this.scheduler.schedule(60, "maintenance", "a");
-      await this.scheduler.schedule(60, "maintenance", "b");
-      await this.scheduler.schedule(120, "maintenance", "c", {
+      await this.scheduler.set(60, "maintenance", "a");
+      await this.scheduler.set(60, "maintenance", "b");
+      await this.scheduler.set(120, "maintenance", "c", {
         idempotent: true
       });
-      await this.scheduler.schedule("0 * * * *", "maintenance");
+      await this.scheduler.set("0 * * * *", "maintenance");
     });
   }
 
@@ -103,7 +104,7 @@ export class SchedulerStartupWarnObject extends DurableObject<Cloudflare.Env> {
     await this.lifecycle.start();
     const before = this.#capturedWarnings.length;
     await captureConsoleWarnings(this.#capturedWarnings, async () => {
-      await this.scheduler.schedule(60, "maintenance", "later");
+      await this.scheduler.set(60, "maintenance", "later");
     });
     return this.#capturedWarnings.length - before;
   }
@@ -143,23 +144,25 @@ export class ScheduledLifecycleObject extends DurableObject<Cloudflare.Env> {
   #callbackScheduleId: string | null = null;
   #callbackScheduleMessage: string | null = null;
 
-  readonly scheduler = new Scheduler(this);
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      reminder: (
+        payload: { message: string },
+        schedule: Schedule<{ message: string }>
+      ) => {
+        this.#events.push(
+          getCurrentAgent<ScheduledLifecycleObject>().agent === this
+            ? "callback:context"
+            : "callback:missing-context"
+        );
+        this.#message = payload.message;
+        this.#callbackScheduleId = schedule.id;
+        this.#callbackScheduleMessage = schedule.payload.message;
+      }
+    }
+  });
 
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
-
-  reminder(
-    payload: { message: string },
-    schedule: Schedule<{ message: string }>
-  ): void {
-    this.#events.push(
-      getCurrentAgent<ScheduledLifecycleObject>().agent === this
-        ? "callback:context"
-        : "callback:missing-context"
-    );
-    this.#message = payload.message;
-    this.#callbackScheduleId = schedule.id;
-    this.#callbackScheduleMessage = schedule.payload.message;
-  }
 
   onAlarm(): void {
     this.#events.push(
@@ -178,7 +181,7 @@ export class ScheduledLifecycleObject extends DurableObject<Cloudflare.Env> {
 
   async scheduleReminder(message: string): Promise<string> {
     await this.lifecycle.start();
-    const schedule = await this.scheduler.schedule(86_400, "reminder", {
+    const schedule = await this.scheduler.set(86_400, "reminder", {
       message
     });
     const past = Math.floor(Date.now() / 1000) - 1;

@@ -5,6 +5,7 @@ import {
   backdateScheduleRow,
   type SchedulerHarnessObject
 } from "../capabilities/scheduler";
+import type { Scheduler } from "../../schedules";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 
 /**
@@ -30,7 +31,7 @@ describe("Scheduler capability", () => {
       await runInDurableObject(
         stub,
         async (instance: SchedulerHarnessObject, state) => {
-          const schedule = await instance.scheduler.schedule(60, "remind", {
+          const schedule = await instance.scheduler.set(60, "remind", {
             message: "hi"
           });
           expect(schedule.type).toBe("delayed");
@@ -68,13 +69,13 @@ describe("Scheduler capability", () => {
       await runInDurableObject(
         stub,
         async (instance: SchedulerHarnessObject) => {
-          const first = await instance.scheduler.schedule(
+          const first = await instance.scheduler.set(
             60,
             "remind",
             { message: "same" },
             { idempotent: true }
           );
-          const second = await instance.scheduler.schedule(
+          const second = await instance.scheduler.set(
             60,
             "remind",
             { message: "same" },
@@ -82,7 +83,7 @@ describe("Scheduler capability", () => {
           );
           expect(second.id).toBe(first.id);
 
-          const third = await instance.scheduler.schedule(60, "remind", {
+          const third = await instance.scheduler.set(60, "remind", {
             message: "same"
           });
           expect(third.id).not.toBe(first.id);
@@ -100,18 +101,14 @@ describe("Scheduler capability", () => {
   it("deduplicates recurring schedules unless idempotency is opted out", async () => {
     const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
-      const cron = await instance.scheduler.schedule(
-        "0 * * * *",
-        "remind",
-        "tick"
-      );
-      const cronAgain = await instance.scheduler.schedule(
+      const cron = await instance.scheduler.set("0 * * * *", "remind", "tick");
+      const cronAgain = await instance.scheduler.set(
         "0 * * * *",
         "remind",
         "tick"
       );
       expect(cronAgain.id).toBe(cron.id);
-      const cronForced = await instance.scheduler.schedule(
+      const cronForced = await instance.scheduler.set(
         "0 * * * *",
         "remind",
         "tick",
@@ -119,12 +116,8 @@ describe("Scheduler capability", () => {
       );
       expect(cronForced.id).not.toBe(cron.id);
 
-      const interval = await instance.scheduler.scheduleEvery(
-        600,
-        "remind",
-        "tick"
-      );
-      const intervalAgain = await instance.scheduler.scheduleEvery(
+      const interval = await instance.scheduler.every(600, "remind", "tick");
+      const intervalAgain = await instance.scheduler.every(
         600,
         "remind",
         "tick"
@@ -136,17 +129,20 @@ describe("Scheduler capability", () => {
   it("rejects unknown callbacks and invalid inputs", async () => {
     const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
-      await expect(instance.scheduler.schedule(60, "nope")).rejects.toThrow(
-        "this.nope is not a function"
+      // Unknown names are a compile error on the typed map; erase the
+      // handler typing to exercise the runtime rejection.
+      const untyped: Scheduler = instance.scheduler;
+      await expect(untyped.set(60, "nope")).rejects.toThrow(
+        'Unknown scheduled callback "nope"'
       );
       await expect(
-        instance.scheduler.schedule(undefined as unknown as number, "remind")
+        instance.scheduler.set(undefined as unknown as number, "remind")
       ).rejects.toThrow(/Invalid schedule type/);
+      await expect(instance.scheduler.every(0, "remind")).rejects.toThrow(
+        "intervalSeconds must be a positive number"
+      );
       await expect(
-        instance.scheduler.scheduleEvery(0, "remind")
-      ).rejects.toThrow("intervalSeconds must be a positive number");
-      await expect(
-        instance.scheduler.scheduleEvery(31 * 24 * 60 * 60, "remind")
+        instance.scheduler.every(31 * 24 * 60 * 60, "remind")
       ).rejects.toThrow(/cannot exceed/);
     });
   });
@@ -159,12 +155,8 @@ describe("Scheduler capability", () => {
         await instance.lifecycle.start();
         expect(instance.scheduler.getNextAlarm()).toBeNull();
 
-        await instance.scheduler.schedule(120, "remind", "later");
-        const sooner = await instance.scheduler.schedule(
-          60,
-          "remind",
-          "sooner"
-        );
+        await instance.scheduler.set(120, "remind", "later");
+        const sooner = await instance.scheduler.set(60, "remind", "sooner");
         // The contribution and the armed physical alarm agree.
         expect(instance.scheduler.getNextAlarm()).toBe(sooner.time * 1000);
         expect(await state.storage.getAlarm()).toBe(sooner.time * 1000);
@@ -188,19 +180,15 @@ describe("Scheduler capability", () => {
       const ids = await runInDurableObject(
         stub,
         async (instance: SchedulerHarnessObject, state) => {
-          const oneShot = await instance.scheduler.schedule(60, "remind", {
+          const oneShot = await instance.scheduler.set(60, "remind", {
             n: 1
           });
-          const interval = await instance.scheduler.scheduleEvery(
-            600,
-            "remind",
-            { n: 2 }
-          );
-          const cron = await instance.scheduler.schedule(
-            "* * * * *",
-            "remind",
-            { n: 3 }
-          );
+          const interval = await instance.scheduler.every(600, "remind", {
+            n: 2
+          });
+          const cron = await instance.scheduler.set("* * * * *", "remind", {
+            n: 3
+          });
           backdateScheduleRow(state.storage, oneShot.id);
           backdateScheduleRow(state.storage, interval.id);
           backdateScheduleRow(state.storage, cron.id);
@@ -258,11 +246,7 @@ describe("Scheduler capability", () => {
         stub,
         async (instance: SchedulerHarnessObject, state) => {
           instance.failuresBeforeSuccess = 1;
-          const schedule = await instance.scheduler.schedule(
-            60,
-            "flaky",
-            "payload"
-          );
+          const schedule = await instance.scheduler.set(60, "flaky", "payload");
           backdateScheduleRow(state.storage, schedule.id);
           return schedule.id;
         }
@@ -301,7 +285,7 @@ describe("Scheduler capability", () => {
       await runInDurableObject(
         stub,
         async (instance: SchedulerHarnessObject, state) => {
-          const schedule = await instance.scheduler.schedule(60, "broken");
+          const schedule = await instance.scheduler.set(60, "broken");
           backdateScheduleRow(state.storage, schedule.id);
         }
       );
@@ -329,11 +313,7 @@ describe("Scheduler capability", () => {
     const marks = await runInDurableObject(
       stub,
       async (instance: SchedulerHarnessObject, state) => {
-        const interval = await instance.scheduler.scheduleEvery(
-          600,
-          "remind",
-          "tick"
-        );
+        const interval = await instance.scheduler.every(600, "remind", "tick");
         const nowSeconds = Math.floor(Date.now() / 1000);
         // In flight and not yet hung (harness hung timeout: 60s).
         state.storage.sql.exec(
@@ -379,10 +359,10 @@ describe("Scheduler capability", () => {
     const ids = await runInDurableObject(
       stub,
       async (instance: SchedulerHarnessObject, state) => {
-        const first = await instance.scheduler.schedule(60, "remind", {
+        const first = await instance.scheduler.set(60, "remind", {
           order: 1
         });
-        const second = await instance.scheduler.schedule(90, "remind", {
+        const second = await instance.scheduler.set(90, "remind", {
           order: 2
         });
         backdateScheduleRow(state.storage, first.id);
@@ -417,7 +397,7 @@ describe("Scheduler capability", () => {
       warning.includes("without { idempotent: true }")
     );
     expect(scheduleWarnings).toHaveLength(1);
-    expect(scheduleWarnings[0]).toContain('schedule("maintenance")');
+    expect(scheduleWarnings[0]).toContain('Scheduling "maintenance"');
 
     // Outside startup the same call does not warn.
     expect(await stub.scheduleOutsideStartup()).toBe(0);

@@ -16,7 +16,31 @@ type DeliveredReminder = {
 
 /** A plain Durable Object with the Scheduler capability installed. */
 export class ReminderObject extends DurableObject<Env> {
-  readonly scheduler = new Scheduler(this);
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      /**
+       * Runs when a reminder schedule fires — with this object available
+       * through `getCurrentAgent()`, even when the alarm wakes a fresh
+       * instance. Registered callbacks are typed where they are declared and
+       * where they are scheduled.
+       */
+      deliverReminder: (
+        payload: ReminderPayload,
+        schedule: Schedule<ReminderPayload>
+      ) => {
+        const { agent } = getCurrentAgent<ReminderObject>();
+        this.ctx.storage.sql.exec(
+          `INSERT OR REPLACE INTO delivered_reminders
+             (schedule_id, message, delivered_at, delivered_by)
+           VALUES (?, ?, ?, ?)`,
+          schedule.id,
+          payload.message,
+          new Date().toISOString(),
+          agent?.lifecycle.name ?? null
+        );
+      }
+    }
+  });
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
 
   onStart(): void {
@@ -32,26 +56,6 @@ export class ReminderObject extends DurableObject<Env> {
     `);
   }
 
-  /**
-   * Scheduled callback. Runs with this object as `this` and available through
-   * `getCurrentAgent()`, even when the alarm wakes a fresh instance.
-   */
-  deliverReminder(
-    payload: ReminderPayload,
-    schedule: Schedule<ReminderPayload>
-  ): void {
-    const { agent } = getCurrentAgent<ReminderObject>();
-    this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO delivered_reminders
-         (schedule_id, message, delivered_at, delivered_by)
-       VALUES (?, ?, ?, ?)`,
-      schedule.id,
-      payload.message,
-      new Date().toISOString(),
-      agent?.lifecycle.name ?? null
-    );
-  }
-
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -62,9 +66,9 @@ export class ReminderObject extends DurableObject<Env> {
         cron?: string;
       };
       const message = body.message ?? "ping";
-      // `set()` checks that "deliverReminder" exists on this object and types
-      // the payload against its first parameter. A cron string and a delay in
-      // seconds create the same kind of durable schedule row.
+      // `set()` types both the name and the payload against the registered
+      // callbacks map. A cron string and a delay in seconds create the same
+      // kind of durable schedule row.
       const schedule = await this.scheduler.set(
         body.cron ?? body.seconds ?? 5,
         "deliverReminder",

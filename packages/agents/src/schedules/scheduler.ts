@@ -37,8 +37,37 @@ import type {
   ScheduleCriteria,
   ScheduleOptions,
   ScheduleStorageRow,
-  SchedulerCallbacks
+  SchedulerCallbacks,
+  SchedulerHandlers,
+  SchedulerPayload
 } from "./types";
+
+/**
+ * A resolved fallback handler for a callback name outside the registered map.
+ */
+type ResolvedSchedulerCallback = (
+  payload: unknown,
+  schedule: Schedule<unknown>
+) => unknown;
+
+const schedulerCallbackResolvers = new WeakMap<
+  object,
+  (name: string) => ResolvedSchedulerCallback | undefined
+>();
+
+/**
+ * @internal Supply a composition-root fallback for callback names outside the
+ * registered map. Agent uses this to keep its historical name-based
+ * scheduling API (`this.schedule(60, "methodName")`) working: the resolver
+ * looks the method up on the Agent, and the resolved handler still runs
+ * inside the Lifecycle host boundary.
+ */
+export function setSchedulerCallbackResolver(
+  scheduler: Scheduler<never>,
+  resolver: (name: string) => ResolvedSchedulerCallback | undefined
+): void {
+  schedulerCallbackResolvers.set(scheduler, resolver);
+}
 
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
 const CURRENT_SCHEDULE_SCHEMA_VERSION = 1;
@@ -205,8 +234,9 @@ export function ensureScheduleTable(storage: DurableObjectStorage): void {
  * through Lifecycle's host-callback boundary.
  */
 export class Scheduler<
-  Host extends object = SchedulerCallbacks
+  Handlers extends SchedulerHandlers = SchedulerCallbacks
 > extends LifecycleCapability {
+  readonly #handlers: SchedulerHandlers;
   readonly #retryDefaults: Required<RetryOptions>;
   readonly #hungScheduleTimeoutSeconds: number;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -214,18 +244,18 @@ export class Scheduler<
   #executingRowId: string | undefined;
 
   /**
-   * Create a persistent Scheduler targeting named methods on the host.
+   * Create a persistent Scheduler.
    *
-   * @param host - The Lifecycle Object whose named methods scheduled
-   * callbacks invoke. Passing it types {@link set} and {@link every} against
-   * the host's methods, and `Lifecycle.use()` verifies it is the same object
-   * the Lifecycle owns — the compile-time callback typing and the runtime
-   * dispatch target can never diverge. Omit it for string-typed scheduling;
-   * callbacks then resolve on whichever host the Scheduler is installed on.
-   * @param options - Optional retry, hung-interval, and error policy.
+   * @param options - Registered callbacks plus optional retry,
+   * hung-interval, and error policy. Registering `callbacks` types
+   * {@link set} and {@link every} against the map — names and
+   * payloads are checked where the handlers are declared and where they are
+   * scheduled. Names outside the map fall back to methods on the installed
+   * host, which is how `Agent`'s name-based scheduling API is implemented.
    */
-  constructor(host?: Host, options: SchedulerOptions = {}) {
-    super("scheduler", host);
+  constructor(options: SchedulerOptions<Handlers> = {}) {
+    super("scheduler");
+    this.#handlers = options.callbacks ?? {};
     // Retry defaults are resolved, not validated, here: a host whose
     // historically tolerated invalid retry config throws at construction
     // would brick every entry point of its Durable Object. Invalid defaults
@@ -308,13 +338,13 @@ export class Scheduler<
 
   // ── Scheduling API ───────────────────────────────────────────────────────
 
-  /** Schedule a delayed, dated, or cron callback by name. */
-  async schedule<T = string>(
+  /** Set a delayed, dated, or cron schedule for a registered callback. */
+  async set<Name extends keyof Handlers & string>(
     when: Date | string | number,
-    callback: string,
-    payload?: T,
+    callback: Name,
+    payload?: SchedulerPayload<Handlers[Name]>,
     options?: ScheduleOptions
-  ): Promise<Schedule<T>> {
+  ): Promise<Schedule<SchedulerPayload<Handlers[Name]>>> {
     await this.lifecycle.ready();
     this.#validateSchedule(when, callback, options);
     const result = this.lifecycle.routes.source
@@ -324,8 +354,10 @@ export class Scheduler<
           callback,
           payload,
           options
-        } satisfies SchedulerRouteMessage)) as InsertResult<T>)
-      : await this.#insert<T>(
+        } satisfies SchedulerRouteMessage)) as InsertResult<
+          SchedulerPayload<Handlers[Name]>
+        >)
+      : await this.#insert<SchedulerPayload<Handlers[Name]>>(
           null,
           parseWhen(when, Date.now(), callback),
           callback,
@@ -336,28 +368,13 @@ export class Scheduler<
     return result.schedule;
   }
 
-  /** Set a delayed, dated, or cron callback on this Scheduler's host. */
-  set<
-    Name extends keyof Host,
-    Method extends Extract<Host[Name], (...args: never[]) => unknown>
-  >(
-    when: Date | string | number,
-    callback: Name,
-    payload: Parameters<Method>[0],
-    options?: ScheduleOptions
-  ): Promise<Schedule<Parameters<Method>[0]>> {
-    return this.schedule(when, callback as string, payload, options) as Promise<
-      Schedule<Parameters<Method>[0]>
-    >;
-  }
-
-  /** Schedule a callback at a fixed interval by name. */
-  async scheduleEvery<T = string>(
+  /** Set a fixed-interval schedule for a registered callback. */
+  async every<Name extends keyof Handlers & string>(
     intervalSeconds: number,
-    callback: string,
-    payload?: T,
+    callback: Name,
+    payload?: SchedulerPayload<Handlers[Name]>,
     options?: ScheduleOptions
-  ): Promise<Schedule<T>> {
+  ): Promise<Schedule<SchedulerPayload<Handlers[Name]>>> {
     await this.lifecycle.ready();
     this.#validateInterval(intervalSeconds, callback, options?.retry);
     const result = this.lifecycle.routes.source
@@ -367,8 +384,10 @@ export class Scheduler<
           callback,
           payload,
           options
-        } satisfies SchedulerRouteMessage)) as InsertResult<T>)
-      : await this.#insert<T>(
+        } satisfies SchedulerRouteMessage)) as InsertResult<
+          SchedulerPayload<Handlers[Name]>
+        >)
+      : await this.#insert<SchedulerPayload<Handlers[Name]>>(
           null,
           parseInterval(intervalSeconds, Date.now()),
           callback,
@@ -377,24 +396,6 @@ export class Scheduler<
         );
     this.#emitCreated(result);
     return result.schedule;
-  }
-
-  /** Set a fixed-interval callback on this Scheduler's host. */
-  every<
-    Name extends keyof Host,
-    Method extends Extract<Host[Name], (...args: never[]) => unknown>
-  >(
-    intervalSeconds: number,
-    callback: Name,
-    payload: Parameters<Method>[0],
-    options?: ScheduleOptions
-  ): Promise<Schedule<Parameters<Method>[0]>> {
-    return this.scheduleEvery(
-      intervalSeconds,
-      callback as string,
-      payload,
-      options
-    ) as Promise<Schedule<Parameters<Method>[0]>>;
   }
 
   /** Get a schedule by ID. Works inside routed sub-agents. */
@@ -511,8 +512,10 @@ export class Scheduler<
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
     }
-    if (!this.lifecycle.callbacks.has(callback)) {
-      throw new Error(`this.${callback} is not a function`);
+    if (!this.#hasCallback(callback)) {
+      throw new Error(
+        `Unknown scheduled callback "${callback}": not registered on this Scheduler`
+      );
     }
     if (options?.retry) {
       validateRetryOptions(options.retry, this.#retryDefaults);
@@ -538,8 +541,10 @@ export class Scheduler<
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
     }
-    if (!this.lifecycle.callbacks.has(callback)) {
-      throw new Error(`this.${callback} is not a function`);
+    if (!this.#hasCallback(callback)) {
+      throw new Error(
+        `Unknown scheduled callback "${callback}": not registered on this Scheduler`
+      );
     }
     if (retry) validateRetryOptions(retry, this.#retryDefaults);
   }
@@ -561,11 +566,43 @@ export class Scheduler<
     if (this.#warnedStartupCallbacks.has(callback)) return;
     this.#warnedStartupCallbacks.add(callback);
     console.warn(
-      `schedule("${callback}") called during startup (e.g. onStart()) without ` +
-        `{ idempotent: true }. This creates a new row on every Durable Object ` +
-        `restart, which can cause duplicate executions. Pass { idempotent: true } ` +
-        `to deduplicate, or use scheduleEvery() for recurring tasks.`
+      `Scheduling "${callback}" during startup (e.g. onStart()) without ` +
+        `{ idempotent: true } creates a new row on every Durable Object ` +
+        `restart, which can cause duplicate executions. Pass ` +
+        `{ idempotent: true } to deduplicate, or use an interval schedule ` +
+        `for recurring tasks.`
     );
+  }
+
+  /** Resolve a name to its registered or composition-root-supplied handler. */
+  #resolveCallback(name: string): ResolvedSchedulerCallback | undefined {
+    const handler = this.#handlers[name];
+    if (handler) {
+      // SAFETY: registered handlers are constrained with `never` parameters
+      // so concrete handler types satisfy the map under contravariance; the
+      // payload passed at dispatch was parsed from the row this handler's
+      // name was persisted with.
+      return handler as ResolvedSchedulerCallback;
+    }
+    return schedulerCallbackResolvers.get(this)?.(name);
+  }
+
+  /** True when a name resolves to a runnable callback. */
+  #hasCallback(name: string): boolean {
+    return this.#resolveCallback(name) !== undefined;
+  }
+
+  /** Run one resolved callback inside the host invocation boundary. */
+  async #invokeCallback(
+    name: string,
+    payload: unknown,
+    schedule: Schedule<unknown>
+  ): Promise<void> {
+    const handler = this.#resolveCallback(name);
+    if (!handler) {
+      throw new Error(`Unknown scheduled callback "${name}"`);
+    }
+    await this.lifecycle.runInHostContext(() => handler(payload, schedule));
   }
 
   // ── Storage ──────────────────────────────────────────────────────────────
@@ -876,7 +913,7 @@ export class Scheduler<
    * boundary establishes host context only around user callback invocation.
    */
   async #executeCallback(row: ScheduleStorageRow): Promise<void> {
-    if (!this.lifecycle.callbacks.has(row.callback)) {
+    if (!this.#hasCallback(row.callback)) {
       console.error(`callback ${row.callback} not found`);
       return;
     }
@@ -935,10 +972,7 @@ export class Scheduler<
               maxAttempts
             });
           }
-          await this.lifecycle.callbacks.invoke(row.callback, [
-            parsedPayload,
-            schedule
-          ]);
+          await this.#invokeCallback(row.callback, parsedPayload, schedule);
         },
         {
           baseDelayMs,

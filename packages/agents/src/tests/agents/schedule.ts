@@ -129,7 +129,7 @@ export class TestOnStartScheduleWarnAgent extends Agent {
   @callable()
   wasWarnedFor(cb: string): boolean {
     return this.scheduleWarnings.some((warning) =>
-      warning.includes(`schedule("${cb}")`)
+      warning.includes(`Scheduling "${cb}"`)
     );
   }
 
@@ -163,7 +163,7 @@ export class TestOnStartScheduleNoWarnAgent extends Agent {
   @callable()
   wasWarnedFor(cb: string): boolean {
     return this.scheduleWarnings.some((warning) =>
-      warning.includes(`schedule("${cb}")`)
+      warning.includes(`Scheduling "${cb}"`)
     );
   }
 
@@ -198,7 +198,7 @@ export class TestOnStartScheduleExplicitFalseAgent extends Agent {
   @callable()
   wasWarnedFor(cb: string): boolean {
     return this.scheduleWarnings.some((warning) =>
-      warning.includes(`schedule("${cb}")`)
+      warning.includes(`Scheduling "${cb}"`)
     );
   }
 }

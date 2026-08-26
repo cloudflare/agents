@@ -14,8 +14,8 @@ per capability, all registered in the shared workers project
   `PlainLifecycleObject` (probe capabilities for phases, alarms, context,
   routing, events, WebSockets) and `RetryableStartObject` (startup-failure
   retry).
-- `scheduler.ts` — `SchedulerHarnessObject` (Scheduler installed with runtime
-  handlers, driven through real platform alarms), `SchedulerStartupWarnObject`,
+- `scheduler.ts` — `SchedulerHarnessObject` (Scheduler with registered
+  callbacks, driven through real platform alarms), `SchedulerStartupWarnObject`,
   `ScheduledLifecycleObject` (Scheduler through full Lifecycle + eviction),
   and `backdateScheduleRow()`.
 - `mcp-client.ts` — `PlainMcpClientObject` (manager as an installed

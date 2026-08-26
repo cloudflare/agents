@@ -26,7 +26,16 @@ import { Lifecycle } from "agents/lifecycle";
 import { Scheduler, type Schedule } from "agents/schedules";
 
 export class ReminderObject extends DurableObject<Env> {
-  readonly scheduler = new Scheduler(this);
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      sendReminder: (
+        payload: { message: string },
+        schedule: Schedule<{ message: string }>
+      ) => {
+        console.log(schedule.id, payload.message);
+      }
+    }
+  });
 
   readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
 
@@ -35,13 +44,6 @@ export class ReminderObject extends DurableObject<Env> {
       message
     });
     return schedule.id;
-  }
-
-  sendReminder(
-    payload: { message: string },
-    schedule: Schedule<{ message: string }>
-  ): void {
-    console.log(schedule.id, payload.message);
   }
 }
 ```
@@ -52,14 +54,14 @@ contribution from Scheduler, other capabilities, and the host, then rearms after
 every alarm phase. A future Fiber or MCP capability can contribute its own wake
 time without storing work in Scheduler or depending on it.
 
-Scheduler's primary API is small: `set()` and `every()` create typed schedules
-(`schedule()` and `scheduleEvery()` are their string-name equivalents), and
-`get()`, `list()`, and `cancel()` manage them. All of these are asynchronous
-and work inside routed sub-agents.
+Scheduler's primary API is small: callbacks are registered by name in the
+constructor, `set()` and `every()` create schedules typed against that
+registration, and `get()`, `list()`, and `cancel()` manage them. All of these
+are asynchronous and work inside routed sub-agents.
 
-Scheduler Lifecycle hooks run without ambient host context. Scheduled methods
-are user callbacks, so they run with the Lifecycle Object as `this` and with
-that object available through `getCurrentAgent()`.
+Scheduler Lifecycle hooks run without ambient host context. Registered
+callbacks are user code, so they run inside the host invocation context with
+the Lifecycle Object available through `getCurrentAgent()`.
 
 ## Using Scheduler through Agent
 
@@ -71,10 +73,11 @@ Existing Agent applications continue to use the established methods:
 - `this.cancelSchedule()` removes a schedule.
 
 These methods delegate to `this.scheduler`; no setup or migration is required.
-Agent passes only policy options (retry defaults, hung-interval timeout, error
-routing) and adapts Lifecycle's event sink, facet transport, and host-callback
-boundary at its composition root — there is no Agent-specific Scheduler
-adapter. Scheduler contributes its next wake time to the same Lifecycle alarm
+Agent registers no callbacks map — a composition-root resolver keeps
+`this.schedule(60, "methodName")` dispatching to Agent methods. Agent passes
+only policy options (retry defaults, hung-interval timeout, error routing) and
+adapts Lifecycle's event sink, facet transport, and host invocation boundary
+at its composition root — there is no Agent-specific Scheduler adapter. Scheduler contributes its next wake time to the same Lifecycle alarm
 selection as Agent keep-alive, fibers, sub-agent work, and deferred
 destruction.
 
@@ -829,23 +832,24 @@ When using this schema with OpenAI models via the AI SDK, you must pass `provide
 
 ## API Reference
 
-### `new Scheduler(target, options?)`
+### `new Scheduler(options?)`
 
 ```typescript
-new Scheduler(this, {
+new Scheduler({
+  callbacks?,
   retry?,
   hungScheduleTimeoutSeconds?,
   onError?
 });
 ```
 
-- `target` is optional. Passing the Lifecycle Object types `set()` and
-  `every()` against its methods, and installation verifies it is the same
-  object that owns the Lifecycle — typed callbacks can never diverge from the
-  runtime dispatch target. Omitting it gives string-typed scheduling;
-  callbacks resolve on whichever host the Scheduler is installed on.
+- `callbacks` registers scheduled callbacks by name. `set()` and `every()`
+  type both the name and the payload against this map, and dispatch runs the
+  registered function — the typed scheduling surface and the runtime dispatch
+  target are the same object. `set()` and `every()` follow the semantics
+  documented for `schedule()` and `scheduleEvery()` below.
 - Lifecycle supplies storage, readiness, startup state, alarm coordination,
-  host-callback dispatch, events, and routing.
+  the host invocation boundary, events, and routing.
 - `retry` supplies callback retry defaults. The defaults are three attempts,
   100 ms base delay, and 3,000 ms maximum delay.
 - `hungScheduleTimeoutSeconds` defaults to 30 seconds.
@@ -907,7 +911,7 @@ async scheduleEvery<T = string>(
 ```
 
 Schedule a task to run repeatedly at a fixed interval. Calling
-`Scheduler.scheduleEvery()` directly also accepts `options.idempotent`; Agent's
+`Scheduler.every()` directly also accepts `options.idempotent`; Agent's
 `this.scheduleEvery()` remains idempotent by design.
 
 **Parameters:**

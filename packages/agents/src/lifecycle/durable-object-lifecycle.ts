@@ -11,7 +11,6 @@ import {
 } from "./capability-runner";
 import {
   bindLifecycleCapability,
-  lifecycleCapabilityHost,
   lifecycleCapabilityId,
   LifecycleCapability,
   type LifecycleRouteAddress,
@@ -313,14 +312,6 @@ export class Lifecycle<
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
-    const declaredHost = lifecycleCapabilityHost(capability);
-    if (declaredHost !== undefined && declaredHost !== this.#host) {
-      throw new Error(
-        `${capability.constructor.name} was constructed for a different host ` +
-          `than this Lifecycle's Durable Object. Construct the capability ` +
-          "with the same object that owns the Lifecycle (usually `this`)."
-      );
-    }
     const capabilityId = lifecycleCapabilityId(capability);
     if (
       capabilityId &&
@@ -357,20 +348,8 @@ export class Lifecycle<
         rearm: () => this.rearmAlarm(),
         disabled: () => this.#alarmsDisabled
       }),
-      callbacks: Object.freeze({
-        has: (name: string) => this.#hostCallback(name) !== undefined,
-        invoke: async (name: string, args: readonly unknown[]) => {
-          const method = this.#hostCallback(name);
-          if (!method) {
-            throw new Error(`this.${name} is not a function`);
-          }
-          const run = () => method.apply(this.#host, [...args]);
-          const boundary = lifecycleHostInvokers.get(lifecycle);
-          return boundary
-            ? boundary(run)
-            : runInLifecycleHostContext({ host: this.#host }, run);
-        }
-      }),
+      runInHostContext: async (fn: () => unknown) =>
+        this.#runInHostBoundary(fn),
       events: Object.freeze({
         emit: (type: string, payload: unknown) =>
           this.#emitCapabilityEvent({ source: capabilityId, type, payload })
@@ -398,14 +377,18 @@ export class Lifecycle<
     });
   }
 
-  #hostCallback(name: string): ((...args: unknown[]) => unknown) | undefined {
-    // SAFETY: host callback names are persisted strings supplied by
-    // capabilities. The typeof check narrows the dynamic lookup to a function
-    // before any invocation.
-    const method = (this.#host as unknown as Record<string, unknown>)[name];
-    return typeof method === "function"
-      ? (method as (...args: unknown[]) => unknown)
-      : undefined;
+  /**
+   * Run a user callback inside the host invocation boundary — plain host
+   * context by default, or the composition root's substitute (Agent installs
+   * its tracing invocation scope).
+   */
+  #runInHostBoundary(fn: () => unknown): Promise<unknown> {
+    const boundary = lifecycleHostInvokers.get(this);
+    return Promise.resolve(
+      boundary
+        ? boundary(fn)
+        : runInLifecycleHostContext({ host: this.#host }, fn)
+    );
   }
 
   async #readyForCapabilityOperation(): Promise<void> {

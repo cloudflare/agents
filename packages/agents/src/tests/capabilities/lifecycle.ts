@@ -86,6 +86,27 @@ class RoutedCapabilityProbe extends LifecycleCapability {
   }
 }
 
+class HostBoundaryProbe extends LifecycleCapability {
+  constructor() {
+    super("host-boundary-probe");
+  }
+
+  /** The host name visible outside and inside the host invocation boundary. */
+  async observeHostThroughBoundary(): Promise<{
+    outsideHostName: string | null;
+    insideHostName: string | null;
+  }> {
+    const read = () =>
+      getCurrentAgent<PlainLifecycleObject>().agent?.lifecycle.name ?? null;
+    return {
+      outsideHostName: read(),
+      insideHostName: (await this.lifecycle.runInHostContext(read)) as
+        | string
+        | null
+    };
+  }
+}
+
 class CapabilityContextProbe implements DurableObjectCapability<StartupProps> {
   readonly events: CapabilityContextEvent[] = [];
 
@@ -148,6 +169,7 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   readonly #startupAlarm = new StartupAlarmProbe();
   readonly #startupEvent = new StartupEventProbe();
   readonly #routedCapability = new RoutedCapabilityProbe();
+  readonly #hostBoundary = new HostBoundaryProbe();
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
   #firstAlarm: number | null = null;
@@ -162,6 +184,7 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     .use(this.#startupAlarm)
     .use(this.#startupEvent)
     .use(this.#routedCapability)
+    .use(this.#hostBoundary)
     .use({
       onStart: ({ props }) => {
         this.#events.push(`capability:start:${props?.label ?? "none"}`);
@@ -299,6 +322,14 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
 
   async routeCapability(payload: unknown): Promise<unknown> {
     return this.#routedCapability.send(payload);
+  }
+
+  async probeHostBoundary(): Promise<{
+    outsideHostName: string | null;
+    insideHostName: string | null;
+  }> {
+    await this.lifecycle.start();
+    return this.#hostBoundary.observeHostThroughBoundary();
   }
 
   async getEvents(): Promise<readonly string[]> {

@@ -37,6 +37,16 @@ describe("Lifecycle host context", () => {
     ]);
   });
 
+  it("enters host context only through runInHostContext", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PlainLifecycleObject.getByName(name);
+
+    expect(await stub.probeHostBoundary()).toEqual({
+      outsideHostName: null,
+      insideHostName: name
+    });
+  });
+
   it("does not leak an inherited Agent context into capabilities", async () => {
     const name = crypto.randomUUID();
     const stub = env.PlainLifecycleObject.getByName(name);

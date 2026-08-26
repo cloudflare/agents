@@ -30,20 +30,6 @@ export type LifecycleAlarms = {
   readonly disabled: () => boolean;
 };
 
-/**
- * Named host-callback dispatch available to every Lifecycle capability.
- *
- * User callbacks run inside the host invocation context, unlike capability
- * hooks. Lifecycle owns that transition so every capability invokes host
- * methods through one boundary.
- */
-export type LifecycleHostCallbacks = {
-  /** True when the host exposes a callable method with this name. */
-  readonly has: (name: string) => boolean;
-  /** Invoke a named host callback inside the host invocation context. */
-  readonly invoke: (name: string, args: readonly unknown[]) => Promise<unknown>;
-};
-
 /** Best-effort telemetry available to every Lifecycle capability. */
 export type LifecycleEvents = {
   /** Publish an event under this capability's stable identity. */
@@ -70,31 +56,28 @@ export type LifecycleServices = {
   /** True while capability and host startup hooks are still running. */
   readonly starting: () => boolean;
   readonly alarms: LifecycleAlarms;
-  readonly callbacks: LifecycleHostCallbacks;
+  /**
+   * Run a capability-held user callback inside the host invocation context.
+   * Capability hooks run outside host context; this is the one boundary for
+   * entering it, and a host composition root may substitute its own wrapper
+   * (Agent adds tracing span scope).
+   */
+  readonly runInHostContext: (fn: () => unknown) => Promise<unknown>;
   readonly events: LifecycleEvents;
   readonly routes: LifecycleRoutes;
 };
 
 const installedServices = new WeakMap<object, LifecycleServices>();
-const declaredHosts = new WeakMap<object, object>();
 
 /** Base class for capabilities that consume standard Lifecycle services. */
 export abstract class LifecycleCapability<Props extends object = object> {
   readonly capabilityId: string;
 
-  /**
-   * @param capabilityId - Stable identity used for events and routing.
-   * @param host - The host object this capability was constructed for, when
-   * it binds to one. `Lifecycle.use()` verifies it is the same object the
-   * Lifecycle owns, so a capability's compile-time host typing can never
-   * diverge from its runtime dispatch target.
-   */
-  protected constructor(capabilityId: string, host?: object) {
+  protected constructor(capabilityId: string) {
     if (capabilityId.trim() === "") {
       throw new Error("Lifecycle capability IDs must be non-empty");
     }
     this.capabilityId = capabilityId;
-    if (host !== undefined) declaredHosts.set(this, host);
   }
 
   /** Default startup hook; capabilities override when they own startup work. */
@@ -128,15 +111,6 @@ export function bindLifecycleCapability(
   services: LifecycleServices
 ): void {
   installedServices.set(capability, services);
-}
-
-/** @internal The host a capability was constructed for, when it declared one. */
-export function lifecycleCapabilityHost(
-  capability: DurableObjectCapability
-): object | undefined {
-  return capability instanceof LifecycleCapability
-    ? declaredHosts.get(capability)
-    : undefined;
 }
 
 /** @internal Read a capability ID without exposing installation internals. */
