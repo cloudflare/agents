@@ -101,24 +101,27 @@ export function ensureScheduleTable(storage: DurableObjectStorage): void {
   const rawSql = (query: string, ...params: (string | number | null)[]) =>
     storage.sql.exec(query, ...params);
 
+  // The literal whitespace below is load-bearing: sqlite_master stores the
+  // statement text verbatim, and the schema DDL snapshot test pins it, so the
+  // stored DDL must stay byte-identical to what Agent created historically.
   rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-        id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-        callback TEXT,
-        payload TEXT,
-        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-        time INTEGER,
-        delayInSeconds INTEGER,
-        cron TEXT,
-        intervalSeconds INTEGER,
-        running INTEGER DEFAULT 0,
-        created_at INTEGER DEFAULT (unixepoch()),
-        execution_started_at INTEGER,
-        retry_options TEXT,
-        owner_path TEXT,
-        owner_path_key TEXT
-      )
-    `);
+        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
+          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+          callback TEXT,
+          payload TEXT,
+          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+          time INTEGER,
+          delayInSeconds INTEGER,
+          cron TEXT,
+          intervalSeconds INTEGER,
+          running INTEGER DEFAULT 0,
+          created_at INTEGER DEFAULT (unixepoch()),
+          execution_started_at INTEGER,
+          retry_options TEXT,
+          owner_path TEXT,
+          owner_path_key TEXT
+        )
+      `);
 
   const addColumnIfMissing = (statement: string): void => {
     try {
