@@ -436,20 +436,26 @@ type SubAgentConnectionMeta = {
 };
 
 type SubAgentConnectionBridgeLike = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void;
-  close(code?: number, reason?: string): void;
-  setState(state: unknown): unknown;
+  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
+  close(code?: number, reason?: string): void | Promise<void>;
+  setState(state: unknown): unknown | Promise<unknown>;
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void;
+  ): void | Promise<void>;
 };
 
+type SubAgentConnectionOperationName = "send" | "setState" | "close";
+
 type StoredSubAgentConnection = {
-  bridge: SubAgentConnectionBridgeLike;
   meta: SubAgentConnectionMeta;
   connection?: Connection;
+};
+
+type SubAgentBridgeInvocationContext = {
+  bridge?: SubAgentConnectionBridgeLike;
+  connectionId: string;
 };
 
 type SubAgentWebSocketEndpoint = {
@@ -481,7 +487,7 @@ class SubAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ) => void;
+  ) => void | Promise<void>;
 
   constructor(
     connection: Connection,
@@ -489,7 +495,7 @@ class SubAgentConnectionBridge
       ownerPath: ReadonlyArray<{ className: string; name: string }>,
       message: string | ArrayBuffer | ArrayBufferView,
       without?: string[]
-    ) => void
+    ) => void | Promise<void>
   ) {
     super();
     this.#connection = connection;
@@ -512,8 +518,8 @@ class SubAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void {
-    this.#broadcast?.(ownerPath, message, without);
+  ): void | Promise<void> {
+    return this.#broadcast?.(ownerPath, message, without);
   }
 }
 
@@ -526,29 +532,28 @@ class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
     this.#connectionId = connectionId;
   }
 
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    void this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
   }
 
-  close(code?: number, reason?: string): void {
-    void this.#root._cf_closeSubAgentConnection(
+  close(code?: number, reason?: string): Promise<void> {
+    return this.#root._cf_closeSubAgentConnection(
       this.#connectionId,
       code,
       reason
     );
   }
 
-  setState(state: unknown): unknown {
-    void this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
-    return state;
+  setState(state: unknown): Promise<unknown> {
+    return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
   }
 
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void {
-    void this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
+  ): Promise<void> {
+    return this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
   }
 }
 
@@ -1626,11 +1631,17 @@ export class Agent<
   private _isFacet = false;
 
   private _protocolBroadcastExcludeIds = new Set<string>();
-  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
+  private _cf_subAgentBridgeContext =
+    new AsyncLocalStorage<SubAgentBridgeInvocationContext>();
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
   >();
+  private _cf_subAgentConnectionOperationTails = new Map<
+    string,
+    Promise<void>
+  >();
+  private _cf_subAgentBroadcastOperationTail?: Promise<void>;
 
   /**
    * User-facing facet name. For legacy facets this is the same as
@@ -5921,7 +5932,6 @@ export class Agent<
       const stored = this._cf_virtualSubAgentConnections.get(id);
       if (stored) {
         return this._cf_createSubAgentBridgeConnection(
-          stored.bridge,
           stored.meta
         ) as Connection<TState>;
       }
@@ -5952,7 +5962,6 @@ export class Agent<
       for (const stored of this._cf_virtualSubAgentConnections.values()) {
         if (!tag || stored.meta.tags.includes(tag)) {
           yield this._cf_createSubAgentBridgeConnection(
-            stored.bridge,
             stored.meta
           ) as Connection<TState>;
         }
@@ -5966,16 +5975,135 @@ export class Agent<
     }
   }
 
+  private _cf_activeSubAgentBridge(
+    connectionId?: string
+  ): SubAgentConnectionBridgeLike | undefined {
+    const context = this._cf_subAgentBridgeContext.getStore();
+    if (connectionId !== undefined && context?.connectionId !== connectionId) {
+      return undefined;
+    }
+    return context?.bridge;
+  }
+
+  /**
+   * Route a virtual sub-agent connection operation through its live frame
+   * bridge, or through the durable root Agent after that frame completes.
+   * All operations share one per-connection queue. Facet broadcasts wait for
+   * older queued operations; failures do not block later work.
+   */
+  private _cf_routeSubAgentConnectionOperation(
+    connectionId: string,
+    operationName: SubAgentConnectionOperationName,
+    operation: (bridge: SubAgentConnectionBridgeLike) => unknown
+  ): void {
+    const activeBridge = this._cf_activeSubAgentBridge(connectionId);
+    const previousConnectionOperation =
+      this._cf_subAgentConnectionOperationTails.get(connectionId);
+    let pending: Promise<void>;
+    if (activeBridge && !previousConnectionOperation) {
+      try {
+        pending = Promise.resolve(operation(activeBridge)).then(() => {});
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+    } else {
+      pending = (previousConnectionOperation ?? Promise.resolve()).then(
+        async () => {
+          const root = await this._rootAlarmOwner();
+          await operation(new RootSubAgentConnectionBridge(root, connectionId));
+        }
+      );
+    }
+    const completion = pending.catch((error: unknown) => {
+      this._cf_reportSubAgentConnectionOperationFailure(
+        connectionId,
+        operationName,
+        error
+      );
+    });
+
+    this._cf_subAgentConnectionOperationTails.set(connectionId, completion);
+    this.ctx.waitUntil(completion);
+    void completion.then(() => {
+      if (
+        this._cf_subAgentConnectionOperationTails.get(connectionId) ===
+        completion
+      ) {
+        this._cf_subAgentConnectionOperationTails.delete(connectionId);
+      }
+    });
+  }
+
+  /**
+   * Route a facet broadcast after every older connection operation.
+   *
+   * This barrier is intentionally one-way: facet startup can broadcast before
+   * a child connection has finished initializing its tags and protocol flags.
+   * Making those later connection operations wait would let the next frame
+   * observe stale root-owned metadata.
+   */
+  private async _cf_routeSubAgentBroadcast(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[],
+    upstreamBridge?: SubAgentConnectionBridgeLike
+  ): Promise<void> {
+    const activeBridge = upstreamBridge ?? this._cf_activeSubAgentBridge();
+    const previousOperations = new Set([
+      ...(this._cf_subAgentBroadcastOperationTail
+        ? [this._cf_subAgentBroadcastOperationTail]
+        : []),
+      ...this._cf_subAgentConnectionOperationTails.values()
+    ]);
+    let pending: Promise<void>;
+    if (activeBridge && previousOperations.size === 0) {
+      try {
+        pending = Promise.resolve(
+          activeBridge.broadcast(ownerPath, message, without)
+        );
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+    } else {
+      pending = Promise.all(previousOperations).then(async () => {
+        const root = await this._rootAlarmOwner();
+        await root._cf_broadcastToSubAgent(ownerPath, message, without);
+      });
+    }
+    const completion = pending.catch((error: unknown) => {
+      console.error("[Agent] Sub-agent broadcast operation failed:", {
+        operation: "broadcast",
+        error
+      });
+    });
+
+    this._cf_subAgentBroadcastOperationTail = completion;
+    this.ctx.waitUntil(completion);
+    void completion.then(() => {
+      if (this._cf_subAgentBroadcastOperationTail === completion) {
+        this._cf_subAgentBroadcastOperationTail = undefined;
+      }
+    });
+    await completion;
+  }
+
+  private _cf_reportSubAgentConnectionOperationFailure(
+    connectionId: string,
+    operation: SubAgentConnectionOperationName,
+    error: unknown
+  ): void {
+    console.error("[Agent] Sub-agent connection operation failed:", {
+      connectionId,
+      operation,
+      error
+    });
+  }
+
   private async _cf_broadcastToParentSubAgent(
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
-      return;
-    }
-    const root = await this._rootAlarmOwner();
-    await root._cf_broadcastToSubAgent(this.selfPath, message, without);
+    await this._cf_routeSubAgentBroadcast(this.selfPath, message, without);
   }
 
   async _cf_broadcastToSubAgent(
@@ -5983,8 +6111,8 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._isFacet && this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
+    if (this._isFacet) {
+      await this._cf_routeSubAgentBroadcast(ownerPath, message, without);
       return;
     }
 
@@ -6186,10 +6314,24 @@ export class Agent<
   private _cf_createSubAgentConnectionBridge(
     connection: Connection
   ): SubAgentConnectionBridge {
+    // A child-to-parent RPC callback starts a fresh async context. Capture the
+    // upstream bridge explicitly while this forwarding frame is still active.
+    const upstreamBroadcastBridge = this._isFacet
+      ? this._cf_activeSubAgentBridge(connection.id)
+      : undefined;
+
     return new SubAgentConnectionBridge(
       connection,
       (ownerPath, message, without) => {
-        void this._cf_broadcastToSubAgent(ownerPath, message, without);
+        if (upstreamBroadcastBridge) {
+          return this._cf_routeSubAgentBroadcast(
+            ownerPath,
+            message,
+            without,
+            upstreamBroadcastBridge
+          );
+        }
+        return this._cf_broadcastToSubAgent(ownerPath, message, without);
       }
     );
   }
@@ -6309,8 +6451,8 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    await this._cf_runWithSubAgentBridge(bridge, async () => {
-      const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+    await this._cf_runWithSubAgentBridge(bridge, meta.id, async () => {
+      const connection = this._cf_createSubAgentBridgeConnection(meta);
       const request = new Request(meta.uri ?? "http://placeholder/", {
         headers: meta.requestHeaders
       });
@@ -6334,9 +6476,9 @@ export class Agent<
         connection.id,
         ...childTags.filter((tag) => tag !== connection.id)
       ];
-      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+      this._cf_storeVirtualSubAgentConnection(connection);
       await this.onConnect(connection, { request });
-      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+      this._cf_storeVirtualSubAgentConnection(connection);
     });
   }
 
@@ -6346,14 +6488,14 @@ export class Agent<
     meta: SubAgentConnectionMeta,
     replyBridge: SubAgentConnectionBridge = bridge
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
-    this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    const connection = this._cf_createSubAgentBridgeConnection(meta);
+    this._cf_storeVirtualSubAgentConnection(connection);
     const replyContext: SubAgentRpcReplyInvocationContext = {
       bridge: replyBridge
     };
     try {
       await subAgentRpcReplyContext.run(replyContext, () =>
-        this._cf_runWithSubAgentBridge(bridge, () =>
+        this._cf_runWithSubAgentBridge(bridge, meta.id, () =>
           this.onMessage(connection, message)
         )
       );
@@ -6369,9 +6511,9 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
-    this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    await this._cf_runWithSubAgentBridge(bridge, () =>
+    const connection = this._cf_createSubAgentBridgeConnection(meta);
+    this._cf_storeVirtualSubAgentConnection(connection);
+    await this._cf_runWithSubAgentBridge(bridge, meta.id, () =>
       this.onClose(connection, code, reason, wasClean)
     );
     this._cf_virtualSubAgentConnections.delete(meta.id);
@@ -6379,24 +6521,24 @@ export class Agent<
 
   private async _cf_runWithSubAgentBridge<T>(
     bridge: SubAgentConnectionBridgeLike,
+    connectionId: string,
     fn: () => Promise<T> | T
   ): Promise<T> {
-    const previous = this._cf_currentSubAgentBridge;
-    this._cf_currentSubAgentBridge = bridge;
+    const context: SubAgentBridgeInvocationContext = { bridge, connectionId };
     try {
-      return await fn();
+      return await this._cf_subAgentBridgeContext.run(context, fn);
     } finally {
-      this._cf_currentSubAgentBridge = previous;
+      // Detached work inherits this context, but a forwarded RPC bridge is only
+      // valid until its originating connect, message, or close call completes.
+      context.bridge = undefined;
     }
   }
 
   private _cf_createSubAgentBridgeConnection(
-    bridge: SubAgentConnectionBridgeLike,
     meta: SubAgentConnectionMeta
   ): Connection {
     let stored = this._cf_virtualSubAgentConnections.get(meta.id);
     if (stored) {
-      stored.bridge = bridge;
       stored.meta = meta;
       if (stored.connection) {
         (
@@ -6414,10 +6556,11 @@ export class Agent<
         return stored.connection;
       }
     } else {
-      stored = { bridge, meta };
+      stored = { meta };
       this._cf_virtualSubAgentConnections.set(meta.id, stored);
     }
 
+    const owner = this;
     const getStored = () =>
       this._cf_virtualSubAgentConnections.get(meta.id) ?? stored;
     const updateStoredState = (nextState: unknown) => {
@@ -6438,14 +6581,22 @@ export class Agent<
         const currentState = getStored().meta.state;
         const state = typeof next === "function" ? next(currentState) : next;
         updateStoredState(state);
-        void getStored().bridge.setState(state);
+        owner._cf_routeSubAgentConnectionOperation(
+          meta.id,
+          "setState",
+          (bridge) => bridge.setState(state)
+        );
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        void getStored().bridge.send(message);
+        owner._cf_routeSubAgentConnectionOperation(meta.id, "send", (bridge) =>
+          bridge.send(message)
+        );
       },
       close(code?: number, reason?: string) {
-        void getStored().bridge.close(code, reason);
+        owner._cf_routeSubAgentConnectionOperation(meta.id, "close", (bridge) =>
+          bridge.close(code, reason)
+        );
       },
       addEventListener() {},
       removeEventListener() {}
@@ -6456,16 +6607,12 @@ export class Agent<
     return connection;
   }
 
-  private _cf_storeVirtualSubAgentConnection(
-    bridge: SubAgentConnectionBridgeLike,
-    connection: Connection
-  ): void {
+  private _cf_storeVirtualSubAgentConnection(connection: Connection): void {
     this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
       ...connection.tags
     ]);
     const stored = this._cf_virtualSubAgentConnections.get(connection.id);
     this._cf_virtualSubAgentConnections.set(connection.id, {
-      bridge,
       meta: {
         id: connection.id,
         uri: connection.uri,
@@ -6489,10 +6636,7 @@ export class Agent<
     const root = await this._rootAlarmOwner();
     const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
     for (const meta of metas) {
-      this._cf_virtualSubAgentConnections.set(meta.id, {
-        bridge: new RootSubAgentConnectionBridge(root, meta.id),
-        meta
-      });
+      this._cf_virtualSubAgentConnections.set(meta.id, { meta });
     }
   }
 
