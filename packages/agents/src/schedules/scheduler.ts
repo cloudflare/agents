@@ -227,11 +227,13 @@ export function ensureScheduleTable(storage: DurableObjectStorage): void {
 /**
  * Persistent task scheduling for a Lifecycle Object.
  *
- * Construct with the host and install the same instance with
+ * Register callbacks in the constructor and install the instance with
  * `Lifecycle.use()`. Scheduler owns its SQL schema, task CRUD, callback
  * retries, and due-row processing. It contributes its next wake time while
- * Lifecycle owns the physical alarm, and it invokes named host callbacks
- * through Lifecycle's host-callback boundary.
+ * Lifecycle owns the physical alarm, and it runs registered callbacks
+ * through Lifecycle's host invocation boundary.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export class Scheduler<
   Handlers extends SchedulerHandlers = SchedulerCallbacks

@@ -48,6 +48,8 @@ export type CapabilityRequestContext = {
  * readiness, alarm, event, and routing surface. Host-specific bindings and
  * protocol adapters remain explicit constructor dependencies. Hook parameters
  * carry only phase data; hooks do not run in ambient host context.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export interface DurableObjectCapability<Props extends object = object> {
   /** Initialize or recover the capability before the host handles work. */

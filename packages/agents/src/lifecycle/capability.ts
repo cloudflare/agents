@@ -49,7 +49,11 @@ export type LifecycleRoutes = {
   ) => Promise<unknown>;
 };
 
-/** Standard services granted to every installed Lifecycle capability. */
+/**
+ * Standard services granted to every installed Lifecycle capability.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export type LifecycleServices = {
   readonly storage: DurableObjectStorage;
   readonly ready: () => Promise<void>;
@@ -69,7 +73,11 @@ export type LifecycleServices = {
 
 const installedServices = new WeakMap<object, LifecycleServices>();
 
-/** Base class for capabilities that consume standard Lifecycle services. */
+/**
+ * Base class for capabilities that consume standard Lifecycle services.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export abstract class LifecycleCapability<Props extends object = object> {
   readonly capabilityId: string;
 

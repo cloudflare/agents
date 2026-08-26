@@ -1,5 +1,9 @@
 # Durable Object lifecycle
 
+> **Experimental.** Everything exported from `agents/lifecycle` — and the
+> capabilities built on it, including `Scheduler` — may change between
+> releases while the composition surface stabilizes.
+
 `agents/lifecycle` lets reusable durable capabilities work in both `Agent` and a
 plain Cloudflare Durable Object. It uses composition: your class extends the
 platform `DurableObject`, then constructs a lifecycle with `this`.

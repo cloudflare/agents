@@ -17,6 +17,10 @@ Under the hood, scheduling uses [Durable Object alarms](https://developers.cloud
 
 ## Scheduler Lifecycle primitive
 
+> **Experimental.** The `Scheduler` primitive and the `agents/lifecycle`
+> surface it builds on may change between releases. Agent's established
+> scheduling methods (`this.schedule()` and friends) are stable.
+
 `Scheduler` is a reusable Lifecycle capability. A plain Lifecycle Object can
 install it without extending `Agent`:
 

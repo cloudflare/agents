@@ -384,7 +384,8 @@ export type MCPServerFilter = {
 
 /**
  * A Durable Object capability that persists and aggregates MCP client
- * connections.
+ * connections. Installing it directly on a Lifecycle (outside `agent.mcp`)
+ * is experimental: that capability surface may change before stabilizing.
  */
 export class MCPClientManager extends LifecycleCapability {
   public mcpConnections: Record<string, MCPClientConnection> = {};

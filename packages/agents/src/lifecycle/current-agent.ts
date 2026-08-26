@@ -10,6 +10,8 @@ import type { Connection, ConnectionContext } from "./types";
  *
  * Pass a more specific Lifecycle Object type to {@link getCurrentAgent} when
  * shared host code needs APIs implemented by a particular object.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export interface LifecycleObject<
   Env extends object = Cloudflare.Env,

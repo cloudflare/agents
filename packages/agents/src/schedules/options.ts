@@ -10,7 +10,11 @@ export type SchedulerEventType =
   | "schedule:error"
   | "schedule:duplicate_warning";
 
-/** Optional callbacks and policy for a Scheduler capability. */
+/**
+ * Optional callbacks and policy for a Scheduler capability.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export interface SchedulerOptions<
   Handlers extends SchedulerHandlers = SchedulerCallbacks
 > {
