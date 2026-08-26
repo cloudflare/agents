@@ -62,5 +62,12 @@ type _LegacyParserCompatibility = LegacyParsedSchedule extends ParsedSchedule
   ? true
   : false;
 
-// @ts-expect-error Scheduler requires a Lifecycle Object callback target.
-new Scheduler({});
+// A Scheduler constructed without a host is string-typed: any callback name
+// compiles, and installation is what binds it to a concrete host.
+const untypedScheduler = new Scheduler();
+untypedScheduler.set(1, "anyCallbackName", { free: true }) satisfies Promise<
+  Schedule<unknown>
+>;
+
+// Constructing with a host types set()/every() against that host's methods
+// (asserted above) and lets Lifecycle.use() verify the host's identity.

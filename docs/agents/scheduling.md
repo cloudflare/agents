@@ -839,8 +839,11 @@ new Scheduler(this, {
 });
 ```
 
-- `target` is the Lifecycle Object containing the named scheduled methods and
-  provides the type information used by `set()` and `every()`.
+- `target` is optional. Passing the Lifecycle Object types `set()` and
+  `every()` against its methods, and installation verifies it is the same
+  object that owns the Lifecycle — typed callbacks can never diverge from the
+  runtime dispatch target. Omitting it gives string-typed scheduling;
+  callbacks resolve on whichever host the Scheduler is installed on.
 - Lifecycle supplies storage, readiness, startup state, alarm coordination,
   host-callback dispatch, events, and routing.
 - `retry` supplies callback retry defaults. The defaults are three attempts,

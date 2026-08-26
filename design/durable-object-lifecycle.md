@@ -58,7 +58,9 @@ methods remain compatibility delegators.
 
 Capabilities extending `LifecycleCapability` receive storage, readiness,
 startup state, alarm coordination, host-callback dispatch, events, and generic
-capability routing. That service surface is the whole contract: Scheduler
+capability routing. A capability constructed for a specific host declares it,
+and `Lifecycle.use()` verifies the identity at install time — compile-time
+host typing and the runtime dispatch target cannot diverge. That service surface is the whole contract: Scheduler
 consumes only standard services plus its own policy options, and a future
 capability composes the same way with no host adapter. Lifecycle routes an
 envelope to the matching capability ID at the destination. Agent supplies an

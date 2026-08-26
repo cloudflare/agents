@@ -76,16 +76,25 @@ export type LifecycleServices = {
 };
 
 const installedServices = new WeakMap<object, LifecycleServices>();
+const declaredHosts = new WeakMap<object, object>();
 
 /** Base class for capabilities that consume standard Lifecycle services. */
 export abstract class LifecycleCapability<Props extends object = object> {
   readonly capabilityId: string;
 
-  protected constructor(capabilityId: string) {
+  /**
+   * @param capabilityId - Stable identity used for events and routing.
+   * @param host - The host object this capability was constructed for, when
+   * it binds to one. `Lifecycle.use()` verifies it is the same object the
+   * Lifecycle owns, so a capability's compile-time host typing can never
+   * diverge from its runtime dispatch target.
+   */
+  protected constructor(capabilityId: string, host?: object) {
     if (capabilityId.trim() === "") {
       throw new Error("Lifecycle capability IDs must be non-empty");
     }
     this.capabilityId = capabilityId;
+    if (host !== undefined) declaredHosts.set(this, host);
   }
 
   /** Default startup hook; capabilities override when they own startup work. */
@@ -119,6 +128,15 @@ export function bindLifecycleCapability(
   services: LifecycleServices
 ): void {
   installedServices.set(capability, services);
+}
+
+/** @internal The host a capability was constructed for, when it declared one. */
+export function lifecycleCapabilityHost(
+  capability: DurableObjectCapability
+): object | undefined {
+  return capability instanceof LifecycleCapability
+    ? declaredHosts.get(capability)
+    : undefined;
 }
 
 /** @internal Read a capability ID without exposing installation internals. */

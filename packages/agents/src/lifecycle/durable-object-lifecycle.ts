@@ -11,6 +11,7 @@ import {
 } from "./capability-runner";
 import {
   bindLifecycleCapability,
+  lifecycleCapabilityHost,
   lifecycleCapabilityId,
   LifecycleCapability,
   type LifecycleRouteAddress,
@@ -311,6 +312,14 @@ export class Lifecycle<
   use(capability: DurableObjectCapability<Props>): this {
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
+    }
+    const declaredHost = lifecycleCapabilityHost(capability);
+    if (declaredHost !== undefined && declaredHost !== this.#host) {
+      throw new Error(
+        `${capability.constructor.name} was constructed for a different host ` +
+          `than this Lifecycle's Durable Object. Construct the capability ` +
+          "with the same object that owns the Lifecycle (usually `this`)."
+      );
     }
     const capabilityId = lifecycleCapabilityId(capability);
     if (

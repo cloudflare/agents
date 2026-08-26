@@ -47,6 +47,17 @@ export type Schedule<T = string> = {
     }
 );
 
+/**
+ * Default callback surface for a Scheduler constructed without a host: any
+ * named callback, with untyped payloads. Constructing with the host object
+ * instead types `set()`/`every()` against its methods and lets installation
+ * verify the host's identity.
+ */
+export type SchedulerCallbacks = Record<
+  string,
+  (payload: unknown, schedule: Schedule<unknown>) => unknown
+>;
+
 /** Options accepted when creating one schedule. */
 export type ScheduleOptions = {
   /** Retry policy for callback execution, overriding the Scheduler default. */

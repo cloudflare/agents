@@ -14,7 +14,6 @@ import {
   type LifecycleRouteAddress,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
-import type { LifecycleObject } from "../lifecycle/current-agent";
 import {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
@@ -37,7 +36,8 @@ import type {
   Schedule,
   ScheduleCriteria,
   ScheduleOptions,
-  ScheduleStorageRow
+  ScheduleStorageRow,
+  SchedulerCallbacks
 } from "./types";
 
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
@@ -205,7 +205,7 @@ export function ensureScheduleTable(storage: DurableObjectStorage): void {
  * through Lifecycle's host-callback boundary.
  */
 export class Scheduler<
-  Host extends LifecycleObject = LifecycleObject
+  Host extends object = SchedulerCallbacks
 > extends LifecycleCapability {
   readonly #retryDefaults: Required<RetryOptions>;
   readonly #hungScheduleTimeoutSeconds: number;
@@ -216,14 +216,16 @@ export class Scheduler<
   /**
    * Create a persistent Scheduler targeting named methods on the host.
    *
-   * @param _host - The Lifecycle Object whose named methods scheduled
-   * callbacks invoke — the same object this Scheduler is installed on. It
-   * anchors callback typing for {@link set} and {@link every}; dispatch runs
-   * through the installing Lifecycle.
+   * @param host - The Lifecycle Object whose named methods scheduled
+   * callbacks invoke. Passing it types {@link set} and {@link every} against
+   * the host's methods, and `Lifecycle.use()` verifies it is the same object
+   * the Lifecycle owns — the compile-time callback typing and the runtime
+   * dispatch target can never diverge. Omit it for string-typed scheduling;
+   * callbacks then resolve on whichever host the Scheduler is installed on.
    * @param options - Optional retry, hung-interval, and error policy.
    */
-  constructor(_host: Host, options: SchedulerOptions = {}) {
-    super("scheduler");
+  constructor(host?: Host, options: SchedulerOptions = {}) {
+    super("scheduler", host);
     // Retry defaults are resolved, not validated, here: a host whose
     // historically tolerated invalid retry config throws at construction
     // would brick every entry point of its Durable Object. Invalid defaults
