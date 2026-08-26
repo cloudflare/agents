@@ -1,23 +1,14 @@
 import {
   ArrowDownIcon,
   ArrowLeftIcon,
-  ArrowRightIcon,
-  ArrowUpIcon
+  ArrowRightIcon
 } from "@phosphor-icons/react";
 
 /** Renders the article explaining the Exo Harness self-modification experiment. */
 export function ExoHarnessBlogPost() {
   return (
-    <main className="flex-1 overflow-y-auto bg-kumo-base">
+    <main className="flex-1 bg-kumo-base">
       <article className="mx-auto max-w-[760px] px-6 py-16 sm:py-24">
-        <a
-          href="/"
-          className="mb-12 flex w-fit items-center gap-2 text-sm font-medium text-kumo-secondary no-underline hover:text-kumo-default"
-        >
-          <ArrowLeftIcon aria-hidden="true" size={16} />
-          Back to agent
-        </a>
-
         <header>
           <p className="text-sm font-semibold uppercase tracking-[0.16em] text-kumo-accent">
             Exo Harness
@@ -55,7 +46,7 @@ export function ExoHarnessBlogPost() {
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
-            customisable is not the same as self-modifying
+            Customisable is not the same as self-modifying
           </h2>
           <p>
             ChatGPT lets users change instructions and memory, but the product
@@ -123,15 +114,15 @@ export function ExoHarnessBlogPost() {
               className="underline underline-offset-4"
             >
               Exo
-            </a>
-            ,{" "}
+            </a>{" "}
+            is a new agent harness{" "}
             <a
               href="https://x.com/AlexKrentsel/status/2077786601418322344"
               className="underline underline-offset-4"
             >
               announced on X
             </a>{" "}
-            a few weeks ago by Alex Krentsel, a senior researcher at Google,
+            a few weeks ago by Alex Krentsel, a senior researcher at Google. It
             separates a stable "<code>exoharness</code>" from a replaceable
             executor. The stable layer owns identity, append-only history,
             artifacts, secrets, and sandbox lifecycle. The executor owns prompt
@@ -291,89 +282,102 @@ export function ExoHarnessBlogPost() {
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
             What does a turn look like?
           </h2>
-          <div className="overflow-x-auto py-2">
-            <ol className="grid min-w-[680px] grid-cols-3 gap-x-12 gap-y-12 text-base leading-7">
-              <li className="relative col-start-1 row-start-1 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
-                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+          <div className="py-2">
+            <ol className="grid grid-cols-1 gap-6 text-base leading-7 sm:grid-cols-2 sm:gap-x-12 sm:gap-y-12">
+              <li className="relative rounded-xl border border-kumo-line bg-kumo-elevated p-5 shadow-sm sm:col-start-1 sm:row-start-1">
+                <span className="mb-4 flex size-8 items-center justify-center rounded-full border-2 border-kumo-accent bg-kumo-base text-sm font-semibold text-kumo-default">
                   1
                 </span>
-                <code>AIChatAgent</code> receives and saves the user's message
-                in the Durable Object.
+                <strong className="mb-2 block">Save the message</strong>
+                <span className="text-kumo-secondary">
+                  <code>AIChatAgent</code> receives and saves the user's message
+                  in the Durable Object.
+                </span>
                 <span
                   aria-hidden="true"
-                  className="absolute left-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
+                  className="absolute left-full top-1/2 hidden w-12 -translate-y-1/2 justify-center text-kumo-secondary sm:flex"
                 >
                   <ArrowRightIcon size={20} />
                 </span>
               </li>
-              <li className="relative col-start-2 row-start-1 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
-                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+              <li className="relative rounded-xl border border-kumo-line bg-kumo-elevated p-5 shadow-sm sm:col-start-2 sm:row-start-1">
+                <span className="mb-4 flex size-8 items-center justify-center rounded-full border-2 border-kumo-accent bg-kumo-base text-sm font-semibold text-kumo-default">
                   2
                 </span>
-                The kernel loads the activated <code>/harness</code> files from
-                Workspace and assembles the initial model context.
+                <strong className="mb-2 block">Load the harness</strong>
+                <span className="text-kumo-secondary">
+                  The kernel loads the activated <code>/harness</code> files
+                  from Workspace and assembles the initial model context.
+                </span>
                 <span
                   aria-hidden="true"
-                  className="absolute left-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
-                >
-                  <ArrowRightIcon size={20} />
-                </span>
-              </li>
-              <li className="relative col-start-3 row-start-1 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
-                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
-                  3
-                </span>
-                If <code>runtime.js</code> defines <code>beforeTurn</code>, it
-                runs in a Dynamic Worker. It may change the effective context,
-                model, tools, or step limit for this turn.
-                <span
-                  aria-hidden="true"
-                  className="absolute left-1/2 top-full flex h-12 -translate-x-1/2 items-center text-kumo-secondary"
+                  className="absolute left-1/2 top-full hidden h-12 -translate-x-1/2 items-center text-kumo-secondary sm:flex"
                 >
                   <ArrowDownIcon size={20} />
                 </span>
               </li>
-              <li className="relative col-start-3 row-start-2 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
-                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+              <li className="relative rounded-xl border border-kumo-line bg-kumo-elevated p-5 shadow-sm sm:col-start-2 sm:row-start-2">
+                <span className="mb-4 flex size-8 items-center justify-center rounded-full border-2 border-kumo-accent bg-kumo-base text-sm font-semibold text-kumo-default">
+                  3
+                </span>
+                <strong className="mb-2 block">Run the turn setup</strong>
+                <span className="text-kumo-secondary">
+                  If <code>runtime.js</code> defines <code>beforeTurn</code>, it
+                  runs in a Dynamic Worker. It may change the effective context,
+                  model, tools, or step limit for this turn.
+                </span>
+                <span
+                  aria-hidden="true"
+                  className="absolute right-full top-1/2 hidden w-12 -translate-y-1/2 justify-center text-kumo-secondary sm:flex"
+                >
+                  <ArrowLeftIcon size={20} />
+                </span>
+              </li>
+              <li className="relative rounded-xl border border-kumo-line bg-kumo-elevated p-5 shadow-sm sm:col-start-1 sm:row-start-2">
+                <span className="mb-4 flex size-8 items-center justify-center rounded-full border-2 border-kumo-accent bg-kumo-base text-sm font-semibold text-kumo-default">
                   4
                 </span>
-                The kernel calls the model through the AI SDK. Between model
-                steps, runtime hooks can adjust context or intercept tool calls.
-                Agent-authored tools run in Dynamic Workers and can reach the
-                kernel only through short-lived, validated capabilities.
+                <strong className="mb-2 block">Call the model and tools</strong>
+                <span className="text-kumo-secondary">
+                  The kernel calls the model through the AI SDK. Runtime hooks
+                  can adjust context or intercept tool calls. Agent-authored
+                  tools run in Dynamic Workers with short-lived, validated
+                  capabilities.
+                </span>
                 <span
                   aria-hidden="true"
-                  className="absolute right-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
+                  className="absolute left-1/2 top-full hidden h-12 -translate-x-1/2 items-center text-kumo-secondary sm:flex"
                 >
-                  <ArrowLeftIcon size={20} />
+                  <ArrowDownIcon size={20} />
                 </span>
               </li>
-              <li className="relative col-start-2 row-start-2 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
-                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+              <li className="relative rounded-xl border border-kumo-line bg-kumo-elevated p-5 shadow-sm sm:col-start-1 sm:row-start-3">
+                <span className="mb-4 flex size-8 items-center justify-center rounded-full border-2 border-kumo-accent bg-kumo-base text-sm font-semibold text-kumo-default">
                   5
                 </span>
-                An optional hook may transform buffered model output before it
-                reaches the browser. <code>AIChatAgent</code> then persists the
-                reply.
+                <strong className="mb-2 block">
+                  Transform and save the reply
+                </strong>
+                <span className="text-kumo-secondary">
+                  An optional hook may transform buffered model output before it
+                  reaches the browser. <code>AIChatAgent</code> then saves the
+                  reply.
+                </span>
                 <span
                   aria-hidden="true"
-                  className="absolute right-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
+                  className="absolute left-full top-1/2 hidden w-12 -translate-y-1/2 justify-center text-kumo-secondary sm:flex"
                 >
-                  <ArrowLeftIcon size={20} />
+                  <ArrowRightIcon size={20} />
                 </span>
               </li>
-              <li className="relative col-start-1 row-start-2 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
-                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+              <li className="relative rounded-xl border border-kumo-line bg-kumo-elevated p-5 shadow-sm sm:col-start-2 sm:row-start-3">
+                <span className="mb-4 flex size-8 items-center justify-center rounded-full border-2 border-kumo-accent bg-kumo-base text-sm font-semibold text-kumo-default">
                   6
                 </span>
-                The final hook runs and the kernel records the turn in its
-                append-only journal.
-                <span
-                  aria-hidden="true"
-                  className="absolute bottom-full left-1/2 flex h-12 -translate-x-1/2 items-center gap-1 whitespace-nowrap text-xs font-semibold text-kumo-secondary"
-                >
-                  <ArrowUpIcon size={20} />
-                  Next turn
+                <strong className="mb-2 block">Finish the turn</strong>
+                <span className="text-kumo-secondary">
+                  The final hook runs and the kernel records the turn in its
+                  append-only journal.
                 </span>
               </li>
             </ol>

@@ -14,6 +14,7 @@ import {
 } from "@cloudflare/kumo";
 import {
   AlarmIcon,
+  ArrowLeftIcon,
   ArticleIcon,
   BrainIcon,
   FolderIcon,
@@ -95,14 +96,14 @@ function ExoHarnessHeader({
 
 function BlogPage() {
   return (
-    <div className="flex h-screen flex-col bg-kumo-elevated">
+    <div className="flex min-h-screen flex-col bg-kumo-elevated">
       <ExoHarnessHeader>
         <LinkButton
-          href="/blog"
+          href="/"
           variant="secondary"
-          icon={<ArticleIcon size={16} />}
+          icon={<ArrowLeftIcon size={16} />}
         >
-          Blog post
+          Back to agent
         </LinkButton>
         <ModeToggle />
       </ExoHarnessHeader>
